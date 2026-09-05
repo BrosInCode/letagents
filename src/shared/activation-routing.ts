@@ -18,8 +18,25 @@ export type AgentMessageActivationReason =
   | "other_reply_target"
   | "thread_participant"
   | "task_owner"
+  | "small_room"
+  | "recent_conversation"
   | "system_event"
   | "unaddressed";
+
+/** Send-time human fallback only; never use this to re-route historical reads. */
+export function humanConversationFallback(input: {
+  source: string | null; publisherAccountId: string | null; publisherAgentKey: string | null;
+  explicitlyAddressed: boolean; registeredAgentKeys: readonly string[];
+  recentAgentKey?: string | null;
+}): { reason: "small_room" | "recent_conversation"; agentKeys: string[] } | null {
+  if (input.source !== "browser" || !input.publisherAccountId || input.publisherAgentKey || input.explicitlyAddressed) return null;
+  const keys = [...new Set(input.registeredAgentKeys)];
+  if (keys.length > 0 && keys.length <= 2) return { reason: "small_room", agentKeys: keys };
+  if (keys.length > 2 && input.recentAgentKey && keys.includes(input.recentAgentKey)) {
+    return { reason: "recent_conversation", agentKeys: [input.recentAgentKey] };
+  }
+  return null;
+}
 
 /**
  * Repository events can contain text written by any external contributor.

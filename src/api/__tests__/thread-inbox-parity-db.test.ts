@@ -3888,3 +3888,136 @@ test("PG thread inbox: bounded page over a ~2,000-message room", runOptions, asy
   // eslint-disable-next-line no-console
   console.log(`[perf] getMessageThreads over ${baseMessageCount + bulkThreads * 2} messages / ${projectedThreadCount} threads: ${elapsedMs}ms, ${queryCount} pool queries; deep summary rows=${summaryNode?.["Actual Rows"]}`);
 });
+
+async function conversationRoutingFixture(name: string) {
+  const room = await createProjectWithName!(name);
+  const account = await newReader();
+  const identities = new Map<string, { actor_label: string; agent_key: string; agent_session_id: string; agent_instance_id: null; display_name: string; session_kind: string }>();
+  const register = async (key: string, suffix = key, kind = "worker", ended = false) => {
+    const session = `${room.id}_${suffix}`;
+    await pool!.query(`INSERT INTO room_agent_sessions (session_id, room_id, token_hash, session_kind, runtime,
+      actor_label, agent_key, display_name, owner_account_id, owner_label, ide_label, created_at, updated_at, last_seen_at, ended_at)
+      VALUES ($1,$2,$1,$3,'test',$4,$5,$4,$6,'Human','Test',NOW(),NOW(),NOW(),CASE WHEN $7 THEN NOW() ELSE NULL END)`,
+      [session, room.id, kind, suffix, `conversation/${key}`, account, ended]);
+    const identity = { actor_label: suffix, agent_key: `conversation/${key}`, agent_session_id: session,
+      agent_instance_id: null, display_name: suffix, session_kind: kind };
+    identities.set(suffix, identity);
+    return identity;
+  };
+  const send = (text: string, options: Parameters<NonNullable<typeof addMessage>>[3] = {}) =>
+    addMessage!(room.id, "Human", text, { source: "browser", account_id: account, ...options });
+  const recipients = async (id: string) => (await pool!.query<{ agent_key: string; activation_reason: string }>(
+    `SELECT agent_key,activation_reason FROM message_agent_receipts WHERE message_room_id=$1 AND message_number=$2 ORDER BY agent_key`,
+    [room.id, Number(id.slice(4))])).rows;
+  return { room, account, register, send, recipients, identities };
+}
+
+test("PG human conversation fallback snapshots small rooms and follows exact larger-room recipients", runOptions, async () => {
+  const f = await conversationRoutingFixture("conversation_small");
+  const empty = await f.send("hello before anyone joins");
+  assert.deepEqual(await f.recipients(empty.id), []);
+  const oak = await f.register("oak");
+  await f.register("controller", "controller", "controller");
+  await f.register("retired", "retired", "worker", true);
+  const one = await f.send("hello there");
+  assert.deepEqual(await f.recipients(one.id), [{ agent_key: "conversation/oak", activation_reason: "small_room" }]);
+  await f.register("oak", "oak_duplicate");
+  const duplicate = await f.send("still one durable agent");
+  assert.equal((await f.recipients(duplicate.id)).length, 1);
+  await f.register("pine");
+  assert.deepEqual(await f.recipients((await f.send("@missing-agent please inspect")).id), [], "unresolved explicit mentions never become small-room fanout");
+  assert.deepEqual(await f.recipients((await f.send("@conversation/pine only you")).id), [
+    { agent_key: "conversation/pine", activation_reason: "explicit_mention" },
+  ]);
+  const two = await f.send("please check this room");
+  assert.deepEqual((await f.recipients(two.id)).map(row => row.agent_key), ["conversation/oak", "conversation/pine"]);
+  await f.register("ash");
+  const ambiguous = await f.send("what about dark mode?");
+  assert.deepEqual(await f.recipients(ambiguous.id), [], "a larger room cannot inherit ambiguous fanout");
+  assert.deepEqual(await f.recipients((await f.send("and also add tests")).id), [], "an untargeted latest human turn cannot reach back to an older focus");
+  const explicit = await f.send("@conversation/pine please review");
+  assert.deepEqual(await f.recipients(explicit.id), [{ agent_key: "conversation/pine", activation_reason: "explicit_mention" }]);
+  const follow = await f.send("add tests too");
+  assert.deepEqual(await f.recipients(follow.id), [{ agent_key: "conversation/pine", activation_reason: "recent_conversation" }]);
+  const otherHuman = await newReader();
+  assert.deepEqual(await f.recipients((await f.send("can you continue?", { account_id: otherHuman })).id), []);
+  for (const source of ["agent", "github", "managed_agent_failure"]) {
+    const event = await f.send("keep going", { source, publisher_agent_key: source === "agent" ? oak.agent_key : undefined });
+    assert.deepEqual(await f.recipients(event.id), [], "agent and external events never use human fallback");
+  }
+  const missingAccount = await f.send("hello", { account_id: undefined });
+  assert.deepEqual(await f.recipients(missingAccount.id), []);
+  const broadcast = await f.send("@everyone check");
+  assert.equal((await f.recipients(broadcast.id)).length, 3);
+  assert.deepEqual(await f.recipients((await f.send("what next?")).id), []);
+  const snapshot = await getMessageById!(f.room.id, empty.id);
+  const [activation] = await attachReceiptAuthorityActivations!(f.room.id, oak, [snapshot!]);
+  assert.equal((activation as any).activation.for_current_agent.decision, "silent", "later workers cannot reactivate an old no-recipient snapshot on MCP reads");
+  const pine = f.identities.get("pine")!;
+  const [followActivation] = await attachReceiptAuthorityActivations!(f.room.id, pine, [await getMessageById!(f.room.id, follow.id)!]);
+  assert.equal((followActivation as any).activation.for_current_agent.reason, "recent_conversation", "cloud MCP consumes the same send-time receipt");
+});
+
+test("PG conversation focus uses canonical answer links, not arbitrary agent chatter, and expires", runOptions, async () => {
+  const f = await conversationRoutingFixture("conversation_focus");
+  for (const key of ["oak", "pine", "ash"]) await f.register(key);
+  const broadcast = await f.send("@everyone inspect this");
+  const oak = f.identities.get("oak")!;
+  const answer = await addMessage!(f.room.id, oak.actor_label, "Here is my answer", {
+    source: "agent", publisher_agent_key: oak.agent_key, publisher_agent_session_id: oak.agent_session_id, account_id: f.account,
+  });
+  await pool!.query(`UPDATE message_agent_receipts SET reply_message_number=$3 WHERE message_room_id=$1 AND message_number=$2 AND agent_key=$4`,
+    [f.room.id, Number(broadcast.id.slice(4)), Number(answer.id.slice(4)), oak.agent_key]);
+  const pine = f.identities.get("pine")!;
+  await addMessage!(f.room.id, pine.actor_label, "Unrelated latest chatter", {
+    source: "agent", publisher_agent_key: pine.agent_key, publisher_agent_session_id: pine.agent_session_id, account_id: f.account,
+  });
+  assert.deepEqual(await f.recipients((await f.send("what about dark mode?")).id), [{ agent_key: oak.agent_key, activation_reason: "recent_conversation" }]);
+  const directed = await f.send("@conversation/pine change direction");
+  assert.deepEqual(await f.recipients((await f.send("add tests too")).id), [{ agent_key: pine.agent_key, activation_reason: "recent_conversation" }]);
+  await pool!.query(`UPDATE messages SET timestamp=NOW()-INTERVAL '31 minutes' WHERE room_id=$1`, [f.room.id]);
+  assert.deepEqual(await f.recipients((await f.send("a later topic")).id), []);
+  const quote = await f.send("quoted followup", { reply_to_message_id: answer.id });
+  assert.deepEqual(await f.recipients(quote.id), [{ agent_key: oak.agent_key, activation_reason: "reply_target" }]);
+  await addMessage!(f.room.id, pine.actor_label, "Following this thread", {
+    source: "agent", publisher_agent_key: pine.agent_key, publisher_agent_session_id: pine.agent_session_id, account_id: f.account,
+    thread_root_message_id: directed.id, reply_to_message_id: directed.id,
+  });
+  const thread = await f.send("thread followup", { thread_root_message_id: directed.id });
+  assert.deepEqual(await f.recipients(thread.id), [{ agent_key: pine.agent_key, activation_reason: "thread_participant" }]);
+});
+
+
+test("PG conversation focus is bounded to 50 room messages and refuses multiple canonical responders", runOptions, async () => {
+  const f = await conversationRoutingFixture("conversation_bounds");
+  for (const key of ["oak", "pine", "ash"]) await f.register(key);
+  const broadcast = await f.send("@everyone inspect");
+  for (const key of ["oak", "pine"]) {
+    const identity = f.identities.get(key)!;
+    const answer = await addMessage!(f.room.id, identity.actor_label, "Canonical answer", {
+      source: "agent", publisher_agent_key: identity.agent_key, publisher_agent_session_id: identity.agent_session_id, account_id: f.account,
+    });
+    await pool!.query(`UPDATE message_agent_receipts SET reply_message_number=$3 WHERE message_room_id=$1 AND message_number=$2 AND agent_key=$4`,
+      [f.room.id, Number(broadcast.id.slice(4)), Number(answer.id.slice(4)), identity.agent_key]);
+  }
+  assert.deepEqual(await f.recipients((await f.send("continue?")).id), [], "two proven responses still have no unique conversation owner");
+  await f.send("@conversation/oak choose this direction");
+  for (let index = 0; index < 50; index++) await addMessage!(f.room.id, "System", `event ${index}`, { source: "system" });
+  assert.deepEqual(await f.recipients((await f.send("what about tests?")).id), [], "focus outside the last 50 messages is not reused");
+});
+
+test("PG conversation population and focus do not erase owner ambiguity", runOptions, async () => {
+  const f = await conversationRoutingFixture("conversation_owner_scope");
+  for (const key of ["oak", "pine", "ash"]) await f.register(key);
+  const conflicting = await f.register("oak", "other_oak");
+  const otherOwner = await newReader();
+  await pool!.query(`UPDATE room_agent_sessions SET owner_account_id=$2 WHERE session_id=$1`, [conflicting.agent_session_id, otherOwner]);
+  assert.deepEqual(await f.recipients((await f.send("hello room")).id), [], "rejecting an ambiguous owner does not turn a three-agent room into two");
+  await pool!.query(`UPDATE room_agent_sessions SET ended_at=NOW() WHERE session_id=$1`, [conflicting.agent_session_id]);
+  const focus = await f.send("@conversation/oak please inspect");
+  assert.equal((await f.recipients(focus.id)).length, 1);
+  await pool!.query(`UPDATE room_agent_sessions SET ended_at=NOW() WHERE session_id=$1`, [f.identities.get("oak")!.agent_session_id]);
+  const replacement = await f.register("oak", "new_owner_oak");
+  await pool!.query(`UPDATE room_agent_sessions SET owner_account_id=$2 WHERE session_id=$1`, [replacement.agent_session_id, otherOwner]);
+  assert.deepEqual(await f.recipients((await f.send("what about dark mode?")).id), [], "recent receipt focus never transfers to a different owner reusing a durable key");
+});
