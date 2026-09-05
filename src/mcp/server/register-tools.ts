@@ -15,6 +15,7 @@ import { registerSupervisedRoomTurnTools } from "./tools/supervised-room-turn.js
 import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
 import { toolSurfaceForExecutionProfile } from "./runtime/tool-surface-policy.js";
 import { profileAwareToolServer } from "./supervised-tool-facade.js";
+import { workerAwareToolServer } from "./worker-tool-facade.js";
 
 export function registerTools(
   server: McpServer,
@@ -22,9 +23,11 @@ export function registerTools(
   supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
   options: { executionOwner?: "provider" | "daemon" } = {},
 ): void {
-  const tools = options.executionOwner === "daemon"
+  const profileTools = options.executionOwner === "daemon"
     ? server
     : profileAwareToolServer(server, profile, undefined, supervisedProvider);
+  const tools = profile === "autonomous_mcp_worker" || profile === "interactive_desktop"
+    ? workerAwareToolServer(profileTools) : profileTools;
   const surface = toolSurfaceForExecutionProfile(profile);
   registerRoomJoinTools(tools);
   if (surface.agentSessionLifecycle) registerAgentSessionTools(tools);

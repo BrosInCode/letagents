@@ -22,8 +22,9 @@ import { workerModeDisabledToolResult } from "../../runtime/worker-bearer.js";
 export function registerSetAgentNameTool(server: McpServer): void {
   server.tool(
     "set_agent_name",
-    "Set or change the agent's display name. The agent will be known by this name in the room. Use this to pick a custom name instead of the auto-generated codename.",
+    "Set or change the legacy process identity's display name. Durable MCP workers choose display_name when first registered; this tool cannot rename them.",
     {
+      worker_id: z.string().optional().describe("Durable worker handles cannot be renamed by this legacy tool."),
       name: z
         .string()
         .min(2)
@@ -34,7 +35,8 @@ export function registerSetAgentNameTool(server: McpServer): void {
         .optional()
         .describe("Optional conversation ID to scope this name change. When provided, only this conversation uses the new name; other conversations keep their own identity."),
     },
-    async ({ name: desiredName, conversation_id }) => {
+    async ({ name: desiredName, conversation_id, worker_id }) => {
+      if (worker_id) throw new Error("Choose display_name when first registering this worker. set_agent_name only changes the legacy process identity.");
       const disabled = workerModeDisabledToolResult();
       if (disabled) return jsonTextResponse(disabled);
       const trimmedName = desiredName.trim();

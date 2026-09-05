@@ -40,18 +40,21 @@ import {
   workerModeDisabledToolResult,
 } from "../runtime/worker-bearer.js";
 import { bindSupervisedWorkerSessionWithContext } from "../runtime/supervisor-bridge.js";
+import { registerMcpWorker } from "../runtime/worker-handles.js";
 
 export function registerAgentSessionTools(server: McpServer): void {
   // -- register_agent_session -------------------------------------------------
 
   server.tool(
     "register_agent_session",
-    "Register this MCP client as an explicit room agent session. Unregistered MCP traffic is treated as controller traffic and stays out of the connected-agent roster.",
+    "Connect a worker to a room. For an independent chat, supply a unique registration_key once, keep the returned worker_id, and use worker_id on room tools. After an MCP restart, reconnect with that worker_id. Separate chats must use separate registration keys. Unregistered traffic remains controller traffic. Legacy agent_session_id registration is retained for existing integrations.",
     {
+      worker_id: z.string().optional().describe("Resume this chat's saved worker handle. Never select another chat's handle automatically."),
+      registration_key: z.string().min(1).max(200).optional().describe("Create a worker using a random key generated once for this chat; reuse the exact key if the first registration needs retrying. Do not use a shared name, room, or repository as the key."),
       room_id: z
         .string()
         .optional()
-        .describe("Canonical room ID. Defaults to the current room."),
+        .describe("Canonical room ID. Required for durable worker handles; legacy registration defaults to the current room."),
       session_kind: z
         .enum(["worker", "controller"])
         .optional()
@@ -69,7 +72,19 @@ export function registerAgentSessionTools(server: McpServer): void {
         .optional()
         .describe("Worker working directory used for branch detection and exact supervised Codex binding. Defaults to the MCP server's working directory."),
     },
-    async ({ room_id, session_kind, runtime, display_name, cwd }) => {
+    async ({ room_id, session_kind, runtime, display_name, cwd, worker_id, registration_key }) => {
+      if (worker_id !== undefined || registration_key !== undefined) {
+        if (session_kind === "controller") throw new Error("Durable handles identify workers, not controllers.");
+        const roomId = room_id?.trim();
+        if (!roomId) throw new Error("Pass room_id explicitly when registering or reconnecting this chat's worker.");
+        const result = await registerMcpWorker({ roomId, workerId: worker_id, registrationKey: registration_key,
+          displayName: display_name, runtime, cwd });
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          success: true, worker_id: result.worker.worker_id,
+          agent_session: toPublicAgentSession(result.session),
+          instruction: "Keep worker_id for this chat and pass it to room tools. After an MCP restart, reconnect with register_agent_session(worker_id, room_id). A separate chat needs its own registration_key. Credentials stay private to MCP.",
+        }) }] };
+      }
       const workerRuntime = requireValidWorkerBearerRuntime();
       if (workerRuntime.mode === "supervised") {
         // Resolve before currentRoom, config, branch, or local storage. The
@@ -400,7 +415,7 @@ export function registerAgentSessionTools(server: McpServer): void {
           : {};
 
       if (await isLocalRoomStorageEnabled(targetRoomId)) {
-        const endedSession = endStoredAgentSession(targetSessionId);
+        const endedSession = endStoredAgentSession(targetSessionId, undefined, localSession?.session_token);
         return {
           content: [
             {
@@ -435,7 +450,7 @@ export function registerAgentSessionTools(server: McpServer): void {
           : new Date().toISOString();
       const endedLocalSession =
         localSession?.session_id === targetSessionId
-          ? endStoredAgentSession(targetSessionId, endedAt)
+          ? endStoredAgentSession(targetSessionId, endedAt, localSession.session_token)
           : null;
 
       return {
