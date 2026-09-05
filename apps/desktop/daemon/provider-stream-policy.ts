@@ -91,7 +91,7 @@ export function isHumanRoomActivityEvent(event: ProviderActionStreamEvent): bool
     && method !== "account/ratelimits/updated";
 }
 
-export function isAgentInspectorLiveDisplayEvent(event: ProviderActionStreamEvent): boolean {
+export function isAgentInspectorLiveDisplayEvent(event: Pick<ProviderActionStreamEvent, "method">): boolean {
   return event.method === "reasoning/summaryTextDelta"
     || event.method === "item/reasoning/summaryTextDelta"
     || event.method === "item/agentMessage/delta"

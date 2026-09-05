@@ -228,6 +228,19 @@ export function isCurrentAgentInspectorWorkResponse(
       : (detail.availability !== "available" || detail.source_message?.id === sourceMessageId));
 }
 
+/** Only navigate to messages in the current agent/room's retained evidence. */
+export function canRevealAgentInspectorWorkMessage(
+  detail: DesktopSupervisorAgentInspectorDetail | null,
+  entryId: string,
+  roomId: string,
+  messageId: string,
+): boolean {
+  if (!messageId.trim() || !detail || detail.entry_id !== entryId || detail.room_id !== roomId) return false;
+  return detail.source_message?.id === messageId
+    || detail.publication?.canonical_message_id === messageId
+    || detail.items.some(item => item.source_message_id === messageId || item.canonical_message_id === messageId);
+}
+
 /** The active turn wins; otherwise the daemon's bounded newest-first list wins. */
 export function defaultAgentInspectorWorkSource(
   entry: Pick<DesktopSupervisorManifestEntry, "roomAgentState">,

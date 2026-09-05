@@ -17,6 +17,7 @@ import {
   createAgentInspectorDetailRequest,
   agentInspectorRuntimeControlMatchesFence,
   defaultAgentInspectorWorkSource,
+  canRevealAgentInspectorWorkMessage,
   describeAgentInspectorRuntimeControl,
   describeAgentInspectorUncertainEffect,
   describeRecordedOperation,
@@ -29,6 +30,20 @@ import {
 test("work detail source selection uses exact active source before bounded recency", () => {
   assert.equal(defaultAgentInspectorWorkSource({ roomAgentState: { turn: { sourceMessageId: "active" } } } as any, { items: [{ source_message_id: "newest" }] }), "active");
   assert.equal(defaultAgentInspectorWorkSource({ roomAgentState: { turn: { sourceMessageId: null } } } as any, { items: [{ source_message_id: "newest" }] }), "newest");
+});
+
+test("trace links only reveal requests and replies retained for the selected agent and room", () => {
+  const detail = { entry_id: "agent_a", room_id: "room_a", source_message: { id: "request_a" },
+    publication: { canonical_message_id: "reply_a" },
+    items: [{ source_message_id: "request_b", canonical_message_id: "reply_b" }] } as any;
+  for (const message of ["request_a", "reply_a", "request_b", "reply_b"]) {
+    assert.equal(canRevealAgentInspectorWorkMessage(detail, "agent_a", "room_a", message), true);
+    assert.equal(canRevealAgentInspectorWorkMessage(detail, "agent_b", "room_a", message), false);
+    assert.equal(canRevealAgentInspectorWorkMessage(detail, "agent_a", "room_b", message), false);
+  }
+  assert.equal(canRevealAgentInspectorWorkMessage(detail, "agent_a", "room_a", "unrelated"), false);
+  assert.equal(canRevealAgentInspectorWorkMessage(detail, "agent_a", "room_a", ""), false);
+  assert.equal(canRevealAgentInspectorWorkMessage(null, "agent_a", "room_a", "request_a"), false);
 });
 
 test("recorded execution renders partial evidence without changing the work receipt or implying live status", async () => {

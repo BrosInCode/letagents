@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { createSSRApp } from "vue";
+import { renderToString } from "@vue/server-renderer";
+import { createServer } from "vite";
+import { agentLiveTrace, canPresentCurrentAgentStream, currentAgentRequest } from "../src/domain/agent-inspector-live-trace";
 
 import {
   agentLiveAvailability,
@@ -38,6 +42,54 @@ test("fold concatenates reasoning and assistant-text deltas per part", () => {
     { kind: "reasoning", id: "r1", text: "let me think" },
     { kind: "message", id: "m1", text: "Hello there" },
   ]);
+});
+
+test("Codex commentary keeps native message blocks and turn identities separate", () => {
+  const transcript = foldAgentStreamEvents([
+    event({sequence:1,payload:{itemId:"one",threadId:"thread",turnId:"first",delta:"Checking"}}),
+    event({sequence:2,payload:{itemId:"two",threadId:"thread",turnId:"first",delta:"Result"}}),
+    event({sequence:3,payload:{itemId:"one",threadId:"thread",turnId:"first",delta:" files"}}),
+    event({sequence:4,payload:{itemId:"one",threadId:"thread",turnId:"second",delta:"New turn"}}),
+  ]);
+  assert.deepEqual(transcript.items.map(item=>item.kind === "message" ? item.text : null), ["Checking files","Result","New turn"]);
+});
+
+test("the Live trace shows durable history across providers and never dresses idle replay as current work", async () => {
+  const vite = await createServer({root:fileURLToPath(new URL("../..",import.meta.url)),appType:"custom",logLevel:"silent",server:{middlewareMode:true}});
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLive.vue")).default;
+    const item = {source_message_id:"msg_1",sender:"Emmy",text_preview:"Inspect package.json",created_at:"2026-09-05T10:00:00Z",updated_at:"2026-09-05T10:01:00Z",state:"acknowledged",terminal_reason:null,outcome:{text:"Three scripts found"},canonical_message_id:"msg_2",last_error:null};
+    const detail = {availability:"available",requested_source_message_id:"msg_1",source_message:{id:"msg_1",sender:"Emmy",text:"Inspect package.json"},items:[item],terminal:{normalized_text:"Three scripts found"},recorded_execution:{availability:"available",evidenceIncomplete:false,truncated:false,turns:[{turnId:"turn",state:"terminal",outcome:"completed",operations:[{executionId:"read",operation:"file_read",outcome:"succeeded",startObserved:true,outputBytes:0,exitCode:null,signalNumber:null,sideEffects:"none"}]}]}};
+    const resource = {status:"ready",sourceMessageId:"msg_1",detail,error:null};
+    const work = {active:false,startedAt:null,state:"idle",freshness:"fresh",agentState:"online",detail:null};
+    const feed = {events:[event({sequence:1,observedAt:"2026-09-05T10:00:01Z",payload:{partId:"public",delta:"Current public commentary"}})],ended:false,droppedEvents:0};
+    const render = (overrides:Record<string,unknown>={}) => renderToString(createSSRApp(component,{resource,work,feed,selectedSourceMessageId:"msg_1",activeSourceMessageId:null,supportsReasoning:false,...overrides}));
+    for (const provider of ["codex","claude-code","cursor","open-model"]) {
+      const html = await render({work:{...work,provider}});
+      assert.match(html,/Inspect package.json/); assert.match(html,/Three scripts found/);
+      assert.match(html,/Reply published/); assert.match(html,/File read · Completed/);
+      assert.match(html,/Open request in Chat/); assert.match(html,/Open reply in Chat/);
+      assert.doesNotMatch(html,/Current public commentary|Following the current|Waiting for room work/);
+    }
+    const active = await render({work:{...work,active:true,startedAt:"2026-09-05T10:00:00Z"},activeSourceMessageId:"msg_3"});
+    assert.match(active,/Current turn/); assert.match(active,/Current public commentary/);
+    assert.match(active,/Inspect package.json/); assert.match(active,/Recorded actions/);
+    assert.ok(active.indexOf("Current public commentary") < active.indexOf("Recent work"), "current activity is separate from selected past work");
+    assert.doesNotMatch(await render({work:{...work,active:true,startedAt:null},activeSourceMessageId:"msg_3"}),/Current public commentary/);
+    assert.match(await render({resource:{...resource,status:"loading",detail:null}}),/Loading recent work/);
+    assert.match(await render({resource:{...resource,status:"error",detail:null}}),/Couldn’t load recent work/);
+    assert.match(await render({resource:{...resource,status:"unavailable",detail:null}}),/Recent work is unavailable/);
+    assert.match(await render({resource:{...resource,detail:{...detail,availability:"pruned"}}}),/Older details have expired/);
+    assert.match(await render({resource:{...resource,detail:{...detail,availability:"not_loaded",items:[]}}}),/No requests have been recorded/);
+    assert.match(await render({resource:{...resource,detail:{...detail,recorded_execution:{availability:"not_captured"}}}}),/does not mean the agent did no work/);
+    assert.deepEqual(agentLiveTrace(resource as any,"msg_other").turns,[],"mismatched source never lends recorded operations");
+    assert.equal(currentAgentRequest(resource as any,"msg_other"),null,"selected history cannot supply another current request");
+    assert.equal(currentAgentRequest(resource as any,"msg_1")?.text,"Inspect package.json");
+    const withActive = {...resource,detail:{...detail,items:[item,{...item,source_message_id:"msg_3",sender:"Alex",text_preview:"Fresh task"}]}};
+    const triggered = await render({resource:withActive,work:{...work,active:true,startedAt:"2026-09-05T10:00:00Z"},activeSourceMessageId:"msg_3"});
+    assert.ok(triggered.indexOf("Fresh task") < triggered.indexOf("Current public commentary"));
+    assert.equal(canPresentCurrentAgentStream({active:false,startedAt:"2026-09-05T10:00:00Z",activeSourceMessageId:"msg_1"}),false);
+  } finally { await vite.close(); }
 });
 
 test("fold renders Codex's verbatim readable reasoning summary method", () => {
@@ -172,6 +224,7 @@ test("a delayed running tool replay cannot regress a terminal card", () => {
   const transcript = foldAgentStreamEvents([
     event({ sequence: 1, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "c1", tool: "bash", status: "completed", output: "done" } }),
     event({ sequence: 2, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "c1", tool: "bash", status: "running" } }),
+    event({ sequence: 3, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "c1", tool: "bash", status: "pending" } }),
   ]);
   const item = transcript.items[0];
   assert.equal(item?.kind === "tool" && item.status, "completed");
@@ -295,7 +348,9 @@ test("the live surface presents a work narrative and keeps technical payloads be
   assert.match(surface, /agentLiveAvailability\(props\.work, props\.feed\.ended\)/);
   assert.match(surface, /This agent is retired and cannot receive new room work/);
   assert.match(surface, /The agent is still starting and cannot receive room work yet/);
-  assert.match(surface, /Waiting for room work/);
+  assert.match(surface, /Ready for a message/);
+  assert.match(surface, /AgentInspectorLiveHistory/);
+  assert.doesNotMatch(surface, /Hidden chain of thought|supervisor's room-turn lifecycle owns|Waiting for room work/);
   assert.doesNotMatch(surface, /transcript\.value\.ended \? "Ended" : "In progress"/);
   assert.match(surface, /Agent commentary/);
   assert.match(surface, /Work note/);

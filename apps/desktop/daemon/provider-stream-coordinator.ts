@@ -1,3 +1,4 @@
+import { ProviderLiveDisplay } from "./provider-live-display.js";
 import { publishWorkerNativeActivity } from "./cloud-http.js";
 import { sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
@@ -10,7 +11,6 @@ import type {
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import {
-  isAgentInspectorLiveDisplayEvent,
   isCorrelatedNonemptyWaitResult,
   isHumanRoomActivityEvent,
   isSupervisedQuietPollContinuation,
@@ -259,6 +259,7 @@ export class ProviderStreamCoordinator {
   /** Kept public as a temporary compatibility seam for main.ts tests/callers. */
   readonly liveHandles: Map<string, ProviderActionHandle>;
 
+  private readonly liveDisplay = new WeakMap<ProviderInstallationToken, ProviderLiveDisplay>();
   private readonly listenerLeases = new Map<string, ProviderListenerLease>();
   private readonly streamQueues = new Map<string, Promise<void>>();
   private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
@@ -1206,8 +1207,13 @@ export class ProviderStreamCoordinator {
       this.options.streams.reset(entryId);
     }
     if (isHumanRoomActivityEvent(event)) {
-      if (isAgentInspectorLiveDisplayEvent(event)) {
-        this.options.streams.push(entryId, sanitizedEvent);
+      let display = this.liveDisplay.get(installation);
+      if (!display) {
+        display = new ProviderLiveDisplay(installation.providerContinuationId);
+        this.liveDisplay.set(installation, display);
+      }
+      for (const projected of display.project(sanitizedEvent, event.nativeLifecyclePhase)) {
+        this.options.streams.push(entryId, projected);
       }
       await this.options.serializeEntry(entryId, async () => {
         if (!this.isCurrentInstallation(installation)) return;
