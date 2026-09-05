@@ -8,6 +8,9 @@ import { createServer } from "vite";
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol";
 import {
   agentInspectorWorkArtifacts,
+  agentInspectorDetailRevision,
+  createAgentInspectorBackgroundRefresh,
+  createAgentInspectorDetailRequest,
   agentInspectorRuntimeControlMatchesFence,
   defaultAgentInspectorWorkSource,
   describeAgentInspectorRuntimeControl,
@@ -106,10 +109,12 @@ test("work labels present human language instead of raw causal enums", () => {
     execution_generation_id: "generation", daemon_generation_id: "4",
   })?.detail ?? "", /will not infer that unfinished work completed/);
   const fenced = { control_state: "responsive", runtime_state: "ready", observed_at: "now",
-    execution_generation_id: "generation", daemon_generation_id: "4" } as const;
-  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 4), true);
-  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "replacement", 4), false);
-  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 5), false);
+    execution_generation_id: "generation", daemon_generation_id: "4", runtime_generation_id: "birth" } as const;
+  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 4, "birth"), true);
+  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "replacement", 4, "birth"), false);
+  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 5, "birth"), false);
+  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 4, "new-birth"), false);
+  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 4), false);
 });
 
 test("shell keeps work loading dark, fenced, stale-safe, and routed through canonical reveal", () => {
@@ -124,8 +129,8 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(shell, /void loadAgentInspectorWorkDetail\(null, false, false\)/);
   assert.match(shell, /followDefaultSource && sourceMessageId === null/);
   assert.match(shell, /refreshOpenAgentInspectorRuntimeControl\(snapshot\)/);
-  assert.match(shell, /if \(detail\?\.runtime_control\) \{[\s\S]{0,240}runtime_control: null/,
-    "capture refresh drops process-birth health before an RPC can fail");
+  assert.match(shell, /if \(detail\?\.runtime_control &&[\s\S]{0,400}runtime_control: null/,
+    "capture refresh drops mismatched process-birth health before an RPC can fail");
   assert.match(shell, /detail\.runtime_control && !agentInspectorRuntimeControlMatchesFence\([\s\S]{0,180}\? \{ \.\.\.detail, runtime_control: null \} : detail/,
     "fresh responses are still fenced to the captured execution and daemon");
   assert.match(shell, /projection\?\.entry\.executionGenerationId === executionGenerationId/);
@@ -139,4 +144,132 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(work, /mutating tool outcomes need verification/i);
   assert.match(work, /A safety upgrade retired this legacy turn/);
   assert.match(work, /Open reply in Chat/);
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("background slow reads coalesce changed work and periodically recheck unchanged health", async () => {
+  let now = 0;
+  const refresh = createAgentInspectorBackgroundRefresh(() => now);
+  const slow = deferred<boolean>();
+  const calls: string[] = [];
+  const read = (name: string) => async () => { calls.push(name); return true; };
+  const first = refresh.refresh("birth-a", "work-1", () => { calls.push("first"); return slow.promise; });
+  await Promise.resolve();
+  refresh.refresh("birth-a", "work-1", read("duplicate"));
+  refresh.refresh("birth-a", "work-2", read("superseded"));
+  refresh.refresh("birth-a", "work-3", read("latest"));
+  assert.deepEqual(calls, ["first"]);
+  slow.resolve(true);
+  await first;
+  assert.deepEqual(calls, ["first", "latest"]);
+  await refresh.refresh("birth-a", "work-3", read("too-soon"));
+  now = 5_000;
+  await refresh.refresh("birth-a", "work-3", read("periodic"));
+  assert.deepEqual(calls, ["first", "latest", "periodic"]);
+});
+
+test("identity roundtrips, close, and errors cannot reuse stale freshness or trailing work", async () => {
+  const refresh = createAgentInspectorBackgroundRefresh(() => 0);
+  const calls: string[] = [];
+  const read = (name: string) => async () => { calls.push(name); return true; };
+  await refresh.refresh("A", "1", read("A1"));
+  const slowB = deferred<boolean>();
+  const old = refresh.refresh("B", "1", () => slowB.promise);
+  await Promise.resolve();
+  refresh.refresh("B", "2", read("old trailing"));
+  await refresh.refresh("A", "1", read("A2"));
+  slowB.resolve(true);
+  await old;
+  assert.deepEqual(calls, ["A1", "A2"]);
+  const pending = deferred<boolean>();
+  const closing = refresh.refresh("C", "1", () => pending.promise);
+  await Promise.resolve();
+  refresh.refresh("C", "2", read("closed trailing"));
+  refresh.reset();
+  pending.resolve(true);
+  await closing;
+  await refresh.refresh("A", "1", read("reopened"));
+  await refresh.refresh("error", "1", async () => { throw new Error("offline"); });
+  await refresh.refresh("error", "1", read("retry"));
+  assert.deepEqual(calls, ["A1", "A2", "reopened", "retry"]);
+});
+
+test("manual and background detail reads share identity and retain explicit source-follow intent", async () => {
+  const requests = createAgentInspectorDetailRequest();
+  const pending = deferred<void>();
+  const calls: string[] = [];
+  let follow = false;
+  const first = requests.run("entry/source/birth-a", false, async intent => {
+    calls.push("a");
+    await pending.promise;
+    follow = intent.followDefaultSource;
+  });
+  assert.deepEqual(calls, ["a"], "admission precedes any newer identity");
+  const same = requests.run("entry/source/birth-a", true, async () => { calls.push("duplicate"); });
+  assert.equal(first, same);
+  requests.run("entry/source/birth-a", false, async () => { calls.push("duplicate background"); });
+  await requests.run("entry/new-source/birth-b", false, async () => { calls.push("b"); });
+  pending.resolve();
+  await first;
+  assert.equal(follow, true);
+  requests.reset();
+  await requests.run("entry/source/birth-a", false, async () => { calls.push("reopened"); });
+  assert.deepEqual(calls, ["a", "b", "reopened"]);
+});
+
+test("timestamp-only snapshots do not refetch detail but durable work changes do", async () => {
+  const entry = { observedState: "running", condition: "ready", bindingUpdatedAt: "1",
+    nativeLiveness: { observedAt: "1" }, roomAgentState: { connection: { observedAt: "1" }, ingress: { observedAt: "1" },
+      turn: { state: "responding", sourceMessageId: "source" }, inbox: { pendingCount: 1 } }, deliveryReceipts: [{ state: "awaiting_result" }] } as any;
+  const refreshed = { ...entry, bindingUpdatedAt: "2", nativeLiveness: { observedAt: "2" }, roomAgentState: {
+    ...entry.roomAgentState, connection: { observedAt: "2" }, ingress: { observedAt: "2" } } };
+  const refresh = createAgentInspectorBackgroundRefresh(() => 0);
+  let calls = 0;
+  const read = async () => { calls += 1; return true; };
+  await refresh.refresh("birth", agentInspectorDetailRevision(entry), read);
+  await refresh.refresh("birth", agentInspectorDetailRevision(refreshed), read);
+  assert.equal(calls, 1);
+  await refresh.refresh("birth", agentInspectorDetailRevision({ ...refreshed, deliveryReceipts: [{ state: "acknowledged" }] }), read);
+  assert.equal(calls, 2);
+  await refresh.refresh("new-birth", agentInspectorDetailRevision(refreshed), read);
+  assert.equal(calls, 3);
+});
+
+test("an old detail response is rejected immediately on daemon snapshot handoff before status negotiation finishes", async () => {
+  const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
+  const body = shell.split("function agentInspectorWorkRequestStillCurrent(")[1]!.split("): boolean {")[1]!.split("\n}\n")[0]!;
+  const state = { token: 1, snapshotGeneration: 4, statusGeneration: 4, source: "source", birth: "birth" };
+  // Execute the actual shell acceptance predicate with controllable reactive
+  // inputs; the daemon status RPC intentionally lags behind the push snapshot.
+  const accepts = () => new Function("entryId", "roomId", "sourceMessageId", "executionGenerationId", "daemonGeneration", "token", "runtimeGenerationId",
+    "agentInspectorWorkRequestToken", "supervisorStateDaemonGeneration", "props", "selectedAgentDetailTarget", "selectedAgentDetailProjection", "supervisorStatus", "agentInspectorWorkSourceMessageId", body)(
+    "entry", "room", "source", "execution", 4, 1, "birth", state.token, state.snapshotGeneration,
+    { room: { identifier: "room" } }, { value: { kind: "supervised", supervisorEntryId: "entry" } },
+    { value: { entry: { executionGenerationId: "execution", runtimeGenerationId: state.birth } } },
+    { value: { generation: state.statusGeneration } }, { value: state.source });
+  assert.equal(accepts(), true);
+  state.snapshotGeneration = 0;
+  assert.equal(accepts(), true, "detail remains supported before the first push snapshot");
+  state.snapshotGeneration = 4;
+  const old = deferred<void>();
+  let painted = false;
+  const response = old.promise.then(() => { if (accepts()) painted = true; });
+  state.snapshotGeneration = 5;
+  old.resolve();
+  await response;
+  assert.equal(painted, false, "old daemon response cannot restore health during negotiation");
+  state.snapshotGeneration = 4;
+  state.birth = "replacement-with-same-pid-and-execution";
+  assert.equal(accepts(), false);
+  state.birth = "birth";
+  state.source = "other-source";
+  assert.equal(accepts(), false);
+  state.source = "source";
+  state.token = 2;
+  assert.equal(accepts(), false, "close/reopen invalidates an otherwise matching old read");
 });

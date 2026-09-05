@@ -641,6 +641,8 @@ export interface DesktopRoomAgentStateProjection {
 }
 
 export interface DesktopSupervisorManifestEntry {
+  /** Opaque exact native process birth, used only to fence cached read evidence. */
+  runtimeGenerationId?: string | null;
   id: string;
   roomId: string;
   displayName: string;
@@ -815,6 +817,7 @@ export interface DesktopSupervisorAgentInspectorDetail {
   recorded_execution?: RetainedExecutionDetail;
   /** Optional for older supervisors; exact current observer health, not work completion. */
   runtime_control?: {
+    runtime_generation_id?: string;
     control_state: "connecting" | "responsive" | "degraded" | "lost" | "unprobeable";
     runtime_state: "starting" | "ready" | "stopping" | "exited";
     observed_at: string | null;
