@@ -368,7 +368,7 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
     const seededEntry: DaemonManifestEntry = {
       id: entryId, room_id: roomId, display_name: "Codex", provider: "codex", model: null, charter: "poll",
       desired_state: "running", observed_state: "working", condition: "none", delivery_mode: "daemon_inbox",
-      permission_profile_id: "workspace-write", created_by: "test", created_at: recordedAt,
+      permission_profile_id: "full_access", created_by: "test", created_at: recordedAt,
       workspace_path: workspacePath, work_attempt_id: workAttemptId,
       provider_ref: {
         work_attempt_id: workAttemptId, provider_continuation_id: continuation,
@@ -591,7 +591,7 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
     await internals.putManifestEntry({
       id: entryId, room_id: roomId, display_name: "Codex", provider: "codex", model: null, charter: "poll",
       desired_state: "running", observed_state: "working", condition: "none", delivery_mode: "daemon_inbox",
-      permission_profile_id: "workspace-write", created_by: "test", created_at: new Date().toISOString(),
+      permission_profile_id: "full_access", created_by: "test", created_at: new Date().toISOString(),
       workspace_path: workspacePath, work_attempt_id: workAttemptId,
       provider_ref: {
         work_attempt_id: workAttemptId, provider_continuation_id: continuation,

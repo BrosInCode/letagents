@@ -447,7 +447,9 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
     if (!Object.hasOwn(frame, "id")) return;
     if (frame.method === "thread/turns/list") assert.deepEqual(frame.params,
       { threadId: "continuation", limit: 1, sortDirection: "desc", itemsView: "full" });
+    if (frame.method === "thread/resume") assert.deepEqual(frame.params, { threadId: "continuation" });
     const result = frame.method === "mcpServerStatus/list" ? { data: [{ name: "letagents" }] }
+      : frame.method === "thread/resume" ? { thread: { id: "continuation" } }
       : frame.method === "thread/read" ? { thread: { id: "continuation", status: { type: "active" },
         turns: isFileChange ? [] : [{ id: "native-turn", status: "inProgress", items: [] }] } }
       : frame.method === "thread/turns/list" ? { data: [{ id: "native-turn", status: "inProgress", itemsView: "full",
