@@ -1,4 +1,26 @@
-import type { DesktopRoomMessage } from "../../../electron/ipc-types";
+import type { DesktopRoomMessage, DesktopSupervisorManifestEntry } from "../../../electron/ipc-types";
+import type { AgentInspectorRequest } from "../components/desktop/content/desktop-chat-message/types";
+
+/** Startup prompts have retained work, but no room-chat message to scroll to. */
+export function initialMessageInspectorRequest(
+  messageId: string,
+  roomId: string,
+  entries: readonly DesktopSupervisorManifestEntry[],
+): AgentInspectorRequest | null {
+  const entry = entries.find((candidate) => candidate.roomId === roomId
+    && messageId === `desktop-initial-message:${candidate.id}`);
+  if (!entry) return null;
+  return {
+    kind: "supervised",
+    supervisorEntryId: entry.id,
+    target: {
+      messageId: null, clientMessageId: null, messageSource: null,
+      actorLabel: entry.displayName, displayName: entry.displayName,
+      ownerAttribution: null, ideLabel: null, sender: entry.displayName,
+      agentKey: entry.agentKey ?? null, agentSessionId: entry.agentSessionId ?? null,
+    },
+  };
+}
 
 export type RoomMessageRevealDestination =
   | { kind: "main" }
