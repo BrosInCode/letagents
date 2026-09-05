@@ -3,6 +3,7 @@ import type {
   DesktopRoomSharedArtifact,
   DesktopSupervisorAgentInspectorDetail,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorStateSnapshot,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
 import { roomArtifactTimelineItems, type RoomArtifactTimelineItem } from "./room-artifacts";
@@ -38,6 +39,59 @@ export function agentInspectorDetailRevision(entry: DesktopSupervisorManifestEnt
     entry.workAttemptId, entry.providerContinuationId, entry.lastTurnControlSequence,
     entry.roomAgentState?.inbox, entry.roomAgentState?.turn, entry.roomAgentState?.task,
     entry.deliveryReceipts, entry.turnControl, entry.lastTerminal]);
+}
+
+export function agentInspectorDetailKey(entry: DesktopSupervisorManifestEntry, source: string | null, generation: number): string {
+  return JSON.stringify([entry.id, entry.roomId, source, entry.executionGenerationId, generation, entry.runtimeGenerationId ?? null]);
+}
+
+export function agentInspectorDetailRequestIsCurrent(key: string, token: number, current: {
+  entry: DesktopSupervisorManifestEntry | null | undefined; roomId: string; source: string | null;
+  generation: number | null; snapshotGeneration: number; token: number;
+}): boolean {
+  return Boolean(current.entry && current.entry.roomId === current.roomId && token === current.token
+    && current.generation !== null && current.snapshotGeneration <= current.generation
+    && agentInspectorDetailKey(current.entry, current.source, current.generation) === key);
+}
+
+export function invalidateAgentInspectorRuntimeControl(resource: AgentInspectorWorkResource,
+  snapshot: DesktopSupervisorStateSnapshot, entryId: string, roomId: string): AgentInspectorWorkResource {
+  const entry = snapshot.entries.find(candidate => candidate.id === entryId);
+  const detail = resource.detail;
+  if (detail?.runtime_control && (!entry || entry.roomId !== roomId || !agentInspectorRuntimeControlMatchesFence(
+    detail.runtime_control, entry.executionGenerationId, snapshot.daemonGeneration, entry.runtimeGenerationId ?? null))) {
+    return { ...resource, detail: { ...detail, runtime_control: null } };
+  }
+  return resource;
+}
+
+/** Retain exact history during a refresh, but never retain unfenced health. */
+export async function readAgentInspectorWorkDetail(input: {
+  entry: DesktopSupervisorManifestEntry; source: string | null; generation: number;
+  previous: AgentInspectorWorkResource;
+  read: () => Promise<DesktopSupervisorAgentInspectorDetail>;
+  isCurrent: () => boolean;
+  write: (resource: AgentInspectorWorkResource) => void;
+}): Promise<DesktopSupervisorAgentInspectorDetail | null> {
+  const { entry, source, generation } = input;
+  const fenceHealth = (detail: DesktopSupervisorAgentInspectorDetail) => detail.runtime_control
+    && !agentInspectorRuntimeControlMatchesFence(detail.runtime_control, entry.executionGenerationId, generation, entry.runtimeGenerationId ?? null)
+    ? { ...detail, runtime_control: null } : detail;
+  const cached = input.previous.detail;
+  const previous = input.previous.sourceMessageId === source && cached
+    && isCurrentAgentInspectorWorkResponse(cached, entry.id, entry.roomId, source) ? fenceHealth(cached) : null;
+  input.write({ status: previous ? "refreshing" : "loading", detail: previous, error: null, sourceMessageId: source });
+  try {
+    const detail = await input.read();
+    if (!input.isCurrent() || !isCurrentAgentInspectorWorkResponse(detail, entry.id, entry.roomId, source)) return null;
+    const current = fenceHealth(detail);
+    input.write({ status: "ready", detail: current, error: null, sourceMessageId: source });
+    return current;
+  } catch (error) {
+    if (input.isCurrent()) input.write({ status: "error", detail: previous ? { ...previous, runtime_control: null } : null,
+      error: error instanceof Error ? error.message : "Could not load retained work.", sourceMessageId: source });
+    return null;
+  }
 }
 
 /** Collapse background bursts without starving a same-runtime response. */
