@@ -429,14 +429,16 @@ import {
   type AgentInspectorSettingsFence,
 } from "../../../domain/agent-inspector-settings";
 import {
-  agentInspectorRuntimeControlMatchesFence,
+  invalidateAgentInspectorRuntimeControl,
   createAgentInspectorBackgroundRefresh,
   createAgentInspectorDetailRequest,
   agentInspectorDetailRevision,
+  agentInspectorDetailKey,
+  agentInspectorDetailRequestIsCurrent,
+  readAgentInspectorWorkDetail,
   agentInspectorWorkArtifacts,
   defaultAgentInspectorWorkSource,
   emptyAgentInspectorWorkResource,
-  isCurrentAgentInspectorWorkResponse,
   type AgentInspectorWorkResource,
 } from "../../../domain/agent-inspector-work";
 import {
@@ -1211,7 +1213,10 @@ function acceptSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot)
   supervisorEntriesUpdatedAt.value = new Date().toISOString();
   supervisorEntriesState.value = "ready";
   supervisorEntriesError.value = null;
-  invalidateAgentInspectorRuntimeControl(snapshot);
+  const target = selectedAgentDetailTarget.value;
+  if (target?.kind === "supervised") agentInspectorWorkResource.value = invalidateAgentInspectorRuntimeControl(
+    agentInspectorWorkResource.value, snapshot, target.supervisorEntryId, props.room.identifier,
+  );
   // Status/capability negotiation is generation-scoped. Push snapshots keep
   // the manifest current, but a daemon handoff requires exactly one new
   // negotiation before generation-specific controls may be used.
@@ -2488,21 +2493,6 @@ async function purgeAgentInspectorAgent(): Promise<void> {
   }
 }
 
-function invalidateAgentInspectorRuntimeControl(snapshot: DesktopSupervisorStateSnapshot): void {
-  const target = selectedAgentDetailTarget.value;
-  if (target?.kind !== "supervised") return;
-  const entry = snapshot.entries.find((candidate) => candidate.id === target.supervisorEntryId);
-  const detail = agentInspectorWorkResource.value.detail;
-  // Preserve last-check evidence only for the exact native process birth.
-  if (detail?.runtime_control && (!entry || entry.roomId !== props.room.identifier || !agentInspectorRuntimeControlMatchesFence(detail.runtime_control,
-    entry.executionGenerationId, snapshot.daemonGeneration, entry.runtimeGenerationId ?? null))) {
-    agentInspectorWorkResource.value = {
-      ...agentInspectorWorkResource.value,
-      detail: { ...detail, runtime_control: null },
-    };
-  }
-}
-
 function refreshOpenAgentInspectorRuntimeControl(snapshot: DesktopSupervisorStateSnapshot): void {
   if (snapshot.daemonGeneration !== supervisorStateDaemonGeneration || snapshot.sequence !== supervisorStateSequence) return;
   const target = selectedAgentDetailTarget.value;
@@ -2521,32 +2511,6 @@ function refreshOpenAgentInspectorRuntimeControl(snapshot: DesktopSupervisorStat
     return Boolean(latest && agentInspectorDetailKey(latest.entry, agentInspectorWorkSourceMessageId.value,
       supervisorStatus.value?.generation ?? 0) === key && agentInspectorWorkResource.value.status === "ready");
   });
-}
-
-function agentInspectorDetailKey(entry: DesktopSupervisorManifestEntry, source: string | null, generation: number): string {
-  return JSON.stringify([entry.id, entry.roomId, source, entry.executionGenerationId, generation, entry.runtimeGenerationId ?? null]);
-}
-
-function agentInspectorWorkRequestStillCurrent(
-  entryId: string,
-  roomId: string,
-  sourceMessageId: string | null,
-  executionGenerationId: string | null,
-  daemonGeneration: number,
-  token: number,
-  runtimeGenerationId: string | null,
-): boolean {
-  const target = selectedAgentDetailTarget.value;
-  const projection = selectedAgentDetailProjection.value;
-  return token === agentInspectorWorkRequestToken
-    && props.room.identifier === roomId
-    && target?.kind === "supervised"
-    && target.supervisorEntryId === entryId
-    && projection?.entry.executionGenerationId === executionGenerationId
-    && (projection?.entry.runtimeGenerationId ?? null) === runtimeGenerationId
-    && supervisorStateDaemonGeneration <= daemonGeneration
-    && supervisorStatus.value?.generation === daemonGeneration
-    && agentInspectorWorkSourceMessageId.value === sourceMessageId;
 }
 
 function selectAgentInspectorWorkSource(sourceMessageId: string): void {
@@ -2582,41 +2546,28 @@ async function loadAgentInspectorWorkDetail(
     return;
   }
   if (!force && agentInspectorWorkResource.value.status === "ready" && agentInspectorWorkSourceMessageId.value === sourceMessageId) return;
-  const executionGenerationId = projection.entry.executionGenerationId;
   const daemonGeneration = supervisorStatus.value.generation;
   agentInspectorWorkSourceMessageId.value = sourceMessageId;
-  const runtimeGenerationId = projection.entry.runtimeGenerationId ?? null;
   const key = agentInspectorDetailKey(projection.entry, sourceMessageId, daemonGeneration);
   return agentInspectorDetailRequest.run(key, followDefaultSource, async intent => {
     const token = ++agentInspectorWorkRequestToken;
-    const cached = agentInspectorWorkResource.value.detail;
-    const retained = agentInspectorWorkResource.value.sourceMessageId === sourceMessageId
-      && cached
-      && isCurrentAgentInspectorWorkResponse(cached, target.supervisorEntryId, projection.roomId, sourceMessageId)
-      ? cached
-      : null;
-    const previous = retained?.runtime_control && !agentInspectorRuntimeControlMatchesFence(
-      retained.runtime_control, executionGenerationId, daemonGeneration, runtimeGenerationId,
-    ) ? { ...retained, runtime_control: null } : retained;
-    agentInspectorWorkResource.value = { status: previous ? "refreshing" : "loading", detail: previous, error: null, sourceMessageId };
-    try {
-      const detail = await desktopIpc.supervisor.getAgentInspectorDetail({ entryId: target.supervisorEntryId, roomId: projection.roomId, sourceMessageId });
-      if (!agentInspectorWorkRequestStillCurrent(target.supervisorEntryId, projection.roomId, sourceMessageId,
-        executionGenerationId, daemonGeneration, token, runtimeGenerationId)
-        || !isCurrentAgentInspectorWorkResponse(detail, target.supervisorEntryId, projection.roomId, sourceMessageId)) return;
-      const currentDetail = detail.runtime_control && !agentInspectorRuntimeControlMatchesFence(
-        detail.runtime_control, executionGenerationId, daemonGeneration, runtimeGenerationId,
-      ) ? { ...detail, runtime_control: null } : detail;
-      const defaultSource = defaultAgentInspectorWorkSource(projection.entry, currentDetail);
-      agentInspectorWorkResource.value = { status: "ready", detail: currentDetail, error: null, sourceMessageId };
-      if (intent.followDefaultSource && sourceMessageId === null && defaultSource && defaultSource !== agentInspectorWorkSourceMessageId.value) {
-        agentInspectorWorkSourceMessageId.value = defaultSource;
-        void loadAgentInspectorWorkDetail(defaultSource);
-      }
-    } catch (error) {
-      if (!agentInspectorWorkRequestStillCurrent(target.supervisorEntryId, projection.roomId, sourceMessageId,
-        executionGenerationId, daemonGeneration, token, runtimeGenerationId)) return;
-      agentInspectorWorkResource.value = { status: "error", detail: previous ? { ...previous, runtime_control: null } : null, error: error instanceof Error ? error.message : "Could not load retained work.", sourceMessageId };
+    const isCurrent = () => agentInspectorDetailRequestIsCurrent(key, token, {
+      entry: selectedAgentDetailProjection.value?.entry, roomId: props.room.identifier,
+      source: agentInspectorWorkSourceMessageId.value, generation: supervisorStatus.value?.generation ?? null,
+      snapshotGeneration: supervisorStateDaemonGeneration, token: agentInspectorWorkRequestToken,
+    });
+    const currentDetail = await readAgentInspectorWorkDetail({
+      entry: projection.entry, source: sourceMessageId, generation: daemonGeneration,
+      previous: agentInspectorWorkResource.value,
+      read: () => desktopIpc.supervisor.getAgentInspectorDetail({ entryId: target.supervisorEntryId, roomId: projection.roomId, sourceMessageId }),
+      isCurrent,
+      write: resource => { agentInspectorWorkResource.value = resource; },
+    });
+    if (!currentDetail || !isCurrent()) return;
+    const defaultSource = defaultAgentInspectorWorkSource(projection.entry, currentDetail);
+    if (intent.followDefaultSource && sourceMessageId === null && defaultSource && defaultSource !== agentInspectorWorkSourceMessageId.value) {
+      agentInspectorWorkSourceMessageId.value = defaultSource;
+      void loadAgentInspectorWorkDetail(defaultSource);
     }
   });
 }

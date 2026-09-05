@@ -9,6 +9,10 @@ import type { RetainedExecutionDetail } from "../../shared/execution-protocol";
 import {
   agentInspectorWorkArtifacts,
   agentInspectorDetailRevision,
+  agentInspectorDetailKey,
+  agentInspectorDetailRequestIsCurrent,
+  readAgentInspectorWorkDetail,
+  invalidateAgentInspectorRuntimeControl,
   createAgentInspectorBackgroundRefresh,
   createAgentInspectorDetailRequest,
   agentInspectorRuntimeControlMatchesFence,
@@ -123,19 +127,17 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   const work = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorWork.vue", import.meta.url)), "utf8");
   assert.doesNotMatch(shell, /agentInspectorFoundationEnabled/);
   assert.match(shell, /capabilities\.agentInspectorDetail/);
-  assert.match(shell, /agentInspectorWorkRequestStillCurrent/);
+  assert.match(shell, /agentInspectorDetailRequestIsCurrent/);
   assert.match(shell, /agentInspectorWorkResource\.value = \{ status: "loading", detail: null, error: null, sourceMessageId \}/);
   assert.match(shell, /void loadAgentInspectorWorkDetail\(sourceMessageId, true\)/);
   assert.match(shell, /void loadAgentInspectorWorkDetail\(null, false, false\)/);
   assert.match(shell, /followDefaultSource && sourceMessageId === null/);
   assert.match(shell, /refreshOpenAgentInspectorRuntimeControl\(snapshot\)/);
-  assert.match(shell, /if \(detail\?\.runtime_control &&[\s\S]{0,400}runtime_control: null/,
-    "capture refresh drops mismatched process-birth health before an RPC can fail");
-  assert.match(shell, /detail\.runtime_control && !agentInspectorRuntimeControlMatchesFence\([\s\S]{0,180}\? \{ \.\.\.detail, runtime_control: null \} : detail/,
-    "fresh responses are still fenced to the captured execution and daemon");
-  assert.match(shell, /projection\?\.entry\.executionGenerationId === executionGenerationId/);
-  assert.match(shell, /supervisorStatus\.value\?\.generation === daemonGeneration/);
-  assert.match(shell, /status: previous \? "refreshing" : "loading", detail: previous/);
+  assert.match(shell, /invalidateAgentInspectorRuntimeControl\(/);
+  assert.match(shell, /readAgentInspectorWorkDetail\(/);
+  assert.match(shell, /snapshotGeneration: supervisorStateDaemonGeneration/);
+  assert.match(shell, /entry: selectedAgentDetailProjection\.value\?\.entry/);
+  assert.match(shell, /if \(!currentDetail \|\| !isCurrent\(\)\) return/);
   assert.match(shell, /activeTab\.value = "chat"[\s\S]{0,120}revealRoomMessage\(canonicalMessageId\)/);
   assert.match(surface, /role="tablist"/);
   assert.match(surface, /ArrowLeft.*ArrowRight.*Home.*End/);
@@ -241,17 +243,13 @@ test("timestamp-only snapshots do not refetch detail but durable work changes do
 });
 
 test("an old detail response is rejected immediately on daemon snapshot handoff before status negotiation finishes", async () => {
-  const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
-  const body = shell.split("function agentInspectorWorkRequestStillCurrent(")[1]!.split("): boolean {")[1]!.split("\n}\n")[0]!;
+  const entry = { id: "entry", roomId: "room", executionGenerationId: "execution", runtimeGenerationId: "birth" } as any;
+  const key = agentInspectorDetailKey(entry, "source", 4);
   const state = { token: 1, snapshotGeneration: 4, statusGeneration: 4, source: "source", birth: "birth" };
-  // Execute the actual shell acceptance predicate with controllable reactive
-  // inputs; the daemon status RPC intentionally lags behind the push snapshot.
-  const accepts = () => new Function("entryId", "roomId", "sourceMessageId", "executionGenerationId", "daemonGeneration", "token", "runtimeGenerationId",
-    "agentInspectorWorkRequestToken", "supervisorStateDaemonGeneration", "props", "selectedAgentDetailTarget", "selectedAgentDetailProjection", "supervisorStatus", "agentInspectorWorkSourceMessageId", body)(
-    "entry", "room", "source", "execution", 4, 1, "birth", state.token, state.snapshotGeneration,
-    { room: { identifier: "room" } }, { value: { kind: "supervised", supervisorEntryId: "entry" } },
-    { value: { entry: { executionGenerationId: "execution", runtimeGenerationId: state.birth } } },
-    { value: { generation: state.statusGeneration } }, { value: state.source });
+  const accepts = () => agentInspectorDetailRequestIsCurrent(key, 1, {
+    entry: { ...entry, runtimeGenerationId: state.birth }, roomId: "room", source: state.source,
+    generation: state.statusGeneration, snapshotGeneration: state.snapshotGeneration, token: state.token,
+  });
   assert.equal(accepts(), true);
   state.snapshotGeneration = 0;
   assert.equal(accepts(), true, "detail remains supported before the first push snapshot");
@@ -272,4 +270,39 @@ test("an old detail response is rejected immediately on daemon snapshot handoff 
   state.source = "source";
   state.token = 2;
   assert.equal(accepts(), false, "close/reopen invalidates an otherwise matching old read");
+});
+
+test("detail refresh retains exact last-check evidence and drops mismatched health synchronously and on errors", async () => {
+  const entry = { id: "entry", roomId: "room", executionGenerationId: "execution", runtimeGenerationId: "birth" } as any;
+  const detail = { entry_id: "entry", room_id: "room", requested_source_message_id: "source", availability: "available",
+    source_message: { id: "source" }, runtime_control: { control_state: "responsive", runtime_state: "ready", observed_at: "then",
+      execution_generation_id: "execution", daemon_generation_id: "4", runtime_generation_id: "birth" } } as any;
+  const initial = { status: "ready", sourceMessageId: "source", detail, error: null } as any;
+  let resource = initial;
+  const slow = deferred<any>();
+  const reading = readAgentInspectorWorkDetail({ entry, source: "source", generation: 4, previous: resource,
+    read: () => slow.promise, isCurrent: () => true, write: next => { resource = next; } });
+  assert.equal(resource.status, "refreshing");
+  assert.equal(resource.detail.runtime_control, detail.runtime_control);
+  const same = { entries: [entry], daemonGeneration: 4 } as any;
+  assert.equal(invalidateAgentInspectorRuntimeControl(resource, same, "entry", "room"), resource);
+  resource = invalidateAgentInspectorRuntimeControl(resource, { ...same, daemonGeneration: 5 }, "entry", "room");
+  assert.equal(resource.detail.runtime_control, null);
+  slow.resolve(detail);
+  await reading;
+  assert.equal(resource.status, "ready");
+  for (const replacement of [{ ...entry, runtimeGenerationId: "new-birth" }, { ...entry, runtimeGenerationId: null }]) {
+    const next = deferred<any>();
+    const read = readAgentInspectorWorkDetail({ entry: replacement, source: "source", generation: 4, previous: initial,
+      read: () => next.promise, isCurrent: () => true, write: value => { resource = value; } });
+    assert.equal(resource.detail.runtime_control, null, "unmatched cached health is stripped at admission");
+    next.resolve(detail);
+    await read;
+    assert.equal(resource.detail.runtime_control, null, "unmatched response health stays stripped");
+  }
+  await readAgentInspectorWorkDetail({ entry, source: "source", generation: 4, previous: initial,
+    read: async () => { throw new Error("offline"); }, isCurrent: () => true, write: next => { resource = next; } });
+  assert.equal(resource.status, "error");
+  assert.equal(resource.detail.runtime_control, null);
+  assert.equal(resource.detail.source_message.id, "source", "exact retained history survives the health failure");
 });
