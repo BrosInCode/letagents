@@ -101,25 +101,22 @@ export class DaemonReadModel {
     if (entry.room_id !== roomId) {
       throw new Error("The agent inspector room does not match the exact supervisor entry.");
     }
-    const providerRef = entry.provider_ref;
-    const connection = providerRef?.provider_connection;
     let runtimeFence: Parameters<SupervisedAgentInboxStore["detail"]>[3] = null;
-    if (providerRef && connection?.pid && connection.processIdentity?.trim()) {
-      try {
-        runtimeFence = {
-          executionGenerationId: providerRef.execution_generation_id,
-          runtimeGenerationId: executionRuntimeStorageIdentity(
-            entry.id,
-            providerRef.execution_generation_id,
-            connection.kind,
-            connection.pid,
-            connection.processIdentity,
-          ),
-          daemonGenerationId: String(this.ports.currentDaemonGeneration()),
-        };
-      } catch { /* Unknown process birth cannot authorize present-tense health. */ }
+    const runtimeGenerationId = this.runtimeGenerationId(entry);
+    if (runtimeGenerationId && entry.provider_ref) {
+      runtimeFence = { executionGenerationId: entry.provider_ref.execution_generation_id,
+        runtimeGenerationId, daemonGenerationId: String(this.ports.currentDaemonGeneration()) };
     }
     return this.ports.inbox.detail(entryId, roomId, sourceMessageId, runtimeFence);
+  }
+
+  private runtimeGenerationId(entry: DaemonManifestEntry): string | null {
+    const ref = entry.provider_ref;
+    const connection = ref?.provider_connection;
+    if (!ref || !connection?.pid || !connection.processIdentity?.trim()) return null;
+    try { return executionRuntimeStorageIdentity(entry.id, ref.execution_generation_id,
+      connection.kind, connection.pid, connection.processIdentity); }
+    catch { return null; }
   }
 
   async entriesWithDerivedLiveness(
@@ -186,7 +183,8 @@ export class DaemonReadModel {
       nativeLivenessStaleAfterMs: NATIVE_LIVENESS_STALE_AFTER_MS,
     });
     const pollingContract = await this.ports.workerAuthority.pollingContract(entry);
-    return pollingContract ? { ...projected, polling_contract: pollingContract } : projected;
+    return { ...projected, runtime_generation_id: this.runtimeGenerationId(entry),
+      ...(pollingContract ? { polling_contract: pollingContract } : {}) };
   }
 
   async attempt(entryId: string) {

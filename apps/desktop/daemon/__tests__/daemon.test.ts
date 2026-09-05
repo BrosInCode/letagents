@@ -956,6 +956,43 @@ test("agent inspector detail socket requests require an exact string-or-null sou
   }
 });
 
+test("inspector snapshot runtime identity distinguishes reused PIDs and missing birth evidence", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      putManifestEntry(entry: Record<string, unknown>): Promise<void>;
+      entryWithDerivedLiveness(entry: DaemonManifestEntry): Promise<DaemonManifestEntryView>;
+    };
+    await internals.putManifestEntry({ ...entry, desired_state: "paused", provider: "codex" });
+    const readIdentity = async (processIdentity: string | null) => {
+      const projected = await internals.entryWithDerivedLiveness({ ...entry, desired_state: "paused", provider: "codex",
+        work_attempt_id: "identity-attempt",
+        provider_ref: { work_attempt_id: "identity-attempt", execution_generation_id: "identity-execution",
+          provider_continuation_id: "identity-thread",
+          provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:65534", pid: 44661, processIdentity } },
+      });
+      return projected.runtime_generation_id;
+    };
+    const first = await readIdentity("birth-one");
+    assert.match(first ?? "", /^runtime-[a-f0-9]{64}$/);
+    assert.equal(await readIdentity("birth-one"), first, "the same process retains its opaque identity");
+    const replacement = await readIdentity("birth-two");
+    assert.match(replacement ?? "", /^runtime-[a-f0-9]{64}$/);
+    assert.notEqual(replacement, first, "PID reuse in the same execution must invalidate cached provider health");
+    assert.equal(await readIdentity(null), null, "missing process-birth evidence cannot authorize cached health");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("production publication requires a nonempty canonical id in the requested room", async () => {
   const previousFetch = globalThis.fetch;
   try {

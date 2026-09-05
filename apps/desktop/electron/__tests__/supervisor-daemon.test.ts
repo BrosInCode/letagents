@@ -1324,6 +1324,11 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   const runtimeControl = { control_state: "degraded", runtime_state: "ready", observed_at: "2026-01-01T00:00:03.000Z",
     execution_generation_id: "generation-1", daemon_generation_id: "4" };
   assert.deepEqual(mapAgentInspectorDetail({ ...wire, runtime_control: runtimeControl }, input).runtime_control, runtimeControl);
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, runtime_control: { ...runtimeControl, runtime_generation_id: "opaque-birth" } }, input).runtime_control,
+    { ...runtimeControl, runtime_generation_id: "opaque-birth" });
+  for (const invalidBirth of [null, "", "   ", 42]) {
+    assert.deepEqual(mapAgentInspectorDetail({ ...wire, runtime_control: { ...runtimeControl, runtime_generation_id: invalidBirth } }, input).runtime_control, runtimeControl);
+  }
   const malformedRuntimeControl = mapAgentInspectorDetail({ ...wire, runtime_control: { ...runtimeControl, control_state: "failed" } }, input);
   assert.equal(malformedRuntimeControl.runtime_control, null, "malformed optional control evidence is isolated");
   assert.deepEqual(malformedRuntimeControl.receipt, mapped.receipt);
@@ -1988,6 +1993,9 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const created = await client.create(createInput);
     assert.deepEqual([created.desiredState, created.observedState, created.condition], ["paused", "absent", "none"]);
     assert.equal(created.deliveryMode, "daemon_inbox");
+    assert.equal(created.runtimeGenerationId, null);
+    wire.entries[0]!.runtime_generation_id = "opaque-birth";
+    assert.equal((await client.list(created.roomId)).find(candidate => candidate.id === created.id)?.runtimeGenerationId, "opaque-birth");
     assert.equal(wire.entries[0]?.last_worker_binding, null, "production creation durably attests that no worker session exists yet");
     const retried = await client.create(createInput);
     assert.equal(retried.id, created.id, "one Start request is idempotent across retries");
@@ -2479,7 +2487,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.135");
+    assert.equal(status.implementationVersion, "2.0.136");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
