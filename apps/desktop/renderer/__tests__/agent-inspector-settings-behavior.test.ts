@@ -243,6 +243,8 @@ before(async () => {
   AgentInspectorSettings = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorSettings.vue")).default;
   AgentInspectorLifecycleActions = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue")).default;
   AgentInspectorSurface = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue")).default;
+  await Promise.all(["AgentInspectorLive", "AgentInspectorDiagnostics"].map(name =>
+    vite.ssrLoadModule(`/renderer/src/components/desktop/content/agent-inspector/${name}.vue`)));
   AgentInspectorHost = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorHost.vue")).default;
   AgentInspectorStatusSurface = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue")).default;
   AgentInspectorOverview = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorOverview.vue")).default;
@@ -414,7 +416,7 @@ test("the lifecycle overflow leaves retirement at the base of Overview", async (
   lifecycle.app.unmount();
 });
 
-test("mounted Overview retirement stays contextual and requires explicit confirmation", async () => {
+test("mounted inspector preserves selected tabs on refresh and keeps retirement contextual", async () => {
   const surfaceSource = await readFile(
     fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue", import.meta.url)),
     "utf8",
@@ -496,6 +498,8 @@ test("mounted Overview retirement stays contextual and requires explicit confirm
       execution_generation_id: "generation_a", daemon_generation_id: "1" },
   };
   const projectionResource = Vue.ref(projection);
+  const requestVersion = Vue.ref(1);
+  const initialTab = Vue.ref<"overview" | "work">("overview");
   const workResource = Vue.ref<Record<string, unknown>>({
     status: "ready",
     detail: runtimeDetail,
@@ -520,6 +524,8 @@ test("mounted Overview retirement stays contextual and requires explicit confirm
     setup: () => () => Vue.h(AgentInspectorSurface, {
       ...surfaceProps,
       projection: projectionResource.value,
+      requestVersion: requestVersion.value,
+      initialTab: initialTab.value,
       workResource: workResource.value,
     }),
   };
@@ -561,6 +567,32 @@ test("mounted Overview retirement stays contextual and requires explicit confirm
   assert.match(textContent(initialProviderRow), /Provider status unavailable/);
   assert.doesNotMatch(textContent(initialProviderRow), /Checking provider|Provider check inconclusive|Checked/,
     "failed reconciliation cannot leave health from an absent process birth visible");
+  const selectInspectorTab = async (label: string) => {
+    (buttonByText(mounted.root, label).props.onClick as () => void)();
+    await nextTick();
+  };
+  const selectedInspectorTab = () => descendants(mounted.root).find(node => node.props.role === "tab" && node.props["aria-selected"] === true);
+  for (const label of ["Overview", "Live", "Work", "Settings", "Diagnostics"]) {
+    await selectInspectorTab(label);
+    for (let refresh = 0; refresh < 2; refresh += 1) {
+      projectionResource.value = { ...projectionResource.value, entry: { ...projectionResource.value.entry } };
+      await nextTick();
+      assert.equal(textContent(selectedInspectorTab()!), label, `${label} stays selected through a same-agent snapshot replacement`);
+    }
+  }
+  requestVersion.value += 1;
+  await nextTick();
+  assert.equal(textContent(selectedInspectorTab()!), "Overview", "an explicit inspector-open request still resets the tab");
+  initialTab.value = "work";
+  await nextTick();
+  assert.equal(textContent(selectedInspectorTab()!), "Work", "explicit Work navigation still selects Work");
+  await selectInspectorTab("Settings");
+  projectionResource.value = { ...projectionResource.value, entryId: "agent_b" };
+  await nextTick();
+  assert.equal(textContent(selectedInspectorTab()!), "Work", "opening a different agent resets to the requested initial tab");
+  projectionResource.value = { ...projectionResource.value, entryId: "agent_a" };
+  initialTab.value = "overview";
+  await nextTick();
   const retire = buttonByText(mounted.root, "Retire agent");
   retire.focus();
   (retire.props.onClick as () => void)();
