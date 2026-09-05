@@ -12,10 +12,13 @@
       <p v-if="currentStep">{{ currentStep }}</p>
     </section>
 
-    <p class="agent-inspector-settings-note">
-      {{ evidenceDescription }} Hidden chain of thought is never shown. The supervisor's room-turn lifecycle owns whether work is active; technical payloads stay behind disclosure.
-    </p>
-
+    <div v-if="canShowCurrent" class="agent-inspector-live-trigger">
+      <span class="agent-inspector-live-label">Current turn</span>
+      <template v-if="currentRequest">
+        <strong>{{ currentRequest.sender }}</strong>
+        <p>{{ currentRequest.text || 'Message text unavailable.' }}</p>
+      </template>
+    </div>
     <ol v-if="presented.length" class="agent-inspector-live-items">
       <li
         v-for="entry in presented"
@@ -60,22 +63,18 @@
       </li>
     </ol>
 
-    <p v-if="feed.droppedEvents > 0" class="agent-inspector-settings-note" role="status">
-      {{ feed.droppedEvents }} earlier live-work {{ feed.droppedEvents === 1 ? "event was" : "events were" }} omitted because this provider stream exceeded the replay limit.
-    </p>
-
-    <p v-if="!presented.length" class="agent-inspector-live-empty">
-      {{ emptyStateLabel }}
-    </p>
-
-    <p class="agent-inspector-live-footer" :data-running="isFollowing">
-      <span aria-hidden="true"></span>{{ footerLabel }}
-    </p>
+    <p v-if="canShowCurrent && !presented.length" class="agent-inspector-live-empty">The agent is working. No public actions have arrived yet.</p>
+    <p v-if="canShowCurrent && feed.droppedEvents > 0" class="agent-inspector-settings-note">Earlier live updates were omitted.</p>
+    <AgentInspectorLiveHistory :resource="resource" :selected-source-message-id="selectedSourceMessageId"
+      @retry="emit('retry')" @select-source="emit('select-source', $event)" @reveal="emit('reveal', $event)" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import AgentInspectorLiveHistory from "./AgentInspectorLiveHistory.vue";
+import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
+import { canPresentCurrentAgentStream, currentAgentRequest } from "../../../../domain/agent-inspector-live-trace";
 import {
   agentLiveAvailability,
   describeLiveToolCall,
@@ -91,9 +90,15 @@ const props = defineProps<{
   feed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
   work: AgentInspectorLiveWorkProjection;
   supportsReasoning: boolean | null;
+  resource: AgentInspectorWorkResource;
+  selectedSourceMessageId: string | null;
+  activeSourceMessageId: string | null;
 }>();
 
-const scopedEvents = computed(() => scopeAgentStreamEventsToWork(props.feed.events, props.work));
+const emit = defineEmits<{ retry: []; 'select-source': [sourceMessageId: string]; reveal: [messageId: string] }>();
+const canShowCurrent = computed(() => canPresentCurrentAgentStream({ ...props.work, activeSourceMessageId: props.activeSourceMessageId }));
+const currentRequest = computed(() => currentAgentRequest(props.resource, props.activeSourceMessageId));
+const scopedEvents = computed(() => canShowCurrent.value ? scopeAgentStreamEventsToWork(props.feed.events, props.work) : []);
 const transcript = computed(() => foldAgentStreamEvents(scopedEvents.value, props.feed.ended));
 const now = ref(Date.now());
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
@@ -102,14 +107,10 @@ const isFollowing = computed(() => props.work.active && !props.feed.ended);
 const availability = computed(() => agentLiveAvailability(props.work, props.feed.ended));
 
 const presented = computed((): { item: LiveTranscriptItem; tool: LiveToolPresentation | null }[] =>
-  transcript.value.items.map((item) => ({
+  transcript.value.items.filter(item => item.kind !== "reasoning" || props.supportsReasoning !== false).map((item) => ({
     item,
     tool: item.kind === "tool" ? describeLiveToolCall(item.tool, item.input, item) : null,
   })));
-
-const evidenceDescription = computed(() => props.supportsReasoning === false
-  ? "Shows public commentary and observed actions from this provider."
-  : "Shows provider-approved work notes, public commentary, and observed actions.");
 
 const workDurationLabel = computed(() => {
   if (availability.value === "closed") return "Work stream closed";
@@ -119,7 +120,7 @@ const workDurationLabel = computed(() => {
   if (availability.value === "disconnected") return "Agent disconnected";
   if (availability.value === "attention") return "Agent needs attention";
   if (availability.value === "transitioning") return transitionTitle(props.work.agentState);
-  if (availability.value !== "active") return presented.value.length ? "Recent work" : "No work in progress";
+  if (availability.value !== "active") return "Ready for a message";
   const duration = formatLiveWorkDuration(
     props.work.startedAt,
     null,
@@ -130,7 +131,7 @@ const workDurationLabel = computed(() => {
 
 const workStateLabel = computed(() => {
   if (availability.value === "active") return "In progress";
-  if (availability.value === "idle") return "Waiting";
+  if (availability.value === "idle") return "Ready";
   if (availability.value === "stopped") return "Stopped";
   if (availability.value === "paused") return "Paused";
   if (availability.value === "attention") return "Needs attention";
@@ -141,16 +142,14 @@ const workStateLabel = computed(() => {
 const currentStep = computed(() => {
   if (availability.value === "closed") return props.work.agentState === "retired"
     ? "This agent is retired and cannot receive new room work."
-    : "The provider's activity stream is no longer available.";
+    : null;
   if (availability.value === "stale") return "Waiting for fresh supervisor state before reporting live work.";
   if (availability.value === "stopped") return "This agent is retired and cannot receive new room work.";
   if (availability.value === "paused") return "Resume this agent before sending it more room work.";
   if (availability.value === "disconnected") return "Reconnect this agent before sending it more room work.";
   if (availability.value === "attention") return "Resolve the agent's blocked state before work can continue.";
   if (availability.value === "transitioning") return transitionDetail(props.work.agentState);
-  if (availability.value === "idle") return presented.value.length
-    ? "The agent is ready for the next room message."
-    : "No room turn is currently active.";
+  if (availability.value === "idle") return null;
   const runningTool = [...presented.value].reverse().find((entry) =>
     entry.item.kind === "tool" && entry.item.status === "running");
   const entry = runningTool ?? presented.value[presented.value.length - 1];
@@ -159,24 +158,7 @@ const currentStep = computed(() => {
     if (!entry.tool) return "Using a tool";
     return entry.tool.detail ? `${entry.tool.headline} · ${entry.tool.detail}` : entry.tool.headline;
   }
-  return truncateStep(entry.item.text);
-});
-
-const emptyStateLabel = computed(() => {
-  if (availability.value === "closed") return "The provider's activity stream is not available.";
-  if (availability.value === "stale") return "Live work will return when the supervisor reconnects.";
-  if (availability.value !== "active") return "No recent work is available for this agent.";
-  return props.work.startedAt
-    ? "Waiting for the agent's next observed action…"
-    : "Waiting for the supervisor's room-turn boundary…";
-});
-
-const footerLabel = computed(() => {
-  if (isFollowing.value) return "Following the current room turn";
-  if (availability.value === "closed") return "Work stream closed";
-  if (availability.value === "stale") return "Live status unavailable";
-  if (availability.value !== "idle") return "Live work unavailable";
-  return "Waiting for room work";
+  return null;
 });
 
 onMounted(syncElapsedTimer);
@@ -223,12 +205,8 @@ function stopElapsedTimer(): void {
   elapsedTimer = null;
 }
 
-function truncateStep(value: string): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  return normalized.length > 150 ? `${normalized.slice(0, 149)}…` : normalized;
-}
-
 function toolStatusLabel(status: string): string {
+  if (status === "pending") return "Requested";
   if (status === "running") return "In progress";
   if (status === "completed") return "Completed";
   if (status === "error" || status === "failed") return "Failed";
@@ -254,3 +232,9 @@ function formatValue(input: unknown): string {
   }
 }
 </script>
+
+<style scoped>
+.agent-inspector-live-trigger { display: grid; gap: 6px; padding: 10px 12px; border-left: 2px solid rgba(96,165,250,.4); }
+.agent-inspector-live-trigger strong { font-size: 12px; color: var(--text, #fafafa); }
+.agent-inspector-live-trigger p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; color: var(--text-secondary, #a1a1aa); max-height: 140px; overflow: auto; }
+</style>

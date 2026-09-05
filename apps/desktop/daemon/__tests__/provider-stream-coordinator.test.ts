@@ -11,8 +11,10 @@ import {
   ProviderStreamCoordinator,
   type ProviderInstallationToken,
 } from "../provider-stream-coordinator.js";
+import { ProviderLiveDisplay } from "../provider-live-display.js";
+import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
-import type { DaemonManifestEntry } from "../types.js";
+import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 import type { LifecycleProjectionObservation } from "../lifecycle-projection-ledger.js";
 
@@ -141,6 +143,7 @@ function coordinatorHarness(input: {
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
   endStream?: (entryId: string) => void;
+  pushStream?: (event: DaemonActivityEvent) => void;
   observeExecution?: (installation: ProviderInstallationToken) => () => void;
   advanceExecution?: (installation: ProviderInstallationToken) => void;
   observeLegacyLifecycle?: (observation: LifecycleProjectionObservation) => void;
@@ -244,7 +247,7 @@ function coordinatorHarness(input: {
     appendActivityOnly: async (_entryId, event) => input.appendActivityOnly?.(event.method),
     publishNativeActivity: async () => input.publishNativeActivity?.(),
     handleTerminal: async () => {},
-    streams: { reset: () => {}, push: () => {}, end: (entryId) => input.endStream?.(entryId) },
+    streams: { reset: () => {}, push: (_entryId, event) => input.pushStream?.(event), end: (entryId) => input.endStream?.(entryId) },
     delivery: { start: input.startDelivery ?? (async () => {}), startCutover: input.startCutover ?? (async () => {}) },
     heartbeat: {
       intervalMs: 60_000,
@@ -1486,4 +1489,110 @@ test("handoff detach attempts every stream disposer, surfaces failures, and neve
   ]);
   releaseCallback();
   await wedgedCallback;
+});
+
+
+function displayEvent(provider: string, method: string, payload: unknown): DaemonActivityEvent {
+  return sanitizeDaemonActivityEvent({ provider, method, payload, kind: "provider_event", summary: "",
+    observed_at: "2026-09-06T00:00:00Z", sequence: 1, status: "working",
+    payload_truncated: false, payload_redacted: false, durable_payload_ref: null });
+}
+
+test("Codex display projects exact native tool shapes without changing lifecycle or exposing reasoning", () => {
+  const display = new ProviderLiveDisplay("thread");
+  for (const item of [
+    { id: "shell", type: "commandExecution", command: "pwd", cwd: "/tmp", aggregatedOutput: "/tmp", status: "completed" },
+    { id: "edit", type: "fileChange", changes: [{ path: "app.ts", kind: "update", diff: "+text" }], status: "completed" },
+    { id: "mcp", type: "mcpToolCall", tool: "search", arguments: { query: "query" }, result: { content: "found" }, status: "completed" },
+  ]) {
+    const raw = displayEvent("codex", "item/completed", { threadId: "thread", turnId: "turn", item });
+    const lifecycle = providerStreamLifecycle({ ...streamEvent(1, raw.method), payload: raw.payload });
+    const [projected] = display.project(raw);
+    assert.equal(projected?.method, "item/toolCall/updated");
+    assert.equal((projected?.payload as any).callID, `codex:thread:turn:${item.id}`);
+    assert.equal((projected?.payload as any).status, "completed");
+    assert.equal(providerStreamLifecycle({ ...streamEvent(1, raw.method), payload: raw.payload }), lifecycle);
+    assert.deepEqual(display.project({ ...raw, payload: { ...raw.payload as object, threadId: "foreign" } }), []);
+  }
+  for (const [status, expected] of [["interrupted", "interrupted"], ["cancelled", "interrupted"], ["declined", "error"], ["failed", "error"]]) {
+    const [projected] = display.project(displayEvent("codex", "item/completed", { threadId: "thread", turnId: "turn", item: { id: "item", type: "fileChange", status } }));
+    assert.equal((projected?.payload as any).status, expected);
+  }
+  const delta = display.project(displayEvent("codex", "item/agentMessage/delta", { threadId: "thread", turnId: "turn", itemId: "message", delta: "hello" }));
+  assert.equal((delta[0]?.payload as any).partId, "codex:thread:turn:message");
+  assert.deepEqual(display.project(displayEvent("codex", "item/reasoning/textDelta", { threadId: "thread", turnId: "turn", delta: "private thought" })), []);
+});
+
+test("Claude display scopes full assistant messages and tool results to proven native turns", () => {
+  const display = new ProviderLiveDisplay("session");
+  const event = (payload: Record<string, unknown>) => displayEvent("claude-code", String(payload.type), { session_id: "session", ...payload });
+  const assistant = event({ type: "assistant", uuid: "packet", message: { id: "message", role: "assistant", content: [
+    { type: "thinking", thinking: "private thought" }, { type: "text", text: "Hello" },
+    { type: "tool_use", id: "tool", name: "Bash", input: { command: "echo public", LETAGENTS_TOKEN: "not-a-real-secret-canary" } },
+  ] } });
+  assert.deepEqual(display.project(assistant), [], "session metadata alone cannot establish a current turn");
+  const start = event({ type: "command_lifecycle", state: "started", command_uuid: "turn" });
+  display.project(start);
+  assert.deepEqual(display.project(assistant), [], "unvalidated command events cannot establish display ownership");
+  display.project(start, "turn_active");
+  const initial = display.project(assistant);
+  assert.equal(initial.length, 2);
+  assert.equal((initial[0]?.payload as any).delta, "Hello");
+  assert.equal((initial[1]?.payload as any).status, "pending", "tool request does not claim execution started");
+  assert.doesNotMatch(JSON.stringify(initial), /private thought|not-a-real-secret-canary/);
+  assert.deepEqual(display.project(assistant), [], "duplicate full snapshots do not append twice");
+  assert.deepEqual(display.project({ ...assistant, payload: { ...(assistant.payload as object), session_id: "foreign" } }), []);
+  assert.deepEqual(display.project({ ...assistant, payload: { ...(assistant.payload as object), user_message_uuid: "foreign" } }), []);
+  const toolResult = event({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tool", content: "done", is_error: false }] } });
+  const [completed] = display.project(toolResult);
+  assert.equal((completed?.payload as any).status, "completed");
+  assert.deepEqual(display.project(toolResult), []);
+  const terminal = event({ type: "result", subtype: "success", is_error: false, user_message_uuid: "turn", result: "Hello" });
+  assert.deepEqual(display.project(terminal, "turn_terminal"), [], "final text does not duplicate streamed full text");
+  assert.deepEqual(display.project(assistant), [], "completed turns cannot accept a late assistant packet");
+  const resultOnly = event({ type: "result", subtype: "success", is_error: false, user_message_uuid: "next", result: "Only final text" });
+  assert.equal((display.project(resultOnly, "turn_terminal")[0]?.payload as any).delta, "Only final text");
+  assert.deepEqual(display.project(resultOnly, "turn_terminal"), []);
+  display.project(event({ type: "command_lifecycle", state: "started", command_uuid: "commentary-turn" }), "turn_active");
+  display.project(assistant);
+  const finalOnly = event({ type: "result", subtype: "success", is_error: false, user_message_uuid: "commentary-turn", result: "Different final answer" });
+  assert.equal((display.project(finalOnly, "turn_terminal")[0]?.payload as any).delta, "Different final answer", "earlier commentary must not hide a distinct final-only answer");
+  const replacement = new ProviderLiveDisplay("session");
+  assert.deepEqual(replacement.project(assistant), [], "replacement installation cannot inherit previous turn ownership");
+});
+
+test("Cursor and OpenModel normalized public display shapes remain unchanged", () => {
+  for (const provider of ["cursor", "open-model"]) {
+    const display = new ProviderLiveDisplay("session");
+    for (const [method, payload] of [
+      ["item/agentMessage/delta", { partId: "native-part", delta: "hello" }],
+      ["item/toolCall/updated", { callID: "native-tool", tool: "read", status: "completed", output: "public" }],
+    ] as const) {
+      const event = displayEvent(provider, method, payload);
+      assert.deepEqual(display.project(event), [event]);
+    }
+  }
+});
+
+
+test("coordinator normalizes only the redacted display copy of a failed native command", async () => {
+  const displayed: DaemonActivityEvent[] = [];
+  const recorded: string[] = [];
+  let listener: ((event: ProviderActionStreamEvent) => void) | null = null;
+  const harness = coordinatorHarness({ pushStream: event => displayed.push(event), appendActivity: async method => { recorded.push(method); },
+    onStream: async (_handle, callback) => { listener = callback; return () => {}; } });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  assert.ok(listener);
+  (listener as (event: ProviderActionStreamEvent) => void)({ ...streamEvent(1, "item/completed"), kind: "item_lifecycle",
+    payload: { threadId: "continuation-1", turnId: "turn", item: { type: "commandExecution", id: "command", status: "completed",
+      command: "exit 2", exitCode: 2, aggregatedOutput: "LETAGENTS_TOKEN=secret_canary_not_real_1234567890" } } });
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(recorded, ["item/completed"], "synthetic display events never enter lifecycle activity");
+  assert.equal(displayed.length, 1);
+  assert.equal((displayed[0]?.payload as any).tool, "shellToolCall");
+  assert.equal((displayed[0]?.payload as any).status, "error");
+  assert.match((displayed[0]?.payload as any).error, /code 2/);
+  assert.doesNotMatch(JSON.stringify(displayed), /secret_canary_not_real_1234567890/);
+  assert.notEqual(harness.getManifest().observed_state, "failed");
+  await harness.coordinator.disposeAll();
 });

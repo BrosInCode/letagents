@@ -114,7 +114,10 @@ export function foldAgentStreamEvents(
           : "reasoning";
       upsertText("reasoning", partId, deltaText(payload, event.summary));
     } else if (event.method === "item/agentMessage/delta") {
-      const partId = payload && typeof payload.partId === "string" ? payload.partId : "message";
+      const nativeId = payload && typeof payload.partId === "string" ? payload.partId
+        : payload && typeof payload.itemId === "string" ? payload.itemId : "message";
+      const partId = payload && (typeof payload.turnId === "string" || typeof payload.threadId === "string")
+        ? JSON.stringify([payload.threadId ?? null, payload.turnId ?? null, nativeId]) : nativeId;
       // Assistant text deltas carry the real text only in the payload; the
       // summary is a "provider · method" fallback and must not be shown.
       upsertText("message", partId, deltaText(payload, null));
@@ -131,7 +134,7 @@ export function foldAgentStreamEvents(
       const priorIsTerminal = priorTool
         ? ["completed", "error", "failed", "interrupted"].includes(priorTool.status)
         : false;
-      if (priorIsTerminal && nextStatus === "running") continue;
+      if (priorIsTerminal && (nextStatus === "running" || nextStatus === "pending")) continue;
       const next: LiveTranscriptItem = {
         kind: "tool",
         id: callId,
