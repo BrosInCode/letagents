@@ -10,7 +10,7 @@ import { pickLocalCodename } from "../../../shared/codenames.js";
 import { buildAgentActorLabel } from "../../../shared/agent-identity.js";
 import { encodeRoomIdPath } from "../../room-id.js";
 import { getGitCurrentBranch } from "../../git-remote.js";
-import { apiCall, getApiUrl } from "./api.js";
+import { apiCall, getApiUrl, getLetagentsToken } from "./api.js";
 import { resolveOwnerContext } from "./identity/directory.js";
 import { detectAgentIdeLabel, detectAgentRuntimeLabel } from "./identity/config.js";
 import { getSessionLivenessRegistration } from "./identity/liveness.js";
@@ -29,7 +29,11 @@ async function workerScope(): Promise<string> {
   if (requireValidWorkerBearerRuntime().mode !== "owner") {
     throw new Error("Worker handles are for independent MCP chats; supervised identity is supplied by its supervisor.");
   }
+  const hasAccountToken = Boolean(await getLetagentsToken());
   const owner = await resolveOwnerContext();
+  if (hasAccountToken && !owner.login) {
+    throw new Error("Could not verify your LetAgents account. Check your connection or sign-in, then retry with the same worker_id or registration_key. Saved worker identities have not been changed.");
+  }
   return `${getApiUrl()}\n${owner.login?.toLowerCase() ?? `local:${owner.slug}`}`;
 }
 

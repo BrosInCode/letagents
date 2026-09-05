@@ -16,13 +16,14 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
   const statePath = join(temp, "state.json");
   const storagePath = join(temp, "storage.json");
   writeFileSync(storagePath, JSON.stringify({ mode: "cloud", roomOverrides: { room_local: "local" } }));
-  writeFileSync(statePath, JSON.stringify({ auth: { token: "owner-test-token", account: { id: "owner-id", login: "owner" },
+  writeFileSync(statePath, JSON.stringify({ auth: { token: "owner-test-token",
     source: "device_flow", stored_at: new Date().toISOString() } }));
   const sessions = new Map<string, Record<string, any>>();
   const registrations: Record<string, any>[] = [];
   const messages: Record<string, any>[] = [];
   const clients: Client[] = [];
   let dropRegistration = false;
+  let directoryFailure: "unavailable" | "offline" | "malformed" | null = null;
   let holdDisconnect = false;
   let releaseDisconnect: (() => void) | undefined;
   let disconnectArrived: (() => void) | undefined;
@@ -32,7 +33,12 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
     const url = new URL(req.url!, "http://localhost");
     const reply = (value: unknown, code = 200) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
-    if (url.pathname === "/agents/me") return reply({ account: { id: "owner-id", login: "owner" }, agents: [] });
+    if (url.pathname === "/agents/me") {
+      if (directoryFailure === "unavailable") return reply({ error: "temporarily unavailable" }, 503);
+      if (directoryFailure === "offline") { res.destroy(); return; }
+      if (directoryFailure === "malformed") return reply({});
+      return reply({ account: { id: "owner-id", login: "owner" }, agents: [] });
+    }
     if (url.pathname === "/agents") return reply({ canonical_key: `owner/${body.name}`, ...body });
     if (url.pathname.endsWith("/agent-sessions")) {
       registrations.push(body);
@@ -116,7 +122,30 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
     assert.doesNotMatch(readFileSync(statePath, "utf8"), /unused-bearer-secret/);
     assert.equal(statSync(statePath).mode & 0o777, 0o600);
 
+    directoryFailure = "unavailable";
     const second = await openClient();
+    const savedWorkers = state().mcp_workers;
+    const savedSessions = state().agent_sessions;
+    const registrationCount = registrations.length;
+    for (const failure of ["unavailable", "offline", "malformed"] as const) {
+      directoryFailure = failure;
+      for (const args of [
+        { worker_id: one.worker_id, room_id: "room_shared" },
+        create,
+        { ...create, registration_key: "new-chat-during-outage", room_id: "room_local" },
+      ]) {
+        const failed = await raw(second.client, "register_agent_session", args);
+        assert.ok(failed.isError);
+        assert.match(JSON.stringify(failed), /Could not verify your LetAgents account/);
+        assert.match(JSON.stringify(failed), /same worker_id or registration_key/);
+        assert.doesNotMatch(JSON.stringify(failed), /Unknown worker_id/);
+      }
+      assert.deepEqual(state().mcp_workers, savedWorkers, "account lookup failure cannot create a local identity");
+      assert.deepEqual(state().agent_sessions, savedSessions, "account lookup failure cannot rotate a saved session");
+      assert.equal(state().auth.token, "owner-test-token");
+      assert.equal(registrations.length, registrationCount);
+    }
+    directoryFailure = null;
     assert.ok((await raw(second.client, "send_message", { worker_id: one.worker_id, text: "before explicit reconnect" })).isError);
     const resumed = await call(second.client, "register_agent_session", { worker_id: one.worker_id, room_id: "room_shared" });
     assert.equal(resumed.agent_session.session_id, one.agent_session.session_id);
