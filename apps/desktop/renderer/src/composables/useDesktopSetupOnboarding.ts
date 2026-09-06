@@ -72,7 +72,9 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       || options.setupLoadError.value;
   });
 
-  async function loadFirstRunSetup(): Promise<void> {
+  async function loadFirstRunSetup(projectBindingsReady: Promise<void> = Promise.resolve()): Promise<void> {
+    // Start local preparation alongside auth, but retain its ordering before room loading.
+    const preparation = projectBindingsReady.catch(() => undefined);
     options.loading.value = true;
     options.setupLoadError.value = null;
     try {
@@ -85,17 +87,28 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       ]);
       options.mcpInstallState.value = nextMcpInstallState;
       options.authStatus.value = nextAuthStatus;
+      const initialAuthStatus = options.authStatus.value;
       if (!options.selectedMcpTargetIds.value.length) {
         options.selectedMcpTargetIds.value = defaultMcpTargetSelection(nextMcpInstallState);
       }
       options.firstRunStage.value = nextMcpInstallState.completed ? "github" : "welcome";
+
+      // The shell can show its loading state once the setup/auth gate is known.
+      // Room, worker and diagnostic requests must not hold the splash screen.
+      initialBootstrapPending.value = false;
 
       // A signed-out desktop is an auth surface, not a public-room preview.
       // Do not load any room/account payload until GitHub authorization has
       // completed; useDesktopAuthFlow performs the first refresh after that.
       if (nextMcpInstallState.completed && nextAuthStatus.authenticated) {
         await waitForInitialRefresh(
-          options.refresh,
+          async () => {
+            await preparation;
+            // The visible shell may have signed out or switched accounts while
+            // project identity checks were pending. Do not resume that startup.
+            if (options.authStatus.value !== initialAuthStatus) return;
+            await options.refresh();
+          },
           options.initialBootstrapTimeoutMs ?? defaultInitialBootstrapTimeoutMs,
         );
       }
