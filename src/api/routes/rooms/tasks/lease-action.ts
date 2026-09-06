@@ -275,12 +275,16 @@ export function registerTaskLeaseActionRoute(
           targetActorKey,
           targetAgentSessionId: deps.normalizeOptionalString(requestBody.target_agent_session_id),
         });
+        const trustedWorker = req.authKind === "agent_session" && req.agentSession
+          ? { agent_session_id: req.agentSession.agent_session_id, agent_key: req.agentSession.agent_key }
+          : undefined;
         const approval = await verifyBoardIntentApproval({
           room_id: project.id,
           action_type: "task_override",
           payload,
           intent_id: deps.normalizeOptionalString(requestBody.board_intent_id),
           approval_token: deps.normalizeOptionalString(requestBody.board_approval_token),
+          ...(trustedWorker ? { trusted_worker: trustedWorker } : {}),
         });
         if (approval.kind === "deny") {
           await createCoordinationEvent({
@@ -303,6 +307,7 @@ export function registerTaskLeaseActionRoute(
             payload,
             intent_id: approval.intent.id,
             approval_token: deps.normalizeOptionalString(requestBody.board_approval_token),
+            ...(trustedWorker ? { trusted_worker: trustedWorker } : {}),
           };
         }
       }

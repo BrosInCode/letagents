@@ -251,6 +251,7 @@ async function workflowHttp(t: import("node:test").TestContext) {
   const { registerHttpMiddleware } = await import("../http/middleware.js");
   const { registerRoomBoardRoutes } = await import("../routes/rooms/board.js");
   const { registerTaskRecordRoutes } = await import("../routes/rooms/tasks/task-record.js");
+  const { registerTaskLeaseActionRoute } = await import("../routes/rooms/tasks/lease-action.js");
   const { resolveCanonicalRoomRequestId, resolveRoomOrReply } = await import("../rooms/resolution.js");
   const { requireAdmin, requireParticipant } = await import("../rooms/access.js");
   const services = await import("../server/room-services.js");
@@ -260,11 +261,13 @@ async function workflowHttp(t: import("node:test").TestContext) {
   const app = express();
   registerHttpMiddleware(app, { resolveRequestAuth });
   registerRoomBoardRoutes(app, common);
-  registerTaskRecordRoutes(app, { ...common, ...services,
+  const taskDeps = { ...common, ...services,
     getTaskById, getTaskOwnershipState, updateTask, taskEvents: new EventEmitter(),
     enforceFocusParentBoardWriteIsolation: ({ req, targetProject }: any) => services.enforceFocusParentBoardWriteIsolation({ req, targetProjectId: targetProject.id }),
     emitTaskLifecycleStatusMessage: async () => {},
-  } as never);
+  };
+  registerTaskRecordRoutes(app, taskDeps as never);
+  registerTaskLeaseActionRoute(app, taskDeps as never);
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
@@ -303,6 +306,25 @@ async function workflowHttp(t: import("node:test").TestContext) {
   }, "PATCH");
   return { ...seeded, request, manager, freshTask, approveClaim, claim };
 }
+
+test("HTTP worker releases its own lease with an approved intent and no token handoff", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const claimIntent = await f.approveClaim(task.id);
+  assert.equal((await f.claim(task.id, claimIntent)).status, 200);
+  const [lease] = await db!.getActiveTaskLeases(f.room.id, task.id);
+  const payload = { task_id: task.id, action: "release", lease_id: lease!.id, target_actor_key: null, target_agent_session_id: null };
+  const registered = await f.request(f.from.worker_bearer, "board-intents", { action_type: "task_override", task_id: task.id, payload });
+  assert.equal(registered.status, 201);
+  const intent = registered.body.intent.id;
+  assert.equal((await f.request(f.manager.worker_bearer, `board-intents/${intent}/approve`, {})).status, 200);
+  const action = { action: "release", lease_id: lease!.id, board_intent_id: intent };
+  assert.equal((await f.request(f.manager.worker_bearer, `tasks/${task.id}/lease-action`, action)).status, 403, "approval does not grant a different worker the lease");
+  const released = await f.request(f.from.worker_bearer, `tasks/${task.id}/lease-action`, action);
+  assert.equal(released.status, 200, JSON.stringify(released.body));
+  assert.equal((await db!.getActiveTaskLeases(f.room.id, task.id)).length, 0);
+  assert.equal((await db!.getBoardIntent({ room_id: f.room.id, intent_id: intent }))!.status, "used");
+});
 
 test("HTTP worker approved intent claims, retries and advances without a token handoff", { skip: requiresDatabase }, async t => {
   const f = await workflowHttp(t);
