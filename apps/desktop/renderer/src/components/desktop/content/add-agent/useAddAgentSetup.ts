@@ -442,12 +442,12 @@ export function useAddAgentSetup() {
       }
     }, { immediate: true });
     watch(
-      () => [
-        selectedProviderId.value,
-        bindings.repoRootPath(),
-        bindings.roomGitRoom()?.ref.type,
-        bindings.roomGitRoom()?.ref.name,
-      ] as const,
+      [
+        () => selectedProviderId.value,
+        () => bindings.repoRootPath(),
+        () => bindings.roomGitRoom()?.ref.type,
+        () => bindings.roomGitRoom()?.ref.name,
+      ],
       () => {
         if (bindings.open() && selectedProviderId.value) void refreshSelectedProvider();
       },

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { computed, nextTick, ref } from "vue";
 import type {
+  DesktopGitRoomInfo,
   DesktopAgentProvider,
   DesktopAgentProviderModelsResult,
   DesktopAgentProviderPreflight,
@@ -59,6 +60,11 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
       },
     },
   });
+  const roomSnapshot = ref<{ path: string; git: DesktopGitRoomInfo }>({ path: "/repo", git: {
+    provider: "github", host: "github.com", repository: { id: null, fullName: "owner/repo", owner: "owner", name: "repo" },
+    ref: { type: "branch", name: "main", defaultBranch: "main", baseRef: null, headRef: null, headRepository: null },
+    visibility: "public", accessMode: "public", isDefault: true, source: "test",
+  } });
   let open = false;
   const setup = useAddAgentSetup();
   const selectedProvider = computed(() =>
@@ -67,8 +73,8 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   const actions = setup.bind({
     open: () => open,
     roomIdentifier: () => "room-1",
-    roomGitRoom: () => null,
-    repoRootPath: () => "/repo",
+    roomGitRoom: () => roomSnapshot.value.git,
+    repoRootPath: () => roomSnapshot.value.path,
     selectedProvider,
     selectedPermissionProfile: computed(() => null),
     expectedWorktreeBranch: computed(() => null),
@@ -122,6 +128,12 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   const backgroundCheck = actions.runPreflight();
   assert.equal(setup.loadingPreflight.value, true, "revalidation keeps the snapshot but disables duplicate checks");
   assert.equal(setup.preflight.value, stableSnapshot);
+  const pendingCalls = preflightCalls;
+  for (let i = 0; i < 3; i++) {
+    roomSnapshot.value = { ...roomSnapshot.value, git: { ...roomSnapshot.value.git, ref: { ...roomSnapshot.value.git.ref } } };
+    await nextTick();
+  }
+  assert.equal(preflightCalls, pendingCalls, "equivalent snapshots preserve the pending check");
   backgroundResult.resolve({
     providerId: "cursor",
     status: "ready",
@@ -134,6 +146,19 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   });
   await backgroundCheck;
   assert.equal(setup.preflight.value?.message, "Still ready");
+  laterPreflight = null;
+  for (const change of [
+    () => { roomSnapshot.value.path = "/other-repo"; },
+    () => { roomSnapshot.value.git.ref.name = "feature"; },
+    () => { roomSnapshot.value.git.ref.type = "tag"; },
+  ]) {
+    const before = preflightCalls;
+    change();
+    await nextTick();
+    await Promise.resolve();
+    assert.equal(preflightCalls, before + 1, "actual repository/ref changes refresh setup");
+  }
+
   const sameProviderSnapshot = setup.preflight.value;
   actions.selectProvider("cursor");
   assert.equal(setup.preflight.value, sameProviderSnapshot, "clicking the selected provider is a no-op");
