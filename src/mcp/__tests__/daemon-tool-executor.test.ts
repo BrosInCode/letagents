@@ -7,6 +7,9 @@ import test from "node:test";
 import type { StoredAgentSessionState } from "../local-state.js";
 import { executeDaemonTool, supervisedToolIsMutation } from "../server/daemon-tool-executor.js";
 
+import { resolveWorkerToolIdentity } from "../server/runtime/agent-sessions.js";
+import { runWithDaemonToolExecutionContext } from "../server/runtime/daemon-tool-context.js";
+
 function session(roomId: string, suffix: string): StoredAgentSessionState {
   const now = "2026-08-14T00:00:00.000Z";
   return {
@@ -47,6 +50,21 @@ test("daemon executor binds exact supervised room authority without crossing the
   assert.equal(payload.room_id, "focus_42");
   assert.equal(payload.room_binding, "daemon_supervised");
   assert.deepEqual(output.durableResult, output.liveResult);
+});
+
+test("Codex daemon identity uses the current worker session and rejects stale explicit IDs", async () => {
+  const current = { ...session("focus_42", "1205"), session_id: "agent_session_1205", runtime: "codex" };
+  await runWithDaemonToolExecutionContext({
+    roomId: current.room_id, apiUrl: "https://letagents.example", bearer: "worker-only",
+    cwd: process.cwd(), agentSession: current,
+  }, async () => {
+    for (const agentSessionId of [undefined, "worker_bearer", current.session_id]) {
+      const resolved = await resolveWorkerToolIdentity({ roomId: current.room_id, agentSessionId });
+      assert.equal(resolved.agentSession, current, "the daemon supplies current identity without a local session cache");
+    }
+    await assert.rejects(() => resolveWorkerToolIdentity({ roomId: current.room_id, agentSessionId: "agent_session_1200" }), /1205, not agent_session_1200/);
+    await assert.rejects(() => resolveWorkerToolIdentity({ roomId: "focus_other", agentSessionId: current.session_id }), /registered for focus_42/);
+  });
 });
 
 test("concurrent daemon executions keep room and session authority isolated", async () => {

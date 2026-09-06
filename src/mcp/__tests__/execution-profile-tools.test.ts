@@ -51,6 +51,7 @@ test("supervised room turns retain product tools but do not discover execution m
 test("the executable runtime contract is derived from the real Cursor registration path", () => {
   const contract = letAgentsRuntimeContract();
   assert.equal(contract.format, 1);
+  assert.deepEqual(contract.profiles.cursor_supervised_room_turn.tools.filter((tool) => tool !== "complete_room_turn"), [...discovered("supervised_room_turn", "codex")].sort(), "the pinned runtime contract also describes Codex except for Cursor-only completion");
   assert.deepEqual(
     contract.profiles.cursor_supervised_room_turn.tools,
     [...discovered("supervised_room_turn", "cursor")].sort(),
