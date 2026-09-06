@@ -1,8 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
-import { task_leases, tasks } from "./schema.js";
+import { room_agent_sessions, task_leases, tasks } from "./schema.js";
 import { clampLimit, formatTaskId, nextRoomScopedNumber, parseScopedId, type RoomSequenceExecutor } from "./utils.js";
 import { toTask } from "./mappers.js";
 import {
@@ -441,6 +442,18 @@ export async function updateTask(
   const task = await getTaskRowById(roomId, taskId);
   if (!task) return null;
 
+  const fence = options?.leaseFence;
+  const progressRetryEligible = Boolean(fence?.kind === "work" && fence.room_id === roomId
+    && fence.task_id === taskId && !options?.boardIntentApproval && !options?.workLeaseCreation);
+  const isExactProgressRetry = (current: TaskRow) => progressRetryEligible
+    && updates.status === current.status && ["in_progress", "in_review"].includes(current.status)
+    && (updates.assignee === undefined || updates.assignee === current.assignee)
+    && (updates.assignee_agent_key === undefined || updates.assignee_agent_key === current.assignee_agent_key)
+    && (updates.pr_url === undefined || updates.pr_url === current.pr_url)
+    && (updates.workflow_artifacts === undefined
+      || isDeepStrictEqual(normalizeTaskWorkflowArtifacts({ artifacts: updates.workflow_artifacts,
+        prUrl: updates.pr_url ?? current.pr_url }), current.workflow_artifacts));
+  const retryingProgress = isExactProgressRetry(task);
   const retryingOwnClaim = task.status === "assigned" && updates.status === "assigned"
     && Boolean(task.assignee_agent_key)
     && updates.assignee_agent_key === task.assignee_agent_key
@@ -452,7 +465,7 @@ export async function updateTask(
     && task.status !== "accepted" && !retryingOwnClaim) {
     throw new LeaseFenceStaleError();
   }
-  if (updates.status && !isValidTransition(task.status, updates.status) && !retryingOwnClaim) {
+  if (updates.status && !isValidTransition(task.status, updates.status) && !retryingOwnClaim && !retryingProgress) {
     throw new Error(
       `Invalid transition: ${task.status} → ${updates.status}. ` +
         `Allowed: ${VALID_TRANSITIONS[task.status].join(", ") || "none"}`
@@ -531,6 +544,7 @@ export async function updateTask(
     );
   };
 
+  let progressRetryResult: Task | null = null;
   if (options?.boardIntentApproval || options?.workLeaseCreation || options?.leaseFence) {
     await db.transaction(async (tx) => {
       // Fence FIRST, under the shared lease advisory lock, so the whole write
@@ -539,6 +553,28 @@ export async function updateTask(
       if (options.leaseFence) {
         const held = await acquireLeaseFenceTx(tx, options.leaseFence);
         if (!held) throw new LeaseFenceStaleError();
+        if (progressRetryEligible && updates.status && ["in_progress", "in_review"].includes(updates.status)) {
+          // Re-read under the rebind lock and task lock: concurrent identical
+          // requests must return the winning commit without changing its timestamp.
+          const [current] = await tx.select().from(tasks)
+            .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber))).for("update");
+          if (!current) throw new LeaseFenceStaleError();
+          if (isExactProgressRetry(current)) {
+            const [session] = await tx.select().from(room_agent_sessions)
+              .where(eq(room_agent_sessions.session_id, options.leaseFence.agent_session_id)).for("share");
+            if (held.agent_key !== current.assignee_agent_key
+              || (held.expires_at && Date.parse(held.expires_at) <= Date.now())
+              || !session || session.ended_at || session.room_id !== roomId
+              || session.agent_key !== held.agent_key) throw new LeaseFenceStaleError();
+            progressRetryResult = toTask(current);
+            return;
+          }
+          if (retryingProgress || current.status !== task.status
+            || current.updated_at !== task.updated_at || current.assignee !== task.assignee
+            || current.assignee_agent_key !== task.assignee_agent_key
+            || current.pr_url !== task.pr_url
+            || JSON.stringify(current.workflow_artifacts) !== JSON.stringify(task.workflow_artifacts)) throw new LeaseFenceStaleError();
+        }
       }
       if (options.workLeaseCreation || retryingOwnClaim) {
         // Serialize fresh/recovery claims on the task row. A concurrent claim
@@ -582,6 +618,7 @@ export async function updateTask(
     await writeArtifactSideEffects(db);
   }
 
+  if (progressRetryResult) return progressRetryResult;
   return toTask({
     ...task,
     status: assignment.status,
