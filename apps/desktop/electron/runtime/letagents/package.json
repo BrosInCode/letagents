@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "dependencies": {
-    "letagents": "0.12.14"
+    "letagents": "0.12.18"
   },
   "overrides": {
     "@hono/node-server": "2.0.10",
