@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import type { Express } from "express";
 
 import {
   BoardIntentApprovalConsumptionError,
   createCoordinationEvent,
   createTask,
+  findTaskByClientId,
   findTaskBySourceMessageId,
   getOpenTasks,
   getTasks,
@@ -88,8 +90,23 @@ export function registerTaskListAndCreateRoutes(
     const effectiveActorKey = workerIdentity?.agent_key ?? actor_key ?? null;
     const effectiveActorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(actor_instance_id);
     const effectiveActorSessionId = workerIdentity?.agent_session_id ?? null;
-    const clientTaskId = deps.normalizeOptionalString(client_task_id);
-    const sourceMessageId = clientTaskId ?? deps.normalizeOptionalString(source_message_id) ?? null;
+    const requestedClientTaskId = deps.normalizeOptionalString(client_task_id);
+    if (client_task_id !== undefined && !requestedClientTaskId) {
+      res.status(400).json({ error: "client_task_id must be a non-empty string." });
+      return;
+    }
+    const clientTaskId = requestedClientTaskId ? createHash("sha256")
+      .update(JSON.stringify([effectiveActorKey ?? createdBy, requestedClientTaskId])).digest("hex") : null;
+    const sourceMessageId = deps.normalizeOptionalString(source_message_id);
+    const replyToRetry = async (existingTask: Awaited<ReturnType<typeof createTask>>) => {
+      if (existingTask.title !== title || existingTask.description !== (description ?? null)
+        || existingTask.source_message_id !== sourceMessageId) {
+        res.status(409).json({ error: "The creation ID was already used for a different task.", code: "task_creation_id_conflict" });
+        return;
+      }
+      const taskWithDetails = await attachTaskDetails(project.id, existingTask);
+      res.status(200).json({ ...taskWithDetails, room_id: project.id, idempotent: true });
+    };
 
     if (!title || !createdBy) {
       res.status(400).json({ error: "title and created_by are required" });
@@ -97,10 +114,9 @@ export function registerTaskListAndCreateRoutes(
     }
 
     if (clientTaskId) {
-      const existingTask = await findTaskBySourceMessageId(project.id, clientTaskId);
+      const existingTask = await findTaskByClientId(project.id, clientTaskId);
       if (existingTask) {
-        const taskWithDetails = await attachTaskDetails(project.id, existingTask);
-        res.status(200).json({ ...taskWithDetails, room_id: project.id, idempotent: true });
+        await replyToRetry(existingTask);
         return;
       }
     }
@@ -132,7 +148,7 @@ export function registerTaskListAndCreateRoutes(
         createdBy,
         description,
         sourceMessageId ?? undefined,
-        { boardIntentApproval }
+        { boardIntentApproval, clientTaskId }
       );
     } catch (error) {
       if (error instanceof BoardIntentApprovalConsumptionError) {
@@ -148,11 +164,12 @@ export function registerTaskListAndCreateRoutes(
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }
-      if (sourceMessageId) {
-        const existingTask = await findTaskBySourceMessageId(project.id, sourceMessageId);
+      if (clientTaskId || sourceMessageId) {
+        const existingTask = clientTaskId
+          ? await findTaskByClientId(project.id, clientTaskId)
+          : await findTaskBySourceMessageId(project.id, sourceMessageId!, { legacyOnly: true });
         if (existingTask) {
-          const taskWithDetails = await attachTaskDetails(project.id, existingTask);
-          res.status(200).json({ ...taskWithDetails, room_id: project.id, idempotent: true });
+          await replyToRetry(existingTask);
           return;
         }
       }

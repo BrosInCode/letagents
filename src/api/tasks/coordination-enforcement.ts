@@ -340,7 +340,8 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     ]);
     const admission = evaluateTaskAdmission({
       intent: {
-        sourceMessageId: input.sourceMessageId,
+        // One source message may describe several tasks. Creation IDs handle
+        // retries; active work/lease identity still prevents competing work.
         outputIntent: input.title,
       },
       tasks: tasks.tasks,

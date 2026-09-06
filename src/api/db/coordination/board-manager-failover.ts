@@ -91,6 +91,12 @@ export async function listActiveBoardManagerAssignments(options?: { now?: number
     .select({
       assignment: board_manager_assignments,
       agent_session_ended_at: room_agent_sessions.ended_at,
+      supervisor_managed: sql<boolean>`EXISTS (
+        SELECT 1 FROM supervisor_host_grants AS supervisor
+         WHERE supervisor.grant_id = ${room_agent_sessions.supervisor_grant_id}
+           AND supervisor.revoked_at IS NULL
+           AND supervisor.expires_at > ${now}::timestamptz
+      )`,
       manager_failover: room_board_settings.manager_failover,
       delivery: room_agent_delivery_sessions,
       runtime_last_active_at: sql<string | null>`(
@@ -226,7 +232,7 @@ export async function listActiveBoardManagerAssignments(options?: { now?: number
       delivery_candidate: effectiveDelivery ? {
         session: effectiveDelivery,
         agent_session_ended_at: row.agent_session_ended_at ?? null,
-        supervisor_managed: false,
+        supervisor_managed: Boolean(row.supervisor_managed),
         runtime_last_active_at: row.runtime_last_active_at ?? null,
         native_last_active_at: row.runtime_last_active_at ?? null,
       } : null,
@@ -322,6 +328,16 @@ export async function releaseBoardManagerAssignmentTx(
                  WHERE manager_delivery.room_id = ${board_manager_assignments.room_id}
                    AND manager_delivery.agent_session_id = ${board_manager_assignments.agent_session_id}
                    AND manager_delivery.session_kind = 'worker'
+                   AND EXISTS (
+                     SELECT 1 FROM ${room_agent_sessions} AS manager_session
+                      WHERE manager_session.session_id = manager_delivery.agent_session_id
+                        AND NOT EXISTS (
+                          SELECT 1 FROM supervisor_host_grants AS supervisor
+                           WHERE supervisor.grant_id = manager_session.supervisor_grant_id
+                             AND supervisor.revoked_at IS NULL
+                             AND supervisor.expires_at > ${now}::timestamptz
+                        )
+                   )
                    AND NOT (
                      (manager_delivery.active_connection_count > 0
                        AND manager_delivery.updated_at >= ${now}::timestamptz - interval '90 seconds')

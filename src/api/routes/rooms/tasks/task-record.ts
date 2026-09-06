@@ -23,6 +23,7 @@ import {
 import { findBoardReviewLeaseForMerge } from "../../../coordination-policy.js";
 import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import { attachTaskDetails } from "./task-details.js";
+import { authorizeBoardDecision } from "../board.js";
 import type { RoomTaskRouteDeps } from "./types.js";
 
 export function registerTaskRecordRoutes(
@@ -105,7 +106,16 @@ export function registerTaskRecordRoutes(
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
       if (updates.status && adminOnlyStatuses.has(updates.status)) {
-        if (!(await deps.requireAdmin(req, res, project))) return;
+        if (workerIdentity && (updates.status === "accepted" || updates.status === "cancelled")) {
+          if (Object.keys(updates).some((key) => key !== "status")) {
+            res.status(403).json({ error: "Board Manager task decisions can only change status." });
+            return;
+          }
+          if (!(await authorizeBoardDecision({
+            req, res, project, workerIdentity, requireAdmin: deps.requireAdmin,
+            getActiveBoardManagerForRoom: deps.getActiveBoardManagerForRoom,
+          }))) return;
+        } else if (!(await deps.requireAdmin(req, res, project))) return;
       }
 
       const isReviewChangeRequest = updates.status === "blocked" && task.status === "in_review";
