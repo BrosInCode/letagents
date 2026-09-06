@@ -60,3 +60,23 @@ test("registerHttpMiddleware allows PUT requests for CORS preflight", async () =
   assert.equal(headers.get("Access-Control-Allow-Origin"), "https://letagents.chat");
   assert.match(headers.get("Access-Control-Allow-Methods") ?? "", /\bPUT\b/);
 });
+
+test("rejected bearer credentials cannot fall through to anonymous room access", async () => {
+  const handlers: Function[] = [];
+  registerHttpMiddleware({ use: (handler: Function) => handlers.push(handler), options() {} } as never, createDeps() as never);
+  for (const [authorization, method, path, rejected] of [
+    [undefined, "PATCH", "/rooms/public/tasks/task_1", false],
+    ["Bearer ", "PATCH", "/rooms/public/tasks/task_1", false],
+    ["Bearer revoked-worker", "PATCH", "/rooms/public/tasks/task_1", true],
+    ["bearer invalid", "PATCH", "/rooms/public/tasks/task_1", true],
+    ["Bearer expired-owner", "GET", "/auth/session", false],
+    ["Bearer revoked-worker", "POST", "/auth/session", true],
+  ] as const) {
+    let continued = false;
+    let status: number | null = null;
+    const res = { status(code: number) { status = code; return this; }, json() {} };
+    await handlers[1]({ method, path, headers: { authorization } }, res, () => { continued = true; });
+    assert.equal(status, rejected ? 401 : null);
+    assert.equal(continued, !rejected);
+  }
+});

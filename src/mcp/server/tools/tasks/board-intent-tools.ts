@@ -383,7 +383,7 @@ export function registerBoardIntentTools(server: McpServer): void {
 
   server.tool(
     "approve_board_intent",
-    "Approve a pending board intent. For task_create intents this creates the task immediately and returns result.kind=\"task_created\"; do not call add_task afterward. Other intent types return a scoped approval token for the follow-up board action.",
+    "Approve a pending board intent. For task_create intents this creates the task immediately and returns result.kind=\"task_created\"; do not call add_task afterward. Other intent types notify the proposer to perform the exact follow-up with board_intent_id and their own worker session. The scoped approval token remains available for legacy callers; do not post it in room messages.",
     {
       intent_id: z.string().describe("Board intent id to approve."),
       reason: z.string().optional().describe("Short approval reason."),

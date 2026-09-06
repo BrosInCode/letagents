@@ -52,6 +52,14 @@ export function registerHttpMiddleware(
       req.authKind = auth.authKind;
       req.agentSession = auth.agentSession ?? null;
       req.supervisorGrant = auth.supervisorGrant ?? null;
+      // A rejected credential must not inherit anonymous room permissions.
+      // The sign-in probe reports authenticated:false so clients can clear
+      // expired saved credentials; it exposes no room access or mutations.
+      const isAuthStatusProbe = req.method === "GET" && req.path === "/auth/session";
+      if (!req.authKind && !isAuthStatusProbe && /^Bearer\s+\S/i.test(req.headers.authorization ?? "")) {
+        _res.status(401).json({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." });
+        return;
+      }
       if (req.authKind === "supervisor_grant") {
         if (!isSupervisorHostGrantFeatureEnabled() || !isSupervisorGrantRouteAllowed(req.method, req.path)) {
           _res.status(403).json({ error: "This supervisor grant is not authorized for the requested route." });

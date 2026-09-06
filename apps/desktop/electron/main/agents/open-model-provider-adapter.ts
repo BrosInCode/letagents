@@ -148,6 +148,8 @@ function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
     "You are handling one daemon-owned room inbox item in an exact bounded turn.",
     "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
     "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
+    "A GitHub webfetch 404 can mean private access, not a missing PR. Check with gh using its existing authentication before concluding the PR is missing; GH_CONFIG_DIR preserves the user's configured GitHub CLI location.",
+    "An explicit git fetch may update only FETCH_HEAD. Inspect FETCH_HEAD or another verified ref before concluding a remote branch has no changes.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     `If no response should be published, return exactly ${NO_REPLY_SENTINEL} with no other text.`,
     `Inbox item: ${request.inboxItemId}`,
@@ -580,6 +582,13 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const sharedCacheRoot = join(this.runtimeRoot, "shared-cache");
     await mkdir(sharedCacheRoot, { recursive: true, mode: 0o700 });
     const env = minimalOpenCodeEnvironment(process.env, {
+      // Resolve gh's config before isolating OpenCode's XDG directories. Keep
+      // the existing credential store location, never copy its credentials.
+      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR || (process.env.XDG_CONFIG_HOME
+        ? join(process.env.XDG_CONFIG_HOME, "gh")
+        : process.platform === "win32" && process.env.APPDATA
+          ? join(process.env.APPDATA, "GitHub CLI")
+          : join(process.env.HOME || homedir(), ".config", "gh")),
       OPENCODE_SERVER_USERNAME: auth.username,
       OPENCODE_SERVER_PASSWORD: auth.password,
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config),

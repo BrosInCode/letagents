@@ -419,3 +419,51 @@ test("worker claims reject missing or mismatched bearer session and room identit
     assert.equal(result.kind, "deny");
   }
 });
+
+test("assigned worker recovers a missing lease through the normal approved claim", async () => {
+  const base = workerClaimInput();
+  const input = { ...base, task: task(), taskOwnership: {
+    status: "assigned", assignee: actorLabel, assignee_agent_key: actorKey,
+  } as TaskOwnershipState };
+  const checks: Array<Record<string, unknown>> = [];
+  const harness = createHarness({ shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async (check) => { checks.push(check); return check.intent_id
+      ? { kind: "allow", intent: { id: check.intent_id } }
+      : { kind: "deny", code: "board_intent_required", error: "Approval required" }; } });
+  const service = createTaskCoordinationEnforcement(harness.deps);
+  assert.equal((await service.enforceTaskCoordinationMutation(input)).kind, "deny");
+  const recovery = await service.enforceTaskCoordinationMutation({ ...input, boardIntentId: "bi_recovery" });
+  assert.equal(recovery.kind, "allow");
+  if (recovery.kind !== "allow") return;
+  assert.equal(recovery.workLeaseCreation?.agent_session_id, input.actorSessionId);
+  assert.deepEqual(checks.at(-1)?.trusted_worker, { agent_session_id: input.actorSessionId, agent_key: actorKey });
+  assert.deepEqual((recovery.boardIntentApproval as Record<string, unknown>).trusted_worker, checks.at(-1)?.trusted_worker);
+  for (const changed of [
+    { taskOwnership: { ...input.taskOwnership, assignee: "Someone else", assignee_agent_key: "other/key" } },
+    { task: task({ status: "in_progress" }) },
+  ]) assert.equal((await service.enforceTaskCoordinationMutation({ ...input, ...changed, boardIntentId: "bi_recovery" })).kind, "deny");
+});
+
+test("retrying an assigned claim reuses only the current session lease without another approval", async () => {
+  const base = workerClaimInput();
+  const input = { ...base, task: task(), taskOwnership: {
+    status: "assigned", assignee: actorLabel, assignee_agent_key: actorKey,
+  } as TaskOwnershipState };
+  const harness = createHarness({ shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async () => assert.fail("an existing claim must not consume another approval") });
+  harness.activeLeases.push(lease({ agent_session_id: input.actorSessionId, epoch: 3 }));
+  const result = await createTaskCoordinationEnforcement(harness.deps).enforceTaskCoordinationMutation(input);
+  assert.equal(result.kind, "allow");
+  if (result.kind === "allow") {
+    assert.equal(result.workLeaseCreation, undefined);
+    assert.equal(result.leaseFence?.expected_epoch, 3);
+    assert.equal(result.leaseFence?.agent_session_id, input.actorSessionId);
+  }
+  harness.activeLocks.push(lock());
+  // A retry cannot bypass a coordination lock or a successor's lease.
+  harness.deps.verifyBoardIntentApproval = async () => ({ kind: "allow" });
+  assert.equal((await createTaskCoordinationEnforcement(harness.deps).enforceTaskCoordinationMutation(input)).kind, "deny");
+  harness.activeLocks.length = 0;
+  harness.activeLeases[0]!.agent_session_id = "successor";
+  assert.equal((await createTaskCoordinationEnforcement(harness.deps).enforceTaskCoordinationMutation(input)).kind, "deny");
+});

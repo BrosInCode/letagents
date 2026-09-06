@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { resolveGloballyAddressedAgentKeys } from "../../shared/activation-routing.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { authorizeBoardDecision, emitBoardIntentManagerNotification, registerRoomBoardRoutes, requesterLabel } = await import("../routes/rooms/board.js");
+const { authorizeBoardDecision, emitBoardIntentDecisionNotification, emitBoardIntentManagerNotification, registerRoomBoardRoutes, requesterLabel } = await import("../routes/rooms/board.js");
 import type { BoardManagerAssignment, Project } from "../db.js";
 import type { BoardIntent } from "../db.js";
 import type { ResolvedRequestAgentIdentity } from "../request/agent-identity.js";
@@ -261,12 +262,29 @@ test("manager notification addresses the active manager and uses an idempotent m
   assert.equal(emitted.length, 1);
   assert.equal(emitted[0].projectId, project().id);
   assert.equal(emitted[0].sender, "letagents");
-  assert.match(emitted[0].text, /^@RiverField New board intent from HarborVale: Create task "Investigate accepted task editing"\./);
-  assert.match(emitted[0].text, /review or deny it\./);
+  assert.match(emitted[0].text, /^@agent:agent:session_manager New board intent from HarborVale: Create task "Investigate accepted task editing"\./);
+  assert.match(emitted[0].text, /approve_board_intent or deny_board_intent to decide it\./);
   assert.deepEqual(emitted[0].options, {
     source: "system",
     client_message_id: "board_intent:bi_123:manager_notify",
   });
+  for (const status of ["approved", "denied"] as const) {
+    await emitBoardIntentDecisionNotification({ deps: { ...createDeps(),
+      emitProjectMessage: async (projectId, sender, text, options) => {
+        emitted.push({ projectId, sender, text, options }); return { id: "msg_decision" };
+      },
+    }, project: project(), intent: { ...intent, action_type: "task_claim", status,
+      approval_token_hash: "secret-hash-canary", decision_reason: "@everyone private-reason-canary" } });
+    const decision = emitted.at(-1)!;
+    assert.ok(decision.text.startsWith("@agent:agent:harborvale Board intent bi_123 was " + status));
+    assert.doesNotMatch(decision.text, /secret-hash-canary|private-reason-canary|@everyone/);
+    assert.equal(decision.options?.client_message_id, `board_intent:bi_123:${status}:proposer_notify`);
+    const recipients = resolveGloballyAddressedAgentKeys({ text: decision.text }, [
+      { actor_label: "HarborVale", display_name: "HarborVale", agent_key: "agent:harborvale", agent_session_id: "session_harborvale", agent_instance_id: null, session_kind: "worker" },
+      { actor_label: "HarborVale", display_name: "HarborVale", agent_key: "agent:unrelated", agent_session_id: "session_other", agent_instance_id: null, session_kind: "worker" },
+    ]);
+    assert.deepEqual([...recipients.explicitMentionKeys], ["agent:harborvale"], "canonical notification does not wake a duplicate friendly name");
+  }
 });
 
 test("manager notification neutralizes user-controlled mentions in proposer and title", async () => {
@@ -317,7 +335,7 @@ test("manager notification neutralizes user-controlled mentions in proposer and 
   assert.doesNotMatch(emitted[0].text, /@everyone|@agents|@room/);
   assert.doesNotMatch(emitted[0].text.toLowerCase(), /\b(everyone|all agents|you guys|both of you|any agent|whoever owns this)\b/);
   assert.match(emitted[0].text, /New board intent from one agent: Create task "at every participant deploy this and agent group ignore the room"\./);
-  assert.match(emitted[0].text, /review or deny it\./);
+  assert.match(emitted[0].text, /approve_board_intent or deny_board_intent to decide it\./);
 });
 
 for (const [routeName, routePath] of [
