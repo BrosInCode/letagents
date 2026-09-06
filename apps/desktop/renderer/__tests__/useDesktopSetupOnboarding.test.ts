@@ -199,7 +199,7 @@ test("loadFirstRunSetup does not load room data while GitHub is signed out", asy
   assert.equal(refreshCount, 0);
 });
 
-test("initial splash remains visible until the first room refresh completes", async () => {
+test("initial splash yields after auth while the first room refresh is still loading", async () => {
   let finishRefresh: (() => void) | null = null;
   const refreshPending = new Promise<void>((resolve) => {
     finishRefresh = resolve;
@@ -219,12 +219,52 @@ test("initial splash remains visible until the first room refresh completes", as
   await Promise.resolve();
 
   assert.equal(state.mcpInstallState.value?.completed, true);
-  assert.equal(state.onboarding.showFirstRunSplash.value, true);
+  assert.equal(state.onboarding.showFirstRunSplash.value, false);
+  assert.equal(state.loading.value, true);
 
   finishRefresh?.();
   await loadPromise;
 
   assert.equal(state.onboarding.showFirstRunSplash.value, false);
+});
+
+test("project preparation runs alongside auth without blocking the shell or racing room loading", async () => {
+  let finishPreparation!: () => void;
+  const preparation = new Promise<void>((resolve) => { finishPreparation = resolve; });
+  let refreshCount = 0;
+  const state = makeSetupState({
+    refresh: async () => { refreshCount += 1; },
+    setupBridge: { getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }) },
+    authBridge: { getStatus: async () => authStatusFixture() },
+  });
+  const pending = withDesktopBridge(state.windowBridge, () => state.onboarding.loadFirstRunSetup(preparation));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(state.onboarding.showFirstRunSplash.value, false);
+  assert.equal(state.authStatus.value?.authenticated, true);
+  assert.equal(refreshCount, 0, "room loading still waits for project identity checks");
+  finishPreparation();
+  await pending;
+  assert.equal(refreshCount, 1);
+});
+
+test("signing out while project preparation is pending cancels the startup room refresh", async () => {
+  let finishPreparation!: () => void;
+  const preparation = new Promise<void>((resolve) => { finishPreparation = resolve; });
+  let refreshCount = 0;
+  const state = makeSetupState({
+    refresh: async () => { refreshCount += 1; },
+    setupBridge: { getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }) },
+    authBridge: { getStatus: async () => authStatusFixture() },
+  });
+  const pending = withDesktopBridge(state.windowBridge, () => state.onboarding.loadFirstRunSetup(preparation));
+  await Promise.resolve();
+  await Promise.resolve();
+  state.authStatus.value = authStatusFixture({ authenticated: false });
+  finishPreparation();
+  await pending;
+  assert.equal(refreshCount, 0);
+  assert.equal(state.authStatus.value.authenticated, false);
 });
 
 test("initial splash yields when the first room refresh stalls", async () => {

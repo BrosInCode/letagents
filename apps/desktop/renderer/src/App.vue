@@ -2464,9 +2464,7 @@ onMounted(() => {
   void loadChatStorageSettings();
   void loadAppAgentSettingsStatus();
   void loadAppAgentActions();
-  void initializeProjectBindings().finally(() => {
-    void loadFirstRunSetup();
-  });
+  void loadFirstRunSetup(initializeProjectBindings());
   void refreshRentalRequestCount();
   void refreshDesktopUpdateStatus();
 });
