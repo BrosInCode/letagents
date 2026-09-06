@@ -346,6 +346,38 @@ function assistantWithTool(
   };
 }
 
+test("Open Model preserves GitHub CLI config discovery while isolating OpenCode child directories", async () => {
+  const keys = ["GH_CONFIG_DIR", "XDG_CONFIG_HOME", "HOME", "APPDATA", "GH_TOKEN", "GITHUB_TOKEN"] as const;
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    process.env.HOME = "/tmp/github-user-home";
+    delete process.env.APPDATA;
+    process.env.GH_TOKEN = "github-token-must-not-be-inherited";
+    process.env.GITHUB_TOKEN = "github-token-must-not-be-inherited";
+    for (const [explicit, xdg, expected] of [
+      ["/tmp/custom-gh", "/tmp/user-config", "/tmp/custom-gh"],
+      [null, "/tmp/user-config", "/tmp/user-config/gh"],
+      [null, null, "/tmp/github-user-home/.config/gh"],
+    ]) {
+      if (explicit) process.env.GH_CONFIG_DIR = explicit; else delete process.env.GH_CONFIG_DIR;
+      if (xdg) process.env.XDG_CONFIG_HOME = xdg; else delete process.env.XDG_CONFIG_HOME;
+      const { harness, runtimeRoot } = await spawnAdapter();
+      try {
+        const env = harness.launches[0]!.env;
+        assert.equal(env.GH_CONFIG_DIR, expected);
+        assert.ok(env.XDG_CONFIG_HOME?.startsWith(runtimeRoot));
+        assert.notEqual(env.XDG_CONFIG_HOME, xdg);
+        assert.equal(env.GH_TOKEN, undefined);
+        assert.equal(env.GITHUB_TOKEN, undefined);
+      } finally { await rm(runtimeRoot, { recursive: true, force: true }); }
+    }
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
+    }
+  }
+});
+
 test("Open Model launches a dedicated OpenCode server without putting the provider key in config or MCP", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const observations: NativeExecutionObservation[] = [];
@@ -590,6 +622,8 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
     modelID: "qwen/qwen3-coder",
   });
   assert.match(JSON.stringify(prompt.parts), /daemon-owned room inbox item/);
+  assert.match(JSON.stringify(prompt.parts), /GitHub webfetch 404.*gh using its existing authentication/);
+  assert.match(JSON.stringify(prompt.parts), /explicit git fetch.*FETCH_HEAD/);
   assert.doesNotMatch(JSON.stringify(prompt.parts), /durable charter/i);
   assert.match(JSON.stringify(prompt.parts), /Earlier context/);
   assert.deepEqual(result, {
