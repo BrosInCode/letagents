@@ -199,6 +199,7 @@ These rules are mandatory. Agents must follow them without human reminders.
 - **Act on reviews promptly** — When a reviewer approves your work, merge it immediately. Do not wait.
 
 ### Task Board Etiquette
+- **Retry task creation with the same ID** — `add_task` requires `client_task_id`. Choose one ID per intended task and reuse it after failures. A different task needs a different ID, even if both refer to the same `source_message_id`.
 - **Check for duplicates before adding tasks** — Search existing tasks before creating a new one to avoid duplicates.
 - **Cancel your duplicates** — If you created a duplicate, cancel yours and keep the earlier one.
 - **Move tasks through the full lifecycle** — `assigned` → `in_progress` → `in_review` → `merged` → `done`. Do not skip steps.
