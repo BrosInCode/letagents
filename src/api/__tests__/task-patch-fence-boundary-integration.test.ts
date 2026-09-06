@@ -56,7 +56,7 @@ function realEnforcement(ownerId: string) {
     updateTaskLeaseWorkflowRefs: db!.updateTaskLeaseWorkflowRefs,
     shouldRequireBoardIntent: async () => false,
     verifyBoardIntentApproval: async () => ({ kind: "allow" as const }),
-  } as never) as { enforceTaskCoordinationMutation: (input: never) => Promise<{ kind: string; code?: string; leaseFence?: unknown }> };
+  } as never) as { enforceTaskCoordinationMutation: (input: never) => Promise<{ kind: string; code?: string; leaseFence?: unknown; workLeaseCreation?: NonNullable<Parameters<typeof updateTask>[3]>["workLeaseCreation"] }> };
 }
 
 let ordinal = 0;
@@ -196,4 +196,47 @@ test("(B) enforcement captures the current tuple, then a rebind makes the in-tx 
   );
   const after = await getTaskById(room.id, task.id);
   assert.equal(after?.pr_url ?? null, null, "the stale write left no side effect");
+});
+
+
+test("worker claim persists a session-bound lease before advancing accepted work", { skip: requiresDatabase }, async () => {
+  const { room, ownerId, from, mintSuccessor } = await seed();
+  const task = await db!.createTask(room.id, "new worker claim", from.actor_label);
+  await updateTask(room.id, task.id, { status: "accepted" });
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${from.worker_bearer}` } } as never);
+  assert.equal(auth.authKind, "agent_session");
+  const enforcement = realEnforcement(ownerId);
+  const decide = async (updates: Record<string, string>, identity = auth.agentSession!) =>
+    enforcement.enforceTaskCoordinationMutation({
+      req: { authKind: "agent_session", agentSession: identity }, projectId: room.id,
+      task: await getTaskById(room.id, task.id), taskOwnership: await getTaskOwnershipState(room.id, task.id),
+      updates, actorLabel: identity.actor_label, actorKey: identity.agent_key,
+      actorInstanceId: identity.agent_instance_id, actorSessionId: identity.agent_session_id,
+    } as never);
+  const claim = await decide({ status: "assigned" });
+  assert.equal(claim.kind, "allow");
+  assert.ok(claim.workLeaseCreation, "a worker claim must create authority, not an unfenced allow");
+  assert.deepEqual(await db!.getActiveTaskLeases(room.id, task.id), [], "enforcement does not write a lease ahead of the task transaction");
+  await updateTask(room.id, task.id, {
+    status: "assigned", assignee: from.actor_label, assignee_agent_key: from.agent_key,
+  }, { workLeaseCreation: claim.workLeaseCreation });
+  const leases = await db!.getActiveTaskLeases(room.id, task.id);
+  assert.equal(leases.length, 1);
+  assert.equal(leases[0]!.kind, "work");
+  assert.equal(leases[0]!.agent_session_id, from.session_id);
+  assert.equal(leases[0]!.agent_key, from.agent_key);
+  assert.equal((await getTaskById(room.id, task.id))?.status, "assigned");
+
+  const advance = await decide({ status: "in_progress" });
+  assert.equal(advance.kind, "allow");
+  assert.ok(advance.leaseFence);
+  await updateTask(room.id, task.id, { status: "in_progress" }, { leaseFence: advance.leaseFence as never });
+  assert.equal((await getTaskById(room.id, task.id))?.status, "in_progress");
+  const other = await mintSuccessor();
+  const otherAuth = await resolveRequestAuth({ headers: { authorization: `Bearer ${other.worker_bearer}` } } as never);
+  assert.equal(otherAuth.authKind, "agent_session");
+  const rejected = await decide({ status: "in_review" }, otherAuth.agentSession!);
+  assert.equal(rejected.kind, "deny");
+  assert.equal(rejected.code, "coordination_work_lease_required");
+  assert.equal((await getTaskById(room.id, task.id))?.status, "in_progress", "another session cannot advance the claimed task");
 });

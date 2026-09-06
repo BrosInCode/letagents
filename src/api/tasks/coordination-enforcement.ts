@@ -485,18 +485,19 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
   async function enforceTaskCoordinationMutation(
     input: TaskCoordinationMutationInput
   ): Promise<TaskCoordinationGuardDecision> {
+    const classified = input.forcedMutation
+      ? { ...input.forcedMutation, claim: false }
+      : classifyTaskCoordinationMutation(input.updates);
+    const workerClaim = input.req.authKind === "agent_session" && classified?.claim === true;
     // The work-lease fence applies ONLY to authenticated worker (agent_session)
     // writes. Anonymous / human-session / other non-owner_token requests are
     // NOT lease principals and must not be reclassified as work-lease traffic —
     // check agent_session explicitly, not "!== owner_token".
-    if (input.req.authKind === "agent_session") {
+    if (input.req.authKind === "agent_session" && !workerClaim) {
       // agent_session (worker-bearer) writes. Only WORK-lease-scoped mutations
       // are holder-scoped: claim creates a fresh lease, review mutations ride a
       // non-rebindable review lease, and unclassified updates aren't lease-bound.
-      const workerClassified = input.forcedMutation
-        ? { ...input.forcedMutation, claim: false }
-        : classifyTaskCoordinationMutation(input.updates);
-      if (!workerClassified || workerClassified.leaseKind !== "work" || workerClassified.claim) {
+      if (!classified || classified.leaseKind !== "work") {
         return { kind: "allow" };
       }
       // A work-lease-scoped worker mutation MUST be performed by the CURRENT
@@ -540,13 +541,18 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
 
     // Non-owner, non-worker requests (anonymous / human session / other) are not
     // lease principals — preserve their prior behavior, no coordination fence.
-    if (input.req.authKind !== "owner_token") {
+    if (input.req.authKind !== "owner_token" && !workerClaim) {
       return { kind: "allow" };
     }
 
-    const classified = input.forcedMutation
-      ? { ...input.forcedMutation, claim: false }
-      : classifyTaskCoordinationMutation(input.updates);
+    // Worker claims use the same lock, approval and transactional lease creation
+    // path as owner-token claims. Their actor comes from the verified bearer.
+    if (workerClaim && (!input.actorSessionId
+      || input.req.agentSession?.agent_session_id !== input.actorSessionId
+      || input.req.agentSession.agent_key !== input.actorKey
+      || input.req.agentSession.room_id !== input.projectId)) {
+      return { kind: "deny", code: "coordination_invalid_actor", error: "Task claims require the authenticated worker identity for this room." };
+    }
     if (!classified) {
       return { kind: "allow" };
     }
@@ -560,10 +566,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         error: "actor_label and actor_key are required for coordinated task mutations",
       };
     }
-    const verified = await validateOwnerTokenTaskActorKey({
-      req: input.req,
-      actorKey: requestedActorKey,
-    });
+    const verified = workerClaim
+      ? { actorKey: requestedActorKey, error: null }
+      : await validateOwnerTokenTaskActorKey({ req: input.req, actorKey: requestedActorKey });
     if (verified.error || !verified.actorKey) {
       return {
         kind: "deny",

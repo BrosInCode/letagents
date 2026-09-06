@@ -11,6 +11,7 @@ import {
   type CodexAppServerLaunch,
 } from "./codex-app-server.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { apiUrl as desktopApiUrl } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import {
   CodexRpcClient,
@@ -261,6 +262,19 @@ function custodialPollingTools(value: unknown): string[] {
     throw new Error("The verified LetAgents MCP runtime does not support custodial_polling_v1.");
   }
   return tools;
+}
+
+function boundedCodexTools(value: unknown): string[] {
+  const report = recordValue(value);
+  const tools = recordValue(recordValue(report?.profiles)?.cursor_supervised_room_turn)?.tools;
+  if (report?.format !== 1 || !Array.isArray(tools) || !tools.every((name) => typeof name === "string")
+    || !["claim_task", "get_board", "read_messages", "send_message"].every((name) => tools.includes(name))
+    || tools.some((name) => /^(?:wait_for_messages|register_agent_session|disconnect_agent_session|start_device_auth|poll_device_auth|clear_saved_auth|resume_room_session)$/.test(name))) {
+    throw new Error("The verified LetAgents MCP runtime does not support Codex supervised room tools.");
+  }
+  // The pinned runtime exposes its common bounded surface under Cursor's
+  // profile. Codex uses the same registration minus Cursor's completion hook.
+  return tools.filter((name) => name !== "complete_room_turn");
 }
 
 function custodialMcpOverride(entryPath: string, cwd: string, environment: Record<string, string>, tools: string[]): string {
@@ -1645,6 +1659,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (hasSupervisorCoordinate && !hasCompleteSupervisorCoordinates) {
       throw new Error("Codex supervisor bridge coordinates are incomplete.");
     }
+    const boundedMcp = req.deliveryMode === "daemon_inbox" && hasCompleteSupervisorCoordinates;
     let custodialRuntime: LetAgentsMcpRuntime | null = null;
     let custodialTools: string[] = [];
     let custodialApiUrl: string | null = null;
@@ -1662,6 +1677,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
       } catch { throw new Error("Custodial polling requires an exact safe worker API origin."); }
       ({ runtime: custodialRuntime, tools: custodialTools } = await this.resolveCustodialPollingRuntime(req.devMcpServerEntryPath));
     }
+    if (boundedMcp) {
+      custodialRuntime = this.deps.resolveMcpRuntime(req.devMcpServerEntryPath);
+      custodialTools = boundedCodexTools(await this.deps.readMcpRuntimeContract(custodialRuntime.entryPath));
+    }
     if (hasCompleteSupervisorCoordinates) {
       await this.deps.writeSupervisorBridgeContext(req.cwd, {
         entry_id: req.supervisorEntryId!,
@@ -1674,7 +1693,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         } : {}),
       });
     }
-    const devOverrides = !custodialPolling && req.devMcpServerEntryPath
+    const devOverrides = !custodialRuntime && req.devMcpServerEntryPath
       ? await buildCodexDevMcpEntryOverrides(req.devMcpServerEntryPath)
       : [];
     const supervisorEnvironment: Record<string, string> | undefined = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
@@ -1710,7 +1729,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const launch = this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
       configOverrides: custodialRuntime
-        ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, supervisorEnvironment!, custodialTools)]
+        ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {
+            ...supervisorEnvironment!,
+            ...(boundedMcp ? { LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
+              LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
+          }, custodialTools)]
         : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
       ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
     });
