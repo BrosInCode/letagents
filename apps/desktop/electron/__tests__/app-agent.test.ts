@@ -167,6 +167,13 @@ test("App Agent settings encrypt and decrypt the OpenRouter key", async () => {
       value.toString("utf8").replace(/^encrypted:/, ""),
   };
 
+  const options = { storePath: settingsPath, secretStorage };
+  assert.equal((await getAppAgentSettingsStatus(options)).enabled, false, "new installs start disabled");
+  await writePlainSettings(settingsPath);
+  const legacy = await getAppAgentSettingsStatus(options);
+  assert.equal(legacy.configured, true);
+  assert.equal(legacy.enabled, false, "a legacy configured key does not opt in");
+
   await saveAppAgentSettings(
     {
       openRouterApiKey: "openrouter-secret",
@@ -190,6 +197,19 @@ test("App Agent settings encrypt and decrypt the OpenRouter key", async () => {
   });
   assert.equal(status.configured, true);
   assert.equal(status.hasApiKey, true);
+  assert.equal(status.enabled, false);
+  const enabled = await saveAppAgentSettings({ enabled: true, model: settings.model }, options);
+  assert.equal(enabled.enabled, true);
+  assert.equal((await readAppAgentSettings(options)).enabled, true);
+  assert.equal((await readAppAgentSettings(options)).openRouterApiKey, "openrouter-secret");
+  const updated = await saveAppAgentSettings({ model: "openai/gpt-4o" }, options);
+  assert.equal(updated.enabled, true, "unrelated settings saves retain opt-in");
+  assert.equal(updated.model, "openai/gpt-4o");
+  const disabled = await saveAppAgentSettings({ enabled: false, model: updated.model }, options);
+  assert.equal(disabled.enabled, false);
+  assert.equal(disabled.hasApiKey, true);
+  assert.equal((await readAppAgentSettings(options)).enabled, false);
+  await rm(dirname(settingsPath), { recursive: true, force: true });
 });
 
 test("missing App Agent key returns a clear configuration error", async () => {

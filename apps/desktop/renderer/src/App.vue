@@ -265,6 +265,7 @@
     </section>
 
     <DesktopAppAgent
+      v-if="appAgentSettingsStatus?.enabled === true"
       :active-room-display-name="selectedRoomInfo.displayName || activeEntry.title"
       :active-room-identifier="selectedRoomIdentifier || selectedRootRoomIdentifier"
       :active-room-pinned="activeEntry.type === 'room' && activeEntry.pinned"
