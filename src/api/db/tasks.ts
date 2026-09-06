@@ -76,7 +76,7 @@ async function insertTaskRow(
   description?: string,
   sourceMessageId?: string,
   executor: RoomSequenceExecutor = db,
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null }
 ): Promise<Task> {
   const now = new Date().toISOString();
   const task: TaskRow = {
@@ -89,6 +89,7 @@ async function insertTaskRow(
     assignee_agent_key: null,
     created_by: createdBy,
     source_message_id: sourceMessageId ?? null,
+    client_task_id: options?.clientTaskId ?? (options?.boardIntentApproval?.intent_id ? `board-intent:${options.boardIntentApproval.intent_id}` : null),
     pr_url: null,
     workflow_artifacts: [],
     created_at: now,
@@ -150,7 +151,7 @@ export async function createTask(
   createdBy: string,
   description?: string,
   sourceMessageId?: string,
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null }
 ): Promise<Task> {
   if (options?.boardIntentApproval) {
     return db.transaction((tx) =>
@@ -158,7 +159,7 @@ export async function createTask(
     );
   }
 
-  return insertTaskRow(roomId, title, createdBy, description, sourceMessageId);
+  return insertTaskRow(roomId, title, createdBy, description, sourceMessageId, db, options);
 }
 
 export async function approveTaskCreateBoardIntent(input: {
@@ -317,9 +318,17 @@ export async function findTaskByPrUrl(roomId: string, prUrl: string): Promise<Ta
   return task ? toTask(task as TaskRow) : undefined;
 }
 
+export async function findTaskByClientId(roomId: string, clientTaskId: string): Promise<Task | null> {
+  const [row] = await db.select().from(tasks).where(and(
+    eq(tasks.room_id, roomId), eq(tasks.client_task_id, clientTaskId),
+  )).limit(1);
+  return row ? toTask(row) : null;
+}
+
 export async function findTaskBySourceMessageId(
   roomId: string,
   sourceMessageId: string,
+  options?: { legacyOnly?: boolean },
 ): Promise<Task | undefined> {
   const trimmedSourceMessageId = sourceMessageId.trim();
   if (!trimmedSourceMessageId) return undefined;
@@ -330,6 +339,7 @@ export async function findTaskBySourceMessageId(
     .where(and(
       eq(tasks.room_id, roomId),
       eq(tasks.source_message_id, trimmedSourceMessageId),
+      options?.legacyOnly ? sql`${tasks.client_task_id} IS NULL` : undefined,
     ))
     .orderBy(asc(tasks.number))
     .limit(1);

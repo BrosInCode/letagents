@@ -342,7 +342,7 @@ test("enforceTaskAdmissionPreconditions records active room lock denials", async
   assert.equal(harness.events[0]?.lock_id, "lock_1");
 });
 
-test("enforceTaskAdmissionPreconditions blocks duplicate task-create intents", async () => {
+test("enforceTaskAdmissionPreconditions allows separate tasks from the same message", async () => {
   const harness = createHarness();
   harness.tasks.push(task({
     id: "task_41",
@@ -353,19 +353,15 @@ test("enforceTaskAdmissionPreconditions blocks duplicate task-create intents", a
 
   const result = await service.enforceTaskAdmissionPreconditions({
     projectId: "focus_5",
-    title: "Investigate board manager delivery",
+    title: "Fix manager permissions",
     sourceMessageId: "msg_existing",
     actorLabel,
     actorKey,
     actorInstanceId: "instance:dawn",
   });
 
-  assert.equal(result.kind, "deny");
-  assert.equal(result.code, "coordination_duplicate_work");
-  assert.match(result.error, /Duplicate work intent matched source_message on task_41/);
-  assert.equal(harness.events[0]?.event_type, "task_admit");
-  assert.equal(harness.events[0]?.decision, "deny");
-  assert.equal(harness.events[0]?.reason, result.error);
+  assert.deepEqual(result, { kind: "allow" });
+  assert.equal(harness.events.length, 0);
 });
 
 function workerClaimInput() {

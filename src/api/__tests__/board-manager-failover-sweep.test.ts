@@ -324,7 +324,7 @@ test("announce mode posts once per outage and respects the cooldown", async () =
   assert.deepEqual(fake.failoverCalls, []);
 });
 
-test("daemon-supervised managers still trigger governance failover", async () => {
+test("daemon-supervised managers keep their role while delivery is quiet", async () => {
   const daemonManagerDelivery: LivenessAnnouncementCandidate = {
     ...delivery(buildDeliverySession()),
     supervisor_managed: true,
@@ -339,8 +339,14 @@ test("daemon-supervised managers still trigger governance failover", async () =>
 
   const summary = await createBoardManagerFailoverSweeper(fake.deps).sweepOnce();
 
-  assert.equal(summary.failovers, 1);
-  assert.equal(fake.failoverCalls.length, 1);
+  assert.equal(summary.failovers, 0);
+  assert.equal(fake.failoverCalls.length, 0);
+  assert.equal(evaluateBoardManagerDeath({
+    assignment_created_at: isoMinutesAgo(120),
+    agent_session_ended_at: isoMinutesAgo(1),
+    delivery: daemonManagerDelivery,
+    now: NOW,
+  }).dead, true, "supervisor termination still makes the role vacant");
 });
 
 test("auto mode promotes the best reachable successor and hands over pending intents", async () => {

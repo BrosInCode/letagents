@@ -132,6 +132,7 @@ export interface TaskOwnershipState {
 export type TaskWorkLeaseActionConflict = "task_not_found" | "lease_not_active" | "target_unreachable";
 
 export interface TaskRow {
+  client_task_id?: string | null;
   room_id: string;
   number: number;
   title: string;

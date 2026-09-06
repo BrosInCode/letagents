@@ -60,14 +60,16 @@ export function registerTaskBoardTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
+      client_task_id: z.string().trim().min(1).describe("Unique ID for this intended task. Reuse it on every retry; use a different ID for a separate task with identical contents."),
       source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
       ...workerTaskIdentitySchema,
       ...boardIntentApprovalSchema,
     },
-    async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
+    async ({ title, description, created_by: _createdBy, source_message_id, client_task_id, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
       const target = resolveTaskToolTarget(room_id);
       if (!target) return taskToolError("Not in a room. Join one first.");
 
+      if (!client_task_id?.trim()) return taskToolError("client_task_id is required. Choose one ID for this intended task and reuse it on every retry.");
       const { identity, agentSession } = await resolveTaskToolIdentity(target, agent_session_id);
       const task = await createTask(target, {
         title,
@@ -75,6 +77,7 @@ export function registerTaskBoardTools(server: McpServer): void {
         created_by: identity.actor_label,
         ...taskActorPayload(identity, agentSession),
         source_message_id,
+        client_task_id,
         board_intent_id,
         board_approval_token,
       });
@@ -84,7 +87,7 @@ export function registerTaskBoardTools(server: McpServer): void {
         identity,
         getRememberedRoomPresence(target.effectiveRoomId, identity),
         agentSession
-      );
+      ).catch((error) => console.error("[tasks] Task created; presence update failed:", String(error)));
 
       return jsonToolResponse(
         { success: true, task, agent_identity: toPublicAgentIdentity(identity) },

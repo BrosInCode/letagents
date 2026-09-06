@@ -136,3 +136,15 @@ test("board task summaries bound workflow history and omit bulky artifact detail
     ["run-8", "run-9", "run-10", "run-11"],
   );
 });
+
+
+test("task creation requires an explicit retry ID before mutation", async () => {
+  const tool = collectTaskToolRegistrations().find((registration) => registration.name === "add_task")!;
+  const idSchema = tool.schema.client_task_id as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(idSchema.safeParse(undefined).success, false);
+  assert.equal(idSchema.safeParse("  ").success, false);
+  assert.equal(idSchema.safeParse("roadmap-due-dates").success, true);
+  const handler = tool.handler as (input: Record<string, unknown>) => Promise<any>;
+  const result = await handler({ title: "Due dates", room_id: "room_1" });
+  assert.match(result.content[0].text, /client_task_id is required/);
+});

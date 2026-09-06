@@ -176,3 +176,33 @@ test("workspace-local tools cannot redirect daemon execution outside the authori
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("task mutations remain successful when the following presence update fails", async (t) => {
+  const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    requests.push({ method: init.method!, path, body: JSON.parse(String(init.body)) });
+    if (path.endsWith("/presence")) throw new TypeError("fetch failed");
+    assert.match(path, /\/tasks(?:\/task_1)?$/);
+    return Response.json({ id: "task_1", room_id: "focus_test", status: "assigned" });
+  });
+  t.mock.method(console, "error", () => {});
+  for (const [toolName, input] of [
+    ["add_task", { title: "Due dates", client_task_id: "due-dates", source_message_id: "msg_121" }],
+    ["claim_task", { task_id: "task_1" }],
+    ["update_task", { task_id: "task_1", status: "in_progress" }],
+    ["complete_task", { task_id: "task_1" }],
+  ] as const) {
+    const output = await executeDaemonTool({
+      provider: "cursor", toolName, input, requestId: `effect_${toolName}`,
+      roomId: "focus_test", apiUrl: "https://letagents.example", bearer: "test-worker-bearer",
+      cwd: process.cwd(), agentSession: session("focus_test", "test"),
+    });
+    const payload = JSON.parse(output.liveResult.content[0]?.type === "text" ? output.liveResult.content[0].text : "{}");
+    assert.equal(payload.success, true, JSON.stringify(payload));
+    assert.equal(payload.task.id, "task_1");
+  }
+  assert.equal(requests.length, 8);
+  assert.equal(requests[0].body.client_task_id, "due-dates");
+  assert.equal(requests[0].body.source_message_id, "msg_121");
+});

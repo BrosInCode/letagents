@@ -51,6 +51,12 @@ export function evaluateBoardManagerDeath(input: {
     return { dead: true, epoch: input.agent_session_ended_at };
   }
 
+  // A daemon owns recovery and termination for supervised workers. A quiet
+  // message connection (including while a turn runs) is not a vacancy.
+  if (input.delivery?.supervisor_managed) {
+    return { dead: false, epoch: null };
+  }
+
   const session = input.delivery?.session;
   if (!session) {
     return { dead: false, epoch: null };

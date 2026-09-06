@@ -88,7 +88,8 @@ async function resolveOptionalWorkerIdentity(input: {
   room_id: string;
   body: Record<string, unknown>;
 }): Promise<ResolvedRequestAgentIdentity | null | "responded"> {
-  if (input.req.authKind !== "owner_token" || !hasAgentSessionCredentials(input.body)) {
+  if (input.req.authKind !== "agent_session"
+    && (input.req.authKind !== "owner_token" || !hasAgentSessionCredentials(input.body))) {
     return null;
   }
   const result = await requireWorkerRequestAgentIdentity(input);

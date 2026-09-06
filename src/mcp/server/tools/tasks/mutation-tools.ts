@@ -50,7 +50,7 @@ export function registerTaskMutationTools(server: McpServer): void {
         await syncRoomPresence(target.effectiveRoomId, identity, {
           status: "working",
           status_text: `claimed ${task_id}`,
-        }, agentSession);
+        }, agentSession).catch((error) => console.error("[tasks] Task updated; presence update failed:", String(error)));
 
         return jsonToolResponse(
           { success: true, task: updated, agent_identity: toPublicAgentIdentity(identity) },
@@ -106,7 +106,7 @@ export function registerTaskMutationTools(server: McpServer): void {
         await syncRoomPresence(target.effectiveRoomId, identity, {
           status: deriveTaskPresenceStatus(status ?? null, rememberedPresence.status),
           status_text: status ? `${task_id} -> ${status}` : rememberedPresence.status_text,
-        }, agentSession);
+        }, agentSession).catch((error) => console.error("[tasks] Task updated; presence update failed:", String(error)));
 
         return jsonToolResponse(
           {
@@ -146,7 +146,7 @@ export function registerTaskMutationTools(server: McpServer): void {
         await syncRoomPresence(target.effectiveRoomId, identity, {
           status: "reviewing",
           status_text: `${task_id} -> in_review`,
-        }, agentSession);
+        }, agentSession).catch((error) => console.error("[tasks] Task updated; presence update failed:", String(error)));
 
         return jsonToolResponse(
           {
