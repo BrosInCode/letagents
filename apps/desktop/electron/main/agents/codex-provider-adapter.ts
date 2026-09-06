@@ -2133,6 +2133,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.execution.markUnavailable();
       return;
     }
+    handle.setLiveState("idle");
     this.emitNativeExecution(handle, {
       ...identity,
       domain: "turn",
