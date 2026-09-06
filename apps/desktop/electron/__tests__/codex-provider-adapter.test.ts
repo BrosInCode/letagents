@@ -227,7 +227,7 @@ type FakeLaunch = CodexAppServerLaunch & {
 
 const custodialRuntimeContract = {
   format: 1,
-  profiles: { supervised_mcp_polling: {
+  profiles: { cursor_supervised_room_turn: { tools: ["claim_task", "get_board", "read_messages", "send_message", "complete_room_turn"] }, supervised_mcp_polling: {
     contract: "custodial_polling_v1", tools: ["wait_for_messages", "read_messages", "send_message"],
   } },
 };
@@ -1888,7 +1888,34 @@ test("Codex resumed bounded launch supplies only the exact non-secret worker rou
     agent_display_name: "LanternSparrow",
   };
   assert.deepEqual(harness.supervisorBridgeContexts.map(({ context }) => context), [expectedBridgeContext, expectedBridgeContext]);
-  assert.doesNotMatch(JSON.stringify(harness.launchOptions), /session-secret|authorization|bearer/i);
+  for (const launch of harness.launchOptions) {
+    const override = launch.options.configOverrides[0]!;
+    assert.ok(override.includes('command = ' + JSON.stringify(process.execPath)));
+    assert.ok(override.includes('/verified/runtime/dist/mcp/server.js'));
+    for (const [name, value] of Object.entries(expectedEnvironment)) {
+      assert.ok(override.includes(`${JSON.stringify(name)} = ${JSON.stringify(value)}`), `${name} crosses the MCP environment filter`);
+    }
+    assert.ok(override.includes('"LETAGENTS_TOKEN" = ""'));
+    assert.ok(override.includes('"LETAGENTS_AGENT_SESSION_BEARER" = ""'));
+    assert.ok(override.includes('"LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID" = ""'));
+    assert.ok(override.includes('env_vars = []'));
+    assert.ok(!override.includes("complete_room_turn"), "pinned Cursor profile excludes its completion hook for Codex");
+    assert.ok(override.includes(`enabled_tools = ${JSON.stringify(custodialRuntimeContract.profiles.cursor_supervised_room_turn.tools.filter((tool) => tool !== "complete_room_turn"))}, disabled_tools = []`));
+  }
+  assert.doesNotMatch(JSON.stringify(harness.launchOptions), /session-secret|authorization/);
+});
+
+test("Codex bounded launches reject missing or unsafe managed MCP tool contracts before launch", async () => {
+  for (const tools of [null, ["get_board"], ["claim_task", "get_board", "read_messages", "send_message", "register_agent_session"]]) {
+    const harness = createHarness();
+    harness.dependencies.readMcpRuntimeContract = async () => ({ format: 1, profiles: { cursor_supervised_room_turn: { tools } } });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    await assert.rejects(adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox",
+      supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact",
+    })), /does not support Codex supervised room tools/);
+    assert.equal(harness.launchOptions.length, 0);
+    assert.equal(harness.supervisorBridgeContexts.length, 0);
+  }
 });
 
 test("explicit custodial activation dispatches once after intent and checkpoints its exact native ID", async () => {
