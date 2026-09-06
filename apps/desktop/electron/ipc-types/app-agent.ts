@@ -22,6 +22,7 @@ export type DesktopAppAgentRefreshTarget =
 export type DesktopAppAgentTraceStatus = "info" | "success" | "error";
 
 export interface DesktopAppAgentSettingsStatus {
+  enabled?: boolean;
   configured: boolean;
   hasApiKey: boolean;
   model: string;
@@ -31,6 +32,7 @@ export interface DesktopAppAgentSettingsStatus {
 }
 
 export interface DesktopAppAgentSaveSettingsInput {
+  enabled?: boolean;
   openRouterApiKey?: string | null;
   model: string;
 }
