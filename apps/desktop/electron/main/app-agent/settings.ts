@@ -26,12 +26,14 @@ interface AppAgentSettingsStoreOptions {
 }
 
 interface StoredAppAgentSettings {
+  enabled: boolean;
   openRouterApiKey: string | null;
   model: string;
   savedAt: string | null;
 }
 
 interface PersistedAppAgentSettings {
+  enabled?: boolean;
   encryptedOpenRouterApiKey?: string | null;
   model?: string | null;
   savedAt?: string | null;
@@ -124,6 +126,7 @@ export async function readAppAgentSettings(
     const raw = await readFile(settingsPath, "utf8");
     const parsed = JSON.parse(raw) as PersistedAppAgentSettings;
     return {
+      enabled: parsed.enabled === true,
       openRouterApiKey: decryptSecret(
         parsed.encryptedOpenRouterApiKey,
         secretStorage,
@@ -133,6 +136,7 @@ export async function readAppAgentSettings(
     };
   } catch {
     return {
+      enabled: false,
       openRouterApiKey: null,
       model: DEFAULT_APP_AGENT_OPENROUTER_MODEL,
       savedAt: null,
@@ -153,6 +157,7 @@ export async function saveAppAgentSettings(
         ? input.openRouterApiKey.trim()
         : current.openRouterApiKey;
   const nextSettings: StoredAppAgentSettings = {
+    enabled: typeof input.enabled === "boolean" ? input.enabled : current.enabled,
     openRouterApiKey: nextApiKey,
     model: normalizeModel(input.model),
     savedAt: new Date().toISOString(),
@@ -168,6 +173,7 @@ export async function writeAppAgentSettings(
   const settingsPath = getAppAgentSettingsStorePath(options);
   const secretStorage = options.secretStorage || defaultSecretStorage();
   const persisted: PersistedAppAgentSettings = {
+    enabled: settings.enabled === true,
     encryptedOpenRouterApiKey: encryptSecret(
       settings.openRouterApiKey,
       secretStorage,
@@ -188,6 +194,7 @@ export async function getAppAgentSettingsStatus(
     const model = normalizeModel(settings.model);
     const hasApiKey = Boolean(settings.openRouterApiKey);
     return {
+      enabled: settings.enabled,
       configured: hasApiKey && Boolean(model),
       hasApiKey,
       model,
@@ -197,6 +204,7 @@ export async function getAppAgentSettingsStatus(
     };
   } catch (error) {
     return {
+      enabled: false,
       configured: false,
       hasApiKey: false,
       model: DEFAULT_APP_AGENT_OPENROUTER_MODEL,
