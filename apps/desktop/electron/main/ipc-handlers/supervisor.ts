@@ -12,6 +12,7 @@ import type {
 } from "../../ipc-types.js";
 import { listDesktopManagedAgentSessions, stopDesktopManagedAgent } from "../agents/codex-supervisor.js";
 import { assertManagedAgentPermissionProfileAvailable } from "../agents/managed-agent-permission-profiles.js";
+import { validateDesktopManagedAgentModel } from "../agents/managed-agent-models.js";
 import { removeCursorSupervisedProfile } from "../agents/cursor-managed-profile.js";
 import { redactCredentialText } from "../agents/provider-evidence.js";
 import {
@@ -149,6 +150,12 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
             error instanceof Error ? error.message : "The selected permission profile is unavailable.",
             "retry",
           );
+        }
+        if (provider === "codex" && !input.model?.trim()) {
+          const validation = await validateDesktopManagedAgentModel({
+            providerId: provider, model: input.model, repoRootPath: input.repoRootPath,
+          });
+          if (validation.error) throw new LaunchBlockedError(validation.error, "retry");
         }
         // Contact the background supervisor first so its (un)availability is an
         // honest, owner-visible fact rather than a hidden part of the claim.

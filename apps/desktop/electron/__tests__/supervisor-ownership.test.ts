@@ -37,6 +37,27 @@ test("supervisor creation admits supervised profiles before claiming durable own
   );
 });
 
+test("blank Codex defaults are checked before the supervisor creates an agent", async () => {
+  const createHandler = ipcSource.slice(
+    ipcSource.indexOf('"desktop:supervisor:create-agent"'),
+    ipcSource.indexOf('"desktop:supervisor:resume-ownership-transfer"'),
+  );
+  const start = createHandler.indexOf('if (provider === "codex" && !input.model?.trim())');
+  assert.ok(start > 0 && start < createHandler.indexOf("supervisorDaemonClient.ensureRunning"));
+  assert.ok(start < createHandler.indexOf("createPausedAndInstall"));
+  const block = createHandler.slice(start, createHandler.indexOf("// Contact the background supervisor"));
+  const check = new Function("provider", "input", "validateDesktopManagedAgentModel", "LaunchBlockedError",
+    `return (async () => { ${block} })();`);
+  const calls: unknown[] = [];
+  const validate = async (input: unknown) => { calls.push(input); return { error: "Update the selected Codex installation." }; };
+  await assert.rejects(check("codex", {model:" ",repoRootPath:"/repo"}, validate, Error), /Update the selected Codex installation/);
+  assert.deepEqual(calls, [{providerId:"codex",model:" ",repoRootPath:"/repo"}]);
+  await check("codex", {model:"custom-model"}, validate, Error);
+  await check("claude-code", {model:null}, validate, Error);
+  assert.equal(calls.length, 1, "explicit selections and other providers retain their existing launch path");
+  await check("codex", {model:null}, async () => ({error:null}), Error);
+});
+
 test("paused launch recovery reuses guarded ownership without requiring a user Claude MCP install", () => {
   const resumeHandler = ipcSource.slice(
     ipcSource.indexOf('"desktop:supervisor:resume-ownership-transfer"'),
