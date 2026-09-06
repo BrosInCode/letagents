@@ -259,6 +259,12 @@ function describeLetAgentsTool(
         toolName: bareTool,
       };
     }
+    case "update_task":
+      return action(outcome?.status === "pending" ? "Requested a task update" : outcome?.status === "running" ? "Updating a task" : "Task update", args, bareTool);
+    case "release_task_lease":
+      return action(outcome?.status === "pending" ? "Requested a task lease release" : "Task lease release", args, bareTool);
+    case "register_task_lease_action_intent":
+      return action("Task lease action request", args, bareTool);
     case "send_message":
       return action("Sent a room message", args, bareTool);
     case "send_thread_message":
@@ -335,12 +341,13 @@ export function describeLiveToolCall(
     return describeLetAgentsTool(bareTool, args, outcome)
       ?? action(bareTool, args, bareTool);
   }
-  const bareTool = tool.replace(MCP_SERVER_ALIAS_PREFIX, "");
+  const bareTool = tool.replace(/^mcp__letagents__/, "").replace(MCP_SERVER_ALIAS_PREFIX, "");
   const known = describeLetAgentsTool(bareTool, inputRecord, outcome);
   if (known) return known;
   const nativeHeadlines = NATIVE_TOOL_HEADLINES[bareTool];
   if (nativeHeadlines) {
-    const headline = outcome?.status === "running" ? nativeHeadlines.running : nativeHeadlines.complete;
+    const headline = outcome?.status === "pending" ? `Requested: ${nativeHeadlines.running}`
+      : outcome?.status === "running" ? nativeHeadlines.running : nativeHeadlines.complete;
     return action(headline, inputRecord, bareTool);
   }
   return action(bareTool, inputRecord, bareTool);

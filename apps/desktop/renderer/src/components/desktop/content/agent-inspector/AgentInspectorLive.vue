@@ -19,6 +19,8 @@
         <p>{{ currentRequest.text || 'Message text unavailable.' }}</p>
       </template>
     </div>
+    <p v-if="presented.length && !canShowCurrent" class="agent-inspector-settings-note">Recent actions — these are saved updates, not current activity.</p>
+    <p v-if="transcript.lastActivityAt" class="agent-inspector-settings-note">Last update: {{ formatFullTimestamp(transcript.lastActivityAt) }}</p>
     <ol v-if="presented.length" class="agent-inspector-live-items">
       <li
         v-for="entry in presented"
@@ -63,16 +65,14 @@
       </li>
     </ol>
 
-    <p v-if="canShowCurrent && !presented.length" class="agent-inspector-live-empty">The agent is working. No public actions have arrived yet.</p>
-    <p v-if="canShowCurrent && feed.droppedEvents > 0" class="agent-inspector-settings-note">Earlier live updates were omitted.</p>
-    <AgentInspectorLiveHistory :resource="resource" :selected-source-message-id="selectedSourceMessageId"
-      @retry="emit('retry')" @select-source="emit('select-source', $event)" @reveal="emit('reveal', $event)" />
+    <p v-if="!presented.length" class="agent-inspector-live-empty">{{ emptyStateLabel }}</p>
+    <p v-if="feed.droppedEvents > 0" class="agent-inspector-settings-note">Earlier live updates were omitted.</p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import AgentInspectorLiveHistory from "./AgentInspectorLiveHistory.vue";
+import { formatFullTimestamp } from "../../../../domain/time";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import { canPresentCurrentAgentStream, currentAgentRequest } from "../../../../domain/agent-inspector-live-trace";
 import {
@@ -91,14 +91,12 @@ const props = defineProps<{
   work: AgentInspectorLiveWorkProjection;
   supportsReasoning: boolean | null;
   resource: AgentInspectorWorkResource;
-  selectedSourceMessageId: string | null;
   activeSourceMessageId: string | null;
 }>();
 
-const emit = defineEmits<{ retry: []; 'select-source': [sourceMessageId: string]; reveal: [messageId: string] }>();
 const canShowCurrent = computed(() => canPresentCurrentAgentStream({ ...props.work, activeSourceMessageId: props.activeSourceMessageId }));
 const currentRequest = computed(() => currentAgentRequest(props.resource, props.activeSourceMessageId));
-const scopedEvents = computed(() => canShowCurrent.value ? scopeAgentStreamEventsToWork(props.feed.events, props.work) : []);
+const scopedEvents = computed(() => !props.work.active || canShowCurrent.value ? scopeAgentStreamEventsToWork(props.feed.events, props.work) : []);
 const transcript = computed(() => foldAgentStreamEvents(scopedEvents.value, props.feed.ended));
 const now = ref(Date.now());
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
@@ -151,14 +149,20 @@ const currentStep = computed(() => {
   if (availability.value === "transitioning") return transitionDetail(props.work.agentState);
   if (availability.value === "idle") return null;
   const runningTool = [...presented.value].reverse().find((entry) =>
-    entry.item.kind === "tool" && entry.item.status === "running");
+    entry.item.kind === "tool" && ["running", "pending"].includes(entry.item.status));
   const entry = runningTool ?? presented.value[presented.value.length - 1];
   if (!entry) return props.work.detail || turnStateFallback(props.work.state);
   if (entry.item.kind === "tool") {
     if (!entry.tool) return "Using a tool";
     return entry.tool.detail ? `${entry.tool.headline} · ${entry.tool.detail}` : entry.tool.headline;
   }
-  return null;
+  return entry.item.text.replace(/\s+/g, " ").trim().slice(0, 150);
+});
+
+const emptyStateLabel = computed(() => {
+  if (props.work.active && !canShowCurrent.value) return "Current activity unavailable: waiting for the current request to be identified.";
+  if (canShowCurrent.value) return "The agent is working. No public actions have arrived yet.";
+  return "No recent actions are available.";
 });
 
 onMounted(syncElapsedTimer);
@@ -206,6 +210,7 @@ function stopElapsedTimer(): void {
 }
 
 function toolStatusLabel(status: string): string {
+  if (!canShowCurrent.value && ["pending", "running"].includes(status)) return "No finish recorded";
   if (status === "pending") return "Requested";
   if (status === "running") return "In progress";
   if (status === "completed") return "Completed";
