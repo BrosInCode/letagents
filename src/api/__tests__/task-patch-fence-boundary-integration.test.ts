@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import express from "express";
+import { once, EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import test from "node:test";
@@ -239,4 +241,124 @@ test("worker claim persists a session-bound lease before advancing accepted work
   assert.equal(rejected.kind, "deny");
   assert.equal(rejected.code, "coordination_work_lease_required");
   assert.equal((await getTaskById(room.id, task.id))?.status, "in_progress", "another session cannot advance the claimed task");
+});
+
+
+// Real HTTP middleware and production board/task routes: only publication side
+// effects are muted; authentication, room scope, approval and writes stay real.
+async function workflowHttp(t: import("node:test").TestContext) {
+  const seeded = await seed();
+  const { registerHttpMiddleware } = await import("../http/middleware.js");
+  const { registerRoomBoardRoutes } = await import("../routes/rooms/board.js");
+  const { registerTaskRecordRoutes } = await import("../routes/rooms/tasks/task-record.js");
+  const { resolveCanonicalRoomRequestId, resolveRoomOrReply } = await import("../rooms/resolution.js");
+  const { requireAdmin, requireParticipant } = await import("../rooms/access.js");
+  const services = await import("../server/room-services.js");
+  const common = { resolveCanonicalRoomRequestId, resolveRoomOrReply, requireAdmin, requireParticipant,
+    normalizeOptionalString: (v: unknown) => typeof v === "string" ? v.trim() || null : null,
+    emitProjectMessage: async () => ({ id: "msg_test" }) };
+  const app = express();
+  registerHttpMiddleware(app, { resolveRequestAuth });
+  registerRoomBoardRoutes(app, common);
+  registerTaskRecordRoutes(app, { ...common, ...services,
+    getTaskById, getTaskOwnershipState, updateTask, taskEvents: new EventEmitter(),
+    enforceFocusParentBoardWriteIsolation: ({ req, targetProject }: any) => services.enforceFocusParentBoardWriteIsolation({ req, targetProjectId: targetProject.id }),
+    emitTaskLifecycleStatusMessage: async () => {},
+  } as never);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const request = async (token: string | null, suffix: string, body: unknown, method = "POST", roomId = seeded.room.id) => {
+    const response = await fetch(`http://127.0.0.1:${address.port}/rooms/${roomId}/${suffix}`, {
+      method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() as any };
+  };
+  const manager = await db!.createRoomAgentSession({ room_id: seeded.room.id, session_kind: "worker", runtime: "codex",
+    actor_label: "Manager", agent_key: "owner/manager", agent_instance_id: "manager-instance", display_name: "Manager",
+    owner_account_id: seeded.ownerId, owner_label: "Owner", ide_label: "Agent" });
+  await db!.assignBoardManager({ room_id: seeded.room.id, agent_session_id: manager.session_id, assigned_by: "Owner" });
+  await db!.setRoomBoardManagerMode({ room_id: seeded.room.id, manager_mode: "intent_required", updated_by: "Owner" });
+  const freshTask = async (assigned = false) => {
+    const task = await db!.createTask(seeded.room.id, "HTTP workflow", seeded.from.actor_label);
+    await updateTask(seeded.room.id, task.id, { status: "accepted" });
+    if (assigned) await updateTask(seeded.room.id, task.id, { status: "assigned", assignee: seeded.from.actor_label, assignee_agent_key: seeded.from.agent_key });
+    return task;
+  };
+  const approveClaim = async (taskId: string, worker = seeded.from) => {
+    const registered = await request(worker.worker_bearer, "board-intents", {
+      action_type: "task_claim", task_id: taskId,
+      payload: { task_id: taskId, status: "assigned", assignee: worker.actor_label, assignee_agent_key: worker.agent_key, pr_url: null },
+    });
+    assert.equal(registered.status, 201, JSON.stringify(registered.body));
+    const intentId = registered.body.intent.id as string;
+    const approved = await request(manager.worker_bearer, `board-intents/${intentId}/approve`, {});
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    return intentId;
+  };
+  const claim = (taskId: string, intentId?: string, worker = seeded.from) => request(worker.worker_bearer, `tasks/${taskId}`, {
+    status: "assigned", assignee: worker.actor_label, ...(intentId ? { board_intent_id: intentId } : {}),
+  }, "PATCH");
+  return { ...seeded, request, manager, freshTask, approveClaim, claim };
+}
+
+test("HTTP worker approved intent claims, retries and advances without a token handoff", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  assert.equal((await f.claim(task.id)).status, 409, "approval is required before the initial claim");
+  const intent = await f.approveClaim(task.id);
+  const claimed = await f.claim(task.id, intent);
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  const [lease] = await db!.getActiveTaskLeases(f.room.id, task.id);
+  assert.equal(lease!.agent_session_id, f.from.session_id);
+  assert.equal((await db!.getBoardIntent({ room_id: f.room.id, intent_id: intent }))!.status, "used");
+  assert.equal((await f.claim(task.id)).status, 200, "lost-response retry needs no new intent");
+  assert.deepEqual((await db!.getActiveTaskLeases(f.room.id, task.id)).map(l => l.id), [lease!.id]);
+  for (const status of ["in_progress", "in_review"]) {
+    const advanced = await f.request(f.from.worker_bearer, `tasks/${task.id}`, { status }, "PATCH");
+    assert.equal(advanced.status, 200, JSON.stringify(advanced.body));
+    assert.equal(advanced.body.status, status);
+  }
+  assert.equal((await f.request(f.from.worker_bearer, `tasks/${task.id}`, { status: "in_progress", agent_session_id: f.manager.session_id }, "PATCH")).status, 401);
+  const otherRoom = await db!.createProjectWithName("other HTTP room");
+  assert.equal((await f.request(f.from.worker_bearer, "board-intents", { action_type: "task_claim", payload: {} }, "POST", otherRoom.id)).status, 403);
+});
+
+test("HTTP own assigned work recovers a missing lease only through an approved claim", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask(true);
+  assert.equal((await f.claim(task.id, undefined, f.manager)).status, 409, "another durable agent cannot recover assigned work");
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), []);
+  assert.equal((await f.request(f.from.worker_bearer, `tasks/${task.id}`, { status: "in_progress" }, "PATCH")).status, 409);
+  assert.equal((await f.claim(task.id)).status, 409);
+  const intent = await f.approveClaim(task.id);
+  assert.equal((await f.claim(task.id, intent)).status, 200);
+  const leases = await db!.getActiveTaskLeases(f.room.id, task.id);
+  assert.equal(leases.length, 1);
+  assert.equal(leases[0]!.agent_session_id, f.from.session_id);
+  await db!.endRoomAgentSession({ session_id: f.from.session_id });
+  const successor = await f.mintSuccessor();
+  const stolen = await f.claim(task.id, undefined, successor);
+  assert.equal(stolen.status, 409, "restart must rebind existing authority, never mint over it");
+  assert.equal((await f.request(f.from.worker_bearer, `tasks/${task.id}`, { status: "in_progress" }, "PATCH")).status, 401);
+  assert.equal((await getTaskById(f.room.id, task.id))!.status, "assigned", "revoked bearer must not mutate the recovered task");
+  assert.deepEqual((await db!.getActiveTaskLeases(f.room.id, task.id)).map(l => l.id), [leases[0]!.id]);
+});
+
+test("HTTP concurrent approved claims mint one work lease", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const firstIntent = await f.approveClaim(task.id);
+  const secondIntent = await f.approveClaim(task.id, f.manager);
+  const results = await Promise.all([f.claim(task.id, firstIntent), f.claim(task.id, secondIntent, f.manager)]);
+  assert.equal(results.filter(r => r.status === 200).length, 1, JSON.stringify(results));
+  assert.equal(results.filter(r => r.status === 409).length, 1, JSON.stringify(results));
+  const leases = await db!.getActiveTaskLeases(f.room.id, task.id);
+  assert.equal(leases.length, 1);
+  const persisted = await getTaskById(f.room.id, task.id);
+  assert.equal(persisted!.assignee_agent_key, leases[0]!.agent_key);
+  const intents = await Promise.all([firstIntent, secondIntent].map(intent_id => db!.getBoardIntent({ room_id: f.room.id, intent_id })));
+  assert.equal(intents.filter(i => i!.status === "used").length, 1, "losing claim must not consume approval");
 });

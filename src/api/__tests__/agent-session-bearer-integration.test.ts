@@ -613,7 +613,16 @@ test("managed board workflow preserves retries, manager authority, and claim lea
     shouldRequireBoardIntent: async () => false,
     verifyBoardIntentApproval: dbModule!.verifyBoardIntentApproval,
   });
+  let failDecisionNotifications = false;
+  const decisionNotifications: string[] = [];
   const deps = {
+    emitProjectMessage: async (_projectId: string, _sender: string, _text: string, options?: { client_message_id?: string | null }) => {
+      if (options?.client_message_id?.endsWith(":proposer_notify")) {
+        if (failDecisionNotifications) throw new Error("private transport diagnostic");
+        decisionNotifications.push(options.client_message_id);
+      }
+      return { id: "msg_notification" };
+    },
     ...enforcement,
     enforceTaskCreateBoardIntentAdmission: enforcement.enforceTaskAdmissionPreconditions,
     taskEvents: { emit() {} },
@@ -688,9 +697,20 @@ test("managed board workflow preserves retries, manager authority, and claim lea
 
     const proposed = await call("POST", "board-intents", {
       action_type: "task_create", payload: { title: "Testing", description: null, source_message_id: "msg_121" },
+      actor_label: "Spoofed manager", actor_key: session.agent_key, actor_instance_id: "spoofed-instance",
     }, peer.worker_bearer!);
     assert.equal(proposed.status, 201, JSON.stringify(proposed.body));
     const intentId = proposed.body.intent.id;
+    assert.equal(proposed.body.intent.proposer_actor_label, peer.actor_label);
+    assert.equal(proposed.body.intent.proposer_actor_key, peer.agent_key);
+    assert.equal(proposed.body.intent.proposer_actor_instance_id, peer.agent_instance_id ?? null);
+    assert.equal(proposed.body.intent.proposer_agent_session_id, peer.session_id);
+    assert.equal((await call("POST", "board-intents", {
+      action_type: "task_create", payload: { title: "Spoofed session" },
+      agent_session_id: session.session_id, agent_session_token: session.session_token,
+    }, peer.worker_bearer!)).status, 401);
+    assert.equal((await call("POST", `board-intents/${intentId}/deny`, {}, peer.worker_bearer!)).status, 403);
+    assert.equal((await call("POST", "board-manager", { agent_session_id: peer.session_id }, peer.worker_bearer!)).status, 403);
     assert.equal((await call("POST", `board-intents/${intentId}/approve`, {}, peer.worker_bearer!)).status, 403);
     const approved = await call("POST", `board-intents/${intentId}/approve`, {});
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
@@ -703,6 +723,72 @@ test("managed board workflow preserves retries, manager authority, and claim lea
     const nextApproval = await call("POST", `board-intents/${nextIntent.body.intent.id}/approve`, {});
     assert.equal(nextApproval.status, 200, JSON.stringify(nextApproval.body));
     assert.notEqual(nextApproval.body.result.task.id, approved.body.result.task.id);
+    const approvalPayload = { task_id: first.id, status: "in_review" };
+    const credentialIntent = await call("POST", "board-intents", {
+      action_type: "task_update", task_id: first.id, payload: approvalPayload,
+    }, peer.worker_bearer!);
+    assert.equal(credentialIntent.status, 201);
+    failDecisionNotifications = true;
+    const credentialApproval = await call("POST", `board-intents/${credentialIntent.body.intent.id}/approve`, {});
+    assert.equal(credentialApproval.status, 200);
+    assert.equal(credentialApproval.body.proposer_notification.delivered, false);
+    assert.doesNotMatch(JSON.stringify(credentialApproval.body), /private transport diagnostic/);
+    failDecisionNotifications = false;
+    const replayApproval = await call("POST", `board-intents/${credentialIntent.body.intent.id}/approve`, {});
+    assert.equal(replayApproval.status, 200);
+    assert.equal(replayApproval.body.proposer_notification.delivered, true);
+    assert.equal(replayApproval.body.approval_token, undefined, "approval retry never mints another token");
+    assert.equal(replayApproval.body.intent.approval_token_hash, credentialApproval.body.intent.approval_token_hash);
+    assert.equal(replayApproval.body.result.requires_follow_up, true);
+    await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: peer.session_id, assigned_by: "owner" });
+    assert.equal((await call("POST", `board-intents/${credentialIntent.body.intent.id}/approve`, {})).status, 403, "former manager cannot resend a decision");
+    await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: session.session_id, assigned_by: "owner" });
+    const replayCreation = await call("POST", `board-intents/${intentId}/approve`, {});
+    assert.equal(replayCreation.status, 200);
+    assert.equal(replayCreation.body.result.task.id, approved.body.result.task.id, "task-create retry returns the existing task");
+    const deniedIntent = await call("POST", "board-intents", { action_type: "task_update", task_id: first.id, payload: approvalPayload }, peer.worker_bearer!);
+    failDecisionNotifications = true;
+    const firstDenial = await call("POST", `board-intents/${deniedIntent.body.intent.id}/deny`, {});
+    assert.equal(firstDenial.status, 200);
+    assert.equal(firstDenial.body.proposer_notification.delivered, false);
+    failDecisionNotifications = false;
+    const replayDenial = await call("POST", `board-intents/${deniedIntent.body.intent.id}/deny`, {});
+    assert.equal(replayDenial.status, 200);
+    assert.equal(replayDenial.body.proposer_notification.delivered, true);
+    assert.ok(decisionNotifications.includes(`board_intent:${deniedIntent.body.intent.id}:denied:proposer_notify`));
+    const boundApproval = { room_id: room.id, action_type: "task_update" as const,
+      payload: approvalPayload, intent_id: credentialIntent.body.intent.id,
+      trusted_worker: { agent_session_id: peer.session_id, agent_key: peer.agent_key } };
+    assert.equal((await dbModule!.verifyBoardIntentApproval(boundApproval)).kind, "allow");
+    for (const invalid of [
+      { ...boundApproval, trusted_worker: undefined },
+      { ...boundApproval, trusted_worker: { ...boundApproval.trusted_worker, agent_session_id: session.session_id } },
+      { ...boundApproval, trusted_worker: { ...boundApproval.trusted_worker, agent_key: session.agent_key } },
+      { ...boundApproval, room_id: "wrong-room" },
+      { ...boundApproval, payload: { ...approvalPayload, status: "done" } },
+      { ...boundApproval, now: new Date("2099-01-01T00:00:00Z") },
+    ]) {
+      assert.equal((await dbModule!.verifyBoardIntentApproval(invalid)).kind, "deny");
+      assert.equal((await dbModule!.consumeBoardIntentApproval(invalid)).kind, "deny", "transaction repeats the exact authority fence");
+    }
+    const consumed = await Promise.all([dbModule!.consumeBoardIntentApproval(boundApproval), dbModule!.consumeBoardIntentApproval(boundApproval)]);
+    assert.deepEqual(consumed.map((result) => result.kind).sort(), ["allow", "deny"]);
+    assert.equal((await dbModule!.consumeBoardIntentApproval(boundApproval)).kind, "deny");
+    await db!.update(schemaModule!.board_intents).set({ expires_at: "2000-01-01T00:00:00Z" })
+      .where(eq(schemaModule!.board_intents.id, boundApproval.intent_id));
+    const usedReplay = await call("POST", `board-intents/${boundApproval.intent_id}/approve`, {});
+    assert.equal(usedReplay.status, 200, "used decisions retain historical replay after expiry");
+    assert.equal(usedReplay.body.result.requires_follow_up, false);
+    const expiringIntent = await call("POST", "board-intents", { action_type: "task_update", task_id: first.id, payload: approvalPayload }, peer.worker_bearer!);
+    assert.equal((await call("POST", `board-intents/${expiringIntent.body.intent.id}/approve`, {})).status, 200);
+    await db!.update(schemaModule!.board_intents).set({ expires_at: "2000-01-01T00:00:00Z" })
+      .where(eq(schemaModule!.board_intents.id, expiringIntent.body.intent.id));
+    const notificationCount = decisionNotifications.length;
+    const expiredReplay = await call("POST", `board-intents/${expiringIntent.body.intent.id}/approve`, {});
+    assert.equal(expiredReplay.status, 404);
+    assert.equal(decisionNotifications.length, notificationCount, "expired approval cannot notify the worker to continue");
+
+
     const legacy = { title: "Legacy task", source_message_id: "msg_121" };
     const legacyCreate = await call("POST", "tasks", legacy);
     const legacyRetry = await call("POST", "tasks", legacy);

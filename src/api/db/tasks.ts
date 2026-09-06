@@ -441,7 +441,18 @@ export async function updateTask(
   const task = await getTaskRowById(roomId, taskId);
   if (!task) return null;
 
-  if (updates.status && !isValidTransition(task.status, updates.status)) {
+  const retryingOwnClaim = task.status === "assigned" && updates.status === "assigned"
+    && Boolean(task.assignee_agent_key)
+    && updates.assignee_agent_key === task.assignee_agent_key
+    && updates.assignee === task.assignee
+    && Boolean(options?.leaseFence?.agent_session_id
+      || (options?.workLeaseCreation?.agent_session_id
+        && options.workLeaseCreation.agent_key === task.assignee_agent_key));
+  if (options?.workLeaseCreation && updates.status === "assigned"
+    && task.status !== "accepted" && !retryingOwnClaim) {
+    throw new LeaseFenceStaleError();
+  }
+  if (updates.status && !isValidTransition(task.status, updates.status) && !retryingOwnClaim) {
     throw new Error(
       `Invalid transition: ${task.status} → ${updates.status}. ` +
         `Allowed: ${VALID_TRANSITIONS[task.status].join(", ") || "none"}`
@@ -528,6 +539,28 @@ export async function updateTask(
       if (options.leaseFence) {
         const held = await acquireLeaseFenceTx(tx, options.leaseFence);
         if (!held) throw new LeaseFenceStaleError();
+      }
+      if (options.workLeaseCreation || retryingOwnClaim) {
+        // Serialize fresh/recovery claims on the task row. A concurrent claim
+        // must not overwrite the winning assignee or mint a second work lease.
+        const [current] = await tx.select().from(tasks)
+          .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)))
+          .for("update");
+        if (!current || current.status !== task.status
+          || current.assignee !== task.assignee
+          || current.assignee_agent_key !== task.assignee_agent_key
+          || current.updated_at !== task.updated_at
+          || current.pr_url !== task.pr_url
+          || JSON.stringify(current.workflow_artifacts) !== JSON.stringify(task.workflow_artifacts)) {
+          throw new LeaseFenceStaleError();
+        }
+        if (options.workLeaseCreation) {
+          const [existingWork] = await tx.select({ id: task_leases.id }).from(task_leases)
+            .where(and(eq(task_leases.room_id, roomId), eq(task_leases.task_id, taskId),
+              eq(task_leases.kind, "work"), eq(task_leases.status, "active")))
+            .limit(1);
+          if (existingWork) throw new LeaseFenceStaleError();
+        }
       }
       if (options.boardIntentApproval) {
         await assertConsumeBoardIntentApproval(options.boardIntentApproval, tx);
