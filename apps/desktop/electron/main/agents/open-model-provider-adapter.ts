@@ -40,6 +40,7 @@ import {
   defaultObserveProcessExit,
   defaultSignalProcess,
   delay,
+  redactCredentialText,
   safeStreamPayload,
   sameProcessBirthIdentity,
   terminateFreshLaunch,
@@ -380,7 +381,18 @@ function safeProviderErrorMessage(message: OpenCodeMessage | null): string | nul
   if (failure.statusCode === 402) {
     return `Open Model request was rejected because the model provider account could not cover this turn's output budget${status}. Add provider credit or choose another model, then send a new message.`;
   }
-  if (failure.statusCode === 401 || failure.statusCode === 403) {
+  if (failure.statusCode === 403) {
+    // A forbidden response can require account attestation or model access,
+    // not a different API key. Preserve the provider's actionable explanation
+    // without publishing credentials or arbitrary provider-supplied URLs.
+    const detail = redactCredentialText(failure.message ?? "").value
+      .replace(/https?:\/\/\S+/gi, "provider settings")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 320);
+    return `Open Model access was denied by the provider${status}${detail ? `: ${detail}` : ". Check the provider's account requirements and model permissions, then send a new message."}`;
+  }
+  if (failure.statusCode === 401) {
     return `Open Model authentication or model access was rejected by the provider${status}. Check the API key and model access, then send a new message.`;
   }
   if (failure.statusCode === 429) {
