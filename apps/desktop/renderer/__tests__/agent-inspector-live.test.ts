@@ -397,6 +397,25 @@ test("running native actions use present-progressive copy", () => {
 test("Claude room tool names read as actions without transport prefixes", () => {
   const pending = describeLiveToolCall("mcp__letagents__update_task", { status: "in_review" }, { status: "pending", output: null, error: null });
   assert.equal(pending.toolName, "update_task");
-  assert.equal(pending.headline, "Requested a task update");
+  assert.equal(pending.headline, "Requested: Update a task");
   assert.equal(pending.detail, "in_review");
+});
+
+test("recognized Claude room tools never claim completion while pending or failed", () => {
+  for (const [tool, completed] of [
+    ["send_message", "Sent a room message"], ["send_thread_message", "Sent a thread reply"],
+    ["post_status", "Posted a status update"], ["post_reasoning", "Shared reasoning in the room"],
+    ["add_task", "Added a board task"], ["get_board", "Read the room board"],
+    ["get_board_settings", "Read the board settings"], ["get_current_room", "Checked the current room"],
+    ["check_repo", "Checked the repository"], ["wait_for_messages", "Waited for new room messages"],
+    ["update_task", "Updated a task"], ["release_task_lease", "Released a task lease"],
+    ["register_task_lease_action_intent", "Registered a task lease action"],
+  ]) {
+    const describe = (status: string) => describeLiveToolCall(`mcp__letagents__${tool}`, {}, { status, output: null, error: null }).headline;
+    assert.match(describe("pending"), /^Requested:/);
+    assert.notEqual(describe("running"), completed);
+    assert.match(describe("error"), /^Failed:/);
+    assert.match(describe("interrupted"), /^Interrupted:/);
+    assert.equal(describe("completed"), completed);
+  }
 });
