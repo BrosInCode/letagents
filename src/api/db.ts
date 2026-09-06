@@ -58,7 +58,7 @@ export {
   revokeSupervisorGrantsForRepositoryAccessChange,
 } from "./db/supervisor-grant-revocation.js";
 export type { SupervisorGrantOwnerAccount } from "./db/supervisor-grant-revocation.js";
-export { isValidTransition, getTasksForRooms, createTask, approveTaskCreateBoardIntent, acceptProposedTaskTx, normalizeTaskCreateBoardIntentPayload, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskBySourceMessageId } from "./db/tasks.js";
+export { isValidTransition, getTasksForRooms, createTask, approveTaskCreateBoardIntent, acceptProposedTaskTx, normalizeTaskCreateBoardIntentPayload, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskByClientId, findTaskBySourceMessageId } from "./db/tasks.js";
 export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction } from "./db/tasks.js";
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
 export { applyTaskWorkLeaseAction, updateTaskLeaseWorkflowRefs, createTaskLock, getActiveTaskLocks, clearTaskLock, createCoordinationEvent } from "./db/coordination.js";
