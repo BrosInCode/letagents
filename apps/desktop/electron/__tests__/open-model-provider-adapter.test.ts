@@ -909,6 +909,46 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
   assert.equal(harness.promptBodies.length, 1);
 });
 
+test("Open Model preserves safe 403 explanations in terminal checkpoints without blaming the API key", async () => {
+  const cases = [
+    {
+      message: "This model requires you to complete the following before use: 18+ age confirmation. Confirm at https://openrouter.ai/settings/preferences.",
+      expected: /18\+ age confirmation\. Confirm at provider settings/,
+    },
+    { message: "Your organization does not have access to this model.", expected: /organization does not have access/ },
+    { message: "  \n  ", expected: /Check the provider's account requirements and model permissions/ },
+    { message: undefined, expected: /Check the provider's account requirements and model permissions/ },
+    {
+      message: `Permission denied. api_key=private-credential-value Authorization: Bearer private-bearer-value https://provider.invalid/secret-link ${"extra ".repeat(100)}`,
+      expected: /Permission denied.*\[REDACTED\]/,
+    },
+  ];
+  for (const { message, expected } of cases) {
+    const { adapter, handle, harness } = await spawnAdapter();
+    let checkpointed: ProviderRoomTurnResult | null = null;
+    harness.setTranscriptFactories([(turnId) => [{
+      info: { id: "assistant-forbidden", role: "assistant", parentID: turnId,
+        time: { created: 10, completed: 11 },
+        error: { name: "APIError", data: { statusCode: 403, message } } },
+      parts: [],
+    }]]);
+    await assert.rejects(adapter.runRoomTurn(handle, {
+      inboxItemId: "inbox-forbidden", sourceMessage: { text: "hi" },
+      activation: { decision: "activate" }, actionId: "forbidden",
+    }, { checkpointTerminalResult: async (result) => { checkpointed = result; } }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /access was denied by the provider \(HTTP 403\)/);
+      assert.match(error.message, expected);
+      assert.doesNotMatch(error.message, /Check the API key|private-credential|private-bearer|secret-link|https?:\/\//);
+      assert.ok(error.message.length < 400, "provider detail is bounded");
+      assert.equal((checkpointed as ProviderRoomTurnResult & { error: string })?.error, error.message);
+      assert.equal((error as Error & { roomTurnRecoveryOutcome: string }).roomTurnRecoveryOutcome, "terminal_failure");
+      return true;
+    });
+    assert.equal(harness.promptBodies.length, 1, "a forbidden turn is not replayed");
+  }
+});
+
 test("a fresh adapter reattaches to the exact OpenCode PID and session", async () => {
   const { handle, harness, runtimeRoot } = await spawnAdapter();
   const fresh = new OpenModelProviderAdapter({
