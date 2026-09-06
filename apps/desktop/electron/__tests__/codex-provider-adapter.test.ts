@@ -2344,6 +2344,7 @@ test("reattachment reconstructs a turn that completed before subscription withou
   const subscription = adapter.onExecution(attached, event => observations.push(event));
   assert.ok(observations.some(event => event.fact.domain === "turn"
     && event.fact.state === "terminal" && event.fact.turnOutcome === "completed"));
+  assert.equal(attached.observedState(), "idle", "configuration restart admission must agree with the exact terminal snapshot");
   subscription.dispose();
 });
 
@@ -2684,6 +2685,7 @@ test("Codex attach gaps a queued start that may precede a terminal snapshot", as
     "the queued start remains retained but cannot erase the ambiguous response boundary");
   assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 4 });
   assert.deepEqual(observations.flatMap(event => event.fact.domain === "turn" ? [event.fact.state] : []), ["active"]);
+  assert.equal(attached.observedState(), "working", "ambiguous queued activity must not admit an idle restart");
   subscription.dispose();
 });
 
