@@ -109,9 +109,7 @@
         :work="projection.liveWork"
         :supports-reasoning="liveSupportsReasoning"
         :resource="workResource"
-        :selected-source-message-id="selectedWorkSourceMessageId"
         :active-source-message-id="projection.liveWork.active ? projection.entry.roomAgentState?.turn.sourceMessageId ?? null : null"
-        @retry="emit('work-retry')" @select-source="emit('work-source-select', $event)" @reveal="emit('reveal-message', $event)"
       />
       <AgentInspectorWork
         v-else-if="selectedTab === 'work'" id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"

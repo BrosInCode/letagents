@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createSSRApp } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
-import { agentLiveTrace, canPresentCurrentAgentStream, currentAgentRequest } from "../src/domain/agent-inspector-live-trace";
+import { canPresentCurrentAgentStream, currentAgentRequest } from "../src/domain/agent-inspector-live-trace";
 
 import {
   agentLiveAvailability,
@@ -54,41 +54,57 @@ test("Codex commentary keeps native message blocks and turn identities separate"
   assert.deepEqual(transcript.items.map(item=>item.kind === "message" ? item.text : null), ["Checking files","Result","New turn"]);
 });
 
-test("the Live trace shows durable history across providers and never dresses idle replay as current work", async () => {
-  const vite = await createServer({root:fileURLToPath(new URL("../..",import.meta.url)),appType:"custom",logLevel:"silent",server:{middlewareMode:true}});
+test("Live keeps captured actions after work finishes and separates them from a new request", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   try {
     const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLive.vue")).default;
-    const item = {source_message_id:"msg_1",sender:"Emmy",text_preview:"Inspect package.json",created_at:"2026-09-05T10:00:00Z",updated_at:"2026-09-05T10:01:00Z",state:"acknowledged",terminal_reason:null,outcome:{text:"Three scripts found"},canonical_message_id:"msg_2",last_error:null};
-    const detail = {availability:"available",requested_source_message_id:"msg_1",source_message:{id:"msg_1",sender:"Emmy",text:"Inspect package.json"},items:[item],terminal:{normalized_text:"Three scripts found"},recorded_execution:{availability:"available",evidenceIncomplete:false,truncated:false,turns:[{turnId:"turn",state:"terminal",outcome:"completed",operations:[{executionId:"read",operation:"file_read",outcome:"succeeded",startObserved:true,outputBytes:0,exitCode:null,signalNumber:null,sideEffects:"none"}]}]}};
-    const resource = {status:"ready",sourceMessageId:"msg_1",detail,error:null};
-    const work = {active:false,startedAt:null,state:"idle",freshness:"fresh",agentState:"online",detail:null};
-    const feed = {events:[event({sequence:1,observedAt:"2026-09-05T10:00:01Z",payload:{partId:"public",delta:"Current public commentary"}})],ended:false,droppedEvents:0};
-    const render = (overrides:Record<string,unknown>={}) => renderToString(createSSRApp(component,{resource,work,feed,selectedSourceMessageId:"msg_1",activeSourceMessageId:null,supportsReasoning:false,...overrides}));
-    for (const provider of ["codex","claude-code","cursor","open-model"]) {
-      const html = await render({work:{...work,provider}});
-      assert.match(html,/Inspect package.json/); assert.match(html,/Three scripts found/);
-      assert.match(html,/Reply published/); assert.match(html,/File read · Completed/);
-      assert.match(html,/Open request in Chat/); assert.match(html,/Open reply in Chat/);
-      assert.doesNotMatch(html,/Current public commentary|Following the current|Waiting for room work/);
+    const work = { active: false, startedAt: null, state: "idle", freshness: "fresh", agentState: "online", detail: null };
+    const resource = { status: "ready", sourceMessageId: "msg_old", error: null, detail: {
+      items: [{ source_message_id: "msg_new", sender: "Emmy", text_preview: "Check the tests" }],
+    } };
+    const events = [
+      event({ sequence: 1, observedAt: "2026-09-05T10:00:01Z", payload: { partId: "old", delta: "Previous request finished" } }),
+      event({ sequence: 2, observedAt: "2026-09-05T10:01:01Z", kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "read", tool: "readToolCall", status: "pending", input: { path: "package.json" } } }),
+      event({ sequence: 3, observedAt: "2026-09-05T10:01:02Z", payload: { partId: "new", delta: "Checking the test configuration" } }),
+    ];
+    const feed = { events, ended: false, droppedEvents: 0 };
+    const render = (overrides: Record<string, unknown> = {}) => renderToString(createSSRApp(component, {
+      resource, work, feed, activeSourceMessageId: null, supportsReasoning: false, ...overrides,
+    }));
+    const idle = await render();
+    assert.match(idle, /Previous request finished/);
+    assert.match(idle, /Checking the test configuration/);
+    assert.match(idle, /Recent actions/);
+    assert.match(idle, /No finish recorded/);
+    assert.match(idle, /Last update:/);
+    assert.doesNotMatch(idle, /Recent work|Recorded actions|No reply needed|Current turn/);
+
+    const activeWork = { ...work, active: true, state: "awaiting_result", agentState: "responding", startedAt: "2026-09-05T10:01:00Z" };
+    const active = await render({ work: activeWork, activeSourceMessageId: "msg_new" });
+    assert.match(active, /Check the tests/);
+    assert.match(active, /Checking the test configuration/);
+    assert.doesNotMatch(active, /Previous request finished|Recent actions/);
+    assert.match(active.split('class="agent-inspector-live-trigger"')[0], /Requested: Reading a file · package.json/,
+      "a pending Claude action remains the current step even when commentary follows it");
+
+    const completedFeed = { ...feed, events: [...events, event({ sequence: 4, observedAt: "2026-09-05T10:01:03Z", kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "read", status: "completed", output: "Three scripts" } })] };
+    const finished = await render({ feed: completedFeed });
+    assert.match(finished, /Read a file/);
+    assert.match(finished, /Completed/);
+    assert.match(finished, /Recent actions/);
+    assert.doesNotMatch(finished, /No finish recorded/);
+
+    for (const overrides of [{ work: { ...activeWork, startedAt: null }, activeSourceMessageId: "msg_new" }, { work: activeWork }]) {
+      const unavailable = await render(overrides);
+      assert.match(unavailable, /Current activity unavailable/);
+      assert.doesNotMatch(unavailable, /Previous request finished|Checking the test configuration/);
     }
-    const active = await render({work:{...work,active:true,startedAt:"2026-09-05T10:00:00Z"},activeSourceMessageId:"msg_3"});
-    assert.match(active,/Current turn/); assert.match(active,/Current public commentary/);
-    assert.match(active,/Inspect package.json/); assert.match(active,/Recorded actions/);
-    assert.ok(active.indexOf("Current public commentary") < active.indexOf("Recent work"), "current activity is separate from selected past work");
-    assert.doesNotMatch(await render({work:{...work,active:true,startedAt:null},activeSourceMessageId:"msg_3"}),/Current public commentary/);
-    assert.match(await render({resource:{...resource,status:"loading",detail:null}}),/Loading recent work/);
-    assert.match(await render({resource:{...resource,status:"error",detail:null}}),/Couldn’t load recent work/);
-    assert.match(await render({resource:{...resource,status:"unavailable",detail:null}}),/Recent work is unavailable/);
-    assert.match(await render({resource:{...resource,detail:{...detail,availability:"pruned"}}}),/Older details have expired/);
-    assert.match(await render({resource:{...resource,detail:{...detail,availability:"not_loaded",items:[]}}}),/No requests have been recorded/);
-    assert.match(await render({resource:{...resource,detail:{...detail,recorded_execution:{availability:"not_captured"}}}}),/does not mean the agent did no work/);
-    assert.deepEqual(agentLiveTrace(resource as any,"msg_other").turns,[],"mismatched source never lends recorded operations");
-    assert.equal(currentAgentRequest(resource as any,"msg_other"),null,"selected history cannot supply another current request");
-    assert.equal(currentAgentRequest(resource as any,"msg_1")?.text,"Inspect package.json");
-    const withActive = {...resource,detail:{...detail,items:[item,{...item,source_message_id:"msg_3",sender:"Alex",text_preview:"Fresh task"}]}};
-    const triggered = await render({resource:withActive,work:{...work,active:true,startedAt:"2026-09-05T10:00:00Z"},activeSourceMessageId:"msg_3"});
-    assert.ok(triggered.indexOf("Fresh task") < triggered.indexOf("Current public commentary"));
-    assert.equal(canPresentCurrentAgentStream({active:false,startedAt:"2026-09-05T10:00:00Z",activeSourceMessageId:"msg_1"}),false);
+    assert.match(await render({ feed: { ...feed, droppedEvents: 3 } }), /Earlier live updates were omitted/);
+    assert.match(await render({ feed: { ...feed, events: [] } }), /No recent actions are available/);
+    assert.match(await render({ work: { ...work, freshness: "stale" } }), /Live status unavailable/);
+    assert.match(await render({ feed: { ...feed, ended: true } }), /Work stream closed/);
+    assert.equal(currentAgentRequest(resource as any, "msg_other"), null);
+    assert.equal(canPresentCurrentAgentStream({ active: false, startedAt: activeWork.startedAt, activeSourceMessageId: "msg_new" }), false);
   } finally { await vite.close(); }
 });
 
@@ -349,7 +365,7 @@ test("the live surface presents a work narrative and keeps technical payloads be
   assert.match(surface, /This agent is retired and cannot receive new room work/);
   assert.match(surface, /The agent is still starting and cannot receive room work yet/);
   assert.match(surface, /Ready for a message/);
-  assert.match(surface, /AgentInspectorLiveHistory/);
+  assert.doesNotMatch(surface, /AgentInspectorLiveHistory/);
   assert.doesNotMatch(surface, /Hidden chain of thought|supervisor's room-turn lifecycle owns|Waiting for room work/);
   assert.doesNotMatch(surface, /transcript\.value\.ended \? "Ended" : "In progress"/);
   assert.match(surface, /Agent commentary/);
@@ -376,4 +392,30 @@ test("running native actions use present-progressive copy", () => {
   );
   assert.equal(running.headline, "Reading a file");
   assert.equal(completed.headline, "Read a file");
+});
+
+test("Claude room tool names read as actions without transport prefixes", () => {
+  const pending = describeLiveToolCall("mcp__letagents__update_task", { status: "in_review" }, { status: "pending", output: null, error: null });
+  assert.equal(pending.toolName, "update_task");
+  assert.equal(pending.headline, "Requested: Update a task");
+  assert.equal(pending.detail, "in_review");
+});
+
+test("recognized Claude room tools never claim completion while pending or failed", () => {
+  for (const [tool, completed] of [
+    ["send_message", "Sent a room message"], ["send_thread_message", "Sent a thread reply"],
+    ["post_status", "Posted a status update"], ["post_reasoning", "Shared reasoning in the room"],
+    ["add_task", "Added a board task"], ["get_board", "Read the room board"],
+    ["get_board_settings", "Read the board settings"], ["get_current_room", "Checked the current room"],
+    ["check_repo", "Checked the repository"], ["wait_for_messages", "Waited for new room messages"],
+    ["update_task", "Updated a task"], ["release_task_lease", "Released a task lease"],
+    ["register_task_lease_action_intent", "Registered a task lease action"],
+  ]) {
+    const describe = (status: string) => describeLiveToolCall(`mcp__letagents__${tool}`, {}, { status, output: null, error: null }).headline;
+    assert.match(describe("pending"), /^Requested:/);
+    assert.notEqual(describe("running"), completed);
+    assert.match(describe("error"), /^Failed:/);
+    assert.match(describe("interrupted"), /^Interrupted:/);
+    assert.equal(describe("completed"), completed);
+  }
 });

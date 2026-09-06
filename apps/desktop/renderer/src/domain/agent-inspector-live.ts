@@ -259,30 +259,35 @@ function describeLetAgentsTool(
         toolName: bareTool,
       };
     }
-    case "send_message":
-      return action("Sent a room message", args, bareTool);
-    case "send_thread_message":
-      return action("Sent a thread reply", args, bareTool);
-    case "post_status":
-      return action("Posted a status update", args, bareTool);
-    case "post_reasoning":
-      return action("Shared reasoning in the room", args, bareTool);
-    case "add_task":
-      return action("Added a board task", args, bareTool);
-    case "get_board":
-      return action("Read the room board", null, bareTool);
-    case "get_board_settings":
-      return action("Read the board settings", null, bareTool);
-    case "get_current_room":
-      return action("Checked the current room", null, bareTool);
-    case "check_repo":
-      return action("Checked the repository", args, bareTool);
-    case "wait_for_messages":
-      return action("Waited for new room messages", null, bareTool);
-    default:
-      return null;
+    default: {
+      const labels = ROOM_TOOL_HEADLINES[bareTool];
+      if (!labels) return null;
+      const status = outcome?.status;
+      const headline = status === "pending" ? `Requested: ${labels.request}`
+        : status === "running" ? labels.running
+        : status === "error" || status === "failed" ? `Failed: ${labels.request}`
+        : status === "interrupted" ? `Interrupted: ${labels.request}`
+        : labels.complete;
+      return action(headline, args, bareTool);
+    }
   }
 }
+
+const ROOM_TOOL_HEADLINES: Readonly<Record<string, { request: string; running: string; complete: string }>> = {
+  update_task: { request: "Update a task", running: "Updating a task", complete: "Updated a task" },
+  release_task_lease: { request: "Release a task lease", running: "Releasing a task lease", complete: "Released a task lease" },
+  register_task_lease_action_intent: { request: "Register a task lease action", running: "Registering a task lease action", complete: "Registered a task lease action" },
+  send_message: { request: "Send a room message", running: "Sending a room message", complete: "Sent a room message" },
+  send_thread_message: { request: "Send a thread reply", running: "Sending a thread reply", complete: "Sent a thread reply" },
+  post_status: { request: "Post a status update", running: "Posting a status update", complete: "Posted a status update" },
+  post_reasoning: { request: "Share reasoning in the room", running: "Sharing reasoning in the room", complete: "Shared reasoning in the room" },
+  add_task: { request: "Add a board task", running: "Adding a board task", complete: "Added a board task" },
+  get_board: { request: "Read the room board", running: "Reading the room board", complete: "Read the room board" },
+  get_board_settings: { request: "Read the board settings", running: "Reading the board settings", complete: "Read the board settings" },
+  get_current_room: { request: "Check the current room", running: "Checking the current room", complete: "Checked the current room" },
+  check_repo: { request: "Check the repository", running: "Checking the repository", complete: "Checked the repository" },
+  wait_for_messages: { request: "Wait for room messages", running: "Waiting for room messages", complete: "Waited for new room messages" },
+};
 
 function containsAcceptedResult(value: unknown, depth = 0): boolean {
   if (depth > 8 || value === null || value === undefined) return false;
@@ -335,12 +340,13 @@ export function describeLiveToolCall(
     return describeLetAgentsTool(bareTool, args, outcome)
       ?? action(bareTool, args, bareTool);
   }
-  const bareTool = tool.replace(MCP_SERVER_ALIAS_PREFIX, "");
+  const bareTool = tool.replace(/^mcp__letagents__/, "").replace(MCP_SERVER_ALIAS_PREFIX, "");
   const known = describeLetAgentsTool(bareTool, inputRecord, outcome);
   if (known) return known;
   const nativeHeadlines = NATIVE_TOOL_HEADLINES[bareTool];
   if (nativeHeadlines) {
-    const headline = outcome?.status === "running" ? nativeHeadlines.running : nativeHeadlines.complete;
+    const headline = outcome?.status === "pending" ? `Requested: ${nativeHeadlines.running}`
+      : outcome?.status === "running" ? nativeHeadlines.running : nativeHeadlines.complete;
     return action(headline, inputRecord, bareTool);
   }
   return action(bareTool, inputRecord, bareTool);
