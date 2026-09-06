@@ -246,7 +246,7 @@ test("worker claim persists a session-bound lease before advancing accepted work
 
 // Real HTTP middleware and production board/task routes: only publication side
 // effects are muted; authentication, room scope, approval and writes stay real.
-async function workflowHttp(t: import("node:test").TestContext) {
+async function workflowHttp(t: import("node:test").TestContext, effects: Record<string, unknown> = {}) {
   const seeded = await seed();
   const { registerHttpMiddleware } = await import("../http/middleware.js");
   const { registerRoomBoardRoutes } = await import("../routes/rooms/board.js");
@@ -265,6 +265,7 @@ async function workflowHttp(t: import("node:test").TestContext) {
     getTaskById, getTaskOwnershipState, updateTask, taskEvents: new EventEmitter(),
     enforceFocusParentBoardWriteIsolation: ({ req, targetProject }: any) => services.enforceFocusParentBoardWriteIsolation({ req, targetProjectId: targetProject.id }),
     emitTaskLifecycleStatusMessage: async () => {},
+    ...effects,
   };
   registerTaskRecordRoutes(app, taskDeps as never);
   registerTaskLeaseActionRoute(app, taskDeps as never);
@@ -383,4 +384,69 @@ test("HTTP concurrent approved claims mint one work lease", { skip: requiresData
   assert.equal(persisted!.assignee_agent_key, leases[0]!.agent_key);
   const intents = await Promise.all([firstIntent, secondIntent].map(intent_id => db!.getBoardIntent({ room_id: f.room.id, intent_id })));
   assert.equal(intents.filter(i => i!.status === "used").length, 1, "losing claim must not consume approval");
+});
+
+
+test("HTTP exact progress retries preserve committed state and reject changed fields and stale workers", { skip: requiresDatabase }, async t => {
+  let notifications = 0;
+  const f = await workflowHttp(t, { emitTaskLifecycleStatusMessage: async () => { notifications++; } });
+  const task = await f.freshTask();
+  assert.equal((await f.claim(task.id, await f.approveClaim(task.id))).status, 200);
+  for (const status of ["in_progress", "in_review"]) {
+    const patch = { status, pr_url: "https://github.com/example/repo/pull/1", workflow_artifacts: [
+      { provider: "git", kind: "branch", ref: "retry-proof" },
+    ] };
+    const first = await f.request(f.from.worker_bearer, `tasks/${task.id}`, patch, "PATCH");
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const before = await getTaskById(f.room.id, task.id);
+    const leases = await db!.getActiveTaskLeases(f.room.id, task.id);
+    const count = notifications;
+    const retry = await f.request(f.from.worker_bearer, `tasks/${task.id}`, patch, "PATCH");
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    assert.deepEqual(await getTaskById(f.room.id, task.id), before);
+    assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), leases);
+    assert.equal(notifications, count);
+    assert.equal((await f.request(f.from.worker_bearer, `tasks/${task.id}`, { ...patch, pr_url: "https://github.com/example/repo/pull/2" }, "PATCH")).status, 400);
+    assert.equal((await f.request(f.manager.worker_bearer, `tasks/${task.id}`, patch, "PATCH")).status, 409);
+  }
+  const before = await getTaskById(f.room.id, task.id);
+  await db!.endRoomAgentSession({ session_id: f.from.session_id });
+  assert.equal((await f.request(f.from.worker_bearer, `tasks/${task.id}`, { status: "in_review" }, "PATCH")).status, 401);
+  assert.deepEqual(await getTaskById(f.room.id, task.id), before);
+});
+
+test("HTTP committed progress succeeds despite failed lifecycle and Git room publication", { skip: requiresDatabase }, async t => {
+  let notifications = 0;
+  const events = new EventEmitter();
+  events.on("task:updated", () => { throw new Error("event delivery failed"); });
+  const f = await workflowHttp(t, {
+    taskEvents: events,
+    emitTaskLifecycleStatusMessage: async () => { notifications++; throw new Error("fetch failed"); },
+    ensureTaskGitRoomForActiveWorkLease: async () => { throw new Error("fetch failed"); },
+  });
+  const task = await f.freshTask();
+  assert.equal((await f.claim(task.id, await f.approveClaim(task.id))).status, 200);
+  const first = await f.request(f.from.worker_bearer, `tasks/${task.id}`, { status: "in_review" }, "PATCH");
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const count = notifications;
+  assert.equal((await f.request(f.from.worker_bearer, `tasks/${task.id}`, { status: "in_review" }, "PATCH")).status, 200);
+  assert.equal(notifications, count);
+  assert.equal((await getTaskById(f.room.id, task.id))!.status, "in_review");
+});
+
+
+test("HTTP concurrent identical progress requests converge on one committed timestamp", { skip: requiresDatabase }, async t => {
+  const publicationIds: string[] = [];
+  const f = await workflowHttp(t, {
+    emitTaskLifecycleStatusMessage: async (_room: string, task: { status: string }, options: { client_message_id: string }) => {
+      if (task.status === "in_review") publicationIds.push(options.client_message_id);
+    },
+  });
+  const task = await f.freshTask();
+  assert.equal((await f.claim(task.id, await f.approveClaim(task.id))).status, 200);
+  const replies = await Promise.all(Array.from({ length: 4 }, () =>
+    f.request(f.from.worker_bearer, `tasks/${task.id}`, { status: "in_review" }, "PATCH")));
+  for (const reply of replies) assert.equal(reply.status, 200, JSON.stringify(reply.body));
+  assert.equal(new Set(replies.map(r => Date.parse(r.body.updated_at))).size, 1);
+  assert.equal(new Set(publicationIds).size, 1, "concurrent notifications share the existing durable deduplication key");
 });

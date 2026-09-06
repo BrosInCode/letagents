@@ -237,16 +237,36 @@ export function registerTaskRecordRoutes(
         }
       );
       if (updated && updates.status && updates.status !== task.status) {
-        await deps.emitTaskLifecycleStatusMessage(project.id, updated);
+        try {
+          await deps.emitTaskLifecycleStatusMessage(project.id, updated, {
+            client_message_id: `task-status:${updated.id}:${Date.parse(updated.updated_at)}:${updated.status}`,
+            parent_client_message_id: `task-status-parent:${updated.id}:${Date.parse(updated.updated_at)}:${updated.status}`,
+          });
+        } catch {
+          // The task is committed. A notification failure cannot undo it or
+          // truthfully turn the successful mutation into a bad request.
+          console.warn("Task lifecycle notification failed after committed update", { roomId: project.id, taskId });
+        }
       }
 
       if (updated) {
-        await deps.ensureTaskGitRoomForActiveWorkLease?.({
-          parentRoomId: project.id,
-          taskId: updated.id,
-        });
-        const taskWithDetails = await attachTaskDetails(project.id, updated);
-        deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+        try {
+          await deps.ensureTaskGitRoomForActiveWorkLease?.({ parentRoomId: project.id, taskId: updated.id });
+        } catch {
+          console.warn("Task Git room enrichment failed after committed update", { roomId: project.id, taskId });
+        }
+        let taskWithDetails: typeof updated | Awaited<ReturnType<typeof attachTaskDetails>> = updated;
+        try {
+          taskWithDetails = await attachTaskDetails(project.id, updated);
+        } catch {
+          // Preserve the committed result without inventing unknown lease/lock state.
+          console.warn("Task detail enrichment failed after committed update", { roomId: project.id, taskId });
+        }
+        try {
+          deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+        } catch {
+          console.warn("Task event delivery failed after committed update", { roomId: project.id, taskId });
+        }
         res.json({ ...taskWithDetails, room_id: project.id });
       } else {
         res.status(404).json({ error: "Task not found" });

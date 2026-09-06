@@ -92,7 +92,8 @@ export interface RoomTaskRouteDeps {
       title: string;
       status: TaskStatus;
       assignee: string | null;
-    }
+    },
+    options?: { client_message_id?: string | null; parent_client_message_id?: string | null }
   ): Promise<unknown>;
   validateOwnerTokenTaskActorKey(input: {
     req: AuthenticatedRequest;
