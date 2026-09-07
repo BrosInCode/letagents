@@ -104,6 +104,66 @@ async function seed() {
   return { room, ownerId, agentKey, from, mintSuccessor, task, lease, grantFence };
 }
 
+for (const expired of [false, true]) {
+  test(`same-scope grant recovery ${expired ? "after expiry" : "after a lost response"} preserves task and review authority`, { skip: requiresDatabase }, async () => {
+    const { room, ownerId, from, mintSuccessor, task, lease, grantFence } = await seed();
+    await updateTask(room.id, task.id, { status: "accepted" });
+    await updateTask(room.id, task.id, { status: "assigned", assignee: from.actor_label, assignee_agent_key: from.agent_key });
+    await updateTask(room.id, task.id, { status: "in_progress" });
+    const reviewTask = await db!.createTask(room.id, "Review another worker's PR", "Another worker");
+    const review = await db!.createTaskLease({
+      room_id: room.id, task_id: reviewTask.id, kind: "review", agent_key: from.agent_key,
+      actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+    });
+    const other = await mintSuccessor();
+    const grant = await db!.getSupervisorHostGrantById(grantFence.grant_id);
+    assert.ok(grant);
+    if (expired) {
+      await client!.pool.query("UPDATE supervisor_host_grants SET expires_at = NOW() - INTERVAL '1 second' WHERE grant_id = $1", [grant.grant_id]);
+      assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${from.worker_bearer}` } } as never)).authKind, null);
+    }
+    const recovered = await db!.createSupervisorHostGrant({ ...grant, expires_at: new Date(Date.now() + 120_000).toISOString() });
+    assert.equal(recovered.grant.grant_id, grant.grant_id);
+    assert.equal(recovered.grant.current_generation, grant.current_generation);
+    const refreshed = await db!.createOrRotateSupervisorWorkerSession({
+      room_id: room.id, session_kind: "worker", runtime: from.runtime,
+      actor_label: from.actor_label, agent_key: from.agent_key, agent_instance_id: from.agent_instance_id!,
+      display_name: from.display_name, owner_account_id: ownerId, owner_label: from.owner_label, ide_label: from.ide_label,
+      supervisor_grant_id: recovered.grant.grant_id,
+      supervisor_grant_fence: { grant_id: recovered.grant.grant_id, generation: recovered.grant.current_generation, token_version: recovered.grant.token_version },
+    });
+    assert.equal(refreshed.session.session_id, from.session_id);
+    assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${from.worker_bearer}` } } as never)).authKind, null);
+    const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${refreshed.session.worker_bearer}` } } as never);
+    const otherAuth = await resolveRequestAuth({ headers: { authorization: `Bearer ${other.worker_bearer}` } } as never);
+    assert.equal(auth.authKind, "agent_session");
+    assert.equal(otherAuth.authKind, "agent_session", "an independent instance keeps its own session");
+    const enforcement = realEnforcement(ownerId);
+    const decide = async (identity: NonNullable<typeof auth.agentSession>) => enforcement.enforceTaskCoordinationMutation({
+      req: { authKind: "agent_session", agentSession: identity }, projectId: room.id,
+      task: await getTaskById(room.id, task.id), taskOwnership: await getTaskOwnershipState(room.id, task.id),
+      updates: { status: "in_review" }, actorLabel: identity.actor_label, actorKey: identity.agent_key,
+      actorInstanceId: identity.agent_instance_id, actorSessionId: identity.agent_session_id,
+    } as never);
+    assert.equal((await decide(otherAuth.agentSession!)).kind, "deny", "same agent key is not task ownership");
+    const decision = await decide(auth.agentSession!);
+    assert.equal(decision.kind, "allow");
+    assert.ok(decision.leaseFence);
+    await updateTask(room.id, task.id, { status: "in_review" }, { leaseFence: decision.leaseFence as never });
+    assert.equal((await getTaskById(room.id, task.id))?.status, "in_review");
+    const [retained] = await db!.getActiveTaskLeases(room.id, task.id);
+    assert.equal(retained?.id, lease.id);
+    assert.equal(retained?.epoch, lease.epoch);
+    assert.equal(await db!.releaseTaskLease(room.id, review.id, {
+      kind: "review", expected_epoch: review.epoch, expected_agent_session_id: otherAuth.agentSession!.agent_session_id,
+    }), null, "a separate instance cannot release the original review assignment");
+    const released = await db!.releaseTaskLease(room.id, review.id, {
+      kind: "review", expected_epoch: review.epoch, expected_agent_session_id: auth.agentSession!.agent_session_id,
+    });
+    assert.equal(released?.status, "released");
+  });
+}
+
 test("(A) a predecessor whose work lease was rebound away is denied at enforcement, never downgraded to allow", { skip: requiresDatabase }, async () => {
   const { room, ownerId, from, mintSuccessor, task, lease, grantFence } = await seed();
   // Real bearer auth for the predecessor.
