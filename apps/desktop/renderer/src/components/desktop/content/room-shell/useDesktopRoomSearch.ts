@@ -13,8 +13,8 @@ export function useDesktopRoomSearch(messages: Readonly<Ref<readonly DesktopRoom
     return messages.value.filter((message) => {
       const haystack = [
         message.sender,
-        message.text,
-        message.replyTo?.text || "",
+        message.displayText || message.text,
+        message.replyTo?.displayText || message.replyTo?.text || "",
         ...message.attachments.map((attachment) => attachment.fileName || attachment.name || ""),
       ].join("\n").toLowerCase();
       return haystack.includes(query);

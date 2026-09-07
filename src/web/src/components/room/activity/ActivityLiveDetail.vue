@@ -216,7 +216,7 @@
             <span>{{ message.source === 'browser' ? 'Browser' : 'Agent message' }}</span>
             <span>{{ formatLastSeen(message.timestamp) }}</span>
           </div>
-          <p>{{ previewMessage(message.text) }}</p>
+          <p>{{ previewMessage(message.display_text || message.text) }}</p>
         </article>
       </div>
     </section>

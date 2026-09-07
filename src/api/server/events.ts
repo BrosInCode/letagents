@@ -77,6 +77,7 @@ export async function emitProjectMessage(
   text: string,
   options?: {
     source?: string;
+    display_text?: string | null;
     agent_prompt_kind?: AgentPromptKind | null;
     reply_to?: string | null;
     thread_root_id?: string | null;
@@ -96,6 +97,7 @@ export async function emitProjectMessage(
     recipientAgentTargets,
   } = await addMessageWithCreateStatus(projectId, sender, text, {
     source: options?.source,
+    display_text: options?.display_text,
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
     reply_to_message_id: options?.reply_to ?? null,
     thread_root_message_id: options?.thread_root_id ?? null,

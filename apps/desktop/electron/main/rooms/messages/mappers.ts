@@ -9,6 +9,7 @@ export type RoomMessageReplyPayload = {
   id: string;
   sender: string;
   text: string;
+  display_text?: string | null;
   source?: string | null;
   timestamp: string;
   agent_identity?: {
@@ -23,6 +24,7 @@ export type RoomMessagePayload = {
   client_message_id?: string | null;
   sender: string;
   text: string;
+  display_text?: string | null;
   attachments?: RoomMessageAttachmentPayload[] | null;
   agent_prompt_kind?: string | null;
   source?: string | null;
@@ -78,6 +80,7 @@ export function mapRoomMessagePayload(
     clientMessageId: message.client_message_id?.trim() || null,
     sender: message.sender,
     text: message.text,
+    ...(message.display_text ? { displayText: message.display_text } : {}),
     attachments: (message.attachments || []).map(
       mapRoomMessageAttachmentPayload,
     ),
@@ -97,6 +100,7 @@ export function mapRoomMessagePayload(
           id: message.reply_to.id,
           sender: message.reply_to.sender,
           text: message.reply_to.text,
+          ...(message.reply_to.display_text ? { displayText: message.reply_to.display_text } : {}),
           source: message.reply_to.source || null,
           timestamp: message.reply_to.timestamp,
           agentIdentity: mapRoomMessageAgentIdentity(message.reply_to.agent_identity || null),
@@ -157,6 +161,7 @@ export function mapRoomMessageThreadSummary(
         id: thread.latest_reply.id,
         sender: thread.latest_reply.sender,
         text: thread.latest_reply.text,
+        ...(thread.latest_reply.display_text ? { displayText: thread.latest_reply.display_text } : {}),
         source: thread.latest_reply.source || null,
         timestamp: thread.latest_reply.timestamp,
       }

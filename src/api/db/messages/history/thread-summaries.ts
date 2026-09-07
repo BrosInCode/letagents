@@ -39,6 +39,7 @@ export interface MaterializedThreadKeySelection {
 export interface MaterializedThreadSummarySelection extends MaterializedThreadKeySelection {
   latest_reply_sender: string;
   latest_reply_text: string;
+  latest_reply_display_text?: string | null;
   latest_reply_source: string | null;
   latest_reply_timestamp: string;
 }
@@ -114,6 +115,7 @@ export function toMaterializedThreadSummaryRow(
     ...key,
     latest_reply_sender: latest.sender,
     latest_reply_text: latest.text,
+    latest_reply_display_text: latest.display_text,
     latest_reply_source: latest.source,
     latest_reply_timestamp: latest.timestamp,
   };
@@ -149,6 +151,7 @@ export function toMaterializedThreadSummary(
       id: formatMessageId(row.summary_latest_reply_number),
       sender: row.latest_reply_sender,
       text: row.latest_reply_text,
+      ...(row.latest_reply_display_text ? { display_text: row.latest_reply_display_text } : {}),
       source: row.latest_reply_source,
       timestamp: row.latest_reply_timestamp,
       agent_identity: null,

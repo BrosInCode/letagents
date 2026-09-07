@@ -4,6 +4,7 @@ import test from 'node:test'
 import type { RoomMessage, StalePromptTaskState } from '../src/composables/useRoom'
 import {
   isAmbientSystemMessage,
+  messageDisplayText,
   renderMessageContent,
   stripStatusPrefix,
 } from '../src/components/room/chat-message/formatting'
@@ -140,4 +141,20 @@ test('isCurrentStalePrompt rejects stale prompt controls after newer task activi
   assert.equal(isCurrentStalePrompt(taskState, '2026-05-28T10:04:59.000Z'), false)
   assert.equal(isCurrentStalePrompt(taskState, '2026-05-28T10:05:00.000Z'), true)
   assert.equal(isCurrentStalePrompt(null, '2026-05-28T10:05:00.000Z'), false)
+})
+
+
+test('board notification display shows names and tasks without agent control instructions', () => {
+  const notification = message({
+    sender: 'letagents', source: 'system',
+    text: '@agent:owner/lumen Board intent bi_123 was approved. Continue with board_intent_id.',
+    display_text: '@LumenRiver — Your request to claim task_19: “Tests and CI” was approved. You can continue.',
+  })
+  const html = renderMessageContent(messageDisplayText(notification), new Set(['task_19']))
+  assert.match(html, /mention-token[^>]*>@LumenRiver/)
+  assert.match(html, /data-task-reference-id="task_19"/)
+  assert.match(html, /Tests and CI/)
+  assert.doesNotMatch(html, /owner\/lumen|bi_123|board_intent_id/)
+  assert.match(notification.text, /board_intent_id/)
+  assert.equal(messageDisplayText(message({ text: 'Ordinary message' })), 'Ordinary message')
 })

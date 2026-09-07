@@ -159,3 +159,17 @@ test("room message mapping preserves account routing authority and fails closed 
     authority: "invalid",
   }, "a cloud POST/SSE/poll response without the opted-in envelope fails closed");
 });
+
+
+test("readable system copy preserves canonical agent instructions in desktop messages and replies", () => {
+  const text = "@agent:owner/lumen Board intent bi_123 was approved. Continue with board_intent_id.";
+  const display_text = "@LumenRiver — Your request to claim task_19: “Tests and CI” was approved. You can continue.";
+  const reply = { id: "msg_1", sender: "letagents", text, display_text, timestamp: "2026-09-07T00:00:00Z" };
+  const mapped = mapRoomMessagePayload({ ...reply, id: "msg_2", reply_to: reply,
+    thread: { root_message_id: "msg_1", latest_reply: reply, reply_count: 1 } });
+  assert.equal(mapped.text, text);
+  assert.equal(mapped.displayText, display_text);
+  assert.equal(mapped.replyTo?.text, text);
+  assert.equal(mapped.replyTo?.displayText, display_text);
+  assert.equal(mapped.thread?.latestReply?.displayText, display_text);
+});

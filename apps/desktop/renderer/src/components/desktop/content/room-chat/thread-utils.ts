@@ -94,6 +94,7 @@ export function resolveThreadParent(
     clientMessageId: null,
     sender: replySnapshot.sender,
     text: replySnapshot.text,
+    displayText: replySnapshot.displayText,
     attachments: [],
     agentPromptKind: null,
     source: replySnapshot.source,
@@ -128,8 +129,8 @@ export function buildThreadIndicatorSummary(
     ),
     latest,
     latestPreview: fallbackIsLatest
-      ? fallbackLatest?.text || null
-      : metadataLatest?.text || latest?.text || null,
+      ? fallbackLatest?.displayText || fallbackLatest?.text || null
+      : metadataLatest?.displayText || metadataLatest?.text || latest?.displayText || latest?.text || null,
     latestTimestamp: latest?.timestamp || null,
     participants: parseThreadParticipants(thread?.participants ?? []),
     hasPartialHistory: false,
@@ -174,7 +175,7 @@ export function threadReadState(
 }
 
 export function threadQuotePreview(message: DesktopRoomMessage): string {
-  const text = message.text.replace(/\s+/g, " ").trim();
+  const text = (message.displayText || message.text).replace(/\s+/g, " ").trim();
   if (text) return truncateThreadText(text, 140);
   if (message.attachments.length === 1) return "1 attachment";
   if (message.attachments.length > 1) return `${message.attachments.length} attachments`;
@@ -254,6 +255,7 @@ function threadReplyToMessage(reply: DesktopRoomMessageReply): DesktopRoomMessag
     clientMessageId: null,
     sender: reply.sender,
     text: reply.text,
+    displayText: reply.displayText,
     attachments: [],
     agentPromptKind: null,
     source: reply.source,

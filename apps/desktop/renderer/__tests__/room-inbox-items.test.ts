@@ -86,6 +86,9 @@ describe("desktop room inbox items", () => {
       unreadThreadCount: 1,
     };
 
+    threadPage.threads[0]!.root.displayText = "LumenRiver requested task_19: Tests and CI";
+    threadPage.threads[0]!.summary.latestReply!.displayText = "The request was approved";
+
     const actionable = buildDesktopInboxItems({
       filter: "actionable",
       threadPage,
@@ -113,6 +116,10 @@ describe("desktop room inbox items", () => {
       "task_review",
       "thread",
     ]);
+    const readableThread = actionable.find((item) => item.kind === "thread");
+    assert.equal(readableThread?.title, "LumenRiver requested task_19: Tests and CI");
+    assert.equal(readableThread?.preview, "The request was approved");
+    assert.ok(readableThread?.activity.every((entry) => !["Unread root", "Latest reply"].includes(entry.description || "")));
     const githubFailure = actionable.find((item) => item.kind === "github_failure");
     assert.ok(githubFailure);
     assert.equal(githubFailure.preview, "Failed check from CI");

@@ -412,6 +412,19 @@ describe("room chat helpers", () => {
     assert.equal(search.activeSearchMessageId.value, "msg_2");
   });
 
+  it("searches and quotes readable board approval copy", () => {
+    const approval = roomMessage("msg_approval", null, "2026-09-07T00:00:00Z");
+    approval.text = "@agent:owner/lumen Board intent bi_123 was approved.";
+    approval.displayText = "@LumenRiver — Your request to claim task_19: Tests and CI was approved.";
+    const search = useDesktopRoomSearch(ref([approval]));
+    search.searchQuery.value = "Tests and CI";
+    assert.equal(search.searchResults.value[0]?.id, approval.id);
+    assert.equal(threadQuotePreview(approval), approval.displayText);
+    search.searchQuery.value = "bi_123";
+    assert.equal(search.searchResults.value.length, 0);
+    assert.match(approval.text, /bi_123/);
+  });
+
   it("finds and scrolls the requested thread message through its shared DOM contract", () => {
     const calls: ScrollIntoViewOptions[] = [];
     const elements = ["msg_root", "msg_reply"].map((messageId) => ({

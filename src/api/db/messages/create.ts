@@ -120,6 +120,7 @@ export type MessageCreateTransaction = Parameters<Parameters<(typeof db)["transa
 
 export interface AddMessageOptions {
   source?: string;
+  display_text?: string | null;
   agent_prompt_kind?: AgentPromptKind | null;
   reply_to_message_id?: string | null;
   thread_root_message_id?: string | null;
@@ -257,6 +258,7 @@ export async function addMessageWithCreateStatus(
       thread_root_number: threadRootNumber,
       sender,
       text,
+      display_text: options?.source === "system" ? options.display_text?.trim() || null : null,
       agent_prompt_kind: promptKind,
       source: options?.source ?? null,
       client_message_id: clientMessageId,

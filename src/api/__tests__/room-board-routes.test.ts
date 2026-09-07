@@ -210,7 +210,7 @@ test("manager notification addresses the active manager and uses an idempotent m
     projectId: string;
     sender: string;
     text: string;
-    options?: { source?: string; client_message_id?: string | null };
+    options?: { source?: string; client_message_id?: string | null; display_text?: string | null };
   }> = [];
   const manager = {
     ...managerAssignment("session_manager"),
@@ -267,24 +267,55 @@ test("manager notification addresses the active manager and uses an idempotent m
   assert.deepEqual(emitted[0].options, {
     source: "system",
     client_message_id: "board_intent:bi_123:manager_notify",
+    display_text: '@RiverField — HarborVale wants to create the task “Investigate accepted task editing”. Review this request on the board.',
   });
   for (const status of ["approved", "denied"] as const) {
     await emitBoardIntentDecisionNotification({ deps: { ...createDeps(),
+      getNotificationTask: async () => ({ title: "Tests and CI" }),
       emitProjectMessage: async (projectId, sender, text, options) => {
         emitted.push({ projectId, sender, text, options }); return { id: "msg_decision" };
       },
-    }, project: project(), intent: { ...intent, action_type: "task_claim", status,
+    }, project: project(), intent: { ...intent, task_id: "task_19", action_type: "task_claim", status,
       approval_token_hash: "secret-hash-canary", decision_reason: "@everyone private-reason-canary" } });
     const decision = emitted.at(-1)!;
     assert.ok(decision.text.startsWith("@agent:agent:harborvale Board intent bi_123 was " + status));
     assert.doesNotMatch(decision.text, /secret-hash-canary|private-reason-canary|@everyone/);
     assert.equal(decision.options?.client_message_id, `board_intent:bi_123:${status}:proposer_notify`);
+    assert.equal(decision.options?.display_text, `@HarborVale — Your request to claim task_19: “Tests and CI” was ${status === "denied" ? "declined" : "approved"}.${status === "approved" ? " You can continue." : ""}`);
+    assert.doesNotMatch(decision.options?.display_text ?? "", /bi_123|board_intent_id|session|token|agent:|private-reason-canary/);
     const recipients = resolveGloballyAddressedAgentKeys({ text: decision.text }, [
       { actor_label: "HarborVale", display_name: "HarborVale", agent_key: "agent:harborvale", agent_session_id: "session_harborvale", agent_instance_id: null, session_kind: "worker" },
       { actor_label: "HarborVale", display_name: "HarborVale", agent_key: "agent:unrelated", agent_session_id: "session_other", agent_instance_id: null, session_kind: "worker" },
     ]);
     assert.deepEqual([...recipients.explicitMentionKeys], ["agent:harborvale"], "canonical notification does not wake a duplicate friendly name");
   }
+  for (const [actionType, payload, status, expectedAction, expectedEnding] of [
+    ["task_create", intent.payload, "used", "create task_19: “Investigate accepted task editing”", "The task is now on the board."],
+    ["task_claim", {}, "used", "claim task_19: “Tests and CI”", "This action is already complete."],
+    ["task_close", { status: "cancelled" }, "approved", "cancel task_19: “Tests and CI”", "You can continue."],
+    ["task_close", { status: "done" }, "approved", "mark task_19: “Tests and CI” as done", "You can continue."],
+    ["task_update", { status: "in_review" }, "approved", "mark task_19: “Tests and CI” as ready for review", "You can continue."],
+    ["task_override", { action: "handoff" }, "approved", "hand off task_19: “Tests and CI” to another agent", "You can continue."],
+    ["task_override", { action: "release" }, "approved", "release task_19: “Tests and CI” for another agent", "You can continue."],
+  ] as const) {
+    await emitBoardIntentDecisionNotification({ deps: { ...createDeps(),
+      getNotificationTask: async () => ({ title: "Tests and CI" }),
+      emitProjectMessage: async (_room, _sender, _text, options) => {
+        assert.equal(options?.display_text, `@HarborVale — Your request to ${expectedAction} was approved. ${expectedEnding}`);
+        return { id: "msg_action" };
+      },
+    }, project: project(), intent: { ...intent, task_id: "task_19", action_type: actionType, payload, status,
+      proposer_actor_label: "HarborVale | EmmyMay's agent | Codex" } });
+  }
+  const fallback = await emitBoardIntentDecisionNotification({ deps: { ...createDeps(),
+    getNotificationTask: async () => { throw new Error("lookup unavailable"); },
+    emitProjectMessage: async (_room, _sender, _text, options) => {
+      assert.equal(options?.display_text, "@HarborVale — Your request to claim task_19 was approved. You can continue.");
+      return { id: "msg_fallback" };
+    },
+  }, project: project(), intent: { ...intent, task_id: "task_19", action_type: "task_claim", status: "approved" } });
+  assert.equal(fallback.delivered, true);
+
 });
 
 test("manager notification neutralizes user-controlled mentions in proposer and title", async () => {

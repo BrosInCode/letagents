@@ -15,6 +15,7 @@ export const messages = pgTable(
     thread_root_number: integer("thread_root_number"),
     sender: text("sender").notNull(),
     text: text("text").notNull(),
+    display_text: text("display_text"),
     agent_prompt_kind: text("agent_prompt_kind"),
     source: text("source"),
     client_message_id: text("client_message_id"),
