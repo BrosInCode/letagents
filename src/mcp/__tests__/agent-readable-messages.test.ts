@@ -254,3 +254,13 @@ test("agent-readable messages thread a reply that carries an explicit thread roo
     latest_reply_id_in_result: "msg_2",
   });
 });
+
+test("readable approval copy does not replace the exact instructions delivered to agents", () => {
+  const text = "@agent:owner/lumen Board intent bi_123 was approved. Continue with board_intent_id and your own worker session.";
+  const display_text = "@LumenRiver — Your request to claim task_19: “Tests and CI” was approved. You can continue.";
+  const [approval] = toAgentReadableMessages([
+    message({ sender: "letagents", source: "system", text, display_text }),
+  ]) as Array<Record<string, unknown>>;
+  assert.equal(approval.text, text);
+  assert.equal(approval.display_text, display_text);
+});

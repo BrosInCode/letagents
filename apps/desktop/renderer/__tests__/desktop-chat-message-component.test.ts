@@ -204,3 +204,27 @@ test("GitHub event task chips expose the shared Board navigation contract", asyn
   assert.match(html, /<button[^>]*data-task-reference-id="task_42"/);
   assert.match(html, /title="Open task_42 on the Board"/);
 });
+
+
+test("board notification renders readable copy while keeping its canonical body intact", async () => {
+  const message = {
+    id: "msg_approval", sender: "letagents", source: "system",
+    text: "@agent:owner/lumen Board intent bi_123 was approved. Continue with board_intent_id.",
+    displayText: "@LumenRiver — Your request to claim task_19: “Tests and CI” was approved. You can continue.",
+    attachments: [], agentPromptKind: null, timestamp: "2026-09-07T00:00:00Z",
+    actorLabel: null, agentIdentity: null, threadRootId: "msg_approval", threadReplyToId: null,
+    thread: null, replyTo: null,
+  };
+  const html = await renderToString(createSSRApp({
+    render: () => h(DesktopChatMessage as object, {
+      message, threadSummary: { count: 0, unreadCount: 0, latest: null, latestPreview: null,
+        latestTimestamp: null, participants: [], hasPartialHistory: false, loadingEarlier: false },
+      activeThreadRoot: false, highlightQuery: "", searchActive: false, taskReferenceIds: new Set(["task_19"]),
+    }),
+  }));
+  assert.match(html, /mention-token[^>]*>@LumenRiver/);
+  assert.match(html, /data-task-reference-id="task_19"/);
+  assert.match(html, /Tests and CI/);
+  assert.doesNotMatch(html, /owner\/lumen|bi_123|board_intent_id/);
+  assert.match(message.text, /board_intent_id/);
+});

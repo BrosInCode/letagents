@@ -239,6 +239,7 @@ export interface DesktopRoomMessageReply {
   id: string;
   sender: string;
   text: string;
+  displayText?: string | null;
   source: string | null;
   timestamp: string;
   agentIdentity?: {
@@ -314,6 +315,7 @@ export interface DesktopRoomMessage {
   clientMessageId?: string | null;
   sender: string;
   text: string;
+  displayText?: string | null;
   attachments: DesktopRoomMessageAttachment[];
   agentPromptKind: string | null;
   source: string | null;

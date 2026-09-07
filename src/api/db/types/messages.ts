@@ -5,6 +5,8 @@ export interface Message {
   agent_identity: MessageAgentIdentity | null;
   sender: string;
   text: string;
+  /** Human-facing copy; canonical text remains the agent/routing input. */
+  display_text?: string | null;
   agent_prompt_kind: AgentPromptKind | null;
   source: string | null;
   timestamp: string;
@@ -67,6 +69,8 @@ export interface MessageReplyReference {
   id: string;
   sender: string;
   text: string;
+  /** Human-facing copy; canonical text remains the agent/routing input. */
+  display_text?: string | null;
   source: string | null;
   timestamp: string;
   agent_identity: MessageAgentIdentity | null;
@@ -131,6 +135,8 @@ export interface MessageRow {
   thread_root_number: number | null;
   sender: string;
   text: string;
+  /** Human-facing copy; canonical text remains the agent/routing input. */
+  display_text?: string | null;
   agent_prompt_kind: string | null;
   source: string | null;
   client_message_id: string | null;
