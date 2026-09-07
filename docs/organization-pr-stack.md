@@ -32,3 +32,23 @@ Proof is incremental: migration integrity; provider and route authorization;
 room discovery without private-repo disclosure; onboarding/navigation regressions;
 and link continuation for signed-out, signed-in, and first-run users. A database
 reset, billing, company-wide chat, and agent-runtime redesign are outside scope.
+
+## Backend onboarding contract (slice 2)
+
+- `GET /account/organizations` returns verified active GitHub organizations, the
+  current provider role (`owner` or `member`), and separate `setup`/`joined` flags.
+  An empty list is valid; the user can continue with personal/shared repo rooms.
+- `POST /organizations/:organizationId/setup` requires a freshly verified owner
+  and atomically sets up the company and joins that person. Repeated setup is
+  idempotent. The ID is GitHub's numeric organization ID, not its mutable login.
+- `POST /organizations/:organizationId/join` requires an active membership and
+  an existing company. A member arriving before owner setup gets HTTP 409 with
+  `organization_setup_required`.
+
+The default OAuth scope includes `read:org`. Deployments overriding
+`GITHUB_OAUTH_SCOPES` must include organization-read access; older credentials
+may need GitHub sign-in again. Membership verification uses the authenticated
+user's memberships endpoint, including private memberships. Provider errors
+block company access without deleting joins; stored membership alone never
+authorizes access. This slice does not synchronize the entire staff directory
+or change repository permissions.

@@ -57,6 +57,7 @@ import {
 import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js";
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
+import { registerAccountOrganizationRoutes } from "../routes/account/organizations.js";
 import {
   registerAuthRoutes,
   registerGitHubAppCallbackRoute,
@@ -480,6 +481,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerAuthRoutes(app);
   registerAccountRoomRoutes(app);
+  registerAccountOrganizationRoutes(app);
   registerDesktopPushRoutes(app);
 
   registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
