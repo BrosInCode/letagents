@@ -1,3 +1,5 @@
+import { resolveWorkspaceFileLinks, openWorkspaceFile, openLocalSourceFile } from "../workspace-file-links.js";
+import { assertHostApprovalSender } from "../window.js";
 import electron from "electron";
 import type { IpcMain } from "electron";
 import { homedir } from "node:os";
@@ -29,6 +31,14 @@ import { desktopUpdater } from "../updates.js";
 const { app } = electron as typeof import("electron");
 
 export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle("desktop:app:resolve-workspace-files", async (event, input) => {
+    assertHostApprovalSender(event);
+    return resolveWorkspaceFileLinks(input);
+  });
+  targetIpcMain.handle("desktop:app:open-workspace-file", async (event, input) => {
+    assertHostApprovalSender(event);
+    return openWorkspaceFile(input, openLocalSourceFile, openExternalWebUrl);
+  });
   targetIpcMain.handle(
     "desktop:app:get-info",
     async (): Promise<DesktopAppInfo> => ({

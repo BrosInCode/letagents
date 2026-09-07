@@ -147,3 +147,40 @@ test("local rooms and invalid cursors do not call the cloud", async () => {
     globalThis.fetch = previous;
   }
 });
+
+test('file opening stays inside the recorded workspace and rejects executable or missing paths', async () => {
+  const { mkdtemp, writeFile, symlink, rm, chmod } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { localWorkspaceFile, safeWorkspaceFilePath } = await import('../main/workspace-file-links.js');
+  const root = await mkdtemp(join(tmpdir(), 'receipt-files-'));
+  const outside = await mkdtemp(join(tmpdir(), 'receipt-outside-'));
+  try {
+    await writeFile(join(root, 'hello.ts'), 'export const hello = true;');
+    await writeFile(join(outside, 'private.ts'), 'private');
+    await symlink(join(outside, 'private.ts'), join(root, 'escape.ts'));
+    assert.ok(await localWorkspaceFile(root, 'hello.ts'));
+    for (const path of ['../private.ts', '/etc/passwd', 'escape.ts', 'missing.ts', 'file.command']) assert.equal(await localWorkspaceFile(root, path), null);
+    await chmod(join(root, 'hello.ts'), 0o755);
+    assert.equal(await localWorkspaceFile(root, 'hello.ts'), null);
+    for (const path of ['../file.ts', 'a/../file.ts', 'a\\file.ts', 'file.ts\u0000', '/file.ts']) assert.equal(safeWorkspaceFilePath(path), false);
+  } finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
+
+test('workspace links require an exact receipt and a verified published file; handlers must be editors', async () => {
+  const { trustedEditor, editorSignatureRequirement, resolveWorkspaceFileLinks, githubFile } = await import('../main/workspace-file-links.js');
+  assert.equal(trustedEditor({ id: 'com.microsoft.VSCode', path: '/Applications/Visual Studio Code.app' }), true);
+  assert.match(editorSignatureRequirement('com.microsoft.VSCode')!, /certificate leaf\[subject.OU\] = "UBF8T346G9"/);
+  assert.equal(editorSignatureRequirement('com.apple.Terminal'), null);
+  assert.equal(trustedEditor({ id: 'com.apple.Terminal', path: '/Applications/Terminal.app' }), false);
+  assert.equal(trustedEditor({ id: 'org.python.PythonLauncher', path: '/Applications/Python Launcher.app' }), false);
+  assert.equal(trustedEditor({ id: 'com.microsoft.VSCode', path: '../Code.app' }), false);
+  assert.equal(await githubFile('github.com/a/b', 'main', '../private.ts'), null);
+  assert.equal(await githubFile('not-a-git-room', 'main', 'file.ts'), null);
+  await assert.rejects(resolveWorkspaceFileLinks({ roomId: ROOM, agentKey: 'other/agent', sourceMessageId: 'invalid', paths: ['file.ts'] }), /Invalid/);
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(changedPayload()), { status: 200 });
+  try {
+    assert.deepEqual(await resolveWorkspaceFileLinks({ roomId: ROOM, agentKey: 'other/agent', sourceMessageId: 'msg_123', paths: ['file.ts'] }), []);
+  } finally { globalThis.fetch = priorFetch; }
+});

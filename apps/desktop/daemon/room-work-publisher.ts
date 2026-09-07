@@ -1,3 +1,4 @@
+import { readableContributionText } from "../../../shared/contribution-text.mjs";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
 import { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "./workspace-turn-capture.js";
 import type { DatabaseSync } from "node:sqlite";
@@ -111,7 +112,7 @@ export class RoomWorkPublisher {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       const pair = await captureWorkspacePair(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref);
-      pair.contribution.summary = summaryText?.trim().slice(0, 400) || null;
+      pair.contribution.summary = readableContributionText(summaryText);
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
       if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return;
