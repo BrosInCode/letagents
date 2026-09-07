@@ -179,7 +179,7 @@ function threadInboxItems(
       id: `thread:${root.id}`,
       kind: "thread" as const,
       title: (root.displayText || root.text).trim() || "Thread",
-      preview: summary.latestReply?.text?.trim() || null,
+      preview: (summary.latestReply?.displayText || summary.latestReply?.text)?.trim() || null,
       context: summary.latestReply ? `Latest reply from ${summary.latestReply.sender}` : null,
       timestamp: summary.latestReply?.timestamp || root.timestamp || null,
       firstSeenTimestamp: root.timestamp || null,
