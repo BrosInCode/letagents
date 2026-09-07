@@ -1,3 +1,4 @@
+import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -462,8 +463,7 @@ function exactPermissionItemKey(threadId: string, turnId: string, itemId: string
 
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
-    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
-    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     "If no response should be published, return exactly LETAGENTS_NO_ROOM_REPLY with no other text.",
