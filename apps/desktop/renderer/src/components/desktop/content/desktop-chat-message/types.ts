@@ -5,6 +5,8 @@ export interface SenderIdentity {
 }
 
 export interface AgentModalTarget {
+  /** Optional exact room contribution to open in Workspace. */
+  workspaceSourceMessageId?: string;
   /** Exact room message whose participant affordance opened the Inspector. */
   messageId: string | null;
   /** Exact publisher idempotency identity for the selected room message. */

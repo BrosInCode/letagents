@@ -1,8 +1,10 @@
-import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import { contributionChanges } from "../../../../domain/room-contributions";
+import type { DesktopRoomAgentWork, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 
 const compactContinuationWindowMs = 5 * 60 * 1000;
 
 export type MessageTimelineEntry =
+  | { type: "contribution"; id: string; work: DesktopRoomAgentWork }
   | {
       type: "date";
       id: string;
@@ -16,24 +18,43 @@ export type MessageTimelineEntry =
       compactWithPrevious: boolean;
     };
 
-export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessage[]): MessageTimelineEntry[] {
+export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessage[], work: readonly DesktopRoomAgentWork[] = []): MessageTimelineEntry[] {
   const entries: MessageTimelineEntry[] = [];
   let previousDayKey: string | null = null;
   let previousMessage: DesktopRoomMessage | null = null;
 
-  for (const message of messages) {
-    const dayKey = messageDayKey(message.timestamp);
+  const sources = new Map(messages.map(message => [message.id, message.timestamp]));
+  const contributions = work.filter(entry => {
+    const changes = contributionChanges(entry);
+    return sources.has(entry.sourceMessageId) && changes && (changes.state !== 'ready' || changes.files.length + changes.hidden_files > 0);
+  });
+  const ordered = [...messages.map(message => ({ timestamp: message.timestamp, id: message.id, message })),
+    ...contributions.map(work => {
+      const captured = contributionChanges(work)!.captured_at;
+      const source = sources.get(work.sourceMessageId)!;
+      // A host clock behind the room server must not put a result before its cause.
+      return { timestamp: Date.parse(source) > Date.parse(captured) ? source : captured, id: `contribution:${work.attemptId}`, work };
+    })]
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  for (const item of ordered) {
+    const dayKey = messageDayKey(item.timestamp);
     if (dayKey !== previousDayKey) {
       entries.push({
         type: "date",
-        id: `date:${dayKey}:${message.id}`,
-        label: formatDateDivider(message.timestamp),
+        id: `date:${dayKey}:${item.id}`,
+        label: formatDateDivider(item.timestamp),
         dateTime: dayKey,
       });
       previousDayKey = dayKey;
       previousMessage = null;
     }
 
+    if ('work' in item) {
+      entries.push({ type: "contribution", id: item.id, work: item.work });
+      previousMessage = null;
+      continue;
+    }
+    const message = item.message;
     entries.push({
       type: "message",
       id: message.id,

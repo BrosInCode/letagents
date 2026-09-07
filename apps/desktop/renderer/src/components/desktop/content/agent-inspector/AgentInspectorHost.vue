@@ -66,6 +66,7 @@ import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts
 import type { AgentInspectorConfigurationResource, AgentInspectorConfigurationDraft, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type {
   DesktopAgentProvider,
+  DesktopRoomAgentWork,
   DesktopAgentStreamEvent,
   DesktopFocusRoomInfo,
   DesktopManagedAgentSession,
@@ -102,7 +103,10 @@ const props = defineProps<{
   liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
   roomIdentifier: string;
   requestVersion: number;
-  initialTab?: "overview" | "work";
+  initialTab?: "overview" | "work" | "workspace";
+  roomAgentWork?: DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
+  workspaceSourceMessageId?: string | null;
   managedSessions: readonly DesktopManagedAgentSession[];
   reasoningSessions: readonly DesktopReasoningSession[];
 }>();
@@ -180,10 +184,13 @@ watch(
   () => { participantAnnouncement.value = null; },
 );
 function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
+  const workspace = { roomAgentWork: props.roomAgentWork ?? [], roomAgentWorkStatus: props.roomAgentWorkStatus ?? 'idle',
+    workspaceSourceMessageId: props.workspaceSourceMessageId, workspaceAgentKey: props.selection.agentKey,
+    initialTab: props.initialTab };
   if (props.projection) {
     return {
+      ...workspace,
       projection: props.projection,
-      initialTab: props.initialTab,
       requestVersion: props.requestVersion,
       actionState: props.actionState,
       compact: compactPresentation,
@@ -201,6 +208,7 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
   }
   if (participantProjection.value) {
     return {
+      ...workspace,
       projection: participantProjection.value,
       compact: compactPresentation,
       busy: false,

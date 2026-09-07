@@ -22,6 +22,7 @@
           <span>{{ entry.label }}</span>
         </div>
 
+        <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
         <DesktopChatMessage
           v-else
           :message="entry.message"
@@ -146,6 +147,7 @@
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import type {
   DesktopAgentPresence,
+  DesktopRoomAgentWork,
   DesktopParticipantSummary,
   DesktopRoomMessage,
   DesktopSupervisorManifestEntry,
@@ -158,6 +160,7 @@ import {
   type ManagedAgentWorkIndicator,
   type WorkIndicatorEchoState,
 } from "../../../../domain/managed-agents";
+import RoomContribution from "./RoomContribution.vue";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
@@ -183,6 +186,8 @@ const maxAutoViewportBackfillPages = 5;
 const viewportFillSlack = 32;
 
 const props = defineProps<{
+  roomAgentWork?: DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
   active: boolean;
   activeSearchMessageId: string | null;
   activeThreadParentId: string | null;
@@ -213,6 +218,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "load-older": [];
+  "open-workspace": [work: DesktopRoomAgentWork];
   "open-agent": [target: AgentModalTarget];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
@@ -266,7 +272,7 @@ let threadActivityNamespace = props.messageNamespace;
 let suppressNextThreadActivityNotice = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
-const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages));
+const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages, props.roomAgentWork));
 const messageReferenceIds = computed(() =>
   new Set(props.messages.map((message) => message.id))
 );
@@ -341,6 +347,17 @@ watch(
   },
   { immediate: true },
 );
+
+// A no-reply turn can add a contribution without adding a chat message.
+watch(() => timelineEntries.value.filter(entry => entry.type === 'contribution').map(entry => entry.id).join('|'), async () => {
+  if (shouldRestoreInitialScroll) return;
+  const following = isScrolledToBottom;
+  const anchor = captureScrollAnchor();
+  await nextTick();
+  if (!props.active) { if (following) shouldJumpToLatestOnActivate = true; return; }
+  if (following) scrollToBottom('auto');
+  else { restoreScrollAnchor(anchor); updateScrollState(); }
+});
 
 // Rate-limit the live echo text: an entry's summary changes at most once per
 // WORK_INDICATOR_ECHO_MIN_INTERVAL_MS. State persists across polls; a trailing

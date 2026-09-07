@@ -290,7 +290,7 @@
       :live-feed="agentInspectorLiveFeed"
       :room-identifier="room.identifier"
       :request-version="selectedAgentDetailRequestVersion"
-      :initial-tab="agentInspectorInitialTab"
+      :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
       :managed-sessions="roomManagedAgentSessions"
       :reasoning-sessions="reasoningSessions"
       @close="closeAgentDetail"
@@ -558,7 +558,7 @@ const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
-const agentInspectorInitialTab = ref<"overview" | "work">("overview");
+const agentInspectorInitialTab = ref<"overview" | "work" | "workspace">("overview");
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
 // Cap the retained live-feed tail so a long turn can't grow the renderer
@@ -1976,7 +1976,7 @@ async function openAgentDetailFromParticipant(target: AgentModalTarget): Promise
 }
 
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
-  agentInspectorInitialTab.value = "overview";
+  agentInspectorInitialTab.value = request.target.workspaceSourceMessageId ? "workspace" : "overview";
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
   agentInspectorActionState.value = null;

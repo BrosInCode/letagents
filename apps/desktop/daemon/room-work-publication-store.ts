@@ -1,3 +1,4 @@
+import { applyRoomWorkspaceSchema } from "./room-workspace-store.js";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
@@ -141,6 +142,7 @@ export function applyRoomWorkPublicationSchema(database: DatabaseSync): void {
     for (const definition of schema.slice(1)) database.exec(definition);
   }
   validateRoomWorkPublicationSchema(database);
+  applyRoomWorkspaceSchema(database);
 }
 export function validateRoomWorkPublicationSchema(database: DatabaseSync, allowLegacy = false): void {
   const actual = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL").all(table)

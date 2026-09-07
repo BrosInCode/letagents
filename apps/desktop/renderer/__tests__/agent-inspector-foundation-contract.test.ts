@@ -122,7 +122,7 @@ test("poll completion cannot remain refreshing after activity arrives", () => {
 });
 
 test("action state and compact controls remain entry-scoped and unclipped", () => {
-  assert.match(shell, /function openAgentDetailRequest[\s\S]{0,220}agentInspectorActionState\.value = null/);
+  assert.match(shell, /function openAgentDetailRequest[\s\S]{0,300}agentInspectorActionState\.value = null/);
   assert.match(shell, /:action-state="selectedAgentInspectorActionState"/);
   assert.match(surface, /:compact="compact"/);
   assert.match(actions, /orderedCompactActions\.value\.slice\(0, 2\)/);
