@@ -4,6 +4,13 @@
   <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
+      :organizations="company.organizations.value"
+      :organization-busy="company.busy.value"
+      :organization-error="company.error.value"
+      :company-name="company.selected.value?.login"
+      :company-rooms="company.rooms.value"
+      @choose-organization="chooseOnboardingCompany"
+      @retry-organizations="company.refresh"
       :mcp-state="visibleMcpInstallState"
       :selected-mcp-target-ids="selectedMcpTargetIds"
       :mcp-wizard-step="mcpWizardStep"
@@ -30,7 +37,7 @@
       @poll-auth="pollAuthFlow"
       @cancel-auth="cancelAuthFlow"
       @sign-out="signOut"
-      @continue-to-room="continueToRoomConfirmation"
+      @continue-to-room="firstRunStage = 'organization'"
       @connect-room-auth="startFirstRunRoomAuth"
       @pick-repo="pickRepoRoom"
       @create-room="createFirstRunInviteRoom"
@@ -423,6 +430,7 @@ import {
 } from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
+import { useDesktopOrganizations } from "./composables/useDesktopOrganizations";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
@@ -539,6 +547,7 @@ const mcpInstallFeedback = ref<string | null>(null);
 const setupLoadError = ref<string | null>(null);
 const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
 const firstRunStage = ref<FirstRunWizardStage>("welcome");
+const company = useDesktopOrganizations(authStatus);
 const {
   activeEntry,
   collapsedProjects,
@@ -1369,7 +1378,7 @@ const {
   getRoomIdentifier: () => getAuthRoomIdentifier(),
   isFirstRunGate: () => Boolean(mcpInstallState.value && !mcpInstallState.value.completed),
   onFirstRunAuthorized: async () => {
-    firstRunStage.value = "room";
+    firstRunStage.value = "organization";
   },
   onAuthorized: () => refresh(),
   onSigningOut: clearDesktopSessionState,
@@ -1796,6 +1805,13 @@ const {
   selectedMcpTargetIds,
   setupLoadError,
 });
+
+async function chooseOnboardingCompany(id: string | null): Promise<void> {
+  if (await company.choose(id)) {
+    firstRunRoomSelected.value = false;
+    continueToRoomConfirmation();
+  }
+}
 
 async function startFirstRunRoomAuth(): Promise<void> {
   firstRunStage.value = "github";
