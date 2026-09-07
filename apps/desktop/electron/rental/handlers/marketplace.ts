@@ -2,6 +2,7 @@ import type {
   DesktopRentalMarketplace,
   DesktopRentalMarketplaceProvider,
   DesktopRentalProviderSettingsInput,
+  DesktopRentalRuntimeId,
 } from "../../ipc-types/rental.js";
 import { mapApiListingArray } from "../api-mapper.js";
 import {
@@ -66,6 +67,13 @@ export function registerMarketplaceHandlers(
   register("desktop:rental:get-provider-settings", async () => {
     if (!providerHostManager) return rentalApiUnavailable("Rental provider settings");
     return providerHostManager.getSettings();
+  });
+
+  register("desktop:rental:verify-provider-runtime", async (_event, rawProviderId) => {
+    if (!providerHostManager) return rentalApiUnavailable("Rental runtime verification");
+    const providerId = text(rawProviderId) as DesktopRentalRuntimeId | null;
+    if (!providerId) throw new Error("Choose a local runtime to verify.");
+    return providerHostManager.verifyRuntime(providerId);
   });
 
   register("desktop:rental:update-provider-settings", async (_event, rawInput) => {

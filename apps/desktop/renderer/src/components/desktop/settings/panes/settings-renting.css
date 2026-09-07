@@ -142,6 +142,18 @@
   font-size: 0.78rem;
 }
 
+.settings-renting-runtime-action {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 112px;
+}
+
+.settings-renting-runtime-action .state-pill {
+  white-space: nowrap;
+}
+
 .settings-renting-limits {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr)) auto;

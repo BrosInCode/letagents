@@ -40,6 +40,12 @@ test("preflights disabled runtimes, then publishes provider limits and authentic
     const before = await manager.getSettings();
     assert.ok(before.runtimes.length >= 4);
     assert.ok(before.runtimes.every((runtime) => !runtime.enabled && runtime.authenticated));
+    assert.equal(before.runtimes.find((runtime) => runtime.providerId === "cursor")?.rentalSandboxStatus, "verified");
+    assert.equal(before.runtimes.find((runtime) => runtime.providerId === "codex")?.rentalSandboxStatus, "unsupported");
+    assert.match(
+      before.runtimes.find((runtime) => runtime.providerId === "codex")?.detail || "",
+      /renting is not available in this version/,
+    );
 
     const after = await manager.updateSettings({
       enabled: true,
@@ -66,6 +72,50 @@ test("preflights disabled runtimes, then publishes provider limits and authentic
       permissionProfiles: ["sandboxed_write"],
     }]);
     assert.equal(registration?.hostId, "host_public_local");
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_RENTAL_PROVIDER_SETTINGS_PATH;
+    else process.env.LETAGENTS_RENTAL_PROVIDER_SETTINGS_PATH = previous;
+  }
+});
+
+test("runtime verification bypasses the bounded preflight cache for the selected safe runtime", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-rental-verify-"));
+  const previous = process.env.LETAGENTS_RENTAL_PROVIDER_SETTINGS_PATH;
+  process.env.LETAGENTS_RENTAL_PROVIDER_SETTINGS_PATH = join(directory, "settings.json");
+  const calls = new Map<string, number>();
+  const manager = new RentalProviderHostManager(
+    {
+      async heartbeatProviderHost() {
+        return { ok: true as const, status: 200, body: { host: {} } };
+      },
+    } as never,
+    {
+      async connectIfRunning() { return { generation: 1 }; },
+      async list() { return []; },
+    } as never,
+    () => "host",
+    async (providerId) => {
+      const count = (calls.get(providerId) || 0) + 1;
+      calls.set(providerId, count);
+      return count === 1 && providerId === "cursor"
+        ? { canStart: false, status: "auth_required", detail: "Sign in with Cursor Agent." } as never
+        : { canStart: true, status: "ready", detail: "Verified." } as never;
+    },
+  );
+  try {
+    const before = await manager.getSettings();
+    assert.equal(before.runtimes.find((runtime) => runtime.providerId === "cursor")?.rentalSandboxStatus, "verification_required");
+    assert.equal(calls.get("cursor"), 1);
+
+    const after = await manager.verifyRuntime("cursor");
+    assert.equal(after.runtimes.find((runtime) => runtime.providerId === "cursor")?.rentalSandboxStatus, "verified");
+    assert.equal(calls.get("cursor"), 2);
+    assert.equal(calls.get("codex"), 1, "verification does not rerun unrelated provider probes");
+
+    await assert.rejects(
+      () => manager.verifyRuntime("codex"),
+      /renting is not available in this version/,
+    );
   } finally {
     if (previous === undefined) delete process.env.LETAGENTS_RENTAL_PROVIDER_SETTINGS_PATH;
     else process.env.LETAGENTS_RENTAL_PROVIDER_SETTINGS_PATH = previous;

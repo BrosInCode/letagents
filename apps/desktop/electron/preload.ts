@@ -191,6 +191,7 @@ const api: DesktopApi = {
   rental: {
     getMarketplace: () => ipcRenderer.invoke("desktop:rental:get-marketplace"),
     getProviderSettings: () => ipcRenderer.invoke("desktop:rental:get-provider-settings"),
+    verifyProviderRuntime: (providerId) => ipcRenderer.invoke("desktop:rental:verify-provider-runtime", providerId),
     updateProviderSettings: (input) => ipcRenderer.invoke("desktop:rental:update-provider-settings", input),
     onProviderEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

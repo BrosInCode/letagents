@@ -61,6 +61,22 @@ export class RentalProviderHostManager {
     return this.project(await readRentalProviderSettings());
   }
 
+  async verifyRuntime(providerId: DesktopRentalRuntimeId): Promise<DesktopRentalProviderSettings> {
+    if (!supported.has(providerId)) {
+      throw new Error(`Unsupported rental runtime '${providerId}'.`);
+    }
+    if (!listRentalSafePermissionProfiles(providerId).length) {
+      const provider = listDesktopAgentProviders().find((candidate) => candidate.id === providerId);
+      throw new Error(
+        `${provider?.name || providerId} renting is not available in this version because its workspace sandbox is not verified.`,
+      );
+    }
+    this.preflightCache.delete(providerId);
+    const settings = await readRentalProviderSettings();
+    await this.sync(settings);
+    return this.project(settings);
+  }
+
   async updateSettings(input: DesktopRentalProviderSettingsInput): Promise<DesktopRentalProviderSettings> {
     const settings = await updateRentalProviderSettings(input);
     await this.sync(settings);
@@ -134,14 +150,20 @@ export class RentalProviderHostManager {
       const authenticated = Boolean(check && !["auth_required", "missing_runtime", "error", "config_required"].includes(check.status));
       const rentalProfiles = listRentalSafePermissionProfiles(provider.id);
       const rentalReady = Boolean(check?.canStart && rentalProfiles.length);
+      const rentalSandboxStatus: DesktopRentalProviderRuntime["rentalSandboxStatus"] = !rentalProfiles.length
+        ? "unsupported"
+        : rentalReady
+          ? "verified"
+          : "verification_required";
       return {
         providerId,
         label: provider.name,
         enabled,
         authenticated,
         status: rentalReady ? "ready" : "blocked",
+        rentalSandboxStatus,
         detail: !rentalProfiles.length
-          ? "No verified workspace-rooted rental profile is available for this runtime yet."
+          ? `${provider.name} renting is not available in this version because its workspace sandbox is not verified.`
           : check?.detail || check?.message || (rentalReady ? "Ready in a verified rental sandbox." : "Finish local runtime setup first."),
         permissionProfileIds: rentalProfiles.map((profile) => profile.id),
       };
