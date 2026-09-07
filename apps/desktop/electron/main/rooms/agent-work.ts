@@ -144,7 +144,7 @@ export async function pollDesktopRoomAgentWork(
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
   if (storage.effectiveMode === "local") return { status: "local", response: null };
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
-  const query = cursor ? `?after=${encodeURIComponent(cursor)}&timeout=0` : "?timeout=0";
+  const query = cursor ? `?after=${encodeURIComponent(cursor)}&timeout=0&include_workspace=1` : "?timeout=0&include_workspace=1";
   try {
     const payload = await apiFetch<unknown>(
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-work/poll${query}`,

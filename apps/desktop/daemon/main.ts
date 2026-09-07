@@ -1,3 +1,4 @@
+import { captureWorkspaceChanges } from "./workspace-change-capture.js";
 import { dirname } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
@@ -614,6 +615,13 @@ export class SupervisorDaemon {
         (input) => this.providerCheckpoints.checkpointPreparedTurn(input),
         (agent) => this.roomWorkPublisher?.observeNewSources(agent),
         (agent) => this.providerStreams.settleCursorLifecycleBeforeIdle(agent, this.executionCapture, this.typedLifecycleEffects),
+        async (agent, sourceMessageId) => {
+          const installation = this.providerStreams.currentInstallation(agent.agentId);
+          if (installation?.handle === agent.handle && installation.executionGenerationId === agent.executionGenerationId) {
+            try { this.executionCapture?.flush(installation); } catch { /* Optional capture may already be retired. */ }
+          }
+          await this.roomWorkPublisher?.captureWorkspace(agent, sourceMessageId);
+        },
       ) : null;
     this.readModel = new DaemonReadModel({
       currentDaemonGeneration: () => this.singleton.currentGeneration,
@@ -938,6 +946,10 @@ export class SupervisorDaemon {
       });
       this.typedLifecycleEffects.start();
       this.roomWorkPublisher = RoomWorkPublisher.open(this.stateDatabasePath, {
+        workspaceSummary: async (workAttemptId) => {
+          const attempt = await this.durability.getAttempt(workAttemptId);
+          return captureWorkspaceChanges(attempt.workspace_path, attempt.workspace_identity.resolved_revision);
+        },
         custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
       });
