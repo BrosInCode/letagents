@@ -348,6 +348,16 @@ watch(
   { immediate: true },
 );
 
+// A no-reply turn can add a contribution without adding a chat message.
+watch(() => timelineEntries.value.filter(entry => entry.type === 'contribution').map(entry => entry.id).join('|'), async () => {
+  const following = isScrolledToBottom;
+  const anchor = captureScrollAnchor();
+  await nextTick();
+  if (!props.active) { if (following) shouldJumpToLatestOnActivate = true; return; }
+  if (following) scrollToBottom('auto');
+  else { restoreScrollAnchor(anchor); updateScrollState(); }
+});
+
 // Rate-limit the live echo text: an entry's summary changes at most once per
 // WORK_INDICATOR_ECHO_MIN_INTERVAL_MS. State persists across polls; a trailing
 // timer flushes any summary held back inside the window so the latest value

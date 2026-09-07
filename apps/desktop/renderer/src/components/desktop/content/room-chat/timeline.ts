@@ -23,13 +23,18 @@ export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessag
   let previousDayKey: string | null = null;
   let previousMessage: DesktopRoomMessage | null = null;
 
-  const sources = new Set(messages.map(message => message.id));
+  const sources = new Map(messages.map(message => [message.id, message.timestamp]));
   const contributions = work.filter(entry => {
     const changes = contributionChanges(entry);
     return sources.has(entry.sourceMessageId) && changes && (changes.state !== 'ready' || changes.files.length + changes.hidden_files > 0);
   });
   const ordered = [...messages.map(message => ({ timestamp: message.timestamp, id: message.id, message })),
-    ...contributions.map(work => ({ timestamp: contributionChanges(work)!.captured_at, id: `contribution:${work.attemptId}`, work }))]
+    ...contributions.map(work => {
+      const captured = contributionChanges(work)!.captured_at;
+      const source = sources.get(work.sourceMessageId)!;
+      // A host clock behind the room server must not put a result before its cause.
+      return { timestamp: Date.parse(source) > Date.parse(captured) ? source : captured, id: `contribution:${work.attemptId}`, work };
+    })]
     .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
   for (const item of ordered) {
     const dayKey = messageDayKey(item.timestamp);

@@ -406,6 +406,14 @@ watch(
   },
 );
 
+watch(() => [props.parent.id, ...props.replies.map(reply => reply.id)]
+  .flatMap(source => contributionsFor(source).map(work => work.attemptId)).join('|'), async () => {
+  const body = bodyElement.value;
+  const following = body && body.scrollHeight - body.scrollTop - body.clientHeight < 96;
+  await nextTick();
+  if (following && bodyElement.value && !props.activeSearchMessageId) bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
+});
+
 function displayName(message: DesktopRoomMessage): string {
   return message.agentIdentity?.displayName || parseSenderIdentity(message).displayName;
 }
