@@ -419,3 +419,114 @@ test("recognized Claude room tools never claim completion while pending or faile
     assert.equal(describe("completed"), completed);
   }
 });
+
+test("Live smoothly follows growing content, yields to readers, and cleans up", async () => {
+  const { followAgentLiveScroll } = await import("../src/domain/agent-inspector-live-scroll");
+  const saved = new Map(["window", "Element", "requestAnimationFrame", "cancelAnimationFrame", "ResizeObserver"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
+  let resize: () => void = () => {};
+  let disconnected = false;
+  const motion = { matches: false };
+  const viewport = Object.assign(new EventTarget(), {
+    scrollHeight: 1000, clientHeight: 400, scrollTop: 0, style: { overflowAnchor: "auto" },
+  });
+  // Match the browser's scrollTop clamping, including the initial jump.
+  let top = 0;
+  Object.defineProperty(viewport, "scrollTop", {
+    get: () => top,
+    set: (value: number) => { top = Math.max(0, Math.min(Math.round(value), viewport.scrollHeight - viewport.clientHeight)); },
+  });
+  Object.assign(globalThis, {
+    window: Object.assign(new EventTarget(), { matchMedia: () => motion, getSelection: () => ({ isCollapsed: true }) }),
+    Element: class {},
+    requestAnimationFrame: (callback: FrameRequestCallback) => { frames.set(++nextFrame, callback); return nextFrame; },
+    cancelAnimationFrame: (id: number) => frames.delete(id),
+    ResizeObserver: class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() {}
+      disconnect() { disconnected = true; }
+    },
+  });
+  let time = performance.now();
+  function tick(interval = 16) {
+    time += interval;
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(time);
+    viewport.dispatchEvent(new Event("scroll"));
+  }
+  function settle(interval = 16) {
+    for (let count = 0; frames.size && count < 100; count++) tick(interval);
+    assert.equal(frames.size, 0, "animation settles instead of running forever");
+  }
+  let dispose: (() => void) | undefined;
+  try {
+    dispose = followAgentLiveScroll(viewport as unknown as HTMLElement, {} as HTMLElement);
+    assert.equal(top, 600, "opening Live starts at the latest activity");
+    viewport.scrollHeight += 200;
+    resize(); tick();
+    assert.ok(top > 600 && top < 800, "new activity moves smoothly instead of jumping");
+    for (let index = 0; index < 10; index++) {
+      const previous = top;
+      viewport.scrollHeight += 50;
+      resize(); tick();
+      assert.ok(top > previous, "rapid text deltas do not restart or starve the animation");
+    }
+    settle();
+    assert.ok(Math.abs(top - 1300) < 1);
+
+    viewport.scrollHeight += 100;
+    resize(); settle(8);
+    assert.equal(top, viewport.scrollHeight - viewport.clientHeight, "high-refresh screens settle despite pixel rounding");
+
+    viewport.scrollHeight += 200;
+    resize(); tick();
+    viewport.dispatchEvent(Object.assign(new Event("wheel"), { deltaY: -10 }));
+    assert.equal(frames.size, 0, "upward wheel cancels an in-flight animation immediately");
+    viewport.scrollTop -= 200;
+    viewport.dispatchEvent(new Event("scroll"));
+    const readingTop = top;
+    viewport.scrollHeight += 200;
+    resize(); tick();
+    assert.equal(top, readingTop, "new content leaves the reader's position alone");
+
+    viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight;
+    viewport.dispatchEvent(new Event("scroll"));
+    viewport.scrollHeight += 100;
+    resize(); settle();
+    assert.ok(Math.abs(top - (viewport.scrollHeight - viewport.clientHeight)) < 1, "returning to the bottom resumes following");
+
+    for (const [start, end] of [["pointerdown", "pointerup"], ["touchstart", "touchend"]]) {
+      viewport.dispatchEvent(new Event(start));
+      assert.equal(frames.size, 0);
+      window.dispatchEvent(new Event(end));
+      viewport.scrollHeight += 100;
+      resize(); settle();
+      assert.ok(Math.abs(top - (viewport.scrollHeight - viewport.clientHeight)) < 1, "a click or tap at the bottom does not leave following paused");
+    }
+
+    motion.matches = true;
+    viewport.scrollHeight += 300;
+    resize(); tick();
+    assert.equal(top, viewport.scrollHeight - viewport.clientHeight, "reduced motion follows without animation");
+    viewport.dispatchEvent(Object.assign(new Event("keydown"), { key: "PageUp" }));
+    window.dispatchEvent(new Event("pointerup"));
+    window.dispatchEvent(new Event("touchend"));
+    viewport.scrollHeight += 100;
+    resize();
+    assert.equal(frames.size, 0, "keyboard navigation stays paused even after unrelated outside clicks");
+    dispose(); dispose = undefined;
+    assert.equal(disconnected, true);
+    assert.equal(viewport.style.overflowAnchor, "auto");
+    viewport.scrollTop += 100;
+    viewport.dispatchEvent(new Event("scroll"));
+    assert.equal(frames.size, 0, "unmount removes event listeners and scheduled work");
+  } finally {
+    dispose?.();
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});

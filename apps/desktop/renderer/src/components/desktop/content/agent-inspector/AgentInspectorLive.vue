@@ -1,5 +1,5 @@
 <template>
-  <div class="agent-inspector-live">
+  <div ref="liveElement" class="agent-inspector-live">
     <section class="agent-inspector-live-summary" :data-running="isFollowing">
       <div class="agent-inspector-live-summary-head">
         <span class="agent-inspector-live-summary-dot" aria-hidden="true"></span>
@@ -72,6 +72,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { followAgentLiveScroll } from "../../../../domain/agent-inspector-live-scroll";
 import { formatFullTimestamp } from "../../../../domain/time";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import { canPresentCurrentAgentStream, currentAgentRequest } from "../../../../domain/agent-inspector-live-trace";
@@ -93,6 +94,15 @@ const props = defineProps<{
   resource: AgentInspectorWorkResource;
   activeSourceMessageId: string | null;
 }>();
+
+const liveElement = ref<HTMLElement | null>(null);
+let stopScrollFollowing: (() => void) | undefined;
+onMounted(() => {
+  const content = liveElement.value;
+  const viewport = content?.closest<HTMLElement>(".agent-inspector-scroll-region");
+  if (content && viewport) stopScrollFollowing = followAgentLiveScroll(viewport, content);
+});
+onUnmounted(() => stopScrollFollowing?.());
 
 const canShowCurrent = computed(() => canPresentCurrentAgentStream({ ...props.work, activeSourceMessageId: props.activeSourceMessageId }));
 const currentRequest = computed(() => currentAgentRequest(props.resource, props.activeSourceMessageId));
