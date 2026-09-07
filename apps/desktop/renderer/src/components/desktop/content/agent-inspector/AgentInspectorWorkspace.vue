@@ -1,6 +1,6 @@
 <template>
   <section class="agent-workspace" aria-label="Agent workspace">
-    <div class="agent-workspace-heading"><button v-if="turn" type="button" @click="showFullWorkspace">← Full workspace</button><span v-else>Full workspace</span><button v-if="!turn && selected && latest && selected.revision !== latest.revision || !turn && selected && latest && selected.attemptId !== latest.attemptId" type="button" @click="showFullWorkspace">View newer snapshot</button><span v-if="status !== 'ready'">Updates unavailable</span></div>
+    <div class="agent-workspace-heading"><button v-if="turn" type="button" @click="showFullWorkspace">← Full workspace</button><span v-else>Full workspace</span><button v-if="!turn && latest && selected?.attemptId !== latest.attemptId" type="button" @click="showFullWorkspace">View newer snapshot</button><span v-if="status !== 'ready'">Updates unavailable</span></div>
     <template v-if="snapshot">
       <header class="agent-workspace-context"><h3>{{ turn ? 'Changes during this turn' : 'Changes since workspace started' }}</h3><p><GitBranch :size="13" aria-hidden="true" />{{ snapshot.branch || 'Workspace' }}</p><div><span>{{ snapshot.files.length + snapshot.hidden_files }} files</span><b>+{{ snapshot.additions }}</b><b>−{{ snapshot.deletions }}</b><time :datetime="snapshot.captured_at">Captured {{ formatShortDateTime(snapshot.captured_at) }}</time></div></header>
       <p v-if="turn && summary" class="agent-workspace-summary">{{ summary }}</p>
@@ -16,13 +16,13 @@ import type { DesktopRoomAgentWork } from '../../../../../../electron/ipc-types'
 import { contributionSummary } from '../../../../domain/room-contributions';
 import { formatShortDateTime } from '../../../../domain/time';
 import WorkspaceDiff from './WorkspaceDiff.vue';
-const props = defineProps<{ work: readonly DesktopRoomAgentWork[]; agentKey: string | null; sourceMessageId?: string | null; status: string }>();
+const props = defineProps<{ work: readonly DesktopRoomAgentWork[]; agentKey: string | null; sourceMessageId?: string | null; requestVersion?: number; status: string }>();
 const selected = ref<DesktopRoomAgentWork | null>(null);
 const turn = ref(false);
 const latest = computed(() => props.work.filter(entry => entry.agentKey === props.agentKey && 'workspace' in entry.summary)
   .sort((a, b) => Date.parse('workspace' in b.summary ? b.summary.workspace?.captured_at ?? '' : '') - Date.parse('workspace' in a.summary ? a.summary.workspace?.captured_at ?? '' : ''))[0] ?? null);
 function showFullWorkspace() { turn.value = false; selected.value = latest.value; }
-watch([() => props.agentKey, () => props.sourceMessageId], () => {
+watch([() => props.agentKey, () => props.sourceMessageId, () => props.requestVersion], () => {
   turn.value = Boolean(props.sourceMessageId);
   selected.value = turn.value ? props.work.find(entry => entry.agentKey === props.agentKey && entry.sourceMessageId === props.sourceMessageId) ?? null : latest.value;
 }, { immediate: true });

@@ -36,7 +36,7 @@
       <button id="participant-workspace-tab" type="button" role="tab" :aria-selected="workspaceSelected" :tabindex="workspaceSelected ? 0 : -1" aria-controls="participant-workspace-panel" @click="workspaceSelected = true">Workspace</button>
     </div>
     <AgentInspectorWorkspace v-if="workspaceSelected" id="participant-workspace-panel" class="agent-inspector-scroll-region" role="tabpanel" aria-labelledby="participant-workspace-tab"
-      :work="roomAgentWork ?? []" :agent-key="workspaceAgentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" />
+      :work="roomAgentWork ?? []" :agent-key="workspaceAgentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :request-version="requestVersion" />
     <div v-show="!workspaceSelected" id="participant-overview-panel" role="tabpanel" aria-labelledby="participant-overview-tab" class="agent-inspector-participant-overview">
     <div class="agent-inspector-status-copy">
       <strong>{{ projection.heading }}</strong>

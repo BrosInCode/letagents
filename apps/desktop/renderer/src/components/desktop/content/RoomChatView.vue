@@ -153,6 +153,7 @@
       ></div>
 
       <RoomThreadPanel
+        v-bind="{ roomAgentWork, roomAgentWorkStatus }"
         v-if="activeThreadPanelParent"
         @message-info="openMessageInfo"
         :parent="activeThreadPanelParent"

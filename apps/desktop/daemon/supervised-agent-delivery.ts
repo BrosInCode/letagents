@@ -191,8 +191,9 @@ export class SupervisedAgentDelivery {
     private readonly checkpointPreparedTurn?: SupervisedPreparedTurnCheckpointer,
     private readonly observeNewSources?: (agent: SupervisedIngressAgent) => ((sourceMessageIds: readonly string[]) => void) | undefined,
     private readonly settleLifecycleBeforeIdle?: SupervisedLifecycleSettler,
-    private readonly observeSettledWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summary?: string | null) => Promise<void>,
-    private readonly observeStartingWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<void>,
+    private readonly observeSettledWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summary?: string | null, baseline?: string | null) => Promise<void>,
+    private readonly observeStartingWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<string | null | void>,
+    private readonly releaseWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<void>,
   ) {}
 
   /**
@@ -1078,10 +1079,11 @@ export class SupervisedAgentDelivery {
     let interruptDispositionForFinalizer: "cancelled" | "resume" | "freeze" | null = null;
     if (item.provider_turn_id) markProviderTurnDurablyStarted();
     let workspaceObserved = false;
+    let workspaceBaseline: string | null = null;
     const observeWorkspace = async (summary?: string | null) => {
       if (workspaceObserved || item.provider_turn_id) return; // Recovery never reconstructs an old filesystem boundary.
       workspaceObserved = true;
-      try { await this.observeSettledWorkspace?.(agent, item.source_message_id, item.inbox_item_id, summary); } catch { /* optional review */ }
+      try { await this.observeSettledWorkspace?.(agent, item.source_message_id, item.inbox_item_id, summary, workspaceBaseline); } catch { /* optional review */ }
     };
     let providerCallEntered = false;
     const recovering = Boolean(item.provider_turn_id);
@@ -1400,7 +1402,7 @@ export class SupervisedAgentDelivery {
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         if (!baselineObserved) {
           baselineObserved = true;
-          try { await this.observeStartingWorkspace?.(agent, item.source_message_id, item.inbox_item_id); } catch { /* Optional observation. */ }
+          try { workspaceBaseline = await this.observeStartingWorkspace?.(agent, item.source_message_id, item.inbox_item_id) || null; } catch { /* Optional observation. */ }
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
@@ -1682,6 +1684,7 @@ export class SupervisedAgentDelivery {
       }
       await retryFailure({ domain: "pre_dispatch", error: message });
     } finally {
+      try { await this.releaseWorkspace?.(agent, item.source_message_id, item.inbox_item_id); } catch { /* Optional retention cleanup. */ }
       controller.signal.removeEventListener("abort", relayPumpAbort);
       const abort = this.activeTurnAborts.get(agent.agentId);
       if (abort?.inboxItemId === item.inbox_item_id && abort.controller === turnController) this.activeTurnAborts.delete(agent.agentId);

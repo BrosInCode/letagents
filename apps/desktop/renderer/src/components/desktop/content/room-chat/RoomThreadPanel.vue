@@ -76,6 +76,7 @@
         @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
       />
 
+      <RoomContribution v-for="work in contributionsFor(parent.id)" :key="work.attemptId" :work="work" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="$emit('open-agent', workspaceAgentTarget($event, participants))" />
       <div class="room-thread-divider">
         <span>Replies</span>
       </div>
@@ -120,6 +121,7 @@
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         />
+        <RoomContribution v-for="work in contributionsFor(reply.id)" :key="work.attemptId" :work="work" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="$emit('open-agent', workspaceAgentTarget($event, participants))" />
       </template>
 
       <div v-if="!replies.length" class="room-thread-empty" data-testid="room-thread-empty">
@@ -216,12 +218,15 @@
 </template>
 
 <script setup lang="ts">
+import RoomContribution from "./RoomContribution.vue";
+import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
 import { computed, nextTick, ref, watch } from "vue";
 import { MessageSquarePlus, Paperclip, X } from "@lucide/vue";
 import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
   DesktopRoomMessage,
+  DesktopRoomAgentWork,
   DesktopRoomMessageThreadSummary,
   DesktopStagedAttachment,
   DesktopSupervisorManifestEntry,
@@ -242,7 +247,15 @@ import {
 } from "./thread-utils";
 import type { ThreadIndicatorSummary } from "./thread-utils";
 
+function contributionsFor(source: string) {
+  return (props.roomAgentWork ?? []).filter(work => {
+    const changes = contributionChanges(work);
+    return work.sourceMessageId === source && changes && (changes.state !== 'ready' || changes.files.length + changes.hidden_files > 0);
+  });
+}
 const props = defineProps<{
+  roomAgentWork?: DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
   parent: DesktopRoomMessage;
   initialThreadSummary: DesktopRoomMessageThreadSummary | null;
   replies: DesktopRoomMessage[];

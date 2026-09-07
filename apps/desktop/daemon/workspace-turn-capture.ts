@@ -10,7 +10,7 @@ import type { WorkspaceChangeSummary } from '../../../shared/workspace-change-su
 const environment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 function git(cwd: string, args: string[], signal: AbortSignal, index?: string, input?: string | Buffer): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', ['--no-optional-locks', ...args], {
+    const child = execFile('git', ['-c', 'core.hooksPath=/dev/null', '--no-optional-locks', ...args], {
       cwd, signal, timeout: 5_000, maxBuffer: 4 * 8 * 1024 * 1024, encoding: 'utf8',
       env: { ...environment(), GIT_TERMINAL_PROMPT: '0', ...(index ? { GIT_INDEX_FILE: index } : {}) },
     }, (error, stdout) => error ? reject(error) : resolve(stdout));

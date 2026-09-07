@@ -84,24 +84,25 @@ export class RoomWorkPublisher {
   }
 
   /** Called only at the native pre-dispatch boundary, never while a message is queued. */
-  async beginWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string): Promise<void> {
-    if (this.unavailable() || !this.options.workspaceLocation) return;
+  async beginWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string): Promise<string | null> {
+    if (this.unavailable() || !this.options.workspaceLocation) return null;
     const context = this.captureAuthority(agent, sourceMessageId);
-    if (!context) return;
+    if (!context) return null;
     const identity = { ...agent, sourceMessageId, inboxItemId };
     try {
-      if (!this.workspaces.begin(identity)) return;
+      if (!this.workspaces.begin(identity)) return null;
       const location = await this.options.workspaceLocation(agent.workAttemptId);
       const tree = await captureWorkspaceTree(location.path, JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]));
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
-      if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return;
+      if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return null;
       this.workspaces.setBaseline(identity, tree);
-    } catch { this.report("storage_unavailable"); }
+      return tree;
+    } catch { this.report("storage_unavailable"); return null; }
   }
 
   /** Save immutable settled bytes even when delayed native execution evidence isn't ready yet. */
-  async captureWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summaryText?: string | null): Promise<void> {
+  async captureWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summaryText?: string | null, invocationBaseline: string | null = null): Promise<void> {
     if (this.unavailable() || !this.options.workspaceLocation) return;
     const context = this.captureAuthority(agent, sourceMessageId);
     if (!context || context.record.summary?.workspace || this.workspaces.settled(agent.agentId, agent.roomId, sourceMessageId)) return;
@@ -109,7 +110,7 @@ export class RoomWorkPublisher {
     try {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
-      const pair = await captureWorkspacePair(location.path, location.revision, this.workspaces.baseline(identity), ref);
+      const pair = await captureWorkspacePair(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref);
       pair.contribution.summary = summaryText?.trim().slice(0, 400) || null;
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
@@ -126,6 +127,17 @@ export class RoomWorkPublisher {
       this.changed(agent.agentId);
       await releaseWorkspaceTree(location.path, ref);
     } catch { this.report("storage_unavailable"); }
+  }
+
+  /** Release only our private retention refs, including Stop, recovery and fencing exits. */
+  async releaseWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string): Promise<void> {
+    if (!this.options.workspaceLocation) return;
+    try {
+      const location = await this.options.workspaceLocation(agent.workAttemptId);
+      const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
+      await releaseWorkspaceTree(location.path, ref);
+      await releaseWorkspaceTree(location.path, `${ref}:settled`);
+    } catch { /* Optional retention cleanup cannot change delivery outcomes. */ }
   }
 
   /** Capture supplies only a postcommit hint; no SQL or HTTP runs on its stack. */

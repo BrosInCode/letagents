@@ -1,6 +1,7 @@
 import { parseWorkspaceChangeSummary } from './workspace-change-summary.mjs';
 // v1 is numeric execution evidence. v2 additionally carries a bounded,
-// deliberately room-visible workspace review snapshot.
+// deliberately room-visible workspace review snapshot. v3 separates changes
+// during one turn from the cumulative workspace, with an optional public summary.
 export const ROOM_WORK_STATES = [
   "active", "completed", "completed_no_reply", "failed", "interrupted", "lost", "unknown",
 ];

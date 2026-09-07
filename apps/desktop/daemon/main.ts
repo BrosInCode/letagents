@@ -614,14 +614,15 @@ export class SupervisorDaemon {
         (input) => this.providerCheckpoints.checkpointPreparedTurn(input),
         (agent) => this.roomWorkPublisher?.observeNewSources(agent),
         (agent) => this.providerStreams.settleCursorLifecycleBeforeIdle(agent, this.executionCapture, this.typedLifecycleEffects),
-        async (agent, sourceMessageId, inboxItemId, summary) => {
+        async (agent, sourceMessageId, inboxItemId, summary, baseline) => {
           const installation = this.providerStreams.currentInstallation(agent.agentId);
           if (installation?.handle === agent.handle && installation.executionGenerationId === agent.executionGenerationId) {
             try { this.executionCapture?.flush(installation); } catch { /* Optional capture may already be retired. */ }
           }
-          await this.roomWorkPublisher?.captureWorkspace(agent, sourceMessageId, inboxItemId, summary);
+          await this.roomWorkPublisher?.captureWorkspace(agent, sourceMessageId, inboxItemId, summary, baseline);
         },
-        async (agent, source, inbox) => { await this.roomWorkPublisher?.beginWorkspace(agent, source, inbox); },
+        async (agent, source, inbox) => this.roomWorkPublisher?.beginWorkspace(agent, source, inbox),
+        async (agent, source, inbox) => { await this.roomWorkPublisher?.releaseWorkspace(agent, source, inbox); },
       ) : null;
     this.readModel = new DaemonReadModel({
       currentDaemonGeneration: () => this.singleton.currentGeneration,
@@ -946,10 +947,8 @@ export class SupervisorDaemon {
       });
       this.typedLifecycleEffects.start();
       this.roomWorkPublisher = RoomWorkPublisher.open(this.stateDatabasePath, {
-        workspaceLocation: async (workAttemptId) => {
-          const attempt = await this.durability.getAttempt(workAttemptId);
-          return { path: attempt.workspace_path, revision: attempt.workspace_identity.resolved_revision };
-        },
+        workspaceLocation: (id) => this.durability.getAttempt(id).then(({ workspace_path: path, workspace_identity }) =>
+          ({ path, revision: workspace_identity.resolved_revision })),
         custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
       });

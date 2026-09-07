@@ -4454,7 +4454,8 @@ test('every provider waits for the workspace snapshot before advancing to its ne
         if (source === '1') { entered.resolve(); await release.promise; }
         // Optional review failure must not retry the agent's completed work.
         if (source === '2') throw new Error('snapshot unavailable');
-      }, async (_agent, source) => { events.push(`baseline:${source}`); });
+      }, async (_agent, source) => { events.push(`baseline:${source}`); return 'a'.repeat(40); },
+      async (_agent, source) => { events.push(`release:${source}`); });
       try {
         const currentAgent = { ...agent, provider: candidate };
         await delivery.pump(currentAgent);
@@ -4463,7 +4464,7 @@ test('every provider waits for the workspace snapshot before advancing to its ne
         await entered.promise;
         assert.deepEqual(events, ['baseline:1', 'turn:1', 'snapshot:1']);
         release.resolve(); await pumping;
-        assert.deepEqual(events, ['baseline:1', 'turn:1', 'snapshot:1', 'baseline:2', 'turn:2', 'snapshot:2']);
+        assert.deepEqual(events, ['baseline:1', 'turn:1', 'snapshot:1', 'release:1', 'baseline:2', 'turn:2', 'snapshot:2', 'release:2']);
         assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.state), ['acknowledged_no_reply', 'acknowledged_no_reply']);
       } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); }
     }

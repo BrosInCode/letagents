@@ -327,14 +327,14 @@ for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const
     const reads: string[] = [];
     f.options.workspaceLocation = async workAttemptId => { reads.push(workAttemptId); return f.location; };
     f.publisher.observeNewSources(f.agent)?.(['msg_1']);
-    await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+    const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
     reads.length = 0;
     await writeFile(join(f.location.path, 'app.ts'), 'new work\n');
     const attemptId = f.captureMessage();
     await f.publisher.flush();
     assert.equal(reads.length, 0, "source changes are captured at completion, not on every stream delta");
     f.fact(1, { state: "terminal", turnOutcome: "completed" });
-    await f.publisher.captureWorkspace(f.agent, "msg_1", "inbox-1");
+    await f.publisher.captureWorkspace(f.agent, "msg_1", "inbox-1", null, baseline);
     f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attemptId);
     f.publisher.changed("agent"); await f.publisher.flush();
     assert.deepEqual(reads, ["workspace"]);
@@ -389,9 +389,9 @@ test('settled workspace bytes survive restart before execution evidence arrives'
   const f = await fixture(t);
   f.options.workspaceLocation = async () => f.location;
   f.publisher.observeNewSources(f.agent)?.(['msg_1']);
-  await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
   await writeFile(join(f.location.path, 'app.ts'), 'this turn\n');
-  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', 'Updated the application');
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', 'Updated the application', baseline);
   assert.equal(f.row().summary, null, 'no invented execution evidence is uploaded');
   f.restart();
   await writeFile(join(f.location.path, 'app.ts'), 'later unrelated edit\n');
@@ -400,7 +400,7 @@ test('settled workspace bytes survive restart before execution evidence arrives'
   assert.equal(f.row().summary?.version, 3);
   assert.match(f.row().summary!.contribution!.changes.patch, /\+this turn/);
   assert.doesNotMatch(f.row().summary!.workspace!.patch, /later unrelated edit/);
-  assert.equal(f.row().summary!.contribution!.summary, 'Updated the application');
+  assert.equal(f.row().summary!.contribution!.summary, 'Updated the application', baseline);
 });
 
 test('a second dispatch never reuses an ambiguous first baseline', async t => {
@@ -427,4 +427,31 @@ test('authority replacement during a workspace read cannot attribute successor e
   };
   await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
   assert.equal(f.row().summary, null);
+});
+
+test('failed retry invalidation cannot revive a baseline from an earlier invocation', async t => {
+  const f = await fixture(t);
+  f.options.workspaceLocation = async () => f.location;
+  f.captureMessage();
+  const old = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.ok(old);
+  f.db.exec("CREATE TRIGGER fail_baseline_invalidation BEFORE UPDATE OF baseline ON room_workspace_captures BEGIN SELECT RAISE(ABORT,'storage failure'); END");
+  const retry = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.equal(retry, null);
+  assert.equal(f.db.prepare('SELECT baseline FROM room_workspace_captures').get()?.baseline, old);
+  await writeFile(join(f.location.path, 'app.ts'), 'retry edits\n');
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, retry);
+  assert.equal(f.row().summary!.contribution!.changes.state, 'unavailable');
+});
+
+test('retained trees can be released after observation authority has closed', async t => {
+  const f = await fixture(t);
+  f.options.workspaceLocation = async () => f.location;
+  f.captureMessage();
+  await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  const refs = () => execFileSync('git', ['for-each-ref', '--format=%(refname)', 'refs/letagents/workspace-review/'], { cwd: f.location.path, encoding: 'utf8' }).trim();
+  assert.ok(refs());
+  f.options.isClosing = () => true;
+  await f.publisher.releaseWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.equal(refs(), '');
 });

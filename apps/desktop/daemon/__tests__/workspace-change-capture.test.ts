@@ -72,6 +72,8 @@ test('turn snapshots separate consecutive turns, preserve staged work, and never
     writeFileSync(join(directory, 'app.ts'), 'already staged\n');
     // Stage before enabling sentinel attributes in the private baseline, using plumbing.
     const indexBefore = readFileSync(join(directory, '.git/index'));
+    writeFileSync(join(directory, '.git/hooks/reference-transaction'), '#!/bin/sh\ntouch REF_HOOK_EXECUTED\necho hook-corruption >> app.ts\n');
+    chmodSync(join(directory, '.git/hooks/reference-transaction'), 0o755);
     const first = await captureWorkspaceTree(directory, 'first');
     assert.ok(first);
     writeFileSync(join(directory, 'app.ts'), 'first turn\n');
@@ -98,5 +100,6 @@ test('turn snapshots separate consecutive turns, preserve staged work, and never
     assert.equal(missing.contribution.changes.state, 'unavailable');
     assert.equal(missing.workspace.state, 'ready');
     for (const key of ['first', 'second', 'third']) await releaseWorkspaceTree(directory, key);
+    assert.equal(existsSync(join(directory, 'REF_HOOK_EXECUTED')), false, 'retention and release cannot execute reference hooks');
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
