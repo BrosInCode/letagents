@@ -610,7 +610,7 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
   });
 }
 
-function reusableDesktopSupervisorGrant(input: {
+function matchingDesktopSupervisorGrantScope(input: {
   existing: Awaited<ReturnType<typeof readDesktopSupervisorGrantForAgent>>;
   agentKey: string;
   entryId: string;
@@ -622,8 +622,6 @@ function reusableDesktopSupervisorGrant(input: {
   if (!existing || existing.entryId !== input.entryId) return false;
   const metadata = existing.metadata;
   if (metadata.hostId !== input.hostId || metadata.installationId !== input.installationId) return false;
-  if (!Number.isFinite(new Date(metadata.expiresAt).getTime())
-    || new Date(metadata.expiresAt).getTime() <= Date.now()) return false;
   if (metadata.allowedAgentKeys.length !== 1) return false;
   try {
     if (canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== input.agentKey) return false;
@@ -862,9 +860,11 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   // being repaired.
   return withAgentGrantLifecycle(entryId, async () => {
     const existing = await readDesktopSupervisorGrantForAgent(agentKey, { storage });
-    if (!input.forceReprovision && existing && reusableDesktopSupervisorGrant({
+    const sameScope = matchingDesktopSupervisorGrantScope({
       existing, agentKey, entryId, hostId, installationId, allowedRoomIds,
-    })) {
+    });
+    if (!input.forceReprovision && !input.sourceAgentSessionId && existing && sameScope
+      && Date.parse(existing.metadata.expiresAt) > Date.now()) {
       return {
         metadata: existing.metadata,
         authority: existing.authority,
@@ -883,7 +883,7 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
         await ensureExactWorkerSessionAndGrantRevoked({
           entryId, agentKey, grant: existing, agentSessionId: input.sourceAgentSessionId,
         }, { ...options, storage, apiFetch: request });
-      } else {
+      } else if (!sameScope) {
         // Preserve the old encrypted mapping until a validated replacement is
         // durably written. A crash after DELETE therefore retries the exact
         // scope and recovers an upserted grant instead of wedging on 409.
@@ -895,6 +895,9 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
       }
     }
 
+    // Exact-scope owner provisioning already rotates the grant in place,
+    // including after expiry or a lost handoff response. Revoking it first
+    // would end the live worker session and strand its task/review leases.
     const response = await provisionWithLostResponseRecovery(request, {
       host_id: hostId,
       installation_id: installationId,
@@ -910,8 +913,9 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
         || canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== agentKey) {
         throw new Error("The provisioned desktop grant was not scoped to the requested agent entry.");
       }
-      const expectedAuthority = input.expectedAuthority
-        ? normalizeAuthority(input.expectedAuthority)
+      const expected = input.expectedAuthority ?? (sameScope ? existing?.authority : null);
+      const expectedAuthority = expected
+        ? normalizeAuthority(expected)
         : null;
       if (expectedAuthority
         && (authority.ownerAccountId !== expectedAuthority.ownerAccountId
@@ -927,7 +931,11 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
         lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
       };
     } catch (error) {
-      await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
+      // A failed Keychain write must leave an existing recovered grant
+      // recoverable by another exact-scope POST, not terminate its worker.
+      if (response.grant_id !== existing?.metadata.grantId) {
+        await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
+      }
       throw error;
     }
   });

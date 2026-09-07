@@ -622,6 +622,8 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
     modelID: "qwen/qwen3-coder",
   });
   assert.match(JSON.stringify(prompt.parts), /daemon-owned room inbox item/);
+  assert.match(JSON.stringify(prompt.parts), /chat reply publication does not publish code or create PRs/);
+  assert.match(JSON.stringify(prompt.parts), /standing merge approval/);
   assert.match(JSON.stringify(prompt.parts), /GitHub webfetch 404.*gh using its existing authentication/);
   assert.match(JSON.stringify(prompt.parts), /explicit git fetch.*FETCH_HEAD/);
   assert.doesNotMatch(JSON.stringify(prompt.parts), /durable charter/i);

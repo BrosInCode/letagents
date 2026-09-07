@@ -1,3 +1,4 @@
+import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -294,8 +295,7 @@ function userStreamJsonLine(text: string, uuid?: string): string {
 
 export function boundedClaudeRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
-    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
-    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     `If no response should be published, return exactly ${CLAUDE_NO_ROOM_REPLY_SENTINEL} with no other text.`,
