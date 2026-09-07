@@ -148,7 +148,7 @@ test("the diagnostics tab is lazy and participates in roving Home/End tab behavi
   assert.match(source, /v-else id="agent-inspector-diagnostics-panel"/);
   assert.match(source, /<button id="agent-inspector-diagnostics-tab"/);
   // The Live tab sits between Overview and Work; Diagnostics stays the End target.
-  assert.match(source, /\["overview", "live", "work", "settings", "diagnostics"\]/);
+  assert.match(source, /\["overview", "live", "work", "workspace", "settings", "diagnostics"\]/);
   assert.match(source, /event\.key === 'End' \? 'diagnostics'/);
 });
 

@@ -23,6 +23,7 @@
 
         <RoomMessageViewport
           ref="messageViewport"
+          v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
           :active-search-message-id="activeTimelineMessageId"
           :active-thread-parent-id="activeThreadParentId"
           :has-older-messages="hasOlderMessages"
@@ -65,7 +66,6 @@
           @scroll-position="emit('scroll-position', $event)"
         />
 
-        <RoomWorkspaceChanges :work="roomAgentWork ?? []" :truncated="roomAgentWorkTruncated" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" :room-identifier="roomIdentifier" />
 
         <div
           v-if="roomLoading"
@@ -153,6 +153,7 @@
       ></div>
 
       <RoomThreadPanel
+        v-bind="{ roomAgentWork, roomAgentWorkStatus }"
         v-if="activeThreadPanelParent"
         @message-info="openMessageInfo"
         :parent="activeThreadPanelParent"
@@ -210,6 +211,7 @@
 </template>
 
 <script setup lang="ts">
+import { workspaceAgentTarget } from "../../../domain/room-contributions";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import type { CSSProperties } from "vue";
 import type {
@@ -234,7 +236,6 @@ import {
   isGitHubRoomMessage,
   isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
-import RoomWorkspaceChanges from "./room-chat/RoomWorkspaceChanges.vue";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";

@@ -191,7 +191,9 @@ export class SupervisedAgentDelivery {
     private readonly checkpointPreparedTurn?: SupervisedPreparedTurnCheckpointer,
     private readonly observeNewSources?: (agent: SupervisedIngressAgent) => ((sourceMessageIds: readonly string[]) => void) | undefined,
     private readonly settleLifecycleBeforeIdle?: SupervisedLifecycleSettler,
-    private readonly observeSettledWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string) => Promise<void>,
+    private readonly observeSettledWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summary?: string | null, baseline?: string | null) => Promise<void>,
+    private readonly observeStartingWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<string | null | void>,
+    private readonly releaseWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<void>,
   ) {}
 
   /**
@@ -1077,10 +1079,11 @@ export class SupervisedAgentDelivery {
     let interruptDispositionForFinalizer: "cancelled" | "resume" | "freeze" | null = null;
     if (item.provider_turn_id) markProviderTurnDurablyStarted();
     let workspaceObserved = false;
-    const observeWorkspace = async () => {
-      if (workspaceObserved) return;
+    let workspaceBaseline: string | null = null;
+    const observeWorkspace = async (summary?: string | null) => {
+      if (workspaceObserved || item.provider_turn_id) return; // Recovery never reconstructs an old filesystem boundary.
       workspaceObserved = true;
-      try { await this.observeSettledWorkspace?.(agent, item.source_message_id); } catch { /* optional review */ }
+      try { await this.observeSettledWorkspace?.(agent, item.source_message_id, item.inbox_item_id, summary, workspaceBaseline); } catch { /* optional review */ }
     };
     let providerCallEntered = false;
     const recovering = Boolean(item.provider_turn_id);
@@ -1394,6 +1397,16 @@ export class SupervisedAgentDelivery {
         }
         await this.settleLifecycleBeforeIdle(agent);
       };
+      let baselineObserved = false;
+      const beforeDispatch = async () => {
+        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
+        if (!baselineObserved) {
+          baselineObserved = true;
+          try { workspaceBaseline = await this.observeStartingWorkspace?.(agent, item.source_message_id, item.inbox_item_id) || null; } catch { /* Optional observation. */ }
+        }
+        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
+        await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
+      };
       providerCallEntered = true;
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
@@ -1406,18 +1419,8 @@ export class SupervisedAgentDelivery {
         activation: item.activation,
         actionId: item.action_id,
         observedContext,
-      }, { beforeNativeDispatch: async () => {
-        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
-        // The provider cannot call turn/start until this durable causal edge
-        // has committed. Dispatching remains truthful until its exact native
-        // turn id has also been checkpointed below.
-        await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
-      }, markDispatched: async () => {
-        // Compatibility only for a pre-checkpoint adapter during upgrade. It
-        // retains the truthful activity projection but cannot replace the
-        // exact turn-id callback implemented by the bounded-turn adapter.
-        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
-        await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
+      }, { beforeNativeDispatch: beforeDispatch, markDispatched: async () => {
+        await beforeDispatch();
         setActive("responding");
       }, checkpointTurnStarted: async (turnId) => {
         // A provider that already entered its native operation may receive an
@@ -1479,7 +1482,7 @@ export class SupervisedAgentDelivery {
       const { acceptedResult: result } = await checkpointTerminalResult(providerResult);
       // Optional review evidence is captured before another turn can mutate this workspace.
       // Failure must not change the provider result or cause the turn to be rerun.
-      await observeWorkspace();
+      await observeWorkspace(result.text);
       const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
       const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
       if (!await this.hasExecutionAuthority(agent, turnController)) return;
@@ -1553,7 +1556,7 @@ export class SupervisedAgentDelivery {
       const acceptedTerminal = persistedAcceptedTerminal(current.outcome);
       // Some adapters commit a terminal result and then reject during cleanup.
       // Their workspace is settled too; observe it before advancing the FIFO.
-      if ((nativeFailure || acceptedTerminal) && await this.hasLaneAuthority(agent, controller)) await observeWorkspace();
+      if ((nativeFailure || acceptedTerminal) && await this.hasLaneAuthority(agent, controller)) await observeWorkspace(acceptedTerminal?.kind === "reply" ? acceptedTerminal.text : null);
       if (nativeFailure) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_failed", {
@@ -1681,6 +1684,7 @@ export class SupervisedAgentDelivery {
       }
       await retryFailure({ domain: "pre_dispatch", error: message });
     } finally {
+      try { await this.releaseWorkspace?.(agent, item.source_message_id, item.inbox_item_id); } catch { /* Optional retention cleanup. */ }
       controller.signal.removeEventListener("abort", relayPumpAbort);
       const abort = this.activeTurnAborts.get(agent.agentId);
       if (abort?.inboxItemId === item.inbox_item_id && abort.controller === turnController) this.activeTurnAborts.delete(agent.agentId);

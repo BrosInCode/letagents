@@ -10,13 +10,13 @@ const execute = promisify(execFile);
 async function git(cwd: string, args: string[], limit = 4 * 1024 * 1024): Promise<string> {
   const result = await execute('git', ['--no-optional-locks', ...args], {
     cwd, encoding: 'utf8', timeout: 5_000, maxBuffer: limit,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))), GIT_TERMINAL_PROMPT: '0' },
   });
   return result.stdout;
 }
 
 /** Reads the actual provider workspace; never stages, commits, or changes its index. */
-export async function captureWorkspaceChanges(workspace: string, startingRevision: string | null): Promise<WorkspaceChangeSummary> {
+export async function captureWorkspaceChanges(workspace: string, startingRevision: string | null, settledTree?: string): Promise<WorkspaceChangeSummary> {
   const empty = (state: WorkspaceChangeSummary['state']): WorkspaceChangeSummary => ({
     captured_at: new Date().toISOString(), branch: null, base_revision: null, state,
     files: [], additions: 0, deletions: 0, hidden_files: 0, patch: '', patch_truncated: false,
@@ -26,13 +26,14 @@ export async function captureWorkspaceChanges(workspace: string, startingRevisio
   try {
     if (startingRevision !== null && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(startingRevision)) return empty('unavailable');
     const branch = await git(workspace, ['symbolic-ref', '--quiet', '--short', 'HEAD']).then(value => value.trim(), () => null);
-    const base = await git(workspace, ['rev-parse', '--verify', `${startingRevision ?? 'HEAD'}^{commit}`])
+    if (settledTree && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(settledTree)) return empty('unavailable');
+    const base = await git(workspace, ['rev-parse', '--verify', `${startingRevision ?? 'HEAD'}^{tree}`])
       .then(value => value.trim(), error => { if (startingRevision) throw error; return null; });
     const diffArgs = ['--no-ext-diff', '--no-textconv', '--no-color', '-M'];
     const [names, stats, untracked] = await Promise.all([
-      base ? git(workspace, ['diff', ...diffArgs, '--name-status', '-z', base, '--']) : Promise.resolve(''),
-      base ? git(workspace, ['diff', ...diffArgs, '--numstat', '-z', base, '--']) : Promise.resolve(''),
-      git(workspace, ['ls-files', '--others', '--exclude-standard', ...(base ? [] : ['--cached']), '-z']),
+      base ? git(workspace, ['diff', ...diffArgs, '--name-status', '-z', base, ...(settledTree ? [settledTree] : []), '--']) : Promise.resolve(''),
+      base ? git(workspace, ['diff', ...diffArgs, '--numstat', '-z', base, ...(settledTree ? [settledTree] : []), '--']) : Promise.resolve(''),
+      settledTree ? Promise.resolve('') : git(workspace, ['ls-files', '--others', '--exclude-standard', ...(base ? [] : ['--cached']), '-z']),
     ]);
     const files = new Map<string, WorkspaceChangedFile>();
     const nameParts = names.split('\0');
@@ -59,7 +60,7 @@ export async function captureWorkspaceChanges(workspace: string, startingRevisio
     let patch = '';
     let truncated = false;
     if (base) {
-      try { patch = await git(workspace, ['diff', ...diffArgs, '--unified=3', base, '--'], WORKSPACE_PATCH_LIMIT); }
+      try { patch = await git(workspace, ['diff', ...diffArgs, '--unified=3', base, ...(settledTree ? [settledTree] : []), '--'], WORKSPACE_PATCH_LIMIT); }
       catch (error) {
         const failure = error as { code?: string; stdout?: string };
         if (failure.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw error;
@@ -100,7 +101,7 @@ export async function captureWorkspaceChanges(workspace: string, startingRevisio
       } else truncated = true;
     }
     const all = [...files.values()];
-    const result = parseWorkspaceChangeSummary({ ...empty('ready'), branch, base_revision: base,
+    const result = parseWorkspaceChangeSummary({ ...empty('ready'), branch, base_revision: startingRevision ?? base,
       files: all.slice(0, WORKSPACE_FILE_LIMIT), additions: all.reduce((n, file) => n + file.additions, 0),
       deletions: all.reduce((n, file) => n + file.deletions, 0), hidden_files: Math.max(0, all.length - WORKSPACE_FILE_LIMIT),
       patch: patch.slice(0, WORKSPACE_PATCH_LIMIT), patch_truncated: truncated || patch.length > WORKSPACE_PATCH_LIMIT,

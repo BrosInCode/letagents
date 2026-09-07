@@ -3,7 +3,7 @@
     ref="surfaceElement"
     class="agent-inspector-surface"
     :data-compact="compact"
-    :data-state="projection.overallState"
+    :data-state="projection.overallState" :data-tab="selectedTab"
     :role="compact ? 'dialog' : 'complementary'"
     :aria-modal="compact ? 'true' : undefined"
     aria-labelledby="agent-inspector-title"
@@ -15,7 +15,7 @@
         <div>
           <div class="agent-inspector-name-line">
             <h2 id="agent-inspector-title">{{ projection.displayName }}</h2>
-            <span class="agent-inspector-state-label" :data-state="projection.overallState">
+            <span class="agent-inspector-state-label" :data-state="projection.overallState" :data-tab="selectedTab">
               <span aria-hidden="true"></span>{{ projection.overallLabel }}
             </span>
           </div>
@@ -58,6 +58,7 @@
       <button ref="overviewTab" id="agent-inspector-overview-tab" type="button" role="tab" :aria-selected="selectedTab === 'overview'" aria-controls="agent-inspector-overview-panel" :tabindex="selectedTab === 'overview' ? 0 : -1" @click="selectTab('overview')">Overview</button>
       <button id="agent-inspector-live-tab" type="button" role="tab" :aria-selected="selectedTab === 'live'" aria-controls="agent-inspector-live-panel" :tabindex="selectedTab === 'live' ? 0 : -1" @click="selectTab('live')">Live</button>
       <button id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
+      <button id="agent-inspector-workspace-tab" type="button" role="tab" :aria-selected="selectedTab === 'workspace'" aria-controls="agent-inspector-workspace-panel" :tabindex="selectedTab === 'workspace' ? 0 : -1" @click="selectTab('workspace')">Workspace</button>
       <button id="agent-inspector-settings-tab" type="button" role="tab" :aria-selected="selectedTab === 'settings'" aria-controls="agent-inspector-settings-panel" :tabindex="selectedTab === 'settings' ? 0 : -1" @click="selectTab('settings')">Settings</button>
       <button id="agent-inspector-diagnostics-tab" type="button" role="tab" :aria-selected="selectedTab === 'diagnostics'" aria-controls="agent-inspector-diagnostics-panel" :tabindex="selectedTab === 'diagnostics' ? 0 : -1" @click="selectTab('diagnostics')">Diagnostics</button>
     </div>
@@ -116,6 +117,8 @@
         :resource="workResource" :selected-source-message-id="selectedWorkSourceMessageId" :tasks="projection.assignedWork" :artifacts="workArtifacts"
         @retry="emit('work-retry')" @select-source="emit('work-source-select', $event)" @reveal="emit('reveal-message', $event)"
       />
+      <AgentInspectorWorkspace v-else-if="selectedTab === 'workspace'" id="agent-inspector-workspace-panel" role="tabpanel" aria-labelledby="agent-inspector-workspace-tab"
+        :work="roomAgentWork ?? []" :agent-key="projection.entry.agentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :request-version="requestVersion" />
       <AgentInspectorSettings
         v-else-if="selectedTab === 'settings'" id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
         :entry-id="projection.entryId" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
@@ -150,10 +153,11 @@ import { AGENT_INSPECTOR_RETIRE_CONFIRMATION, configurationHasRuntimeLag } from 
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
+import AgentInspectorWorkspace from "./AgentInspectorWorkspace.vue";
 import AgentInspectorWork from "./AgentInspectorWork.vue";
 import AgentInspectorSettings from "./AgentInspectorSettings.vue";
 
-type InspectorTab = "overview" | "live" | "work" | "settings" | "diagnostics";
+type InspectorTab = "overview" | "live" | "work" | "workspace" | "settings" | "diagnostics";
 
 /** Diagnostics and Live stay out of the normal inspector path until opened. */
 const AgentInspectorDiagnostics = defineAsyncComponent(() => import("./AgentInspectorDiagnostics.vue"));
@@ -161,7 +165,10 @@ const AgentInspectorLive = defineAsyncComponent(() => import("./AgentInspectorLi
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
-  initialTab?: "overview" | "work";
+  initialTab?: "overview" | "work" | "workspace";
+  roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
+  workspaceSourceMessageId?: string | null;
   requestVersion?: number;
   actionState: AgentInspectorActionState | null;
   compact: boolean;
@@ -298,7 +305,7 @@ function emitRecoveryControl(
 function handleTabKeydown(event: KeyboardEvent): void {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
-  const tabs: InspectorTab[] = ["overview", "live", "work", "settings", "diagnostics"];
+  const tabs: InspectorTab[] = ["overview", "live", "work", "workspace", "settings", "diagnostics"];
   const current = tabs.indexOf(selectedTab.value);
   const next = event.key === 'Home' ? 'overview' : event.key === 'End' ? 'diagnostics' : tabs[(current + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length]!;
   selectTab(next);

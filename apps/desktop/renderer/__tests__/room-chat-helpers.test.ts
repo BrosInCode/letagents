@@ -1085,3 +1085,21 @@ function presenceEntry(overrides: Partial<DesktopAgentPresence> = {}): DesktopAg
     ...overrides,
   };
 }
+
+it('places only turn contributions beside their visible conversation and never presents cumulative snapshots as turns', () => {
+  const message = roomMessage('msg_1', null, '2026-05-28T12:00:00Z');
+  const snapshot = { captured_at: '2026-05-28T12:01:00Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
+    files: [{ path: 'app.ts', previous_path: null, status: 'modified' as const, additions: 1, deletions: 1, binary: false }],
+    additions: 1, deletions: 1, hidden_files: 0, patch: '', patch_truncated: false };
+  const work = { attemptId: 'attempt', roomId: 'room', sourceMessageId: 'msg_1', agentKey: 'Emmy/agent', revision: 1, updatedAt: snapshot.captured_at,
+    summary: { version: 3 as const, recorded_state: 'completed' as const, evidence_incomplete: false, elapsed_ms: 1,
+      operation_counts: { unresolved: 0, succeeded: 1, failed: 0, denied_before_start: 0, cancelled_before_start: 0, interrupted_after_start: 0, lost_after_start: 0 },
+      workspace: snapshot, contribution: { changes: snapshot, summary: 'Saved tasks' } } };
+  const entries = buildMessageTimelineEntries([message, roomMessage('msg_2', null, '2026-05-28T12:02:00Z')], [work]);
+  assert.deepEqual(entries.map(entry => entry.type), ['date', 'message', 'contribution', 'message']);
+  const skewed = { ...work, summary: { ...work.summary, contribution: { ...work.summary.contribution, changes: { ...snapshot, captured_at: '2026-05-27T12:00:00Z' } } } };
+  assert.deepEqual(buildMessageTimelineEntries([message], [skewed]).map(entry => entry.type), ['date', 'message', 'contribution']);
+  assert.equal(buildMessageTimelineEntries([], [work]).length, 0, 'hidden/absent sources cannot leave receipts in the conversation');
+  const { contribution: _turn, ...legacy } = work.summary;
+  assert.equal(buildMessageTimelineEntries([message], [{ ...work, summary: { ...legacy, version: 2 } }]).some(entry => entry.type === 'contribution'), false);
+});

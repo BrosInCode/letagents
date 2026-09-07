@@ -58,3 +58,48 @@ test('unborn repos and symlinks produce review data without reading external tar
     assert.equal((await captureWorkspaceChanges(directory, 'bad-ref')).state, 'unavailable');
   } finally { rmSync(directory, { recursive: true, force: true }); rmSync(outside, { force: true }); }
 });
+
+test('turn snapshots separate consecutive turns, preserve staged work, and never execute Git filters', async () => {
+  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../workspace-turn-capture.js');
+  const { readFileSync, existsSync, chmodSync, unlinkSync } = await import('node:fs');
+  const directory = mkdtempSync(join(tmpdir(), 'workspace-turn-'));
+  try {
+    git(directory, 'init', '-q'); git(directory, 'config', 'user.name', 'Test'); git(directory, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(directory, 'app.ts'), 'original\n'); git(directory, 'add', '.'); git(directory, 'commit', '-qm', 'base');
+    const base = git(directory, 'rev-parse', 'HEAD');
+    writeFileSync(join(directory, '.gitattributes'), '*.ts filter=sentinel\n');
+    git(directory, 'config', 'filter.sentinel.clean', 'touch FILTER_EXECUTED; cat');
+    writeFileSync(join(directory, 'app.ts'), 'already staged\n');
+    // Stage before enabling sentinel attributes in the private baseline, using plumbing.
+    const indexBefore = readFileSync(join(directory, '.git/index'));
+    writeFileSync(join(directory, '.git/hooks/reference-transaction'), '#!/bin/sh\ntouch REF_HOOK_EXECUTED\necho hook-corruption >> app.ts\n');
+    chmodSync(join(directory, '.git/hooks/reference-transaction'), 0o755);
+    const first = await captureWorkspaceTree(directory, 'first');
+    assert.ok(first);
+    writeFileSync(join(directory, 'app.ts'), 'first turn\n');
+    const pair1 = await captureWorkspacePair(directory, base, first, 'first');
+    assert.match(pair1.contribution.changes.patch, /-already staged\n\+first turn/);
+    assert.doesNotMatch(pair1.contribution.changes.patch, /-original/);
+    assert.match(pair1.workspace.patch, /-original\n\+first turn/);
+    const second = await captureWorkspaceTree(directory, 'second');
+    assert.ok(second);
+    writeFileSync(join(directory, 'new.txt'), 'second turn\n');
+    chmodSync(join(directory, 'app.ts'), 0o755);
+    const pair2 = await captureWorkspacePair(directory, base, second, 'second');
+    assert.match(pair2.contribution.changes.patch, /\+second turn/);
+    assert.doesNotMatch(pair2.contribution.changes.patch, /\+first turn/);
+    assert.match(pair2.contribution.changes.patch, /new mode 100755/);
+    assert.match(pair2.workspace.patch, /\+first turn/);
+    assert.deepEqual(readFileSync(join(directory, '.git/index')), indexBefore);
+    assert.equal(existsSync(join(directory, 'FILTER_EXECUTED')), false);
+    const third = await captureWorkspaceTree(directory, 'third');
+    unlinkSync(join(directory, 'new.txt'));
+    const pair3 = await captureWorkspacePair(directory, base, third, 'third');
+    assert.equal(pair3.contribution.changes.files[0]?.status, 'deleted');
+    const missing = await captureWorkspacePair(directory, base, 'a'.repeat(40), 'missing');
+    assert.equal(missing.contribution.changes.state, 'unavailable');
+    assert.equal(missing.workspace.state, 'ready');
+    for (const key of ['first', 'second', 'third']) await releaseWorkspaceTree(directory, key);
+    assert.equal(existsSync(join(directory, 'REF_HOOK_EXECUTED')), false, 'retention and release cannot execute reference hooks');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
