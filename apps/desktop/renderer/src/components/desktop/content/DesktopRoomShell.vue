@@ -318,6 +318,7 @@
 
     <AddAgentModal
       :open="addAgentModalOpen"
+      :preferred-provider-id="addAgentPreferredProviderId"
       :room-identifier="room.identifier"
       :room-git-room="room.gitRoom"
       :room-display-name="room.displayName"
@@ -337,6 +338,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRe
 import type {
   DesktopActivityEntry,
   DesktopAgentProvider,
+  DesktopAgentProviderId,
   DesktopAgentPresence,
   DesktopBoardSettingsSummary,
   DesktopFocusRoomInfo,
@@ -521,6 +523,7 @@ const props = defineProps<{
   projectRoom?: boolean;
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
+  preferredAddAgentProviderId?: DesktopAgentProviderId | null;
   notificationRevealMessageId?: string | null;
   notificationRevealNonce?: number;
   initialChatScrollTop?: number | null;
@@ -556,6 +559,7 @@ const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
 const revealedMessageId = ref<string | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
+const addAgentPreferredProviderId = ref<DesktopAgentProviderId | null>(null);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
 const agentInspectorInitialTab = ref<"overview" | "work">("overview");
@@ -1021,6 +1025,8 @@ watch(() => props.repoStatus, () => {
 watch(addAgentModalOpen, (open) => {
   if (open) {
     void refreshManagedAgentSessions();
+  } else {
+    addAgentPreferredProviderId.value = null;
   }
 });
 
@@ -1041,6 +1047,7 @@ watch(
 
 watch(() => props.openAddAgentRequested, (requested) => {
   if (!requested) return;
+  addAgentPreferredProviderId.value = props.preferredAddAgentProviderId || null;
   openAddAgentModal();
   emit("add-agent-open-request-consumed");
 }, { immediate: true });
