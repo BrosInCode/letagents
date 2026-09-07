@@ -52,3 +52,30 @@ user's memberships endpoint, including private memberships. Provider errors
 block company access without deleting joins; stored membership alone never
 authorizes access. This slice does not synchronize the entire staff directory
 or change repository permissions.
+
+## Company room discovery contract (slice 3)
+
+`GET /organizations/:organizationId/rooms` requires both a stored LetAgents join
+and freshly verified active GitHub membership. It returns the existing canonical
+repo room IDs, display names, repository IDs/full names, organization ID, and
+current visibility. It does not create rooms or change their permissions.
+
+Connected candidates come from active GitHub App installations targeting the
+organization's immutable GitHub ID. Suspended/uninstalled installations, removed
+repositories, and child rooms are excluded. Candidates are intersected with the
+organization repository list fetched using the person's GitHub token; private
+entries require explicit read permission. Both repository identity and current
+full name must match so pending rename/transfer reconciliation cannot expose a
+stale room. Provider failures return an error rather than a partial room list.
+
+The company association is derived from the existing installation/repository
+records rather than duplicated on rooms. The existing `/account/rooms` list and
+direct repo-room entry remain unchanged, including external collaborators and
+personal/shared rooms. Newly installed repositories appear after the existing
+webhook synchronization creates their canonical room. Installation setup UI is
+still room-based; company-level installation navigation belongs to the UI slice.
+
+Provider list operations each have a 15-second deadline and a 10-page cap (100
+entries/page). Exceeding the cap returns a verification error, never a silently
+truncated list. Live GitHub consent/SSO and desktop UI are not validated by these
+backend slices.
