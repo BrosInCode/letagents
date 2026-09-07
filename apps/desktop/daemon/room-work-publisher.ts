@@ -1,3 +1,4 @@
+import type { WorkspaceChangeSummary } from "../../../shared/workspace-change-summary.mjs";
 import type { DatabaseSync } from "node:sqlite";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
@@ -15,6 +16,7 @@ type Options = {
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict"): void;
   now?(): number;
+  workspaceSummary?(workAttemptId: string): Promise<WorkspaceChangeSummary>;
 };
 type Row = Record<string, string | number | null>;
 const COALESCE_MS = 1_000;
@@ -68,6 +70,26 @@ export class RoomWorkPublisher {
       try { this.store.pin(origin, ids.filter(canonicalSource)); this.changed(origin.agentId); }
       catch { this.report("storage_unavailable"); }
     };
+  }
+
+  /** Awaited at the settled provider boundary, before the next room turn can run. */
+  async captureWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
+    if (this.unavailable() || !this.options.workspaceSummary) return;
+    const record = this.store.get(agent.agentId, agent.roomId, sourceMessageId);
+    const authority = this.authority(agent.agentId);
+    if (!record || record.state !== "open" || record.summary?.workspace || !authority
+      || !this.sameOrigin(authority.origin, record, true) || authority.worker.workAttemptId !== agent.workAttemptId
+      || agent.daemonGeneration !== this.options.daemonGeneration()) return;
+    try {
+      const workspace = await this.options.workspaceSummary(agent.workAttemptId);
+      await this.options.assertCurrent();
+      const current = this.authority(agent.agentId);
+      if (this.unavailable() || current?.worker !== authority.worker || current?.grant !== authority.grant) return;
+      const captured = this.capture.roomWorkSummary(agent.agentId, agent.roomId, sourceMessageId);
+      if (captured.availability !== "available") return;
+      this.store.stage(record, { ...captured, summary: { ...captured.summary, version: 2, workspace } });
+      this.changed(agent.agentId);
+    } catch { this.report("storage_unavailable"); }
   }
 
   /** Capture supplies only a postcommit hint; no SQL or HTTP runs on its stack. */
@@ -176,7 +198,11 @@ export class RoomWorkPublisher {
       try {
         const captured = this.capture.roomWorkSummary(record.agentId, record.roomId, record.sourceMessageId);
         if (captured.availability !== "available") continue;
-        this.store.stage(record, captured);
+        // Reuse the exact review captured at the turn boundary, including after restart.
+        const current = this.store.get(record.agentId, record.roomId, record.sourceMessageId);
+        if (!current || current.state !== "open") continue;
+        if (current.summary?.workspace) captured.summary = { ...captured.summary, version: 2, workspace: current.summary.workspace };
+        this.store.stage(current, captured);
         previous.set(recordKey, stamp);
         this.stagingAttemptedAt.delete(recordKey);
       } catch { this.report("storage_unavailable"); }

@@ -167,7 +167,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // 1531 -> 1550 for the isolated runtime-configuration apply coordinator.
   // 1550 -> 1575 for delegation lifecycle composition and shutdown wiring; paging,
   // coalescing, exact reconciliation, and policy remain in the extracted coordinator.
-  assert.ok(mainSource.split("\n").length < 1_575, "main.ts must remain a thin composition root");
+  // 1575 -> 1585 for independently reviewed workspace snapshot composition;
+  // Git capture, persistence, and publication policy remain in their own modules.
+  assert.ok(mainSource.split("\n").length < 1_585, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

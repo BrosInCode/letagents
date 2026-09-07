@@ -29,7 +29,7 @@ export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageR
       res.status(404).json({ error: "Work evidence is not available in this room." }); return;
     }
     try {
-      const result = await readRoomAgentWork({ room_id: room.id, ...(attemptId ? { attempt_id: attemptId } : {}) });
+      const result = await readRoomAgentWork({ room_id: room.id, include_workspace: req.query?.include_workspace === "1", ...(attemptId ? { attempt_id: attemptId } : {}) });
       if (attemptId && result.work.length === 0) {
         res.status(404).json({ error: "Work evidence is not available in this room." }); return;
       }
@@ -154,7 +154,7 @@ async function pollRoomAgentWork(req: AuthenticatedRequest, res: Response, deps:
       if (closed()) return;
       // One SQL snapshot filters visibility before ordering and LIMIT. The
       // digest covers precisely that canonical public body, including truncation.
-      const snapshot = await readRoomAgentWork({ room_id: room.id });
+      const snapshot = await readRoomAgentWork({ room_id: room.id, include_workspace: req.query?.include_workspace === "1" });
       if (closed()) return;
       const cursor = prefix + createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
       if (after !== cursor || performance.now() >= deadline) {

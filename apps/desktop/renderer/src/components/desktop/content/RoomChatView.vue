@@ -65,6 +65,8 @@
           @scroll-position="emit('scroll-position', $event)"
         />
 
+        <RoomWorkspaceChanges :work="roomAgentWork ?? []" :truncated="roomAgentWorkTruncated" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" :room-identifier="roomIdentifier" />
+
         <div
           v-if="roomLoading"
           class="desktop-composer desktop-composer-skeleton"
@@ -216,6 +218,7 @@ import type {
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
+  DesktopRoomAgentWork,
   DesktopRoomMessageThreadSummary,
   DesktopSupervisorManifestEntry,
   DesktopTaskSummary,
@@ -231,6 +234,7 @@ import {
   isGitHubRoomMessage,
   isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
+import RoomWorkspaceChanges from "./room-chat/RoomWorkspaceChanges.vue";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
@@ -283,6 +287,9 @@ const props = defineProps<{
   participants: DesktopParticipantSummary[];
   presence: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
+  roomAgentWork?: DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
+  roomAgentWorkTruncated?: boolean;
   resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   reasoningSessions: DesktopReasoningSession[];
   tasks: DesktopTaskSummary[];

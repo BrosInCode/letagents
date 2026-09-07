@@ -1,6 +1,6 @@
-// Room-public, host-reported evidence; never execution or approval authority.
-// No free-form strings, native handles, paths, command text, or output belong
-// in this version. Both the publisher and server use this strict boundary.
+import { parseWorkspaceChangeSummary } from './workspace-change-summary.mjs';
+// v1 is numeric execution evidence. v2 additionally carries a bounded,
+// deliberately room-visible workspace review snapshot.
 export const ROOM_WORK_STATES = [
   "active", "completed", "completed_no_reply", "failed", "interrupted", "lost", "unknown",
 ];
@@ -21,8 +21,11 @@ export function isClearedRoomAgentWorkSummary(value) {
 
 /** Return a canonical allowlisted copy, or reject without echoing private input. */
 export function parseRoomAgentWorkSummary(value) {
-  if (!exactKeys(value, ["version", "recorded_state", "evidence_incomplete", "elapsed_ms", "operation_counts"])
-    || value.version !== 1 || !ROOM_WORK_STATES.includes(value.recorded_state)
+  const workspace = value?.version === 2 ? parseWorkspaceChangeSummary(value.workspace) : null;
+  const keys = ["version", "recorded_state", "evidence_incomplete", "elapsed_ms", "operation_counts"];
+  if (value?.version === 2) keys.push("workspace");
+  if (!exactKeys(value, keys)
+    || ![1, 2].includes(value.version) || (value.version === 2 && !workspace) || !ROOM_WORK_STATES.includes(value.recorded_state)
     || typeof value.evidence_incomplete !== "boolean"
     || (value.elapsed_ms !== null && (!Number.isSafeInteger(value.elapsed_ms) || Number(value.elapsed_ms) < 0))
     || !exactKeys(value.operation_counts, ROOM_WORK_OPERATION_OUTCOMES)) return null;
@@ -37,7 +40,8 @@ export function parseRoomAgentWorkSummary(value) {
   // A bounded evidence snapshot, not an unbounded lifetime counter.
   if (total > 10_000) return null;
   return {
-    version: 1, recorded_state: value.recorded_state,
+    version: value.version, recorded_state: value.recorded_state,
+    ...(workspace ? { workspace } : {}),
     evidence_incomplete: value.evidence_incomplete, elapsed_ms: value.elapsed_ms,
     operation_counts: counts,
   };

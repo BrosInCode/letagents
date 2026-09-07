@@ -110,7 +110,7 @@ test("cloud poll uses the opaque cursor and maps access or payload invalidation 
   try {
     const ready = await pollDesktopRoomAgentWork(ROOM, CURSOR);
     assert.equal(ready.status, "ready");
-    assert.match(calls[0] || "", new RegExp(`/rooms/${ROOM}/agent-work/poll\\?after=${CURSOR}&timeout=0$`));
+    assert.match(calls[0] || "", new RegExp(`/rooms/${ROOM}/agent-work/poll\\?after=${CURSOR}&timeout=0&include_workspace=1$`));
 
     response = new Response(JSON.stringify({ error: "forbidden" }), {
       status: 403,

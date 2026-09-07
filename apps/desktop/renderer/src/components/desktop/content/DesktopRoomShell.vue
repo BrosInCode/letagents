@@ -107,6 +107,7 @@
       :loading-older-messages="loadingOlderMessages"
       :participants="roomParticipants"
       :presence="roomPresence"
+      v-bind="{ roomAgentWork, roomAgentWorkStatus, roomAgentWorkTruncated }"
       :local-agent-work="localAgentWork"
       :delivery-receipts-by-message="deliveryReceiptsByMessage"
       :delivery-recovery-available="deliveryRetryAvailable"

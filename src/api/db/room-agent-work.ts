@@ -154,12 +154,19 @@ export async function clearRoomAgentWork(input: {
 }
 
 /** Authorized human room readers only; the route performs current membership checks. */
-export async function readRoomAgentWork(input: { room_id: string; attempt_id?: string }): Promise<RoomAgentWorkSnapshot> {
+export async function readRoomAgentWork(input: { room_id: string; attempt_id?: string; include_workspace?: boolean }): Promise<RoomAgentWorkSnapshot> {
   const rows = await db.select({ work: room_agent_work }).from(room_agent_work)
     .innerJoin(messages, and(eq(messages.room_id, room_agent_work.room_id), eq(messages.number, room_agent_work.source_message_number)))
     .where(and(eq(room_agent_work.room_id, input.room_id),
       ...(input.attempt_id ? [eq(room_agent_work.attempt_id, input.attempt_id)] : []),
       visibleMessageCondition(false), isNull(messages.visibility), isNull(messages.rental_session_id)))
     .orderBy(desc(room_agent_work.updated_at), asc(room_agent_work.attempt_id)).limit(input.attempt_id ? 1 : 51);
-  return { work: rows.slice(0, 50).map((row) => publicWork(row.work)), truncated: rows.length > 50 };
+  return { work: rows.slice(0, 50).map((row) => {
+    const work = publicWork(row.work);
+    if (!input.include_workspace && work.summary.version === 2 && "workspace" in work.summary) {
+      const { workspace: _workspace, ...execution } = work.summary;
+      work.summary = { ...execution, version: 1 };
+    }
+    return work;
+  }), truncated: rows.length > 50 };
 }

@@ -3347,13 +3347,17 @@ test("exact native failure settles once, advances FIFO, and survives cleanup err
           return result;
         }, async () => { recoveries += 1; throw new Error("must not re-read a settled native failure"); });
         const http = { poll: async () => ({}), publish: async () => { throw new Error("failure has no room reply"); } };
-        const delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority);
+        const snapshots: string[] = [];
+        const delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority,
+          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+          async (_agent, source) => { snapshots.push(source); });
         try {
           await delivery.pump(agent);
           await ingest(store, "1"); await ingest(store, "2");
           await delivery.pump(agent);
           const receipts = await store.receipts(agent.agentId);
           assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
+          assert.deepEqual(snapshots, ["1", "2"], "settled failures capture changes even when adapter cleanup rejects");
           assert.equal(JSON.parse(receipts[0]!.outcome!).kind, outcome);
           assert.equal(receipts[0]!.canonical_message_id, null);
           assert.equal(receipts[0]!.attempt_count, 1);
@@ -4428,5 +4432,40 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
       assert.equal(published.length, 0, "and nothing is published for the stopped turn");
     } finally { await delivery.fenceAndDrain().catch(() => undefined); }
     await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('every provider waits for the workspace snapshot before advancing to its next turn', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'letagents-workspace-boundary-'));
+  try {
+    for (const candidate of ['codex', 'claude-code', 'cursor', 'open-model']) {
+      const store = new SupervisedAgentInboxStore(join(root, `${candidate}.sqlite`));
+      const entered = deferred<void>(), release = deferred<void>();
+      const events: string[] = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+        events.push(`turn:${request.sourceMessage.id}`);
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.(request.inboxItemId);
+        return { turnId: request.inboxItemId, outcome: 'no_reply', text: null, publicationContract: 'legacy_cursor_aggregate_v0' };
+      }), { poll: async () => ({}), publish: async () => { throw new Error('no reply'); } }, currentAuthority,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      async (_agent, source) => {
+        events.push(`snapshot:${source}`);
+        if (source === '1') { entered.resolve(); await release.promise; }
+        // Optional review failure must not retry the agent's completed work.
+        if (source === '2') throw new Error('snapshot unavailable');
+      });
+      try {
+        const currentAgent = { ...agent, provider: candidate };
+        await delivery.pump(currentAgent);
+        await ingest(store, '1'); await ingest(store, '2');
+        const pumping = delivery.pump(currentAgent);
+        await entered.promise;
+        assert.deepEqual(events, ['turn:1', 'snapshot:1']);
+        release.resolve(); await pumping;
+        assert.deepEqual(events, ['turn:1', 'snapshot:1', 'turn:2', 'snapshot:2']);
+        assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.state), ['acknowledged_no_reply', 'acknowledged_no_reply']);
+      } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); }
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -1,7 +1,9 @@
+import type { WorkspaceChangeSummary } from "./workspace-change-summary.mjs";
 export const ROOM_WORK_STATES: readonly ["active", "completed", "completed_no_reply", "failed", "interrupted", "lost", "unknown"];
 export const ROOM_WORK_OPERATION_OUTCOMES: readonly ["unresolved", "succeeded", "failed", "denied_before_start", "cancelled_before_start", "interrupted_after_start", "lost_after_start"];
 export type RoomAgentWorkSummary = {
-  version: 1;
+  version: 1 | 2;
+  workspace?: WorkspaceChangeSummary;
   recorded_state: typeof ROOM_WORK_STATES[number];
   evidence_incomplete: boolean;
   elapsed_ms: number | null;

@@ -1792,3 +1792,19 @@ test("room work poll HTTP route wins over the detail route and retains human-onl
     assert.equal((await fetch(url, { headers: workerHeaders })).status, 403);
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });
+
+test('workspace reviews survive publication and are negotiated without breaking older readers', { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll();
+  const workspace = { captured_at: '2026-09-07T00:00:00.000Z', branch: 'feature/review', base_revision: 'a'.repeat(40), state: 'ready',
+    files: [{ path: 'app.ts', previous_path: null, status: 'modified', additions: 1, deletions: 1, binary: false }],
+    additions: 1, deletions: 1, hidden_files: 0, patch: '-old\n+new\n'.repeat(6000), patch_truncated: false };
+  const summary = { ...workSummary, version: 2, recorded_state: 'completed', workspace };
+  const published = await publishRoomAgentWork({ ...f.input, summary });
+  assert.equal(published.work.summary.version, 2);
+  const legacy = await f.poll();
+  assert.equal(legacy.body.snapshot.work[0].summary.version, 1);
+  assert.equal('workspace' in legacy.body.snapshot.work[0].summary, false);
+  const current = await f.poll({ include_workspace: '1' });
+  assert.deepEqual(current.body.snapshot.work[0].summary.workspace, workspace);
+  assert.notEqual(legacy.body.cursor, current.body.cursor);
+});
