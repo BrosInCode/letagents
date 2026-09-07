@@ -1,4 +1,5 @@
-import type { WorkspaceChangeSummary } from "../../../shared/workspace-change-summary.mjs";
+import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
+import { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "./workspace-turn-capture.js";
 import type { DatabaseSync } from "node:sqlite";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
@@ -16,7 +17,7 @@ type Options = {
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict"): void;
   now?(): number;
-  workspaceSummary?(workAttemptId: string): Promise<WorkspaceChangeSummary>;
+  workspaceLocation?(workAttemptId: string): Promise<{ path: string; revision: string | null }>;
 };
 type Row = Record<string, string | number | null>;
 const COALESCE_MS = 1_000;
@@ -29,6 +30,7 @@ const key = (record: Pick<RoomWorkPublication, "agentId" | "roomId" | "sourceMes
 export class RoomWorkPublisher {
   private readonly store: RoomWorkPublicationStore;
   private readonly capture: ExecutionShadowStore;
+  private readonly workspaces: RoomWorkspaceStore;
   private readonly stamps = new Map<string, Map<string, string>>();
   private readonly attemptedAt = new Map<string, number>();
   private readonly stagingAttemptedAt = new Map<string, number>();
@@ -51,6 +53,7 @@ export class RoomWorkPublisher {
   constructor(private readonly database: DatabaseSync, private readonly options: Options) {
     this.store = new RoomWorkPublicationStore(database);
     this.capture = new ExecutionShadowStore(database);
+    this.workspaces = new RoomWorkspaceStore(database);
   }
 
   /** Called before the worker-authenticated poll, never after delayed native capture. */
@@ -72,23 +75,56 @@ export class RoomWorkPublisher {
     };
   }
 
-  /** Awaited at the settled provider boundary, before the next room turn can run. */
-  async captureWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
-    if (this.unavailable() || !this.options.workspaceSummary) return;
+  private captureAuthority(agent: SupervisedIngressAgent, sourceMessageId: string) {
     const record = this.store.get(agent.agentId, agent.roomId, sourceMessageId);
     const authority = this.authority(agent.agentId);
-    if (!record || record.state !== "open" || record.summary?.workspace || !authority
-      || !this.sameOrigin(authority.origin, record, true) || authority.worker.workAttemptId !== agent.workAttemptId
-      || agent.daemonGeneration !== this.options.daemonGeneration()) return;
+    return record?.state === "open" && authority && this.sameOrigin(authority.origin, record, true)
+      && authority.worker.workAttemptId === agent.workAttemptId && agent.daemonGeneration === this.options.daemonGeneration()
+      ? { record, authority } : null;
+  }
+
+  /** Called only at the native pre-dispatch boundary, never while a message is queued. */
+  async beginWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string): Promise<void> {
+    if (this.unavailable() || !this.options.workspaceLocation) return;
+    const context = this.captureAuthority(agent, sourceMessageId);
+    if (!context) return;
+    const identity = { ...agent, sourceMessageId, inboxItemId };
     try {
-      const workspace = await this.options.workspaceSummary(agent.workAttemptId);
+      if (!this.workspaces.begin(identity)) return;
+      const location = await this.options.workspaceLocation(agent.workAttemptId);
+      const tree = await captureWorkspaceTree(location.path, JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]));
       await this.options.assertCurrent();
-      const current = this.authority(agent.agentId);
-      if (this.unavailable() || current?.worker !== authority.worker || current?.grant !== authority.grant) return;
+      const current = this.captureAuthority(agent, sourceMessageId);
+      if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return;
+      this.workspaces.setBaseline(identity, tree);
+    } catch { this.report("storage_unavailable"); }
+  }
+
+  /** Save immutable settled bytes even when delayed native execution evidence isn't ready yet. */
+  async captureWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summaryText?: string | null): Promise<void> {
+    if (this.unavailable() || !this.options.workspaceLocation) return;
+    const context = this.captureAuthority(agent, sourceMessageId);
+    if (!context || context.record.summary?.workspace || this.workspaces.settled(agent.agentId, agent.roomId, sourceMessageId)) return;
+    const identity: WorkspaceCaptureIdentity = { ...agent, sourceMessageId, inboxItemId };
+    try {
+      const location = await this.options.workspaceLocation(agent.workAttemptId);
+      const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
+      const pair = await captureWorkspacePair(location.path, location.revision, this.workspaces.baseline(identity), ref);
+      pair.contribution.summary = summaryText?.trim().slice(0, 400) || null;
+      await this.options.assertCurrent();
+      const current = this.captureAuthority(agent, sourceMessageId);
+      if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return;
       const captured = this.capture.roomWorkSummary(agent.agentId, agent.roomId, sourceMessageId);
-      if (captured.availability !== "available") return;
-      this.store.stage(record, { ...captured, summary: { ...captured.summary, version: 2, workspace } });
+      const execution = captured.availability === "available" ? captured.summary : {
+        recorded_state: "unknown" as const, evidence_incomplete: true, elapsed_ms: null,
+        operation_counts: { unresolved: 0, succeeded: 0, failed: 0, denied_before_start: 0,
+          cancelled_before_start: 0, interrupted_after_start: 0, lost_after_start: 0 },
+      };
+      const summary = { ...execution, version: 3 as const, ...pair };
+      this.workspaces.settle(identity, summary);
+      if (captured.availability === "available") this.store.stage(current.record, { ...captured, summary });
       this.changed(agent.agentId);
+      await releaseWorkspaceTree(location.path, ref);
     } catch { this.report("storage_unavailable"); }
   }
 
@@ -201,7 +237,9 @@ export class RoomWorkPublisher {
         // Reuse the exact review captured at the turn boundary, including after restart.
         const current = this.store.get(record.agentId, record.roomId, record.sourceMessageId);
         if (!current || current.state !== "open") continue;
-        if (current.summary?.workspace) captured.summary = { ...captured.summary, version: 2, workspace: current.summary.workspace };
+        const settled = this.workspaces.settled(record.agentId, record.roomId, record.sourceMessageId) ?? current.summary;
+        if (settled?.workspace) captured.summary = { ...captured.summary, version: settled.contribution ? 3 : 2,
+          workspace: settled.workspace, ...(settled.contribution ? { contribution: settled.contribution } : {}) };
         this.store.stage(current, captured);
         previous.set(recordKey, stamp);
         this.stagingAttemptedAt.delete(recordKey);

@@ -3,7 +3,7 @@
     ref="surfaceElement"
     class="agent-inspector-surface agent-inspector-participant-surface"
     :data-compact="compact"
-    :data-kind="projection.kind"
+    :data-kind="projection.kind" :data-tab="workspaceSelected ? 'workspace' : 'overview'"
     :role="compact ? 'dialog' : 'complementary'"
     :aria-modal="compact ? 'true' : undefined"
     aria-labelledby="agent-inspector-participant-title"
@@ -31,6 +31,13 @@
       </button>
     </header>
 
+    <div class="agent-inspector-tabs" role="tablist" aria-label="Agent inspector sections" @keydown="handleWorkspaceTabs">
+      <button id="participant-overview-tab" type="button" role="tab" :aria-selected="!workspaceSelected" :tabindex="workspaceSelected ? -1 : 0" aria-controls="participant-overview-panel" @click="workspaceSelected = false">Overview</button>
+      <button id="participant-workspace-tab" type="button" role="tab" :aria-selected="workspaceSelected" :tabindex="workspaceSelected ? 0 : -1" aria-controls="participant-workspace-panel" @click="workspaceSelected = true">Workspace</button>
+    </div>
+    <AgentInspectorWorkspace v-if="workspaceSelected" id="participant-workspace-panel" class="agent-inspector-scroll-region" role="tabpanel" aria-labelledby="participant-workspace-tab"
+      :work="roomAgentWork ?? []" :agent-key="workspaceAgentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" />
+    <div v-show="!workspaceSelected" id="participant-overview-panel" role="tabpanel" aria-labelledby="participant-overview-tab" class="agent-inspector-participant-overview">
     <div class="agent-inspector-status-copy">
       <strong>{{ projection.heading }}</strong>
       <p>{{ projection.detail }}</p>
@@ -148,11 +155,13 @@
         <p v-else class="agent-inspector-work-empty">No readable progress has been published for this participant.</p>
       </section>
     </div>
+    </div>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import AgentInspectorWorkspace from "./AgentInspectorWorkspace.vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopManagedAgentChangeSummary,
   DesktopManagedAgentPermissionDecisionBehavior,
@@ -181,6 +190,11 @@ import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import { desktopIpc } from "../../../../ipc/index.js";
 
 const props = defineProps<{
+  initialTab?: "overview" | "work" | "workspace";
+  roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
+  workspaceSourceMessageId?: string | null;
+  workspaceAgentKey?: string | null;
   compact: boolean;
   projection: AgentInspectorParticipantProjection;
   roomIdentifier: string;
@@ -189,6 +203,14 @@ const props = defineProps<{
   reasoning: DesktopReasoningSession | null;
   busy?: boolean;
 }>();
+const workspaceSelected = ref(props.initialTab === 'workspace');
+watch([() => props.initialTab, () => props.requestVersion], () => { workspaceSelected.value = props.initialTab === 'workspace'; });
+function handleWorkspaceTabs(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  workspaceSelected.value = event.key === 'Home' ? false : event.key === 'End' ? true : !workspaceSelected.value;
+  void nextTick(() => surfaceElement.value?.querySelector<HTMLButtonElement>(workspaceSelected.value ? '#participant-workspace-tab' : '#participant-overview-tab')?.focus());
+}
 const emit = defineEmits<{
   close: [];
   status: [message: string];

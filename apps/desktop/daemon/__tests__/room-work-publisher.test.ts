@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -15,6 +16,12 @@ import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 
 async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
+  const workspacePath = await mkdtemp(join(tmpdir(), 'publisher-workspace-'));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: workspacePath, encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
+  await writeFile(join(workspacePath, 'app.ts'), 'original\n'); git('add', '.'); git('commit', '-qm', 'base');
+  const location = { path: workspacePath, revision: git('rev-parse', 'HEAD') };
+  t.after(() => rm(workspacePath, { recursive: true, force: true }));
   const path = join(directory, "state.sqlite");
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL");
@@ -75,7 +82,7 @@ async function fixture(t: TestContext, provider: "codex" | "claude-code" | "curs
     if (result.availability !== "available") assert.fail(JSON.stringify(result));
     return result;
   }
-  return { db, path, capture, receipts, custody, grant, worker, agent, sent, diagnostics, options, fact, operation, captureMessage, summary,
+  return { db, path, location, capture, receipts, custody, grant, worker, agent, sent, diagnostics, options, fact, operation, captureMessage, summary,
     get publisher() { return publisher; },
     restart() { publisher.close(); publisher = new RoomWorkPublisher(openDaemonStateObservationDatabase(path), options); },
     row(id = 1) { return receipts.get("agent", "room", `msg_${id}`)!; },
@@ -318,23 +325,26 @@ for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const
   test(`${provider} publishes workspace review after a no-reply turn through the shared path`, async t => {
     const f = await fixture(t, provider);
     const reads: string[] = [];
-    const workspace = { captured_at: "2026-09-07T00:00:00.000Z", branch: "feature/work", base_revision: "a".repeat(40), state: "ready" as const,
-      files: [{ path: "app.ts", previous_path: null, status: "modified" as const, additions: 1, deletions: 1, binary: false }],
-      additions: 1, deletions: 1, hidden_files: 0, patch: "-old\n+new\n".repeat(1000), patch_truncated: false };
-    f.options.workspaceSummary = async workAttemptId => { reads.push(workAttemptId); return workspace; };
+    f.options.workspaceLocation = async workAttemptId => { reads.push(workAttemptId); return f.location; };
+    f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+    await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+    reads.length = 0;
+    await writeFile(join(f.location.path, 'app.ts'), 'new work\n');
     const attemptId = f.captureMessage();
     await f.publisher.flush();
     assert.equal(reads.length, 0, "source changes are captured at completion, not on every stream delta");
     f.fact(1, { state: "terminal", turnOutcome: "completed" });
-    await f.publisher.captureWorkspace(f.agent, "msg_1");
+    await f.publisher.captureWorkspace(f.agent, "msg_1", "inbox-1");
     f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attemptId);
     f.publisher.changed("agent"); await f.publisher.flush();
     assert.deepEqual(reads, ["workspace"]);
-    assert.equal(f.sent.at(-1)?.summary.version, 2);
-    assert.deepEqual(f.sent.at(-1)?.summary.workspace, workspace);
-    f.options.workspaceSummary = async () => { throw new Error("Later workspace contents must not replace the captured turn"); };
+    assert.equal(f.sent.at(-1)?.summary.version, 3);
+    const saved = f.sent.at(-1)!.summary;
+    assert.match(saved.workspace!.patch, /\+new work/);
+    assert.match(saved.contribution!.changes.patch, /-original\n\+new work/);
+    f.options.workspaceLocation = async () => { throw new Error("Later workspace contents must not replace the captured turn"); };
     f.restart(); await f.publisher.flush();
-    assert.deepEqual(f.row().summary?.workspace, workspace, "the review snapshot survives daemon restart");
+    assert.deepEqual(f.row().summary?.workspace, saved.workspace, "the review snapshot survives daemon restart");
   });
 }
 
@@ -344,7 +354,7 @@ test('v36 upgrades existing publication receipts to store real diffs without los
   const before = f.row();
   f.publisher.close();
   const definitions = f.db.prepare("SELECT type,sql FROM sqlite_master WHERE tbl_name='room_work_publications' AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END").all();
-  f.db.exec('CREATE TEMP TABLE saved_publications AS SELECT * FROM room_work_publications; DROP TABLE room_work_publications');
+  f.db.exec('DROP TABLE room_workspace_captures; CREATE TEMP TABLE saved_publications AS SELECT * FROM room_work_publications; DROP TABLE room_work_publications');
   f.db.exec(String(definitions[0].sql).replaceAll('524288', '2048'));
   f.db.exec('INSERT INTO room_work_publications SELECT * FROM saved_publications; DROP TABLE saved_publications');
   for (const definition of definitions.slice(1)) f.db.exec(String(definition.sql));
@@ -363,15 +373,58 @@ test('v36 upgrades existing publication receipts to store real diffs without los
 test('a background staging pass preserves a workspace captured while its authority check yielded', async t => {
   const f = await fixture(t);
   f.captureMessage();
-  const workspace = { captured_at: '2026-09-07T00:00:00.000Z', branch: 'work', base_revision: 'a'.repeat(40), state: 'ready' as const,
-    files: [], additions: 0, deletions: 0, hidden_files: 0, patch: '', patch_truncated: false };
-  f.options.workspaceSummary = async () => workspace;
+  f.options.workspaceLocation = async () => f.location;
+  await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
   let checks = 0;
   f.options.assertCurrent = async () => {
     // First check enters flush; second occurs after stageChanged loaded its v1 row.
-    if (++checks === 2) await f.publisher.captureWorkspace(f.agent, 'msg_1');
+    if (++checks === 2) await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
   };
   await f.publisher.flush();
-  assert.deepEqual(f.row().summary?.workspace, workspace);
-  assert.deepEqual(f.sent.at(-1)?.summary.workspace, workspace);
+  assert.equal(f.row().summary?.version, 3);
+  assert.deepEqual(f.sent.at(-1)?.summary, f.row().summary);
+});
+
+test('settled workspace bytes survive restart before execution evidence arrives', async t => {
+  const f = await fixture(t);
+  f.options.workspaceLocation = async () => f.location;
+  f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+  await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  await writeFile(join(f.location.path, 'app.ts'), 'this turn\n');
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', 'Updated the application');
+  assert.equal(f.row().summary, null, 'no invented execution evidence is uploaded');
+  f.restart();
+  await writeFile(join(f.location.path, 'app.ts'), 'later unrelated edit\n');
+  f.captureMessage(1, false);
+  await f.publisher.flush();
+  assert.equal(f.row().summary?.version, 3);
+  assert.match(f.row().summary!.contribution!.changes.patch, /\+this turn/);
+  assert.doesNotMatch(f.row().summary!.workspace!.patch, /later unrelated edit/);
+  assert.equal(f.row().summary!.contribution!.summary, 'Updated the application');
+});
+
+test('a second dispatch never reuses an ambiguous first baseline', async t => {
+  const f = await fixture(t);
+  f.options.workspaceLocation = async () => f.location;
+  f.captureMessage();
+  await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  await writeFile(join(f.location.path, 'app.ts'), 'between attempts\n');
+  await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  await writeFile(join(f.location.path, 'app.ts'), 'retry result\n');
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.equal(f.row().summary!.contribution!.changes.state, 'unavailable');
+  assert.equal(f.row().summary!.workspace!.state, 'ready');
+});
+
+test('authority replacement during a workspace read cannot attribute successor edits', async t => {
+  const f = await fixture(t);
+  f.captureMessage();
+  f.options.workspaceLocation = async () => f.location;
+  await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  f.options.workspaceLocation = async () => {
+    f.custody.installWorkerAuthorization({ ...f.worker, workAttemptId: 'replacement-workspace' });
+    return f.location;
+  };
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.equal(f.row().summary, null);
 });

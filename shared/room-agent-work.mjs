@@ -21,11 +21,22 @@ export function isClearedRoomAgentWorkSummary(value) {
 
 /** Return a canonical allowlisted copy, or reject without echoing private input. */
 export function parseRoomAgentWorkSummary(value) {
-  const workspace = value?.version === 2 ? parseWorkspaceChangeSummary(value.workspace) : null;
+  const workspace = [2, 3].includes(value?.version) ? parseWorkspaceChangeSummary(value.workspace) : null;
   const keys = ["version", "recorded_state", "evidence_incomplete", "elapsed_ms", "operation_counts"];
-  if (value?.version === 2) keys.push("workspace");
+  if ([2, 3].includes(value?.version)) keys.push("workspace");
+  let contribution = null;
+  if (value?.version === 3) {
+    keys.push("contribution");
+    const candidate = value.contribution;
+    if (!exactKeys(candidate, ["changes", "summary"]) || !(candidate.summary === null
+      || typeof candidate.summary === "string" && candidate.summary.length <= 400)) return null;
+    const changes = parseWorkspaceChangeSummary(candidate.changes);
+    if (!changes) return null;
+    contribution = { changes, summary: candidate.summary };
+    if (new TextEncoder().encode(JSON.stringify(value)).length > 500 * 1024) return null;
+  }
   if (!exactKeys(value, keys)
-    || ![1, 2].includes(value.version) || (value.version === 2 && !workspace) || !ROOM_WORK_STATES.includes(value.recorded_state)
+    || ![1, 2, 3].includes(value.version) || (value.version >= 2 && !workspace) || !ROOM_WORK_STATES.includes(value.recorded_state)
     || typeof value.evidence_incomplete !== "boolean"
     || (value.elapsed_ms !== null && (!Number.isSafeInteger(value.elapsed_ms) || Number(value.elapsed_ms) < 0))
     || !exactKeys(value.operation_counts, ROOM_WORK_OPERATION_OUTCOMES)) return null;
@@ -42,6 +53,7 @@ export function parseRoomAgentWorkSummary(value) {
   return {
     version: value.version, recorded_state: value.recorded_state,
     ...(workspace ? { workspace } : {}),
+    ...(contribution ? { contribution } : {}),
     evidence_incomplete: value.evidence_incomplete, elapsed_ms: value.elapsed_ms,
     operation_counts: counts,
   };

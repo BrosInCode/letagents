@@ -4443,8 +4443,8 @@ test('every provider waits for the workspace snapshot before advancing to its ne
       const entered = deferred<void>(), release = deferred<void>();
       const events: string[] = [];
       const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
-        events.push(`turn:${request.sourceMessage.id}`);
         await options?.beforeNativeDispatch?.();
+        events.push(`turn:${request.sourceMessage.id}`);
         await options?.checkpointTurnStarted?.(request.inboxItemId);
         return { turnId: request.inboxItemId, outcome: 'no_reply', text: null, publicationContract: 'legacy_cursor_aggregate_v0' };
       }), { poll: async () => ({}), publish: async () => { throw new Error('no reply'); } }, currentAuthority,
@@ -4454,16 +4454,16 @@ test('every provider waits for the workspace snapshot before advancing to its ne
         if (source === '1') { entered.resolve(); await release.promise; }
         // Optional review failure must not retry the agent's completed work.
         if (source === '2') throw new Error('snapshot unavailable');
-      });
+      }, async (_agent, source) => { events.push(`baseline:${source}`); });
       try {
         const currentAgent = { ...agent, provider: candidate };
         await delivery.pump(currentAgent);
         await ingest(store, '1'); await ingest(store, '2');
         const pumping = delivery.pump(currentAgent);
         await entered.promise;
-        assert.deepEqual(events, ['turn:1', 'snapshot:1']);
+        assert.deepEqual(events, ['baseline:1', 'turn:1', 'snapshot:1']);
         release.resolve(); await pumping;
-        assert.deepEqual(events, ['turn:1', 'snapshot:1', 'turn:2', 'snapshot:2']);
+        assert.deepEqual(events, ['baseline:1', 'turn:1', 'snapshot:1', 'baseline:2', 'turn:2', 'snapshot:2']);
         assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.state), ['acknowledged_no_reply', 'acknowledged_no_reply']);
       } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); }
     }
