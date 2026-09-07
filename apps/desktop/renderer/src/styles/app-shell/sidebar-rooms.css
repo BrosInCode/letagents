@@ -5,6 +5,12 @@
   display: grid;
   gap: 4px;
   padding: 8px;
+  color: inherit;
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) var(--ease-out),
+    opacity var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .project-list,
@@ -452,7 +458,6 @@
   .pinned-room:hover,
   .project-row:hover,
   .room-focus:hover {
-    transform: none;
     border-color: transparent;
     background: var(--sidebar-hover);
   }

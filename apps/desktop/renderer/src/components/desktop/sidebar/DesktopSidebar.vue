@@ -293,23 +293,16 @@
                 tag="div"
                 class="project-room-list"
               >
-                <button
+                <SidebarChildRoom
                   v-for="childRoom in visibleProjectChildRooms(project)"
                   :key="childRoom.id"
-                  class="room-row room-focus"
-                  :data-kind="childRoom.kind"
-                  :data-active="activeEntry.id === childRoom.id"
-                  :data-unread="childRoom.hasUnread"
-                  :data-selected="isEntrySelected(childRoom)"
+                  :entry="childRoom"
+                  :active="activeEntry.id === childRoom.id"
+                  :selected="isEntrySelected(childRoom)"
+                  :selectable="selectionActive && isSidebarRoomSelectable(childRoom)"
+                  :reorder-enabled="roomReorderEnabled"
                   :data-dragging="isChildDragging(project.id, childRoom.id)"
                   :data-drop-position="childDropPosition(project.id, childRoom.id)"
-                  :data-sidebar-entry-id="childRoom.id"
-                  :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
-                  :aria-pressed="selectionActive && isSidebarRoomSelectable(childRoom) ? isEntrySelected(childRoom) : undefined"
-                  :aria-describedby="roomReorderEnabled ? 'sidebar-room-reorder-instructions' : undefined"
-                  :aria-keyshortcuts="roomReorderEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined"
-                  :draggable="roomReorderEnabled"
-                  type="button"
                   :data-testid="`pinned-child-room-${childRoom.id}`"
                   @click="handleEntryActivation($event, childRoom)"
                   @contextmenu.prevent.stop="openRoomContextMenu($event, childRoom)"
@@ -318,33 +311,7 @@
                   @drop.stop="dropChildRoom($event, project, childRoom)"
                   @dragend="finishSidebarDrag"
                   @keydown="handleChildReorderKeydown($event, project, childRoom)"
-                >
-                  <span
-                    v-if="selectionActive && isSidebarRoomSelectable(childRoom)"
-                    class="sidebar-child-selection-indicator"
-                    :data-selected="isEntrySelected(childRoom)"
-                    aria-hidden="true"
-                  >
-                    <Check v-if="isEntrySelected(childRoom)" />
-                  </span>
-                  <span class="room-title-line">
-                    <span class="room-title">{{ childRoom.title }}</span>
-                    <span v-if="childRoom.currentWorkspace" class="room-workspace-pill">Current</span>
-                    <span
-                      v-if="childRoom.hasUnread"
-                      class="room-unread-dot"
-                      aria-label="Unread messages"
-                      title="Unread messages"
-                    ></span>
-                  </span>
-                  <small v-if="childRoom.meta" class="room-child-meta">{{ childRoom.meta }}</small>
-                  <small
-                    v-if="childRoom.suggestedAction && !childRoom.currentWorkspace"
-                    class="room-suggested-action"
-                  >
-                    {{ childRoom.suggestedAction }}
-                  </small>
-                </button>
+                />
                 <button
                   v-if="hasProjectRoomOverflow(project)"
                   :key="`overflow:${project.id}`"
@@ -475,23 +442,16 @@
                 tag="div"
                 class="project-room-list"
               >
-                <button
+                <SidebarChildRoom
                   v-for="childRoom in visibleProjectChildRooms(project)"
                   :key="childRoom.id"
-                  class="room-row room-focus"
-                  :data-kind="childRoom.kind"
-                  :data-active="activeEntry.id === childRoom.id"
-                  :data-unread="childRoom.hasUnread"
-                  :data-selected="isEntrySelected(childRoom)"
+                  :entry="childRoom"
+                  :active="activeEntry.id === childRoom.id"
+                  :selected="isEntrySelected(childRoom)"
+                  :selectable="selectionActive && isSidebarRoomSelectable(childRoom)"
+                  :reorder-enabled="roomReorderEnabled"
                   :data-dragging="isChildDragging(project.id, childRoom.id)"
                   :data-drop-position="childDropPosition(project.id, childRoom.id)"
-                  :data-sidebar-entry-id="childRoom.id"
-                  :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
-                  :aria-pressed="selectionActive && isSidebarRoomSelectable(childRoom) ? isEntrySelected(childRoom) : undefined"
-                  :aria-describedby="roomReorderEnabled ? 'sidebar-room-reorder-instructions' : undefined"
-                  :aria-keyshortcuts="roomReorderEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined"
-                  :draggable="roomReorderEnabled"
-                  type="button"
                   :data-testid="`child-room-${childRoom.id}`"
                   @click="handleEntryActivation($event, childRoom)"
                   @contextmenu.prevent.stop="openRoomContextMenu($event, childRoom)"
@@ -500,33 +460,7 @@
                   @drop.stop="dropChildRoom($event, project, childRoom)"
                   @dragend="finishSidebarDrag"
                   @keydown="handleChildReorderKeydown($event, project, childRoom)"
-                >
-                  <span
-                    v-if="selectionActive && isSidebarRoomSelectable(childRoom)"
-                    class="sidebar-child-selection-indicator"
-                    :data-selected="isEntrySelected(childRoom)"
-                    aria-hidden="true"
-                  >
-                    <Check v-if="isEntrySelected(childRoom)" />
-                  </span>
-                  <span class="room-title-line">
-                    <span class="room-title">{{ childRoom.title }}</span>
-                    <span v-if="childRoom.currentWorkspace" class="room-workspace-pill">Current</span>
-                    <span
-                      v-if="childRoom.hasUnread"
-                      class="room-unread-dot"
-                      aria-label="Unread messages"
-                      title="Unread messages"
-                    ></span>
-                  </span>
-                  <small v-if="childRoom.meta" class="room-child-meta">{{ childRoom.meta }}</small>
-                  <small
-                    v-if="childRoom.suggestedAction && !childRoom.currentWorkspace"
-                    class="room-suggested-action"
-                  >
-                    {{ childRoom.suggestedAction }}
-                  </small>
-                </button>
+                />
                 <button
                   v-if="hasProjectRoomOverflow(project)"
                   :key="`overflow:${project.id}`"
@@ -713,6 +647,7 @@ import {
   type SidebarRoomMenuActionId,
 } from "../../../domain/sidebar-context-menu";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
+import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
