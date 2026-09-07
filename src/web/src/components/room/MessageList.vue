@@ -101,7 +101,7 @@ const matchedIds = computed(() => {
   if (!q) return new Set<string>()
   const ids = new Set<string>()
   for (const msg of props.messages) {
-    if ((msg.text || '').toLowerCase().includes(q) || (msg.sender || '').toLowerCase().includes(q)) {
+    if ((msg.display_text || msg.text || '').toLowerCase().includes(q) || (msg.sender || '').toLowerCase().includes(q)) {
       ids.add(msg.id)
     }
   }

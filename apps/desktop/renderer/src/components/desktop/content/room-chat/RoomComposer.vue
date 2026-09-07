@@ -92,7 +92,7 @@
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
         <strong>{{ replyHeading }}</strong>
-        <span>{{ replyPreview(replyTo.text) }}</span>
+        <span>{{ replyPreview(replyTo.isSelection ? replyTo.text : replyTo.displayText || replyTo.text) }}</span>
       </div>
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
@@ -216,6 +216,7 @@ export interface RoomComposerReplyTarget {
   id: string;
   sender: string;
   text: string;
+  displayText?: string | null;
   isSelection?: boolean;
   sourceMessageId?: string | null;
 }
