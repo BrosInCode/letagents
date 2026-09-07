@@ -214,9 +214,9 @@ export function hasInlinePromptInjection(
 }
 
 export function getReplyPreviewText(
-  reply: Pick<MessageReplyReference, 'text'> | null | undefined,
+  reply: Pick<MessageReplyReference, 'text' | 'display_text'> | null | undefined,
 ): string {
-  const text = String(reply?.text || '')
+  const text = String(reply?.display_text || reply?.text || '')
     .replace(/\s+/g, ' ')
     .trim()
   return text.length > 160 ? `${text.slice(0, 157)}...` : text

@@ -1,3 +1,7 @@
+export function messageDisplayText(message: { text: string; display_text?: string | null }): string {
+  return message.display_text || message.text
+}
+
 export function formatMessageTime(timestamp: string, now = new Date()): string {
   try {
     const date = new Date(timestamp)

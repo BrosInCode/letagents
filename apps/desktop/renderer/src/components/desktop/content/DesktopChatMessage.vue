@@ -108,7 +108,7 @@
 
         <DesktopLongMessageContent
           v-else
-          :text="message.text || 'No message body.'"
+          :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
           @message-reference-click="$emit('scroll-to-message', $event)"
@@ -462,10 +462,11 @@ const provenanceLabel = computed(() =>
 const replyDisplayName = computed(() =>
   props.message.replyTo ? parseSenderIdentity(props.message.replyTo).displayName : "unknown"
 );
-const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
+const replyPreviewText = computed(() => truncate((props.message.replyTo?.displayText || props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
+const visibleText = computed(() => props.message.displayText || props.message.text);
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
 const renderedText = computed(() => {
-  const text = props.message.text || "No message body.";
+  const text = visibleText.value || "No message body.";
   return renderMessageText(
     isAmbientSystem.value ? stripStatusPrefix(text) : text,
     props.highlightQuery,
@@ -639,7 +640,7 @@ async function copyMessage(): Promise<void> {
 }
 
 function messageCopyText(): string {
-  const text = props.message.text.trim();
+  const text = visibleText.value.trim();
   if (text) return text;
   if (props.message.attachments.length === 1) {
     return props.message.attachments[0]?.fileName || props.message.attachments[0]?.name || "1 attachment";

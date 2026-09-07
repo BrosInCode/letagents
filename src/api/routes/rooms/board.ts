@@ -58,11 +58,12 @@ export interface RoomBoardRouteDeps {
     body: Record<string, unknown>;
   }): Promise<ResolvedRequestAgentIdentity | null | "responded">;
   getActiveBoardManagerForRoom?(roomId: string): Promise<BoardManagerAssignment | null>;
+  getNotificationTask?(roomId: string, taskId: string): Promise<{ title: string } | null>;
   emitProjectMessage?(
     projectId: string,
     sender: string,
     text: string,
-    options?: { source?: string; client_message_id?: string | null }
+    options?: { source?: string; client_message_id?: string | null; display_text?: string | null }
   ): Promise<{ id?: string }>;
   enforceFocusParentBoardWriteIsolation?(input: {
     req: AuthenticatedRequest;
@@ -143,6 +144,40 @@ function intentSummary(intent: BoardIntent): string {
   return intent.action_type.replaceAll("_", " ");
 }
 
+function notificationName(actorLabel: string | null, fallback: string): string {
+  return safeNotificationFragment(actorLabel?.split("|")[0], fallback);
+}
+
+async function readableIntentAction(deps: RoomBoardRouteDeps, intent: BoardIntent): Promise<string> {
+  const payload = intent.payload;
+  const taskId = intent.task_id || (typeof payload.task_id === "string" ? payload.task_id : null);
+  let title = intent.action_type === "task_create"
+    ? normalizeTaskCreateBoardIntentPayload(payload)?.title
+    : null;
+  if (!title && taskId) {
+    // A title lookup must not prevent delivery of a committed decision.
+    try {
+      title = (await (deps.getNotificationTask ?? getTaskById)(intent.room_id, taskId))?.title;
+    } catch { /* The task reference still identifies the approved action. */ }
+  }
+  const task = taskId
+    ? `${taskId}${title ? `: “${safeNotificationFragment(title, "Untitled task")}”` : ""}`
+    : title ? `the task “${safeNotificationFragment(title, "Untitled task")}”` : "the task";
+  if (intent.action_type === "task_create") return `create ${task}`;
+  if (intent.action_type === "task_claim") return `claim ${task}`;
+  if (payload.action === "release") return `release ${task} for another agent`;
+  if (payload.action === "handoff") return `hand off ${task} to another agent`;
+  if (payload.status === "cancelled") return `cancel ${task}`;
+  if (payload.status === "accepted") return `accept ${task}`;
+  const statusLabels: Record<string, string> = {
+    proposed: "proposed", assigned: "assigned", in_progress: "in progress",
+    in_review: "ready for review", blocked: "blocked", merged: "merged", done: "done",
+  };
+  const status = typeof payload.status === "string" ? statusLabels[payload.status] : null;
+  if (status) return `mark ${task} as ${status}`;
+  return `${intent.action_type === "task_close" ? "close" : "update"} ${task}`;
+}
+
 export async function emitBoardIntentManagerNotification(input: {
   deps: RoomBoardRouteDeps;
   project: Project;
@@ -163,6 +198,10 @@ export async function emitBoardIntentManagerNotification(input: {
   const text = input.activeManager
     ? `${managerMention ?? safeNotificationFragment(input.activeManager.actor_label, "Board Manager")} New board intent from ${proposer}: ${summary}. Intent ${input.intent.id}: use approve_board_intent or deny_board_intent to decide it.`
     : `New board intent from ${proposer}: ${summary}. It is pending, but no Board Manager is assigned.`;
+  const action = await readableIntentAction(input.deps, input.intent);
+  const displayText = input.activeManager
+    ? `@${notificationName(input.activeManager.actor_label, "Board Manager")} — ${notificationName(input.intent.proposer_actor_label, "A participant")} wants to ${action}. Review this request on the board.`
+    : `${notificationName(input.intent.proposer_actor_label, "A participant")} wants to ${action}. A Board Manager is needed to review this request.`;
   const message = await input.deps.emitProjectMessage(
     input.project.id,
     "letagents",
@@ -170,6 +209,7 @@ export async function emitBoardIntentManagerNotification(input: {
     {
       source: "system",
       client_message_id: `board_intent:${input.intent.id}:manager_notify`,
+      display_text: displayText,
     }
   );
 
@@ -193,9 +233,15 @@ export async function emitBoardIntentDecisionNotification(input: {
     : input.intent.action_type === "task_create" ? "The approved task was created; read the board for its current state."
       : "Continue the exact approved action with board_intent_id and your own worker session; no approval token is needed.";
   try {
+    const action = await readableIntentAction(input.deps, input.intent);
+    const nextStep = outcome === "denied" ? ""
+      : input.intent.action_type === "task_create" ? " The task is now on the board."
+      : input.intent.status === "used" ? " This action is already complete."
+      : " You can continue.";
+    const displayText = `@${notificationName(input.intent.proposer_actor_label, "Agent")} — Your request to ${action} was ${outcome === "denied" ? "declined" : "approved"}.${nextStep}`;
     const message = await input.deps.emitProjectMessage(input.project.id, "letagents",
     `${mention} Board intent ${input.intent.id} was ${outcome}. ${followUp}`,
-    { source: "system", client_message_id: `board_intent:${input.intent.id}:${outcome}:proposer_notify` });
+    { source: "system", client_message_id: `board_intent:${input.intent.id}:${outcome}:proposer_notify`, display_text: displayText });
     return { delivered: Boolean(message.id), message_id: message.id ?? null };
   } catch {
     return { delivered: false, message_id: null, error: "The decision was recorded, but notification failed. Retry this decision to notify the proposer." };

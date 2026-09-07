@@ -222,3 +222,37 @@ test(
     assert.equal(inbox.threads[0]?.summary.latest_reply?.id, attachmentReply.id);
   },
 );
+
+test("system display copy survives storage, retries, history, and quoted replies without changing agent text", {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed message tests" : false,
+}, async () => {
+  if (!addMessageWithCreateStatus || !addMessage || !createProjectWithName || !getMessages || !getMessageThread) {
+    throw new Error("DB-backed message tests require TEST_DB_URL");
+  }
+  const room = await createProjectWithName("board-notification-display-room");
+  const text = "@agent:owner/lumen Board intent bi_123 was approved. Continue with board_intent_id.";
+  const display_text = "@LumenRiver — Your request to claim task_19: “Tests and CI” was approved. You can continue.";
+  const first = await addMessageWithCreateStatus(room.id, "letagents", text, {
+    source: "system", display_text, client_message_id: "board_intent:bi_123:approved:proposer_notify",
+  });
+  assert.equal(first.message.text, text);
+  assert.equal(first.message.display_text, display_text);
+  assert.equal(first.canonical_message.display_text, display_text);
+  const replay = await addMessageWithCreateStatus(room.id, "letagents", text, {
+    source: "system", display_text: "Changed during retry", client_message_id: "board_intent:bi_123:approved:proposer_notify",
+  });
+  assert.equal(replay.created, false);
+  assert.equal(replay.message.display_text, display_text);
+  const reply = await addMessage(room.id, "EmmyMay", "Thanks", {
+    source: "browser", reply_to_message_id: first.message.id, thread_root_message_id: first.message.id,
+  });
+  assert.equal(reply.reply_to?.text, text);
+  assert.equal(reply.reply_to?.display_text, display_text);
+  const history = await getMessages(room.id);
+  assert.equal(history.messages.find((message) => message.id === first.message.id)?.display_text, display_text);
+  assert.equal(history.messages.find((message) => message.id === reply.id)?.reply_to?.display_text, display_text);
+  // Public message writes cannot use presentation copy to hide their real text.
+  const ordinary = await addMessage(room.id, "EmmyMay", "Original", { source: "browser", display_text: "Hidden replacement" });
+  assert.equal(ordinary.display_text, undefined);
+});
