@@ -1103,3 +1103,21 @@ it('places only turn contributions beside their visible conversation and never p
   const { contribution: _turn, ...legacy } = work.summary;
   assert.equal(buildMessageTimelineEntries([message], [{ ...work, summary: { ...legacy, version: 2 } }]).some(entry => entry.type === 'contribution'), false);
 });
+
+it('keeps contribution prose formatted and never displays a machine path or a cut sentence', async () => {
+  const { readableContributionText } = await import('../../../../shared/contribution-text.mjs');
+  const value = readableContributionText('Done.\n\nPath: `/Users/emmy/work tree/src/example.ts`\n\n**Changed**\n- Added a file.\n- Preserved existing work.');
+  assert.equal(value, '**Changed**\n- Added a file.\n- Preserved existing work.');
+  assert.match(renderDesktopMarkdown(value!, { block: true }), /<strong>Changed<\/strong>.*<ul><li>Added a file\./);
+  const linked = readableContributionText('Created [example.ts](/Users/emmy/repo/example.ts).');
+  assert.equal(linked, 'Created `example.ts`.');
+  assert.doesNotMatch(linked!, /\/Users|\]\(/);
+  assert.equal(readableContributionText('Updated the task editor. ' + 'unfinished '.repeat(60)), 'Updated the task editor.');
+  assert.equal(readableContributionText('x'.repeat(400)), null);
+  assert.equal(readableContributionText('Updated /tmp/private.ts successfully.'), 'Updated `private.ts` successfully.');
+  assert.equal(readableContributionText('See https://raw.githubusercontent.com/acme/repo/main/app.ts.'), 'See `app.ts`.');
+  assert.equal(readableContributionText('See [app.ts](https://github.com/acme/repo/blob/missing/app.ts).'), 'See `app.ts`.');
+  assert.equal(readableContributionText('Updated the file. Status: `?? ' + 'x'.repeat(400)), 'Updated the file.');
+  const hostile = readableContributionText('<img src=x onerror=alert(1)>\n\n**Text**');
+  assert.doesNotMatch(renderDesktopMarkdown(hostile!, { block: true }), /<img/);
+});

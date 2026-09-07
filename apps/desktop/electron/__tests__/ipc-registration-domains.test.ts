@@ -28,6 +28,8 @@ const expectedDirectChannels = [
   "desktop:app:open-credential-storage",
   "desktop:app:open-external-url",
   "desktop:app:open-github-url",
+  "desktop:app:open-workspace-file",
+  "desktop:app:resolve-workspace-files",
   "desktop:auth:cancel-device-flow",
   "desktop:auth:get-status",
   "desktop:auth:open-verification",
