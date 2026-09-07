@@ -2,6 +2,11 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopApi } from "./ipc-types.js";
 
 const api: DesktopApi = {
+  organizations: {
+    list: () => ipcRenderer.invoke("desktop:organizations:list"),
+    join: (id, setup) => ipcRenderer.invoke("desktop:organizations:join", id, setup),
+    rooms: (id) => ipcRenderer.invoke("desktop:organizations:rooms", id),
+  },
   ui: {
     onOpenSettings: (callback) => {
       const listener = () => callback();

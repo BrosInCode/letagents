@@ -58,6 +58,7 @@ import type {
   DesktopOpenModelSettingsStatus,
 } from "./agents.js";
 import type { DesktopRentalApi } from "./rental.js";
+import type { DesktopOrganizationApi } from "./organizations.js";
 import type {
   DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
@@ -123,6 +124,7 @@ import type {
 } from "./board-governance.js";
 
 export interface DesktopApi {
+  organizations: DesktopOrganizationApi;
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
     onOpenUpdates?: (callback: () => void) => () => void;

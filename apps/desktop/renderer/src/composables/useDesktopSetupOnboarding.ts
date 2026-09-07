@@ -286,6 +286,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.setupLoadError.value = null;
 
     if (options.firstRunStage.value === "room") {
+      options.firstRunStage.value = "organization";
+      return;
+    }
+
+    if (options.firstRunStage.value === "organization") {
       options.firstRunStage.value = "github";
       return;
     }

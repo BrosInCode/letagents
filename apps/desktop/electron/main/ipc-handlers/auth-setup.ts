@@ -41,8 +41,10 @@ import {
   revokeDesktopSupervisorGrant,
 } from "../supervisor-grant.js";
 import { supervisorGrantCoordinator } from "../supervisor-grant-coordinator.js";
+import { registerOrganizationIpcHandlers } from "../organizations.js";
 
 export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): void {
+  registerOrganizationIpcHandlers(targetIpcMain);
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
     supervisorGrantCoordinator.scheduleCredentialRecovery();
