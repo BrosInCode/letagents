@@ -24,5 +24,5 @@ export const room_agent_work = pgTable("room_agent_work", {
   delivery_uq: uniqueIndex("room_agent_work_delivery_uq").on(table.room_id, table.source_message_number, table.agent_key),
   recent_idx: index("room_agent_work_recent_idx").on(table.room_id, table.updated_at, table.attempt_id),
   revision_check: check("room_agent_work_revision_check", sql`${table.publisher_revision} BETWEEN 1 AND 9007199254740991`),
-  summary_size_check: check("room_agent_work_summary_size_check", sql`octet_length(${table.summary}::text) <= 2048`),
+  summary_size_check: check("room_agent_work_summary_size_check", sql`octet_length(${table.summary}::text) <= 524288`),
 }));

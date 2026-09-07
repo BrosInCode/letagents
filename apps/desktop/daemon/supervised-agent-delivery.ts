@@ -191,6 +191,7 @@ export class SupervisedAgentDelivery {
     private readonly checkpointPreparedTurn?: SupervisedPreparedTurnCheckpointer,
     private readonly observeNewSources?: (agent: SupervisedIngressAgent) => ((sourceMessageIds: readonly string[]) => void) | undefined,
     private readonly settleLifecycleBeforeIdle?: SupervisedLifecycleSettler,
+    private readonly observeSettledWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string) => Promise<void>,
   ) {}
 
   /**
@@ -1075,6 +1076,12 @@ export class SupervisedAgentDelivery {
     let admittedProviderTurnId = item.provider_turn_id ?? null;
     let interruptDispositionForFinalizer: "cancelled" | "resume" | "freeze" | null = null;
     if (item.provider_turn_id) markProviderTurnDurablyStarted();
+    let workspaceObserved = false;
+    const observeWorkspace = async () => {
+      if (workspaceObserved) return;
+      workspaceObserved = true;
+      try { await this.observeSettledWorkspace?.(agent, item.source_message_id); } catch { /* optional review */ }
+    };
     let providerCallEntered = false;
     const recovering = Boolean(item.provider_turn_id);
     let providerTurnOriginExecutionGenerationId = agent.executionGenerationId;
@@ -1470,6 +1477,9 @@ export class SupervisedAgentDelivery {
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
       const { acceptedResult: result } = await checkpointTerminalResult(providerResult);
+      // Optional review evidence is captured before another turn can mutate this workspace.
+      // Failure must not change the provider result or cause the turn to be rerun.
+      await observeWorkspace();
       const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
       const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
       if (!await this.hasExecutionAuthority(agent, turnController)) return;
@@ -1539,7 +1549,12 @@ export class SupervisedAgentDelivery {
       // interrupt, not a delivery failure: leave the head for interruptActiveDelivery
       // to settle rather than retrying/blocking (and rerunning) the stopped turn.
       if (turnController.signal.aborted) return;
-      if (await this.inbox.nativeFailure(current.inbox_item_id)) {
+      const nativeFailure = await this.inbox.nativeFailure(current.inbox_item_id);
+      const acceptedTerminal = persistedAcceptedTerminal(current.outcome);
+      // Some adapters commit a terminal result and then reject during cleanup.
+      // Their workspace is settled too; observe it before advancing the FIFO.
+      if ((nativeFailure || acceptedTerminal) && await this.hasLaneAuthority(agent, controller)) await observeWorkspace();
+      if (nativeFailure) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_failed", {
           last_error: current.last_error?.trim() || providerFailureDisplayText(message),
@@ -1547,7 +1562,6 @@ export class SupervisedAgentDelivery {
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
-      const acceptedTerminal = persistedAcceptedTerminal(current.outcome);
       if (acceptedTerminal?.kind === "no_reply"
         && ["dispatching", "awaiting_result", "result_recovery"].includes(current.state)) {
         // The normalized terminal checkpoint committed before provider-journal

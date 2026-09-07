@@ -13,7 +13,7 @@ import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult 
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
   const path = join(directory, "state.sqlite");
   const db = new DatabaseSync(path);
@@ -27,22 +27,22 @@ async function fixture(t: TestContext) {
     grantId: "grant", grantGeneration: 1, daemonGeneration: 1, apiUrl: grant.apiUrl, agentSessionId: "session",
     bearer: "PRIVATE_WORKER_BEARER", bearerId: "bearer", expiresAt: null, mintedAtMs: 100,
     agentSession: { session_id: "session", session_token: "PRIVATE_SESSION_TOKEN", room_id: "room", session_kind: "worker",
-      runtime: "codex", actor_label: "Agent", agent_key: "owner/agent", agent_instance_id: "daemon:agent", display_name: "Agent",
+      runtime: provider, actor_label: "Agent", agent_key: "owner/agent", agent_instance_id: "daemon:agent", display_name: "Agent",
       owner_label: "Owner", ide_label: "Desktop", created_at: "2026-08-31", updated_at: "2026-08-31", last_seen_at: "2026-08-31", ended_at: null } };
   custody.installHostGrant(grant); custody.installWorkerAuthorization(worker);
-  const agent: SupervisedIngressAgent = { agentId: "agent", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox",
+  const agent: SupervisedIngressAgent = { agentId: "agent", roomId: "room", provider, deliveryMode: "daemon_inbox",
     apiUrl: grant.apiUrl, agentSessionId: worker.agentSessionId, bearer: worker.bearer, handle: null,
     workAttemptId: "workspace", providerContinuationId: "conversation", providerConnection: null,
     executionGenerationId: "generation", daemonGeneration: 1 };
   const capture = new ExecutionShadowStore(db);
   const receipts = new RoomWorkPublicationStore(db);
   capture.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime",
-    provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+    provider, authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
   const observer = capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "runtime", observerRuntimeGenerationId: "runtime",
     sourceId: "source", daemonGenerationId: "1", expectedEpoch: 0, boundAtMs: 100 });
   const sent: RoomWorkPublishInput[] = [];
   const diagnostics: string[] = [];
-  const options = {
+  const options: ConstructorParameters<typeof RoomWorkPublisher>[1] = {
     custody, daemonGeneration: () => 1, isClosing: () => false, now: () => Date.parse("2026-08-31T00:00:00Z"),
     assertCurrent: async () => {}, diagnostic: (code: string) => { diagnostics.push(code); },
     publish: async (input: RoomWorkPublishInput): Promise<RoomWorkPublishResult> => { sent.push(input); return "acknowledged"; },
@@ -312,4 +312,66 @@ test("HTTP publication validates exact receipts, both clear responses, and never
     { ...work, summary: { ...input.summary, command: "PRIVATE" } }]) {
     response = { status: "updated", work: bad }; await assert.rejects(publishRoomWork(input), /different/);
   }
+});
+
+for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
+  test(`${provider} publishes workspace review after a no-reply turn through the shared path`, async t => {
+    const f = await fixture(t, provider);
+    const reads: string[] = [];
+    const workspace = { captured_at: "2026-09-07T00:00:00.000Z", branch: "feature/work", base_revision: "a".repeat(40), state: "ready" as const,
+      files: [{ path: "app.ts", previous_path: null, status: "modified" as const, additions: 1, deletions: 1, binary: false }],
+      additions: 1, deletions: 1, hidden_files: 0, patch: "-old\n+new\n".repeat(1000), patch_truncated: false };
+    f.options.workspaceSummary = async workAttemptId => { reads.push(workAttemptId); return workspace; };
+    const attemptId = f.captureMessage();
+    await f.publisher.flush();
+    assert.equal(reads.length, 0, "source changes are captured at completion, not on every stream delta");
+    f.fact(1, { state: "terminal", turnOutcome: "completed" });
+    await f.publisher.captureWorkspace(f.agent, "msg_1");
+    f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attemptId);
+    f.publisher.changed("agent"); await f.publisher.flush();
+    assert.deepEqual(reads, ["workspace"]);
+    assert.equal(f.sent.at(-1)?.summary.version, 2);
+    assert.deepEqual(f.sent.at(-1)?.summary.workspace, workspace);
+    f.options.workspaceSummary = async () => { throw new Error("Later workspace contents must not replace the captured turn"); };
+    f.restart(); await f.publisher.flush();
+    assert.deepEqual(f.row().summary?.workspace, workspace, "the review snapshot survives daemon restart");
+  });
+}
+
+test('v36 upgrades existing publication receipts to store real diffs without losing history', async t => {
+  const f = await fixture(t);
+  f.captureMessage(); await f.publisher.flush();
+  const before = f.row();
+  f.publisher.close();
+  const definitions = f.db.prepare("SELECT type,sql FROM sqlite_master WHERE tbl_name='room_work_publications' AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END").all();
+  f.db.exec('CREATE TEMP TABLE saved_publications AS SELECT * FROM room_work_publications; DROP TABLE room_work_publications');
+  f.db.exec(String(definitions[0].sql).replaceAll('524288', '2048'));
+  f.db.exec('INSERT INTO room_work_publications SELECT * FROM saved_publications; DROP TABLE saved_publications');
+  for (const definition of definitions.slice(1)) f.db.exec(String(definition.sql));
+  f.db.exec('PRAGMA user_version=36; UPDATE manifest_metadata SET schema_version=36');
+  new DaemonStateSchema().createSchema(f.db);
+  f.restart();
+  assert.deepEqual(f.row(), before);
+  const captured = f.summary();
+  const workspace = { captured_at: '2026-09-07T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
+    files: [], additions: 0, deletions: 0, hidden_files: 0, patch: '+ substantial diff\n'.repeat(4000), patch_truncated: false };
+  f.receipts.stage(before, { ...captured, summary: { ...captured.summary, version: 2, workspace } });
+  f.restart();
+  assert.equal(f.row().summary?.workspace?.patch, workspace.patch);
+});
+
+test('a background staging pass preserves a workspace captured while its authority check yielded', async t => {
+  const f = await fixture(t);
+  f.captureMessage();
+  const workspace = { captured_at: '2026-09-07T00:00:00.000Z', branch: 'work', base_revision: 'a'.repeat(40), state: 'ready' as const,
+    files: [], additions: 0, deletions: 0, hidden_files: 0, patch: '', patch_truncated: false };
+  f.options.workspaceSummary = async () => workspace;
+  let checks = 0;
+  f.options.assertCurrent = async () => {
+    // First check enters flush; second occurs after stageChanged loaded its v1 row.
+    if (++checks === 2) await f.publisher.captureWorkspace(f.agent, 'msg_1');
+  };
+  await f.publisher.flush();
+  assert.deepEqual(f.row().summary?.workspace, workspace);
+  assert.deepEqual(f.sent.at(-1)?.summary.workspace, workspace);
 });
