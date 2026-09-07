@@ -795,8 +795,8 @@ export class SupervisorGrantCoordinator {
       return { metadata, authority, token: response.supervisor_grant, entryId: entry.id, lastInstalledDaemonGeneration: null };
     } catch (error) {
       // The handoff may have succeeded but its response was lost, or the old
-      // bearer may be revoked. Owner-auth revoke/reprovision is the only safe
-      // recovery; do not try an owner token in the daemon or fallback to it.
+      // bearer may be revoked. Recover the exact scope using owner authority;
+      // do not pass an owner token into the daemon or retire its worker.
       // Rental and legacy grants have no proven owner authority, so they
       // cannot enter that owner-authenticated recovery path.
       if (!stored.authority) throw error;

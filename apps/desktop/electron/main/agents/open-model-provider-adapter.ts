@@ -1,3 +1,4 @@
+import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -145,8 +146,7 @@ export type OpenCodePermissionObservation =
 
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
-    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
-    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "A GitHub webfetch 404 can mean private access, not a missing PR. Check with gh using its existing authentication before concluding the PR is missing; GH_CONFIG_DIR preserves the user's configured GitHub CLI location.",
     "An explicit git fetch may update only FETCH_HEAD. Inspect FETCH_HEAD or another verified ref before concluding a remote branch has no changes.",

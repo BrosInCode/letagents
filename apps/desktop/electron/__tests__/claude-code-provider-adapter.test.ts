@@ -988,8 +988,10 @@ test("daemon-owned Claude runs one exact bounded room turn and checkpoints befor
   assert.ok(frame.uuid);
   assert.deepEqual(calls, ["intent", `turn:${frame.uuid}`], "durable intent and exact id precede native completion");
   const prompt = frame.message.content[0]!.text;
-  assert.match(prompt, /daemon owns observation, credentials, retries, and publication/i);
-  assert.match(prompt, /Do not register a session, authenticate, poll/);
+  assert.match(prompt, /publication of your final chat reply/i);
+  assert.match(prompt, /chat reply publication does not publish code or create PRs/);
+  assert.match(prompt, /standing merge approval/);
+  assert.match(prompt, /Do not register a session, authenticate LetAgents, poll/);
   assert.doesNotMatch(prompt, /durable charter/i);
   assert.match(prompt, /Inbox item: inbox-claude-1/);
   assert.match(prompt, /Source message: .*Please fix it/);

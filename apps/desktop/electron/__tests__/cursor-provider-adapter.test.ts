@@ -2618,6 +2618,8 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   assert.equal(launch.args.at(-1)?.includes(`Turn id: ${persistedTurnId}`), true);
   assert.equal(launch.args.at(-1)?.includes("Please fix it"), true);
   assert.equal(launch.args.at(-1)?.includes("call complete_room_turn exactly once"), true);
+  assert.match(launch.args.at(-1)!, /chat reply publication does not publish code or create PRs/);
+  assert.match(launch.args.at(-1)!, /standing merge approval/);
   const child = harness.children[0]!;
   child.emit({
     type: "result",

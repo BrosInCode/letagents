@@ -675,7 +675,82 @@ test("narrowing the canonical room set rotates away excess authority", async () 
   });
 });
 
-test("stale or under-scoped cached grant is revoked and reprovisioned", async () => {
+for (const expired of [false, true]) {
+  test(`same-scope credential recovery preserves the grant after ${expired ? "expiry" : "a lost handoff response"}`, async () => {
+    await withRegistry(async () => {
+      const agentKey = "owner/agent-continuity";
+      const entryId = "entry-continuity";
+      const saved = {
+        ...metadata(agentKey, "continuity"),
+        installationId: desktopSupervisorGrantInstallationId("desktop_host", entryId),
+        allowedRoomIds: ["room-continuity"],
+        expiresAt: new Date(Date.now() + (expired ? -1_000 : 60_000)).toISOString(),
+      };
+      await replaceDesktopSupervisorGrantForAgent({
+        agentKey, metadata: saved, authority: { ownerAccountId: "account_1", scopeKey: "owner" },
+        token: "lashg_previous", entryId,
+      }, { storage: keychain });
+      const calls: string[] = [];
+      const apiFetch = (async <T>(path: string, init?: { method?: string; body?: string }) => {
+        calls.push(`${init?.method} ${path}`);
+        assert.equal(init?.method, "POST", "credential recovery must not end the worker session");
+        if (calls.length === 1) throw new Error("response lost after credential rotation");
+        const body = JSON.parse(init!.body!) as Record<string, unknown>;
+        return {
+          grant_id: saved.grantId, host_id: body.host_id, installation_id: body.installation_id,
+          allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+          current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+          supervisor_grant: "lashg_recovered", owner_account_id: "account_1", scope_key: "owner",
+        } as T;
+      }) as never;
+      const recovered = await getOrProvisionDesktopSupervisorGrantForAgent({
+        hostId: "desktop_host", entryId, agentKey, roomScopes: [roomScope("room-continuity")],
+        forceReprovision: !expired,
+      }, { storage: keychain, apiFetch });
+      assert.deepEqual(calls, ["POST /supervisor-host-grants", "POST /supervisor-host-grants"]);
+      assert.equal(recovered.metadata.grantId, saved.grantId);
+      assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_recovered");
+    });
+  });
+}
+
+test("failed secure storage after same-scope recovery does not revoke the live worker", async () => {
+  await withRegistry(async () => {
+    const agentKey = "owner/agent-storage-recovery";
+    const entryId = "entry-storage-recovery";
+    const saved = {
+      ...metadata(agentKey, "storage-recovery"),
+      installationId: desktopSupervisorGrantInstallationId("desktop_host", entryId),
+      allowedRoomIds: ["room-recovery"],
+    };
+    await replaceDesktopSupervisorGrantForAgent({ agentKey, metadata: saved, token: "lashg_previous", entryId }, { storage: keychain });
+    const calls: string[] = [];
+    const apiFetch = (async <T>(path: string, init?: { method?: string; body?: string }) => {
+      calls.push(`${init?.method} ${path}`);
+      const body = JSON.parse(init!.body!) as Record<string, unknown>;
+      return {
+        grant_id: saved.grantId, host_id: body.host_id, installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: `lashg_recovered_${calls.length}`, owner_account_id: "account_1", scope_key: "owner",
+      } as T;
+    }) as never;
+    const input = { hostId: "desktop_host", entryId, agentKey, roomScopes: [roomScope("room-recovery")], forceReprovision: true };
+    await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent(input, {
+      storage: { ...keychain, encryptString: (value: string) => {
+        if (value.startsWith("lashg_recovered")) throw new Error("Keychain locked");
+        return keychain.encryptString(value);
+      } }, apiFetch,
+    }), /OS-backed encryption/);
+    assert.deepEqual(calls, ["POST /supervisor-host-grants"]);
+    assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_previous");
+    const recovered = await getOrProvisionDesktopSupervisorGrantForAgent(input, { storage: keychain, apiFetch });
+    assert.equal(recovered.metadata.grantId, saved.grantId);
+    assert.equal(recovered.token, "lashg_recovered_2");
+  });
+});
+
+test("under-scoped cached grant is revoked and reprovisioned", async () => {
   await withRegistry(async () => {
     const agentKey = "owner/agent-stale";
     const installationId = desktopSupervisorGrantInstallationId("desktop_host", "entry-stale");

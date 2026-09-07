@@ -1186,6 +1186,9 @@ test("Codex bounded room turn waits for its exact terminal event and publishes o
   const causal: string[] = []; let boundedStatus = "inProgress"; let settled = false;
   client.request = async <T>(method: string, params?: unknown): Promise<T> => {
     if (method === "turn/start") {
+      const prompt = (params as { input: Array<{ text: string }> }).input[0]!.text;
+      assert.match(prompt, /chat reply publication does not publish code or create PRs/);
+      assert.match(prompt, /standing merge approval/);
       causal.push("turn/start");
       return { turn: { id: "turn-bounded" } } as T;
     }

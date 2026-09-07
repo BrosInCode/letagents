@@ -1,3 +1,4 @@
+import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, mkdtempSync, openSync, readSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -269,9 +270,8 @@ export function boundedCursorRoomTurnPrompt(
   permissionProfileId?: string | null,
 ): string {
   return [
-    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
+    ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     ...cursorPermissionProfileInstructionLines(permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"]),
-    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
     "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Assistant text generated during this turn is live activity only. Cursor's terminal result concatenates that activity, so it is never published as the room reply.",
     "After all work is finished, call complete_room_turn exactly once with either { outcome: \"reply\", text: \"your concise public answer\" } or { outcome: \"no_reply\" }.",
