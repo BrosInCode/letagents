@@ -34,6 +34,8 @@ const api: DesktopApi = {
     },
   },
   app: {
+    resolveWorkspaceFiles: input => ipcRenderer.invoke("desktop:app:resolve-workspace-files", input),
+    openWorkspaceFile: input => ipcRenderer.invoke("desktop:app:open-workspace-file", input),
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
     openGitHubUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-github-url", url),
     openExternalUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-external-url", url),

@@ -3,7 +3,7 @@
     <span class="room-contribution-mark" aria-hidden="true"><FileDiff :size="17" /></span>
     <div class="room-contribution-body">
       <div class="room-contribution-byline"><button type="button" @click="emit('open-workspace', work)">{{ identity.ownerAttribution || identity.displayName }}</button><span v-if="identity.ownerAttribution">{{ identity.displayName }}</span><time :datetime="changes.captured_at" :title="formatFullTimestamp(changes.captured_at)">{{ formatShortDateTime(changes.captured_at) }}</time></div>
-      <p>{{ contributionSummary(work) || 'Workspace changes could not be captured for this turn.' }}</p>
+      <ContributionDescription :work="work" />
       <button class="room-contribution-review" type="button" @click="emit('open-workspace', work)"><span>{{ changes.state === 'ready' ? `View ${count} changed ${count === 1 ? 'file' : 'files'}` : 'View workspace' }}</span><span v-if="changes.state === 'ready'" class="room-contribution-counts"><b>+{{ changes.additions }}</b><b>−{{ changes.deletions }}</b></span><ChevronRight :size="14" aria-hidden="true" /></button>
       <small>Workspace changes during this turn<span v-if="status !== 'ready'"> · Updates unavailable</span></small>
     </div>
@@ -11,9 +11,10 @@
 </template>
 <script setup lang="ts">
 import { computed } from 'vue';
+import ContributionDescription from './ContributionDescription.vue';
 import { FileDiff, ChevronRight } from '@lucide/vue';
 import type { DesktopRoomAgentWork, DesktopParticipantSummary } from '../../../../../../electron/ipc-types';
-import { contributionChanges, contributionSummary, workspaceAgentTarget } from '../../../../domain/room-contributions';
+import { contributionChanges, workspaceAgentTarget } from '../../../../domain/room-contributions';
 import { formatFullTimestamp, formatShortDateTime } from '../../../../domain/time';
 const props = defineProps<{ work: DesktopRoomAgentWork; participants: readonly DesktopParticipantSummary[]; status: string }>();
 const emit = defineEmits<{ 'open-workspace': [work: DesktopRoomAgentWork] }>();
@@ -28,7 +29,6 @@ const identity = computed(() => workspaceAgentTarget(props.work, props.participa
 .room-contribution-byline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--text-secondary); }
 .room-contribution-byline button { background: none; border: 0; padding: 0; color: var(--text); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
 .room-contribution-byline time { margin-left: auto; font-size: 10px; }
-.room-contribution-body p { margin: 7px 0 10px; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
 .room-contribution-review { display: inline-flex; align-items: center; gap: 10px; min-height: 34px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: var(--bg-card); color: var(--text); font: inherit; font-size: 11px; cursor: pointer; transition: background 140ms ease; }
 .room-contribution-counts { display: inline-flex; gap: 7px; font-variant-numeric: tabular-nums; }
 .room-contribution-counts b { font-weight: 500; color: light-dark(#167544, #88d9a2); }

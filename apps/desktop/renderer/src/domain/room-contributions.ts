@@ -1,3 +1,4 @@
+import { readableContributionText } from "../../../../../shared/contribution-text.mjs";
 import type { DesktopParticipantSummary, DesktopRoomAgentWork } from '../../../electron/ipc-types';
 import type { AgentModalTarget } from '../components/desktop/content/desktop-chat-message/types';
 import { resolveOwnerAttribution } from '../components/desktop/content/desktop-chat-message/identity';
@@ -13,7 +14,7 @@ export function workspaceAgentTarget(work: DesktopRoomAgentWork, participants: r
 }
 export function contributionSummary(work: DesktopRoomAgentWork): string {
   const contribution = 'contribution' in work.summary ? work.summary.contribution : undefined;
-  const summary = contribution?.summary?.replace(/```[\s\S]*?```/g, '').replace(/[#*`]/g, '').replace(/\s+/g, ' ').trim();
+  const summary = readableContributionText(contribution?.summary);
   if (summary) return summary;
   const files = contribution?.changes.files ?? [];
   return files.slice(0, 3).map(file => `${({ added: 'Added', untracked: 'Added', deleted: 'Deleted', renamed: 'Renamed' } as Record<string, string>)[file.status] ?? 'Updated'} ${file.path.split('/').at(-1)}`).join(' · ')
