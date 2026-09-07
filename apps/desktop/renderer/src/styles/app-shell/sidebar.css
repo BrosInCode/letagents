@@ -1,3 +1,13 @@
+.sidebar-cta,
+.pinned-room,
+.project-row,
+.room-row,
+.sidebar-row {
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+}
+
 @property --sidebar-scroll-mask-edge {
   syntax: "<length>";
   inherits: false;
@@ -44,32 +54,13 @@
   padding-inline: 4px;
 }
 
-.sidebar-topbar:has(.sidebar-search-button) {
-  justify-content: space-between;
-}
-
 .sidebar-topbar-actions {
   display: flex;
   align-items: center;
   gap: 2px;
 }
 
-.sidebar-collapse-button {
-  display: inline-grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
-  transition:
-    transform var(--duration-fast) var(--ease-out),
-    background-color var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
-}
-
+.sidebar-collapse-button,
 .sidebar-search-button,
 .sidebar-topbar-action {
   display: inline-grid;
@@ -83,9 +74,9 @@
   color: var(--text-secondary);
   cursor: pointer;
   transition:
+    transform var(--duration-fast) var(--ease-out),
     background-color var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out),
-    transform var(--duration-fast) var(--ease-out);
+    color var(--duration-fast) var(--ease-out);
 }
 
 .sidebar-search-button svg,
@@ -730,12 +721,12 @@
 }
 
 .sidebar-settings-row {
+  border: 1px solid transparent;
   position: relative;
   overflow: hidden;
   min-height: 48px;
   margin-top: 6px;
   padding: 5px 8px;
-  border-color: transparent;
   border-radius: 10px;
   background: transparent;
 }
@@ -857,7 +848,6 @@
   .sidebar-selection-scope:hover,
   .sidebar-settings-row:hover,
   .sidebar-section-header:hover {
-    transform: none;
     border-color: transparent;
     background: var(--sidebar-hover);
     color: var(--text);
@@ -872,20 +862,6 @@
   .sidebar-section-header:hover .sidebar-section-arrow {
     opacity: 1;
     color: var(--text-secondary);
-  }
-}
-
-@media (hover: none) {
-  .app-sidebar :is(
-    .sidebar-cta,
-    .pinned-room,
-    .project-row,
-    .room-row,
-    .sidebar-row
-  ):not([data-active="true"]):hover {
-    transform: none;
-    border-color: transparent;
-    background: transparent;
   }
 }
 
@@ -920,10 +896,9 @@
   .sidebar-collapse-button:active,
   .sidebar-search-button:active,
   .sidebar-cta:active,
-  .pinned-room:active,
-  .project-row:active,
-  .room-row:active,
-  .sidebar-row:active {
+  .sidebar-topbar-action:not(:disabled):active,
+  .sidebar-selection-scope:not(:disabled):active,
+  .sidebar-selection-toolbar button:not(:disabled):active {
     transform: none;
   }
 }
