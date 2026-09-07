@@ -350,6 +350,7 @@ watch(
 
 // A no-reply turn can add a contribution without adding a chat message.
 watch(() => timelineEntries.value.filter(entry => entry.type === 'contribution').map(entry => entry.id).join('|'), async () => {
+  if (shouldRestoreInitialScroll) return;
   const following = isScrolledToBottom;
   const anchor = captureScrollAnchor();
   await nextTick();
