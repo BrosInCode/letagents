@@ -724,3 +724,32 @@ function restoreGlobalProperty(key: "Notification" | "window", descriptor: Prope
     delete (globalThis as Record<typeof key, unknown>)[key];
   }
 }
+
+it("send completion reports failure and isolates late room responses", async () => {
+  let settle: (value: { message: DesktopRoomMessage }) => void = () => undefined;
+  let reject: (error: Error) => void = () => undefined;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    sendMessage: () => new Promise((resolve, fail) => { settle = resolve; reject = fail; }),
+  } } }, async () => {
+    const room = ref(roomInfo());
+    const completions: boolean[] = [];
+    const state = useDesktopRoomMessages({ room, messages: ref([]), githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() {} });
+    const failed = state.sendRoomMessage("draft", null, [{ upload_id: "upload-1" }], null, sent => completions.push(sent));
+    assert.equal(state.sendingMessage.value, true);
+    reject(new Error("Offline")); await failed;
+    assert.deepEqual(completions, [false]);
+    assert.equal(state.sendError.value, "Offline");
+    const oldSend = state.sendRoomMessage("old room", null, [], null, sent => completions.push(sent));
+    const oldSettle = settle;
+    room.value = { ...room.value, identifier: "another-room" }; await nextTick();
+    assert.equal(state.sendingMessage.value, false);
+    const newSend = state.sendRoomMessage("new room", null, [], null, sent => completions.push(sent));
+    oldSettle({ message: roomMessage({ id: "old" }) }); await oldSend;
+    assert.equal(state.sendingMessage.value, true);
+    assert.deepEqual(state.visibleMessages.value, []);
+    assert.deepEqual(completions, [false]);
+    settle({ message: roomMessage({ id: "new" }) }); await newSend;
+    assert.deepEqual(state.visibleMessages.value.map(message => message.id), ["new"]);
+    assert.deepEqual(completions, [false, true]);
+  });
+});

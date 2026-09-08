@@ -313,7 +313,7 @@ const roomSupervisorEntries = computed(() => {
 });
 
 const emit = defineEmits<{
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId?: string | null];
+  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId: string | null, complete: (sent: boolean) => void];
   "load-older": [];
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
@@ -418,7 +418,6 @@ const {
   attaching,
   attachmentDrafts,
   attachmentError,
-  clearAttachmentDrafts,
   handleAttachmentDragEnter,
   handleAttachmentDragLeave,
   handleAttachmentDragOver,
@@ -596,9 +595,14 @@ function sendThreadMessage(
   threadRootId: string,
   replyToId: string | null,
   attachments: Array<{ upload_id: string }>,
+  complete: (sent: boolean) => void,
 ): void {
-  emit("send-message", text, replyToId, attachments, threadRootId);
-  clearThreadAttachmentDrafts();
+  const namespace = props.messageNamespace;
+  emit("send-message", text, replyToId, attachments, threadRootId, (sent) => {
+    if (namespace !== props.messageNamespace) return;
+    if (sent) threadAttachmentDrafts.value = threadAttachmentDrafts.value.filter((draft) => !attachments.some((attachment) => attachment.upload_id === draft.uploadId));
+    complete(sent);
+  });
 }
 
 async function loadThread(threadRootId: string): Promise<void> {
@@ -802,10 +806,18 @@ function handleComposerSend(
   text: string,
   replyToId: string | null,
   attachments: Array<{ upload_id: string }>,
+  complete: (sent: boolean) => void,
 ): void {
-  emit("send-message", text, replyToId, attachments);
-  clearReplyTarget();
-  clearAttachmentDrafts();
+  const namespace = props.messageNamespace;
+  const submittedReply = replyTarget.value;
+  emit("send-message", text, replyToId, attachments, null, (sent) => {
+    if (namespace !== props.messageNamespace) return;
+    if (sent) {
+      if (replyTarget.value === submittedReply) clearReplyTarget();
+      attachmentDrafts.value = attachmentDrafts.value.filter((draft) => !attachments.some((attachment) => attachment.upload_id === draft.uploadId));
+    }
+    complete(sent);
+  });
 }
 
 watch(toRef(props, "messageNamespace"), () => {
