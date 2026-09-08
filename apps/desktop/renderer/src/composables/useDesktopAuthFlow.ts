@@ -21,6 +21,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
   // stale authenticated snapshot.
   const authSessionLocked = ref(false);
   let authPollTimer: number | null = null;
+  let authGeneration = 0;
 
   function clearAuthPollTimer(): void {
     if (!authPollTimer) return;
@@ -33,6 +34,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     const pending = authStatus.value?.pendingDeviceAuth;
     if (!pending) return;
 
+    const generation = authGeneration;
     const remainingMs = Date.parse(pending.expiresAt) - Date.now();
     if (!(remainingMs > 0)) {
       authFeedback.value = "Your GitHub approval code expired. Start again when you are ready.";
@@ -40,6 +42,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     }
     const waitMs = Math.min(Math.max(2, pending.intervalSeconds) * 1000 + 350, remainingMs);
     authPollTimer = window.setTimeout(() => {
+      if (generation !== authGeneration) return;
       authPollTimer = null;
       if (Date.parse(pending.expiresAt) <= Date.now()) {
         authFeedback.value = "Your GitHub approval code expired. Start again when you are ready.";
@@ -50,6 +53,8 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
   }
 
   async function startAuthFlow(roomIdentifierOverride?: string | null): Promise<void> {
+    const generation = ++authGeneration;
+    clearAuthPollTimer();
     if (!authStatus.value?.authenticated) authSessionLocked.value = true;
     authBusy.value = true;
     authFeedback.value = null;
@@ -58,13 +63,15 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
         ? options.getRoomIdentifier()
         : roomIdentifierOverride;
       const result = await desktopIpc.auth.startDeviceFlow(roomIdentifier);
+      if (generation !== authGeneration) return;
       authStatus.value = result.authStatus;
       authFeedback.value = "Your code is ready. Copy it, then open GitHub to finish connecting.";
       scheduleAuthPoll();
     } catch (error) {
+      if (generation !== authGeneration) return;
       authFeedback.value = error instanceof Error ? error.message : "Could not start GitHub approval.";
     } finally {
-      authBusy.value = false;
+      if (generation === authGeneration) authBusy.value = false;
     }
   }
 
@@ -82,23 +89,28 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
   }
 
   async function cancelAuthFlow(): Promise<void> {
+    const generation = ++authGeneration;
     clearAuthPollTimer();
     authBusy.value = true;
     authFeedback.value = null;
     const previousStatus = authStatus.value;
     authStatus.value = signedOutStatus(previousStatus);
     try {
-      authStatus.value = await desktopIpc.auth.cancelDeviceFlow();
+      const status = await desktopIpc.auth.cancelDeviceFlow();
+      if (generation !== authGeneration) return;
+      authStatus.value = status;
     } catch (error) {
+      if (generation !== authGeneration) return;
       authStatus.value = previousStatus;
       authFeedback.value = error instanceof Error ? error.message : "Could not cancel GitHub sign-in.";
       scheduleAuthPoll();
     } finally {
-      authBusy.value = false;
+      if (generation === authGeneration) authBusy.value = false;
     }
   }
 
   async function pollAuthFlow(optionsOverride: { automatic?: boolean } = {}): Promise<void> {
+    const generation = authGeneration;
     clearAuthPollTimer();
     if (!optionsOverride.automatic) {
       authBusy.value = true;
@@ -106,17 +118,20 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     authFeedback.value = null;
     try {
       const result = await desktopIpc.auth.pollDeviceFlow();
+      if (generation !== authGeneration) return;
       authStatus.value = result.authStatus;
 
       if (result.status === "authorized") {
         authFeedback.value = "Connected. Confirm the room and you are ready.";
         if (options.isFirstRunGate()) {
           await options.onFirstRunAuthorized();
+          if (generation !== authGeneration) return;
           authSessionLocked.value = false;
           authFeedback.value = null;
           return;
         }
         await options.onAuthorized();
+        if (generation !== authGeneration) return;
         authSessionLocked.value = false;
         return;
       }
@@ -135,6 +150,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
         scheduleAuthPoll();
       }
     } catch (error) {
+      if (generation !== authGeneration) return;
       authFeedback.value = error instanceof Error ? error.message : "Could not check GitHub approval.";
       if (authStatus.value?.pendingDeviceAuth) {
         authFeedback.value += " LetAgents will check again shortly.";
@@ -142,12 +158,13 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
       }
     } finally {
       if (!optionsOverride.automatic) {
-        authBusy.value = false;
+        if (generation === authGeneration) authBusy.value = false;
       }
     }
   }
 
   async function signOut(): Promise<void> {
+    const generation = ++authGeneration;
     clearAuthPollTimer();
     authSessionLocked.value = true;
     authBusy.value = true;
@@ -155,12 +172,15 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     authStatus.value = signedOutStatus(authStatus.value);
     options.onSigningOut?.();
     try {
-      authStatus.value = signedOutStatus(await desktopIpc.auth.signOut());
+      const status = await desktopIpc.auth.signOut();
+      if (generation !== authGeneration) return;
+      authStatus.value = signedOutStatus(status);
       await options.onSignedOut();
     } catch (error) {
+      if (generation !== authGeneration) return;
       authFeedback.value = error instanceof Error ? error.message : "Could not sign out.";
     } finally {
-      authBusy.value = false;
+      if (generation === authGeneration) authBusy.value = false;
     }
   }
 
