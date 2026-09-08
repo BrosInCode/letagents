@@ -568,3 +568,17 @@ test("a new exact request resets operations even when its presentation is unchan
   assert.equal(staleWrites, 0);
   assert.equal(activeOperation, newOperation);
 });
+
+
+test("contribution targets resolve a local supervisor by its projected key without message or session identity", async () => {
+  const { workspaceAgentTarget } = await import("../src/domain/room-contributions");
+  const request = participantAgentInspectorRequest(workspaceAgentTarget({
+    attemptId: "attempt_1", roomId: "room_a", sourceMessageId: "msg_1", agentKey: "EmmyMay/desktop-codex-copper", revision: 1,
+    summary: { version: 1, availability: "cleared" }, updatedAt: "2026-09-08T00:00:00Z",
+  }, []));
+  const selection = resolveAgentInspectorSelection(resource("ready", [entry({ agentKey: "EmmyMay/desktop-codex-copper" })]), request, "room_a");
+  assert.equal(selection.kind, "supervised");
+  assert.equal(selection.kind === "supervised" && selection.supervisorEntryId, "supervised_garden");
+  assert.equal(selection.workspaceSourceMessageId, "msg_1");
+  assert.equal(resolveAgentInspectorSelection(resource("ready", [entry({ agentKey: null })]), request, "room_a").kind, "external");
+});
