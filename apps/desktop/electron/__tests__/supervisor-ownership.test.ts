@@ -18,8 +18,9 @@ test("supervisor list projects canonical agent keys for renderer mention routing
     ipcSource.indexOf('"desktop:supervisor:list-agents"'),
     ipcSource.indexOf('"desktop:supervisor:create-agent"'),
   );
-  assert.match(listHandler, /readDesktopSupervisorGrantAgentKeysForEntries/);
-  assert.match(listHandler, /agentKey:/);
+  assert.match(listHandler, /projectDesktopSupervisorAgentKeys\(entries\)/);
+  const pushBridge = ipcSource.slice(ipcSource.indexOf('if (!supervisorStateBridgeRegistered)'));
+  assert.match(pushBridge, /projectDesktopSupervisorAgentKeys\(snapshot.entries\)/);
 });
 
 test("supervisor creation admits supervised profiles before claiming durable ownership", () => {
