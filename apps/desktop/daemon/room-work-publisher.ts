@@ -1,6 +1,6 @@
 import { readableContributionText } from "../../../shared/contribution-text.mjs";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
-import { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "./workspace-turn-capture.js";
+import { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
 import type { DatabaseSync } from "node:sqlite";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";

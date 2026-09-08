@@ -16,6 +16,7 @@ import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
 import { toolSurfaceForExecutionProfile } from "./runtime/tool-surface-policy.js";
 import { profileAwareToolServer } from "./supervised-tool-facade.js";
 import { workerAwareToolServer } from "./worker-tool-facade.js";
+import { registerWorkspaceTools } from "./tools/workspace.js";
 
 export function registerTools(
   server: McpServer,
@@ -33,6 +34,7 @@ export function registerTools(
   if (surface.agentSessionLifecycle) registerAgentSessionTools(tools);
   registerRoomInspectionTools(tools);
   registerStatusTools(tools);
+  if (profile === "autonomous_mcp_worker" || profile === "interactive_desktop") registerWorkspaceTools(tools);
   registerTaskTools(tools);
   registerRepoInitializationTool(tools);
   registerMessageTools(tools, { includeDeliveryLoop: surface.deliveryLoop });

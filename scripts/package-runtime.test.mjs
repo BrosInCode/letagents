@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { Worker } from "node:worker_threads";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +36,34 @@ test("the packed MCP CLI reports its contract and exposes the supervised Cursor 
     const packageRoot = join(installRoot, "node_modules", "letagents");
     const runtimeDependency = join(packageRoot, "dist", "api", "board-intent-payloads.js");
     assert.equal(existsSync(runtimeDependency), true, "packed runtime dependency is missing");
+    // Exercise the installed worker, not a source-tree import: the published CLI
+    // must ship both shared capture modules and their archive dependencies.
+    const workspace = join(tempRoot, 'workspace'); mkdirSync(workspace);
+    const git = (...args) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8', stdio: 'pipe' }).trim();
+    git('init'); git('config', 'user.email', 'package-test@example.invalid'); git('config', 'user.name', 'Package Test');
+    writeFileSync(join(workspace, 'app.txt'), 'before\n'); git('add', '.'); git('commit', '-m', 'baseline');
+    const capture = { capture_id: randomUUID(), workspace, base_revision: git('rev-parse', 'HEAD'), baseline: null };
+    const directory = join(tempRoot, 'prepared');
+    const captureFiles = async operation => {
+      const worker = new Worker(join(packageRoot, 'shared/mcp-workspace-capture-worker.mjs'), {
+        workerData: { operation, capture, directory, text: 'Updated app.txt' }, execArgv: [],
+      });
+      try {
+        return await new Promise((resolve, reject) => {
+          worker.once('message', value => value.error ? reject(new Error(value.error)) : resolve(value));
+          worker.once('error', reject); worker.once('exit', () => reject(new Error('Capture exited before returning')));
+        });
+      } finally { await worker.terminate(); }
+    };
+    capture.baseline = (await captureFiles('begin')).baseline;
+    assert.ok(capture.baseline);
+    writeFileSync(join(workspace, 'app.txt'), 'after\n');
+    await captureFiles('finish');
+    const prepared = JSON.parse(readFileSync(join(directory, 'prepared.json'), 'utf8'));
+    assert.equal(prepared.summary.contribution.changes.files[0].path, 'app.txt');
+    assert.equal(prepared.summary.contribution.changes.additions, 1);
+    assert.equal(existsSync(join(directory, 'review')), true);
+    assert.equal(git('diff', '--cached'), '', 'capture must not modify the real index');
     const entry = join(packageRoot, "dist", "mcp", "server.js");
     const contract = JSON.parse(execFileSync(
       process.execPath,

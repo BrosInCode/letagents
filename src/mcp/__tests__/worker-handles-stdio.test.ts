@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { setTimeout as delay } from 'node:timers/promises';
+import { execFileSync } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { decodeWorkspaceReview } from '../../../shared/workspace-review.mjs';
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
@@ -11,9 +15,26 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 // Real MCP processes and schemas; the HTTP fixture controls response loss and
 // response ordering. The companion DB tests verify server auth and allocation.
-test("worker handles isolate chats on shared MCP, survive process loss, and fence delayed replies", { timeout: 30_000 }, async () => {
+test("worker handles isolate chats and workspace captures, survive process loss, and fence delayed replies", { timeout: 60_000 }, async () => {
   const temp = mkdtempSync(join(tmpdir(), "letagents-worker-stdio-"));
   const statePath = join(temp, "state.json");
+  const pauseFlag = join(temp, 'pause-capture'), pauseReady = join(temp, 'capture-paused');
+  const preload = join(temp, 'pause-worker.cjs');
+  writeFileSync(preload, `
+    const threads = require('node:worker_threads'), fs = require('node:fs');
+    const Original = threads.Worker;
+    threads.Worker = class extends Original {
+      constructor(path, options) { super(path, options); this.finish = options?.workerData?.operation === 'finish'; }
+      emit(event, ...args) {
+        if (this.finish && event === 'message' && fs.existsSync(${JSON.stringify(pauseFlag)})) {
+          fs.unlinkSync(${JSON.stringify(pauseFlag)}); fs.writeFileSync(${JSON.stringify(pauseReady)}, 'paused');
+          process.kill(process.pid, 'SIGSTOP');
+        }
+        return super.emit(event, ...args);
+      }
+    };
+    require('node:module').syncBuiltinESMExports();
+  `);
   const storagePath = join(temp, "storage.json");
   writeFileSync(storagePath, JSON.stringify({ mode: "cloud", roomOverrides: { room_local: "local" } }));
   writeFileSync(statePath, JSON.stringify({ auth: { token: "owner-test-token",
@@ -22,6 +43,10 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
   const registrations: Record<string, any>[] = [];
   const messages: Record<string, any>[] = [];
   const clients: Client[] = [];
+  const processIds: number[] = [];
+  const work = new Map<string, any>();
+  const pages = new Map<string, Map<number, any>>();
+  let dropSummaryResponse = false;
   let dropRegistration = false;
   let directoryFailure: "unavailable" | "offline" | "malformed" | null = null;
   let holdDisconnect = false;
@@ -74,8 +99,23 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
       if (body.text === "force401" || !session || session.ended_at || session.session_token !== body.agent_session_token) {
         return reply({ error: "stale worker credential" }, 401);
       }
-      messages.push(body);
-      return reply({ id: `msg_${messages.length}`, room_id: session.room_id, text: body.text, sender: body.sender });
+      let index = body.client_message_id ? messages.findIndex(message => message.client_message_id === body.client_message_id) : -1;
+      if (index < 0) { messages.push(body); index = messages.length - 1; }
+      if (dropSummaryResponse) { dropSummaryResponse = false; res.destroy(); return; }
+      return reply({ id: `msg_${index + 1}`, room_id: session.room_id, text: body.text, sender: body.sender });
+    }
+    if (url.pathname.endsWith('/agent-work') && req.method === 'POST') {
+      const session = [...sessions.values()].find(s => s.session_id === body.agent_session_id);
+      if (!session || session.ended_at || session.session_token !== body.agent_session_token) return reply({ error: 'stale credential' }, 401);
+      const existing = work.get(body.source_message_id);
+      const record = existing ?? { attempt_id: randomUUID(), room_id: session.room_id, agent_key: session.agent_key,
+        source_message_id: body.source_message_id, summary: body.summary };
+      work.set(body.source_message_id, record);
+      if (body.review_page) {
+        if (!pages.has(record.attempt_id)) pages.set(record.attempt_id, new Map());
+        pages.get(record.attempt_id)!.set(body.review_page.index, body.review_page);
+      }
+      return reply({ status: existing ? 'replayed' : 'created', work: record });
     }
     if (url.pathname.endsWith("/messages")) return reply({ messages: [], room_id: "room_shared" });
     if (url.pathname.endsWith("/tasks")) return reply({ tasks: [] });
@@ -86,7 +126,7 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
   const apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const openClient = async () => {
     const transport = new StdioClientTransport({ command: process.execPath,
-      args: ["--import", resolve("node_modules/tsx/dist/loader.mjs"), resolve("src/mcp/server.ts")], cwd: temp,
+      args: ["--require", preload, "--import", resolve("node_modules/tsx/dist/loader.mjs"), resolve("src/mcp/server.ts")], cwd: temp,
       env: { PATH: process.env.PATH!, LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
         LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: storagePath, LETAGENTS_LOCAL_CHAT_DB: join(temp, "chat.sqlite"),
         LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }, stderr: "pipe" });
@@ -94,6 +134,7 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
     const client = new Client({ name: "identity-test", version: "1" });
     clients.push(client);
     await client.connect(transport);
+    if (transport.pid) processIds.push(transport.pid);
     return { client, transport };
   };
   const raw = (client: Client, name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
@@ -121,6 +162,73 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
     assert.doesNotMatch(JSON.stringify(one), /session_token|owner-test-token|unused-bearer-secret/);
     assert.doesNotMatch(readFileSync(statePath, "utf8"), /unused-bearer-secret/);
     assert.equal(statSync(statePath).mode & 0o777, 0o600);
+
+    assert.match(one.workspace_instructions, /begin_workspace_capture before editing/);
+    assert.ok(tools.tools.find(t => t.name === 'begin_workspace_capture')?.inputSchema.properties?.worker_id);
+    const workspaceArgs = (worker: any) => ({ worker_id: worker.worker_id, room_id: 'room_shared' });
+    const repo = (name: string) => {
+      const cwd = join(temp, name); mkdirSync(cwd);
+      const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+      git('init'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
+      writeFileSync(join(cwd, 'app.txt'), 'base\n'); git('add', '.'); git('commit', '-m', 'base');
+      return { cwd, git };
+    };
+    const emmy = repo('emmy'), jessica = repo('jessica');
+    writeFileSync(join(emmy.cwd, 'app.txt'), 'base\npre-existing edit\n');
+    const beforeHead = emmy.git('rev-parse', 'HEAD');
+    const captureOne = await call(first.client, 'begin_workspace_capture', { ...workspaceArgs(one), cwd: emmy.cwd });
+    const captureTwo = await call(first.client, 'begin_workspace_capture', { ...workspaceArgs(two), cwd: jessica.cwd });
+    writeFileSync(join(emmy.cwd, 'app.txt'), 'base\npre-existing edit\nemmy edit\n');
+    writeFileSync(join(emmy.cwd, 'emmy.txt'), 'emmy new file\n');
+    writeFileSync(join(jessica.cwd, 'jessica.txt'), randomBytes(400_000).toString('hex') + '\n');
+    assert.equal((await call(first.client, 'begin_workspace_capture', { ...workspaceArgs(one), cwd: emmy.cwd })).capture_id, captureOne.capture_id);
+    assert.equal((await call(first.client, 'begin_workspace_capture', workspaceArgs(one))).capture_id, captureOne.capture_id);
+    assert.ok((await raw(first.client, 'begin_workspace_capture', { ...workspaceArgs(one), cwd: jessica.cwd })).isError);
+    assert.ok((await raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(two), capture_id: captureOne.capture_id, summary: 'wrong worker' })).isError);
+    assert.ok((await raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: randomUUID(), summary: 'no starting capture' })).isError);
+    dropSummaryResponse = true;
+    assert.ok((await raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: captureOne.capture_id, summary: 'Emmy updated the app.' })).isError);
+    writeFileSync(join(emmy.cwd, 'later.txt'), 'must not enter the saved capture\n');
+    const publishedOne = await call(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: captureOne.capture_id, summary: 'different retry text is ignored' });
+    assert.equal(publishedOne.status, 'published');
+    assert.equal(messages.filter(m => m.client_message_id === `mcp-workspace:${captureOne.capture_id}`).length, 1);
+    assert.equal(work.get(publishedOne.source_message_id).summary.contribution.summary, 'Emmy updated the app.');
+    assert.equal(work.get(publishedOne.source_message_id).summary.contribution.changes.additions, 2, 'pre-existing edits are not new work');
+    assert.equal(work.get(publishedOne.source_message_id).summary.workspace.additions, 3);
+    assert.deepEqual(work.get(publishedOne.source_message_id).summary.contribution.changes.files.map((f: any) => f.path), ['app.txt', 'emmy.txt']);
+    assert.equal(emmy.git('rev-parse', 'HEAD'), beforeHead);
+    assert.equal(emmy.git('diff', '--cached'), '', 'capture leaves the real index alone');
+    assert.equal(emmy.git('for-each-ref', 'refs/letagents/workspace-review'), '', 'published capture releases its retention refs');
+    assert.equal((await call(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: captureOne.capture_id, summary: 'retry' })).attempt_id, publishedOne.attempt_id);
+    let publishedTwo = await call(first.client, 'publish_workspace_capture', { ...workspaceArgs(two), capture_id: captureTwo.capture_id, summary: 'Jessica added her file.' });
+    assert.equal(publishedTwo.status, 'uploading', 'large captures transfer in bounded batches');
+    for (let i = 0; i < 5 && publishedTwo.status === 'uploading'; i++) {
+      publishedTwo = await call(first.client, 'publish_workspace_capture', { ...workspaceArgs(two), capture_id: captureTwo.capture_id, summary: 'retry' });
+    }
+    assert.equal(publishedTwo.status, 'published');
+    assert.notEqual(work.get(publishedOne.source_message_id).agent_key, work.get(publishedTwo.source_message_id).agent_key);
+    const chunks = [...pages.get(publishedTwo.attempt_id)!.values()].sort((a, b) => a.index - b.index);
+    const archived = decodeWorkspaceReview(chunks.map(page => page.data).join(''), chunks[0].digest);
+    assert.deepEqual(archived.contribution.files.map(file => file.path), ['jessica.txt']);
+    assert.equal(archived.contribution.patch_truncated, false);
+    const unavailable = repo('unavailable');
+    writeFileSync(join(unavailable.cwd, 'oversized.txt'), Buffer.alloc(8 * 1024 * 1024 + 1));
+    const missing = await call(first.client, 'begin_workspace_capture', { ...workspaceArgs(two), cwd: unavailable.cwd });
+    assert.equal(missing.baseline_available, false);
+    assert.match((await call(first.client, 'begin_workspace_capture', workspaceArgs(two))).warning, /unavailable/);
+    rmSync(join(unavailable.cwd, 'oversized.txt'));
+    writeFileSync(join(unavailable.cwd, 'app.txt'), 'changed after a missing baseline\n');
+    const uncertain = await call(first.client, 'publish_workspace_capture', { ...workspaceArgs(two), capture_id: missing.capture_id, summary: 'Baseline was unavailable.' });
+    assert.equal(work.get(uncertain.source_message_id).summary.contribution.changes.state, 'unavailable');
+    assert.equal(work.get(uncertain.source_message_id).summary.workspace.state, 'ready');
+    const resumeCapture = await call(first.client, 'begin_workspace_capture', { ...workspaceArgs(one), cwd: emmy.cwd });
+
+    // Freeze process A after its worker has written files but before it can
+    // commit that preparation. B reconnects and wins; A must never replace B.
+    writeFileSync(pauseFlag, 'pause');
+    const stalePublish = raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: resumeCapture.capture_id, summary: 'Old process summary.' });
+    for (let i = 0; i < 300 && !existsSync(pauseReady); i++) await delay(10);
+    assert.ok(existsSync(pauseReady), 'old process reached the preparation boundary');
 
     directoryFailure = "unavailable";
     const second = await openClient();
@@ -150,6 +258,15 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
     const resumed = await call(second.client, "register_agent_session", { worker_id: one.worker_id, room_id: "room_shared" });
     assert.equal(resumed.agent_session.session_id, one.agent_session.session_id);
     assert.equal(resumed.agent_session.display_name, one.agent_session.display_name);
+    writeFileSync(join(emmy.cwd, 'resumed.txt'), 'after reconnect\n');
+    const resumedCapture = await call(second.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: resumeCapture.capture_id, summary: 'Finished after reconnect.' });
+    assert.equal(resumedCapture.status, 'published');
+    assert.deepEqual(work.get(resumedCapture.source_message_id).summary.contribution.changes.files.map((file: any) => file.path), ['resumed.txt']);
+    const immutable = JSON.stringify(work.get(resumedCapture.source_message_id));
+    process.kill(first.transport.pid!, 'SIGCONT');
+    assert.ok((await stalePublish).isError, 'old preparation cannot install after reconnect');
+    assert.equal(JSON.stringify(work.get(resumedCapture.source_message_id)), immutable);
+    assert.equal(work.get(resumedCapture.source_message_id).summary.contribution.summary, 'Finished after reconnect.');
     assert.ok((await raw(first.client, "send_message", { worker_id: one.worker_id, text: "stale" })).isError);
     assert.ok((await raw(first.client, "send_message", { agent_session_id: one.agent_session.session_id, room_id: "room_shared", text: "stale legacy id" })).isError);
     await call(first.client, "send_message", { worker_id: two.worker_id, text: "other chat still works" });
@@ -225,6 +342,7 @@ test("worker handles isolate chats on shared MCP, survive process loss, and fenc
     }
   } finally {
     releaseDisconnect?.();
+    for (const pid of processIds) { try { process.kill(pid, 'SIGCONT'); } catch { /* already exited */ } }
     await Promise.allSettled(clients.map((client) => client.close()));
     server.closeAllConnections();
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));

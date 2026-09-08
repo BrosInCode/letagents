@@ -27,7 +27,7 @@ const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
 const { requireGitRoomParticipant } = await import("../rooms/access.js");
 const { hashToken } = await import("../db/utils.js");
 const { registerRoomAgentWorkRoutes } = await import("../routes/rooms/agent-work.js");
-const { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork, readRoomAgentWorkReviewPage } = await import("../db/room-agent-work.js");
+const { clearRoomAgentWork, publishRoomAgentWork, publishIndependentWorkspace, readRoomAgentWork, readRoomAgentWorkReviewPage } = await import("../db/room-agent-work.js");
 const { parseRoomAgentWorkSummary } = await import("../../../shared/room-agent-work.mjs");
 const { acquireLiveRoomAuthorization } = await import("../rooms/live-authorization.js");
 const { githubRepoAccessInvalidationEvents } = await import("../github/repo-access.js");
@@ -1245,7 +1245,7 @@ test("room work summary is a canonical, bounded allowlist without private fields
   try {
     process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "false";
     registerRoomAgentWorkRoutes({ get() { paths.push("GET"); }, delete() { paths.push("DELETE"); }, post() { paths.push("POST"); } } as never, {} as never, {} as never);
-    assert.deepEqual(paths, ["GET", "GET", "DELETE"]);
+    assert.deepEqual(paths, ["POST", "GET", "GET", "DELETE"], 'independent publication does not depend on supervisor rollout');
   } finally { process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = before; }
 });
 
@@ -1851,4 +1851,123 @@ test('full reviews publish in immutable pages, remain outside polling, and clear
   assert.equal((await readRoomAgentWorkReviewPage(published.work.attempt_id, 0)).status, 'unavailable');
   await publishRoomAgentWork({ ...f.input, summary, review_page: page });
   assert.equal((await readRoomAgentWorkReviewPage(published.work.attempt_id, 0)).status, 'unavailable');
+});
+
+async function setupIndependentWorkspace() {
+  const f = await setupWorkPoll();
+  const sessionInput = { room_id: f.room.id, session_kind: 'worker' as const, runtime: 'mcp',
+    actor_label: 'MCP Worker', agent_key: f.agent.canonical_key, agent_instance_id: 'independent-instance',
+    display_name: 'MCP Worker', owner_account_id: 'owner_route', owner_label: 'Owner', ide_label: 'Agent' };
+  const independent = await authDb!.createRoomAgentSession(sessionInput);
+  await client!.db.insert(schema!.messages).values({ room_id: f.room.id, number: 2, sender: 'MCP Worker',
+    text: 'Updated app.ts', source: 'agent', timestamp: new Date().toISOString(),
+    publisher_agent_key: independent.agent_key, publisher_agent_session_id: independent.session_id, publisher_account_id: 'owner_route' });
+  const workspace = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready',
+    files: [{ path: 'app.ts', previous_path: null, status: 'modified', additions: 1, deletions: 1, binary: false }],
+    additions: 1, deletions: 1, hidden_files: 0, patch: '-old\n+new', patch_truncated: false };
+  const summary = { ...completedWorkSummary, version: 3, evidence_incomplete: true, elapsed_ms: null,
+    operation_counts: Object.fromEntries(Object.keys(workSummary.operation_counts).map(key => [key, 0])),
+    workspace, contribution: { changes: workspace, summary: 'Updated app.ts' } };
+  const input = { room_id: f.room.id, source_message_number: 2, session_id: independent.session_id,
+    owner_account_id: 'owner_route', token_hash: hashToken(independent.session_token), summary };
+  const publish = f.handlers.get(`POST ${/^\/rooms\/(.+)\/agent-work$/}`);
+  const request = { ...f.request, authKind: 'owner_token', body: { agent_session_id: independent.session_id,
+    agent_session_token: independent.session_token, source_message_id: 'msg_2', summary } };
+  return { ...f, independent, sessionInput, independentInput: input, independentPublish: publish, independentRequest: request };
+}
+
+test('independent workspace publication uses worker ownership, existing room views and immutable replay', { skip: requiresDatabase }, async () => {
+  const f = await setupIndependentWorkspace();
+  for (const authKind of ['session', 'agent_session', 'supervisor_grant', null]) {
+    const denied = recorder(); await f.independentPublish({ ...f.independentRequest, authKind }, denied);
+    assert.equal(denied.statusCode, 403);
+  }
+  const first = recorder(); await f.independentPublish(f.independentRequest, first);
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  const results = await Promise.all([publishIndependentWorkspace(f.independentInput), publishIndependentWorkspace(f.independentInput)]);
+  assert.ok(results.every(result => result.status === 'replayed' && result.work.attempt_id === first.body.work.attempt_id));
+  const poll = await f.poll({ include_workspace: '1', include_contribution: '1' });
+  assert.deepEqual(poll.body.snapshot.work[0].summary, f.independentInput.summary);
+  const [row] = await client!.db.select().from(schema!.room_agent_work);
+  assert.equal(row.publisher_kind, 'independent_worker'); assert.equal(row.host_id, null); assert.equal(row.installation_id, null);
+  await assert.rejects(publishIndependentWorkspace({ ...f.independentInput, summary: { ...f.independentInput.summary,
+    contribution: { ...f.independentInput.summary.contribution, summary: 'Different bytes' } } }), /revision_conflict/);
+  f.setReaderAllowed(false);
+  const removed = recorder(); await f.independentPublish(f.independentRequest, removed); assert.equal(removed.statusCode, 403);
+});
+
+test('independent captures reject foreign or hidden anchors and fabricated execution evidence', { skip: requiresDatabase }, async () => {
+  const f = await setupIndependentWorkspace();
+  for (const changes of [{ owner_account_id: 'someone-else' }, { token_hash: 'old-token' }, { source_message_number: 1 },
+    { source_message_number: 999 }, { session_id: f.session.session_id }]) {
+    await assert.rejects(publishIndependentWorkspace({ ...f.independentInput, ...changes }), /publisher_not_authorized/);
+  }
+  for (const changes of [{ recorded_state: 'active' }, { evidence_incomplete: false }, { elapsed_ms: 100 },
+    { operation_counts: { ...f.independentInput.summary.operation_counts, succeeded: 3 } }]) {
+    await assert.rejects(publishIndependentWorkspace({ ...f.independentInput, summary: { ...f.independentInput.summary, ...changes } }), /invalid_summary/);
+  }
+  for (const [column, value] of [['publisher_account_id', 'foreign-owner'], ['publisher_agent_key', 'foreign-agent'],
+    ['visibility', 'internal'], ['rental_session_id', 'rental'], ['source', 'human']]) {
+    const old = await client!.pool.query(`SELECT ${column} FROM messages WHERE room_id = $1 AND number = 2`, [f.room.id]);
+    await client!.pool.query(`UPDATE messages SET ${column} = $1 WHERE room_id = $2 AND number = 2`, [value, f.room.id]);
+    await assert.rejects(publishIndependentWorkspace(f.independentInput), /publisher_not_authorized/);
+    await client!.pool.query(`UPDATE messages SET ${column} = $1 WHERE room_id = $2 AND number = 2`, [old.rows[0][column], f.room.id]);
+  }
+  assert.equal((await client!.db.select().from(schema!.room_agent_work)).length, 0);
+  const [a, b] = await Promise.all([publishIndependentWorkspace(f.independentInput), publishIndependentWorkspace(f.independentInput)]);
+  assert.deepEqual(new Set([a.status, b.status]), new Set(['created', 'replayed']));
+  assert.equal(a.work.attempt_id, b.work.attempt_id);
+});
+
+test('independent captures survive a same-worker reconnect but fence rotated credentials and a different instance', { skip: requiresDatabase }, async () => {
+  const f = await setupIndependentWorkspace();
+  const lock = await client!.pool.connect();
+  try {
+    await lock.query('BEGIN');
+    await lock.query('SELECT session_id FROM room_agent_sessions WHERE session_id = $1 FOR UPDATE', [f.independent.session_id]);
+    const pending = publishIndependentWorkspace(f.independentInput).then(() => null, error => error);
+    await waitForBlockedSelect('%room_agent_sessions%for share%');
+    await lock.query('UPDATE room_agent_sessions SET token_hash = $1 WHERE session_id = $2', [hashToken('rotated'), f.independent.session_id]);
+    await lock.query('COMMIT');
+    assert.equal((await pending)?.code, 'publisher_not_authorized');
+  } finally { await lock.query('ROLLBACK'); lock.release(); }
+  await client!.db.update(schema!.room_agent_sessions).set({ ended_at: new Date().toISOString() })
+    .where(eq(schema!.room_agent_sessions.session_id, f.independent.session_id));
+  const replacement = await authDb!.createRoomAgentSession(f.sessionInput);
+  const retry = { ...f.independentInput, session_id: replacement.session_id, token_hash: hashToken(replacement.session_token) };
+  assert.equal((await publishIndependentWorkspace(retry)).status, 'created');
+  const foreign = await authDb!.createRoomAgentSession({ ...f.sessionInput, actor_label: 'Different Worker', agent_instance_id: 'different-instance' });
+  await assert.rejects(publishIndependentWorkspace({ ...retry, session_id: foreign.session_id, token_hash: hashToken(foreign.session_token) }), /publisher_not_authorized/);
+});
+
+test('independent review pages are immutable and cannot race clearing to restore a payload', { skip: requiresDatabase }, async () => {
+  const f = await setupIndependentWorkspace();
+  const page = { digest: 'a'.repeat(64), index: 0, total: 2, data: 'A'.repeat(65536) };
+  const first = await publishIndependentWorkspace({ ...f.independentInput, review_page: page });
+  assert.equal((await readRoomAgentWorkReviewPage(first.work.attempt_id, 0)).status, 'pending');
+  await assert.rejects(publishIndependentWorkspace({ ...f.independentInput, review_page: { ...page, data: 'B'.repeat(65536) } }), /revision_conflict/);
+  const second = { ...page, index: 1, data: 'AAAA' };
+  await publishIndependentWorkspace({ ...f.independentInput, review_page: second });
+  assert.deepEqual(await readRoomAgentWorkReviewPage(first.work.attempt_id, 1), { status: 'ready', page: second });
+  const results = await Promise.allSettled([
+    clearRoomAgentWork({ room_id: f.room.id, attempt_id: first.work.attempt_id, owner_account_id: 'owner_route', revision: 1 }),
+    publishIndependentWorkspace({ ...f.independentInput, review_page: second }),
+  ]);
+  assert.equal(results[0].status, 'fulfilled');
+  assert.equal((await readRoomAgentWorkReviewPage(first.work.attempt_id, 0)).status, 'unavailable');
+  const response = recorder(); await f.independentPublish({ ...f.independentRequest, body: { ...f.independentRequest.body, review_page: page } }, response);
+  assert.equal(response.statusCode, 410);
+  assert.equal((await readRoomAgentWorkReviewPage(first.work.attempt_id, 0)).status, 'unavailable');
+});
+
+test('the independent publisher migration preserves populated supervisor custody', { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  await publishRoomAgentWork(f.input);
+  await client!.pool.query('ALTER TABLE room_agent_work DROP CONSTRAINT room_agent_work_publisher_check, DROP COLUMN publisher_kind, ALTER COLUMN host_id SET NOT NULL, ALTER COLUMN installation_id SET NOT NULL');
+  await client!.pool.query('DELETE FROM drizzle.__drizzle_migrations WHERE id = (SELECT max(id) FROM drizzle.__drizzle_migrations)');
+  await migrate(client!.db, { migrationsFolder: path.resolve(process.cwd(), 'drizzle') });
+  const [row] = await client!.db.select().from(schema!.room_agent_work);
+  assert.equal(row.publisher_kind, 'supervisor'); assert.equal(row.host_id, 'host_route'); assert.equal(row.installation_id, 'install_route');
+  assert.equal((await publishRoomAgentWork(f.input)).status, 'replayed');
+  await assert.rejects(client!.db.update(schema!.room_agent_work).set({ publisher_kind: 'independent_worker' }), /room_agent_work/);
 });
