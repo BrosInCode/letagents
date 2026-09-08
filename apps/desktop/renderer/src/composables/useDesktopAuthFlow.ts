@@ -33,8 +33,18 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     const pending = authStatus.value?.pendingDeviceAuth;
     if (!pending) return;
 
-    const waitMs = Math.max(2, pending.intervalSeconds) * 1000 + 350;
+    const remainingMs = Date.parse(pending.expiresAt) - Date.now();
+    if (!(remainingMs > 0)) {
+      authFeedback.value = "Your GitHub approval code expired. Start again when you are ready.";
+      return;
+    }
+    const waitMs = Math.min(Math.max(2, pending.intervalSeconds) * 1000 + 350, remainingMs);
     authPollTimer = window.setTimeout(() => {
+      authPollTimer = null;
+      if (Date.parse(pending.expiresAt) <= Date.now()) {
+        authFeedback.value = "Your GitHub approval code expired. Start again when you are ready.";
+        return;
+      }
       void pollAuthFlow({ automatic: true });
     }, waitMs);
   }
@@ -89,6 +99,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
   }
 
   async function pollAuthFlow(optionsOverride: { automatic?: boolean } = {}): Promise<void> {
+    clearAuthPollTimer();
     if (!optionsOverride.automatic) {
       authBusy.value = true;
     }
@@ -119,8 +130,12 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
       }
 
       authFeedback.value = result.error || "GitHub approval did not complete. Start again when you are ready.";
+      if (result.status === "unknown" && authStatus.value?.pendingDeviceAuth) {
+        scheduleAuthPoll();
+      }
     } catch (error) {
       authFeedback.value = error instanceof Error ? error.message : "Could not check GitHub approval.";
+      scheduleAuthPoll();
     } finally {
       if (!optionsOverride.automatic) {
         authBusy.value = false;
