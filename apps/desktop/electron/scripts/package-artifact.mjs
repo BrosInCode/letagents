@@ -123,6 +123,10 @@ for (const key of [
 ]) {
   await removePlistKey(infoPlist, key);
 }
+await removePlistKey(infoPlist, "CFBundleURLTypes");
+await execFileAsync("plutil", ["-insert", "CFBundleURLTypes", "-json", JSON.stringify([
+  { CFBundleURLName: "chat.letagents.company", CFBundleURLSchemes: ["letagents"] },
+]), infoPlist]);
 await createApplicationIcon();
 await writeFile(
   join(resources, "app-update.yml"),

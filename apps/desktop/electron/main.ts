@@ -6,6 +6,7 @@ import {
 } from "./main/agents/legacy-open-model-retirement.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
+import { prepareCompanyLinks } from "./main/company-links.js";
 import { configureApplicationMenu } from "./main/menu.js";
 import { startDesktopShellEnvironmentHydration } from "./main/desktop-shell-environment.js";
 import {
@@ -27,6 +28,8 @@ import { stopActiveRentalProviderHostManager } from "./rental/provider-host-mana
 import { stopActiveRentalProviderEventPoller } from "./rental/provider-event-poller.js";
 
 configureDesktopSmokeEnvironment();
+if (!app.requestSingleInstanceLock()) app.exit(0);
+prepareCompanyLinks();
 prepareDesktopNotifications();
 
 protocol.registerSchemesAsPrivileged([

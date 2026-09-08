@@ -4,6 +4,7 @@
   <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
+      :invited-company-id="pendingCompanyInvite"
       :organizations="company.organizations.value"
       :organization-busy="company.busy.value"
       :organization-error="company.error.value"
@@ -84,6 +85,7 @@
           :company-error="company.error.value"
           @choose-company="chooseSidebarCompany"
           @refresh-companies="company.refresh"
+          @copy-company-link="copyCompanyLink"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
@@ -152,6 +154,9 @@
       />
 
       <section v-if="showCompanyHome" class="company-home surface-page" data-testid="company-home">
+        <FirstRunOrganizationStep v-if="pendingCompanyInvite" :invited-id="pendingCompanyInvite"
+          :organizations="company.organizations.value" :busy="company.busy.value" :error="company.error.value"
+          @choose="chooseSidebarCompany" @retry="company.refresh" />
         <h1>{{ company.selected.value?.login || 'Personal & shared rooms' }}</h1>
         <p v-if="company.busy.value" role="status">Loading your repo rooms…</p>
         <p v-else-if="company.error.value" role="alert">{{ company.error.value }}</p>
@@ -228,7 +233,7 @@
       </KeepAlive>
 
       <SettingsView
-        v-if="activeEntry.type === 'system'"
+        v-if="!showCompanyHome && activeEntry.type === 'system'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
         :app-agent-actions="appAgentActions"
@@ -424,6 +429,7 @@ import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboarding";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
+import FirstRunOrganizationStep from "./components/desktop/setup/FirstRunOrganizationStep.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
@@ -563,6 +569,7 @@ const mcpInstallFeedback = ref<string | null>(null);
 const setupLoadError = ref<string | null>(null);
 const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
 const firstRunStage = ref<FirstRunWizardStage>("welcome");
+const pendingCompanyInvite = ref<string | null>(null);
 const company = useDesktopOrganizations(authStatus);
 const navigationAccountRooms = computed(() => mergeCompanyRooms(accountRooms.value, company.rooms.value));
 const {
@@ -603,6 +610,8 @@ const {
   selectedSnapshot,
 });
 
+let unsubscribeCompanyInvite: (() => void) | null = null;
+let companyInviteEventVersion = 0;
 let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
 let unsubscribeOpenUpdates: (() => void) | null = null;
@@ -713,12 +722,14 @@ const sidebarProjectEntries = computed(() =>
     focusRooms: project.focusRooms.map(withRoomUnreadState),
   })), sidebarRoomOrder.value)
 );
-const showCompanyHome = computed(() => activeEntry.value.type === "room" && !sidebarProjectEntries.value.some((project) =>
+const showCompanyHome = computed(() => Boolean(pendingCompanyInvite.value) || activeEntry.value.type === "room" && !sidebarProjectEntries.value.some((project) =>
   [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id && entry.roomIdentifier)
 ));
 async function chooseSidebarCompany(id: string | null): Promise<void> {
+  const invite = pendingCompanyInvite.value;
   cancelSidebarRoomSelection();
   if (await company.choose(id)) {
+    await completeCompanyInvite(invite);
     await nextTick();
     const first = sidebarProjectEntries.value.find((project) => project.parent.roomIdentifier);
     if (first) handleSidebarEntrySelected(first.parent);
@@ -1836,10 +1847,35 @@ const {
 });
 
 async function chooseOnboardingCompany(id: string | null): Promise<void> {
+  const invite = pendingCompanyInvite.value;
   if (await company.choose(id)) {
+    await completeCompanyInvite(invite);
+    if (pendingCompanyInvite.value) return;
     firstRunRoomSelected.value = false;
     continueToRoomConfirmation();
   }
+}
+
+async function completeCompanyInvite(id: string | null): Promise<void> {
+  if (!id || pendingCompanyInvite.value !== id) return;
+  await desktopIpc.organizations.acknowledgeInvite(id);
+  if (pendingCompanyInvite.value === id) pendingCompanyInvite.value = null;
+}
+
+function receiveCompanyInvite(id: string): void {
+  if (!/^[1-9][0-9]*$/.test(id)) return;
+  pendingCompanyInvite.value = id;
+  if (firstRunStage.value === "room") firstRunStage.value = "organization";
+  if (authStatus.value?.authenticated) void company.refresh();
+}
+
+async function copyCompanyLink(): Promise<void> {
+  if (!company.selectedId.value || !authStatus.value?.apiUrl) return;
+  const url = new URL(`/join/${company.selectedId.value}`, authStatus.value.apiUrl).toString();
+  try {
+    await navigator.clipboard.writeText(url);
+    pushActionToast("Company link copied. GitHub membership is required to join.", "success");
+  } catch { pushActionToast("Couldn’t copy the company link.", "error"); }
 }
 
 async function startFirstRunRoomAuth(): Promise<void> {
@@ -2486,6 +2522,14 @@ watch(
 );
 
 onMounted(() => {
+  const inviteVersion = companyInviteEventVersion;
+  unsubscribeCompanyInvite = desktopIpc.organizations?.onInvited?.((id) => {
+    companyInviteEventVersion += 1;
+    receiveCompanyInvite(id);
+  }) || null;
+  void desktopIpc.organizations?.pendingInvite?.().then((id) => {
+    if (id && inviteVersion === companyInviteEventVersion) receiveCompanyInvite(id);
+  });
   unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
   unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
   unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
@@ -2516,6 +2560,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  unsubscribeCompanyInvite?.();
   clearAuthPollTimer();
   clearLiveMetadataRefreshTimer();
   clearLiveMetadataRefreshInterval();

@@ -2,6 +2,11 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
   {
+    path: '/join/:organizationId',
+    name: 'company-join',
+    component: () => import('./pages/CompanyJoin.vue'),
+  },
+  {
     path: '/',
     name: 'landing',
     component: () => import('./pages/Landing.vue'),
