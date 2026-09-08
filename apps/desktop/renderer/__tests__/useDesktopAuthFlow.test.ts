@@ -407,3 +407,61 @@ test("retry timers stop at device-code expiry, including after suspend", async (
     assert.equal(callback, undefined);
   });
 });
+
+for (const action of ["cancelAuthFlow", "signOut", "startAuthFlow"] as const) {
+  test(`late authorized poll cannot override ${action}`, async () => {
+    let finishPoll!: (value: unknown) => void;
+    let authorizedCount = 0;
+    const state = useDesktopAuthFlow({
+      authStatus: ref(authStatusFixture()),
+      getRoomIdentifier: () => null,
+      isFirstRunGate: () => false,
+      onFirstRunAuthorized: async () => { authorizedCount += 1; },
+      onAuthorized: async () => { authorizedCount += 1; },
+      onSignedOut: async () => undefined,
+    });
+    const signedOut = { ...authStatusFixture(), pendingDeviceAuth: null };
+    await withDesktopBridge({
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      letagentsDesktop: { auth: {
+        pollDeviceFlow: () => new Promise(resolve => { finishPoll = resolve; }),
+        cancelDeviceFlow: async () => signedOut,
+        signOut: async () => signedOut,
+        startDeviceFlow: async () => ({ authStatus: authStatusFixture() }),
+      } },
+    }, async () => {
+      const poll = state.pollAuthFlow();
+      await state[action]();
+      finishPoll({ status: "authorized", authStatus: authenticatedStatusFixture() });
+      await poll;
+      assert.equal(state.authStatus.value?.authenticated, false);
+      assert.equal(authorizedCount, 0);
+      assert.equal(state.authStatus.value?.pendingDeviceAuth !== null, action === "startAuthFlow");
+    });
+  });
+}
+
+test("cancel during device-code startup ignores the late code", async () => {
+  let finishStart!: (value: unknown) => void;
+  let scheduled = 0;
+  const state = useDesktopAuthFlow({
+    getRoomIdentifier: () => null, isFirstRunGate: () => false,
+    onFirstRunAuthorized: async () => undefined, onAuthorized: async () => undefined,
+    onSignedOut: async () => undefined,
+  });
+  await withDesktopBridge({
+    setTimeout: () => ++scheduled, clearTimeout: () => undefined,
+    letagentsDesktop: { auth: {
+      startDeviceFlow: () => new Promise(resolve => { finishStart = resolve; }),
+      cancelDeviceFlow: async () => ({ ...authStatusFixture(), pendingDeviceAuth: null }),
+    } },
+  }, async () => {
+    const start = state.startAuthFlow();
+    await state.cancelAuthFlow();
+    finishStart({ authStatus: authStatusFixture() });
+    await start;
+    assert.equal(state.authStatus.value?.pendingDeviceAuth, null);
+    assert.equal(scheduled, 0);
+  });
+});
