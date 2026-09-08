@@ -1,4 +1,4 @@
-import { readWorkspaceReview } from '../workspace-review.js';
+import { readWorkspaceReview, readWorkspaceReviewPage, closeWorkspaceReview } from '../workspace-review.js';
 import { resolveWorkspaceFileLinks, openWorkspaceFile, openLocalSourceFile } from "../workspace-file-links.js";
 import { assertHostApprovalSender } from "../window.js";
 import electron from "electron";
@@ -31,10 +31,28 @@ import { desktopUpdater } from "../updates.js";
 
 const { app } = electron as typeof import("electron");
 
+const reviewSenders = new Set<number>();
+
 export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:app:read-workspace-review", async (event, input) => {
     assertHostApprovalSender(event);
-    return readWorkspaceReview(input);
+    const sender = event.sender;
+    if (!reviewSenders.has(sender.id)) {
+      reviewSenders.add(sender.id);
+      sender.on('render-process-gone', () => { void closeWorkspaceReview(sender.id); });
+      sender.on('did-start-navigation', (_, __, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) void closeWorkspaceReview(sender.id); });
+      sender.once('destroyed', () => { reviewSenders.delete(sender.id); void closeWorkspaceReview(sender.id); });
+    }
+    return readWorkspaceReview(sender.id, input);
+  });
+  targetIpcMain.handle("desktop:app:read-workspace-review-page", async (event, input) => {
+    assertHostApprovalSender(event);
+    return readWorkspaceReviewPage(event.sender.id, input);
+  });
+  targetIpcMain.handle("desktop:app:close-workspace-review", async (event, input) => {
+    assertHostApprovalSender(event);
+    if (typeof input?.requestId !== 'string') throw new Error('Invalid review.');
+    return closeWorkspaceReview(event.sender.id, input.requestId);
   });
   targetIpcMain.handle("desktop:app:resolve-workspace-files", async (event, input) => {
     assertHostApprovalSender(event);

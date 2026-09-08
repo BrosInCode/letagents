@@ -3,27 +3,39 @@
           <div v-if="snapshot.state !== 'ready'" class="workspace-empty"><FileDiff :size="28" aria-hidden="true" /><h3>{{ snapshot.state === 'not_git' ? 'No Git workspace' : 'Changes could not be captured' }}</h3><p>{{ snapshot.state === 'not_git' ? 'This agent’s workspace is not a Git repository.' : 'The workspace was unavailable at the end of this turn. Its changes may still be present.' }}</p></div>
           <div v-else-if="!(snapshot.files.length + snapshot.hidden_files)" class="workspace-empty"><Check :size="28" aria-hidden="true" /><h3>No changes to review</h3><p>No file changes were recorded for this view.</p></div>
           <div v-else class="workspace-review-layout">
-            <nav class="workspace-file-nav" aria-label="Changed files">
+            <div class="workspace-file-sidebar"><nav ref="fileNav" class="workspace-file-nav" aria-label="Changed files">
               <div class="workspace-files-heading">Files <span>{{ snapshot.files.length }}</span></div>
-              <button v-for="file in snapshot.files" :key="file.path" type="button" class="workspace-file-button" :aria-current="selectedPath === file.path ? 'true' : undefined" :title="file.previous_path ? `${file.previous_path} → ${file.path}` : file.path" @click="selectedPath = file.path">
+              <button v-for="file in visibleFiles" :key="file.path" type="button" class="workspace-file-button" :aria-current="selectedPath === file.path ? 'true' : undefined" :title="file.previous_path ? `${file.previous_path} → ${file.path}` : file.path" @click="selectedPath = file.path">
                 <span class="workspace-file-status" :data-status="file.status" :aria-label="fileStatus(file.status)">{{ statusLetter(file.status) }}</span>
                 <span class="workspace-file-name"><strong>{{ basename(file.path) }}</strong><small v-if="dirname(file.path)">{{ dirname(file.path) }}</small></span>
                 <span v-if="!file.binary" class="workspace-file-counts"><span class="workspace-added">+{{ file.additions }}</span><span class="workspace-deleted">−{{ file.deletions }}</span></span>
               </button>
               <p v-if="snapshot.hidden_files" class="workspace-hidden-note">{{ snapshot.hidden_files }} more files omitted</p>
             </nav>
+            <nav v-if="snapshot.files.length > 100" class="workspace-file-pages" aria-label="File pages">
+              <button type="button" :disabled="fileOffset === 0" aria-label="Previous files" @click="fileOffset -= 100">←</button>
+              <span>{{ fileOffset + 1 }}–{{ Math.min(fileOffset + 100, snapshot.files.length) }} of {{ snapshot.files.length.toLocaleString() }}</span>
+              <button type="button" :disabled="fileOffset + 100 >= snapshot.files.length" aria-label="Next files" @click="fileOffset += 100">→</button>
+            </nav></div>
             <section v-if="selectedFile" class="workspace-file-review" :aria-label="selectedFile.path">
               <header class="workspace-file-toolbar"><FileCode :size="15" aria-hidden="true" /><span :title="selectedFile.path">{{ selectedFile.path }}</span><small>{{ fileStatus(selectedFile.status) }}</small></header>
               <p v-if="selectedFile.previous_path" class="workspace-rename-note">Renamed from {{ selectedFile.previous_path }}</p>
-              <div v-if="diffLines.length" :key="`${selectedPath}:${lineOffset}`" class="workspace-code-scroll" tabindex="0" aria-label="Code diff">
-                <pre class="workspace-patch"><code><span v-for="(line, index) in visibleLines" :key="index" class="workspace-diff-line" :data-kind="line.kind"><span class="workspace-line-number" aria-hidden="true">{{ line.before }}</span><span class="workspace-line-number" aria-hidden="true">{{ line.after }}</span><span class="workspace-line-sign">{{ line.kind === 'added' ? '+' : line.kind === 'deleted' ? '−' : ' ' }}</span><span class="workspace-line-content">{{ line.text || ' ' }}</span></span></code></pre>
+              <div v-if="pageLoading || pageError" class="workspace-page-status" role="status"><span>{{ pageError ? 'Couldn’t load these lines.' : 'Loading lines…' }}</span><button v-if="pageError" type="button" @click="retryPage++">Try again</button></div>
+              <div v-if="longLine !== null" class="workspace-long-line-heading"><button type="button" ref="backToDiff" @click="leaveLongLine">← Back to diff</button><span v-if="page">Long line · characters {{ (page?.lines[0]?.textOffset ?? 0) + 1 }}–{{ (page?.lines[0]?.textOffset ?? 0) + (page?.lines[0]?.text.length ?? 0) }}</span></div>
+              <div v-if="diffLines.length" :key="`${selectedPath}:${lineOffset}:${longLine}:${textOffset}`" ref="codeScroll" class="workspace-code-scroll" tabindex="0" aria-label="Code diff">
+                <pre class="workspace-patch"><code><span v-for="(line, index) in visibleLines" :key="index" class="workspace-diff-line" :data-kind="line.kind"><span class="workspace-line-number" aria-hidden="true">{{ line.before }}</span><span class="workspace-line-number" aria-hidden="true">{{ line.after }}</span><span class="workspace-line-sign">{{ line.kind === 'added' ? '+' : line.kind === 'deleted' ? '−' : ' ' }}</span><span class="workspace-line-content">{{ line.text || ' ' }}<button v-if="longLine === null && line.nextTextOffset !== null" type="button" class="workspace-long-line" :data-line-offset="lineOffset + index" @click="openLongLine(lineOffset + index)">Read full line ({{ line.textLength.toLocaleString() }} characters)</button></span></span></code></pre>
 
               </div>
-              <div v-else class="workspace-empty workspace-file-empty"><FileCode :size="26" aria-hidden="true" /><h3>{{ selectedFile.binary ? 'Binary file changed' : patches.has(selectedFile.path) ? 'No text changes' : 'Diff not included' }}</h3><p>{{ selectedFile.binary ? 'A text preview is not available for this file.' : patches.has(selectedFile.path) ? 'Only the file name, permissions, or other file metadata changed.' : 'This file is listed in the snapshot, but its code diff was not captured.' }}</p></div>
-              <nav v-if="lineOffset || diffLines.length > 500" class="workspace-line-pages" aria-label="Diff pages">
-                <button type="button" :disabled="!lineOffset" @click="lineOffset = Math.max(0, lineOffset - 500)">Previous lines</button>
-                <span aria-live="polite">{{ lineOffset + 1 }}–{{ lineOffset + visibleLines.length }}</span>
-                <button type="button" :disabled="diffLines.length <= 500" @click="lineOffset += 500">Next lines</button>
+              <div v-else-if="!pageLoading && !pageError" class="workspace-empty workspace-file-empty"><FileCode :size="26" aria-hidden="true" /><h3>{{ selectedFile.binary ? 'Binary file changed' : page?.included ? 'No text changes' : 'Diff not included' }}</h3><p>{{ selectedFile.binary ? 'A text preview is not available for this file.' : page?.included ? 'Only the file name, permissions, or other file metadata changed.' : 'This file is listed in the snapshot, but its code diff was not captured.' }}</p></div>
+              <nav v-if="longLine !== null" class="workspace-line-pages" aria-label="Long line parts">
+                <button type="button" :disabled="textOffset === 0 || pageLoading" @click="textOffset = textHistory.pop() ?? 0">Previous part</button>
+                <span>Full captured text</span>
+                <button type="button" :disabled="page?.lines[0]?.nextTextOffset == null || pageLoading" @click="textHistory.push(textOffset); textOffset = page!.lines[0].nextTextOffset!">Next part</button>
+              </nav>
+              <nav v-else-if="lineOffset || page?.nextOffset != null" class="workspace-line-pages" aria-label="Diff pages">
+                <button type="button" :disabled="!lineOffset || pageLoading" @click="lineOffset = pageHistory.pop() ?? 0">Previous lines</button>
+                <span aria-live="polite">{{ pageLoading ? 'Loading…' : `${lineOffset + 1}–${lineOffset + diffLines.length}` }}</span>
+                <button type="button" :disabled="page?.nextOffset == null || pageLoading" @click="pageHistory.push(lineOffset); lineOffset = page!.nextOffset!">Next lines</button>
               </nav>
             </section>
           </div>
@@ -31,19 +43,52 @@
 </section>
 </template>
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, shallowRef, watch } from 'vue';
 import { Check, FileCode, FileDiff, Info } from '@lucide/vue';
 import type { WorkspaceChangeSummary } from '../../../../../../../../shared/workspace-change-summary.mjs';
-import { workspaceFilePatches } from '../../../../domain/workspace-diff';
-const props = defineProps<{ snapshot: WorkspaceChangeSummary }>();
+import { createWorkspaceDiffIndex, readWorkspaceDiffPage, type WorkspaceDiffPage, type WorkspaceDiffPageOptions } from '../../../../domain/workspace-diff';
+const props = defineProps<{ snapshot: WorkspaceChangeSummary; viewKey?: string; loadPage?: (path: string, options: WorkspaceDiffPageOptions) => Promise<WorkspaceDiffPage> }>();
 const selectedPath = ref('');
-watch(() => props.snapshot, value => { if (!value.files.some(file => file.path === selectedPath.value)) selectedPath.value = value.files[0]?.path ?? ''; }, { immediate: true });
+const fileOffset = ref(0);
+const fileNav = ref<HTMLElement | null>(null);
+watch(fileOffset, () => { fileNav.value?.scrollTo({ top: 0, left: 0 }); }, { flush: 'post' });
+const visibleFiles = computed(() => props.snapshot.files.slice(fileOffset.value, fileOffset.value + 100));
+watch(() => props.snapshot, value => {
+  if (!value.files.some(file => file.path === selectedPath.value)) selectedPath.value = value.files[0]?.path ?? '';
+  fileOffset.value = Math.floor(Math.max(0, value.files.findIndex(file => file.path === selectedPath.value)) / 100) * 100;
+}, { immediate: true });
 const selectedFile = computed(() => props.snapshot.files.find(file => file.path === selectedPath.value));
-const lineOffset = ref(0);
-const patches = computed(() => workspaceFilePatches(props.snapshot.patch, selectedFile.value ? [selectedFile.value] : [], { offset: lineOffset.value, limit: 501 }));
-const diffLines = computed(() => patches.value.get(selectedPath.value) ?? []);
-watch([selectedPath, () => props.snapshot.captured_at, () => props.snapshot.base_revision], () => { lineOffset.value = 0; });
-const visibleLines = computed(() => diffLines.value.slice(0, 500));
+const lineOffset = ref(0), longLine = ref<number | null>(null), textOffset = ref(0);
+const pageHistory = ref<number[]>([]), textHistory = ref<number[]>([]);
+const backToDiff = ref<HTMLButtonElement | null>(null), codeScroll = ref<HTMLElement | null>(null);
+let focusAfterPage: number | 'back' | null = null;
+function openLongLine(offset: number) { focusAfterPage = 'back'; longLine.value = offset; textOffset.value = 0; textHistory.value = []; }
+function leaveLongLine() { focusAfterPage = longLine.value; longLine.value = null; textOffset.value = 0; }
+const index = computed(() => props.loadPage ? null : createWorkspaceDiffIndex(props.snapshot.patch, props.snapshot.files));
+const page = shallowRef<WorkspaceDiffPage | null>(null);
+watch(page, value => {
+  if (!value || focusAfterPage === null) return;
+  if (focusAfterPage === 'back') backToDiff.value?.focus();
+  else codeScroll.value?.querySelector<HTMLButtonElement>(`[data-line-offset="${focusAfterPage}"]`)?.focus();
+  focusAfterPage = null;
+}, { flush: 'post' });
+const pageLoading = ref(false), pageError = ref(false), retryPage = ref(0);
+watch([selectedPath, () => props.viewKey, () => props.snapshot.captured_at, () => props.snapshot.base_revision], () => {
+  focusAfterPage = null; lineOffset.value = 0; longLine.value = null; textOffset.value = 0; pageHistory.value = []; textHistory.value = [];
+}, { flush: 'sync' });
+watch([selectedPath, lineOffset, longLine, textOffset, retryPage, () => props.viewKey, () => props.snapshot, () => props.loadPage], async (_, __, onCleanup) => {
+  let cancelled = false; onCleanup(() => { cancelled = true; });
+  page.value = null; pageError.value = false; pageLoading.value = Boolean(props.loadPage);
+  if (!selectedFile.value) { pageLoading.value = false; return; }
+  const options = { offset: longLine.value ?? lineOffset.value, textOffset: textOffset.value, singleLine: longLine.value !== null };
+  try {
+    const result = props.loadPage ? await props.loadPage(selectedPath.value, options) : readWorkspaceDiffPage(index.value!, selectedPath.value, options);
+    if (!cancelled) page.value = result;
+  } catch { if (!cancelled) pageError.value = true; }
+  finally { if (!cancelled) pageLoading.value = false; }
+}, { immediate: true });
+const diffLines = computed(() => page.value?.lines ?? []);
+const visibleLines = diffLines;
 const basename = (path: string) => path.split('/').at(-1);
 const dirname = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
 const fileStatus = (status: string) => ({ untracked: 'New file', added: 'Added', modified: 'Modified', deleted: 'Deleted', renamed: 'Renamed', copied: 'Copied', typechange: 'Type changed', unknown: 'Changed' }[status] ?? 'Changed');
@@ -113,8 +158,16 @@ const statusLetter = (status: string) => status === 'untracked' ? 'A' : status =
   .workspace-diff .workspace-files-heading { display: flex; }
 }
 
- .workspace-line-pages { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-secondary); }
+.workspace-line-pages { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-secondary); }
 .workspace-line-pages button { padding: 6px; background: none; border: 0; color: var(--text); font: inherit; cursor: pointer; }
 .workspace-line-pages button:disabled { opacity: .4; cursor: default; }
 .workspace-line-pages button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.workspace-file-sidebar { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+.workspace-file-sidebar .workspace-file-nav { flex: 1; min-height: 0; }
+.workspace-file-pages { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 6px 8px; border-top: 1px solid var(--border); font-size: 10px; color: var(--text-secondary); }
+.workspace-file-pages button, .workspace-page-status button, .workspace-long-line-heading button { background: none; border: 0; padding: 6px; color: var(--text); cursor: pointer; font: inherit; }
+.workspace-file-pages button:disabled { opacity: .4; cursor: default; }
+.workspace-file-pages button:focus-visible, .workspace-long-line:focus-visible, .workspace-long-line-heading button:focus-visible, .workspace-page-status button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.workspace-page-status, .workspace-long-line-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; color: var(--text-secondary); font-size: 11px; }
+.workspace-long-line { display: block; margin: 6px 0; border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; color: var(--text); background: var(--bg-card); font: 11px/1.5 system-ui; cursor: pointer; }
 </style>

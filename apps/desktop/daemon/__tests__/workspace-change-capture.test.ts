@@ -148,3 +148,17 @@ test('full review retains files beyond the compact 200-file list', async () => {
     await releaseWorkspaceTree(directory, 'many-files');
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test('full review decoding keeps gzip integrity checks with bounded output allocation', async () => {
+  const { encodeWorkspaceReview, decodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
+  const { createHash } = await import('node:crypto');
+  const snapshot = { captured_at: '2026-09-08T00:00:00.000Z', branch: null, base_revision: null, state: 'ready' as const,
+    files: [], additions: 0, deletions: 0, hidden_files: 0, patch: 'captured evidence', patch_truncated: false };
+  const encoded = encodeWorkspaceReview({ version: 1, workspace: snapshot, contribution: snapshot });
+  const compressed = Buffer.from(encoded.data, 'base64');
+  compressed.writeUInt32LE(1024, compressed.length - 4);
+  const changed = compressed.toString('base64');
+  assert.throws(() => decodeWorkspaceReview(changed, createHash('sha256').update(changed).digest('hex')));
+  assert.equal(decodeWorkspaceReview(encoded.data, encoded.digest).workspace.patch, snapshot.patch);
+});
