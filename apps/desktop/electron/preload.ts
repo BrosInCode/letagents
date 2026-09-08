@@ -34,6 +34,8 @@ const api: DesktopApi = {
     },
   },
   app: {
+    readWorkspaceReviewPage: input => ipcRenderer.invoke("desktop:app:read-workspace-review-page", input),
+    closeWorkspaceReview: input => ipcRenderer.invoke("desktop:app:close-workspace-review", input),
     readWorkspaceReview: input => ipcRenderer.invoke("desktop:app:read-workspace-review", input),
     resolveWorkspaceFiles: input => ipcRenderer.invoke("desktop:app:resolve-workspace-files", input),
     openWorkspaceFile: input => ipcRenderer.invoke("desktop:app:open-workspace-file", input),

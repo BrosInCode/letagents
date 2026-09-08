@@ -20,7 +20,9 @@ export function parseWorkspaceChangeSummary(value, fullReview = false) {
     || !count(value.additions) || !count(value.deletions) || !count(value.hidden_files)
     || typeof value.patch !== 'string' || value.patch.length > (fullReview ? 128 * 1024 * 1024 : WORKSPACE_PATCH_LIMIT)
     || typeof value.patch_truncated !== 'boolean') return null;
-  if (new TextEncoder().encode(JSON.stringify(value)).length > (fullReview ? 128 * 1024 * 1024 : 480 * 1024)) return null;
+  // Full reviews are byte-bounded by their encoded envelope. Re-serializing each
+  // patch here creates several full-size copies while decoding a large review.
+  if (!fullReview && new TextEncoder().encode(JSON.stringify(value)).length > 480 * 1024) return null;
   const files = [];
   const paths = new Set();
   for (const file of value.files) {

@@ -8,7 +8,7 @@
         <span>{{ reviewState === 'loading' ? 'Loading complete review…' : reviewState === 'pending' ? 'The host is still sharing this review.' : reviewState === 'error' ? 'Couldn’t load the complete review.' : 'Only the original preview is available for this capture.' }}</span>
         <button v-if="reviewState !== 'loading'" type="button" @click="retryReview++">Try again</button>
       </div>
-      <WorkspaceDiff :snapshot="snapshot" />
+      <WorkspaceDiff :snapshot="snapshot" :view-key="`${activeRequestId}:${turn}`" :load-page="reviewState === 'ready' ? loadPage : undefined" />
     </template>
     <div v-else class="agent-workspace-empty"><FileDiff :size="28" aria-hidden="true" /><h3>No workspace snapshot available</h3><p>Changes appear here after this agent finishes a turn and its host shares a snapshot.</p></div>
   </section>
@@ -41,9 +41,12 @@ const previewSnapshot = computed(() => selected.value && 'workspace' in selected
 const review = shallowRef<import('../../../../../../../../shared/workspace-review.mjs').WorkspaceReview | null>(null);
 const reviewState = ref<'idle' | 'loading' | 'ready' | 'pending' | 'unavailable' | 'error'>('idle');
 const retryReview = ref(0);
+const activeRequestId = ref('');
 watch([selected, retryReview], async ([work], _, onCleanup) => {
   let cancelled = false;
-  onCleanup(() => { cancelled = true; });
+  const requestId = crypto.randomUUID();
+  activeRequestId.value = requestId;
+  onCleanup(() => { cancelled = true; void window.letagentsDesktop?.app.closeWorkspaceReview?.({ requestId }).catch(() => {}); });
   review.value = null; reviewState.value = 'idle';
   if (!work || !('workspace' in work.summary)) return;
   const needsFullReview = [work.summary.workspace, work.summary.contribution?.changes].some(value => value && (value.patch_truncated || value.hidden_files));
@@ -52,7 +55,7 @@ watch([selected, retryReview], async ([work], _, onCleanup) => {
   if (!load) { reviewState.value = 'unavailable'; return; }
   reviewState.value = 'loading';
   try {
-    const result = await load({ roomId: work.roomId, agentKey: work.agentKey, sourceMessageId: work.sourceMessageId, attemptId: work.attemptId });
+    const result = await load({ requestId, roomId: work.roomId, agentKey: work.agentKey, sourceMessageId: work.sourceMessageId, attemptId: work.attemptId });
     if (cancelled) return;
     if (result.status === 'ready') {
       // The full payload must describe the same immutable capture being read.
@@ -65,6 +68,11 @@ watch([selected, retryReview], async ([work], _, onCleanup) => {
     reviewState.value = result.status;
   } catch { if (!cancelled) reviewState.value = 'error'; }
 }, { immediate: true });
+async function loadPage(path: string, options: import('../../../../domain/workspace-diff').WorkspaceDiffPageOptions) {
+  const load = window.letagentsDesktop?.app.readWorkspaceReviewPage;
+  if (!load) throw new Error('Review is unavailable.');
+  return load({ requestId: activeRequestId.value, view: turn.value ? 'contribution' : 'workspace', path, ...options });
+}
 const snapshot = computed(() => review.value ? turn.value ? review.value.contribution : review.value.workspace : previewSnapshot.value);
 </script>
 <style scoped>
