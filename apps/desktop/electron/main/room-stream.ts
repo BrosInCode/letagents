@@ -1725,7 +1725,8 @@ export async function startDesktopRoomStream(
     return;
   }
 
-  await stopDesktopRoomStream();
+  // Stop and replace synchronously so another start cannot claim the gap.
+  stopActiveRoomStream();
   let resolveReady: (() => void) | null = null;
   const readyPromise = new Promise<void>((resolve) => { resolveReady = resolve; });
   activeRoomStream = {
@@ -1779,34 +1780,46 @@ export async function startDesktopRoomStream(
       type: "open",
       roomIdentifier: trimmedRoomIdentifier,
     });
-    activeRoomStream.resolveReady?.();
-    activeRoomStream.resolveReady = null;
+    startingStream.resolveReady?.();
+    startingStream.resolveReady = null;
     return;
   }
-  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  let storage;
+  try {
+    storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  } catch (error) {
+    if (!isCurrentRoomStream(startingStream)) return;
+    stopActiveRoomStream();
+    throw error;
+  }
+  if (!isCurrentRoomStream(startingStream)) return;
   if (storage.effectiveMode === "local") {
-    activeRoomStream.localRoomIdentifier = localRoomIdentifierForStorage(
+    startingStream.localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
       trimmedRoomIdentifier,
     );
     void pollLocalDesktopRoomMessages(
-      activeRoomStream,
-      activeRoomStream.localRoomIdentifier,
+      startingStream,
+      startingStream.localRoomIdentifier,
     );
-    activeRoomStream.resolveReady?.();
-    activeRoomStream.resolveReady = null;
+    startingStream.resolveReady?.();
+    startingStream.resolveReady = null;
     return;
   }
   // Cloud rooms start with SSE only. The long-poll is now a fallback that
   // `openDesktopRoomStream` brings up if/when SSE drops, and retires again on
   // reconnect — instead of running a second permanent transport per room.
-  void openDesktopRoomStream(activeRoomStream);
-  await activeRoomStream.readyPromise;
+  void openDesktopRoomStream(startingStream);
+  await startingStream.readyPromise;
 }
 
 export async function stopDesktopRoomStream(
   roomIdentifier?: string | null,
 ): Promise<void> {
+  stopActiveRoomStream(roomIdentifier);
+}
+
+function stopActiveRoomStream(roomIdentifier?: string | null): void {
   if (!activeRoomStream) return;
   if (
     roomIdentifier &&
