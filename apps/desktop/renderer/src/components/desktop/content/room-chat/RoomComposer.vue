@@ -106,6 +106,7 @@
         class="desktop-composer-add-agent"
         type="button"
         :disabled="roomLoading || !roomIdentifier"
+        :data-needs-agent="Boolean(roomIdentifier && !hasListeningAgent)"
         :title="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
         :aria-label="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
         data-testid="desktop-composer-add-agent"
@@ -328,6 +329,9 @@ const canSend = computed(() =>
 );
 const primaryPermissionApproval = computed(() => props.permissionApprovals[0] ?? null);
 const permissionOverflowCount = computed(() => Math.max(0, props.permissionApprovals.length - 1));
+const hasListeningAgent = computed(() => props.participants.some((participant) =>
+  participant.kind === "agent" && participant.activityState !== "offline"
+));
 const composerInputLabel = computed(() => {
   if (props.roomLoading) return "Room messages are loading";
   return props.roomIdentifier ? "Message room" : "Choose a room before writing";

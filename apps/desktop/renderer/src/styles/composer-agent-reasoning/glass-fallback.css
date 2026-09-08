@@ -27,7 +27,6 @@
   .desktop-room-shell[data-liquid-glass="true"] .stat-card,
   .desktop-room-shell[data-liquid-glass="true"] .surface-intro,
   .desktop-room-shell[data-liquid-glass="true"] .surface-row,
-  .desktop-room-shell[data-liquid-glass="true"] .room-empty-card,
   .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar,
   .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-cta,
   .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pinned-room,

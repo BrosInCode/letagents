@@ -29,6 +29,7 @@ import {
 
 export interface AddAgentModalProps {
   open: boolean;
+  preferredProviderId?: DesktopAgentProviderId | null;
   roomIdentifier: string;
   roomGitRoom: DesktopGitRoomInfo | null;
   gitRoomMatchesActiveRepo: boolean;
@@ -312,6 +313,7 @@ const dismissLaunch = supervisedLaunch.dismiss;
 const handleLaunchRecover = supervisedLaunch.handleRecover;
 setupActions = setup.bind({
   open: () => props.open,
+  preferredProviderId: () => props.preferredProviderId || null,
   roomIdentifier: () => props.roomIdentifier,
   roomGitRoom: () => props.roomGitRoom,
   repoRootPath: () => props.repoRootPath,

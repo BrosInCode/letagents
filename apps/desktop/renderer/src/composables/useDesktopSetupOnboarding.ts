@@ -1,5 +1,6 @@
 import { computed, nextTick, ref, type ComputedRef, type Ref } from "vue";
 import type {
+  DesktopAgentProviderId,
   DesktopAuthStatus,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
@@ -7,7 +8,11 @@ import type {
   DesktopRoomSnapshot,
   RepoStatus,
 } from "../../../electron/ipc-types";
-import type { DesktopMcpWizardStep, FirstRunWizardStage } from "../components/desktop/setup/types";
+import type {
+  DesktopMcpWizardStep,
+  FirstRunAgentOption,
+  FirstRunWizardStage,
+} from "../components/desktop/setup/types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { setupEntry } from "../domain/desktop-navigation";
 import { defaultMcpTargetSelection, fallbackMcpInstallState } from "../domain/mcp-install";
@@ -36,6 +41,7 @@ interface DesktopSetupOnboardingOptions {
   mcpWizardStep: Ref<DesktopMcpWizardStep>;
   openRoomSnapshot: (snapshot: DesktopRoomSnapshot, options?: OpenRoomOptions) => void;
   pinnedRoom: ComputedRef<RoomEntry>;
+  requestFirstAgent?: (providerId: DesktopAgentProviderId) => void;
   refresh: () => Promise<void>;
   repoStatus: Ref<RepoStatus | null>;
   selectedMcpTargetIds: Ref<DesktopMcpInstallTargetId[]>;
@@ -47,6 +53,11 @@ interface DesktopSetupOnboardingOptions {
 export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions) {
   const firstRunRoomSelected = ref(false);
   const firstRunInviteCode = ref<string | null>(null);
+  const firstRunAgentProviderId = ref<DesktopAgentProviderId | null>(null);
+  const firstRunAgentOptions = ref<FirstRunAgentOption[]>([]);
+  const firstRunAgentLoading = ref(false);
+  const firstRunAgentError = ref<string | null>(null);
+  let firstRunAgentLoadVersion = 0;
   const initialBootstrapPending = ref(true);
 
   const showFirstRunGate = computed(() => {
@@ -157,6 +168,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpWizardStep.value = "choose";
     firstRunRoomSelected.value = false;
     firstRunInviteCode.value = null;
+    firstRunAgentLoadVersion += 1;
+    firstRunAgentProviderId.value = null;
+    firstRunAgentOptions.value = [];
+    firstRunAgentLoading.value = false;
+    firstRunAgentError.value = null;
   }
 
   function goBackMcpOnboarding(): void {
@@ -284,6 +300,13 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpInstallFeedback.value = null;
     options.authFeedback.value = null;
     options.setupLoadError.value = null;
+
+    if (options.firstRunStage.value === "agent") {
+      firstRunAgentLoadVersion += 1;
+      firstRunAgentLoading.value = false;
+      options.firstRunStage.value = "room";
+      return;
+    }
 
     if (options.firstRunStage.value === "room") {
       options.firstRunStage.value = "github";
@@ -418,7 +441,89 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.firstRunStage.value = "room";
   }
 
-  async function finishFirstRunOnboarding(): Promise<void> {
+  async function continueToFirstAgent(): Promise<void> {
+    if (!firstRunRoomSelected.value) return;
+    options.authFeedback.value = null;
+    options.firstRunStage.value = "agent";
+    await loadFirstRunAgentOptions();
+  }
+
+  async function loadFirstRunAgentOptions(): Promise<void> {
+    const loadVersion = ++firstRunAgentLoadVersion;
+    firstRunAgentLoading.value = true;
+    firstRunAgentError.value = null;
+    firstRunAgentOptions.value = [];
+    try {
+      const workers = desktopIpc.workers;
+      if (
+        !workers
+        || typeof workers.listAgentProviders !== "function"
+        || typeof workers.runAgentProviderPreflight !== "function"
+      ) {
+        throw new Error("Restart LetAgents Desktop to check local agent CLIs.");
+      }
+      const providers = (await workers.listAgentProviders()).filter((provider) =>
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      );
+      const roomIdentifier = options.pinnedRoom.value.roomIdentifier;
+      const roomGitRoom = options.pinnedRoom.value.gitRoom || null;
+      const repoRootPath = options.repoStatus.value?.rootPath?.trim() || null;
+      const roomOnly = roomGitRoom == null && !repoRootPath;
+      const checkedOptions = await Promise.all(providers.map(async (provider): Promise<FirstRunAgentOption> => {
+        try {
+          const preflight = await workers.runAgentProviderPreflight(provider.id, {
+            roomIdentifier,
+            roomGitRoom,
+            repoRootPath,
+            roomOnly,
+            launchMode: "supervised",
+          });
+          return { provider, preflight, error: null };
+        } catch (error) {
+          return {
+            provider,
+            preflight: null,
+            error: error instanceof Error ? error.message : `Could not check ${provider.name}.`,
+          };
+        }
+      }));
+      if (loadVersion !== firstRunAgentLoadVersion) return;
+      firstRunAgentOptions.value = checkedOptions;
+      const selectedStillAvailable = checkedOptions.some(
+        (option) => option.provider.id === firstRunAgentProviderId.value,
+      );
+      if (!selectedStillAvailable) {
+        firstRunAgentProviderId.value = checkedOptions.find((option) => option.preflight?.canStart)?.provider.id
+          || checkedOptions.find((option) => option.preflight?.status !== "missing_runtime" && !option.error)?.provider.id
+          || checkedOptions[0]?.provider.id
+          || null;
+      }
+      if (!checkedOptions.length) {
+        firstRunAgentError.value = "No managed agent providers are available in this desktop build.";
+      }
+    } catch (error) {
+      if (loadVersion !== firstRunAgentLoadVersion) return;
+      firstRunAgentProviderId.value = null;
+      firstRunAgentError.value = error instanceof Error
+        ? error.message
+        : "LetAgents could not check local agent CLIs.";
+    } finally {
+      if (loadVersion === firstRunAgentLoadVersion) firstRunAgentLoading.value = false;
+    }
+  }
+
+  function selectFirstAgentProvider(providerId: DesktopAgentProviderId): void {
+    if (firstRunAgentOptions.value.some((option) => option.provider.id === providerId)) {
+      firstRunAgentProviderId.value = providerId;
+    }
+  }
+
+  async function finishFirstRunOnboarding(
+    preferredProviderId: DesktopAgentProviderId | null = null,
+  ): Promise<boolean> {
+    firstRunAgentLoadVersion += 1;
+    firstRunAgentLoading.value = false;
     const roomIdentifier = firstRunRoomSelected.value
       ? options.pinnedRoom.value.roomIdentifier
       : null;
@@ -439,15 +544,20 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
           firstRunRoomSelected.value = snapshot.access.status === "auth_required";
           options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
           options.authFeedback.value = roomAccessFeedback(snapshot);
-          return;
+          return false;
         }
         options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
       }
       options.mcpInstallState.value = await desktopIpc.setup.completeMcpOnboarding();
       await options.refresh();
       options.activeEntry.value = options.pinnedRoom.value;
+      if (roomIdentifier && preferredProviderId) {
+        options.requestFirstAgent?.(preferredProviderId);
+      }
+      return true;
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "Could not close setup.";
+      return false;
     } finally {
       options.mcpInstallBusy.value = false;
     }
@@ -456,10 +566,15 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
   return {
     clearMcpTargetSelection,
     completeMcpOnboarding,
+    continueToFirstAgent,
     continueMcpOnboarding,
     continueToRoomConfirmation,
     createFirstRunInviteRoom,
     finishFirstRunOnboarding,
+    firstRunAgentError,
+    firstRunAgentLoading,
+    firstRunAgentOptions,
+    firstRunAgentProviderId,
     firstRunInviteCode,
     firstRunRoomSelected,
     firstRunFeedback,
@@ -469,7 +584,9 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     joinRoomCode,
     loadFirstRunSetup,
     pickRepoRoom,
+    retryFirstRunAgentProviders: loadFirstRunAgentOptions,
     selectAllMcpTargets,
+    selectFirstAgentProvider,
     selectMcpTarget,
     setupApiAvailable,
     showFirstRunGate,

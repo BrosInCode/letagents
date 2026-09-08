@@ -36,6 +36,7 @@ const MODEL_PREFLIGHT_DEBOUNCE_MS = 400;
 
 interface SetupBindings {
   open: () => boolean;
+  preferredProviderId?: () => DesktopAgentProviderId | null;
   roomIdentifier: () => string;
   roomGitRoom: () => DesktopGitRoomInfo | null;
   repoRootPath: () => string | null;
@@ -228,10 +229,14 @@ export function useAddAgentSetup() {
         if (!isCurrent()) return;
         providers.value = nextProviders;
         const previousProviderId = selectedProviderId.value;
-        selectedProviderId.value = selectedProviderId.value
-          && nextProviders.some((provider) => provider.id === selectedProviderId.value)
-          ? selectedProviderId.value
-          : nextProviders.find((provider) => provider.id === "codex")?.id || nextProviders[0]?.id || null;
+        const preferredProviderId = bindings.preferredProviderId?.() || null;
+        selectedProviderId.value = preferredProviderId
+          && nextProviders.some((provider) => provider.id === preferredProviderId)
+          ? preferredProviderId
+          : selectedProviderId.value
+            && nextProviders.some((provider) => provider.id === selectedProviderId.value)
+            ? selectedProviderId.value
+            : nextProviders.find((provider) => provider.id === "codex")?.id || nextProviders[0]?.id || null;
         if (
           hasSupervisedRuntime(bindings.selectedProvider.value)
           && !hasDesktopManagedRuntime(bindings.selectedProvider.value)
