@@ -193,16 +193,9 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
         return leaseTask;
       }
 
-      if (!referencedTaskId) {
-        return emptyRepoRoomEventTaskResolution();
-      }
-
-      const task = await deps.getTaskById(project.id, referencedTaskId);
-      return {
-        task: task ?? undefined,
-        matchedByTaskReference: Boolean(task),
-        matchedByWorkflowArtifact: false,
-      };
+      // PR/review prose can quote examples or tasks belonging to other rooms.
+      // A room-local task number alone does not establish a workflow link.
+      return emptyRepoRoomEventTaskResolution();
     }
 
     if (event.kind === "pull_request_review") {
@@ -236,16 +229,9 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
         return leaseTask;
       }
 
-      if (!referencedTaskId) {
-        return emptyRepoRoomEventTaskResolution();
-      }
-
-      const task = await deps.getTaskById(project.id, referencedTaskId);
-      return {
-        task: task ?? undefined,
-        matchedByTaskReference: Boolean(task),
-        matchedByWorkflowArtifact: false,
-      };
+      // PR/review prose can quote examples or tasks belonging to other rooms.
+      // A room-local task number alone does not establish a workflow link.
+      return emptyRepoRoomEventTaskResolution();
     }
 
     return resolveTaskByArtifactsOrReferences(

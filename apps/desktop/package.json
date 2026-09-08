@@ -53,7 +53,7 @@
     "@openai/agents": "0.11.6",
     "@openai/agents-extensions": "0.11.6",
     "@openrouter/ai-sdk-provider": "2.9.1",
-    "ai": "6.0.207",
+    "ai": "6.0.214",
     "cuelume": "0.1.0",
     "electron-updater": "6.8.9",
     "undici": "7.29.0",
@@ -82,8 +82,10 @@
     "postcss": "8.5.23",
     "@hono/node-server": "2.0.10",
     "fast-uri": "3.1.6",
-    "hono": "4.12.34",
+    "hono": "4.13.5",
     "ip-address": "10.3.1",
-    "builder-util-runtime": "9.7.0"
+    "builder-util-runtime": "9.7.0",
+    "joi": "18.2.5",
+    "js-yaml": "4.3.2"
   }
 }
