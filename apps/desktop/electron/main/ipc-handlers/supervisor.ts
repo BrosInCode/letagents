@@ -37,7 +37,7 @@ import {
   supervisorDaemonClient,
 } from "../supervisor-daemon.js";
 import {
-  readDesktopSupervisorGrantAgentKeysForEntries,
+  projectDesktopSupervisorAgentKeys,
   readDesktopSupervisorGrantRevocationAttestationForEntry,
 } from "../supervisor-grant.js";
 import { supervisorGrantCoordinator } from "../supervisor-grant-coordinator.js";
@@ -102,13 +102,7 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       const entries = isDesktopSmokeCheck()
         ? desktopSmokeSupervisorEntries().filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier)
         : await supervisorDaemonClient.list(roomIdentifier ?? null);
-      const agentKeys = await readDesktopSupervisorGrantAgentKeysForEntries(
-        entries.map((entry) => entry.id),
-      ).catch(() => new Map<string, string>());
-      return entries.map((entry) => ({
-        ...entry,
-        agentKey: entry.agentKey ?? agentKeys.get(entry.id) ?? null,
-      }));
+      return projectDesktopSupervisorAgentKeys(entries);
     },
   );
   targetIpcMain.handle(
@@ -474,7 +468,11 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
   }
   if (!supervisorStateBridgeRegistered) {
     supervisorStateBridgeRegistered = true;
-    onSupervisorState((snapshot) => emitToMainWindow("desktop:supervisor:state", snapshot));
+    onSupervisorState((snapshot) => {
+      void projectDesktopSupervisorAgentKeys(snapshot.entries).then((entries) => {
+        emitToMainWindow("desktop:supervisor:state", { ...snapshot, entries });
+      });
+    });
   }
   if (!supervisorLaunchBridgeRegistered) {
     supervisorLaunchBridgeRegistered = true;

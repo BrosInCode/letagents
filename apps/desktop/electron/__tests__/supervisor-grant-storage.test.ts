@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   canonicalSupervisorGrantAgentKey,
+  projectDesktopSupervisorAgentKeys,
   decryptSupervisorGrantFromStorage,
   desktopSupervisorGrantInstallationId,
   encryptSupervisorGrantForStorage,
@@ -1182,5 +1183,18 @@ test("global revoke cannot erase a concurrent managed save it did not revoke", a
     assert.deepEqual(revoked, ["/supervisor-host-grants/grant_old"]);
     assert.equal(await readDesktopSupervisorGrantForAgent("owner/agent-old", { storage: keychain }), null);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-new", { storage: keychain }))?.token, "lashg_new");
+  });
+});
+
+
+test("live and listed supervisor entries retain canonical identity for contribution inspector resolution", async () => {
+  await withRegistry(async path => {
+    await writeFile(path, JSON.stringify({ version: 7, grants: {}, entryAgentKeys: { copper: "EmmyMay/desktop-codex-copper" }, credentialRevocations: {}, purgeRevocationReceipts: {} }));
+    const input = [{ id: "copper", agentKey: null }, { id: "external", agentKey: null }, { id: "explicit", agentKey: "Jessica/agent" }];
+    const projected = await projectDesktopSupervisorAgentKeys(input);
+    assert.deepEqual(projected.map(entry => entry.agentKey), ["EmmyMay/desktop-codex-copper", null, "Jessica/agent"]);
+    assert.equal(input[0]!.agentKey, null);
+    await writeFile(path, JSON.stringify({ version: 7, grants: {}, entryAgentKeys: {}, credentialRevocations: {}, purgeRevocationReceipts: {} }));
+    assert.equal((await projectDesktopSupervisorAgentKeys(input))[0]!.agentKey, null);
   });
 });
