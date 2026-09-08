@@ -43,7 +43,7 @@
 </section>
 </template>
 <script setup lang="ts">
-import { computed, ref, shallowRef, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import { Check, FileCode, FileDiff, Info } from '@lucide/vue';
 import type { WorkspaceChangeSummary } from '../../../../../../../../shared/workspace-change-summary.mjs';
 import { createWorkspaceDiffIndex, readWorkspaceDiffPage, type WorkspaceDiffPage, type WorkspaceDiffPageOptions } from '../../../../domain/workspace-diff';
@@ -61,20 +61,32 @@ const selectedFile = computed(() => props.snapshot.files.find(file => file.path 
 const lineOffset = ref(0), longLine = ref<number | null>(null), textOffset = ref(0);
 const pageHistory = ref<number[]>([]), textHistory = ref<number[]>([]);
 const backToDiff = ref<HTMLButtonElement | null>(null), codeScroll = ref<HTMLElement | null>(null);
-let focusAfterPage: number | 'back' | null = null;
-function openLongLine(offset: number) { focusAfterPage = 'back'; longLine.value = offset; textOffset.value = 0; textHistory.value = []; }
-function leaveLongLine() { focusAfterPage = longLine.value; longLine.value = null; textOffset.value = 0; }
+let returnFocus: number | null = null, returnSource: Element | null = null;
+function cancelReturnFocus() { returnFocus = null; document.removeEventListener('focusin', cancelReturnFocus); }
+async function openLongLine(offset: number) {
+  cancelReturnFocus(); const source = document.activeElement;
+  longLine.value = offset; textOffset.value = 0; textHistory.value = [];
+  await nextTick();
+  if (document.activeElement === document.body || document.activeElement === source) backToDiff.value?.focus();
+}
+function leaveLongLine() {
+  cancelReturnFocus(); returnFocus = longLine.value; returnSource = document.activeElement;
+  document.addEventListener('focusin', cancelReturnFocus, { once: true });
+  longLine.value = null; textOffset.value = 0;
+}
+onBeforeUnmount(cancelReturnFocus);
 const index = computed(() => props.loadPage ? null : createWorkspaceDiffIndex(props.snapshot.patch, props.snapshot.files));
 const page = shallowRef<WorkspaceDiffPage | null>(null);
 watch(page, value => {
-  if (!value || focusAfterPage === null) return;
-  if (focusAfterPage === 'back') backToDiff.value?.focus();
-  else codeScroll.value?.querySelector<HTMLButtonElement>(`[data-line-offset="${focusAfterPage}"]`)?.focus();
-  focusAfterPage = null;
+  if (!value || returnFocus === null) return;
+  const target = codeScroll.value?.querySelector<HTMLButtonElement>(`[data-line-offset="${returnFocus}"]`);
+  const restore = document.activeElement === document.body || document.activeElement === returnSource;
+  cancelReturnFocus();
+  if (restore) target?.focus();
 }, { flush: 'post' });
 const pageLoading = ref(false), pageError = ref(false), retryPage = ref(0);
 watch([selectedPath, () => props.viewKey, () => props.snapshot.captured_at, () => props.snapshot.base_revision], () => {
-  focusAfterPage = null; lineOffset.value = 0; longLine.value = null; textOffset.value = 0; pageHistory.value = []; textHistory.value = [];
+  cancelReturnFocus(); lineOffset.value = 0; longLine.value = null; textOffset.value = 0; pageHistory.value = []; textHistory.value = [];
 }, { flush: 'sync' });
 watch([selectedPath, lineOffset, longLine, textOffset, retryPage, () => props.viewKey, () => props.snapshot, () => props.loadPage], async (_, __, onCleanup) => {
   let cancelled = false; onCleanup(() => { cancelled = true; });

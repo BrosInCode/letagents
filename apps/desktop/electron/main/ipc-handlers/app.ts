@@ -36,14 +36,14 @@ const reviewSenders = new Set<number>();
 export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:app:read-workspace-review", async (event, input) => {
     assertHostApprovalSender(event);
-    const sender = event.sender;
-    if (!reviewSenders.has(sender.id)) {
-      reviewSenders.add(sender.id);
-      sender.on('render-process-gone', () => { void closeWorkspaceReview(sender.id); });
-      sender.on('did-start-navigation', (_, __, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) void closeWorkspaceReview(sender.id); });
-      sender.once('destroyed', () => { reviewSenders.delete(sender.id); void closeWorkspaceReview(sender.id); });
+    const sender = event.sender, owner = sender.id;
+    if (!reviewSenders.has(owner)) {
+      reviewSenders.add(owner);
+      sender.on('render-process-gone', () => { void closeWorkspaceReview(owner); });
+      sender.on('did-start-navigation', (_, __, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) void closeWorkspaceReview(owner); });
+      sender.once('destroyed', () => { reviewSenders.delete(owner); void closeWorkspaceReview(owner); });
     }
-    return readWorkspaceReview(sender.id, input);
+    return readWorkspaceReview(owner, input);
   });
   targetIpcMain.handle("desktop:app:read-workspace-review-page", async (event, input) => {
     assertHostApprovalSender(event);
