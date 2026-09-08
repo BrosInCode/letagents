@@ -29,6 +29,7 @@
           :has-older-messages="hasOlderMessages"
           :active="active"
           :loading-older-messages="loadingOlderMessages"
+          :older-messages-error="olderMessagesError"
           :messages="messagesWithThreadOverrides"
           :thread-messages="threadMessagesWithThreadOverrides"
           :message-namespace="messageNamespace"
@@ -285,6 +286,7 @@ const props = defineProps<{
   sendError: string | null;
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
+  olderMessagesError?: string | null;
   participants: DesktopParticipantSummary[];
   presence: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];

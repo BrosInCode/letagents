@@ -323,6 +323,13 @@
   }
 }
 
+.room-load-older-error {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
 .room-load-older {
   width: fit-content;
   margin: 0 auto 12px;
