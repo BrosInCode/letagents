@@ -1,3 +1,4 @@
+import type { WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
 import type { SupervisedDeliveryHttp, SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
 import type { RemoteExecutionDelegationRevision } from "./execution-delegation-journal.js";
@@ -175,7 +176,7 @@ function parseExecutionDelegationInventoryPage(
 export type RoomWorkPublishInput = {
   apiOrigin: string; grantId: string; supervisorGrant: string; grantGeneration: number;
   sessionId: string; roomId: string; sourceMessageId: string; agentKey: string;
-  revision: number; summary: RoomAgentWorkSummary; signal: AbortSignal;
+  revision: number; summary: RoomAgentWorkSummary; reviewPage?: WorkspaceReviewPage; signal: AbortSignal;
 };
 export type RoomWorkPublishResult = "acknowledged" | "cleared" | "conflict";
 
@@ -187,7 +188,7 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
     method: "POST", redirect: "error",
     headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
     body: JSON.stringify({ generation: input.grantGeneration, room_id: input.roomId,
-      source_message_id: input.sourceMessageId, revision: input.revision, summary }),
+      source_message_id: input.sourceMessageId, revision: input.revision, summary, ...(input.reviewPage ? { review_page: input.reviewPage } : {}) }),
     signal: boundedCloudSignal(input.signal),
   });
   const body = await response.json() as Record<string, unknown>;
@@ -204,6 +205,7 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
   if (body.status === "replayed" && isClearedRoomAgentWorkSummary(work.summary)) return "cleared";
   const accepted = parseRoomAgentWorkSummary(work.summary);
   if (!accepted || JSON.stringify(accepted) !== JSON.stringify(summary)) throw new Error("Room work publication returned a different summary.");
+  if (input.reviewPage && (body.review_digest !== input.reviewPage.digest || body.review_page !== input.reviewPage.index)) throw new Error("Workspace review page was not acknowledged.");
   return "acknowledged";
 }
 

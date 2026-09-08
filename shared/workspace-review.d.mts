@@ -1,0 +1,10 @@
+import type { WorkspaceChangeSummary } from './workspace-change-summary.mjs';
+export const REVIEW_LIMIT: number;
+export const REVIEW_PAGE_SIZE: number;
+export const REVIEW_MAX_PAGES: number;
+export type WorkspaceReview = { version: 1; workspace: WorkspaceChangeSummary; contribution: WorkspaceChangeSummary };
+export type WorkspaceReviewPage = { digest: string; index: number; total: number; data: string };
+export function parseWorkspaceReview(value: unknown): WorkspaceReview | null;
+export function encodeWorkspaceReview(value: WorkspaceReview): { data: string; digest: string };
+export function decodeWorkspaceReview(data: string, digest: string): WorkspaceReview;
+export function parseWorkspaceReviewPage(value: unknown): WorkspaceReviewPage | null;

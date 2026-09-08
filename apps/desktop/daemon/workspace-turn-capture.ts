@@ -61,7 +61,7 @@ export async function captureWorkspaceTree(workspace: string, identity: string):
       const mode = stat.isSymbolicLink() ? '120000' : stat.mode & 0o111 ? '100755' : '100644';
       const rawOid = createHash(head.length === 64 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
       if (original.get(path)?.[0] === mode && original.get(path)?.[2] === rawOid) continue;
-      if (entries.length >= 200) return null;
+      if (entries.length >= 10_000) return null;
       const oid = (await git(root, ['hash-object', '-w', '--no-filters', '--stdin'], signal, undefined, bytes)).trim();
       entries.push(`${mode} ${oid}\t${path}\0`);
     }
@@ -78,12 +78,12 @@ export async function releaseWorkspaceTree(workspace: string, identity: string):
 export async function captureWorkspacePair(workspace: string, startingRevision: string | null, baseline: string | null, identity: string) {
   const tree = await captureWorkspaceTree(workspace, `${identity}:settled`);
   try {
-    const full = tree ? await captureWorkspaceChanges(workspace, startingRevision, tree) : unavailableWorkspace();
-    const changes = tree && baseline ? await captureWorkspaceChanges(workspace, baseline, tree) : unavailableWorkspace();
-    // Bound the combined v3 envelope without changing accurate file totals.
-    for (const snapshot of [full, changes]) {
-      if (snapshot.patch.length > 48 * 1024) { snapshot.patch = snapshot.patch.slice(0, 48 * 1024); snapshot.patch_truncated = true; }
-    }
-    return { workspace: full, contribution: { changes, summary: null as string | null } };
+    const full = tree ? await captureWorkspaceChanges(workspace, startingRevision, tree, true) : unavailableWorkspace();
+    const changes = tree && baseline ? await captureWorkspaceChanges(workspace, baseline, tree, true) : unavailableWorkspace();
+    const preview = (snapshot: WorkspaceChangeSummary): WorkspaceChangeSummary => ({ ...snapshot,
+      files: snapshot.files.slice(0, 200), hidden_files: snapshot.hidden_files + Math.max(0, snapshot.files.length - 200),
+      patch: snapshot.patch.slice(0, 48 * 1024), patch_truncated: snapshot.patch_truncated || snapshot.patch.length > 48 * 1024 });
+    return { workspace: preview(full), contribution: { changes: preview(changes), summary: null as string | null },
+      review: { version: 1 as const, workspace: full, contribution: changes } };
   } finally { await releaseWorkspaceTree(workspace, `${identity}:settled`); }
 }

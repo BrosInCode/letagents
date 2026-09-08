@@ -27,7 +27,7 @@ const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
 const { requireGitRoomParticipant } = await import("../rooms/access.js");
 const { hashToken } = await import("../db/utils.js");
 const { registerRoomAgentWorkRoutes } = await import("../routes/rooms/agent-work.js");
-const { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork } = await import("../db/room-agent-work.js");
+const { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork, readRoomAgentWorkReviewPage } = await import("../db/room-agent-work.js");
 const { parseRoomAgentWorkSummary } = await import("../../../shared/room-agent-work.mjs");
 const { acquireLiveRoomAuthorization } = await import("../rooms/live-authorization.js");
 const { githubRepoAccessInvalidationEvents } = await import("../github/repo-access.js");
@@ -1815,4 +1815,40 @@ test('workspace reviews survive publication and are negotiated without breaking 
   assert.equal(incompleteOptIn.body.snapshot.work[0].summary.version, 1);
   assert.notEqual(turns.body.cursor, current.body.cursor);
   assert.notEqual(legacy.body.cursor, current.body.cursor);
+});
+
+
+test('full reviews publish in immutable pages, remain outside polling, and clear with their receipt', { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll();
+  const workspace = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready',
+    files: [{ path: 'app.ts', previous_path: null, status: 'modified', additions: 1, deletions: 1, binary: false }],
+    additions: 1, deletions: 1, hidden_files: 0, patch: '-old\n+new', patch_truncated: true };
+  const summary = { ...workSummary, operation_counts: { ...workSummary.operation_counts, unresolved: 0 }, version: 3, recorded_state: 'completed', workspace, contribution: { changes: workspace, summary: 'Updated app.ts' } };
+  const page = { digest: 'a'.repeat(64), index: 0, total: 2, data: 'A'.repeat(65536) };
+  const published = await publishRoomAgentWork({ ...f.input, summary, review_page: page });
+  assert.equal((await readRoomAgentWorkReviewPage(published.work.attempt_id, 0)).status, 'pending');
+  await assert.rejects(publishRoomAgentWork({ ...f.input, summary, review_page: { ...page, data: 'B'.repeat(65536) } }), /revision_conflict/);
+  await assert.rejects(publishRoomAgentWork({ ...f.input, summary, review_page: { ...page, index: 1, digest: 'b'.repeat(64) } }), /revision_conflict/);
+  const second = { ...page, index: 1, data: 'AAAA' };
+  assert.equal((await publishRoomAgentWork({ ...f.input, summary, review_page: second })).status, 'replayed');
+  assert.deepEqual(await readRoomAgentWorkReviewPage(published.work.attempt_id, 1), { status: 'ready', page: second });
+  const reader = f.handlers.get('GET agent-work');
+  const request = { ...f.request, params: { 0: f.room.id, 1: published.work.attempt_id }, query: { review_page: '1' } };
+  const pageRead = recorder(); await reader(request, pageRead);
+  assert.equal(pageRead.statusCode, 200); assert.deepEqual(pageRead.body.page, second);
+  const denied = recorder(); await reader({ ...request, authKind: 'agent_session', sessionAccount: null }, denied);
+  assert.equal(denied.statusCode, 401);
+  const badPage = recorder(); await reader({ ...request, query: { review_page: '2048' } }, badPage);
+  assert.equal(badPage.statusCode, 400);
+  await assert.rejects(publishRoomAgentWork({ ...f.input, session_id: 'foreign-worker', summary, review_page: second }), /publisher_not_authorized/);
+  const uploaded = recorder(); await f.publish({ ...f.publishRequest, body: { ...f.publishRequest.body, summary, review_page: second } }, uploaded);
+  assert.equal(uploaded.statusCode, 200); assert.equal(uploaded.body.review_digest, second.digest); assert.equal(uploaded.body.review_page, 1);
+
+  assert.equal(JSON.stringify((await f.poll({ include_workspace: '1', include_contribution: '1' })).body).includes(page.data), false);
+  const cleared = await clearRoomAgentWork({ room_id: published.work.room_id, attempt_id: published.work.attempt_id,
+    owner_account_id: 'owner_route', revision: published.work.revision });
+  assert.equal(cleared?.status, 'cleared');
+  assert.equal((await readRoomAgentWorkReviewPage(published.work.attempt_id, 0)).status, 'unavailable');
+  await publishRoomAgentWork({ ...f.input, summary, review_page: page });
+  assert.equal((await readRoomAgentWorkReviewPage(published.work.attempt_id, 0)).status, 'unavailable');
 });

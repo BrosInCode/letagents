@@ -1,8 +1,9 @@
+import { parseWorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull } from "drizzle-orm";
 import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWork, type RoomAgentWorkSnapshot } from "../../../shared/room-agent-work.mjs";
 import { db } from "./client.js";
-import { message_agent_receipts, messages, room_agent_sessions, room_agent_work, supervisor_host_grants } from "./schema.js";
+import { message_agent_receipts, messages, room_agent_sessions, room_agent_work, room_agent_work_review_pages, supervisor_host_grants } from "./schema.js";
 import { assertSupervisorGrantFenceTx, SupervisorGrantFenceStaleError, type SupervisorGrantFence } from "./auth/supervisor-grants.js";
 import { visibleMessageCondition } from "./messages/visibility.js";
 
@@ -29,8 +30,10 @@ function publicWork(row: typeof room_agent_work.$inferSelect): RoomAgentWork {
  */
 export async function publishRoomAgentWork(input: {
   fence: SupervisorGrantFence; room_id: string; session_id: string;
-  source_message_number: number; revision: number; summary: unknown;
+  source_message_number: number; revision: number; summary: unknown; review_page?: unknown;
 }): Promise<{ status: "created" | "updated" | "replayed"; work: RoomAgentWork }> {
+  const reviewPage = input.review_page === undefined ? null : parseWorkspaceReviewPage(input.review_page);
+  if (input.review_page !== undefined && !reviewPage) throw new RoomAgentWorkError("invalid_summary");
   const summary = parseRoomAgentWorkSummary(input.summary);
   if (!summary || !Number.isSafeInteger(input.revision) || input.revision < 1
     || !Number.isSafeInteger(input.source_message_number) || input.source_message_number < 1) {
@@ -93,6 +96,20 @@ export async function publishRoomAgentWork(input: {
     // evidence or let a stale clear erase a newly published revision.
     const [existing] = await tx.select().from(room_agent_work).where(identity).for("update");
     if (Date.parse(grant.expires_at) <= Date.now()) throw new SupervisorGrantFenceStaleError();
+    const saveReviewPage = async (work: typeof room_agent_work.$inferSelect) => {
+      if (!reviewPage || isClearedRoomAgentWorkSummary(work.summary)) return;
+      if (summary.version !== 3) throw new RoomAgentWorkError("invalid_summary");
+      // The work lock serializes all pages and clearing. A retry cannot replace
+      // captured bytes, mix two captures, or resurrect a cleared review.
+      const [prior] = await tx.select().from(room_agent_work_review_pages)
+        .where(eq(room_agent_work_review_pages.attempt_id, work.attempt_id)).limit(1);
+      if (prior && (prior.digest !== reviewPage.digest || prior.page_total !== reviewPage.total)) throw new RoomAgentWorkError("revision_conflict");
+      const pageWhere = and(eq(room_agent_work_review_pages.attempt_id, work.attempt_id), eq(room_agent_work_review_pages.page_index, reviewPage.index));
+      const [page] = await tx.select().from(room_agent_work_review_pages).where(pageWhere);
+      if (page && page.data !== reviewPage.data) throw new RoomAgentWorkError("revision_conflict");
+      if (!page) await tx.insert(room_agent_work_review_pages).values({ attempt_id: work.attempt_id,
+        digest: reviewPage.digest, page_index: reviewPage.index, page_total: reviewPage.total, data: reviewPage.data });
+    };
     if (existing) {
       if (existing.owner_account_id !== grant.owner_account_id || existing.host_id !== grant.host_id
         || existing.installation_id !== grant.installation_id || existing.agent_instance_id !== publisher.agent_instance_id) {
@@ -101,10 +118,11 @@ export async function publishRoomAgentWork(input: {
       if (input.revision < existing.publisher_revision || (input.revision === existing.publisher_revision && digest !== existing.summary_digest)) {
         throw new RoomAgentWorkError("revision_conflict");
       }
-      if (input.revision === existing.publisher_revision) return { status: "replayed", work: publicWork(existing) };
+      if (input.revision === existing.publisher_revision) { await saveReviewPage(existing); return { status: "replayed", work: publicWork(existing) }; }
       if (isClearedRoomAgentWorkSummary(existing.summary)) throw new RoomAgentWorkError("payload_cleared");
       const [updated] = await tx.update(room_agent_work).set({ publisher_revision: input.revision, summary_digest: digest, summary,
         updated_at: new Date().toISOString() }).where(identity).returning();
+      await saveReviewPage(updated);
       return { status: "updated", work: publicWork(updated) };
     }
     const [created] = await tx.insert(room_agent_work).values({
@@ -113,6 +131,7 @@ export async function publishRoomAgentWork(input: {
       installation_id: grant.installation_id, agent_instance_id: publisher.agent_instance_id,
       publisher_revision: input.revision, summary_digest: digest, summary, updated_at: new Date().toISOString(),
     }).returning();
+    await saveReviewPage(created);
     return { status: "created", work: publicWork(created) };
   });
 }
@@ -149,6 +168,7 @@ export async function clearRoomAgentWork(input: {
     // Equal-revision retries acknowledge the receipt without restoring payload;
     // future revisions are terminally rejected, not an invitation to rerun work.
     const [cleared] = await tx.update(room_agent_work).set({ summary: { version: 1, availability: "cleared" } }).where(identity).returning();
+    await tx.delete(room_agent_work_review_pages).where(eq(room_agent_work_review_pages.attempt_id, existing.attempt_id));
     return { status: "cleared", work: publicWork(cleared) };
   });
 }
@@ -173,4 +193,14 @@ export async function readRoomAgentWork(input: { room_id: string; attempt_id?: s
     }
     return work;
   }), truncated: rows.length > 50 };
+}
+
+/** Only called after the detail route has verified current room membership and source visibility. */
+export async function readRoomAgentWorkReviewPage(attemptId: string, index: number) {
+  const table = room_agent_work_review_pages;
+  const [page] = await db.select().from(table).where(and(eq(table.attempt_id, attemptId), eq(table.page_index, index)));
+  if (!page) return { status: 'unavailable' as const, page: null };
+  const [size] = await db.select({ count: count() }).from(table).where(eq(table.attempt_id, attemptId));
+  if (size.count !== page.page_total) return { status: 'pending' as const, page: null };
+  return { status: 'ready' as const, page: { digest: page.digest, index: page.page_index, total: page.page_total, data: page.data } };
 }

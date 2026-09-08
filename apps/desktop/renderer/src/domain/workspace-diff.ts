@@ -27,35 +27,66 @@ function unquotePath(path: string): string {
   return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
-/** Associate patches by their actual headers, never by the order of the file list. */
-export function workspaceFilePatches(patch: string, files: WorkspaceChangedFile[]): Map<string, WorkspaceDiffLine[]> {
+/** Iterate without materializing every line of a potentially large captured file. */
+function* patchLines(patch: string, start: number, end: number): Generator<string> {
+  while (start < end) {
+    const newline = patch.indexOf('\n', start);
+    const stop = newline < 0 || newline >= end ? end : newline;
+    yield patch.slice(start, stop);
+    start = stop + 1;
+  }
+}
+
+/** Associate by actual headers; optionally materialize only the visible line window. */
+export function workspaceFilePatches(patch: string, files: WorkspaceChangedFile[], window?: { offset: number; limit: number }): Map<string, WorkspaceDiffLine[]> {
   const result = new Map<string, WorkspaceDiffLine[]>();
-  for (const block of patch.split(/(?=^diff --git )/m).filter(Boolean)) {
-    const lines = block.split('\n');
-    const hunkStart = lines.findIndex(line => line.startsWith('@@ '));
-    const headers = hunkStart < 0 ? lines : lines.slice(0, hunkStart);
+  const boundary = /^diff --git /gm;
+  let current = boundary.exec(patch);
+  while (current) {
+    const start = current.index;
+    const next = boundary.exec(patch);
+    const lines = patchLines(patch, current.index, next?.index ?? patch.length);
+    current = next;
+    const headers: string[] = [];
+    let firstHunk: string | undefined;
+    for (const line of lines) {
+      if (line.startsWith('@@ ')) { firstHunk = line; break; }
+      headers.push(line);
+    }
     const target = headers.find(line => line.startsWith('+++ '));
     const source = headers.find(line => line.startsWith('--- '));
     const path = target && target !== '+++ /dev/null' ? unquotePath(target.slice(4)).replace(/^b\//, '')
       : source ? unquotePath(source.slice(4)).replace(/^a\//, '') : null;
     const renamed = headers.find(line => line.startsWith('rename to '));
     const file = files.find(file => file.path === path || (renamed && file.path === unquotePath(renamed.slice(10))))
-      ?? files.find(file => lines[0] === `diff --git a/${file.previous_path ?? file.path} b/${file.path}`
-        || lines[0] === `diff --git ${JSON.stringify(`a/${file.previous_path ?? file.path}`)} ${JSON.stringify(`b/${file.path}`)}`);
+      ?? files.find(file => headers[0] === `diff --git a/${file.previous_path ?? file.path} b/${file.path}`
+        || headers[0] === `diff --git ${JSON.stringify(`a/${file.previous_path ?? file.path}`)} ${JSON.stringify(`b/${file.path}`)}`);
     if (!file) continue;
-    let before = 0, after = 0, inHunk = false;
+    let before = 0, after = 0, index = 0;
+    const offset = window?.offset ?? 0;
+    const limit = window?.limit ?? Infinity;
     const parsed: WorkspaceDiffLine[] = [];
-    for (const text of (hunkStart < 0 ? [] : lines.slice(hunkStart))) {
-      const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
-      if (hunk) {
-        before = Number(hunk[1]); after = Number(hunk[2]); inHunk = true;
-        parsed.push({ text, kind: 'hunk', before: null, after: null });
-      } else if (inHunk && text.startsWith('+')) parsed.push({ text: text.slice(1), kind: 'added', before: null, after: after++ });
-      else if (inHunk && text.startsWith('-')) parsed.push({ text: text.slice(1), kind: 'deleted', before: before++, after: null });
-      else if (inHunk && text.startsWith(' ')) parsed.push({ text: text.slice(1), kind: 'context', before: before++, after: after++ });
-      else if (text) parsed.push({ text, kind: 'metadata', before: null, after: null });
+    // A generator's for-of break closes it; resume body with a new iterator at
+    // the hunk's actual position, rather than retaining arrays of all lines.
+    if (firstHunk !== undefined) {
+      const headerLength = headers.reduce((size, line) => size + line.length + 1, 0);
+      const bodyStart = start + headerLength;
+      for (const text of patchLines(patch, bodyStart, next?.index ?? patch.length)) {
+        const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+        let kind: WorkspaceDiffLine['kind'];
+        let oldLine: number | null = null, newLine: number | null = null, content = text;
+        if (hunk) { before = Number(hunk[1]); after = Number(hunk[2]); kind = 'hunk'; }
+        else if (text.startsWith('+')) { kind = 'added'; content = text.slice(1); newLine = after++; }
+        else if (text.startsWith('-')) { kind = 'deleted'; content = text.slice(1); oldLine = before++; }
+        else if (text.startsWith(' ')) { kind = 'context'; content = text.slice(1); oldLine = before++; newLine = after++; }
+        else if (text) kind = 'metadata';
+        else continue;
+        if (index++ >= offset) parsed.push({ text: content, kind, before: oldLine, after: newLine });
+        if (parsed.length >= limit) break;
+      }
     }
     result.set(file.path, parsed);
+    if (result.size === files.length) break;
   }
   return result;
 }

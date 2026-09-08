@@ -184,3 +184,55 @@ test('workspace links require an exact receipt and a verified published file; ha
     assert.deepEqual(await resolveWorkspaceFileLinks({ roomId: ROOM, agentKey: 'other/agent', sourceMessageId: 'msg_123', paths: ['file.ts'] }), []);
   } finally { globalThis.fetch = priorFetch; }
 });
+
+
+test('on-demand full review reads every page and rejects mixed or damaged captures', async () => {
+  const { loadWorkspaceReviewPages } = await import('../main/workspace-review.js');
+  const { encodeWorkspaceReview, REVIEW_PAGE_SIZE } = await import('../../../../shared/workspace-review.mjs');
+  const { randomBytes } = await import('node:crypto');
+  const snapshot = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
+    files: [{ path: 'app.ts', previous_path: null, status: 'added' as const, additions: 1, deletions: 0, binary: false }],
+    additions: 1, deletions: 0, hidden_files: 0, patch: randomBytes(180_000).toString('hex') + 'LAST LINE', patch_truncated: false };
+  const expected = { version: 1 as const, workspace: snapshot, contribution: snapshot };
+  const encoded = encodeWorkspaceReview(expected);
+  const total = Math.ceil(encoded.data.length / REVIEW_PAGE_SIZE);
+  const page = (index: number) => ({ status: 'ready', page: { index, total, digest: encoded.digest,
+    data: encoded.data.slice(index * REVIEW_PAGE_SIZE, (index + 1) * REVIEW_PAGE_SIZE) } });
+  assert.ok(total > 1);
+  assert.deepEqual(await loadWorkspaceReviewPages(async index => page(index)), { status: 'ready', review: expected });
+  assert.deepEqual(await loadWorkspaceReviewPages(async () => ({ status: 'pending', page: null })), { status: 'pending', review: null });
+  assert.deepEqual(await loadWorkspaceReviewPages(async () => ({ status: 'unavailable', page: null })), { status: 'unavailable', review: null });
+  await assert.rejects(loadWorkspaceReviewPages(async index => { const result = page(index); if (index === 1) result.page.digest = 'b'.repeat(64); return result; }), /Incomplete/);
+  await assert.rejects(loadWorkspaceReviewPages(async index => { const result = page(index); if (index === total - 1) result.page.data = 'AAAA'; return result; }), /Incomplete/);
+});
+
+
+test('local review cache requires current access and the exact uncleared public receipt', async t => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { encodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
+  const { readWorkspaceReview } = await import('../main/workspace-review.js');
+  const { apiUrl } = await import('../main/paths.js');
+  const directory = mkdtempSync(join(tmpdir(), 'review-authority-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const databasePath = join(directory, 'state.sqlite');
+  const db = new DatabaseSync(databasePath);
+  const snapshot = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
+    files: [], additions: 0, deletions: 0, hidden_files: 0, patch: 'LOCAL_CAPTURE', patch_truncated: false };
+  const review = { version: 1 as const, workspace: snapshot, contribution: snapshot };
+  const encoded = encodeWorkspaceReview(review);
+  db.exec(`CREATE TABLE room_workspace_reviews(agent_id,room_id,source_message_id,data,digest);
+    CREATE TABLE room_work_publications(agent_id,room_id,source_message_id,agent_key,api_origin,state);`);
+  db.prepare('INSERT INTO room_workspace_reviews VALUES(?,?,?,?,?)').run('agent', ROOM, 'msg_1', encoded.data, encoded.digest);
+  db.prepare('INSERT INTO room_work_publications VALUES(?,?,?,?,?,?)').run('agent', ROOM, 'msg_1', 'owner/agent', apiUrl, 'open'); db.close();
+  const input = { roomId: ROOM, agentKey: 'owner/agent', sourceMessageId: 'msg_1', attemptId: ATTEMPT };
+  const current = { attempt_id: ATTEMPT, room_id: ROOM, agent_key: 'owner/agent', source_message_id: 'msg_1',
+    summary: { ...summary(), version: 3, workspace: snapshot, contribution: { changes: snapshot, summary: null } } };
+  const fetch = async <T>() => current as T;
+  assert.deepEqual(await readWorkspaceReview(input, { databasePath, fetch }), { status: 'ready', review });
+  await assert.rejects(readWorkspaceReview(input, { databasePath, fetch: async () => { throw new Error('Access revoked'); } }), /Access revoked/);
+  await assert.rejects(readWorkspaceReview({ ...input, attemptId: '223e4567-e89b-42d3-a456-426614174000' }, { databasePath, fetch }), /no longer available/);
+  await assert.rejects(readWorkspaceReview(input, { databasePath, fetch: async <T>() => ({ ...current, summary: { version: 1, availability: 'cleared' } }) as T }), /no longer available/);
+});

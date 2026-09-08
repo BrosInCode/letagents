@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Express, Response } from "express";
 import { isSupervisorHostGrantFeatureEnabled } from "../../../shared/agent-session-bearer.js";
 import type { RoomAgentWorkPollResponse } from "../../../../shared/room-agent-work.mjs";
-import { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork, RoomAgentWorkError } from "../../db/room-agent-work.js";
+import { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork, readRoomAgentWorkReviewPage, RoomAgentWorkError } from "../../db/room-agent-work.js";
 import { parsePollTimeout, respondWithInternalError, type AuthenticatedRequest } from "../../http/helpers.js";
 import { resolveRequestAuth } from "../../request/auth.js";
 import { reauthorizeGitRoomParticipant, resolveRequestProjectRepoAccessRoomName } from "../../rooms/access.js";
@@ -34,6 +34,14 @@ export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageR
         res.status(404).json({ error: "Work evidence is not available in this room." }); return;
       }
       res.setHeader("Cache-Control", "no-store");
+      if (req.query?.review_page !== undefined) {
+        const page = String(req.query.review_page);
+        if (!attemptId || !/^(0|[1-9]\d{0,3})$/.test(page) || Number(page) >= 2048) {
+          res.status(400).json({ error: "Invalid review page." }); return;
+        }
+        if ('availability' in result.work[0].summary) { res.status(404).json({ error: "Review is no longer available." }); return; }
+        res.json(await readRoomAgentWorkReviewPage(attemptId, Number(page))); return;
+      }
       res.json(attemptId ? result.work[0] : result);
     } catch (error) { respondWithInternalError(res, "room-agent-work.read", error, "Could not read room work evidence."); }
   });
@@ -76,7 +84,7 @@ export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageR
     }
     const body = req.body as Record<string, unknown> | null;
     if (!body || typeof body !== "object" || Array.isArray(body)
-      || Object.keys(body).some((key) => !["room_id", "source_message_id", "revision", "summary", "generation"].includes(key))
+      || Object.keys(body).some((key) => !["room_id", "source_message_id", "revision", "summary", "generation", "review_page"].includes(key))
       || typeof body.room_id !== "string" || body.room_id.length > 512 || !body.room_id.trim()
       || typeof body.source_message_id !== "string" || !/^msg_[1-9]\d{0,9}$/.test(body.source_message_id)
       || Number(body.source_message_id.slice(4)) > 2147483647) {
@@ -89,12 +97,16 @@ export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageR
       const result = await publishRoomAgentWork({
         fence: { grant_id: grant.grant_id, generation: grant.current_generation, token_version: grant.token_version },
         room_id: roomId, session_id: String(req.params.sessionId), source_message_number: Number(body.source_message_id.slice(4)),
-        revision: body.revision as number, summary: body.summary,
+        revision: body.revision as number, summary: body.summary, ...(body.review_page !== undefined ? { review_page: body.review_page } : {}),
       });
       if (result.status === "created" || result.status === "updated") {
         queueAgentWorkInvalidation(roomId);
       }
-      res.status(result.status === "created" ? 201 : 200).json(result);
+      res.status(result.status === "created" ? 201 : 200).json({ ...result,
+        ...(body.review_page && !('availability' in result.work.summary) ? {
+          review_digest: (body.review_page as { digest: string }).digest,
+          review_page: (body.review_page as { index: number }).index,
+        } : {}) });
     } catch (error) {
       if (respondToStaleSupervisorGrantFence(res, error)) return;
       if (error instanceof RoomAgentWorkError) {

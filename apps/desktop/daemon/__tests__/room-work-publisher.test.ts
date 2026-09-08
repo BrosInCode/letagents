@@ -455,3 +455,59 @@ test('retained trees can be released after observation authority has closed', as
   await f.publisher.releaseWorkspace(f.agent, 'msg_1', 'inbox-1');
   assert.equal(refs(), '');
 });
+
+
+test('complete review pages resume after restart without recapturing or bloating the room summary', async t => {
+  const { randomBytes } = await import('node:crypto');
+  const { decodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
+  const f = await fixture(t);
+  f.options.workspaceLocation = async () => f.location;
+  f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+  const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  f.captureMessage();
+  await writeFile(join(f.location.path, 'app.ts'), randomBytes(180_000).toString('hex').match(/.{1,100}/g)!.join('\n') + '\nLAST SAVED LINE\n');
+  f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', 'Large change', baseline);
+  await f.publisher.flush();
+  const first = f.sent.at(-1)!.reviewPage!;
+  assert.ok(first.total > 1); assert.equal(first.index, 0);
+  assert.ok(JSON.stringify(f.sent.at(-1)!.summary).length < 128 * 1024);
+  await rm(join(f.location.path, 'app.ts'));
+  f.options.workspaceLocation = async () => { throw new Error('Cannot recapture'); };
+  f.restart();
+  for (let i = 1; i < first.total; i++) await f.publisher.flush();
+  const pages = f.sent.flatMap(value => value.reviewPage ? [value.reviewPage] : []);
+  assert.deepEqual(pages.map(page => page.index), Array.from({ length: first.total }, (_, index) => index));
+  const review = decodeWorkspaceReview(pages.map(page => page.data).join(''), first.digest);
+  assert.match(review.contribution.patch, /\+LAST SAVED LINE/);
+  assert.equal(f.db.prepare('SELECT uploaded_pages FROM room_workspace_reviews').get()?.uploaded_pages, first.total);
+});
+
+test('v38 migrates additively to full reviews without changing existing captured previews', async t => {
+  const f = await fixture(t);
+  f.captureMessage(); await f.publisher.flush();
+  const before = f.row();
+  f.publisher.close();
+  f.db.exec('DROP TABLE room_workspace_reviews; PRAGMA user_version=38; UPDATE manifest_metadata SET schema_version=38');
+  new DaemonStateSchema().createSchema(f.db);
+  f.restart();
+  assert.deepEqual(f.row(), before);
+  assert.equal(f.db.prepare('SELECT count(*) AS count FROM room_workspace_reviews').get()?.count, 0);
+});
+
+
+test('optional full-review capacity cannot discard a valid compact receipt', async t => {
+  const { RoomWorkspaceStore } = await import('../room-workspace-store.js');
+  const f = await fixture(t);
+  f.captureMessage(); await f.publisher.flush();
+  const store = new RoomWorkspaceStore(f.db);
+  const key = { agentId: 'agent', roomId: 'room', sourceMessageId: 'msg_1', workAttemptId: 'workspace', inboxItemId: 'inbox-1' };
+  store.begin(key);
+  const snapshot = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
+    files: [], additions: 0, deletions: 0, hidden_files: 0, patch: 'preview', patch_truncated: true };
+  const summary = { ...f.summary().summary, version: 3 as const, workspace: snapshot, contribution: { changes: snapshot, summary: null } };
+  const full = { ...snapshot, patch: 'x'.repeat(65 * 1024 * 1024), patch_truncated: false };
+  store.settle(key, summary, { version: 1, workspace: full, contribution: full });
+  assert.deepEqual(store.settled('agent', 'room', 'msg_1'), summary);
+  assert.equal(store.pendingPage('agent', 'room', 'msg_1'), null);
+});

@@ -1,4 +1,4 @@
-import { validateRoomWorkspaceSchema } from "./room-workspace-store.js";
+import { validateRoomWorkspaceSchema, validateRoomWorkspaceReviewSchema } from "./room-workspace-store.js";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20,
@@ -15,7 +15,7 @@ import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLed
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
 import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 38;
+export const DAEMON_STATE_SCHEMA_VERSION = 39;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -129,6 +129,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
+  if (existingVersion >= 39) validateRoomWorkspaceReviewSchema(database);
   if (existingVersion >= 38) validateRoomWorkspaceSchema(database);
   if (existingVersion >= 36) validateExecutionApprovalPublicationSchema(database);
   if (existingVersion >= 27) validateRoomWorkPublicationSchema(database, existingVersion < 37);
@@ -305,7 +306,7 @@ createSchema(database: DatabaseSync): void {
     this.migrateExecutionApprovalProjectionStorage(database);
     return;
   }
-  if (existingVersion === 35 || existingVersion === 36 || existingVersion === 37) {
+  if (existingVersion === 35 || existingVersion === 36 || existingVersion === 37 || existingVersion === 38) {
     this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
@@ -3001,6 +3002,7 @@ repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 
     if (version < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
     else validateLifecycleProjectionLedgerSchema(database);
   }
+  if (version >= 39) validateRoomWorkspaceReviewSchema(database);
   if (version >= 38) validateRoomWorkspaceSchema(database);
   if (version >= 27) validateRoomWorkPublicationSchema(database, version < 37);
   if (version >= 25) validatePollingOfferSchema(database, version >= 26 ? 26 : 25);

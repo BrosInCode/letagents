@@ -15,10 +15,16 @@
             <section v-if="selectedFile" class="workspace-file-review" :aria-label="selectedFile.path">
               <header class="workspace-file-toolbar"><FileCode :size="15" aria-hidden="true" /><span :title="selectedFile.path">{{ selectedFile.path }}</span><small>{{ fileStatus(selectedFile.status) }}</small></header>
               <p v-if="selectedFile.previous_path" class="workspace-rename-note">Renamed from {{ selectedFile.previous_path }}</p>
-              <div v-if="diffLines.length" :key="selectedPath" class="workspace-code-scroll" tabindex="0" aria-label="Code diff">
-                <pre class="workspace-patch"><code><span v-for="(line, index) in diffLines" :key="index" class="workspace-diff-line" :data-kind="line.kind"><span class="workspace-line-number" aria-hidden="true">{{ line.before }}</span><span class="workspace-line-number" aria-hidden="true">{{ line.after }}</span><span class="workspace-line-sign">{{ line.kind === 'added' ? '+' : line.kind === 'deleted' ? '−' : ' ' }}</span><span class="workspace-line-content">{{ line.text || ' ' }}</span></span></code></pre>
+              <div v-if="diffLines.length" :key="`${selectedPath}:${lineOffset}`" class="workspace-code-scroll" tabindex="0" aria-label="Code diff">
+                <pre class="workspace-patch"><code><span v-for="(line, index) in visibleLines" :key="index" class="workspace-diff-line" :data-kind="line.kind"><span class="workspace-line-number" aria-hidden="true">{{ line.before }}</span><span class="workspace-line-number" aria-hidden="true">{{ line.after }}</span><span class="workspace-line-sign">{{ line.kind === 'added' ? '+' : line.kind === 'deleted' ? '−' : ' ' }}</span><span class="workspace-line-content">{{ line.text || ' ' }}</span></span></code></pre>
+
               </div>
               <div v-else class="workspace-empty workspace-file-empty"><FileCode :size="26" aria-hidden="true" /><h3>{{ selectedFile.binary ? 'Binary file changed' : patches.has(selectedFile.path) ? 'No text changes' : 'Diff not included' }}</h3><p>{{ selectedFile.binary ? 'A text preview is not available for this file.' : patches.has(selectedFile.path) ? 'Only the file name, permissions, or other file metadata changed.' : 'This file is listed in the snapshot, but its code diff was not captured.' }}</p></div>
+              <nav v-if="lineOffset || diffLines.length > 500" class="workspace-line-pages" aria-label="Diff pages">
+                <button type="button" :disabled="!lineOffset" @click="lineOffset = Math.max(0, lineOffset - 500)">Previous lines</button>
+                <span aria-live="polite">{{ lineOffset + 1 }}–{{ lineOffset + visibleLines.length }}</span>
+                <button type="button" :disabled="diffLines.length <= 500" @click="lineOffset += 500">Next lines</button>
+              </nav>
             </section>
           </div>
           <footer class="workspace-review-footer"><span v-if="snapshot.patch_truncated || snapshot.hidden_files" class="workspace-partial"><Info :size="13" aria-hidden="true" />Partial snapshot · some content or line counts omitted</span><span v-else>Snapshot after the agent’s turn</span></footer>
@@ -31,10 +37,13 @@ import type { WorkspaceChangeSummary } from '../../../../../../../../shared/work
 import { workspaceFilePatches } from '../../../../domain/workspace-diff';
 const props = defineProps<{ snapshot: WorkspaceChangeSummary }>();
 const selectedPath = ref('');
-watch(() => props.snapshot, value => { selectedPath.value = value.files[0]?.path ?? ''; }, { immediate: true });
+watch(() => props.snapshot, value => { if (!value.files.some(file => file.path === selectedPath.value)) selectedPath.value = value.files[0]?.path ?? ''; }, { immediate: true });
 const selectedFile = computed(() => props.snapshot.files.find(file => file.path === selectedPath.value));
-const patches = computed(() => workspaceFilePatches(props.snapshot.patch, props.snapshot.files));
+const lineOffset = ref(0);
+const patches = computed(() => workspaceFilePatches(props.snapshot.patch, selectedFile.value ? [selectedFile.value] : [], { offset: lineOffset.value, limit: 501 }));
 const diffLines = computed(() => patches.value.get(selectedPath.value) ?? []);
+watch([selectedPath, () => props.snapshot.captured_at, () => props.snapshot.base_revision], () => { lineOffset.value = 0; });
+const visibleLines = computed(() => diffLines.value.slice(0, 500));
 const basename = (path: string) => path.split('/').at(-1);
 const dirname = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
 const fileStatus = (status: string) => ({ untracked: 'New file', added: 'Added', modified: 'Modified', deleted: 'Deleted', renamed: 'Renamed', copied: 'Copied', typechange: 'Type changed', unknown: 'Changed' }[status] ?? 'Changed');
@@ -103,4 +112,9 @@ const statusLetter = (status: string) => status === 'untracked' ? 'A' : status =
   .workspace-diff .workspace-file-button { width: 100%; margin-bottom: 4px; }
   .workspace-diff .workspace-files-heading { display: flex; }
 }
+
+ .workspace-line-pages { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-secondary); }
+.workspace-line-pages button { padding: 6px; background: none; border: 0; color: var(--text); font: inherit; cursor: pointer; }
+.workspace-line-pages button:disabled { opacity: .4; cursor: default; }
+.workspace-line-pages button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 </style>
