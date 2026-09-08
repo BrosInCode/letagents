@@ -802,9 +802,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         throw error;
       }
       const terminal = await terminalPromise;
-      const result = this.providerRoomTurnResult(terminal);
+      const result = this.providerRoomTurnResult(handle, terminal);
       await options.checkpointTerminalResult?.(result);
-      handle.roomTurnResults.delete(turnId);
+      if (!("error" in terminal) || options.checkpointTerminalResult) handle.roomTurnResults.delete(turnId);
       return result;
     } catch (error) {
       if (terminalPromise && handle.activeRoomTurnId !== turnId) {
@@ -845,9 +845,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       );
     }
 
-    const result = this.providerRoomTurnResult(terminal);
+    const result = this.providerRoomTurnResult(handle, terminal);
     await options.checkpointTerminalResult?.(result);
-    handle.roomTurnResults.delete(turnId);
+    if (!("error" in terminal) || options.checkpointTerminalResult) handle.roomTurnResults.delete(turnId);
     return result;
   }
 
@@ -1247,10 +1247,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       let exactTurnFailed = false;
       if (exactTurnId) {
         const terminal = contextualInterruptTurnId
-          ? { turnId: contextualInterruptTurnId, error: "Claude command ended interrupted." }
+          ? { turnId: contextualInterruptTurnId, nativeOutcome: "interrupted" as const, error: "Claude command ended interrupted." }
           : exactClaudeStreamTerminal(message, exactTurnId, handle.providerContinuationId);
         if (terminal) {
-          exactTurnFailed = "error" in terminal;
+          exactTurnFailed = "error" in terminal && handle.activeRoomTurnId === exactTurnId;
           handle.roomTurnResults.set(exactTurnId, terminal);
           if (handle.activeRoomTurnId === exactTurnId) handle.activeRoomTurnId = null;
           if (handle.pendingInterruptTurnId === exactTurnId) handle.pendingInterruptTurnId = null;
@@ -1284,7 +1284,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       if (isClaudeFailedResult(message) || (typedAuthority && exactTurnFailed)) {
         const turnLimited = isClaudeTurnLimitResult(message);
-        if (!typedAuthority) handle.state = turnLimited ? "idle" : "failed";
+        if (!typedAuthority) handle.state = turnLimited || exactTurnFailed ? "idle" : "failed";
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
@@ -1528,9 +1528,12 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private providerRoomTurnResult(terminal: ClaudeRoomTurnTerminal): ProviderRoomTurnResult {
+  private providerRoomTurnResult(handle: ClaudeProviderHandle, terminal: ClaudeRoomTurnTerminal): ProviderRoomTurnResult {
     if ("error" in terminal) {
-      throw new Error(`Claude bounded room turn ${terminal.turnId} failed: ${terminal.error}`);
+      if (!terminal.nativeOutcome) throw new Error(`Claude bounded room turn ${terminal.turnId} failed: ${terminal.error}`);
+      return { turnId: terminal.turnId, providerContinuationId: handle.providerContinuationId,
+        outcome: terminal.nativeOutcome, text: null, evidence: "stream",
+        error: String(safeStreamPayload(terminal.error).payload).slice(0, 2000) };
     }
     if (terminal.outcome === "reply") {
       return {

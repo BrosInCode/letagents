@@ -1099,6 +1099,29 @@ for (const delivery_mode of ["daemon_inbox", "mcp_polling"] as const) {
   });
 }
 
+for (const provider of ["claude-code", "cursor"] as const) {
+  test(`${provider} exact failed native result preserves the daemon inbox installation`, async () => {
+    const observed: string[] = [];
+    const harness = coordinatorHarness({ appendActivity: async method => { observed.push(method); } });
+    harness.setManifest({ ...entry(), provider, delivery_mode: "daemon_inbox" });
+    await harness.coordinator.install("agent-1", handle, "generation-2");
+    const event: ProviderActionStreamEvent = { ...streamEvent(1, "result/error_during_execution"), provider,
+      kind: "error", nativeEventId: `nlc1:${"a".repeat(43)}`, nativeLifecyclePhase: "turn_terminal",
+      payload: { type: "result", subtype: "error_during_execution", is_error: true } };
+    assert.equal(providerStreamLifecycle(event, true), "terminal");
+    assert.equal(providerStreamLifecycle(event), "failed", "legacy polling is unchanged");
+    await harness.coordinator.enqueue("agent-1", handle, event);
+    assert.notEqual(harness.getManifest().observed_state, "failed");
+    assert.deepEqual(observed, [event.method], "the exact result reached the installed runtime");
+    assert.equal(harness.stopCalls(), 0);
+    await harness.coordinator.enqueue("agent-1", handle, { ...event, sequence: 2,
+      nativeEventId: undefined, nativeLifecyclePhase: undefined });
+    assert.equal(harness.getManifest().observed_state, "failed", "unbound failures still fence the native runtime");
+    assert.equal(harness.stopCalls(), 1);
+    await harness.coordinator.disposeAll();
+  });
+}
+
 test("genuine runtime failures and failed MCP waits keep their existing classification", () => {
   assert.equal(providerStreamLifecycle({
     ...streamEvent(1, "item/completed"), kind: "item_lifecycle",
