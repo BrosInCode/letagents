@@ -250,7 +250,7 @@ const emit = defineEmits<{
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
   ];
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
+  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
   "open-event-preview": [event: ComposerEventPreview];
   "dismiss-event-preview": [messageId: string];
 }>();
@@ -394,19 +394,24 @@ onBeforeUnmount(() => {
 
 function submitMessage(): void {
   const text = draft.value.trim();
-  if (!text && props.attachmentDrafts.length === 0) return;
+  if ((!text && props.attachmentDrafts.length === 0) || props.sending) return;
   const replyTarget = props.replyTo;
   const messageText = replyTarget?.isSelection
     ? applySelectedTextQuoteToDraft(text, replyTarget.text, replyTarget.sourceMessageId)
     : text;
+  const submittedDraft = draft.value;
+  const roomIdentifier = props.roomIdentifier;
   emit(
     "send-message",
     messageText,
     replyTarget?.isSelection ? null : replyTarget?.id || null,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
+    (sent) => {
+      if (!sent || props.roomIdentifier !== roomIdentifier || draft.value !== submittedDraft) return;
+      draft.value = "";
+      syncDraftToShell();
+    },
   );
-  draft.value = "";
-  syncDraftToShell();
 }
 
 function insertNewlineAtCursor(): void {
