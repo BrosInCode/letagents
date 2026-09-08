@@ -65,7 +65,7 @@ webhookIntegrationTest(
 );
 
 webhookIntegrationTest(
-  "pull_request opened with only a task reference is recorded but not projected without a matching lease",
+  "pull_request prose alone creates an event without selecting or warning about a room task",
   async (context) => {
     const { getMessages, getTaskById, port } = context;
     const room = await createRepoRoom(context);
@@ -93,17 +93,24 @@ webhookIntegrationTest(
     assert.equal(unchangedTask?.pr_url, null);
 
     const messages = (await getMessages(room.id)).messages;
-    assert.ok(messages.some((message) =>
+    assert.equal(messages.some((message) =>
       message.sender === "letagents" &&
-      message.text.includes("Ignored unleased GitHub pull_request projection") &&
-      message.text.includes(task.id)
-    ));
+      message.text.includes("Ignored unleased GitHub pull_request projection")
+    ), false);
     const githubMessage = messages.find((message) =>
       message.sender === "github" &&
       message.text.includes("PR #299 opened by octocat")
     );
     assert.ok(githubMessage);
-    assert.equal(githubMessage?.text.includes(task.id), false);
+    assert.equal(githubMessage?.text.includes("linked to"), false);
+    assert.ok(githubMessage?.text.includes(`${task.id}: unauthorized work should not project`));
+    const events = await context.getGitHubRoomEvents({
+      room_id: room.id,
+      event_type: "pull_request",
+      github_object_id: "299",
+    });
+    assert.equal(events.events.length, 1);
+    assert.equal(events.events[0].linked_task_id, null);
   }
 );
 
