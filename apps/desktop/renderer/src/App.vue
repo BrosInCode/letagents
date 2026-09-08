@@ -78,6 +78,12 @@
         :inert="isSettingsSurface || sidebarMode === 'hidden'"
       >
         <DesktopSidebar
+          :company-organizations="company.organizations.value"
+          :company-selected-id="company.selectedId.value"
+          :company-busy="company.busy.value"
+          :company-error="company.error.value"
+          @choose-company="chooseSidebarCompany"
+          @refresh-companies="company.refresh"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
@@ -145,8 +151,17 @@
         @refresh="refresh"
       />
 
+      <section v-if="showCompanyHome" class="company-home surface-page" data-testid="company-home">
+        <h1>{{ company.selected.value?.login || 'Personal & shared rooms' }}</h1>
+        <p v-if="company.busy.value" role="status">Loading your repo rooms…</p>
+        <p v-else-if="company.error.value" role="alert">{{ company.error.value }}</p>
+        <p v-else>{{ sidebarProjectEntries.length ? 'Choose a repo room from the sidebar to work with your agents.' : 'No rooms here yet. Open a repository to get started.' }}</p>
+        <button class="ghost-button" @click="company.refresh" :disabled="company.busy.value">Refresh rooms</button>
+        <button class="primary-button" @click="selectNewRoomEntry">Open a repository</button>
+        <button class="ghost-button" @click="cycleSidebar">Show or hide sidebar</button>
+      </section>
       <AuthOnboardingView
-        v-if="activeEntry.type === 'room' && selectedNeedsAccess"
+        v-if="!showCompanyHome && activeEntry.type === 'room' && selectedNeedsAccess"
         :sidebar-mode="sidebarMode"
         :access="selectedAccess"
         :auth-status="authStatus"
@@ -164,7 +179,7 @@
 
       <KeepAlive :max="1">
         <DesktopRoomShell
-          v-if="activeEntry.type === 'room' && !selectedNeedsAccess"
+          v-if="!showCompanyHome && activeEntry.type === 'room' && !selectedNeedsAccess"
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
@@ -430,6 +445,7 @@ import {
 } from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
+import { companyProjectGroups, mergeCompanyRooms } from "./domain/company-navigation";
 import { useDesktopOrganizations } from "./composables/useDesktopOrganizations";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
@@ -548,6 +564,7 @@ const setupLoadError = ref<string | null>(null);
 const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
 const firstRunStage = ref<FirstRunWizardStage>("welcome");
 const company = useDesktopOrganizations(authStatus);
+const navigationAccountRooms = computed(() => mergeCompanyRooms(accountRooms.value, company.rooms.value));
 const {
   activeEntry,
   collapsedProjects,
@@ -575,7 +592,7 @@ const {
   togglePinnedCollapsed,
   toggleRoomsCollapsed,
 } = useDesktopNavigationState({
-  accountRooms,
+  accountRooms: navigationAccountRooms,
   activeEntryStorageKey,
   appInfo,
   recentRootRooms,
@@ -689,13 +706,24 @@ function gitRoomsShareRepo(
   return left.provider === right.provider && left.host === right.host && leftRepo === rightRepo;
 }
 const sidebarProjectEntries = computed(() =>
-  applySidebarRoomOrder(projectEntries.value.map((project) => ({
+  applySidebarRoomOrder(companyProjectGroups(projectEntries.value, company.selectedId.value, company.rooms.value).map((project) => ({
     ...project,
     parent: withRoomUnreadState(project.parent),
     branchRooms: project.branchRooms.map(withRoomUnreadState),
     focusRooms: project.focusRooms.map(withRoomUnreadState),
   })), sidebarRoomOrder.value)
 );
+const showCompanyHome = computed(() => activeEntry.value.type === "room" && !sidebarProjectEntries.value.some((project) =>
+  [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id && entry.roomIdentifier)
+));
+async function chooseSidebarCompany(id: string | null): Promise<void> {
+  cancelSidebarRoomSelection();
+  if (await company.choose(id)) {
+    await nextTick();
+    const first = sidebarProjectEntries.value.find((project) => project.parent.roomIdentifier);
+    if (first) handleSidebarEntrySelected(first.parent);
+  }
+}
 const sidebarSelectedEntries = computed(() => {
   const selectedIds = new Set(sidebarSelectedEntryIds.value);
   return flattenSidebarRoomEntries(sidebarProjectEntries.value)
@@ -1011,6 +1039,7 @@ function handleVisibilityChange(): void {
 }
 
 function handleWindowFocus(): void {
+  if (authStatus.value?.authenticated && !company.busy.value) void company.refresh();
   syncAppIdleAttribute();
   refreshForegroundData();
 }
