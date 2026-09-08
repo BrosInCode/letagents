@@ -1,5 +1,5 @@
 <template>
-  <div class="mcp-progress" data-testid="mcp-wizard-progress">
+  <div :style="{ gridTemplateColumns: `repeat(${steps.length}, minmax(0, 1fr))` }" class="mcp-progress" data-testid="mcp-wizard-progress">
     <span
       v-for="(step, index) in steps"
       :key="step.id"

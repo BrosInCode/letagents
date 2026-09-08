@@ -76,7 +76,7 @@
               />
 
               <FirstRunOrganizationStep v-else-if="stage === 'organization'"
-                :organizations="organizations || []" :busy="organizationBusy || false" :error="organizationError || null"
+                :invited-id="invitedCompanyId" :organizations="organizations || []" :busy="organizationBusy || false" :error="organizationError || null"
                 @choose="$emit('choose-organization', $event)" @retry="$emit('retry-organizations')" />
 
               <div v-else class="first-run-room-stage">
@@ -213,6 +213,7 @@ import SetupWizardProgress from "./SetupWizardProgress.vue";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./types";
 
 const props = defineProps<{
+  invitedCompanyId?: string | null;
   organizations?: DesktopOrganization[];
   organizationBusy?: boolean;
   organizationError?: string | null;

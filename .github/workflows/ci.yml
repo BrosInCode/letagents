@@ -178,6 +178,15 @@ jobs:
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
 
+      - name: Run organization onboarding and web entry tests
+        run: >-
+          node --import tsx --test --test-concurrency=1
+          src/api/__tests__/organization-migration.test.ts
+          src/api/__tests__/organization-storage.test.ts
+          src/api/__tests__/organization-onboarding.test.ts
+          src/api/__tests__/organization-rooms.test.ts
+          src/api/__tests__/web-routes.test.ts
+
       - name: Run message attachment tests
         run: >-
           node

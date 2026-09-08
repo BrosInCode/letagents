@@ -13,6 +13,7 @@
       Drag rooms to reorder them. Press Option plus Up or Down Arrow to move the focused room.
     </p>
     <p class="sr-only" role="status" aria-live="polite">{{ reorderAnnouncement }}</p>
+    <div class="sidebar-header">
     <div class="sidebar-topbar" :data-selection-active="selectionActive">
       <template v-if="selectionActive">
         <div class="sidebar-selection-summary" aria-live="polite">
@@ -89,7 +90,8 @@
     </div>
 
     <CompanySwitcher :organizations="companyOrganizations || []" :selected-id="companySelectedId || null"
-      :busy="companyBusy || false" :error="companyError || null" @choose="$emit('choose-company', $event)" @refresh="$emit('refresh-companies')" />
+      :busy="companyBusy || false" :error="companyError || null" @choose="$emit('choose-company', $event)" @refresh="$emit('refresh-companies')" @copy-link="$emit('copy-company-link')" />
+    </div>
     <section
       v-if="searchOpen"
       id="sidebar-room-search"
@@ -720,6 +722,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "choose-company": [id: string | null];
   "refresh-companies": [];
+  "copy-company-link": [];
   "cycle-sidebar": [];
   "new-room": [];
   "open-rent": [];

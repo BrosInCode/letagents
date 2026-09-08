@@ -97,3 +97,42 @@ shared retains the existing account room view, including directly opened company
 repos, so unconnected repositories and external collaboration remain reachable.
 Company verification failures clear the company list rather than falling back
 to cached private room groups. Returning to the app rechecks company membership.
+
+## Company invitations and combined validation (slice 6)
+
+Company links use `/join/<GitHub organization ID>` in the browser and
+`letagents://join/<ID>` in desktop. Links select a destination; they grant no
+access. Browser sign-in preserves the destination. Desktop persists the pending
+ID across restarts and clears it only after joining or choosing personal rooms.
+A newer invitation cannot be cleared by an older request. Packaged macOS apps
+register the protocol; development runs do not replace an installed handler.
+
+Run `npm --prefix apps/desktop run smoke:organizations` after dependency setup
+for an isolated Electron journey against the built renderer. It uses a temporary
+profile and simulated GitHub responses, without changing MCP configuration.
+Screenshots and a JSON report go to `/tmp/letagents-org-onboarding-results`
+(or `LETAGENTS_ORG_SMOKE_OUTPUT`). It checks owner setup, member waiting, repo
+selection, company switching, empty rooms, provider failures, personal fallback,
+and persisted invitations. This journey also caught and fixed the four-step
+progress layout and sidebar switcher placement.
+
+Combined branch validation: root/web and desktop builds, desktop typechecks,
+967 renderer tests, backend organization/access/migration tests, link parsing,
+auth redirect tests, packaging contract tests, and the Electron journey passed.
+Live GitHub consent/SSO and installed-app OS protocol dispatch still need a real
+account and packaged-app check. No production database was changed. Migration
+0093 only adds organization and membership tables; no reset is required.
+
+## Independent review follow-up
+
+Separate reviewers checked backend slices 1–3, desktop slices 4–5, and links
+in slice 6. Backend review found no actionable issue. Three UI/entry findings
+were fixed and rechecked: direct HTTP company links now serve the Vue app;
+explicitly opening a room outside a selected company switches to Personal &
+shared; an incoming invitation hides Marketplace while it is being handled.
+The HTTP entry regression and extended isolated desktop walkthrough cover these
+paths. Existing CI now runs organization migration/storage/access tests.
+
+The reviewed stack remains unmerged. Independent agent review is not a GitHub
+approval from a separate human account. Live GitHub/SSO and installed-app protocol
+dispatch remain the documented verification limits.
