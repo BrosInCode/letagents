@@ -103,3 +103,48 @@ test('turn snapshots separate consecutive turns, preserve staged work, and never
     assert.equal(existsSync(join(directory, 'REF_HOOK_EXECUTED')), false, 'retention and release cannot execute reference hooks');
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test('full review retains the last line beyond the room preview and survives workspace deletion', async () => {
+  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../workspace-turn-capture.js');
+  const { encodeWorkspaceReview, decodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
+  const directory = mkdtempSync(join(tmpdir(), 'workspace-full-review-'));
+  try {
+    git(directory, 'init', '-q'); git(directory, 'config', 'user.name', 'Test'); git(directory, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(directory, 'base.txt'), 'original\n'); git(directory, 'add', '.'); git(directory, 'commit', '-qm', 'base');
+    const base = git(directory, 'rev-parse', 'HEAD');
+    const baseline = await captureWorkspaceTree(directory, 'large-turn'); assert.ok(baseline);
+    const contents = 'full review line café 😀\n'.repeat(9000) + 'FINAL CAPTURED LINE\n';
+    writeFileSync(join(directory, 'large.txt'), contents);
+    const pair = await captureWorkspacePair(directory, base, baseline, 'large-turn');
+    assert.equal(pair.contribution.changes.patch_truncated, true);
+    assert.doesNotMatch(pair.contribution.changes.patch, /FINAL CAPTURED LINE/);
+    assert.equal(pair.review.contribution.patch_truncated, false);
+    assert.match(pair.review.contribution.patch, /\+FINAL CAPTURED LINE/);
+    assert.equal(pair.review.contribution.additions, 9001);
+    const encoded = encodeWorkspaceReview(pair.review);
+    await releaseWorkspaceTree(directory, 'large-turn');
+    rmSync(directory, { recursive: true, force: true });
+    assert.deepEqual(decodeWorkspaceReview(encoded.data, encoded.digest), pair.review);
+    assert.throws(() => decodeWorkspaceReview(encoded.data.slice(0, -4), encoded.digest), /Incomplete/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('full review retains files beyond the compact 200-file list', async () => {
+  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../workspace-turn-capture.js');
+  const directory = mkdtempSync(join(tmpdir(), 'workspace-many-files-'));
+  try {
+    git(directory, 'init', '-q'); git(directory, 'config', 'user.name', 'Test'); git(directory, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(directory, 'base.txt'), 'original\n'); git(directory, 'add', '.'); git(directory, 'commit', '-qm', 'base');
+    const base = git(directory, 'rev-parse', 'HEAD');
+    const baseline = await captureWorkspaceTree(directory, 'many-files'); assert.ok(baseline);
+    for (let i = 0; i < 205; i++) writeFileSync(join(directory, `file-${String(i).padStart(3, '0')}.txt`), `file ${i}\n`);
+    const pair = await captureWorkspacePair(directory, base, baseline, 'many-files');
+    assert.equal(pair.contribution.changes.files.length, 200);
+    assert.equal(pair.contribution.changes.hidden_files, 5);
+    assert.equal(pair.review.contribution.files.length, 205);
+    assert.equal(pair.review.contribution.hidden_files, 0);
+    assert.match(pair.review.contribution.patch, /\+file 204/);
+    await releaseWorkspaceTree(directory, 'many-files');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

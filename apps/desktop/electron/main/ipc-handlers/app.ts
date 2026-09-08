@@ -1,3 +1,4 @@
+import { readWorkspaceReview } from '../workspace-review.js';
 import { resolveWorkspaceFileLinks, openWorkspaceFile, openLocalSourceFile } from "../workspace-file-links.js";
 import { assertHostApprovalSender } from "../window.js";
 import electron from "electron";
@@ -31,6 +32,10 @@ import { desktopUpdater } from "../updates.js";
 const { app } = electron as typeof import("electron");
 
 export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle("desktop:app:read-workspace-review", async (event, input) => {
+    assertHostApprovalSender(event);
+    return readWorkspaceReview(input);
+  });
   targetIpcMain.handle("desktop:app:resolve-workspace-files", async (event, input) => {
     assertHostApprovalSender(event);
     return resolveWorkspaceFileLinks(input);

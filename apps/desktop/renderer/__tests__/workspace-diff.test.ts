@@ -21,3 +21,15 @@ test('workspace review does not treat source code resembling patch headers as fi
   assert.equal(patches.get('file.ts')?.[1].text, '++ b/not-the-file.ts');
   assert.equal(patches.get('file.ts')?.[2].text, '<script>alert(1)</script>');
 });
+
+
+test('large-file review parses a bounded page while retaining exact line numbers across pages', () => {
+  const patch = 'diff --git a/a.ts b/a.ts\n--- /dev/null\n+++ b/a.ts\n@@ -0,0 +1,1000000 @@\n' + '+line\n'.repeat(1_000_000);
+  const first = workspaceFilePatches(patch, [file('a.ts')], { offset: 0, limit: 501 }).get('a.ts')!;
+  assert.equal(first.length, 501);
+  assert.equal(first[0].kind, 'hunk'); assert.equal(first[500].after, 500);
+  const second = workspaceFilePatches(patch, [file('a.ts')], { offset: 500, limit: 501 }).get('a.ts')!;
+  assert.equal(second.length, 501); assert.equal(second[0].after, 500);
+  const last = workspaceFilePatches(patch, [file('a.ts')], { offset: 1_000_000, limit: 501 }).get('a.ts')!;
+  assert.equal(last.length, 1); assert.equal(last[0].after, 1_000_000);
+});
