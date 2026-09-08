@@ -131,11 +131,15 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
 
       authFeedback.value = result.error || "GitHub approval did not complete. Start again when you are ready.";
       if (result.status === "unknown" && authStatus.value?.pendingDeviceAuth) {
+        authFeedback.value += " LetAgents will check again shortly.";
         scheduleAuthPoll();
       }
     } catch (error) {
       authFeedback.value = error instanceof Error ? error.message : "Could not check GitHub approval.";
-      scheduleAuthPoll();
+      if (authStatus.value?.pendingDeviceAuth) {
+        authFeedback.value += " LetAgents will check again shortly.";
+        scheduleAuthPoll();
+      }
     } finally {
       if (!optionsOverride.automatic) {
         authBusy.value = false;
