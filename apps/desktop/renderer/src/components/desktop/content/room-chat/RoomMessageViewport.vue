@@ -144,7 +144,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
 import type {
   DesktopAgentPresence,
   DesktopRoomAgentWork,
@@ -266,6 +266,20 @@ let shouldJumpToLatestOnActivate = false;
 let shouldRestoreKeepAliveScroll = false;
 let lastKnownScrollAnchor: ScrollAnchor | null = null;
 let lastKnownScrollTop: number | null = null;
+let anchorElements: HTMLElement[] | null = null;
+let anchorElementsById = new Map<string, HTMLElement>();
+
+// The timeline is vertically ordered. Cache its nodes between renders, but read
+// current geometry so image loads, resizing and thread-panel reflow stay correct.
+onUpdated(() => { anchorElements = null; });
+
+function getAnchorElements(): HTMLElement[] {
+  if (!anchorElements) {
+    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []);
+    anchorElementsById = new Map(anchorElements.map(element => [element.dataset.messageId!, element]));
+  }
+  return anchorElements;
+}
 let autoViewportBackfillFrame: number | null = null;
 let layoutAnchorRestoreFrame: number | null = null;
 let threadActivityNamespace = props.messageNamespace;
@@ -700,7 +714,6 @@ function handleScroll(): void {
   shouldRestoreInitialScroll = false;
   const element = messagesElement.value;
   updateScrollState();
-  rememberScrollAnchor();
   if (isScrolledToBottom) {
     unreadCount.value = 0;
   }
@@ -822,10 +835,15 @@ function captureScrollAnchor(): ScrollAnchor | null {
   const element = messagesElement.value;
   if (!element || !isMeasurableScrollViewport(element)) return null;
   const viewportTop = element.getBoundingClientRect().top;
-  const messageElements = [...element.querySelectorAll<HTMLElement>("[data-message-id]")];
-  const anchorElement = messageElements.find((messageElement) =>
-    messageElement.getBoundingClientRect().bottom > viewportTop
-  );
+  const messageElements = getAnchorElements();
+  let low = 0;
+  let high = messageElements.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (messageElements[middle].getBoundingClientRect().bottom > viewportTop) high = middle;
+    else low = middle + 1;
+  }
+  const anchorElement = messageElements[low];
   const messageId = anchorElement?.dataset.messageId;
   if (!anchorElement || !messageId) return null;
   return {
@@ -837,8 +855,8 @@ function captureScrollAnchor(): ScrollAnchor | null {
 function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
   const element = messagesElement.value;
   if (!element || !anchor || !isMeasurableScrollViewport(element)) return false;
-  const anchorElement = [...element.querySelectorAll<HTMLElement>("[data-message-id]")]
-    .find((messageElement) => messageElement.dataset.messageId === anchor.messageId);
+  getAnchorElements();
+  const anchorElement = anchorElementsById.get(anchor.messageId);
   if (!anchorElement) return false;
   const viewportTop = element.getBoundingClientRect().top;
   const nextOffsetTop = anchorElement.getBoundingClientRect().top - viewportTop;
