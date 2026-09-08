@@ -79,18 +79,22 @@ async function openInlineFile(event: MouseEvent) {
   const index = Number(button.dataset.fileIndex);
   const file = Number.isInteger(index) ? files.value[index] : undefined;
   if (!file || !links.value[file.path] || opening.value) return;
-  const focused = document.activeElement === button;
   button.setAttribute('aria-busy', 'true');
-  await open(file.path);
+  await open(file.path, button);
   await nextTick();
   button.removeAttribute('aria-busy');
-  if (focused && !button.isConnected) fileError.value?.focus();
 }
-async function open(path: string) {
+async function open(path: string, sourceButton?: HTMLButtonElement) {
   if (opening.value) return;
   opening.value = path; error.value = '';
   try { await window.letagentsDesktop?.app.openWorkspaceFile?.({ ...request(), paths: [path] }); }
-  catch { error.value = 'File no longer available'; delete links.value[path]; }
+  catch {
+    const focused = sourceButton && document.activeElement === sourceButton;
+    error.value = 'File no longer available';
+    delete links.value[path];
+    await nextTick();
+    if (focused) fileError.value?.focus();
+  }
   finally { opening.value = null; }
 }
 </script>
