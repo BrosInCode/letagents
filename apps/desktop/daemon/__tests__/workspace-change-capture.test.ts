@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { captureWorkspaceChanges } from '../workspace-change-capture.js';
+import { captureWorkspaceChanges } from '../../../../shared/workspace-change-capture.mjs';
 import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mjs';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -60,7 +60,7 @@ test('unborn repos and symlinks produce review data without reading external tar
 });
 
 test('turn snapshots separate consecutive turns, preserve staged work, and never execute Git filters', async () => {
-  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../workspace-turn-capture.js');
+  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../../../../shared/workspace-turn-capture.mjs');
   const { readFileSync, existsSync, chmodSync, unlinkSync } = await import('node:fs');
   const directory = mkdtempSync(join(tmpdir(), 'workspace-turn-'));
   try {
@@ -106,7 +106,7 @@ test('turn snapshots separate consecutive turns, preserve staged work, and never
 
 
 test('full review retains the last line beyond the room preview and survives workspace deletion', async () => {
-  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../workspace-turn-capture.js');
+  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../../../../shared/workspace-turn-capture.mjs');
   const { encodeWorkspaceReview, decodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
   const directory = mkdtempSync(join(tmpdir(), 'workspace-full-review-'));
   try {
@@ -131,7 +131,7 @@ test('full review retains the last line beyond the room preview and survives wor
 });
 
 test('full review retains files beyond the compact 200-file list', async () => {
-  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../workspace-turn-capture.js');
+  const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../../../../shared/workspace-turn-capture.mjs');
   const directory = mkdtempSync(join(tmpdir(), 'workspace-many-files-'));
   try {
     git(directory, 'init', '-q'); git(directory, 'config', 'user.name', 'Test'); git(directory, 'config', 'user.email', 'test@example.com');

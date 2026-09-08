@@ -41,6 +41,7 @@ import {
 } from "../runtime/worker-bearer.js";
 import { bindSupervisedWorkerSessionWithContext } from "../runtime/supervisor-bridge.js";
 import { registerMcpWorker } from "../runtime/worker-handles.js";
+import { WORKSPACE_CAPTURE_INSTRUCTIONS } from './workspace.js';
 
 export function registerAgentSessionTools(server: McpServer): void {
   // -- register_agent_session -------------------------------------------------
@@ -83,6 +84,7 @@ export function registerAgentSessionTools(server: McpServer): void {
           success: true, worker_id: result.worker.worker_id,
           agent_session: toPublicAgentSession(result.session),
           instruction: "Keep worker_id for this chat and pass it to room tools. After an MCP restart, reconnect with register_agent_session(worker_id, room_id). A separate chat needs its own registration_key. Credentials stay private to MCP.",
+          workspace_instructions: WORKSPACE_CAPTURE_INSTRUCTIONS,
         }) }] };
       }
       const workerRuntime = requireValidWorkerBearerRuntime();

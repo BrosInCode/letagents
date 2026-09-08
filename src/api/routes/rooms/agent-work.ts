@@ -3,7 +3,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Express, Response } from "express";
 import { isSupervisorHostGrantFeatureEnabled } from "../../../shared/agent-session-bearer.js";
 import type { RoomAgentWorkPollResponse } from "../../../../shared/room-agent-work.mjs";
-import { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork, readRoomAgentWorkReviewPage, RoomAgentWorkError } from "../../db/room-agent-work.js";
+import { clearRoomAgentWork, publishRoomAgentWork, publishIndependentWorkspace, readRoomAgentWork, readRoomAgentWorkReviewPage, RoomAgentWorkError } from "../../db/room-agent-work.js";
+import { requireWorkerRequestAgentIdentity } from "../../request/agent-identity.js";
 import { parsePollTimeout, respondWithInternalError, type AuthenticatedRequest } from "../../http/helpers.js";
 import { resolveRequestAuth } from "../../request/auth.js";
 import { reauthorizeGitRoomParticipant, resolveRequestProjectRepoAccessRoomName } from "../../rooms/access.js";
@@ -15,6 +16,43 @@ import type { RoomMessageRouteDeps } from "./messages/types.js";
 import { queueAgentWorkInvalidation } from "../../server/events.js";
 
 export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageRouteDeps, supervisorDeps: RoomResolverDeps): void {
+  app.post(/^\/rooms\/(.+)\/agent-work$/, async (req: AuthenticatedRequest, res) => {
+    // Independent local MCP uses its owner's account token plus its pinned
+    // worker credential. Supervised publishers keep the existing grant route.
+    if (req.authKind !== "owner_token" || !req.sessionAccount?.account_id) {
+      res.status(403).json({ error: "An authenticated independent MCP worker is required." }); return;
+    }
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body)
+      || Object.keys(body).some(key => !["source_message_id", "summary", "review_page", "agent_session_id", "agent_session_token"].includes(key))
+      || typeof body.source_message_id !== "string" || !/^msg_[1-9]\d{0,9}$/.test(body.source_message_id)
+      || Number(body.source_message_id.slice(4)) > 2147483647) {
+      res.status(400).json({ error: "Invalid workspace publication." }); return;
+    }
+    try {
+      const room = await resolveParticipantRoom(req, res, roomDeps);
+      if (!room) return;
+      const resolved = await requireWorkerRequestAgentIdentity({ req, body, room_id: room.id });
+      if (!resolved.ok) { res.status(resolved.status).json({ error: resolved.error }); return; }
+      const identity = resolved.identity;
+      if (!identity.agent_session_id || identity.credential_fence?.kind !== "session_token") {
+        res.status(403).json({ error: "A current independent worker connection is required." }); return;
+      }
+      const result = await publishIndependentWorkspace({ room_id: room.id, source_message_number: Number(body.source_message_id.slice(4)),
+        session_id: identity.agent_session_id, owner_account_id: req.sessionAccount.account_id,
+        token_hash: identity.credential_fence.token_hash, summary: body.summary,
+        ...(body.review_page !== undefined ? { review_page: body.review_page } : {}) });
+      if (result.status === "created") queueAgentWorkInvalidation(room.id);
+      res.setHeader("Cache-Control", "no-store");
+      res.status(result.status === "created" ? 201 : 200).json(result);
+    } catch (error) {
+      if (error instanceof RoomAgentWorkError) {
+        const status = error.code === "payload_cleared" ? 410 : error.code === "publisher_not_authorized" ? 403 : error.code === "invalid_summary" ? 400 : 409;
+        res.status(status).json({ error: "Workspace publication was not accepted.", code: error.code }); return;
+      }
+      respondWithInternalError(res, "room-agent-work.independent", error, "Could not publish workspace changes.");
+    }
+  });
   // Reads remain available when grant rollout is disabled. These are retained
   // host reports, not current liveness. Register poll before the detail route.
   app.get(/^\/rooms\/(.+)\/agent-work\/poll$/, (req: AuthenticatedRequest, res) => pollRoomAgentWork(req, res, roomDeps));

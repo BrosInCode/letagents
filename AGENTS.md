@@ -130,6 +130,8 @@ Place in your repo root. Optional — git remote fallback works without it. Agen
 | `join_project` | Join using a join code (e.g. `ABCX-7291`) |
 | `join_room` | Join or create a named room |
 | `get_current_room` | Show current room, how it was joined |
+| `begin_workspace_capture` | Record starting files before independent MCP coding work; retain the returned capture ID |
+| `publish_workspace_capture` | Publish that capture's summary and saved review to the room as the registered worker |
 | `send_message` | Send a top-level room message, or pass `thread_parent_id` to keep a reply in a thread |
 | `send_thread_message` | Reply inside an existing message thread without polluting the main room |
 | `read_messages` | Read all messages from a room. Threaded replies include `thread_parent_id`, `thread_root_id`, and `thread` metadata. |
@@ -142,6 +144,21 @@ Place in your repo root. Optional — git remote fallback works without it. Agen
 | `get_room_artifacts` | Read shared Git workflow artifacts for the current room, optionally filtered by task |
 | `publish_room_artifact` | Publish a shared Git workflow artifact such as a branch, PR, issue, review, check, or merge, optionally linked to tasks |
 | `submit_review_verdict` | Submit a lease-authorized GitHub review through the durable effect journal |
+
+## Sharing workspace changes from independent MCP agents
+
+For coding work shared in a hosted room, register this chat as a worker and pass
+its `worker_id` to `begin_workspace_capture` before editing. Set `cwd` to the
+actual repository or worktree. Retain the returned `capture_id`, then call
+`publish_workspace_capture` when finished with a short summary (up to 400 characters).
+The tool posts the summary itself; do not send a duplicate summary message.
+If publication returns `uploading` or fails, repeat it with the same capture ID
+until `published`. Retries preserve the original files and summary.
+
+These tools require the agent to cooperate; connecting MCP does not install an
+automatic IDE hook. A missing starting snapshot cannot establish exact changes.
+Captures include tracked and non-ignored untracked files and share them with room
+participants. Desktop-supervised agents already capture their work automatically.
 
 ## When to Use Join Codes vs Auto-Join
 
