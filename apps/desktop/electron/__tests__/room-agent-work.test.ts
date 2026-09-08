@@ -188,7 +188,7 @@ test('workspace links require an exact receipt and a verified published file; ha
 
 test('on-demand full review reads every page and rejects mixed or damaged captures', async () => {
   const { loadWorkspaceReviewPages } = await import('../main/workspace-review.js');
-  const { encodeWorkspaceReview, REVIEW_PAGE_SIZE } = await import('../../../../shared/workspace-review.mjs');
+  const { encodeWorkspaceReview, decodeWorkspaceReview, REVIEW_PAGE_SIZE } = await import('../../../../shared/workspace-review.mjs');
   const { randomBytes } = await import('node:crypto');
   const snapshot = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
     files: [{ path: 'app.ts', previous_path: null, status: 'added' as const, additions: 1, deletions: 0, binary: false }],
@@ -199,11 +199,16 @@ test('on-demand full review reads every page and rejects mixed or damaged captur
   const page = (index: number) => ({ status: 'ready', page: { index, total, digest: encoded.digest,
     data: encoded.data.slice(index * REVIEW_PAGE_SIZE, (index + 1) * REVIEW_PAGE_SIZE) } });
   assert.ok(total > 1);
-  assert.deepEqual(await loadWorkspaceReviewPages(async index => page(index)), { status: 'ready', review: expected });
-  assert.deepEqual(await loadWorkspaceReviewPages(async () => ({ status: 'pending', page: null })), { status: 'pending', review: null });
-  assert.deepEqual(await loadWorkspaceReviewPages(async () => ({ status: 'unavailable', page: null })), { status: 'unavailable', review: null });
-  await assert.rejects(loadWorkspaceReviewPages(async index => { const result = page(index); if (index === 1) result.page.digest = 'b'.repeat(64); return result; }), /Incomplete/);
-  await assert.rejects(loadWorkspaceReviewPages(async index => { const result = page(index); if (index === total - 1) result.page.data = 'AAAA'; return result; }), /Incomplete/);
+  const load = async (fetchPage: (index: number) => Promise<unknown>) => {
+    const pages: import('../../../../shared/workspace-review.mjs').WorkspaceReviewPage[] = [];
+    const status = await loadWorkspaceReviewPages(fetchPage, async batch => { pages.push(...batch); }, new AbortController().signal);
+    return status === 'ready' ? { status, review: decodeWorkspaceReview(pages.map(page => page.data).join(''), pages[0].digest) } : { status, review: null };
+  };
+  assert.deepEqual(await load(async index => page(index)), { status: 'ready', review: expected });
+  assert.deepEqual(await load(async () => ({ status: 'pending', page: null })), { status: 'pending', review: null });
+  assert.deepEqual(await load(async () => ({ status: 'unavailable', page: null })), { status: 'unavailable', review: null });
+  await assert.rejects(load(async index => { const result = page(index); if (index === 1) result.page.digest = 'b'.repeat(64); return result; }), /Incomplete/);
+  await assert.rejects(load(async index => { const result = page(index); if (index === total - 1) result.page.data = 'AAAA'; return result; }), /Incomplete/);
 });
 
 
@@ -213,7 +218,7 @@ test('local review cache requires current access and the exact uncleared public 
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const { encodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
-  const { readWorkspaceReview } = await import('../main/workspace-review.js');
+  const { WorkspaceReviewSession } = await import('../main/workspace-review.js');
   const { apiUrl } = await import('../main/paths.js');
   const directory = mkdtempSync(join(tmpdir(), 'review-authority-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -227,12 +232,100 @@ test('local review cache requires current access and the exact uncleared public 
     CREATE TABLE room_work_publications(agent_id,room_id,source_message_id,agent_key,api_origin,state);`);
   db.prepare('INSERT INTO room_workspace_reviews VALUES(?,?,?,?,?)').run('agent', ROOM, 'msg_1', encoded.data, encoded.digest);
   db.prepare('INSERT INTO room_work_publications VALUES(?,?,?,?,?,?)').run('agent', ROOM, 'msg_1', 'owner/agent', apiUrl, 'open'); db.close();
-  const input = { roomId: ROOM, agentKey: 'owner/agent', sourceMessageId: 'msg_1', attemptId: ATTEMPT };
+  const input = { roomId: ROOM, agentKey: 'owner/agent', sourceMessageId: 'msg_1', attemptId: ATTEMPT, requestId: ATTEMPT };
   const current = { attempt_id: ATTEMPT, room_id: ROOM, agent_key: 'owner/agent', source_message_id: 'msg_1',
     summary: { ...summary(), version: 3, workspace: snapshot, contribution: { changes: snapshot, summary: null } } };
   const fetch = async <T>() => current as T;
-  assert.deepEqual(await readWorkspaceReview(input, { databasePath, fetch }), { status: 'ready', review });
-  await assert.rejects(readWorkspaceReview(input, { databasePath, fetch: async () => { throw new Error('Access revoked'); } }), /Access revoked/);
-  await assert.rejects(readWorkspaceReview({ ...input, attemptId: '223e4567-e89b-42d3-a456-426614174000' }, { databasePath, fetch }), /no longer available/);
-  await assert.rejects(readWorkspaceReview(input, { databasePath, fetch: async <T>() => ({ ...current, summary: { version: 1, availability: 'cleared' } }) as T }), /no longer available/);
+  const session = new WorkspaceReviewSession(input, { databasePath, fetch });
+  t.after(() => session.close());
+  assert.deepEqual(await session.open(), { status: 'ready', review: { ...review, workspace: { ...snapshot, patch: '' }, contribution: { ...snapshot, patch: '' } } });
+  await assert.rejects(new WorkspaceReviewSession(input, { databasePath, fetch: async () => { throw new Error('Access revoked'); } }).open(), /Access revoked/);
+  await assert.rejects(new WorkspaceReviewSession({ ...input, attemptId: '223e4567-e89b-42d3-a456-426614174000' }, { databasePath, fetch }).open(), /no longer available/);
+  await assert.rejects(new WorkspaceReviewSession(input, { databasePath, fetch: async <T>() => ({ ...current, summary: { version: 1, availability: 'cleared' } }) as T }).open(), /no longer available/);
+});
+
+
+test('review downloads have bounded concurrency and stop after cancellation', async () => {
+  const { loadWorkspaceReviewPages } = await import('../main/workspace-review.js');
+  const controller = new AbortController();
+  let active = 0, maxActive = 0, requests = 0, appended = 0;
+  await assert.rejects(loadWorkspaceReviewPages(async index => {
+    requests++; active++; maxActive = Math.max(maxActive, active);
+    await new Promise(resolve => setTimeout(resolve, 1)); active--;
+    return { status: 'ready', page: { digest: 'a'.repeat(64), index, total: 100, data: 'a'.repeat(65536) } };
+  }, async pages => { appended += pages.length; if (appended >= 5) controller.abort(); }, controller.signal), /abort/i);
+  assert.equal(maxActive, 4); assert.equal(requests, 5); assert.equal(appended, 5);
+});
+
+test('background review returns bounded pages, rechecks access, and cancels pending work', async t => {
+  const { WorkspaceReviewSession } = await import('../main/workspace-review.js');
+  const { encodeWorkspaceReview, REVIEW_PAGE_SIZE } = await import('../../../../shared/workspace-review.mjs');
+  const patch = 'diff --git a/app.ts b/app.ts\n--- /dev/null\n+++ b/app.ts\n@@ -0,0 +1,700 @@\n' + '+line\n'.repeat(699) + '+' + 'x'.repeat(8 * 1024 * 1024) + 'FINAL\n';
+  const snapshot = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
+    files: [{ path: 'app.ts', previous_path: null, status: 'added' as const, additions: 700, deletions: 0, binary: false }],
+    additions: 700, deletions: 0, hidden_files: 0, patch, patch_truncated: false };
+  const encoded = encodeWorkspaceReview({ version: 1, workspace: snapshot, contribution: snapshot });
+  const preview = { ...snapshot, patch: patch.slice(0, 48000), patch_truncated: true };
+  const current = { attempt_id: ATTEMPT, room_id: ROOM, agent_key: 'owner/agent', source_message_id: 'msg_1',
+    summary: { ...summary(), version: 3, workspace: preview, contribution: { changes: preview, summary: null } } };
+  const input = { roomId: ROOM, agentKey: 'owner/agent', sourceMessageId: 'msg_1', attemptId: ATTEMPT, requestId: ATTEMPT };
+  const { DesktopApiError } = await import('../main/auth.js');
+  let revoked = false, transientFailure = false;
+  const fetch = async <T>(path: string): Promise<T> => {
+    if (revoked) throw new DesktopApiError(403, { message: 'Access revoked' });
+    if (transientFailure) throw new DesktopApiError(503, { message: 'Temporarily unavailable' });
+    const match = /review_page=(\d+)/.exec(path);
+    if (!match) return current as T;
+    const index = Number(match[1]);
+    return { status: 'ready', page: { index, total: Math.ceil(encoded.data.length / REVIEW_PAGE_SIZE), digest: encoded.digest, data: encoded.data.slice(index * REVIEW_PAGE_SIZE, (index + 1) * REVIEW_PAGE_SIZE) } } as T;
+  };
+  const session = new WorkspaceReviewSession(input, { fetch, databasePath: '/nonexistent-review-test.sqlite' });
+  t.after(() => session.close());
+  const opened = await session.open(); assert.equal(opened.status, 'ready');
+  assert.ok(JSON.stringify(opened).length < 2048, 'opening a review must not transfer captured patch text');
+  const page = await session.page({ requestId: ATTEMPT, view: 'contribution', path: 'app.ts' });
+  assert.equal(page.lines.length, 500); assert.equal(page.nextOffset, 500);
+  const longLine = await session.page({ requestId: ATTEMPT, view: 'contribution', path: 'app.ts', offset: 700, singleLine: true });
+  assert.equal(longLine.lines[0].text.length, 4096); assert.equal(longLine.lines[0].textLength, 8 * 1024 * 1024 + 5);
+  const lastPart = await session.page({ requestId: ATTEMPT, view: 'contribution', path: 'app.ts', offset: 700, singleLine: true, textOffset: 8 * 1024 * 1024 });
+  assert.equal(lastPart.lines[0].text, 'FINAL'); assert.equal(lastPart.lines[0].nextTextOffset, null);
+  transientFailure = true;
+  await assert.rejects(session.page({ requestId: ATTEMPT, view: 'workspace', path: 'app.ts' }), /Temporarily unavailable/);
+  transientFailure = false;
+  assert.equal((await session.page({ requestId: ATTEMPT, view: 'workspace', path: 'app.ts' })).lines.length, 500);
+  revoked = true;
+  await assert.rejects(session.page({ requestId: ATTEMPT, view: 'workspace', path: 'app.ts' }), /Access revoked/);
+  await assert.rejects(session.page({ requestId: ATTEMPT, view: 'workspace', path: 'app.ts' }), /not open/);
+
+  let started!: () => void; const waiting = new Promise<void>(resolve => { started = resolve; });
+  const interrupted = new WorkspaceReviewSession(input, { fetch: async <T>(_: string, init?: RequestInit) => {
+    started(); return new Promise<T>((_, reject) => init!.signal!.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+  } });
+  const pending = interrupted.open(); const rejected = assert.rejects(pending, /aborted/);
+  await waiting; await interrupted.close(); await rejected;
+});
+
+
+test('explicit close then immediate reopen waits for the previous review worker to retire', async t => {
+  const { WorkspaceReviewSession, readWorkspaceReview, closeWorkspaceReview } = await import('../main/workspace-review.js');
+  const owner = -901;
+  const input = { roomId: ROOM, agentKey: 'owner/agent', sourceMessageId: 'msg_1', attemptId: ATTEMPT, requestId: ATTEMPT };
+  const second = { ...input, requestId: '223e4567-e89b-42d3-a456-426614174000' };
+  let release!: () => void;
+  const retired = new Promise<void>(resolve => { release = resolve; });
+  const opened: string[] = [];
+  t.mock.method(WorkspaceReviewSession.prototype, 'open', async function(this: InstanceType<typeof WorkspaceReviewSession>) {
+    opened.push(this.input.requestId); return { status: 'unavailable', review: null };
+  });
+  t.mock.method(WorkspaceReviewSession.prototype, 'close', function(this: InstanceType<typeof WorkspaceReviewSession>) {
+    return this.input.requestId === input.requestId ? retired : Promise.resolve();
+  });
+  await readWorkspaceReview(owner, input);
+  const closing = closeWorkspaceReview(owner, input.requestId);
+  const reopening = readWorkspaceReview(owner, second);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(opened, [input.requestId]);
+  release(); await Promise.all([closing, reopening]);
+  assert.deepEqual(opened, [input.requestId, second.requestId]);
+  await closeWorkspaceReview(owner, second.requestId);
 });

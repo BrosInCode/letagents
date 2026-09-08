@@ -33,3 +33,41 @@ test('large-file review parses a bounded page while retaining exact line numbers
   const last = workspaceFilePatches(patch, [file('a.ts')], { offset: 1_000_000, limit: 501 }).get('a.ts')!;
   assert.equal(last.length, 1); assert.equal(last[0].after, 1_000_000);
 });
+
+
+test('indexed pages bound long text, preserve every character and reuse line checkpoints', async () => {
+  const { createWorkspaceDiffIndex, readWorkspaceDiffPage } = await import('../src/domain/workspace-diff.js');
+  const text = 'a'.repeat(4095) + '😀' + 'z'.repeat(8192) + 'END';
+  const patch = 'diff --git a/a.ts b/a.ts\n--- /dev/null\n+++ b/a.ts\n@@ -0,0 +1,1000001 @@\n' + '+x\n'.repeat(1_000_000) + '+' + text + '\n';
+  const index = createWorkspaceDiffIndex(patch, [file('a.ts')]);
+  const last = readWorkspaceDiffPage(index, 'a.ts', { offset: 1_000_000 });
+  assert.equal(last.lines.length, 2); assert.equal(last.lines[1].after, 1_000_001);
+  assert.ok(index.files.get('a.ts')!.checkpoints.length > 1000);
+  const checkpoints = index.files.get('a.ts')!.checkpoints.length;
+  assert.deepEqual(readWorkspaceDiffPage(index, 'a.ts', { offset: 1_000_000 }), last);
+  assert.equal(index.files.get('a.ts')!.checkpoints.length, checkpoints);
+  let reconstructed = '', textOffset = 0;
+  do {
+    const part = readWorkspaceDiffPage(index, 'a.ts', { offset: 1_000_001, singleLine: true, textOffset }).lines[0];
+    assert.ok(part.text.length <= 4096); reconstructed += part.text;
+    if (part.nextTextOffset === null) break;
+    textOffset = part.nextTextOffset;
+  } while (true);
+  assert.equal(reconstructed, text);
+  assert.throws(() => readWorkspaceDiffPage(index, 'a.ts', { offset: -1 }), /Invalid/);
+});
+
+test('a diff page has a total character budget even when every line is enormous', async () => {
+  const { createWorkspaceDiffIndex, readWorkspaceDiffPage } = await import('../src/domain/workspace-diff.js');
+  const patch = 'diff --git a/a.ts b/a.ts\n--- /dev/null\n+++ b/a.ts\n@@ -0,0 +1,600 @@\n' + ('+' + 'x'.repeat(5000) + '\n').repeat(600);
+  const index = createWorkspaceDiffIndex(patch, [file('a.ts')]);
+  let offset = 0, rows = 0;
+  do {
+    const page = readWorkspaceDiffPage(index, 'a.ts', { offset });
+    assert.ok(page.lines.length <= 500); assert.ok(page.lines.reduce((n, line) => n + line.text.length, 0) <= 128 * 1024);
+    rows += page.lines.length;
+    if (page.nextOffset === null) break;
+    assert.ok(page.nextOffset > offset); offset = page.nextOffset;
+  } while (true);
+  assert.equal(rows, 601);
+});

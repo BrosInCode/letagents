@@ -24,7 +24,13 @@ export function encodeWorkspaceReview(value) {
 }
 export function decodeWorkspaceReview(data, digest) {
   if (typeof data !== 'string' || data.length > REVIEW_LIMIT || createHash('sha256').update(data).digest('hex') !== digest) throw new Error('Incomplete workspace review.');
-  const value = parseWorkspaceReview(JSON.parse(gunzipSync(Buffer.from(data, 'base64'), { maxOutputLength: REVIEW_LIMIT }).toString('utf8')));
+  const compressed = Buffer.from(data, 'base64');
+  // Our single-member gzip records its output size in the trailer. Use it only
+  // as a bounded allocation hint: zlib still verifies CRC/size and enforces the
+  // output limit. One spare byte avoids allocating another full output buffer.
+  const chunkSize = compressed.length < 4 ? 16 * 1024
+    : Math.max(16 * 1024, Math.min(REVIEW_LIMIT + 1, compressed.readUInt32LE(compressed.length - 4) + 1));
+  const value = parseWorkspaceReview(JSON.parse(gunzipSync(compressed, { maxOutputLength: REVIEW_LIMIT, chunkSize }).toString('utf8')));
   if (!value) throw new Error('Invalid workspace review.');
   return value;
 }
