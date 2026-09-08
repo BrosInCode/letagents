@@ -122,8 +122,9 @@ export class RoomWorkPublisher {
         operation_counts: { unresolved: 0, succeeded: 0, failed: 0, denied_before_start: 0,
           cancelled_before_start: 0, interrupted_after_start: 0, lost_after_start: 0 },
       };
-      const summary = { ...execution, version: 3 as const, ...pair };
-      this.workspaces.settle(identity, summary);
+      const { review, ...preview } = pair;
+      const summary = { ...execution, version: 3 as const, ...preview };
+      this.workspaces.settle(identity, summary, review);
       if (captured.availability === "available") this.store.stage(current.record, { ...captured, summary });
       this.changed(agent.agentId);
       await releaseWorkspaceTree(location.path, ref);
@@ -285,7 +286,7 @@ export class RoomWorkPublisher {
       catch { this.report("storage_unavailable"); }
       if (this.unavailable()) return;
       const pending = this.store.list(agentId)
-        .filter(record => record.state === "open" && record.summary && record.revision > record.acknowledgedRevision)
+        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId)))
         .sort((a, b) => (this.attemptedAt.get(key(a)) ?? -Infinity) - (this.attemptedAt.get(key(b)) ?? -Infinity));
       const eligible: Array<{ record: RoomWorkPublication; authority: NonNullable<ReturnType<RoomWorkPublisher["authority"]>> }> = [];
       for (const record of pending) {
@@ -301,15 +302,20 @@ export class RoomWorkPublisher {
         if (this.unavailable() || current?.grant !== authority.grant || current?.worker !== authority.worker) continue;
         this.attemptedAt.set(key(record), this.now());
         try {
+          const reviewPage = this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId);
           const result = await (this.options.publish ?? publishRoomWork)({ apiOrigin: record.apiOrigin,
             grantId: authority.grant.grantId, supervisorGrant: authority.grant.supervisorGrant,
             grantGeneration: authority.grant.grantGeneration, sessionId: authority.worker.agentSessionId,
             roomId: record.roomId, sourceMessageId: record.sourceMessageId, agentKey: record.agentKey,
-            revision: record.revision, summary: record.summary!, signal: this.cancellation.signal });
+            revision: record.revision, summary: record.summary!, ...(reviewPage ? { reviewPage } : {}), signal: this.cancellation.signal });
           await this.options.assertCurrent();
           if (this.unavailable()) return;
           if (result === "acknowledged") {
             this.store.acknowledge(record);
+            if (reviewPage) {
+              this.workspaces.acknowledgePage(record.agentId, record.roomId, record.sourceMessageId, reviewPage);
+              more = more || !!this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId);
+            }
             this.attemptedAt.delete(key(record));
           }
           else {

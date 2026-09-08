@@ -16,7 +16,9 @@ async function git(cwd: string, args: string[], limit = 4 * 1024 * 1024): Promis
 }
 
 /** Reads the actual provider workspace; never stages, commits, or changes its index. */
-export async function captureWorkspaceChanges(workspace: string, startingRevision: string | null, settledTree?: string): Promise<WorkspaceChangeSummary> {
+export async function captureWorkspaceChanges(workspace: string, startingRevision: string | null, settledTree?: string, fullReview = false): Promise<WorkspaceChangeSummary> {
+  const patchLimit = fullReview ? 128 * 1024 * 1024 : WORKSPACE_PATCH_LIMIT;
+  const fileLimit = fullReview ? 10_000 : WORKSPACE_FILE_LIMIT;
   const empty = (state: WorkspaceChangeSummary['state']): WorkspaceChangeSummary => ({
     captured_at: new Date().toISOString(), branch: null, base_revision: null, state,
     files: [], additions: 0, deletions: 0, hidden_files: 0, patch: '', patch_truncated: false,
@@ -60,11 +62,11 @@ export async function captureWorkspaceChanges(workspace: string, startingRevisio
     let patch = '';
     let truncated = false;
     if (base) {
-      try { patch = await git(workspace, ['diff', ...diffArgs, '--unified=3', base, ...(settledTree ? [settledTree] : []), '--'], WORKSPACE_PATCH_LIMIT); }
+      try { patch = await git(workspace, ['diff', ...diffArgs, '--unified=3', base, ...(settledTree ? [settledTree] : []), '--'], patchLimit); }
       catch (error) {
         const failure = error as { code?: string; stdout?: string };
         if (failure.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw error;
-        patch = String(failure.stdout ?? '').slice(0, WORKSPACE_PATCH_LIMIT);
+        patch = String(failure.stdout ?? '').slice(0, patchLimit);
         truncated = true;
       }
     }
@@ -74,7 +76,7 @@ export async function captureWorkspaceChanges(workspace: string, startingRevisio
       if (files.has(path)) continue;
       const file: WorkspaceChangedFile = { path, previous_path: null, status: base ? 'untracked' : 'added', additions: 0, deletions: 0, binary: false };
       files.set(path, file);
-      if (++inspectedFiles > WORKSPACE_FILE_LIMIT) { truncated = true; continue; }
+      if (++inspectedFiles > fileLimit) { truncated = true; continue; }
       // Do not follow symlinks into files outside the workspace.
       const absolute = join(workspace, path);
       const metadata = await lstat(absolute);
@@ -94,7 +96,7 @@ export async function captureWorkspaceChanges(workspace: string, startingRevisio
       const text = bytes.toString('utf8');
       const lines = text ? text.replace(/\n$/, '').split('\n') : [];
       file.additions = lines.length;
-      if (patch.length < WORKSPACE_PATCH_LIMIT) {
+      if (patch.length < patchLimit) {
         const label = JSON.stringify(`b/${path}`);
         const addition = `diff --git ${JSON.stringify(`a/${path}`)} ${label}\nnew file mode ${metadata.isSymbolicLink() ? '120000' : '100644'}\n--- /dev/null\n+++ ${label}\n@@ -0,0 +1,${lines.length} @@\n${lines.map(line => `+${line}\n`).join('')}`;
         patch += addition;
@@ -102,10 +104,10 @@ export async function captureWorkspaceChanges(workspace: string, startingRevisio
     }
     const all = [...files.values()];
     const result = parseWorkspaceChangeSummary({ ...empty('ready'), branch, base_revision: startingRevision ?? base,
-      files: all.slice(0, WORKSPACE_FILE_LIMIT), additions: all.reduce((n, file) => n + file.additions, 0),
-      deletions: all.reduce((n, file) => n + file.deletions, 0), hidden_files: Math.max(0, all.length - WORKSPACE_FILE_LIMIT),
-      patch: patch.slice(0, WORKSPACE_PATCH_LIMIT), patch_truncated: truncated || patch.length > WORKSPACE_PATCH_LIMIT,
-    });
+      files: all.slice(0, fileLimit), additions: all.reduce((n, file) => n + file.additions, 0),
+      deletions: all.reduce((n, file) => n + file.deletions, 0), hidden_files: Math.max(0, all.length - fileLimit),
+      patch: patch.slice(0, patchLimit), patch_truncated: truncated || patch.length > patchLimit,
+    }, fullReview);
     return result ?? empty('unavailable');
   } catch { return empty('unavailable'); }
 }

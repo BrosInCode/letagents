@@ -135,6 +135,7 @@ export interface DesktopApi {
     onStatusChanged: (callback: (status: DesktopNotificationStatus) => void) => () => void;
   };
   app: {
+    readWorkspaceReview?: (input: import("../main/workspace-review.js").WorkspaceReviewRequest) => Promise<import("../main/workspace-review.js").WorkspaceReviewResult>;
     resolveWorkspaceFiles?: (input: { roomId: string; agentKey: string; sourceMessageId: string; paths: string[] }) => Promise<Array<{ path: string; kind: "local" | "github"; url?: string }>>;
     openWorkspaceFile?: (input: { roomId: string; agentKey: string; sourceMessageId: string; paths: string[] }) => Promise<void>;
     getInfo: () => Promise<DesktopAppInfo>;

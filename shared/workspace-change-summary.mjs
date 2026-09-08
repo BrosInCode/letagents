@@ -10,17 +10,17 @@ const path = value => typeof value === 'string' && value.length > 0 && value.len
   && !value.startsWith('/') && !/^[A-Za-z]:/.test(value) && !value.split(/[\\/]/).includes('..')
   && !/[\x00-\x1f\x7f]/.test(value);
 
-export function parseWorkspaceChangeSummary(value) {
+export function parseWorkspaceChangeSummary(value, fullReview = false) {
   if (!exact(value, ['captured_at', 'branch', 'base_revision', 'state', 'files', 'additions', 'deletions', 'hidden_files', 'patch', 'patch_truncated'])
     || typeof value.captured_at !== 'string' || !Number.isFinite(Date.parse(value.captured_at))
     || !(value.branch === null || typeof value.branch === 'string' && value.branch.length <= 256 && !/[\x00-\x1f\x7f]/.test(value.branch))
     || !(value.base_revision === null || typeof value.base_revision === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.base_revision))
     || !['ready', 'unavailable', 'not_git'].includes(value.state)
-    || !Array.isArray(value.files) || value.files.length > WORKSPACE_FILE_LIMIT
+    || !Array.isArray(value.files) || value.files.length > (fullReview ? 10_000 : WORKSPACE_FILE_LIMIT)
     || !count(value.additions) || !count(value.deletions) || !count(value.hidden_files)
-    || typeof value.patch !== 'string' || value.patch.length > WORKSPACE_PATCH_LIMIT
+    || typeof value.patch !== 'string' || value.patch.length > (fullReview ? 128 * 1024 * 1024 : WORKSPACE_PATCH_LIMIT)
     || typeof value.patch_truncated !== 'boolean') return null;
-  if (new TextEncoder().encode(JSON.stringify(value)).length > 480 * 1024) return null;
+  if (new TextEncoder().encode(JSON.stringify(value)).length > (fullReview ? 128 * 1024 * 1024 : 480 * 1024)) return null;
   const files = [];
   const paths = new Set();
   for (const file of value.files) {

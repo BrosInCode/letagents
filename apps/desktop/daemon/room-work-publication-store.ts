@@ -237,6 +237,8 @@ export class RoomWorkPublicationStore {
       if (current.state !== "open") return;
       this.database.prepare(`UPDATE ${table} SET state=?,summary_json=CASE WHEN ?='cleared' THEN NULL ELSE summary_json END
         WHERE agent_id=? AND room_id=? AND source_message_id=?`).run(state, state, key.agentId, key.roomId, key.sourceMessageId);
+      if (state === 'cleared') this.database.prepare('DELETE FROM room_workspace_reviews WHERE agent_id=? AND room_id=? AND source_message_id=?')
+        .run(key.agentId, key.roomId, key.sourceMessageId);
     });
   }
 }

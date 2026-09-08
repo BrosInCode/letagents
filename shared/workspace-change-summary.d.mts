@@ -21,4 +21,4 @@ export type WorkspaceChangeSummary = {
   patch: string;
   patch_truncated: boolean;
 };
-export function parseWorkspaceChangeSummary(value: unknown): WorkspaceChangeSummary | null;
+export function parseWorkspaceChangeSummary(value: unknown, fullReview?: boolean): WorkspaceChangeSummary | null;

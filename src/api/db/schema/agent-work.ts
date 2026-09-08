@@ -26,3 +26,15 @@ export const room_agent_work = pgTable("room_agent_work", {
   revision_check: check("room_agent_work_revision_check", sql`${table.publisher_revision} BETWEEN 1 AND 9007199254740991`),
   summary_size_check: check("room_agent_work_summary_size_check", sql`octet_length(${table.summary}::text) <= 524288`),
 }));
+
+// Paged immutable review payloads are never selected by timeline polling.
+export const room_agent_work_review_pages = pgTable("room_agent_work_review_pages", {
+  attempt_id: text("attempt_id").notNull().references(() => room_agent_work.attempt_id, { onDelete: "cascade" }),
+  page_index: integer("page_index").notNull(),
+  page_total: integer("page_total").notNull(),
+  digest: text("digest").notNull(),
+  data: text("data").notNull(),
+}, (table) => ({
+  page_uq: uniqueIndex("room_agent_work_review_page_uq").on(table.attempt_id, table.page_index),
+  page_check: check("room_agent_work_review_page_check", sql`${table.page_total} BETWEEN 1 AND 2048 AND ${table.page_index} >= 0 AND ${table.page_index} < ${table.page_total} AND octet_length(${table.data}) BETWEEN 1 AND 65536 AND ${table.digest} ~ '^[a-f0-9]{64}$'`),
+}));
