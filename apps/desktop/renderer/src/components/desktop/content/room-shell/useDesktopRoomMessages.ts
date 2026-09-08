@@ -26,6 +26,7 @@ export function useDesktopRoomMessages(options: {
   playRoomSound(kind: "send" | "notification"): void;
   onMessageSent(message: DesktopRoomMessage): void;
 }) {
+  let roomGeneration = 0;
   const sendingMessage = ref(false);
   const sendError = ref<string | null>(null);
   const olderMessages = ref<DesktopRoomMessage[]>([]);
@@ -72,6 +73,8 @@ export function useDesktopRoomMessages(options: {
   watch(
     () => options.room.value.identifier,
     () => {
+      roomGeneration += 1;
+      sendingMessage.value = false;
       olderMessages.value = [];
       localMessages.value = [];
       hasOlderMessages.value = true;
@@ -104,28 +107,39 @@ export function useDesktopRoomMessages(options: {
     replyTo: string | null = null,
     attachments: Array<{ upload_id: string }> = [],
     threadRootId: string | null = null,
+    complete: (sent: boolean) => void = () => undefined,
   ): Promise<void> {
     const trimmedText = text.trim();
-    if (!trimmedText && attachments.length === 0) return;
+    if ((!trimmedText && attachments.length === 0) || sendingMessage.value) {
+      complete(false);
+      return;
+    }
+    const generation = roomGeneration;
+    const roomIdentifier = options.room.value.identifier;
+    const isCurrentRoom = () => generation === roomGeneration && roomIdentifier === options.room.value.identifier;
 
     sendingMessage.value = true;
     sendError.value = null;
     try {
       const result = await desktopIpc.room.sendMessage(
-        options.room.value.identifier,
+        roomIdentifier,
         trimmedText,
         replyTo,
         attachments,
         threadRootId,
       );
+      if (!isCurrentRoom()) return;
       ownMessageIds.add(result.message.id);
       localMessages.value = mergeRoomMessages(localMessages.value, [result.message]);
       options.playRoomSound("send");
       options.onMessageSent(result.message);
+      complete(true);
     } catch (error) {
+      if (!isCurrentRoom()) return;
       sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
+      complete(false);
     } finally {
-      sendingMessage.value = false;
+      if (isCurrentRoom()) sendingMessage.value = false;
     }
   }
 
