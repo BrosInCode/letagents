@@ -13,19 +13,30 @@ export function renderDesktopMarkdown(value: string, options: DesktopMarkdownOpt
 
 export function renderInlineMarkdown(value: string, options: DesktopMarkdownOptions = {}): string {
   const tokens: string[] = [];
-  const tokenized = value.replace(/`([^`\n]+)`/g, (_match, code: string) =>
-    markdownToken(tokens, `<code>${escapeHtml(code)}</code>`)
+  // File references are display text here. Only the receipt's verified file actions
+  // may open a local workspace; never turn a path supplied in prose into a URL.
+  let tokenized = value.replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_match, code: string) =>
+    markdownToken(tokens, `<code>${escapeHtml(localFileName(code) ?? code)}</code>`)
   );
+  tokenized = tokenized.replace(/\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)/g, (match, label: string, target: string) => {
+    const path = target.replace(/^<|>$/g, "");
+    if (/^https?:\/\/[^\s]+$/.test(path)) {
+      return markdownToken(tokens, `<a href="${escapeAttr(path)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`);
+    }
+    const filename = localFileName(path, true);
+    return filename ? markdownToken(tokens, `<code>${escapeHtml(filename)}</code>`) : match;
+  });
+  tokenized = tokenized.replace(/(https?:\/\/[^\s<>"']+)/g, (_match, url: string) =>
+    markdownToken(tokens, `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`)
+  );
+  // Web links and inline code are already protected by tokens. Match only file
+  // paths in prose, preserving punctuation and leaving API routes alone.
+  tokenized = tokenized.replace(/(^|[\s(])((?:file:\/\/\/|~?\/|\.\.?\/|[A-Za-z]:[\\/]|(?:[\w.-]+\/)+)[^\s<>"'`()[\]]+)/g, (match, before: string, path: string) => {
+    const punctuation = path.match(/[.,;!?]+$/)?.[0] ?? "";
+    const filename = localFileName(path.slice(0, path.length - punctuation.length));
+    return filename ? before + markdownToken(tokens, `<code>${escapeHtml(filename)}</code>`) + punctuation : match;
+  });
   let rendered = highlightEscapedText(escapeHtml(tokenized), options.highlightQuery || "");
-
-  rendered = rendered.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_match, label: string, url: string) => {
-    const normalizedUrl = url.replace(/&amp;/g, "&");
-    return markdownToken(tokens, `<a href="${escapeAttr(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${label}</a>`);
-  });
-  rendered = rendered.replace(/(https?:\/\/[^\s<"']+)/g, (_match, url: string) => {
-    const normalizedUrl = url.replace(/&amp;/g, "&");
-    return markdownToken(tokens, `<a href="${escapeAttr(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${url}</a>`);
-  });
   rendered = rendered
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/__(.+?)__/g, "<strong>$1</strong>")
@@ -38,6 +49,17 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
   }
 
   return restoreMarkdownTokens(rendered, tokens);
+}
+
+function localFileName(value: string, linked = false): string | null {
+  const path = value.replace(/^file:\/\/\//i, "/");
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(path) && !/^[A-Za-z]:[\\/]/.test(path)) return null;
+  if (!linked && !/^(?:~?[\\/]|\.\.?[\\/]|[A-Za-z]:[\\/]|[\w.-]+[\\/])/.test(path)) return null;
+  if (/[\n\r<>`]/.test(path) || (!linked && /\s/.test(path))) return null;
+  const name = path.split(/[\\/]/).at(-1)!;
+  if (!linked && !/^(?:[^\s.][^\/]*\.[A-Za-z0-9_-]+|\.[A-Za-z0-9_.-]+)(?:#L\d+(?:C\d+)?|:\d+(?::\d+)?)?$/.test(name)) return null;
+  if (!name || name.startsWith("#") || name.includes("\u0000")) return null;
+  try { return decodeURIComponent(name); } catch { return name; }
 }
 
 function renderBlockMarkdown(value: string, options: DesktopMarkdownOptions, quoteDepth = 0): string {
