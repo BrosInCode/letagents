@@ -22,6 +22,23 @@ function publicWork(row: typeof room_agent_work.$inferSelect): RoomAgentWork {
   };
 }
 
+
+type WorkTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+async function saveRoomWorkReviewPage(tx: WorkTransaction, work: typeof room_agent_work.$inferSelect, summary: NonNullable<ReturnType<typeof parseRoomAgentWorkSummary>>, reviewPage: ReturnType<typeof parseWorkspaceReviewPage>): Promise<void> {
+  if (!reviewPage || isClearedRoomAgentWorkSummary(work.summary)) return;
+  if (summary.version !== 3) throw new RoomAgentWorkError("invalid_summary");
+  // The work lock serializes all pages and clearing. A retry cannot replace
+  // captured bytes, mix two captures, or resurrect a cleared review.
+  const [prior] = await tx.select().from(room_agent_work_review_pages)
+    .where(eq(room_agent_work_review_pages.attempt_id, work.attempt_id)).limit(1);
+  if (prior && (prior.digest !== reviewPage.digest || prior.page_total !== reviewPage.total)) throw new RoomAgentWorkError("revision_conflict");
+  const pageWhere = and(eq(room_agent_work_review_pages.attempt_id, work.attempt_id), eq(room_agent_work_review_pages.page_index, reviewPage.index));
+  const [page] = await tx.select().from(room_agent_work_review_pages).where(pageWhere);
+  if (page && page.data !== reviewPage.data) throw new RoomAgentWorkError("revision_conflict");
+  if (!page) await tx.insert(room_agent_work_review_pages).values({ attempt_id: work.attempt_id,
+    digest: reviewPage.digest, page_index: reviewPage.index, page_total: reviewPage.total, data: reviewPage.data });
+}
+
 /**
  * Admission is evidence publication, not permission to execute. Serialize on
  * the captured receipt, then reverify the exact live publisher in the same
@@ -96,33 +113,20 @@ export async function publishRoomAgentWork(input: {
     // evidence or let a stale clear erase a newly published revision.
     const [existing] = await tx.select().from(room_agent_work).where(identity).for("update");
     if (Date.parse(grant.expires_at) <= Date.now()) throw new SupervisorGrantFenceStaleError();
-    const saveReviewPage = async (work: typeof room_agent_work.$inferSelect) => {
-      if (!reviewPage || isClearedRoomAgentWorkSummary(work.summary)) return;
-      if (summary.version !== 3) throw new RoomAgentWorkError("invalid_summary");
-      // The work lock serializes all pages and clearing. A retry cannot replace
-      // captured bytes, mix two captures, or resurrect a cleared review.
-      const [prior] = await tx.select().from(room_agent_work_review_pages)
-        .where(eq(room_agent_work_review_pages.attempt_id, work.attempt_id)).limit(1);
-      if (prior && (prior.digest !== reviewPage.digest || prior.page_total !== reviewPage.total)) throw new RoomAgentWorkError("revision_conflict");
-      const pageWhere = and(eq(room_agent_work_review_pages.attempt_id, work.attempt_id), eq(room_agent_work_review_pages.page_index, reviewPage.index));
-      const [page] = await tx.select().from(room_agent_work_review_pages).where(pageWhere);
-      if (page && page.data !== reviewPage.data) throw new RoomAgentWorkError("revision_conflict");
-      if (!page) await tx.insert(room_agent_work_review_pages).values({ attempt_id: work.attempt_id,
-        digest: reviewPage.digest, page_index: reviewPage.index, page_total: reviewPage.total, data: reviewPage.data });
-    };
+
     if (existing) {
-      if (existing.owner_account_id !== grant.owner_account_id || existing.host_id !== grant.host_id
+      if (existing.publisher_kind !== "supervisor" || existing.owner_account_id !== grant.owner_account_id || existing.host_id !== grant.host_id
         || existing.installation_id !== grant.installation_id || existing.agent_instance_id !== publisher.agent_instance_id) {
         throw new RoomAgentWorkError("publisher_conflict");
       }
       if (input.revision < existing.publisher_revision || (input.revision === existing.publisher_revision && digest !== existing.summary_digest)) {
         throw new RoomAgentWorkError("revision_conflict");
       }
-      if (input.revision === existing.publisher_revision) { await saveReviewPage(existing); return { status: "replayed", work: publicWork(existing) }; }
+      if (input.revision === existing.publisher_revision) { await saveRoomWorkReviewPage(tx, existing, summary, reviewPage); return { status: "replayed", work: publicWork(existing) }; }
       if (isClearedRoomAgentWorkSummary(existing.summary)) throw new RoomAgentWorkError("payload_cleared");
       const [updated] = await tx.update(room_agent_work).set({ publisher_revision: input.revision, summary_digest: digest, summary,
         updated_at: new Date().toISOString() }).where(identity).returning();
-      await saveReviewPage(updated);
+      await saveRoomWorkReviewPage(tx, updated, summary, reviewPage);
       return { status: "updated", work: publicWork(updated) };
     }
     const [created] = await tx.insert(room_agent_work).values({
@@ -131,7 +135,68 @@ export async function publishRoomAgentWork(input: {
       installation_id: grant.installation_id, agent_instance_id: publisher.agent_instance_id,
       publisher_revision: input.revision, summary_digest: digest, summary, updated_at: new Date().toISOString(),
     }).returning();
-    await saveReviewPage(created);
+    await saveRoomWorkReviewPage(tx, created, summary, reviewPage);
+    return { status: "created", work: publicWork(created) };
+  });
+}
+
+/** Independent MCP captures attach only to the worker's own authenticated message.
+ * Session locks fence replacement/disconnect; no supervisor custody is inferred. */
+export async function publishIndependentWorkspace(input: {
+  room_id: string; source_message_number: number; session_id: string;
+  owner_account_id: string; token_hash: string; summary: unknown; review_page?: unknown;
+}): Promise<{ status: "created" | "replayed"; work: RoomAgentWork }> {
+  const summary = parseRoomAgentWorkSummary(input.summary);
+  const reviewPage = input.review_page === undefined ? null : parseWorkspaceReviewPage(input.review_page);
+  if (!summary || summary.version !== 3 || summary.recorded_state !== "completed"
+    || summary.evidence_incomplete !== true || summary.elapsed_ms !== null
+    || Object.values(summary.operation_counts).some(value => value !== 0)
+    || (input.review_page !== undefined && !reviewPage)
+    || !Number.isSafeInteger(input.source_message_number) || input.source_message_number < 1) {
+    throw new RoomAgentWorkError("invalid_summary");
+  }
+  const digest = createHash("sha256").update(JSON.stringify(summary)).digest("hex");
+  return db.transaction(async tx => {
+    const sourceWhere = and(eq(messages.room_id, input.room_id), eq(messages.number, input.source_message_number));
+    const [candidate] = await tx.select().from(messages).where(sourceWhere);
+    if (!candidate?.publisher_agent_session_id) throw new RoomAgentWorkError("publisher_not_authorized");
+    const sessions = await tx.select().from(room_agent_sessions)
+      .where(inArray(room_agent_sessions.session_id, [input.session_id, candidate.publisher_agent_session_id]))
+      .orderBy(asc(room_agent_sessions.session_id)).for("share");
+    const current = sessions.find(session => session.session_id === input.session_id);
+    const original = sessions.find(session => session.session_id === candidate.publisher_agent_session_id);
+    if (!current || !original || current.ended_at || current.token_hash !== input.token_hash
+      || current.supervisor_grant_id || original.supervisor_grant_id
+      || current.session_kind !== "worker" || original.session_kind !== "worker"
+      || current.room_id !== input.room_id || original.room_id !== input.room_id
+      || current.owner_account_id !== input.owner_account_id || original.owner_account_id !== input.owner_account_id
+      || !current.agent_instance_id || current.agent_instance_id !== original.agent_instance_id
+      || current.agent_key !== original.agent_key) throw new RoomAgentWorkError("publisher_not_authorized");
+    // Serialize first publication as well as its retries; deletion/visibility must
+    // remain stable until both summary and archive page have been admitted.
+    const [source] = await tx.select().from(messages).where(and(sourceWhere, visibleMessageCondition(false),
+      isNull(messages.visibility), isNull(messages.rental_session_id))).for("update");
+    if (!source || source.source !== "agent" || source.publisher_account_id !== input.owner_account_id
+      || source.publisher_agent_key !== current.agent_key || source.publisher_agent_session_id !== original.session_id) {
+      throw new RoomAgentWorkError("publisher_not_authorized");
+    }
+    const where = and(eq(room_agent_work.room_id, input.room_id), eq(room_agent_work.source_message_number, input.source_message_number),
+      eq(room_agent_work.agent_key, current.agent_key));
+    const [existing] = await tx.select().from(room_agent_work).where(where).for("update");
+    if (existing) {
+      if (existing.publisher_kind !== "independent_worker" || existing.owner_account_id !== input.owner_account_id
+        || existing.agent_instance_id !== current.agent_instance_id) throw new RoomAgentWorkError("publisher_conflict");
+      if (isClearedRoomAgentWorkSummary(existing.summary)) throw new RoomAgentWorkError("payload_cleared");
+      if (existing.publisher_revision !== 1 || existing.summary_digest !== digest) throw new RoomAgentWorkError("revision_conflict");
+      await saveRoomWorkReviewPage(tx, existing, summary, reviewPage);
+      return { status: "replayed", work: publicWork(existing) };
+    }
+    const [created] = await tx.insert(room_agent_work).values({ attempt_id: randomUUID(), room_id: input.room_id,
+      source_message_number: input.source_message_number, agent_key: current.agent_key,
+      publisher_kind: "independent_worker", host_id: null, installation_id: null,
+      owner_account_id: input.owner_account_id, agent_instance_id: current.agent_instance_id,
+      publisher_revision: 1, summary_digest: digest, summary, updated_at: new Date().toISOString() }).returning();
+    await saveRoomWorkReviewPage(tx, created, summary, reviewPage);
     return { status: "created", work: publicWork(created) };
   });
 }
@@ -161,7 +226,7 @@ export async function clearRoomAgentWork(input: {
     if (isClearedRoomAgentWorkSummary(existing.summary)) return { status: "already_cleared", work: publicWork(existing) };
     const summary = parseRoomAgentWorkSummary(existing.summary);
     if (!summary || !["completed", "completed_no_reply", "failed", "interrupted"].includes(summary.recorded_state)
-      || summary.evidence_incomplete || summary.operation_counts.unresolved || summary.operation_counts.lost_after_start) {
+      || (existing.publisher_kind === "supervisor" && summary.evidence_incomplete) || summary.operation_counts.unresolved || summary.operation_counts.lost_after_start) {
       throw new RoomAgentWorkError("evidence_not_clearable");
     }
     // Preserve publication revision, digest, timestamp and custody verbatim.

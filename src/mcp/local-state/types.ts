@@ -149,6 +149,7 @@ export interface StoredMcpWorker {
 }
 
 export interface LetagentsLocalState {
+  workspace_captures?: Record<string, StoredWorkspaceCapture>;
   mcp_workers?: Record<string, StoredMcpWorker>;
   auth?: StoredAuthState;
   pending_device_auth?: PendingDeviceAuthState;
@@ -162,4 +163,20 @@ export interface LetagentsLocalState {
   current_codex_live_session_ids?: Record<string, string>;
   codex_live_sessions?: Record<string, CodexLiveSessionState>;
   local_host_id?: string;
+}
+
+export interface StoredWorkspaceCapture {
+  capture_id: string;
+  api_url: string;
+  room_id: string;
+  agent_key: string;
+  agent_instance_id: string;
+  workspace: string;
+  base_revision: string;
+  baseline: string | null;
+  preparation_id?: string;
+  phase: "starting" | "ready" | "publishing" | "published" | "blocked";
+  source_message_id?: string;
+  attempt_id?: string;
+  next_page: number;
 }

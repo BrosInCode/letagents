@@ -76,6 +76,14 @@ test("autonomous MCP workers retain the established full tool registry", () => {
   }
 });
 
+test('workspace capture tools are available to independent callers without duplicating supervised capture', () => {
+  for (const profile of ['autonomous_mcp_worker', 'interactive_desktop', 'supervised_room_turn', 'supervised_mcp_polling'] as const) {
+    for (const name of ['begin_workspace_capture', 'publish_workspace_capture']) {
+      assert.equal(discovered(profile).has(name), profile === 'autonomous_mcp_worker' || profile === 'interactive_desktop');
+    }
+  }
+});
+
 test("interactive desktop sessions retain rental tools", () => {
   const names = discovered("interactive_desktop");
   assert.equal(names.has("rental_list_requests"), true);

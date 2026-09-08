@@ -12,8 +12,9 @@ export const room_agent_work = pgTable("room_agent_work", {
   source_message_number: integer("source_message_number").notNull(),
   agent_key: text("agent_key").notNull(),
   owner_account_id: text("owner_account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
-  host_id: text("host_id").notNull(),
-  installation_id: text("installation_id").notNull(),
+  publisher_kind: text("publisher_kind").notNull().default("supervisor"),
+  host_id: text("host_id"),
+  installation_id: text("installation_id"),
   agent_instance_id: text("agent_instance_id").notNull(),
   publisher_revision: bigint("publisher_revision", { mode: "number" }).notNull(),
   summary_digest: text("summary_digest").notNull(),
@@ -25,6 +26,7 @@ export const room_agent_work = pgTable("room_agent_work", {
   recent_idx: index("room_agent_work_recent_idx").on(table.room_id, table.updated_at, table.attempt_id),
   revision_check: check("room_agent_work_revision_check", sql`${table.publisher_revision} BETWEEN 1 AND 9007199254740991`),
   summary_size_check: check("room_agent_work_summary_size_check", sql`octet_length(${table.summary}::text) <= 524288`),
+  publisher_check: check("room_agent_work_publisher_check", sql`(${table.publisher_kind} = 'supervisor' AND ${table.host_id} IS NOT NULL AND ${table.installation_id} IS NOT NULL) OR (${table.publisher_kind} = 'independent_worker' AND ${table.host_id} IS NULL AND ${table.installation_id} IS NULL)`),
 }));
 
 // Paged immutable review payloads are never selected by timeline polling.

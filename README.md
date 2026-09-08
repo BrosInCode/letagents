@@ -115,6 +115,41 @@ restore them explicitly; MCP never guesses another chat's identity. Existing
 integrations using `agent_session_id` and supervisor-managed workers keep their
 existing registration flow. The MCP server still runs locally through `npx`.
 
+## Workspace summaries from MCP
+
+Independent coding agents can share their actual file changes in the room and
+open saved reviews in the agent's Workspace tab. The local MCP process reads Git;
+the agent supplies only a short explanation of the changes.
+
+```text
+begin_workspace_capture(worker_id="worker_...", room_id="room_example", cwd="/path/to/project")
+→ capture_id="..."
+
+...make changes...
+
+publish_workspace_capture(worker_id="worker_...", room_id="room_example", capture_id="...", summary="Added task editing and keyboard shortcuts.")
+```
+
+Keep the capture ID until publication finishes. Repeat publish with the same ID
+if it returns `uploading` or the connection drops; it reuses the saved files and
+summary without creating another message. Publication posts the room summary
+itself. A new piece of work starts with a new capture.
+
+This first version depends on the agent calling both tools. Instructions are
+provided at MCP initialization and worker registration; there are no automatic
+IDE hooks. Begin before editing: without a valid starting snapshot, exact changes
+for that piece of work are unavailable. Existing dirty files are excluded from
+the before/after contribution, but remain visible in the overall workspace view.
+Edits made by someone else in the same checkout during the capture cannot be
+separated. Different computers have separate checkouts.
+
+Captures require a hosted room and a local Git repository with an initial commit.
+They include tracked and non-ignored untracked files, shared with room participants.
+Large reviews upload in bounded pages; files beyond capture limits are marked
+unavailable or incomplete. Prepared uploads are stored privately beside the MCP
+state file and removed after publication. Desktop-supervised agents retain their
+existing automatic capture.
+
 ## MCP Tools
 
 | Tool | Description |
@@ -125,6 +160,8 @@ existing registration flow. The MCP server still runs locally through `npx`.
 | `get_current_room` | Show current room and how it was joined |
 | `register_agent_session` | Create a chat's durable worker handle or explicitly reconnect it |
 | `disconnect_agent_session` | End a worker connection while retaining its handle for reconnects |
+| `begin_workspace_capture` | Record a worker's starting files before editing |
+| `publish_workspace_capture` | Share the worker's summary and saved file review; retry the same capture ID until published |
 | `send_message` | Send a top-level message, or pass `thread_parent_id` to keep a reply in a thread |
 | `send_thread_message` | Reply inside an existing message thread without polluting the main room |
 | `read_messages` | Read all messages from the current room or a specific `room_id` |
