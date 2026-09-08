@@ -465,3 +465,52 @@ test("cancel during device-code startup ignores the late code", async () => {
     assert.equal(scheduled, 0);
   });
 });
+
+test("late transient failures cannot restart cancelled or replaced approval polling", async () => {
+  for (const action of ["cancelAuthFlow", "signOut", "startAuthFlow"] as const) {
+    for (const failure of ["unknown", "throw"] as const) {
+      let resolvePoll!: (result: unknown) => void;
+      let rejectPoll!: (error: Error) => void;
+      let nextTimer = 0;
+      const scheduled = new Map<number, () => void>();
+      const state = useDesktopAuthFlow({
+        authStatus: ref<DesktopAuthStatus | null>(authStatusFixture()),
+        getRoomIdentifier: () => null,
+        isFirstRunGate: () => false,
+        onFirstRunAuthorized: async () => undefined,
+        onAuthorized: async () => undefined,
+        onSignedOut: async () => undefined,
+      });
+      const signedOut = { ...authStatusFixture(), pendingDeviceAuth: null };
+      await withDesktopBridge({
+        setTimeout: (callback: () => void) => {
+          scheduled.set(++nextTimer, callback);
+          return nextTimer;
+        },
+        clearTimeout: (id: number) => scheduled.delete(id),
+        letagentsDesktop: { auth: {
+          pollDeviceFlow: () => new Promise((resolve, reject) => {
+            resolvePoll = resolve;
+            rejectPoll = reject;
+          }),
+          cancelDeviceFlow: async () => signedOut,
+          signOut: async () => signedOut,
+          startDeviceFlow: async () => ({ authStatus: authStatusFixture() }),
+        } },
+      }, async () => {
+        const pending = state.pollAuthFlow({ automatic: true });
+        await state[action]();
+        const timersBefore = [...scheduled.keys()];
+        const statusBefore = state.authStatus.value;
+        const feedbackBefore = state.authFeedback.value;
+        if (failure === "throw") rejectPoll(new Error("Network unavailable"));
+        else resolvePoll({ status: "unknown", authStatus: authStatusFixture(), error: "Network unavailable" });
+        await pending;
+        assert.deepEqual([...scheduled.keys()], timersBefore, `${action}/${failure}`);
+        assert.equal(state.authStatus.value, statusBefore);
+        assert.equal(state.authFeedback.value, feedbackBefore);
+        state.clearAuthPollTimer();
+      });
+    }
+  }
+});
