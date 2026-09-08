@@ -830,6 +830,34 @@ describe("room chat helpers", () => {
     );
   });
 
+  it("renders local-file Markdown as clean filenames in full chat messages", () => {
+    const path = "/Users/emmy/.letagents/worktrees/todo-app/workspace-file-open-qa-20260908.md";
+    const html = renderMessageText(`### Workspace file QA\n- Created [test file](${path}).\n- Everything else was preserved.`, "");
+    assert.equal(html, '<h3>Workspace file QA</h3><ul><li>Created <code>workspace-file-open-qa-20260908.md</code>.</li><li>Everything else was preserved.</li></ul>');
+    assert.doesNotMatch(html, /href|\/Users|\[test file\]/);
+    for (const target of ["./src/App.tsx", "../src/App.tsx", "src/App.tsx", "App.tsx", "file:///Users/emmy/App.tsx", "C:\\project\\App.tsx"]) {
+      assert.equal(renderMessageText(`[file](${target})`, ""), '<p><code>App.tsx</code></p>');
+    }
+    assert.equal(renderMessageText('[file](<./My Project/My File.md>) and [build](Dockerfile)', ""), '<p><code>My File.md</code> and <code>Dockerfile</code></p>');
+  });
+
+  it("shortens standalone file paths without changing executable code or web links", () => {
+    assert.equal(renderMessageText('Path: `/Users/emmy/project/App.tsx` and ./src/test.ts.', ""), '<p>Path: <code>App.tsx</code> and <code>test.ts</code>.</p>');
+    for (const command of ["/usr/bin/python3 script.py", "./scripts/run.sh input.txt", "/bin/cat /tmp/App.tsx"]) {
+      assert.equal(renderMessageText("`" + command + "`", ""), `<p><code>${command}</code></p>`);
+    }
+    assert.equal(renderMessageText('Run `cat /Users/emmy/project/App.tsx`. Route /api/health.', ""), '<p>Run <code>cat /Users/emmy/project/App.tsx</code>. Route /api/health.</p>');
+    assert.equal(renderMessageText('```sh\ncat /Users/emmy/project/App.tsx\n```', ""), '<pre><code class="language-sh">cat /Users/emmy/project/App.tsx</code></pre>');
+    assert.equal(renderMessageText('[PR](https://github.com/owner/repo/pull/1)', ""), '<p><a href="https://github.com/owner/repo/pull/1" target="_blank" rel="noopener noreferrer">PR</a></p>');
+  });
+
+  it("escapes file names and never creates local or executable URL links", () => {
+    const html = renderMessageText('Created /tmp/%3Cimg%20src=x%20onerror=alert(1)%3E.md [x](javascript:alert) [x](file:///tmp/%3Cscript%3E.md)', "");
+    assert.doesNotMatch(html, /<img|<script|href=/);
+    assert.match(html, /&lt;script&gt;\.md/);
+    assert.doesNotMatch(renderMessageText('[bad](./a\"onmouseover=evil.md)', ""), /<code>[^<]*"/);
+  });
+
   it("links loaded message id references in desktop message text", () => {
     assert.equal(
       renderMessageText("See msg_6's note, not msg_99.", "", new Set(["msg_6"])),
