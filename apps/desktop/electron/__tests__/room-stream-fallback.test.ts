@@ -53,6 +53,41 @@ mock.module("../main/agents/codex-supervisor.js", {
   },
 });
 
+// Delay only storage selection; keep the real resolver for the transport suite.
+const localStore = await import("../main/rooms/local-store.js");
+type RoomStorage = Awaited<ReturnType<typeof localStore.resolveLocalAwareRoomStorageMode>>;
+const deferredStorage = new Map<string, Promise<RoomStorage>>();
+mock.module("../main/rooms/local-store.js", {
+  namedExports: {
+    ...localStore,
+    resolveLocalAwareRoomStorageMode: (roomIdentifier: string) =>
+      deferredStorage.get(roomIdentifier)
+      ?? localStore.resolveLocalAwareRoomStorageMode(roomIdentifier),
+  },
+});
+
+const localMessages = await import("../main/rooms/messages/local-store.js");
+const localPollRooms: string[] = [];
+mock.module("../main/rooms/messages/local-store.js", {
+  namedExports: {
+    ...localMessages,
+    getLocalChatMessages: (...args: Parameters<typeof localMessages.getLocalChatMessages>) => {
+      localPollRooms.push(args[0]);
+      return localMessages.getLocalChatMessages(...args);
+    },
+  },
+});
+
+function deferStorage(roomIdentifier: string) {
+  let resolve!: (storage: RoomStorage) => void;
+  let reject!: (error: Error) => void;
+  deferredStorage.set(roomIdentifier, new Promise<RoomStorage>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  }));
+  return { resolve, reject };
+}
+
 const {
   startDesktopRoomStream,
   stopDesktopRoomStream,
@@ -311,10 +346,12 @@ function emittedMessage(id: string) {
 
 test.beforeEach(() => {
   emitted.length = 0;
+  localPollRooms.length = 0;
 });
 
 test.afterEach(async () => {
   await stopDesktopRoomStream();
+  deferredStorage.clear();
 });
 
 test("healthy SSE with an empty snapshot establishes the first cursor before reading live frames", async () => {
@@ -1207,5 +1244,109 @@ test("a live broker gap repairs missed targeted messages and tasks exactly once"
   } finally {
     router.restore();
     await stopDesktopRoomStream();
+  }
+});
+
+
+test("a delayed local startup cannot attach to the replacement cloud room", async () => {
+  const router = installFetchRouter();
+  const localRoom = "local_stale_start";
+  const pending = deferStorage(localRoom);
+  try {
+    const startingLocal = startDesktopRoomStream(localRoom);
+    await startDesktopRoomStream(ROOM);
+    const eventCount = emitted.length;
+    const localStorage = await localStore.resolveLocalAwareRoomStorageMode(localRoom);
+    pending.resolve({ ...localStorage, effectiveMode: "local" });
+    await startingLocal;
+    assert.equal(getActiveRoomIdentifier(), ROOM);
+    assert.equal(router.streamCalls.length, 1);
+    assert.equal(emitted.length, eventCount);
+    assert.deepEqual(localPollRooms, []);
+    assert.ok(router.pollCalls.every((call) => call.url.includes(ROOM)));
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("stopping during storage selection prevents late transport and readiness events", async () => {
+  const router = installFetchRouter();
+  const pending = deferStorage(ROOM);
+  try {
+    const starting = startDesktopRoomStream(ROOM);
+    await Promise.resolve();
+    await stopDesktopRoomStream();
+    pending.resolve(await localStore.resolveLocalAwareRoomStorageMode(ROOM));
+    await starting;
+    await sleep(CATCH_UP_RETRY_MS + 20);
+    assert.equal(getActiveRoomIdentifier(), null);
+    assert.equal(router.streamCalls.length, 0);
+    assert.equal(router.pollCalls.length, 0);
+    assert.deepEqual(emitted, []);
+  } finally {
+    router.restore();
+  }
+});
+
+test("concurrent same-room starts share startup and readiness", async () => {
+  const router = installFetchRouter();
+  const pending = deferStorage(ROOM);
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    const first = startDesktopRoomStream(ROOM);
+    let secondReady = false;
+    const second = startDesktopRoomStream(ROOM).then(() => { secondReady = true; });
+    await Promise.resolve();
+    assert.equal(secondReady, false);
+    pending.resolve(await localStore.resolveLocalAwareRoomStorageMode(ROOM));
+    await waitUntil(() => router.streamCalls.length > 0);
+    assert.equal(secondReady, false);
+    sse.pushRoomSync(null);
+    await Promise.all([first, second]);
+    assert.equal(router.streamCalls.length, 1);
+    await stopDesktopRoomStream();
+    assert.ok(router.streamCalls.every((call) => call.signal.aborted));
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("concurrent different-room starts open only the latest transport", async () => {
+  const router = installFetchRouter();
+  try {
+    const first = startDesktopRoomStream("superseded_room");
+    const second = startDesktopRoomStream(ROOM);
+    await Promise.all([first, second]);
+    assert.equal(getActiveRoomIdentifier(), ROOM);
+    assert.equal(router.streamCalls.length, 1);
+    assert.ok(router.streamCalls[0]!.url.includes(ROOM));
+    await stopDesktopRoomStream();
+    assert.ok(router.streamCalls.every((call) => call.signal.aborted));
+    assert.ok(router.pollCalls.every((call) => call.signal.aborted));
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("failed storage selection cleans up startup and permits a same-room retry", async () => {
+  const router = installFetchRouter();
+  const pending = deferStorage(ROOM);
+  try {
+    const starting = startDesktopRoomStream(ROOM);
+    const sameRoom = startDesktopRoomStream(ROOM);
+    pending.reject(new Error("storage unavailable"));
+    await assert.rejects(starting, /storage unavailable/);
+    await sameRoom;
+    assert.equal(getActiveRoomIdentifier(), null);
+    deferredStorage.delete(ROOM);
+    await startDesktopRoomStream(ROOM);
+    assert.equal(router.streamCalls.length, 1);
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
   }
 });
