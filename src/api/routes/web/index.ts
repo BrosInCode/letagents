@@ -66,6 +66,10 @@ export function registerWebRoutes(app: Express): void {
     sendVueApp(res);
   });
 
+  app.get("/join/:organizationId", (_req, res) => {
+    sendVueApp(res);
+  });
+
   app.get("/app", (_req, res) => {
     res.redirect(301, "/");
   });

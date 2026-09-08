@@ -55,6 +55,7 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'organizations.pendingInvite': return links.getPendingCompanyLink();
     case 'organizations.acknowledgeInvite': links.acknowledgeCompanyLink(args[0]); return;
     case 'app.getInfo': return { appName: 'LetAgents', appVersion: 'test', platform: 'darwin', versions: process.versions, workspaceRoot: profile, homePath: profile, apiUrl: 'https://letagents.chat' };
+    case 'rental.getMarketplace': return { providers: [] };
     case 'room.getSnapshot': return snapshot(args[0] || undefined);
     case 'room.listAccountRooms': return [];
     case 'room.getSourceStates': return {};
@@ -106,6 +107,8 @@ try {
   failOrganizations = false;
   await js(`document.querySelector('#company-scope').value = ''; document.querySelector('#company-scope').dispatchEvent(new Event('change', {bubbles:true}));`);
   await waitFor(`document.querySelector('#company-scope')?.value === ''`);
+  await click('[data-testid="sidebar-rent"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="rent-marketplace-view"]'))`);
   links.acceptCompanyLink('letagents://join/42');
   assert.equal(links.getPendingCompanyLink(), '42');
   const reloadedLinks = await import(`../../dist-electron/main/company-links.js?restart=${Date.now()}`);
@@ -114,12 +117,19 @@ try {
   assert.equal(links.getPendingCompanyLink(), '42');
   window.webContents.send('fixture:invite', '42');
   await waitFor(`document.body.innerText.includes('following a company invitation') && !document.querySelector('.company-choice')?.disabled`);
+  assert.equal(await js(`Boolean(document.querySelector('[data-testid="rent-marketplace-view"]'))`), false);
   await capture('06-company-invitation.png');
   await click('.company-choice');
   await waitFor(`!document.body.innerText.includes('following a company invitation')`);
   assert.equal(links.getPendingCompanyLink(), null);
+  await click('[data-testid="sidebar-new-room"]');
+  await click('[data-testid="new-room-intent-join"]');
+  await js(`const input = document.querySelector('[data-testid="new-room-join-input"]'); input.value = 'github.com/alex/personal'; input.dispatchEvent(new Event('input', { bubbles: true }));`);
+  await click('[data-testid="new-room-join-submit"]');
+  await waitFor(`document.querySelector('#company-scope')?.value === '' && !document.querySelector('[data-testid="company-home"]')`);
+  await capture('07-explicit-personal-room.png');
   assert.deepEqual(errors, [], 'renderer must not report uncaught errors');
-  const report = { passed: true, checks: ['first-run owner setup', 'member waiting for owner', 'repo is room selection', 'company sidebar', 'multi-company empty state', 'provider failure and retry', 'personal fallback', 'native invite persistence and acknowledgement', 'signed-in invitation'], consoleErrors: errors, calls: [...new Set(calls)] };
+  const report = { passed: true, checks: ['first-run owner setup', 'member waiting for owner', 'repo is room selection', 'company sidebar', 'multi-company empty state', 'provider failure and retry', 'personal fallback', 'native invite persistence and acknowledgement', 'signed-in invitation', 'invitation replaces marketplace', 'explicit outside-company room opens in personal scope'], consoleErrors: errors, calls: [...new Set(calls)] };
   writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ passed: true, output, consoleErrors: errors }, null, 2));
 } catch (error) {

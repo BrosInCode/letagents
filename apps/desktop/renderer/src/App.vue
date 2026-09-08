@@ -284,7 +284,7 @@
       />
 
       <RentMarketplaceView
-        v-else-if="activeEntry.type === 'marketplace'"
+        v-else-if="!showCompanyHome && activeEntry.type === 'marketplace'"
         :rooms="settingsAccountRooms"
         :initial-role="rentMarketplaceRole"
       />
@@ -579,7 +579,7 @@ const {
   cycleSidebar: toggleSidebarMode,
   focusRooms,
   getAuthRoomIdentifier,
-  openRoomSnapshot,
+  openRoomSnapshot: openNavigationRoomSnapshot,
   pinnedCollapsed,
   pinnedRoom,
   projectEntries,
@@ -725,6 +725,16 @@ const sidebarProjectEntries = computed(() =>
 const showCompanyHome = computed(() => Boolean(pendingCompanyInvite.value) || activeEntry.value.type === "room" && !sidebarProjectEntries.value.some((project) =>
   [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id && entry.roomIdentifier)
 ));
+function openRoomSnapshot(...args: Parameters<typeof openNavigationRoomSnapshot>): void {
+  openNavigationRoomSnapshot(...args);
+  // An explicit room open must remain reachable even when it is outside the
+  // selected company's connected repositories (including ad-hoc rooms).
+  if (company.selectedId.value && !sidebarProjectEntries.value.some((project) =>
+    [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id)
+  )) {
+    void company.choose(null);
+  }
+}
 async function chooseSidebarCompany(id: string | null): Promise<void> {
   const invite = pendingCompanyInvite.value;
   cancelSidebarRoomSelection();
