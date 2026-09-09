@@ -491,3 +491,109 @@ test("retry coordinator suppresses duplicate receipts and isolates concurrent su
   if (!pineResult.ok && pineResult.started) assert.equal(pineResult.error, failure);
   assert.equal(coordinator.retryingKeys.value.size, 0);
 });
+
+test("viewport bounds scroll geometry work and preserves reading offsets through reflow and prepend", async () => {
+  const props = Vue.reactive({
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
+    loadingOlderMessages: false, messages: [message()], threadMessages: [], messageNamespace: "scroll-test",
+    localAgentWork: [], deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
+    roomIdentifier: "room", githubActivityAvailable: false, roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
+  });
+  let afterRender = () => {};
+  const visible = Vue.ref(true);
+  const component = { setup() {
+    Vue.onUpdated(() => afterRender());
+    return () => {
+      const viewportProps = { ...props };
+      return Vue.h(Vue.KeepAlive, null, { default: () => visible.value ? Vue.h(RoomMessageViewport, viewportProps) : null });
+    };
+  } };
+  const { root, app } = mount(component, {});
+  await nextTick();
+  const list = descendants(root).find(node => node.props["data-testid"] === "room-chat-list")!;
+  let geometryReads = 0;
+  let queries = 0;
+  let layoutShift = 0;
+  const nodes = Array.from({ length: 5_000 }, (_, index) => ({
+    dataset: { messageId: `message_${index}` },
+    getBoundingClientRect: () => {
+      geometryReads++;
+      const top = index * 40 + layoutShift - list.scrollTop;
+      return { top, bottom: top + 40 };
+    },
+  }));
+  let currentNodes = nodes;
+  Object.assign(list, {
+    isConnected: true, clientHeight: 600, scrollHeight: 200_000, scrollTop: 198_015,
+    getClientRects: () => [{}],
+    getBoundingClientRect: () => { geometryReads++; return { top: 0 }; },
+    querySelectorAll: () => { queries++; return currentNodes; },
+  });
+  const scroll = list.props.onScroll as () => void;
+  try {
+    scroll();
+    assert.ok(geometryReads <= 16, `one scroll used ${geometryReads} geometry reads`);
+    await nextTick();
+    scroll();
+    const previousQueries = queries;
+    geometryReads = 0;
+    for (let index = 0; index < 10; index++) { list.scrollTop -= 1; scroll(); }
+    assert.equal(queries, previousQueries, "steady scrolling reuses the DOM node index");
+    assert.ok(geometryReads <= 160, `ten scrolls used ${geometryReads} geometry reads`);
+
+    const viewportInstance = app._instance!.subTree.component!.subTree.component!;
+    const exposed = viewportInstance.exposed as { preserveScrollAnchorOnNextLayout: () => void };
+    const readingPosition = list.scrollTop;
+    exposed.preserveScrollAnchorOnNextLayout();
+    layoutShift = 135;
+    await nextTick();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(list.scrollTop, readingPosition + 135, "thread/resize reflow preserves the visible message offset");
+
+    const beforePrepend = list.scrollTop;
+    const beforeQuery = queries;
+    afterRender = () => {
+      layoutShift += 80;
+      currentNodes = [{ dataset: { messageId: "older" }, getBoundingClientRect: () => ({ top: -list.scrollTop, bottom: 80 - list.scrollTop }) }, ...nodes];
+      afterRender = () => {};
+    };
+    props.messages = [message("older"), message()];
+    await nextTick();
+    await nextTick();
+    assert.equal(list.scrollTop, beforePrepend + 80, "prepend preserves the original anchor offset");
+    assert.ok(queries > beforeQuery, "a changed timeline refreshes the DOM index");
+
+    props.active = false;
+    await nextTick();
+    const inactiveReads = geometryReads;
+    scroll();
+    assert.equal(geometryReads, inactiveReads, "inactive rooms ignore scroll events");
+    props.active = true;
+    await nextTick();
+    scroll();
+    assert.equal(list.scrollTop, beforePrepend + 80, "reactivation retains the reading position");
+
+    visible.value = false;
+    await nextTick();
+    Object.assign(list, { isConnected: false });
+    layoutShift += 50;
+    Object.assign(list, { isConnected: true });
+    visible.value = true;
+    await nextTick();
+    await nextTick();
+    assert.equal(list.scrollTop, beforePrepend + 130, "KeepAlive restores the message offset after reactivation reflow");
+
+    let smoothScroll: ScrollToOptions | undefined;
+    list.scrollTo = options => { smoothScroll = options; };
+    const latest = descendants(root).find(node => node.props["data-testid"] === "desktop-new-messages-pill")!;
+    (latest.props.onClick as () => void)();
+    assert.deepEqual(smoothScroll, { top: list.scrollHeight, behavior: "smooth" });
+    // The browser produces intermediate scroll events during smooth follow.
+    list.scrollTop = list.scrollHeight - list.clientHeight;
+    scroll();
+    props.messages = [...props.messages, { ...message("message_z"), timestamp: "2026-07-20T12:01:00.000Z" }];
+    await nextTick();
+    await nextTick();
+    assert.equal(list.scrollTop, list.scrollHeight, "new messages continue following the bottom");
+  } finally { app.unmount(); }
+});
