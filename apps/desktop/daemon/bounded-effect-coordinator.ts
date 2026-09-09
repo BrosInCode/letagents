@@ -160,6 +160,10 @@ export type BoundedEffectHandoffPort = {
 export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
   private readonly journalReservations = new Set<Promise<void>>();
   private readonly externalExecutions = new Set<Promise<void>>();
+  private readonly activeRequests = new Map<string, {
+    payload: string;
+    result: Promise<Record<string, unknown>>;
+  }>();
 
   constructor(private readonly options: BoundedEffectCoordinatorOptions) {}
 
@@ -168,7 +172,27 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
   }
 
   async execute(input: ExecuteBoundedToolInput): Promise<Record<string, unknown>> {
-    return this.reserveExecution(() => this.executeOnce(input));
+    const key = JSON.stringify([
+      input.entryId, input.workAttemptId, input.executionGenerationId,
+      input.daemonGeneration, input.providerTurnId, input.mcpRequestId,
+    ]);
+    const payload = JSON.stringify([input.toolName, input.input]);
+    const active = this.activeRequests.get(key);
+    if (active) {
+      if (active.payload !== payload) {
+        throw new Error("A supervised MCP request id was reused for a different effect; refusing ambiguous execution.");
+      }
+      // Sharing an admitted execution must not grant a stale turn authority.
+      await this.options.context.exactActive(input);
+      return active.result;
+    }
+    // A live retry is not crash recovery. Keep it out of prepareEffect until
+    // the original execution AND its result checkpoint have settled.
+    const result = this.reserveExecution(() => this.executeOnce(input)).finally(() => {
+      this.activeRequests.delete(key);
+    });
+    this.activeRequests.set(key, { payload, result });
+    return result;
   }
 
   async executeOnce(input: ExecuteBoundedToolInput): Promise<Record<string, unknown>> {
