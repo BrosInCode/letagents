@@ -910,3 +910,28 @@ it("a stream-confirmed message stays sent when the pending HTTP request fails", 
     assert.equal(state.visibleMessages.value[0]?.outgoing, undefined);
   });
 });
+
+it("outbox rows and stream reconciliation stay in the original storage namespace", async () => {
+  clearDesktopMessageOutbox();
+  let finish!: (value: { message: DesktopRoomMessage }) => void;
+  let capturedNamespace: unknown;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    sendMessage: (...args: unknown[]) => { capturedNamespace = args[6]; return new Promise(resolve => { finish = resolve; }); },
+  } } }, async () => {
+    const namespace = ref("room:cloud:cloud");
+    const messages = ref<DesktopRoomMessage[]>([]);
+    const state = useDesktopRoomMessages({ room: ref(roomInfo()), messageNamespace: namespace, messages, githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() {} });
+    const pending = state.sendRoomMessage("Cloud send");
+    const clientId = state.visibleMessages.value[0]!.clientMessageId;
+    namespace.value = "room:local:room"; await nextTick();
+    messages.value = [roomMessage({ id: "msg_7", clientMessageId: clientId })]; await nextTick();
+    assert.equal(desktopMessageOutbox.value.length, 1, "local echo cannot acknowledge a cloud send");
+    messages.value = []; await nextTick();
+    assert.equal(state.visibleMessages.value.length, 0);
+    assert.equal(capturedNamespace, "room:cloud:cloud");
+    namespace.value = "room:cloud:cloud"; await nextTick();
+    assert.equal(state.visibleMessages.value.length, 1);
+    finish({ message: roomMessage({ id: "msg_8", text: "Cloud send" }) }); await pending;
+  });
+  clearDesktopMessageOutbox();
+});

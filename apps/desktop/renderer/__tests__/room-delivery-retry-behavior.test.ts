@@ -670,3 +670,34 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
   }
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;
 });
+
+test("outgoing row exposes sending, uncertain retry, and confirmed state without server actions", async () => {
+  const outbox = await vite.ssrLoadModule("/renderer/src/domain/message-outbox.ts");
+  outbox.clearDesktopMessageOutbox();
+  let reject!: (error: Error) => void;
+  let resolve!: (value: { message: DesktopRoomMessage }) => void;
+  const calls: unknown[][] = [];
+  Object.assign(window, { letagentsDesktop: { room: {
+    sendMessage: (...args: unknown[]) => { calls.push(args); return new Promise((done, fail) => { resolve = done; reject = fail; }); },
+  } } });
+  const id = outbox.enqueueDesktopMessage({ roomIdentifier: "room", messageNamespace: null, text: "Hello", replyTo: null, threadRootId: null, attachments: [], replyPreview: null, onConfirmed() {} });
+  const component = { setup: () => () => Vue.h(DesktopChatMessage, {
+    message: outbox.desktopMessageOutbox.value[0].message, threadSummary: emptyThreadSummary,
+    deliveryReceipts: [], activeThreadRoot: false,
+  }) };
+  const { root, app } = mount(component, {});
+  try {
+    const sending = outbox.retryDesktopOutgoingMessage(id);
+    await nextTick();
+    assert.ok(descendants(root).some(node => node.text.includes("Sending…")));
+    assert.equal(buttons(root).some(node => node.props["aria-label"] === "Quote reply"), false);
+    reject(new Error("Timed out")); await sending; await nextTick();
+    assert.ok(descendants(root).some(node => node.text.includes("Delivery not confirmed")));
+    const retry = (buttonByText(root, "Retry safely").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(calls[0], calls[1]);
+    resolve({ message: { ...message("msg_2"), clientMessageId: id } }); await retry; await nextTick();
+    assert.equal(descendants(root).some(node => node.props.class === "room-message-outgoing"), false);
+    assert.equal(buttons(root).some(node => node.props["aria-label"] === "Quote reply"), true);
+  } finally { app.unmount(); outbox.clearDesktopMessageOutbox(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});

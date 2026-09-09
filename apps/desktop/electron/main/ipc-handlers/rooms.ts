@@ -294,8 +294,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
       clientMessageId?: string | null,
+      messageNamespace?: string | null,
     ): Promise<DesktopSendRoomMessageResult> => {
-      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId);
+      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId, messageNamespace);
       // Local dispatch is secondary to the saved message acknowledgement.
       // Keep its routing/retry path running without making the user resend.
       void Promise.resolve().then(() =>
