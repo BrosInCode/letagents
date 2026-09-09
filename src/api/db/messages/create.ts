@@ -172,7 +172,7 @@ export async function addMessageWithCreateStatus(
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
-  const result = await db.transaction(async (tx): Promise<AddMessageTransactionResult> => {
+  const result = await db.transaction(async (tx): Promise<AddMessageResult> => {
     // Transitional projection repair can inspect a legacy thread on the first
     // post-watermark reply. Bound that work—and every other statement in this
     // atomic send—so a pathological archive cannot wedge an API worker.
@@ -194,12 +194,12 @@ export async function addMessageWithCreateStatus(
         .limit(1);
 
       if (existingMessage) {
-        return {
+        return hydrateCreatedMessage(roomId, {
           messageRow: existingMessage,
           created: false,
           recipientAgentKeys: [],
           recipientAgentTargets: [],
-        };
+        }, options, tx);
       }
     }
 
@@ -285,12 +285,12 @@ export async function addMessageWithCreateStatus(
         if (!existingMessage) {
           throw new Error("message idempotency conflict could not be resolved");
         }
-        return {
+        return hydrateCreatedMessage(roomId, {
           messageRow: existingMessage,
           created: false,
           recipientAgentKeys: [],
           recipientAgentTargets: [],
-        };
+        }, options, tx);
       }
       createdMessage = insertedMessage;
     } else {
@@ -860,21 +860,37 @@ export async function addMessageWithCreateStatus(
       }
     }
 
-    return {
+    return hydrateCreatedMessage(roomId, {
       messageRow: createdMessage,
       created: true,
       recipientAgentKeys,
       recipientAgentTargets,
-    };
+    }, options, tx);
   });
   if (repliedReceiptTargets.size > 0) {
     // Dynamic import avoids a module cycle; room-level so the shared stream
     // never enumerates ids that may be concealed from some participants.
-    const { queueMessageInfoInvalidation } = await import("../../server/message-info-events.js");
-    queueMessageInfoInvalidation(roomId, null);
+    void import("../../server/message-info-events.js").then(({ queueMessageInfoInvalidation }) => {
+      queueMessageInfoInvalidation(roomId, null);
+    }).catch((error) => {
+      console.error(`[room messages] failed receipt invalidation for ${roomId}`, error);
+    });
   }
+  return result;
+}
+
+// Build the complete acknowledgement before commit: a failed attachment,
+// thread, or routing read must roll back the write rather than strand an
+// unpublished message that idempotent retries can no longer publish.
+async function hydrateCreatedMessage(
+  roomId: string,
+  result: AddMessageTransactionResult,
+  options: AddMessageOptions | undefined,
+  tx: MessageCreateTransaction,
+): Promise<AddMessageResult> {
   const [hydrated] = await hydrateMessageReplies(roomId, [result.messageRow], {
     accountId: null,
+    executor: tx,
   });
   const canonicalMessage = hydrated ?? toMessageWithReply(result.messageRow, null);
   let message = canonicalMessage;
@@ -885,10 +901,10 @@ export async function addMessageWithCreateStatus(
         ? getMessageThreadReadOverlays(roomId, [{
             root_message_id: canonicalMessage.thread.root_message_id,
             reply_count: canonicalMessage.thread.reply_count,
-          }], [accountId])
+          }], [accountId], tx)
         : Promise.resolve(new Map()),
       options?.account_agent_routing
-        ? getMessageAccountAgentRouting(db, roomId, accountId, [result.messageRow])
+        ? getMessageAccountAgentRouting(tx, roomId, accountId, [result.messageRow])
         : Promise.resolve(new Map()),
     ]);
     const readOverlay = canonicalMessage.thread
