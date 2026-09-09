@@ -840,3 +840,24 @@ test("acceptance after switching threads clears only the original submitted text
     assert.equal(descendants(view.root).some(node => node.props["data-testid"] === "room-thread-quote-preview"), false);
   } finally { view.app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
 });
+
+test("attachment-only thread acceptance restores composer focus without requiring stored text", async () => {
+  messageDrafts.clearDesktopMessageDrafts();
+  const { root, app } = mount(RoomThreadPanel, {
+    parent: message(), replies: [], participants: [], roomIdentifier: "attachment-focus", draftNamespace: "attachment-focus:cloud:cloud",
+    sending: false, sendError: null, attaching: false,
+    attachmentDrafts: [{ uploadId: "upload-focus", fileName: "note.txt", mimeType: "text/plain", sizeBytes: 3, previewDataUrl: null }],
+    attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false,
+    searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
+    onSendThreadMessage: (...args: unknown[]) => (args.at(-1) as (accepted: boolean) => void)(true),
+  });
+  try {
+    const input = descendants(root).find(node => node.type === "textarea")!;
+    let focused = false;
+    input.focus = () => { focused = true; };
+    const form = descendants(root).find(node => node.type === "form")!;
+    (form.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+    await nextTick();
+    assert.equal(focused, true);
+  } finally { app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
+});

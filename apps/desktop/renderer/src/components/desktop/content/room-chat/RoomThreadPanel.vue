@@ -482,8 +482,8 @@ function submitThreadReply(): void {
     (sent) => {
       if (!sent) return;
       const cleared = clearSubmittedText();
-      if (!cleared || props.roomIdentifier !== roomIdentifier || props.parent.id !== parentId) return;
-      mentionQuery.value = null;
+      if (props.roomIdentifier !== roomIdentifier || props.parent.id !== parentId) return;
+      if (cleared) mentionQuery.value = null;
       void nextTick(() => textareaElement.value?.focus());
     },
   );
