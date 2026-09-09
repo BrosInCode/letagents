@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   BoundedEffectCoordinator,
   type BoundedEffectContext,
+  type BoundedEffectCoordinates,
   type BoundedEffectCoordinatorOptions,
   type CompleteBoundedEffectInput,
   type ExecuteBoundedToolInput,
@@ -121,6 +122,7 @@ function boundedContext(provider = "codex"): BoundedEffectContext {
 }
 
 type HarnessOptions = {
+  assertContext?: (input: BoundedEffectCoordinates) => void;
   provider?: string;
   prepareResult?: { created: boolean; effect: SupervisedEffectRecord };
   roomMoveResult?: { created: boolean; effect: SupervisedEffectRecord };
@@ -154,7 +156,8 @@ function harness(options: HarnessOptions = {}) {
   let subject!: BoundedEffectCoordinator;
   subject = new BoundedEffectCoordinator({
     context: {
-      exactActive: async () => {
+      exactActive: async (input) => {
+        options.assertContext?.(input);
         contextCalls += 1;
         events.push(`context:${contextCalls}`);
         return context;
@@ -566,4 +569,116 @@ test("complete preserves validation order, Cursor capability enforcement, and fe
   assert.deepEqual(await admitted.subject.completeOnce(completeInput(), true), { completed: true });
   assert.equal(admitted.events.includes("fence:ordinary"), false);
   assert.equal(admitted.events.includes("fence:admitted"), true);
+});
+
+test("overlapping read retries share execution through the durable checkpoint", { timeout: 2_000 }, async () => {
+  const started = deferred();
+  const finishRead = deferred();
+  const checkpointStarted = deferred();
+  const finishCheckpoint = deferred();
+  let executions = 0;
+  const state = harness({
+    runtimeMutation: false,
+    execute: async () => {
+      executions += 1;
+      started.resolve();
+      await finishRead.promise;
+      return { liveResult: { read: true }, durableResult: { read: true } };
+    },
+    complete: async () => {
+      checkpointStarted.resolve();
+      await finishCheckpoint.promise;
+      return effect({ state: "completed", result: { read: true } });
+    },
+  });
+  const input = executeInput({ toolName: "get_board", input: {} });
+  const requests = [state.subject.execute(input)];
+  try {
+    await started.promise;
+    requests.push(state.subject.execute(input));
+    await flushMicrotasks();
+    finishRead.resolve();
+    await checkpointStarted.promise;
+    requests.push(state.subject.execute(input));
+    // Let retries reach the journal if they are not coalesced. The checkpoint
+    // remains blocked, so no timing assumption can hide a duplicate read.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(executions, 1);
+    assert.equal(state.events.filter(event => event === "journal:prepare").length, 1);
+  } finally {
+    finishRead.resolve();
+    finishCheckpoint.resolve();
+    await Promise.allSettled(requests);
+  }
+  const results = await Promise.all(requests);
+  assert.deepEqual(results, results.map(() => ({ state: "completed", room_id: "room-a", result: { read: true } })));
+  // Settled in-memory coordination must not replace durable replay/recovery.
+  await state.subject.execute(input);
+  assert.equal(state.events.filter(event => event === "journal:prepare").length, 2);
+});
+
+test("overlap admission preserves payload, request and exact-turn authority", { timeout: 2_000 }, async () => {
+  const started = deferred();
+  const finish = deferred();
+  let stale = false;
+  let executions = 0;
+  const state = harness({
+    assertContext: (input) => {
+      if (stale || input.providerTurnId !== "turn-a") throw new Error("stale provider turn");
+    },
+    execute: async () => {
+      executions += 1;
+      started.resolve();
+      await finish.promise;
+      return { liveResult: {}, durableResult: {} };
+    },
+  });
+  const input = executeInput();
+  const original = state.subject.execute(input);
+  const pending = [original];
+  try {
+    await started.promise;
+    await assert.rejects(state.subject.execute({ ...input, input: { text: "changed" } }), /different effect/);
+    await assert.rejects(state.subject.execute({ ...input, toolName: "post_status" }), /different effect/);
+    stale = true;
+    await assert.rejects(state.subject.execute(input), /stale provider turn/);
+    stale = false;
+    await assert.rejects(state.subject.execute({ ...input, providerTurnId: "turn-old" }), /stale provider turn/);
+    pending.push(state.subject.execute({ ...input, mcpRequestId: "request-b" }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(executions, 2, "distinct requests retain independent execution");
+  } finally {
+    finish.resolve();
+    await Promise.allSettled(pending);
+  }
+});
+
+test("failed shared execution releases overlap coordination for journal recovery", { timeout: 2_000 }, async () => {
+  const started = deferred();
+  const finish = deferred();
+  const failure = new Error("callback failed");
+  let executions = 0;
+  const state = harness({
+    runtimeMutation: false,
+    execute: async () => {
+      executions += 1;
+      started.resolve();
+      await finish.promise;
+      if (executions === 1) throw failure;
+      return { liveResult: {}, durableResult: {} };
+    },
+  });
+  const input = executeInput({ toolName: "get_board", input: {} });
+  const first = state.subject.execute(input);
+  await started.promise;
+  const retry = state.subject.execute(input);
+  const rejected = Promise.all([
+    assert.rejects(first, error => error === failure),
+    assert.rejects(retry, error => error === failure),
+  ]);
+  finish.resolve();
+  await rejected;
+  assert.equal(executions, 1);
+  await state.subject.execute(input);
+  assert.equal(executions, 2, "settled failures return to the journal, which owns recovery policy");
 });
