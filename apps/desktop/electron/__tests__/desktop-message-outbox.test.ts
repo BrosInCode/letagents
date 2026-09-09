@@ -42,7 +42,7 @@ test("cloud retry forwards the same logical ID and exact attachment/thread paylo
     return Response.json({ id: "msg_4", client_message_id: body.client_message_id, sender: "Desktop", text: body.text, timestamp: new Date().toISOString() });
   };
   try {
-    const args = ["outbox-cloud-room", "Instruction", "msg_1", [{ upload_id: "upload" }], "msg_1", id] as const;
+    const args: Parameters<typeof sendDesktopRoomMessage> = ["outbox-cloud-room", "Instruction", "msg_1", [{ upload_id: "upload" }], "msg_1", id];
     await assert.rejects(sendDesktopRoomMessage(...args), /Response lost/);
     const retried = await sendDesktopRoomMessage(...args);
     assert.equal(retried.message.clientMessageId, id);
