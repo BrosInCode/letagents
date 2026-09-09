@@ -453,25 +453,27 @@ test("post-COMMIT prepare and completion errors recover from exact durable readb
 test("an exact failed terminal wins Stop without native dispatch, cancellation, or replay", async () => {
   for (const nativeFailure of ["failed", "interrupted"] as const) {
     for (const commitPostCommitError of [false, true]) {
-      const harness = effectFixture({ nativeFailure, missingReservation: true, commitPostCommitError });
+      for (const missingReservation of [false, true]) {
+        const harness = effectFixture({ nativeFailure, missingReservation, commitPostCommitError });
 
-      const result = await harness.subject.control(turnInput());
+        const result = await harness.subject.control(turnInput());
 
-      assert.equal(result.interrupted, false, "Stop did not interrupt an already ended turn");
-      assert.equal(result.resumed, false, "failed work is not replayed");
-      assert.equal(harness.providerCalls, 0, "no latest native turn may be stopped");
-      assert.equal(harness.commits, 1);
-      assert.equal(harness.current.turn_control?.status, "completed");
-      assert.match(harness.current.activity?.at(-1)?.summary ?? "", /ended unsuccessfully/);
-      assert.doesNotMatch(harness.current.activity?.at(-1)?.summary ?? "", /reply stands|cancelled/);
-      assert.equal(harness.deliveryDecisions.every((decision) => decision === "finish:resume"), true,
-        "release the reservation only for terminal fast-forward, never cancel or freeze it");
+        assert.equal(result.interrupted, false, "Stop did not interrupt an already ended turn");
+        assert.equal(result.resumed, false, "failed work is not replayed");
+        assert.equal(harness.providerCalls, 0, "no latest native turn may be stopped");
+        assert.equal(harness.commits, 1);
+        assert.equal(harness.current.turn_control?.status, "completed");
+        assert.match(harness.current.activity?.at(-1)?.summary ?? "", /ended unsuccessfully/);
+        assert.doesNotMatch(harness.current.activity?.at(-1)?.summary ?? "", /reply stands|cancelled/);
+        assert.equal(harness.deliveryDecisions.every((decision) => decision === "finish:resume"), true,
+          "release the reservation only for terminal fast-forward, never cancel or freeze it");
+      }
     }
   }
 });
 
 test("an exact terminal wins a race with native Stop without claiming Stop caused the failure", async () => {
-  const harness = effectFixture({ nativeFailure: "failed" });
+  const harness = effectFixture({ nativeFailure: "failed", failureAfterDispatch: true });
 
   const result = await harness.subject.control(turnInput());
 
@@ -485,7 +487,7 @@ test("an exact terminal wins a race with native Stop without claiming Stop cause
 test("uncertain Stop resolution preserves exact native failure even after completion readback", async () => {
   for (const resolution of ["applied", "not_applied"] as const) {
     const harness = effectFixture({
-      nativeFailure: "interrupted", providerFailure: "uncertain", commitPostCommitError: true,
+      nativeFailure: "interrupted", failureAfterDispatch: true, providerFailure: "uncertain", commitPostCommitError: true,
     });
     await assert.rejects(() => harness.subject.control(turnInput()), /secret-token/);
 
@@ -609,6 +611,7 @@ function effectFixture(options: {
   preparePostCommitError?: boolean;
   commitPostCommitError?: boolean;
   nativeFailure?: "failed" | "interrupted";
+  failureAfterDispatch?: boolean;
   runtimeFailureBeforeCommit?: "handle_and_durable" | "handle_only_at_fence" | "durable_only";
 } = {}) {
   const deliveryMode = options.deliveryMode ?? "daemon_inbox";
@@ -747,9 +750,9 @@ function effectFixture(options: {
       }),
     },
     inbox: {
-      get: async () => inboxItem(options.nativeFailure ? "acknowledged_failed"
+      get: async () => inboxItem(options.nativeFailure && (!options.failureAfterDispatch || providerCalls > 0) ? "acknowledged_failed"
         : current.turn_control?.status === "completed" ? "cancelled_by_user" : "awaiting_result"),
-      nativeFailure: async () => options.nativeFailure ?? null,
+      nativeFailure: async () => !options.failureAfterDispatch || providerCalls > 0 ? options.nativeFailure ?? null : null,
     },
     delivery: {
       activeTurn: () => null,
