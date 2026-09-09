@@ -28,6 +28,7 @@ export async function getMessageThreadReadOverlays(
   roomId: string,
   targets: readonly MessageThreadReadTarget[],
   accountIds: readonly string[],
+  executor: Pick<typeof db, "select"> = db,
 ): Promise<Map<string, Map<string, MessageThreadReadOverlay>>> {
   const targetByNumber = new Map<number, MessageThreadReadTarget>();
   for (const target of targets) {
@@ -52,7 +53,7 @@ export async function getMessageThreadReadOverlays(
     );
   }
 
-  const rows = await db
+  const rows = await executor
     .select({
       account_id: message_thread_reads.account_id,
       thread_root_number: message_thread_reads.thread_root_number,
