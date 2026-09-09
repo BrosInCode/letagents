@@ -580,21 +580,32 @@ export class TurnControlCoordinator {
           this.ports.delivery?.finishActiveDeliveryInterrupt(interruptedDelivery.current, "resume");
           interruptedDelivery.current = null;
         }
-        if (!interruptedDelivery.current) {
+        // Provider cleanup can retain the exact active reservation after its
+        // durable inbox outcome is terminal. The persisted outcome wins over
+        // that stale in-memory liveness; keep the reservation until the atomic
+        // correction commit releases it, without controlling the provider again.
+        try {
           const linked = await this.ports.inbox.get(prepared.linkedInboxItemId);
-          if (linked && (["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linked.state)
-            || await this.ports.inbox.nativeFailure(linked.inbox_item_id))) {
-            foldCompletedRetryWithoutNativeControl = true;
-          } else {
-            const message = "Turn control is waiting for its exact admitted FIFO invocation; no native latest-turn control was dispatched.";
-            await this.ports.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
-              && current.turn_control.status === "prepared"
-              ? { ...current, turn_control: { ...current.turn_control, status: "retryable", error: message, updated_at: new Date().toISOString() } }
-              : current);
-            try { await this.ports.wakeDelivery(entry.id); } catch { this.ports.scheduleRecovery(entry.id, 250); }
-            this.ports.requestConvergence(entry.id);
-            throw new Error(message);
-          }
+          foldCompletedRetryWithoutNativeControl = Boolean(linked
+            && (["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linked.state)
+              || await this.ports.inbox.nativeFailure(linked.inbox_item_id)));
+        } catch (error) {
+          const reservation = interruptedDelivery.current;
+          interruptedDelivery.current = null;
+          // No native control ran. Release only this lease; the prepared journal
+          // still fences later FIFO work, and an already frozen lease stays frozen.
+          if (reservation) this.ports.delivery?.resolveActiveDeliveryInterrupt(reservation, "resume");
+          throw error;
+        }
+        if (!foldCompletedRetryWithoutNativeControl && !interruptedDelivery.current) {
+          const message = "Turn control is waiting for its exact admitted FIFO invocation; no native latest-turn control was dispatched.";
+          await this.ports.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
+            && current.turn_control.status === "prepared"
+            ? { ...current, turn_control: { ...current.turn_control, status: "retryable", error: message, updated_at: new Date().toISOString() } }
+            : current);
+          try { await this.ports.wakeDelivery(entry.id); } catch { this.ports.scheduleRecovery(entry.id, 250); }
+          this.ports.requestConvergence(entry.id);
+          throw new Error(message);
         }
       } else {
         foldCompletedRetryWithoutNativeControl = true;

@@ -394,6 +394,7 @@ import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
+import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "./domain/desktop-message-drafts";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
@@ -423,6 +424,7 @@ import {
 } from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
+import { clearDesktopMessageOutbox } from "./domain/message-outbox";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
@@ -483,6 +485,8 @@ const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
+watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
+  setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
 const sessionGeneration = ref(0);
 const authDialogOpen = ref(false);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
@@ -1376,6 +1380,10 @@ const {
   onSignedOut: async () => undefined,
 });
 
+watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
+  if (next !== previous) clearDesktopMessageOutbox();
+}, { flush: "sync" });
+
 const showSignedOutGate = computed(() => (
   authSessionLocked.value || !authStatus.value?.authenticated
 ));
@@ -1385,6 +1393,8 @@ function startSignedOutAuthFlow(): Promise<void> {
 }
 
 function clearDesktopSessionState(): void {
+  clearDesktopMessageOutbox();
+  clearDesktopMessageDrafts();
   invalidateSession();
   clearLiveMetadataRefreshTimer();
   clearLiveMetadataRefreshInterval();

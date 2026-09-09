@@ -1,6 +1,8 @@
 import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 
 export interface Message {
+  /** Random desktop submission identity; internal publisher keys stay private. */
+  client_message_id?: string;
   id: string;
   agent_identity: MessageAgentIdentity | null;
   sender: string;

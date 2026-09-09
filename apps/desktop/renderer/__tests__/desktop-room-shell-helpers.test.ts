@@ -1,4 +1,6 @@
+import { clearDesktopMessageOutbox, desktopMessageOutbox, retryDesktopOutgoingMessage } from "../src/domain/message-outbox";
 import assert from "node:assert/strict";
+import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount, useDesktopMessageDraft } from "../src/domain/desktop-message-drafts";
 import { describe, it } from "node:test";
 import { nextTick, ref } from "vue";
 
@@ -311,6 +313,85 @@ describe("desktop room shell helpers", () => {
       assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1"]);
       assert.equal(hasFilteredRoomActivity.value, false);
     });
+  });
+
+  it("keeps failed history available and retries only on an explicit request", async () => {
+    let calls = 0;
+    await withWindowAsync({ letagentsDesktop: { room: {
+      async getMessagesBefore() {
+        calls += 1;
+        if (calls === 1) throw new Error("offline");
+        return { messages: [roomMessage({ id: "msg_1", text: "Earlier instruction" })], hasOlder: false };
+      },
+    } } }, async () => {
+      const state = useDesktopRoomMessages({
+        room: ref(roomInfo()),
+        messages: ref([roomMessage({ id: "msg_20", sender: "github", source: "github", text: "PR #558 opened in BrosInCode/letagents: Polish desktop focus room manager https://github.com/BrosInCode/letagents/pull/558" })]),
+        githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
+      });
+      await flushPromises();
+      await nextTick();
+      await flushPromises();
+      assert.equal(calls, 1, "filtered-history backfill must stop on failure");
+      assert.equal(state.hasOlderMessages.value, true);
+      assert.match(state.olderMessagesError.value!, /Retry/);
+      assert.equal(state.loadingOlderMessages.value, false);
+      await state.loadOlderMessages();
+      await flushPromises();
+      assert.equal(calls, 2);
+      assert.equal(state.olderMessagesError.value, null);
+      assert.equal(state.hasOlderMessages.value, false);
+      assert.ok(state.visibleMessages.value.some(message => message.id === "msg_1"));
+    });
+  });
+
+  it("stops an explicit reveal on history failure and allows another attempt", async () => {
+    let calls = 0;
+    await withWindowAsync({ letagentsDesktop: { room: {
+      async getMessagesBefore() { calls += 1; throw new Error("offline"); },
+    } } }, async () => {
+      const state = useDesktopRoomMessages({
+        room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_20", text: "Latest" })]),
+        githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
+      });
+      assert.equal(await state.revealMessage("msg_1"), false);
+      assert.equal(calls, 1);
+      assert.equal(state.hasOlderMessages.value, true);
+      assert.equal(await state.revealMessage("msg_1"), false);
+      assert.equal(calls, 2);
+    });
+  });
+
+  it("ignores stale history success and failure after leaving and returning to a room", async () => {
+    for (const fail of [false, true]) {
+      const pending: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
+      await withWindowAsync({ letagentsDesktop: { room: {
+        getMessagesBefore() { return new Promise((resolve, reject) => pending.push({ resolve, reject })); },
+      } } }, async () => {
+        const room = ref(roomInfo());
+        const state = useDesktopRoomMessages({
+          room, messages: ref([roomMessage({ id: "msg_20", text: "Latest" })]),
+          githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
+        });
+        const stale = state.loadOlderMessages();
+        room.value = { ...roomInfo(), identifier: "other-room" };
+        await nextTick();
+        room.value = roomInfo();
+        await nextTick();
+        const current = state.loadOlderMessages();
+        if (fail) pending[0].reject(new Error("stale failure"));
+        else pending[0].resolve({ messages: [roomMessage({ id: "stale" })], hasOlder: false });
+        await stale;
+        assert.equal(state.loadingOlderMessages.value, true);
+        assert.equal(state.olderMessagesError.value, null);
+        assert.equal(state.hasOlderMessages.value, true);
+        assert.equal(state.visibleMessages.value.some(message => message.id === "stale"), false);
+        pending[1].resolve({ messages: [roomMessage({ id: "current" })], hasOlder: false });
+        await current;
+        assert.equal(state.loadingOlderMessages.value, false);
+        assert.ok(state.visibleMessages.value.some(message => message.id === "current"));
+      });
+    }
   });
 
   it("matches reasoning fallback targets and builds pending sessions from latest agent activity", () => {
@@ -724,3 +805,169 @@ function restoreGlobalProperty(key: "Notification" | "window", descriptor: Prope
     delete (globalThis as Record<typeof key, unknown>)[key];
   }
 }
+
+it("local acceptance clears the composer immediately and keeps uncertain sends across room switches", async () => {
+  clearDesktopMessageOutbox();
+  let settle: (value: { message: DesktopRoomMessage }) => void = () => undefined;
+  let reject: (error: Error) => void = () => undefined;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    sendMessage: () => new Promise((resolve, fail) => { settle = resolve; reject = fail; }),
+  } } }, async () => {
+    const room = ref(roomInfo());
+    const originalRoom = room.value;
+    const completions: boolean[] = [];
+    const state = useDesktopRoomMessages({ room, messages: ref([]), githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() {} });
+    const failed = state.sendRoomMessage("draft", null, [{ upload_id: "upload-1" }], null, sent => completions.push(sent));
+    assert.equal(state.sendingMessage.value, false);
+    assert.deepEqual(completions, [true]);
+    assert.equal(state.visibleMessages.value[0]?.outgoing?.status, "pending");
+    reject(new Error("Offline")); await failed;
+    assert.equal(state.visibleMessages.value[0]?.outgoing?.status, "uncertain");
+    const oldSend = state.sendRoomMessage("old room");
+    const oldSettle = settle;
+    room.value = { ...room.value, identifier: "another-room" }; await nextTick();
+    const newSend = state.sendRoomMessage("new room");
+    oldSettle({ message: roomMessage({ id: "old", text: "old room" }) }); await oldSend;
+    assert.deepEqual(state.visibleMessages.value.map(message => message.text), ["new room"]);
+    settle({ message: roomMessage({ id: "new" }) }); await newSend;
+    assert.deepEqual(state.visibleMessages.value.map(message => message.id), ["new"]);
+    room.value = originalRoom; await nextTick();
+    assert.equal(state.visibleMessages.value.length, 2);
+    assert.equal(state.visibleMessages.value.some(message => message.outgoing?.status === "uncertain"), true);
+  });
+  clearDesktopMessageOutbox();
+});
+
+for (const streamFirst of [true, false]) {
+  it(`outgoing identity converges stream ${streamFirst ? "before" : "after"} HTTP without text matching`, async () => {
+    clearDesktopMessageOutbox();
+    let finish!: (value: { message: DesktopRoomMessage }) => void;
+    let clientId = "";
+    let confirmed = 0;
+    await withWindowAsync({ letagentsDesktop: { room: {
+      sendMessage: (_room: string, _text: string, _reply: unknown, _attachments: unknown, _thread: unknown, id: string) => {
+        clientId = id;
+        return new Promise(resolve => { finish = resolve; });
+      },
+    } } }, async () => {
+      const messages = ref<DesktopRoomMessage[]>([]);
+      const state = useDesktopRoomMessages({ room: ref(roomInfo()), messages, githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() { confirmed++; } });
+      const sending = state.sendRoomMessage("same text", "msg_1", [], "msg_1");
+      assert.equal(state.visibleMessages.value[0]?.threadRootId, "msg_1");
+      assert.equal(state.timelineMessages.value.length, 0);
+      const canonical = roomMessage({ id: "msg_2", text: "same text", clientMessageId: clientId, threadRootId: "msg_1", threadReplyToId: "msg_1" });
+      const unrelated = roomMessage({ id: "msg_3", text: "same text" });
+      if (streamFirst) { messages.value = [canonical, unrelated]; await nextTick(); }
+      finish({ message: canonical }); await sending;
+      if (!streamFirst) { messages.value = [canonical, unrelated]; await nextTick(); }
+      assert.deepEqual(state.visibleMessages.value.map(message => message.id), ["msg_2", "msg_3"]);
+      assert.equal(confirmed, 1);
+      assert.equal(desktopMessageOutbox.value.length, 0);
+    });
+  });
+}
+
+it("retry retains exact payload and ID, suppresses concurrent retry, and signout fences late results", async () => {
+  clearDesktopMessageOutbox();
+  const calls: unknown[][] = [];
+  let finish!: (value: { message: DesktopRoomMessage }) => void;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    sendMessage: (...args: unknown[]) => {
+      calls.push(args);
+      if (calls.length === 1) return Promise.reject(new Error("Timed out"));
+      return new Promise(resolve => { finish = resolve; });
+    },
+  } } }, async () => {
+    let confirmed = 0;
+    const state = useDesktopRoomMessages({ room: ref(roomInfo()), messages: ref([]), githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() { confirmed++; } });
+    await state.sendRoomMessage("instruction", "msg_1", [{ upload_id: "attachment" }], "msg_1");
+    const id = state.visibleMessages.value[0]!.clientMessageId!;
+    const retry = retryDesktopOutgoingMessage(id);
+    await retryDesktopOutgoingMessage(id);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], calls[1]);
+    clearDesktopMessageOutbox();
+    finish({ message: roomMessage({ id: "msg_9" }) }); await retry;
+    assert.equal(state.visibleMessages.value.length, 0);
+    assert.equal(confirmed, 0);
+  });
+});
+
+it("a stream-confirmed message stays sent when the pending HTTP request fails", async () => {
+  clearDesktopMessageOutbox();
+  let fail!: (error: Error) => void;
+  let id = "";
+  await withWindowAsync({ letagentsDesktop: { room: {
+    sendMessage: (...args: unknown[]) => { id = args[5] as string; return new Promise((_resolve, reject) => { fail = reject; }); },
+  } } }, async () => {
+    const messages = ref<DesktopRoomMessage[]>([]);
+    const state = useDesktopRoomMessages({ room: ref(roomInfo()), messages, githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() {} });
+    const sending = state.sendRoomMessage("Hello");
+    messages.value = [roomMessage({ id: "msg_1", text: "Hello", clientMessageId: id })];
+    await nextTick();
+    fail(new Error("HTTP response lost")); await sending;
+    assert.equal(state.visibleMessages.value.length, 1);
+    assert.equal(state.visibleMessages.value[0]?.id, "msg_1");
+    assert.equal(state.visibleMessages.value[0]?.outgoing, undefined);
+  });
+});
+
+it("outbox rows and stream reconciliation stay in the original storage namespace", async () => {
+  clearDesktopMessageOutbox();
+  let finish!: (value: { message: DesktopRoomMessage }) => void;
+  let capturedNamespace: unknown;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    sendMessage: (...args: unknown[]) => { capturedNamespace = args[6]; return new Promise(resolve => { finish = resolve; }); },
+  } } }, async () => {
+    const namespace = ref("room:cloud:cloud");
+    const messages = ref<DesktopRoomMessage[]>([]);
+    const state = useDesktopRoomMessages({ room: ref(roomInfo()), messageNamespace: namespace, messages, githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() {} });
+    const pending = state.sendRoomMessage("Cloud send");
+    const clientId = state.visibleMessages.value[0]!.clientMessageId;
+    namespace.value = "room:local:room"; await nextTick();
+    messages.value = [roomMessage({ id: "msg_7", clientMessageId: clientId })]; await nextTick();
+    assert.equal(desktopMessageOutbox.value.length, 1, "local echo cannot acknowledge a cloud send");
+    messages.value = []; await nextTick();
+    assert.equal(state.visibleMessages.value.length, 0);
+    assert.equal(capturedNamespace, "room:cloud:cloud");
+    namespace.value = "room:cloud:cloud"; await nextTick();
+    assert.equal(state.visibleMessages.value.length, 1);
+    finish({ message: roomMessage({ id: "msg_8", text: "Cloud send" }) }); await pending;
+  });
+  clearDesktopMessageOutbox();
+});
+
+it("draft acceptance is revision guarded, room scoped, and invalidated by signout", () => {
+  clearDesktopMessageDrafts();
+  setDesktopMessageDraftAccount("alice");
+  const namespace = ref(" GitHub.com/BrosInCode/LetAgents:cloud:cloud ");
+  const draft = useDesktopMessageDraft(() => namespace.value);
+  draft.text.value = "Original";
+  const accept = draft.captureSubmittedDraft();
+  namespace.value = "sky-lake:cloud:cloud";
+  draft.text.value = "Other room";
+  accept();
+  assert.equal(draft.text.value, "Other room");
+  namespace.value = "github.com/brosincode/letagents:cloud:cloud";
+  assert.equal(draft.text.value, "");
+  draft.text.value = "Original";
+  const acceptOld = draft.captureSubmittedDraft();
+  draft.text.value = "New";
+  draft.text.value = "Original";
+  acceptOld();
+  assert.equal(draft.text.value, "Original", "even edits returning to the same text are a newer draft");
+  const acceptBeforeSignout = draft.captureSubmittedDraft();
+  clearDesktopMessageDrafts();
+  draft.text.value = "Original";
+  acceptBeforeSignout();
+  assert.equal(draft.text.value, "Original");
+  const localDraft = useDesktopMessageDraft(() => "github.com/brosincode/letagents:local:room-local");
+  assert.equal(localDraft.text.value, "", "local and cloud histories do not share drafts");
+  draft.quote.value = { ...roomMessage({ id: "quote" }), isSelection: true, sourceMessageId: "source", attachments: [{ uploadId: "must-not-retain" }] as never };
+  assert.deepEqual(draft.quote.value?.attachments, []);
+  assert.equal(draft.quote.value?.sourceMessageId, "source");
+  setDesktopMessageDraftAccount("bob");
+  assert.equal(draft.text.value, "");
+  assert.equal(draft.quote.value, null);
+  clearDesktopMessageDrafts();
+});

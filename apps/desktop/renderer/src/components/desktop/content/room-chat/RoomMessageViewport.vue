@@ -1,6 +1,7 @@
 <template>
   <div class="room-message-viewport" data-testid="room-chat-viewport">
     <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
+      <p v-if="olderMessagesError" role="status" class="room-load-older-error">{{ olderMessagesError }}</p>
       <button
         v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
         class="room-load-older"
@@ -9,10 +10,10 @@
         data-testid="desktop-load-older-messages"
         @click="$emit('load-older')"
       >
-        {{ loadingOlderMessages ? "Loading earlier messages..." : "Load earlier messages" }}
+        {{ loadingOlderMessages ? "Loading earlier messages..." : olderMessagesError ? "Retry loading earlier messages" : "Load earlier messages" }}
       </button>
 
-      <template v-for="entry in timelineEntries" :key="entry.id">
+      <template v-for="entry in timelineEntries" :key="entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id">
         <div
           v-if="entry.type === 'date'"
           class="room-date-separator"
@@ -144,7 +145,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
 import type {
   DesktopAgentPresence,
   DesktopRoomAgentWork,
@@ -193,6 +194,7 @@ const props = defineProps<{
   activeThreadParentId: string | null;
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
+  olderMessagesError?: string | null;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
@@ -266,6 +268,20 @@ let shouldJumpToLatestOnActivate = false;
 let shouldRestoreKeepAliveScroll = false;
 let lastKnownScrollAnchor: ScrollAnchor | null = null;
 let lastKnownScrollTop: number | null = null;
+let anchorElements: HTMLElement[] | null = null;
+let anchorElementsById = new Map<string, HTMLElement>();
+
+// The timeline is vertically ordered. Cache its nodes between renders, but read
+// current geometry so image loads, resizing and thread-panel reflow stay correct.
+onUpdated(() => { anchorElements = null; });
+
+function getAnchorElements(): HTMLElement[] {
+  if (!anchorElements) {
+    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []);
+    anchorElementsById = new Map(anchorElements.map(element => [element.dataset.messageId!, element]));
+  }
+  return anchorElements;
+}
 let autoViewportBackfillFrame: number | null = null;
 let layoutAnchorRestoreFrame: number | null = null;
 let threadActivityNamespace = props.messageNamespace;
@@ -512,6 +528,7 @@ watch(
     () => props.roomLoading,
     () => props.hasOlderMessages,
     () => props.loadingOlderMessages,
+    () => props.olderMessagesError,
     () => props.messages.length,
     () => props.threadMessages.length,
     () => props.hasFilteredRoomActivity,
@@ -646,6 +663,7 @@ function canAutoFillViewport(): boolean {
     && !props.roomLoading
     && props.hasOlderMessages
     && !props.loadingOlderMessages
+    && !props.olderMessagesError
     && autoViewportBackfillCount.value < maxAutoViewportBackfillPages
   );
 }
@@ -700,12 +718,11 @@ function handleScroll(): void {
   shouldRestoreInitialScroll = false;
   const element = messagesElement.value;
   updateScrollState();
-  rememberScrollAnchor();
   if (isScrolledToBottom) {
     unreadCount.value = 0;
   }
   emitScrollPosition();
-  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
+  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages && !props.olderMessagesError) {
     emit("load-older");
   }
 }
@@ -822,10 +839,15 @@ function captureScrollAnchor(): ScrollAnchor | null {
   const element = messagesElement.value;
   if (!element || !isMeasurableScrollViewport(element)) return null;
   const viewportTop = element.getBoundingClientRect().top;
-  const messageElements = [...element.querySelectorAll<HTMLElement>("[data-message-id]")];
-  const anchorElement = messageElements.find((messageElement) =>
-    messageElement.getBoundingClientRect().bottom > viewportTop
-  );
+  const messageElements = getAnchorElements();
+  let low = 0;
+  let high = messageElements.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (messageElements[middle].getBoundingClientRect().bottom > viewportTop) high = middle;
+    else low = middle + 1;
+  }
+  const anchorElement = messageElements[low];
   const messageId = anchorElement?.dataset.messageId;
   if (!anchorElement || !messageId) return null;
   return {
@@ -837,8 +859,8 @@ function captureScrollAnchor(): ScrollAnchor | null {
 function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
   const element = messagesElement.value;
   if (!element || !anchor || !isMeasurableScrollViewport(element)) return false;
-  const anchorElement = [...element.querySelectorAll<HTMLElement>("[data-message-id]")]
-    .find((messageElement) => messageElement.dataset.messageId === anchor.messageId);
+  getAnchorElements();
+  const anchorElement = anchorElementsById.get(anchor.messageId);
   if (!anchorElement) return false;
   const viewportTop = element.getBoundingClientRect().top;
   const nextOffsetTop = anchorElement.getBoundingClientRect().top - viewportTop;
