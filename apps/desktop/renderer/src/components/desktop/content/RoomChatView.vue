@@ -92,7 +92,7 @@
           :attachment-drafts="attachmentDrafts"
           :attachment-error="attachmentError"
           :event-previews="composerEventPreviews"
-          :initial-draft="initialDraft"
+          :message-namespace="messageNamespace"
           :participants="participants"
           :permission-approvals="permissionApprovals"
           :permission-error="permissionError"
@@ -104,7 +104,6 @@
           :send-error="sendError"
           :sending="sending"
           @clear-reply="clearReplyTarget"
-          @draft-change="emit('draft-change', $event)"
           @open-add-agent="emit('open-add-agent')"
           @open-permission-detail="emit('open-permission-detail', $event)"
           @pick-attachments="pickAttachments"
@@ -158,6 +157,7 @@
         v-if="activeThreadPanelParent"
         @message-info="openMessageInfo"
         :parent="activeThreadPanelParent"
+        :message-namespace="messageNamespace"
         :initial-thread-summary="activeThreadInitialSummary"
         :replies="activeThreadReplies"
         :participants="participants"
@@ -237,6 +237,7 @@ import {
   isGitHubRoomMessage,
   isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
+import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
@@ -298,7 +299,6 @@ const props = defineProps<{
   tasks: DesktopTaskSummary[];
   searchQuery: string;
   activeSearchMessageId: string | null;
-  initialDraft?: string;
   initialScrollTop?: number | null;
 }>();
 
@@ -323,7 +323,6 @@ const emit = defineEmits<{
   "open-agent-detail": [target: AgentModalTarget];
   "open-add-agent": [];
   "open-permission-detail": [approval: ManagedAgentPermissionApproval];
-  "draft-change": [text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
   "open-events": [];
@@ -341,11 +340,6 @@ const emit = defineEmits<{
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
 }>();
 
-interface RoomReplyTarget extends DesktopRoomMessage {
-  isSelection?: boolean;
-  sourceMessageId?: string | null;
-}
-
 const threadLayoutAnimationMs = 250;
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
   new Set(props.tasks.map((task) => task.id))
@@ -353,7 +347,7 @@ const taskReferenceIds = computed<ReadonlySet<string>>(() =>
 const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
 const threadRevealTargetId = ref<string | null>(null);
-const replyTarget = ref<RoomReplyTarget | null>(null);
+const { quote: replyTarget } = useDesktopMessageDraft(() => props.messageNamespace);
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const roomComposer = ref<InstanceType<typeof RoomComposer> | null>(null);
 const threadLayoutElement = ref<HTMLElement | null>(null);
@@ -833,7 +827,6 @@ watch(toRef(props, "messageNamespace"), () => {
   threadSummaryOverrides.value = new Map();
   openedThreadSummaries.value = new Map();
   lastMarkedThreadReadKey.value = null;
-  clearReplyTarget();
   clearThreadAttachmentDrafts();
 });
 
@@ -854,13 +847,6 @@ watch(
   () => {
     if (activeThreadParentId.value && !activeThreadParent.value) {
       activeThreadParentId.value = null;
-    }
-    if (
-      replyTarget.value &&
-      !replyTarget.value.isSelection &&
-      !threadMessagesWithThreadOverrides.value.some((message) => message.id === replyTarget.value?.id)
-    ) {
-      clearReplyTarget();
     }
   },
 );
