@@ -790,6 +790,7 @@ const {
   revealMessage,
 } = useDesktopRoomMessages({
   room: roomRef,
+  messageNamespace,
   messages: messagesRef,
   githubEventsVisible,
   playRoomSound,

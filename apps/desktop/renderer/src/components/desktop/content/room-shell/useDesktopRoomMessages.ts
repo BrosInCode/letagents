@@ -23,6 +23,7 @@ const maxExplicitMessageRevealPages = 5;
 
 export function useDesktopRoomMessages(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
+  messageNamespace?: Readonly<Ref<string>>;
   messages: Readonly<Ref<readonly DesktopRoomMessage[]>>;
   githubEventsVisible: Readonly<Ref<boolean>>;
   playRoomSound(kind: "send" | "notification"): void;
@@ -33,7 +34,7 @@ export function useDesktopRoomMessages(options: {
   const sendError = ref<string | null>(null);
   const olderMessages = ref<DesktopRoomMessage[]>([]);
   const localMessages = computed(() => desktopMessageOutbox.value
-    .filter(entry => entry.roomIdentifier === options.room.value.identifier)
+    .filter(entry => entry.roomIdentifier === options.room.value.identifier && entry.messageNamespace === (options.messageNamespace?.value ?? null))
     .map(entry => entry.message));
   const hasOlderMessages = ref(true);
   const loadingOlderMessages = ref(false);
@@ -71,7 +72,7 @@ export function useDesktopRoomMessages(options: {
     () => options.messages.value.map((message) => `${message.id}:${message.clientMessageId || ""}`).join("|"),
     () => {
       autoHistoryBackfillCount.value = 0;
-      reconcileDesktopMessageOutbox(options.room.value.identifier, options.messages.value);
+      reconcileDesktopMessageOutbox(options.room.value.identifier, options.messages.value, options.messageNamespace?.value ?? null);
     },
     { immediate: true },
   );
@@ -125,15 +126,16 @@ export function useDesktopRoomMessages(options: {
       return;
     }
     const generation = roomGeneration;
+    const messageNamespace = options.messageNamespace?.value ?? null;
     const reply = visibleMessages.value.find(message => message.id === replyTo);
     const clientMessageId = enqueueDesktopMessage({
-      roomIdentifier, text: trimmedText, replyTo, threadRootId, attachments,
+      roomIdentifier, messageNamespace, text: trimmedText, replyTo, threadRootId, attachments,
       replyPreview: reply ? {
         id: reply.id, sender: reply.sender, text: reply.text, source: reply.source,
         timestamp: reply.timestamp, agentIdentity: reply.agentIdentity,
       } : null,
       onConfirmed: (message) => {
-        if (generation !== roomGeneration || roomIdentifier !== options.room.value.identifier) return;
+        if (generation !== roomGeneration || roomIdentifier !== options.room.value.identifier || messageNamespace !== (options.messageNamespace?.value ?? null)) return;
         ownMessageIds.add(message.id);
         options.onMessageSent(message);
       },

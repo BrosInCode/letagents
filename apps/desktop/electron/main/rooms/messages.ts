@@ -93,6 +93,7 @@ export async function sendDesktopRoomMessage(
   attachments: Array<{ upload_id: string }> = [],
   threadRootId?: string | null,
   clientMessageId?: string | null,
+  messageNamespace?: string | null,
 ): Promise<DesktopSendRoomMessageResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedText = text.trim();
@@ -111,6 +112,9 @@ export async function sendDesktopRoomMessage(
   const sender =
     storedAuth.account?.displayName || storedAuth.account?.login || "Desktop";
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (messageNamespace && messageNamespace !== [trimmedRoomIdentifier, storage.effectiveMode, storage.localRoom?.roomIdentifier || "cloud"].join(":")) {
+    throw new Error("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
+  }
   if (storage.effectiveMode === "local") {
     const localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
@@ -793,7 +797,11 @@ export async function syncDesktopLocalChatRoom(
           reply_to: replyToCloudId,
           thread_root_id: threadRootCloudId,
           attachments,
-          client_message_id: localMessage.sync_key,
+          // Local publication re-stages attachments after an uncertain upload.
+          // Keep its established key-only replay contract separate from the
+          // renderer's immutable direct-send payload identity.
+          client_message_id: localMessage.sync_key.startsWith("desktop-send:")
+            ? `local-chat:${localMessage.sync_key}` : localMessage.sync_key,
           ...(publishAsWorker && effectivePublisherSession ? {
             agent_session_id: effectivePublisherSession.session_id,
             agent_session_token: effectivePublisherSession.session_token,

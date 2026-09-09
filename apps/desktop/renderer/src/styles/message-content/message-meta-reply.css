@@ -513,13 +513,13 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 4px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 0.72rem;
   margin: 2px 0 5px;
 }
 
 .room-message-outgoing button {
-  color: var(--text-primary);
+  color: var(--text);
   text-decoration: underline;
   text-underline-offset: 3px;
   padding: 2px 4px;

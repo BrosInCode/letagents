@@ -4,6 +4,7 @@ import { desktopIpc } from "../ipc/index.js";
 
 interface OutgoingMessage {
   roomIdentifier: string;
+  messageNamespace: string | null;
   clientMessageId: string;
   text: string;
   replyTo: string | null;
@@ -27,10 +28,10 @@ export function clearDesktopMessageOutbox(): void {
   desktopMessageOutbox.value = [];
 }
 
-export function reconcileDesktopMessageOutbox(roomIdentifier: string, messages: readonly DesktopRoomMessage[]): void {
+export function reconcileDesktopMessageOutbox(roomIdentifier: string, messages: readonly DesktopRoomMessage[], messageNamespace: string | null = null): void {
   const byClientId = new Map(messages.filter(message => message.clientMessageId).map(message => [message.clientMessageId, message]));
   desktopMessageOutbox.value = desktopMessageOutbox.value.filter(entry => {
-    if (entry.roomIdentifier !== roomIdentifier) return true;
+    if (entry.roomIdentifier !== roomIdentifier || entry.messageNamespace !== messageNamespace) return true;
     const message = byClientId.get(entry.clientMessageId);
     if (!message) return true;
     confirm(entry, message);
@@ -47,6 +48,7 @@ function confirm(entry: OutgoingMessage, message: DesktopRoomMessage): void {
 
 export function enqueueDesktopMessage(input: {
   roomIdentifier: string;
+  messageNamespace: string | null;
   text: string;
   replyTo: string | null;
   threadRootId: string | null;
@@ -83,7 +85,7 @@ export async function retryDesktopOutgoingMessage(clientMessageId: string): Prom
   changed();
   try {
     const result = await desktopIpc.room.sendMessage(
-      entry.roomIdentifier, entry.text, entry.replyTo, entry.attachments, entry.threadRootId, entry.clientMessageId,
+      entry.roomIdentifier, entry.text, entry.replyTo, entry.attachments, entry.threadRootId, entry.clientMessageId, entry.messageNamespace,
     );
     // Sign-out or a stream acknowledgement may have removed the entry.
     if (!desktopMessageOutbox.value.includes(entry)) return;

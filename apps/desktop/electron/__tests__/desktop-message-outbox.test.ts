@@ -50,3 +50,42 @@ test("cloud retry forwards the same logical ID and exact attachment/thread paylo
     assert.equal((bodies[0] as { client_message_id: string }).client_message_id, id);
   } finally { globalThis.fetch = previousFetch; }
 });
+
+test("retry cannot silently switch from cloud to local storage", async () => {
+  await setChatStorageMode("local");
+  const room = "outbox-storage-switch";
+  await assert.rejects(sendDesktopRoomMessage(room, "Cloud send", null, [], null,
+    "desktop-send:32571cb6-3fe9-48a1-9b3c-28f775bdc726", `${room}:cloud:cloud`), /original mode/);
+  assert.equal((await getLocalChatMessages(room)).messages.length, 0);
+});
+
+test("local-to-cloud retry keeps its publication key when attachment upload IDs change", async () => {
+  const { createLocalRoom } = await import("../main/rooms/local-store.js");
+  const { syncDesktopLocalChatRoom } = await import("../main/rooms/messages.js");
+  const { getLocalChatDatabase } = await import("../main/rooms/local-db.js");
+  const room = "outbox-publish-retry";
+  await createLocalRoom({ roomIdentifier: room, cloudRoomIdentifier: "outbox-cloud-target" });
+  const [attachment] = await stageDroppedDesktopAttachmentContents(room, [{ fileName: "note.txt", mimeType: "text/plain", sizeBytes: 3, contentBase64: "YWJj" }]);
+  await sendDesktopRoomMessage(room, "", null, [{ upload_id: attachment!.uploadId }], null,
+    "desktop-send:32571cb6-3fe9-48a1-9b3c-28f775bdc727");
+  const previousFetch = globalThis.fetch;
+  let upload = 0;
+  const posts: Array<{ client_message_id: string; attachments: Array<{ upload_id: string }> }> = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/attachments/uploads")) return Response.json({ upload_id: `cloud-upload-${++upload}`, upload_url: "https://uploads.example.test/file" });
+    if (String(url).startsWith("https://uploads.example.test/")) return new Response(null, { status: 200 });
+    posts.push(JSON.parse(String(init?.body)));
+    if (posts.length === 1) throw new Error("Response lost after commit");
+    return Response.json({ id: "msg_50" });
+  };
+  try {
+    await assert.rejects(syncDesktopLocalChatRoom(room), /Response lost/);
+    const database = await getLocalChatDatabase();
+    database.prepare("UPDATE local_chat_messages SET sync_started_at = NULL WHERE room_id = ?").run(room);
+    const retry = await syncDesktopLocalChatRoom(room);
+    assert.equal(retry.syncedCount, 1);
+    assert.equal(posts[0]?.client_message_id, posts[1]?.client_message_id);
+    assert.match(posts[0]!.client_message_id, /^local-chat:desktop-send:/);
+    assert.notDeepEqual(posts[0]?.attachments, posts[1]?.attachments);
+  } finally { globalThis.fetch = previousFetch; }
+});
