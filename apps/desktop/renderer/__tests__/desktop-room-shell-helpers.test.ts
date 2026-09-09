@@ -1,3 +1,4 @@
+import { clearDesktopMessageOutbox, desktopMessageOutbox, retryDesktopOutgoingMessage } from "../src/domain/message-outbox";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { nextTick, ref } from "vue";
@@ -725,31 +726,108 @@ function restoreGlobalProperty(key: "Notification" | "window", descriptor: Prope
   }
 }
 
-it("send completion reports failure and isolates late room responses", async () => {
+it("local acceptance clears the composer immediately and keeps uncertain sends across room switches", async () => {
+  clearDesktopMessageOutbox();
   let settle: (value: { message: DesktopRoomMessage }) => void = () => undefined;
   let reject: (error: Error) => void = () => undefined;
   await withWindowAsync({ letagentsDesktop: { room: {
     sendMessage: () => new Promise((resolve, fail) => { settle = resolve; reject = fail; }),
   } } }, async () => {
     const room = ref(roomInfo());
+    const originalRoom = room.value;
     const completions: boolean[] = [];
     const state = useDesktopRoomMessages({ room, messages: ref([]), githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() {} });
     const failed = state.sendRoomMessage("draft", null, [{ upload_id: "upload-1" }], null, sent => completions.push(sent));
-    assert.equal(state.sendingMessage.value, true);
+    assert.equal(state.sendingMessage.value, false);
+    assert.deepEqual(completions, [true]);
+    assert.equal(state.visibleMessages.value[0]?.outgoing?.status, "pending");
     reject(new Error("Offline")); await failed;
-    assert.deepEqual(completions, [false]);
-    assert.equal(state.sendError.value, "Offline");
-    const oldSend = state.sendRoomMessage("old room", null, [], null, sent => completions.push(sent));
+    assert.equal(state.visibleMessages.value[0]?.outgoing?.status, "uncertain");
+    const oldSend = state.sendRoomMessage("old room");
     const oldSettle = settle;
     room.value = { ...room.value, identifier: "another-room" }; await nextTick();
-    assert.equal(state.sendingMessage.value, false);
-    const newSend = state.sendRoomMessage("new room", null, [], null, sent => completions.push(sent));
-    oldSettle({ message: roomMessage({ id: "old" }) }); await oldSend;
-    assert.equal(state.sendingMessage.value, true);
-    assert.deepEqual(state.visibleMessages.value, []);
-    assert.deepEqual(completions, [false]);
+    const newSend = state.sendRoomMessage("new room");
+    oldSettle({ message: roomMessage({ id: "old", text: "old room" }) }); await oldSend;
+    assert.deepEqual(state.visibleMessages.value.map(message => message.text), ["new room"]);
     settle({ message: roomMessage({ id: "new" }) }); await newSend;
     assert.deepEqual(state.visibleMessages.value.map(message => message.id), ["new"]);
-    assert.deepEqual(completions, [false, true]);
+    room.value = originalRoom; await nextTick();
+    assert.equal(state.visibleMessages.value.length, 2);
+    assert.equal(state.visibleMessages.value.some(message => message.outgoing?.status === "uncertain"), true);
+  });
+  clearDesktopMessageOutbox();
+});
+
+for (const streamFirst of [true, false]) {
+  it(`outgoing identity converges stream ${streamFirst ? "before" : "after"} HTTP without text matching`, async () => {
+    clearDesktopMessageOutbox();
+    let finish!: (value: { message: DesktopRoomMessage }) => void;
+    let clientId = "";
+    let confirmed = 0;
+    await withWindowAsync({ letagentsDesktop: { room: {
+      sendMessage: (_room: string, _text: string, _reply: unknown, _attachments: unknown, _thread: unknown, id: string) => {
+        clientId = id;
+        return new Promise(resolve => { finish = resolve; });
+      },
+    } } }, async () => {
+      const messages = ref<DesktopRoomMessage[]>([]);
+      const state = useDesktopRoomMessages({ room: ref(roomInfo()), messages, githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() { confirmed++; } });
+      const sending = state.sendRoomMessage("same text", "msg_1", [], "msg_1");
+      assert.equal(state.visibleMessages.value[0]?.threadRootId, "msg_1");
+      assert.equal(state.timelineMessages.value.length, 0);
+      const canonical = roomMessage({ id: "msg_2", text: "same text", clientMessageId: clientId, threadRootId: "msg_1", threadReplyToId: "msg_1" });
+      const unrelated = roomMessage({ id: "msg_3", text: "same text" });
+      if (streamFirst) { messages.value = [canonical, unrelated]; await nextTick(); }
+      finish({ message: canonical }); await sending;
+      if (!streamFirst) { messages.value = [canonical, unrelated]; await nextTick(); }
+      assert.deepEqual(state.visibleMessages.value.map(message => message.id), ["msg_2", "msg_3"]);
+      assert.equal(confirmed, 1);
+      assert.equal(desktopMessageOutbox.value.length, 0);
+    });
+  });
+}
+
+it("retry retains exact payload and ID, suppresses concurrent retry, and signout fences late results", async () => {
+  clearDesktopMessageOutbox();
+  const calls: unknown[][] = [];
+  let finish!: (value: { message: DesktopRoomMessage }) => void;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    sendMessage: (...args: unknown[]) => {
+      calls.push(args);
+      if (calls.length === 1) return Promise.reject(new Error("Timed out"));
+      return new Promise(resolve => { finish = resolve; });
+    },
+  } } }, async () => {
+    let confirmed = 0;
+    const state = useDesktopRoomMessages({ room: ref(roomInfo()), messages: ref([]), githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() { confirmed++; } });
+    await state.sendRoomMessage("instruction", "msg_1", [{ upload_id: "attachment" }], "msg_1");
+    const id = state.visibleMessages.value[0]!.clientMessageId!;
+    const retry = retryDesktopOutgoingMessage(id);
+    await retryDesktopOutgoingMessage(id);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], calls[1]);
+    clearDesktopMessageOutbox();
+    finish({ message: roomMessage({ id: "msg_9" }) }); await retry;
+    assert.equal(state.visibleMessages.value.length, 0);
+    assert.equal(confirmed, 0);
+  });
+});
+
+it("a stream-confirmed message stays sent when the pending HTTP request fails", async () => {
+  clearDesktopMessageOutbox();
+  let fail!: (error: Error) => void;
+  let id = "";
+  await withWindowAsync({ letagentsDesktop: { room: {
+    sendMessage: (...args: unknown[]) => { id = args[5] as string; return new Promise((_resolve, reject) => { fail = reject; }); },
+  } } }, async () => {
+    const messages = ref<DesktopRoomMessage[]>([]);
+    const state = useDesktopRoomMessages({ room: ref(roomInfo()), messages, githubEventsVisible: ref(true), playRoomSound() {}, onMessageSent() {} });
+    const sending = state.sendRoomMessage("Hello");
+    messages.value = [roomMessage({ id: "msg_1", text: "Hello", clientMessageId: id })];
+    await nextTick();
+    fail(new Error("HTTP response lost")); await sending;
+    assert.equal(state.visibleMessages.value.length, 1);
+    assert.equal(state.visibleMessages.value[0]?.id, "msg_1");
+    assert.equal(state.visibleMessages.value[0]?.outgoing, undefined);
   });
 });

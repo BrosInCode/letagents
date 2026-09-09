@@ -157,6 +157,31 @@ interface AddMessageTransactionResult {
   recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
+async function assertDesktopReplayMatches(
+  tx: MessageCreateTransaction, existing: MessageRow, sender: string, text: string, options: AddMessageOptions | undefined,
+): Promise<void> {
+  // Existing internal publishers intentionally replay by key alone. Desktop
+  // keys are public correlation IDs, so they must never grant another writer
+  // access to a previous writer's successful result.
+  if (!existing.client_message_id?.startsWith("desktop-send:")) return;
+  const replyNumber = options?.reply_to_message_id ? parseScopedId(options.reply_to_message_id, "msg") : null;
+  const rootNumber = options?.thread_root_message_id ? parseScopedId(options.thread_root_message_id, "msg") : null;
+  if (existing.publisher_account_id !== (options?.account_id?.trim() || null)
+    || existing.publisher_agent_key !== (options?.publisher_agent_key?.trim() || null)
+    || existing.publisher_agent_session_id !== (options?.publisher_agent_session_id?.trim() || null)
+    || existing.source !== (options?.source || null) || existing.sender !== sender || existing.text !== text
+    || existing.reply_to_number !== replyNumber
+    || (existing.thread_root_number ?? existing.number) !== (rootNumber ?? existing.number)
+    || existing.agent_prompt_kind !== (options?.agent_prompt_kind || null)) {
+    throw new RequestValidationError("Outgoing message identity was reused by another writer or with different content.");
+  }
+  const attached = await tx.select({ upload_id: message_attachments.upload_id }).from(message_attachments)
+    .where(and(eq(message_attachments.room_id, existing.room_id), eq(message_attachments.message_number, existing.number)));
+  if (attached.map(item => item.upload_id).sort().join("|") !== (options?.attachments || []).map(item => item.upload_id).sort().join("|")) {
+    throw new RequestValidationError("Outgoing message identity was reused with different attachments.");
+  }
+}
+
 export async function addMessageWithCreateStatus(
   roomId: string,
   sender: string,
@@ -194,6 +219,7 @@ export async function addMessageWithCreateStatus(
         .limit(1);
 
       if (existingMessage) {
+        await assertDesktopReplayMatches(tx, existingMessage, sender, text, options);
         return {
           messageRow: existingMessage,
           created: false,
@@ -285,6 +311,7 @@ export async function addMessageWithCreateStatus(
         if (!existingMessage) {
           throw new Error("message idempotency conflict could not be resolved");
         }
+        await assertDesktopReplayMatches(tx, existingMessage, sender, text, options);
         return {
           messageRow: existingMessage,
           created: false,

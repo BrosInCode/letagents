@@ -661,7 +661,7 @@ async function markThreadRead(
   roomIdentifier = props.roomIdentifier,
   messageNamespace = props.messageNamespace,
 ): Promise<void> {
-  if (!roomIdentifier || !props.active) return;
+  if (!roomIdentifier || !props.active || messageId.startsWith("pending:") || threadRootId.startsWith("pending:")) return;
   const roomApi = desktopIpc.room;
   if (!roomApi?.markThreadRead) return;
   const readKey = `${threadRootId}:${messageId}`;
@@ -734,7 +734,8 @@ function mergeThreadMessages(
     const existing = byId.get(message.id);
     byId.set(message.id, existing ? { ...existing, ...message } : message);
   }
-  return [...byId.values()].sort(
+  const canonicalClientIds = new Set([...byId.values()].filter(message => !message.outgoing && message.clientMessageId).map(message => message.clientMessageId));
+  return [...byId.values()].filter(message => !message.outgoing || !canonicalClientIds.has(message.clientMessageId)).sort(
     (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.id.localeCompare(b.id),
   );
 }
@@ -863,7 +864,7 @@ watch(
 );
 
 watch(
-  () => [activeThreadParent.value?.id || null, activeThreadReplies.value.at(-1)?.id || null] as const,
+  () => [activeThreadParent.value?.id || null, activeThreadReplies.value.filter(message => !message.outgoing).at(-1)?.id || null] as const,
   ([threadRootId, latestReplyId]) => {
     if (!threadRootId || !latestReplyId) return;
     void markThreadRead(threadRootId, latestReplyId);

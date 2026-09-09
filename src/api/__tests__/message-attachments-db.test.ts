@@ -256,3 +256,27 @@ test("system display copy survives storage, retries, history, and quoted replies
   const ordinary = await addMessage(room.id, "EmmyMay", "Original", { source: "browser", display_text: "Hidden replacement" });
   assert.equal(ordinary.display_text, undefined);
 });
+
+test("desktop submission retry is immutable across owners, text, thread, and attachments", { skip: requiresDatabase }, async () => {
+  const room = await createProjectWithName!("desktop-outbox-replay");
+  const root = await addMessage!(room.id, "Human", "Root", { source: "browser" });
+  await createMessageAttachmentUpload!({
+    upload_id: "upl_desktop_outbox", room_id: room.id, filename: "note.txt", content_type: "text/plain", byte_size: 3,
+    storage_provider: "s3", bucket: "letagents-test", object_key: "test/outbox/note.txt",
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const options = {
+    source: "browser", account_id: "acct_desktop", reply_to_message_id: root.id, thread_root_message_id: root.id,
+    client_message_id: "desktop-send:32571cb6-3fe9-48a1-9b3c-28f775bdc724",
+    attachments: [{ upload_id: "upl_desktop_outbox" }],
+  };
+  const first = await addMessageWithCreateStatus!(room.id, "Human", "Instruction", options);
+  const replay = await addMessageWithCreateStatus!(room.id, "Human", "Instruction", options);
+  assert.equal(replay.created, false);
+  assert.equal(replay.message.id, first.message.id);
+  assert.equal(replay.message.client_message_id, options.client_message_id);
+  await assert.rejects(addMessageWithCreateStatus!(room.id, "Human", "Changed", options), /different content/);
+  await assert.rejects(addMessageWithCreateStatus!(room.id, "Human", "Instruction", { ...options, account_id: "other" }), /another writer/);
+  await assert.rejects(addMessageWithCreateStatus!(room.id, "Human", "Instruction", { ...options, thread_root_message_id: undefined }), /different content/);
+  await assert.rejects(addMessageWithCreateStatus!(room.id, "Human", "Instruction", { ...options, attachments: [] }), /different attachments/);
+});

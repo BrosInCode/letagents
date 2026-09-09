@@ -513,6 +513,8 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
     });
     try {
       const input = descendants(mounted.root).find(node => node.type === "textarea")!;
+      let focusCount = 0;
+      input.focus = () => { focusCount++; };
       const form = descendants(mounted.root).find(node => node.type === "form")!;
       const setDraft = input.props["onUpdate:modelValue"] as (text: string) => void;
       const submit = () => (form.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
@@ -524,6 +526,10 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
       assert.equal((input as unknown as { value: string }).value, "A newer instruction");
       submit(); complete(true); await nextTick();
       assert.equal((input as unknown as { value: string }).value, "");
+      assert.ok(focusCount > 0, "accepted send returns focus to the composer");
+      assert.equal(Boolean(input.props.disabled), false);
+      setDraft("Next message while the accepted message is in flight"); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "Next message while the accepted message is in flight");
     } finally { mounted.app.unmount(); }
   }
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;

@@ -14,11 +14,13 @@ import type {
 import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
 import { apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
 import {
-  consumeLocalStagedAttachments,
+  readLocalStagedAttachments,
+  releaseLocalStagedAttachments,
   publishLocalAttachmentPayload,
 } from "../attachments.js";
 import {
   addLocalChatMessage,
+  getLocalChatMessageByClientId,
   claimUnsyncedLocalChatMessages,
   getLatestLocalChatMessages,
   getLocalChatMessagesBefore,
@@ -90,9 +92,14 @@ export async function sendDesktopRoomMessage(
   replyTo?: string | null,
   attachments: Array<{ upload_id: string }> = [],
   threadRootId?: string | null,
+  clientMessageId?: string | null,
 ): Promise<DesktopSendRoomMessageResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedText = text.trim();
+  const clientId = clientMessageId?.trim() || null;
+  if (clientId && !/^desktop-send:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientId)) {
+    throw new Error("Invalid outgoing message identity.");
+  }
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before sending a message.");
   }
@@ -109,7 +116,17 @@ export async function sendDesktopRoomMessage(
       storage,
       trimmedRoomIdentifier,
     );
-    const localAttachments = consumeLocalStagedAttachments(
+    const readerKey = await resolveLocalThreadReaderKey(storedAuth);
+    const existing = clientId ? await getLocalChatMessageByClientId(localRoomIdentifier, clientId, { readerKey }) : null;
+    if (existing) {
+      if (existing.sender !== sender || existing.source !== "browser" || existing.text !== trimmedText || (existing.thread_reply_to_id || null) !== (replyTo || null)
+        || (threadRootId && existing.thread_root_id !== threadRootId)
+        || existing.attachments?.map(item => item.id).sort().join("|") !== attachments.map(item => item.upload_id).sort().join("|")) {
+        throw new Error("Outgoing message identity was reused with different content.");
+      }
+      return { message: mapRoomMessagePayload(existing) };
+    }
+    const localAttachments = readLocalStagedAttachments(
       localRoomIdentifier,
       attachments,
     );
@@ -120,8 +137,10 @@ export async function sendDesktopRoomMessage(
       thread_root_id: threadRootId || null,
       source: "browser",
       attachments: localAttachments,
-      readerKey: await resolveLocalThreadReaderKey(storedAuth),
+      readerKey,
+      idempotency_key: clientId,
     });
+    releaseLocalStagedAttachments(localRoomIdentifier, attachments);
     return {
       message: mapRoomMessagePayload(message),
     };
@@ -144,6 +163,7 @@ export async function sendDesktopRoomMessage(
         reply_to: replyTo || null,
         thread_root_id: threadRootId || null,
         attachments,
+        ...(clientId ? { client_message_id: clientId } : {}),
       }),
     },
   );

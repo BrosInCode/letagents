@@ -507,3 +507,20 @@
     white-space: normal;
   }
 }
+
+.room-message-outgoing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  margin: 2px 0 5px;
+}
+
+.room-message-outgoing button {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  padding: 2px 4px;
+}
