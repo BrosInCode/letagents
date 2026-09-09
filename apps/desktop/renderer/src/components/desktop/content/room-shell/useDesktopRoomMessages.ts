@@ -37,6 +37,8 @@ export function useDesktopRoomMessages(options: {
     .map(entry => entry.message));
   const hasOlderMessages = ref(true);
   const loadingOlderMessages = ref(false);
+  const olderMessagesError = ref<string | null>(null);
+  let roomHistoryGeneration = 0;
   const chatDraftText = ref("");
   const autoHistoryBackfillCount = ref(0);
   const ownMessageIds = new Set<string>();
@@ -79,6 +81,8 @@ export function useDesktopRoomMessages(options: {
     () => {
       roomGeneration += 1;
       sendingMessage.value = false;
+      roomHistoryGeneration += 1;
+      olderMessagesError.value = null;
       olderMessages.value = [];
       hasOlderMessages.value = true;
       loadingOlderMessages.value = false;
@@ -94,10 +98,11 @@ export function useDesktopRoomMessages(options: {
       () => hasFilteredRoomActivity.value,
       () => hasOlderMessages.value,
       () => loadingOlderMessages.value,
+      () => olderMessagesError.value,
       () => options.room.value.identifier,
     ],
-    ([visibleCount, hasFilteredActivity, hasOlder, loading, roomIdentifier]) => {
-      if (visibleCount > 0 || !hasFilteredActivity || !hasOlder || loading || !roomIdentifier) return;
+    ([visibleCount, hasFilteredActivity, hasOlder, loading, historyError, roomIdentifier]) => {
+      if (visibleCount > 0 || !hasFilteredActivity || !hasOlder || loading || historyError || !roomIdentifier) return;
       if (autoHistoryBackfillCount.value >= maxAutoHistoryBackfillPages) return;
       autoHistoryBackfillCount.value += 1;
       void loadOlderMessages();
@@ -155,21 +160,25 @@ export function useDesktopRoomMessages(options: {
       return;
     }
 
+    const generation = roomHistoryGeneration;
+    const isCurrentHistory = () => roomHistoryGeneration === generation
+      && options.room.value.identifier === roomIdentifier;
     loadingOlderMessages.value = true;
+    olderMessagesError.value = null;
     try {
       const page = await desktopIpc.room.getMessagesBefore(
         roomIdentifier,
         firstMessageId,
         messageHistoryPageSize
       );
-      if (options.room.value.identifier !== roomIdentifier) return;
+      if (!isCurrentHistory()) return;
       olderMessages.value = [...page.messages, ...olderMessages.value];
       hasOlderMessages.value = page.hasOlder;
     } catch {
-      if (options.room.value.identifier !== roomIdentifier) return;
-      hasOlderMessages.value = false;
+      if (!isCurrentHistory()) return;
+      olderMessagesError.value = "Earlier messages could not be loaded. Retry to load them.";
     } finally {
-      if (options.room.value.identifier === roomIdentifier) {
+      if (isCurrentHistory()) {
         loadingOlderMessages.value = false;
       }
     }
@@ -181,12 +190,14 @@ export function useDesktopRoomMessages(options: {
    * silently leaving a link that appears to have worked.
    */
   async function revealMessage(messageId: string): Promise<boolean> {
+    const generation = roomHistoryGeneration;
     const targetId = messageId.trim();
     if (!targetId) return false;
     for (let page = 0; page <= maxExplicitMessageRevealPages; page += 1) {
       if (visibleMessages.value.some((message) => message.id === targetId)) return true;
       if (!hasOlderMessages.value || loadingOlderMessages.value) return false;
       await loadOlderMessages();
+      if (roomHistoryGeneration !== generation || olderMessagesError.value) return false;
     }
     return visibleMessages.value.some((message) => message.id === targetId);
   }
@@ -196,6 +207,7 @@ export function useDesktopRoomMessages(options: {
     sendError,
     hasOlderMessages,
     loadingOlderMessages,
+    olderMessagesError,
     chatDraftText,
     ownMessageIds,
     hasFilteredRoomActivity,
