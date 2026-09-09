@@ -450,6 +450,17 @@ test("post-COMMIT prepare and completion errors recover from exact durable readb
   assert.deepEqual(harness.deliveryDecisions, ["finish:cancelled"]);
 });
 
+test("durable outcome read failures release the exact reservation without dispatching", async () => {
+  for (const durableReadFailure of ["get", "nativeFailure"] as const) {
+    const harness = effectFixture({ durableReadFailure });
+    await assert.rejects(() => harness.subject.control(turnInput()), new RegExp(`durable ${durableReadFailure} failed`));
+    assert.equal(harness.providerCalls, 0);
+    assert.equal(harness.commits, 0);
+    assert.equal(harness.current.turn_control?.status, "prepared", "the journal continues to fence later FIFO work");
+    assert.deepEqual(harness.deliveryDecisions, ["resolve:resume"]);
+  }
+});
+
 test("an exact failed terminal wins Stop without native dispatch, cancellation, or replay", async () => {
   for (const nativeFailure of ["failed", "interrupted"] as const) {
     for (const commitPostCommitError of [false, true]) {
@@ -612,6 +623,7 @@ function effectFixture(options: {
   commitPostCommitError?: boolean;
   nativeFailure?: "failed" | "interrupted";
   failureAfterDispatch?: boolean;
+  durableReadFailure?: "get" | "nativeFailure";
   runtimeFailureBeforeCommit?: "handle_and_durable" | "handle_only_at_fence" | "durable_only";
 } = {}) {
   const deliveryMode = options.deliveryMode ?? "daemon_inbox";
@@ -750,9 +762,15 @@ function effectFixture(options: {
       }),
     },
     inbox: {
-      get: async () => inboxItem(options.nativeFailure && (!options.failureAfterDispatch || providerCalls > 0) ? "acknowledged_failed"
-        : current.turn_control?.status === "completed" ? "cancelled_by_user" : "awaiting_result"),
-      nativeFailure: async () => !options.failureAfterDispatch || providerCalls > 0 ? options.nativeFailure ?? null : null,
+      get: async () => {
+        if (options.durableReadFailure === "get") throw new Error("durable get failed");
+        return inboxItem(options.nativeFailure && (!options.failureAfterDispatch || providerCalls > 0) ? "acknowledged_failed"
+          : current.turn_control?.status === "completed" ? "cancelled_by_user" : "awaiting_result");
+      },
+      nativeFailure: async () => {
+        if (options.durableReadFailure === "nativeFailure") throw new Error("durable nativeFailure failed");
+        return !options.failureAfterDispatch || providerCalls > 0 ? options.nativeFailure ?? null : null;
+      },
     },
     delivery: {
       activeTurn: () => null,

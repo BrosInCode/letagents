@@ -584,11 +584,20 @@ export class TurnControlCoordinator {
         // durable inbox outcome is terminal. The persisted outcome wins over
         // that stale in-memory liveness; keep the reservation until the atomic
         // correction commit releases it, without controlling the provider again.
-        const linked = await this.ports.inbox.get(prepared.linkedInboxItemId);
-        if (linked && (["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linked.state)
-          || await this.ports.inbox.nativeFailure(linked.inbox_item_id))) {
-          foldCompletedRetryWithoutNativeControl = true;
-        } else if (!interruptedDelivery.current) {
+        try {
+          const linked = await this.ports.inbox.get(prepared.linkedInboxItemId);
+          foldCompletedRetryWithoutNativeControl = Boolean(linked
+            && (["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linked.state)
+              || await this.ports.inbox.nativeFailure(linked.inbox_item_id)));
+        } catch (error) {
+          const reservation = interruptedDelivery.current;
+          interruptedDelivery.current = null;
+          // No native control ran. Release only this lease; the prepared journal
+          // still fences later FIFO work, and an already frozen lease stays frozen.
+          if (reservation) this.ports.delivery?.resolveActiveDeliveryInterrupt(reservation, "resume");
+          throw error;
+        }
+        if (!foldCompletedRetryWithoutNativeControl && !interruptedDelivery.current) {
           const message = "Turn control is waiting for its exact admitted FIFO invocation; no native latest-turn control was dispatched.";
           await this.ports.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
             && current.turn_control.status === "prepared"
