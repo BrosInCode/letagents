@@ -103,8 +103,7 @@
       :room-loading="roomLoading"
       :sending="sendingMessage"
       :send-error="sendError"
-      :has-older-messages="hasOlderMessages"
-      :loading-older-messages="loadingOlderMessages"
+      v-bind="{ hasOlderMessages, loadingOlderMessages, olderMessagesError }"
       :participants="roomParticipants"
       :presence="roomPresence"
       v-bind="{ roomAgentWork, roomAgentWorkStatus, roomAgentWorkTruncated }"
@@ -778,6 +777,7 @@ const {
   sendError,
   hasOlderMessages,
   loadingOlderMessages,
+  olderMessagesError,
   chatDraftText,
   ownMessageIds,
   hasFilteredRoomActivity,

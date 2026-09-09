@@ -314,6 +314,85 @@ describe("desktop room shell helpers", () => {
     });
   });
 
+  it("keeps failed history available and retries only on an explicit request", async () => {
+    let calls = 0;
+    await withWindowAsync({ letagentsDesktop: { room: {
+      async getMessagesBefore() {
+        calls += 1;
+        if (calls === 1) throw new Error("offline");
+        return { messages: [roomMessage({ id: "msg_1", text: "Earlier instruction" })], hasOlder: false };
+      },
+    } } }, async () => {
+      const state = useDesktopRoomMessages({
+        room: ref(roomInfo()),
+        messages: ref([roomMessage({ id: "msg_20", sender: "github", source: "github", text: "PR #558 opened in BrosInCode/letagents: Polish desktop focus room manager https://github.com/BrosInCode/letagents/pull/558" })]),
+        githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
+      });
+      await flushPromises();
+      await nextTick();
+      await flushPromises();
+      assert.equal(calls, 1, "filtered-history backfill must stop on failure");
+      assert.equal(state.hasOlderMessages.value, true);
+      assert.match(state.olderMessagesError.value!, /Retry/);
+      assert.equal(state.loadingOlderMessages.value, false);
+      await state.loadOlderMessages();
+      await flushPromises();
+      assert.equal(calls, 2);
+      assert.equal(state.olderMessagesError.value, null);
+      assert.equal(state.hasOlderMessages.value, false);
+      assert.ok(state.visibleMessages.value.some(message => message.id === "msg_1"));
+    });
+  });
+
+  it("stops an explicit reveal on history failure and allows another attempt", async () => {
+    let calls = 0;
+    await withWindowAsync({ letagentsDesktop: { room: {
+      async getMessagesBefore() { calls += 1; throw new Error("offline"); },
+    } } }, async () => {
+      const state = useDesktopRoomMessages({
+        room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_20", text: "Latest" })]),
+        githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
+      });
+      assert.equal(await state.revealMessage("msg_1"), false);
+      assert.equal(calls, 1);
+      assert.equal(state.hasOlderMessages.value, true);
+      assert.equal(await state.revealMessage("msg_1"), false);
+      assert.equal(calls, 2);
+    });
+  });
+
+  it("ignores stale history success and failure after leaving and returning to a room", async () => {
+    for (const fail of [false, true]) {
+      const pending: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
+      await withWindowAsync({ letagentsDesktop: { room: {
+        getMessagesBefore() { return new Promise((resolve, reject) => pending.push({ resolve, reject })); },
+      } } }, async () => {
+        const room = ref(roomInfo());
+        const state = useDesktopRoomMessages({
+          room, messages: ref([roomMessage({ id: "msg_20", text: "Latest" })]),
+          githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
+        });
+        const stale = state.loadOlderMessages();
+        room.value = { ...roomInfo(), identifier: "other-room" };
+        await nextTick();
+        room.value = roomInfo();
+        await nextTick();
+        const current = state.loadOlderMessages();
+        if (fail) pending[0].reject(new Error("stale failure"));
+        else pending[0].resolve({ messages: [roomMessage({ id: "stale" })], hasOlder: false });
+        await stale;
+        assert.equal(state.loadingOlderMessages.value, true);
+        assert.equal(state.olderMessagesError.value, null);
+        assert.equal(state.hasOlderMessages.value, true);
+        assert.equal(state.visibleMessages.value.some(message => message.id === "stale"), false);
+        pending[1].resolve({ messages: [roomMessage({ id: "current" })], hasOlder: false });
+        await current;
+        assert.equal(state.loadingOlderMessages.value, false);
+        assert.ok(state.visibleMessages.value.some(message => message.id === "current"));
+      });
+    }
+  });
+
   it("matches reasoning fallback targets and builds pending sessions from latest agent activity", () => {
     const target = {
       actorLabel: "Agent Smith | Codex",
