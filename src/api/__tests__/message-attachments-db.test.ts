@@ -280,3 +280,69 @@ test("desktop submission retry is immutable across owners, text, thread, and att
   await assert.rejects(addMessageWithCreateStatus!(room.id, "Human", "Instruction", { ...options, thread_root_message_id: undefined }), /different content/);
   await assert.rejects(addMessageWithCreateStatus!(room.id, "Human", "Instruction", { ...options, attachments: [] }), /different attachments/);
 });
+
+for (const stage of ["attachments", "thread-read", "routing"] as const) {
+  test(`${stage} hydration failure rolls back message, attachments and receipts; retry publishes once`, {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+  }, async (t) => {
+    if (!pool || !createProjectWithName || !createMessageAttachmentUpload || !getMessageAttachmentUpload) throw new Error("database required");
+    const { Client } = await import("pg");
+    const { emitProjectMessage, messageEvents } = await import("../server/events.js");
+    const room = await createProjectWithName("publication-retry");
+    const account = await dbModule!.upsertAccount({ provider: "test", provider_user_id: "publication", login: "publication" });
+    await pool.query(`INSERT INTO room_agent_sessions (
+      session_id, room_id, token_hash, session_kind, runtime, actor_label,
+      agent_key, agent_instance_id, display_name, owner_account_id,
+      owner_label, ide_label, created_at, updated_at, last_seen_at
+    ) VALUES ('publication_session', $1, 'publication_hash', 'worker', 'test', 'Publication',
+      'test/publication', 'publication', 'Publication', $2, 'Human', 'Codex', NOW(), NOW(), NOW())`, [room.id, account.id]);
+    const root = await addMessage!(room.id, "human", "root", { source: "browser" });
+    await createMessageAttachmentUpload({
+      upload_id: "upl_publication_failure", room_id: room.id, filename: "notes.txt", content_type: "text/plain",
+      byte_size: 4, storage_provider: "s3", bucket: "test", object_key: "notes", expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const published: unknown[] = [];
+    const listener = (event: { projectId: string }) => { if (event.projectId === room.id) published.push(event); };
+    messageEvents.on("message:created", listener);
+    t.after(() => messageEvents.off("message:created", listener));
+    const originalQuery = Client.prototype.query;
+    let failHydration = true;
+    t.mock.method(Client.prototype, "query", function(this: InstanceType<typeof Client>, ...args: unknown[]) {
+      const query = typeof args[0] === "string" ? args[0] : (args[0] as { text?: string }).text ?? "";
+      const targetQuery = stage === "attachments"
+        ? /^select /i.test(query) && query.includes('from "message_attachments"')
+        : stage === "thread-read"
+        ? /^select /i.test(query) && query.includes('from "message_thread_reads"')
+        : query.includes("WITH requested_account AS");
+      if (failHydration && targetQuery) {
+        const error = new Error("injected hydration failure");
+        const callback = args.at(-1);
+        if (typeof callback === "function") { callback(error); return; }
+        return Promise.reject(error);
+      }
+      return (originalQuery as (...args: unknown[]) => unknown).apply(this, args);
+    });
+    const options = { source: "browser", account_id: account.id, account_agent_routing: true,
+      reply_to: root.id, thread_root_id: root.id, client_message_id: "publication-retry-1",
+      attachments: [{ upload_id: "upl_publication_failure" }] };
+    await assert.rejects(emitProjectMessage(room.id, "human", "@test/publication see attached", options), (error: unknown) => (error as { cause?: Error }).cause?.message === "injected hydration failure");
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM messages WHERE room_id = $1 AND client_message_id IS NOT NULL', [room.id])).rows[0].count, 0);
+    assert.equal((await getMessageAttachmentUpload(room.id, "upl_publication_failure"))?.status, "pending");
+    assert.equal(published.length, 0);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM message_agent_receipts WHERE message_room_id = $1', [room.id])).rows[0].count, 0);
+    failHydration = false;
+    const saved = await emitProjectMessage(room.id, "human", "@test/publication see attached", options);
+    const replay = await emitProjectMessage(room.id, "human", "@test/publication see attached", options);
+    assert.equal(saved.id, replay.id);
+    assert.equal(saved.attachments.length, 1);
+    assert.equal(saved.reply_to?.id, root.id);
+    assert.equal(saved.thread?.reply_count, 1);
+    assert.deepEqual(saved.account_agent_routing?.recipient_agent_keys, ["test/publication"]);
+    assert.deepEqual(replay.account_agent_routing, saved.account_agent_routing);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM message_agent_receipts WHERE message_room_id = $1', [room.id])).rows[0].count, 1);
+    assert.deepEqual(replay.attachments, saved.attachments);
+    assert.equal(published.length, 1);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM messages WHERE room_id = $1 AND client_message_id IS NOT NULL', [room.id])).rows[0].count, 1);
+  });
+}
