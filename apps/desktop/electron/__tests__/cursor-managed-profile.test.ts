@@ -171,10 +171,13 @@ test("supervised Cursor profiles are stable per attempt, isolated across attempt
 test("the packaged supervised runtime pin agrees with its package and registry lock", () => {
   const runtimePackage = JSON.parse(
     readFileSync(new URL("../runtime/letagents/package.json", import.meta.url), "utf8"),
-  ) as { dependencies?: { letagents?: unknown } };
+  ) as { dependencies?: { letagents?: unknown }; overrides?: unknown };
   const runtimeLock = JSON.parse(
     readFileSync(new URL("../runtime/letagents/package-lock.json", import.meta.url), "utf8"),
   ) as { packages?: Record<string, { version?: unknown; dependencies?: { letagents?: unknown } }> };
+  const workspacePackage = JSON.parse(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8"));
+  assert.equal(JSON.stringify(runtimePackage.overrides ?? {}), JSON.stringify(workspacePackage.overrides ?? {}),
+    "the packaged runtime must inherit workspace overrides exactly before release packaging");
   assert.equal(runtimePackage.dependencies?.letagents, LETAGENTS_MCP_RUNTIME_VERSION);
   assert.equal(runtimeLock.packages?.[""]?.dependencies?.letagents, LETAGENTS_MCP_RUNTIME_VERSION);
   assert.equal(runtimeLock.packages?.["node_modules/letagents"]?.version, LETAGENTS_MCP_RUNTIME_VERSION);

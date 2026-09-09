@@ -33,7 +33,7 @@ export const LETAGENTS_MCP_RUNTIME_VERSION = configuredVersion;
 // Generated from the complete symlink-free node_modules tree installed by the
 // committed desktop runtime lock. Packaging and every production resolution
 // recompute it; changing runtime code requires an intentional constant update.
-export const LETAGENTS_MCP_RUNTIME_TREE_SHA256 = "396852ca9aad30781aaa6d35e26e73b821c9e59e4e12f6062abc9e9dad0011c9";
+export const LETAGENTS_MCP_RUNTIME_TREE_SHA256 = "7514899f39688faf72b99e12347a9b8486895db7e733405f92046715973e4f51";
 
 const MAX_RUNTIME_TREE_ENTRIES = 20_000;
 const MAX_RUNTIME_TREE_BYTES = 128 * 1024 * 1024;
