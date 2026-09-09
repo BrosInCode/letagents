@@ -134,6 +134,7 @@ let DesktopLongMessageContent: object;
 let DesktopAttachmentDrafts: object;
 let RoomComposer: object;
 let RoomComposerEventChips: object;
+let messageDrafts: typeof import("../src/domain/desktop-message-drafts");
 
 async function attachClientRender(component: object, modulePath: string): Promise<void> {
   const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
@@ -158,6 +159,7 @@ before(async () => {
     root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent",
     server: { middlewareMode: true },
   });
+  messageDrafts = await vite.ssrLoadModule("/renderer/src/domain/desktop-message-drafts.ts");
   [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomComposerEventChips] = await Promise.all([
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue").then((module) => module.default),
@@ -516,6 +518,20 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
       const form = descendants(mounted.root).find(node => node.type === "form")!;
       const setDraft = input.props["onUpdate:modelValue"] as (text: string) => void;
       const submit = () => (form.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+      setDraft("入力中"); await nextTick();
+      let prevented = 0;
+      const enter = input.props.onKeydown as ((event: unknown) => void) | Array<(event: unknown) => void>;
+      const pressEnter = (isComposing: boolean) => {
+        const event = { key: "Enter", isComposing, preventDefault: () => { prevented += 1; } };
+        for (const handler of Array.isArray(enter) ? enter : [enter]) handler(event);
+      };
+      pressEnter(true);
+      assert.equal(prevented, 0, "IME confirmation remains under composition control");
+      assert.equal((input as unknown as { value: string }).value, "入力中");
+      pressEnter(false);
+      assert.equal(prevented, 1);
+      complete(true); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "", "normal Enter submits the draft");
       setDraft("Investigate the flaky worker"); await nextTick(); submit(); await nextTick();
       assert.equal((input as unknown as { value: string }).value, "Investigate the flaky worker");
       complete(false); await nextTick();
@@ -527,4 +543,93 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
     } finally { mounted.app.unmount(); }
   }
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+
+test("room drafts survive switching and remount, stay account isolated, and never auto-send", async () => {
+  messageDrafts.clearDesktopMessageDrafts();
+  messageDrafts.setDesktopMessageDraftAccount("alice");
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  let sends = 0;
+  let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
+  const open = (room: string) => mount(RoomComposer, { ...composerProps(), roomIdentifier: room, messageNamespace: `${room}:cloud:cloud`, onSendMessage: (...args: unknown[]) => { sends += 1; complete = args.at(-1) as typeof complete; } });
+  const input = (view: ReturnType<typeof mount>) => descendants(view.root).find(node => node.type === "textarea")!;
+  const value = (view: ReturnType<typeof mount>) => (input(view) as unknown as { value: string }).value;
+  let view = open("Messaging-QA");
+  try {
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Keep my investigation notes");
+    await nextTick();
+    view.app.unmount();
+    view = open("sky-lake");
+    assert.equal(value(view), "");
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Different room");
+    view.app.unmount();
+    view = open("messaging-qa");
+    assert.equal(value(view), "Keep my investigation notes");
+    assert.equal(sends, 0, "switching never submits a draft");
+    (descendants(view.root).find(node => node.type === "form")!.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+    view.app.unmount();
+    complete(true);
+    view = open("messaging-qa");
+    assert.equal(value(view), "", "acceptance still clears the captured draft after composer disposal");
+    messageDrafts.setDesktopMessageDraftAccount("bob");
+    await nextTick();
+    assert.equal(value(view), "");
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Bob draft");
+    messageDrafts.clearDesktopMessageDrafts();
+    await nextTick();
+    assert.equal(value(view), "", "signout clears currently mounted text as well as saved drafts");
+    messageDrafts.setDesktopMessageDraftAccount("alice");
+    await nextTick();
+    assert.equal(value(view), "", "previous account drafts do not return after account transition");
+    assert.equal(sends, 1);
+  } finally {
+    view.app.unmount(); messageDrafts.clearDesktopMessageDrafts();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+  }
+});
+
+test("thread reopen restores text and selection quote and accepted send clears only its submitted draft", async () => {
+  messageDrafts.clearDesktopMessageDrafts();
+  messageDrafts.setDesktopMessageDraftAccount("alice");
+  const saved = messageDrafts.useDesktopMessageDraft(() => "room:cloud:cloud", () => "message_1");
+  saved.quote.value = { ...message("quoted"), text: "Earlier instruction" };
+  saved.selectedQuoteText.value = "Earlier";
+  let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
+  const sends: unknown[][] = [];
+  const open = (id = "message_1") => mount(RoomThreadPanel, {
+    parent: message(id), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
+    messageNamespace: "room:cloud:cloud", sending: false, sendError: null, attaching: false,
+    attachmentDrafts: [], attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false,
+    loadingOlderReplies: false, revealMessageId: null, searchQuery: "", activeSearchMessageId: null,
+    taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
+    onSendThreadMessage: (...args: unknown[]) => { sends.push(args); complete = args.at(-1) as typeof complete; },
+  });
+  const input = (view: ReturnType<typeof mount>) => descendants(view.root).find(node => node.type === "textarea")!;
+  const value = (view: ReturnType<typeof mount>) => (input(view) as unknown as { value: string }).value;
+  const submit = (view: ReturnType<typeof mount>) => (descendants(view.root).find(node => node.type === "form")!.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+  let view = open();
+  try {
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Follow up");
+    await nextTick();
+    view.app.unmount(); view = open("other-thread");
+    assert.equal(value(view), "");
+    view.app.unmount(); view = open();
+    assert.equal(value(view), "Follow up");
+    assert.ok(descendants(view.root).some(node => node.text.includes("Earlier")));
+    assert.equal(sends.length, 0, "reopening must not submit");
+    submit(view);
+    assert.match(sends[0][0] as string, /Earlier/);
+    complete(false); await nextTick();
+    assert.equal(value(view), "Follow up");
+    submit(view);
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Next instruction");
+    complete(true); await nextTick();
+    assert.equal(value(view), "Next instruction");
+    submit(view); complete(true); await nextTick();
+    assert.equal(value(view), "");
+    view.app.unmount(); view = open();
+    assert.equal(value(view), "");
+    assert.equal(saved.quote.value, null);
+  } finally { view.app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
 });
