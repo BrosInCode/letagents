@@ -102,6 +102,15 @@ test("auth cache: warm read is reused, mutations invalidate/refresh it", async (
       login: "octocat",
     },
   }));
+  const { startDeviceAuthFlow } = await import("../main/auth.js");
+  // Poll only the active request, just like the desktop device-flow entrypoint.
+  const authorizedFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    request_id: "req-1", user_code: "CODE", verification_uri: "https://github.com/login/device",
+    expires_in: 600, interval: 5,
+  });
+  await startDeviceAuthFlow();
+  globalThis.fetch = authorizedFetch;
   await pollDeviceAuthFlow("req-1");
   await apiFetch("/after-write");
   const afterWrite = authorizedRecorder.calls.at(-1)!;

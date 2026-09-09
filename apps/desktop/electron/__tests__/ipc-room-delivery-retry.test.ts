@@ -19,6 +19,15 @@ mock.module("electron", {
   namedExports: { ipcMain: fakeIpcMain },
 });
 
+let sendMessage = async (..._args: unknown[]): Promise<unknown> => { throw new Error("unexpected send"); };
+let deliverMessage = async (..._args: unknown[]): Promise<void> => { throw new Error("unexpected delivery"); };
+mock.module("../main/rooms.js", {
+  namedExports: { ...await import("../main/rooms.js"), sendDesktopRoomMessage: (...args: unknown[]) => sendMessage(...args) },
+});
+mock.module("../main/room-stream.js", {
+  namedExports: { ...await import("../main/room-stream.js"), deliverDesktopRoomMessageToManagedAgents: (...args: unknown[]) => deliverMessage(...args) },
+});
+
 const { registerDesktopIpcHandlers } = await import("../main/ipc.js");
 const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
 const { supervisorGrantCoordinator } = await import("../main/supervisor-grant-coordinator.js");
@@ -198,3 +207,36 @@ test("room-move IPC durably requests rollback and restores source authority when
     coordinator.prepareRoomMoveSourceRollback = originalSource;
   }
 });
+
+for (const failure of ["delivery", "blocked", "persistence"] as const) {
+  test(`send IPC acknowledges persistence independently of ${failure}`, { timeout: 2_000 }, async (t) => {
+    const errors: unknown[][] = [];
+    t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args); });
+    const result = { message: { id: "msg_1", text: "hello" }, roomIdentifier: "room_1" };
+    const deliveries: unknown[][] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    sendMessage = async () => {
+      if (failure === "persistence") throw new Error("save failed");
+      return result;
+    };
+    deliverMessage = async (...args) => {
+      deliveries.push(args);
+      if (failure === "blocked") await blocked;
+      else throw new Error("dispatch failed");
+    };
+    registerDesktopIpcHandlers(fakeIpcMain as never);
+    const handler = handlers.get("desktop:room:send-message")!;
+    try {
+      if (failure === "persistence") {
+        await assert.rejects(async () => handler({}, "room_1"), /save failed/);
+        assert.deepEqual(deliveries, []);
+      } else {
+        assert.equal(await handler({}, "room_1"), result);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.deepEqual(deliveries, [["room_1", result.message]]);
+        assert.equal(errors.length, failure === "delivery" ? 1 : 0);
+      }
+    } finally { release(); }
+  });
+}

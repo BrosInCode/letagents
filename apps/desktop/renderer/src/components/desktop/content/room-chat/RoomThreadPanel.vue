@@ -81,7 +81,7 @@
         <span>Replies</span>
       </div>
 
-      <template v-for="reply in replies" :key="reply.id">
+      <template v-for="reply in replies" :key="reply.clientMessageId || reply.id">
         <div
           v-if="readState.firstUnreadReplyId === reply.id"
           class="room-thread-new-divider"
@@ -148,7 +148,7 @@
         ref="textareaElement"
         v-model="draft"
         rows="2"
-        :disabled="sending || !roomIdentifier"
+        :disabled="!roomIdentifier"
         :placeholder="composerPlaceholder"
         role="combobox"
         aria-autocomplete="list"
@@ -218,6 +218,7 @@
 </template>
 
 <script setup lang="ts">
+import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import RoomContribution from "./RoomContribution.vue";
 import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
 import { computed, nextTick, ref, watch } from "vue";
@@ -263,6 +264,7 @@ const props = defineProps<{
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
   roomIdentifier: string | null;
+  messageNamespace?: string;
   sending: boolean;
   sendError: string | null;
   attaching: boolean;
@@ -288,7 +290,7 @@ const emit = defineEmits<{
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   close: [];
   "open-image": [imageId: string];
-  "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>];
+  "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
   "open-github-event": [url: string];
   "open-agent": [target: AgentModalTarget];
   "open-task": [taskId: string];
@@ -302,9 +304,9 @@ const emit = defineEmits<{
   "skip-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
-const draft = ref("");
-const quoteTarget = ref<DesktopRoomMessage | null>(null);
-const selectedQuoteText = ref<string | null>(null);
+const { text: draft, quote: quoteTarget, selectedQuoteText, captureSubmittedDraft } = useDesktopMessageDraft(
+  () => props.messageNamespace || props.roomIdentifier, () => props.parent.id,
+);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
 const bodyElement = ref<HTMLElement | null>(null);
@@ -364,9 +366,6 @@ watch(
 watch(
   () => props.parent.id,
   async () => {
-    draft.value = "";
-    quoteTarget.value = null;
-    selectedQuoteText.value = null;
     mentionQuery.value = null;
     await nextTick();
     panelElement.value?.focus({ preventScroll: true });
@@ -469,6 +468,9 @@ function handleAttachmentDrop(event: DragEvent): void {
 function submitThreadReply(): void {
   const text = draft.value.trim();
   if ((!text && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
+  const clearSubmittedText = captureSubmittedDraft();
+  const roomIdentifier = props.roomIdentifier;
+  const parentId = props.parent.id;
   emit(
     "send-thread-message",
     selectedQuoteText.value
@@ -477,11 +479,14 @@ function submitThreadReply(): void {
     props.parent.id,
     quoteTarget.value?.id || props.parent.id,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
+    (sent) => {
+      if (!sent) return;
+      const cleared = clearSubmittedText();
+      if (props.roomIdentifier !== roomIdentifier || props.parent.id !== parentId) return;
+      if (cleared) mentionQuery.value = null;
+      void nextTick(() => textareaElement.value?.focus());
+    },
   );
-  draft.value = "";
-  quoteTarget.value = null;
-  selectedQuoteText.value = null;
-  mentionQuery.value = null;
 }
 
 function insertNewlineAtCursor(): void {
@@ -497,6 +502,7 @@ function insertNewlineAtCursor(): void {
 }
 
 function handleEnterKey(event: KeyboardEvent): void {
+  if (event.isComposing) return;
   event.preventDefault();
   if (mentionOpen.value) {
     const candidate = mentionCandidates.value[activeMentionIndex.value];

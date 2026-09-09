@@ -255,10 +255,10 @@ function pendingDeviceAuthFixture() {
     requestId: "request_1",
     userCode: "ABCD-1234",
     verificationUri: "https://github.com/login/device",
-    expiresAt: "2026-06-30T10:00:00.000Z",
+    expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
     intervalSeconds: 1,
     roomIdentifier: null,
-    startedAt: "2026-06-30T09:55:00.000Z",
+    startedAt: new Date().toISOString(),
   };
 }
 
@@ -290,3 +290,227 @@ function authenticatedStatusFixture(): DesktopAuthStatus {
     error: null,
   };
 }
+
+
+test("automatic sign-in recovers from transient API and IPC failures", async () => {
+  for (const failure of ["unknown", "throw"] as const) {
+    const authStatus = ref<DesktopAuthStatus | null>(authStatusFixture());
+    const scheduled = new Map<number, () => void>();
+    let nextTimer = 0;
+    let polls = 0;
+    let authorized = 0;
+    const state = useDesktopAuthFlow({
+      authStatus,
+      getRoomIdentifier: () => null,
+      isFirstRunGate: () => false,
+      onFirstRunAuthorized: async () => undefined,
+      onAuthorized: async () => { authorized += 1; },
+      onSignedOut: async () => undefined,
+    });
+    await withDesktopBridge({
+      setTimeout: (callback: () => void, delay: number) => {
+        assert.ok(delay >= 2000);
+        scheduled.set(++nextTimer, callback);
+        return nextTimer;
+      },
+      clearTimeout: (id: number) => scheduled.delete(id),
+      letagentsDesktop: { auth: { pollDeviceFlow: async () => {
+        polls += 1;
+        if (polls === 1 && failure === "throw") throw new Error("Network unavailable");
+        return {
+          status: polls === 1 ? "unknown" : "authorized",
+          intervalSeconds: 1,
+          expiresInSeconds: null,
+          authStatus: polls === 1 ? authStatusFixture() : authenticatedStatusFixture(),
+          error: polls === 1 ? "Network unavailable" : null,
+        };
+      } } },
+    }, async () => {
+      await state.pollAuthFlow({ automatic: true });
+      assert.equal(scheduled.size, 1, failure);
+      const retry = scheduled.values().next().value!;
+      scheduled.clear();
+      retry();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(polls, 2, failure);
+      assert.equal(authorized, 1, failure);
+      assert.equal(scheduled.size, 0, failure);
+    });
+  }
+});
+
+test("terminal sign-in results never retain an automatic retry", async () => {
+  for (const status of ["denied", "expired", "unknown"] as const) {
+    const scheduled = new Map<number, () => void>();
+    let nextTimer = 0;
+    const state = useDesktopAuthFlow({
+      authStatus: ref<DesktopAuthStatus | null>(authStatusFixture()),
+      getRoomIdentifier: () => null,
+      isFirstRunGate: () => false,
+      onFirstRunAuthorized: async () => undefined,
+      onAuthorized: async () => undefined,
+      onSignedOut: async () => undefined,
+    });
+    await withDesktopBridge({
+      setTimeout: (callback: () => void) => {
+        scheduled.set(++nextTimer, callback);
+        return nextTimer;
+      },
+      clearTimeout: (id: number) => scheduled.delete(id),
+      letagentsDesktop: { auth: { pollDeviceFlow: async () => ({
+        status,
+        intervalSeconds: null,
+        expiresInSeconds: null,
+        authStatus: { ...authStatusFixture(), pendingDeviceAuth: null },
+        error: "Start again",
+      }) } },
+    }, async () => {
+      state.scheduleAuthPoll();
+      await state.pollAuthFlow();
+      assert.equal(scheduled.size, 0, status);
+    });
+  }
+});
+
+test("retry timers stop at device-code expiry, including after suspend", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const authStatus = ref<DesktopAuthStatus | null>(authStatusFixture());
+  authStatus.value!.pendingDeviceAuth!.expiresAt = new Date(Date.now() + 1000).toISOString();
+  let callback: (() => void) | undefined;
+  let polls = 0;
+  const state = useDesktopAuthFlow({
+    authStatus,
+    getRoomIdentifier: () => null,
+    isFirstRunGate: () => false,
+    onFirstRunAuthorized: async () => undefined,
+    onAuthorized: async () => undefined,
+    onSignedOut: async () => undefined,
+  });
+  await withDesktopBridge({
+    setTimeout: (fn: () => void, delay: number) => {
+      assert.equal(delay, 1000);
+      callback = fn;
+      return 1;
+    },
+    clearTimeout: () => undefined,
+    letagentsDesktop: { auth: { pollDeviceFlow: async () => { polls += 1; } } },
+  }, async () => {
+    state.scheduleAuthPoll();
+    assert.ok(callback);
+    t.mock.timers.tick(2000);
+    callback!();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(polls, 0);
+    assert.match(state.authFeedback.value!, /expired/i);
+    callback = undefined;
+    state.scheduleAuthPoll();
+    assert.equal(callback, undefined);
+  });
+});
+
+for (const action of ["cancelAuthFlow", "signOut", "startAuthFlow"] as const) {
+  test(`late authorized poll cannot override ${action}`, async () => {
+    let finishPoll!: (value: unknown) => void;
+    let authorizedCount = 0;
+    const state = useDesktopAuthFlow({
+      authStatus: ref(authStatusFixture()),
+      getRoomIdentifier: () => null,
+      isFirstRunGate: () => false,
+      onFirstRunAuthorized: async () => { authorizedCount += 1; },
+      onAuthorized: async () => { authorizedCount += 1; },
+      onSignedOut: async () => undefined,
+    });
+    const signedOut = { ...authStatusFixture(), pendingDeviceAuth: null };
+    await withDesktopBridge({
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      letagentsDesktop: { auth: {
+        pollDeviceFlow: () => new Promise(resolve => { finishPoll = resolve; }),
+        cancelDeviceFlow: async () => signedOut,
+        signOut: async () => signedOut,
+        startDeviceFlow: async () => ({ authStatus: authStatusFixture() }),
+      } },
+    }, async () => {
+      const poll = state.pollAuthFlow();
+      await state[action]();
+      finishPoll({ status: "authorized", authStatus: authenticatedStatusFixture() });
+      await poll;
+      assert.equal(state.authStatus.value?.authenticated, false);
+      assert.equal(authorizedCount, 0);
+      assert.equal(state.authStatus.value?.pendingDeviceAuth !== null, action === "startAuthFlow");
+    });
+  });
+}
+
+test("cancel during device-code startup ignores the late code", async () => {
+  let finishStart!: (value: unknown) => void;
+  let scheduled = 0;
+  const state = useDesktopAuthFlow({
+    getRoomIdentifier: () => null, isFirstRunGate: () => false,
+    onFirstRunAuthorized: async () => undefined, onAuthorized: async () => undefined,
+    onSignedOut: async () => undefined,
+  });
+  await withDesktopBridge({
+    setTimeout: () => ++scheduled, clearTimeout: () => undefined,
+    letagentsDesktop: { auth: {
+      startDeviceFlow: () => new Promise(resolve => { finishStart = resolve; }),
+      cancelDeviceFlow: async () => ({ ...authStatusFixture(), pendingDeviceAuth: null }),
+    } },
+  }, async () => {
+    const start = state.startAuthFlow();
+    await state.cancelAuthFlow();
+    finishStart({ authStatus: authStatusFixture() });
+    await start;
+    assert.equal(state.authStatus.value?.pendingDeviceAuth, null);
+    assert.equal(scheduled, 0);
+  });
+});
+
+test("late transient failures cannot restart cancelled or replaced approval polling", async () => {
+  for (const action of ["cancelAuthFlow", "signOut", "startAuthFlow"] as const) {
+    for (const failure of ["unknown", "throw"] as const) {
+      let resolvePoll!: (result: unknown) => void;
+      let rejectPoll!: (error: Error) => void;
+      let nextTimer = 0;
+      const scheduled = new Map<number, () => void>();
+      const state = useDesktopAuthFlow({
+        authStatus: ref<DesktopAuthStatus | null>(authStatusFixture()),
+        getRoomIdentifier: () => null,
+        isFirstRunGate: () => false,
+        onFirstRunAuthorized: async () => undefined,
+        onAuthorized: async () => undefined,
+        onSignedOut: async () => undefined,
+      });
+      const signedOut = { ...authStatusFixture(), pendingDeviceAuth: null };
+      await withDesktopBridge({
+        setTimeout: (callback: () => void) => {
+          scheduled.set(++nextTimer, callback);
+          return nextTimer;
+        },
+        clearTimeout: (id: number) => scheduled.delete(id),
+        letagentsDesktop: { auth: {
+          pollDeviceFlow: () => new Promise((resolve, reject) => {
+            resolvePoll = resolve;
+            rejectPoll = reject;
+          }),
+          cancelDeviceFlow: async () => signedOut,
+          signOut: async () => signedOut,
+          startDeviceFlow: async () => ({ authStatus: authStatusFixture() }),
+        } },
+      }, async () => {
+        const pending = state.pollAuthFlow({ automatic: true });
+        await state[action]();
+        const timersBefore = [...scheduled.keys()];
+        const statusBefore = state.authStatus.value;
+        const feedbackBefore = state.authFeedback.value;
+        if (failure === "throw") rejectPoll(new Error("Network unavailable"));
+        else resolvePoll({ status: "unknown", authStatus: authStatusFixture(), error: "Network unavailable" });
+        await pending;
+        assert.deepEqual([...scheduled.keys()], timersBefore, `${action}/${failure}`);
+        assert.equal(state.authStatus.value, statusBefore);
+        assert.equal(state.authFeedback.value, feedbackBefore);
+        state.clearAuthPollTimer();
+      });
+    }
+  }
+});
