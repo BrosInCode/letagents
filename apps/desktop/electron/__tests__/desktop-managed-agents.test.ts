@@ -1852,7 +1852,23 @@ test("desktop event public replies suppress internal stop markers", () => {
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "LOCAL_CODEX_ROOM_test_DONE"), null);
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", " LOCAL_CODEX_ROOM_test_DONE\n"), null);
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "NO_ROOM_REPLY"), null);
+  assert.equal(
+    desktopEventPublicReplyText(
+      "LOCAL_CODEX_ROOM_test",
+      "Already handled this in the thread.\n\nNO_ROOM_REPLY",
+    ),
+    null,
+  );
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "- NO_ROOM_REPLY"), null);
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "Stopping now.\nLOCAL_CODEX_ROOM_test_DONE"),
+    null,
+  );
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", ""), null);
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions NO_ROOM_REPLY inline."),
+    "This mentions NO_ROOM_REPLY inline.",
+  );
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "OTHER_CODEX_ROOM_DONE"), "OTHER_CODEX_ROOM_DONE");
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "Done publicly."), "Done publicly.");
 });
