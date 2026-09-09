@@ -207,7 +207,9 @@ export interface DesktopApi {
       text: string,
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>,
-      threadRootId?: string | null
+      threadRootId?: string | null,
+      clientMessageId?: string | null,
+      messageNamespace?: string | null
     ) => Promise<DesktopSendRoomMessageResult>;
     addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (

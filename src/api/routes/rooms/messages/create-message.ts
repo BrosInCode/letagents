@@ -85,19 +85,26 @@ export function registerCreateMessageRoute(
           ?? null,
         account_agent_routing: desktopHumanWrite,
       });
-      await deps.rememberRoomParticipantFromMessage({
+      // The message and routing receipts are already saved. Bookkeeping must
+      // not turn that success into a failed send or delay its acknowledgement.
+      void Promise.resolve().then(() => deps.rememberRoomParticipantFromMessage({
         projectId: project.id,
         sender: normalizedSender,
         source,
         sessionAccount: req.sessionAccount,
         timestamp: message.timestamp,
+      })).catch((error) => {
+        console.error(`[room messages] failed to remember participant for ${project.id}`, error);
       });
       if (req.sessionAccount && (source === "browser" || source === "agent")) {
-        await deps.rememberAccountRoom({
-          accountId: req.sessionAccount.account_id,
+        const accountId = req.sessionAccount.account_id;
+        void Promise.resolve().then(() => deps.rememberAccountRoom({
+          accountId,
           roomId: project.id,
           displayName: project.display_name,
           source: "open_room",
+        })).catch((error) => {
+          console.error(`[room messages] failed to remember account room for ${project.id}`, error);
         });
       }
       const { account_agent_routing: createdRouting, ...responseMessage } = message;

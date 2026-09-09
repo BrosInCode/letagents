@@ -293,9 +293,17 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
+      clientMessageId?: string | null,
+      messageNamespace?: string | null,
     ): Promise<DesktopSendRoomMessageResult> => {
-      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId);
-      await deliverDesktopRoomMessageToManagedAgents(roomIdentifier, result.message);
+      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId, messageNamespace);
+      // Local dispatch is secondary to the saved message acknowledgement.
+      // Keep its routing/retry path running without making the user resend.
+      void Promise.resolve().then(() =>
+        deliverDesktopRoomMessageToManagedAgents(roomIdentifier, result.message),
+      ).catch((error) => {
+        console.error(`[room messages] failed managed delivery for ${roomIdentifier}/${result.message.id}`, error);
+      });
       return result;
     },
   );

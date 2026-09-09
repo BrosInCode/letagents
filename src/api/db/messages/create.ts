@@ -157,6 +157,31 @@ interface AddMessageTransactionResult {
   recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
+async function assertDesktopReplayMatches(
+  tx: MessageCreateTransaction, existing: MessageRow, sender: string, text: string, options: AddMessageOptions | undefined,
+): Promise<void> {
+  // Existing internal publishers intentionally replay by key alone. Desktop
+  // keys are public correlation IDs, so they must never grant another writer
+  // access to a previous writer's successful result.
+  if (!existing.client_message_id?.startsWith("desktop-send:")) return;
+  const replyNumber = options?.reply_to_message_id ? parseScopedId(options.reply_to_message_id, "msg") : null;
+  const rootNumber = options?.thread_root_message_id ? parseScopedId(options.thread_root_message_id, "msg") : null;
+  if (existing.publisher_account_id !== (options?.account_id?.trim() || null)
+    || existing.publisher_agent_key !== (options?.publisher_agent_key?.trim() || null)
+    || existing.publisher_agent_session_id !== (options?.publisher_agent_session_id?.trim() || null)
+    || existing.source !== (options?.source || null) || existing.sender !== sender || existing.text !== text
+    || existing.reply_to_number !== replyNumber
+    || (existing.thread_root_number ?? existing.number) !== (rootNumber ?? existing.number)
+    || existing.agent_prompt_kind !== (options?.agent_prompt_kind || null)) {
+    throw new RequestValidationError("Outgoing message identity was reused by another writer or with different content.");
+  }
+  const attached = await tx.select({ upload_id: message_attachments.upload_id }).from(message_attachments)
+    .where(and(eq(message_attachments.room_id, existing.room_id), eq(message_attachments.message_number, existing.number)));
+  if (attached.map(item => item.upload_id).sort().join("|") !== (options?.attachments || []).map(item => item.upload_id).sort().join("|")) {
+    throw new RequestValidationError("Outgoing message identity was reused with different attachments.");
+  }
+}
+
 export async function addMessageWithCreateStatus(
   roomId: string,
   sender: string,
@@ -172,7 +197,7 @@ export async function addMessageWithCreateStatus(
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
-  const result = await db.transaction(async (tx): Promise<AddMessageTransactionResult> => {
+  const result = await db.transaction(async (tx): Promise<AddMessageResult> => {
     // Transitional projection repair can inspect a legacy thread on the first
     // post-watermark reply. Bound that work—and every other statement in this
     // atomic send—so a pathological archive cannot wedge an API worker.
@@ -194,12 +219,13 @@ export async function addMessageWithCreateStatus(
         .limit(1);
 
       if (existingMessage) {
-        return {
+        await assertDesktopReplayMatches(tx, existingMessage, sender, text, options);
+        return hydrateCreatedMessage(roomId, {
           messageRow: existingMessage,
           created: false,
           recipientAgentKeys: [],
           recipientAgentTargets: [],
-        };
+        }, options, tx);
       }
     }
 
@@ -285,12 +311,13 @@ export async function addMessageWithCreateStatus(
         if (!existingMessage) {
           throw new Error("message idempotency conflict could not be resolved");
         }
-        return {
+        await assertDesktopReplayMatches(tx, existingMessage, sender, text, options);
+        return hydrateCreatedMessage(roomId, {
           messageRow: existingMessage,
           created: false,
           recipientAgentKeys: [],
           recipientAgentTargets: [],
-        };
+        }, options, tx);
       }
       createdMessage = insertedMessage;
     } else {
@@ -860,21 +887,37 @@ export async function addMessageWithCreateStatus(
       }
     }
 
-    return {
+    return hydrateCreatedMessage(roomId, {
       messageRow: createdMessage,
       created: true,
       recipientAgentKeys,
       recipientAgentTargets,
-    };
+    }, options, tx);
   });
   if (repliedReceiptTargets.size > 0) {
     // Dynamic import avoids a module cycle; room-level so the shared stream
     // never enumerates ids that may be concealed from some participants.
-    const { queueMessageInfoInvalidation } = await import("../../server/message-info-events.js");
-    queueMessageInfoInvalidation(roomId, null);
+    void import("../../server/message-info-events.js").then(({ queueMessageInfoInvalidation }) => {
+      queueMessageInfoInvalidation(roomId, null);
+    }).catch((error) => {
+      console.error(`[room messages] failed receipt invalidation for ${roomId}`, error);
+    });
   }
+  return result;
+}
+
+// Build the complete acknowledgement before commit: a failed attachment,
+// thread, or routing read must roll back the write rather than strand an
+// unpublished message that idempotent retries can no longer publish.
+async function hydrateCreatedMessage(
+  roomId: string,
+  result: AddMessageTransactionResult,
+  options: AddMessageOptions | undefined,
+  tx: MessageCreateTransaction,
+): Promise<AddMessageResult> {
   const [hydrated] = await hydrateMessageReplies(roomId, [result.messageRow], {
     accountId: null,
+    executor: tx,
   });
   const canonicalMessage = hydrated ?? toMessageWithReply(result.messageRow, null);
   let message = canonicalMessage;
@@ -885,10 +928,10 @@ export async function addMessageWithCreateStatus(
         ? getMessageThreadReadOverlays(roomId, [{
             root_message_id: canonicalMessage.thread.root_message_id,
             reply_count: canonicalMessage.thread.reply_count,
-          }], [accountId])
+          }], [accountId], tx)
         : Promise.resolve(new Map()),
       options?.account_agent_routing
-        ? getMessageAccountAgentRouting(db, roomId, accountId, [result.messageRow])
+        ? getMessageAccountAgentRouting(tx, roomId, accountId, [result.messageRow])
         : Promise.resolve(new Map()),
     ]);
     const readOverlay = canonicalMessage.thread

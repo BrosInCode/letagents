@@ -103,11 +103,9 @@
       :room-loading="roomLoading"
       :sending="sendingMessage"
       :send-error="sendError"
-      :has-older-messages="hasOlderMessages"
-      :loading-older-messages="loadingOlderMessages"
       :participants="roomParticipants"
       :presence="roomPresence"
-      v-bind="{ roomAgentWork, roomAgentWorkStatus, roomAgentWorkTruncated }"
+      v-bind="{ roomAgentWork, roomAgentWorkStatus, roomAgentWorkTruncated, hasOlderMessages, loadingOlderMessages, olderMessagesError }"
       :local-agent-work="localAgentWork"
       :delivery-receipts-by-message="deliveryReceiptsByMessage"
       :delivery-recovery-available="deliveryRetryAvailable"
@@ -125,7 +123,6 @@
       :supervisor-entries="supervisorEntries"
       :search-query="searchQuery"
       :active-search-message-id="activeSearchMessageId"
-      :initial-draft="chatDraftText"
       :initial-scroll-top="initialChatScrollTop ?? null"
       @send-message="sendRoomMessage"
       @discard-attachment="discardAttachment"
@@ -141,7 +138,6 @@
       @reveal-message="revealRoomMessage"
       @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
       @resolve-permission="resolveComposerPermission"
-      @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
       @open-task="openBoardTask"
@@ -778,7 +774,7 @@ const {
   sendError,
   hasOlderMessages,
   loadingOlderMessages,
-  chatDraftText,
+  olderMessagesError,
   ownMessageIds,
   hasFilteredRoomActivity,
   visibleMessages,
@@ -790,6 +786,7 @@ const {
   revealMessage,
 } = useDesktopRoomMessages({
   room: roomRef,
+  messageNamespace,
   messages: messagesRef,
   githubEventsVisible,
   playRoomSound,
