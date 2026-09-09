@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount, useDesktopMessageDraft } from "../src/domain/desktop-message-drafts";
 import { describe, it } from "node:test";
 import { nextTick, ref } from "vue";
 
@@ -752,4 +753,40 @@ it("send completion reports failure and isolates late room responses", async () 
     assert.deepEqual(state.visibleMessages.value.map(message => message.id), ["new"]);
     assert.deepEqual(completions, [false, true]);
   });
+});
+
+
+it("draft acceptance is revision guarded, room scoped, and invalidated by signout", () => {
+  clearDesktopMessageDrafts();
+  setDesktopMessageDraftAccount("alice");
+  const namespace = ref(" GitHub.com/BrosInCode/LetAgents:cloud:cloud ");
+  const draft = useDesktopMessageDraft(() => namespace.value);
+  draft.text.value = "Original";
+  const accept = draft.captureSubmittedText();
+  namespace.value = "sky-lake:cloud:cloud";
+  draft.text.value = "Other room";
+  accept();
+  assert.equal(draft.text.value, "Other room");
+  namespace.value = "github.com/brosincode/letagents:cloud:cloud";
+  assert.equal(draft.text.value, "");
+  draft.text.value = "Original";
+  const acceptOld = draft.captureSubmittedText();
+  draft.text.value = "New";
+  draft.text.value = "Original";
+  acceptOld();
+  assert.equal(draft.text.value, "Original", "even edits returning to the same text are a newer draft");
+  const acceptBeforeSignout = draft.captureSubmittedText();
+  clearDesktopMessageDrafts();
+  draft.text.value = "Original";
+  acceptBeforeSignout();
+  assert.equal(draft.text.value, "Original");
+  const localDraft = useDesktopMessageDraft(() => "github.com/brosincode/letagents:local:room-local");
+  assert.equal(localDraft.text.value, "", "local and cloud histories do not share drafts");
+  draft.quote.value = { ...roomMessage({ id: "quote" }), isSelection: true, sourceMessageId: "source", attachments: [{ uploadId: "must-not-retain" }] as never };
+  assert.deepEqual(draft.quote.value?.attachments, []);
+  assert.equal(draft.quote.value?.sourceMessageId, "source");
+  setDesktopMessageDraftAccount("bob");
+  assert.equal(draft.text.value, "");
+  assert.equal(draft.quote.value, null);
+  clearDesktopMessageDrafts();
 });
