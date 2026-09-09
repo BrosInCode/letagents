@@ -2174,3 +2174,55 @@ test("invalid agent session credentials do not create messages", async () => {
   });
   assert.equal(messageCreated, false);
 });
+
+for (const failure of ["participant", "account", "blocked", "persistence"] as const) {
+  test(`message acknowledgement survives secondary work: ${failure}`, { timeout: 2_000 }, async (t) => {
+    const errors: unknown[][] = [];
+    t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args); });
+    let handler: (req: unknown, res: unknown) => Promise<void>;
+    const { registerCreateMessageRoute } = await import("../routes/rooms/messages/create-message.js");
+    const calls: string[] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const message = { id: "msg_1", timestamp: "2026-09-09T00:00:00.000Z" };
+    registerCreateMessageRoute({ post(_path: unknown, callback: typeof handler) { handler = callback; } } as never, {
+      ...createDeps(),
+      resolveCanonicalRoomRequestId: async () => "room_1",
+      resolveRoomOrReply: async () => ({ id: "room_1" }),
+      requireParticipant: async () => true,
+      emitProjectMessage: async () => {
+        calls.push("save");
+        if (failure === "persistence") throw new Error("database unavailable");
+        return message;
+      },
+      rememberRoomParticipantFromMessage: async () => {
+        calls.push("participant");
+        if (failure === "participant") throw new Error("participant unavailable");
+        if (failure === "blocked") await blocked;
+      },
+      rememberAccountRoom: async () => {
+        calls.push("account");
+        if (failure === "account") throw new Error("account unavailable");
+      },
+    } as never);
+    const res = {
+      statusCode: 200, body: undefined as unknown,
+      status(code: number) { this.statusCode = code; return this; },
+      json(body: unknown) { this.body = body; return this; },
+    };
+    try {
+      await handler!({ params: { 0: "room_1" }, body: { sender: "Alice", text: "hello" },
+        authKind: "session", sessionAccount: { account_id: "acct_1" } }, res);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (failure === "persistence") {
+        assert.equal(res.statusCode, 500);
+        assert.deepEqual(calls, ["save"]);
+      } else {
+        assert.equal(res.statusCode, 201);
+        assert.deepEqual(res.body, { ...message, room_id: "room_1" });
+        assert.deepEqual(calls, ["save", "participant", "account"]);
+        if (failure !== "blocked") assert.equal(errors.length, 1);
+      }
+    } finally { release(); }
+  });
+}

@@ -15,24 +15,31 @@ import {
 import { roomTimelineMessages } from "../room-chat/thread-utils";
 import { desktopIpc } from "../../../../ipc/index.js";
 
+import { desktopMessageOutbox, enqueueDesktopMessage, reconcileDesktopMessageOutbox, retryDesktopOutgoingMessage } from "../../../../domain/message-outbox";
+
 const messageHistoryPageSize = 150;
 const maxAutoHistoryBackfillPages = 5;
 const maxExplicitMessageRevealPages = 5;
 
 export function useDesktopRoomMessages(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
+  messageNamespace?: Readonly<Ref<string>>;
   messages: Readonly<Ref<readonly DesktopRoomMessage[]>>;
   githubEventsVisible: Readonly<Ref<boolean>>;
   playRoomSound(kind: "send" | "notification"): void;
   onMessageSent(message: DesktopRoomMessage): void;
 }) {
+  let roomGeneration = 0;
   const sendingMessage = ref(false);
   const sendError = ref<string | null>(null);
   const olderMessages = ref<DesktopRoomMessage[]>([]);
-  const localMessages = ref<DesktopRoomMessage[]>([]);
+  const localMessages = computed(() => desktopMessageOutbox.value
+    .filter(entry => entry.roomIdentifier === options.room.value.identifier && entry.messageNamespace === (options.messageNamespace?.value ?? null))
+    .map(entry => entry.message));
   const hasOlderMessages = ref(true);
   const loadingOlderMessages = ref(false);
-  const chatDraftText = ref("");
+  const olderMessagesError = ref<string | null>(null);
+  let roomHistoryGeneration = 0;
   const autoHistoryBackfillCount = ref(0);
   const ownMessageIds = new Set<string>();
 
@@ -61,23 +68,25 @@ export function useDesktopRoomMessages(options: {
   );
 
   watch(
-    () => options.messages.value.map((message) => message.id).join("|"),
+    () => options.messages.value.map((message) => `${message.id}:${message.clientMessageId || ""}`).join("|"),
     () => {
       autoHistoryBackfillCount.value = 0;
-      const serverIds = new Set(options.messages.value.map((message) => message.id));
-      localMessages.value = localMessages.value.filter((message) => !serverIds.has(message.id));
-    }
+      reconcileDesktopMessageOutbox(options.room.value.identifier, options.messages.value, options.messageNamespace?.value ?? null);
+    },
+    { immediate: true },
   );
 
   watch(
     () => options.room.value.identifier,
     () => {
+      roomGeneration += 1;
+      sendingMessage.value = false;
+      roomHistoryGeneration += 1;
+      olderMessagesError.value = null;
       olderMessages.value = [];
-      localMessages.value = [];
       hasOlderMessages.value = true;
       loadingOlderMessages.value = false;
       sendError.value = null;
-      chatDraftText.value = "";
       autoHistoryBackfillCount.value = 0;
     },
   );
@@ -88,10 +97,11 @@ export function useDesktopRoomMessages(options: {
       () => hasFilteredRoomActivity.value,
       () => hasOlderMessages.value,
       () => loadingOlderMessages.value,
+      () => olderMessagesError.value,
       () => options.room.value.identifier,
     ],
-    ([visibleCount, hasFilteredActivity, hasOlder, loading, roomIdentifier]) => {
-      if (visibleCount > 0 || !hasFilteredActivity || !hasOlder || loading || !roomIdentifier) return;
+    ([visibleCount, hasFilteredActivity, hasOlder, loading, historyError, roomIdentifier]) => {
+      if (visibleCount > 0 || !hasFilteredActivity || !hasOlder || loading || historyError || !roomIdentifier) return;
       if (autoHistoryBackfillCount.value >= maxAutoHistoryBackfillPages) return;
       autoHistoryBackfillCount.value += 1;
       void loadOlderMessages();
@@ -104,29 +114,37 @@ export function useDesktopRoomMessages(options: {
     replyTo: string | null = null,
     attachments: Array<{ upload_id: string }> = [],
     threadRootId: string | null = null,
+    complete: (sent: boolean) => void = () => undefined,
   ): Promise<void> {
     const trimmedText = text.trim();
-    if (!trimmedText && attachments.length === 0) return;
-
-    sendingMessage.value = true;
-    sendError.value = null;
-    try {
-      const result = await desktopIpc.room.sendMessage(
-        options.room.value.identifier,
-        trimmedText,
-        replyTo,
-        attachments,
-        threadRootId,
-      );
-      ownMessageIds.add(result.message.id);
-      localMessages.value = mergeRoomMessages(localMessages.value, [result.message]);
-      options.playRoomSound("send");
-      options.onMessageSent(result.message);
-    } catch (error) {
-      sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
-    } finally {
-      sendingMessage.value = false;
+    const roomIdentifier = options.room.value.identifier;
+    if ((!trimmedText && attachments.length === 0) || !roomIdentifier
+      || replyTo?.startsWith("pending:") || threadRootId?.startsWith("pending:")) {
+      complete(false);
+      return;
     }
+    const generation = roomGeneration;
+    const messageNamespace = options.messageNamespace?.value ?? null;
+    const reply = visibleMessages.value.find(message => message.id === replyTo);
+    const clientMessageId = enqueueDesktopMessage({
+      roomIdentifier, messageNamespace, text: trimmedText, replyTo, threadRootId, attachments,
+      replyPreview: reply ? {
+        id: reply.id, sender: reply.sender, text: reply.text, source: reply.source,
+        timestamp: reply.timestamp, agentIdentity: reply.agentIdentity,
+      } : null,
+      onConfirmed: (message) => {
+        if (generation !== roomGeneration || roomIdentifier !== options.room.value.identifier || messageNamespace !== (options.messageNamespace?.value ?? null)) return;
+        ownMessageIds.add(message.id);
+        options.onMessageSent(message);
+      },
+    });
+    ownMessageIds.add(`pending:${clientMessageId}`);
+    sendError.value = null;
+    // Local acceptance releases the composer synchronously. Delivery progress
+    // belongs to its message row, so the next draft remains editable.
+    complete(true);
+    options.playRoomSound("send");
+    await retryDesktopOutgoingMessage(clientMessageId);
   }
 
   async function discardAttachment(uploadId: string): Promise<void> {
@@ -142,21 +160,25 @@ export function useDesktopRoomMessages(options: {
       return;
     }
 
+    const generation = roomHistoryGeneration;
+    const isCurrentHistory = () => roomHistoryGeneration === generation
+      && options.room.value.identifier === roomIdentifier;
     loadingOlderMessages.value = true;
+    olderMessagesError.value = null;
     try {
       const page = await desktopIpc.room.getMessagesBefore(
         roomIdentifier,
         firstMessageId,
         messageHistoryPageSize
       );
-      if (options.room.value.identifier !== roomIdentifier) return;
+      if (!isCurrentHistory()) return;
       olderMessages.value = [...page.messages, ...olderMessages.value];
       hasOlderMessages.value = page.hasOlder;
     } catch {
-      if (options.room.value.identifier !== roomIdentifier) return;
-      hasOlderMessages.value = false;
+      if (!isCurrentHistory()) return;
+      olderMessagesError.value = "Earlier messages could not be loaded. Retry to load them.";
     } finally {
-      if (options.room.value.identifier === roomIdentifier) {
+      if (isCurrentHistory()) {
         loadingOlderMessages.value = false;
       }
     }
@@ -168,12 +190,14 @@ export function useDesktopRoomMessages(options: {
    * silently leaving a link that appears to have worked.
    */
   async function revealMessage(messageId: string): Promise<boolean> {
+    const generation = roomHistoryGeneration;
     const targetId = messageId.trim();
     if (!targetId) return false;
     for (let page = 0; page <= maxExplicitMessageRevealPages; page += 1) {
       if (visibleMessages.value.some((message) => message.id === targetId)) return true;
       if (!hasOlderMessages.value || loadingOlderMessages.value) return false;
       await loadOlderMessages();
+      if (roomHistoryGeneration !== generation || olderMessagesError.value) return false;
     }
     return visibleMessages.value.some((message) => message.id === targetId);
   }
@@ -183,8 +207,8 @@ export function useDesktopRoomMessages(options: {
     sendError,
     hasOlderMessages,
     loadingOlderMessages,
-    chatDraftText,
-    ownMessageIds,
+    olderMessagesError,
+      ownMessageIds,
     hasFilteredRoomActivity,
     visibleMessages,
     timelineMessages,
