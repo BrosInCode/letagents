@@ -633,3 +633,38 @@ test("thread reopen restores text and selection quote and accepted send clears o
     assert.equal(saved.quote.value, null);
   } finally { view.app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
 });
+
+
+test("acceptance after switching threads clears only the original submitted text and quote", async () => {
+  messageDrafts.clearDesktopMessageDrafts();
+  messageDrafts.setDesktopMessageDraftAccount("alice");
+  const threadId = Vue.ref("thread-a");
+  const savedA = messageDrafts.useDesktopMessageDraft(() => "room", () => "thread-a");
+  const savedB = messageDrafts.useDesktopMessageDraft(() => "room", () => "thread-b");
+  savedA.text.value = "A reply";
+  savedA.quote.value = message("quote-a");
+  savedA.selectedQuoteText.value = "Selection A";
+  savedB.text.value = "B reply";
+  savedB.quote.value = message("quote-b");
+  let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
+  const component = { setup: () => () => Vue.h(RoomThreadPanel, {
+    parent: message(threadId.value), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
+    sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
+    pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, searchQuery: "",
+    activeSearchMessageId: null, taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
+    onSendThreadMessage: (...args: unknown[]) => { complete = args.at(-1) as typeof complete; },
+  }) };
+  const view = mount(component, {});
+  try {
+    (descendants(view.root).find(node => node.type === "form")!.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+    threadId.value = "thread-b"; await nextTick();
+    complete(true); await nextTick();
+    assert.equal(savedA.text.value, "");
+    assert.equal(savedA.quote.value, null);
+    assert.equal(savedA.selectedQuoteText.value, null);
+    assert.equal(savedB.text.value, "B reply");
+    assert.equal(savedB.quote.value?.id, "quote-b");
+    threadId.value = "thread-a"; await nextTick();
+    assert.equal(descendants(view.root).some(node => node.props["data-testid"] === "room-thread-quote-preview"), false);
+  } finally { view.app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
+});

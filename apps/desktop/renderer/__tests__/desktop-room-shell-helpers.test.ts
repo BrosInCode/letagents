@@ -762,7 +762,7 @@ it("draft acceptance is revision guarded, room scoped, and invalidated by signou
   const namespace = ref(" GitHub.com/BrosInCode/LetAgents:cloud:cloud ");
   const draft = useDesktopMessageDraft(() => namespace.value);
   draft.text.value = "Original";
-  const accept = draft.captureSubmittedText();
+  const accept = draft.captureSubmittedDraft();
   namespace.value = "sky-lake:cloud:cloud";
   draft.text.value = "Other room";
   accept();
@@ -770,12 +770,12 @@ it("draft acceptance is revision guarded, room scoped, and invalidated by signou
   namespace.value = "github.com/brosincode/letagents:cloud:cloud";
   assert.equal(draft.text.value, "");
   draft.text.value = "Original";
-  const acceptOld = draft.captureSubmittedText();
+  const acceptOld = draft.captureSubmittedDraft();
   draft.text.value = "New";
   draft.text.value = "Original";
   acceptOld();
   assert.equal(draft.text.value, "Original", "even edits returning to the same text are a newer draft");
-  const acceptBeforeSignout = draft.captureSubmittedText();
+  const acceptBeforeSignout = draft.captureSubmittedDraft();
   clearDesktopMessageDrafts();
   draft.text.value = "Original";
   acceptBeforeSignout();
