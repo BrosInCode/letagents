@@ -446,6 +446,28 @@ test("typed-shadow Claude keeps malformed exact-result observation unchanged", a
     "the permissive exact-result terminal belongs only to typed authority");
 });
 
+test("Claude checkpoints an exact provider failure while retaining its reusable session", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const checkpoints: unknown[] = [];
+  const pending = adapter.runRoomTurn(handle, { inboxItemId: "failure", actionId: "failure", sourceMessage: {}, activation: {} }, {
+    checkpointTerminalResult: async result => { checkpoints.push(result); },
+  });
+  await flush();
+  const child = harness.children[0]!;
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "error_during_execution", is_error: true,
+    session_id: handle.providerContinuationId, user_message_uuid: turnId, errors: ["HTTP 503 service unavailable"] });
+  const failure = await pending;
+  assert.deepEqual(failure, { turnId, providerContinuationId: handle.providerContinuationId,
+    outcome: "failed", text: null, evidence: "stream", error: "HTTP 503 service unavailable" });
+  assert.deepEqual(checkpoints, [failure]);
+  assert.equal(handle.observedState(), "idle");
+  assert.equal(child.alive, true);
+  assert.deepEqual(harness.signals, []);
+});
+
 test("preflight and launch use the exact configured Claude Code executable", async () => {
   const previousExact = process.env.LETAGENTS_CLAUDE_CODE_BIN;
   const previousLegacy = process.env.LETAGENTS_CLAUDE_BIN;
@@ -1255,7 +1277,7 @@ test("Claude turn control interrupts only the active bounded turn and refuses co
     resumed: false,
     state: "idle",
   });
-  await assert.rejects(running, /failed.*interrupted/i);
+  assert.equal((await running).outcome, "interrupted");
   const writesAfterInterrupt = child.written.length;
   await assert.rejects(
     adapter.controlTurn!(handle, "Start another untracked turn."),
@@ -1304,7 +1326,7 @@ test("Claude 2.1.238 UUID-less interrupt boundary settles only the daemon-fenced
     resumed: false,
     state: "idle",
   });
-  await assert.rejects(running, /failed.*interrupted/i);
+  assert.equal((await running).outcome, "interrupted");
   assert.equal(handle.observedState(), "idle");
   const terminalFacts = events.filter(({ fact }) => fact.domain === "turn"
     && fact.state === "terminal"
@@ -1406,7 +1428,7 @@ test("Claude UUID-less interrupt compatibility stays fenced across malformed and
       type: "result", subtype: "error_during_execution", is_error: true,
       terminal_reason: "aborted_streaming", session_id: handle.providerContinuationId,
     });
-    await assert.rejects(running, /failed.*interrupted/i,
+    assert.equal((await running).outcome, "interrupted",
       "the retained exact-turn context recognizes the late provider boundary");
     assert.equal(handle.observedState(), "idle");
   }
@@ -1449,7 +1471,7 @@ for (const natural of [
     if (natural.name === "success") {
       assert.equal((await running).text, "natural result");
     } else {
-      await assert.rejects(running, /failed.*error_during_execution/i);
+      assert.equal((await running).outcome, "failed");
     }
     assert.equal(handle.observedState(), "idle");
   });
@@ -1485,7 +1507,7 @@ for (const subtype of ["error_max_turns", "error_max_budget_usd", "error_max_str
       session_id: handle.providerContinuationId, user_message_uuid: frame.uuid,
       errors: ["Configured turn limit reached."],
     });
-    await assert.rejects(running, /failed: Configured turn limit reached/);
+    assert.equal((await running).outcome, "failed");
     assert.equal(handle.observedState(), "idle");
     assert.equal(stream.at(-1)?.kind, "turn_lifecycle");
     assert.equal(stream.at(-1)?.method, `result/${subtype}`);
@@ -1493,9 +1515,9 @@ for (const subtype of ["error_max_turns", "error_max_budget_usd", "error_max_str
     assert.equal((stream.at(-1)?.payload as { is_error: boolean }).is_error, true);
 
     const writesBeforeRecovery = child.written.length;
-    await assert.rejects(adapter.recoverRoomTurn!(handle, {
+    assert.equal((await adapter.recoverRoomTurn!(handle, {
       inboxItemId: request.inboxItemId, providerTurnId: frame.uuid,
-    }), /failed: Configured turn limit reached/);
+    })).outcome, "failed");
     assert.equal(child.written.length, writesBeforeRecovery, "exact failed-turn evidence is retained without replay");
 
     const next = adapter.runRoomTurn!(handle, { ...request, inboxItemId: "inbox-next", actionId: "action-next" }, options);
@@ -1591,7 +1613,7 @@ test("Claude typed observations correlate native turns and completed tools witho
   ] } });
   const failedResult = { type: "result", subtype: "error_max_turns", is_error: true, session_id, user_message_uuid: turnId };
   child.emit(failedResult);
-  await assert.rejects(running, /failed/);
+  assert.equal((await running).outcome, "failed");
   child.emit(failedResult);
   assert.equal(handle.observedState(), "idle", "typed collection preserves legacy containment");
   assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" }, "turn failure is not runtime death");

@@ -1143,8 +1143,8 @@ export class ProviderStreamCoordinator {
       return;
     }
     const { entryId, handle, executionGenerationId } = installation;
-    const observedLifecycle = providerStreamLifecycle(event);
     const entry = await this.options.manifest.getEntry(entryId);
+    const observedLifecycle = providerStreamLifecycle(event, entry?.delivery_mode === "daemon_inbox");
     if (!entry || !this.entryMatchesInstallation(entry, installation)
       || !this.isCurrentInstallation(installation)) {
       this.markLifecycleProjectionUnavailableForEvent(event);

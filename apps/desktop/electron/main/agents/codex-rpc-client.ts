@@ -63,6 +63,7 @@ export interface ThreadReadTurnItem {
 }
 
 export interface ThreadReadTurn {
+  error?: { message?: string; codexErrorInfo?: unknown } | null;
   id?: string;
   status?: string | { status?: string };
   items?: ThreadReadTurnItem[];
