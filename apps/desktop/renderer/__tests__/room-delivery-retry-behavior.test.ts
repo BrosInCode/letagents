@@ -441,6 +441,36 @@ test("missing-conversation controls render only before provider work starts", ()
   ambiguous.app.unmount();
 });
 
+test("history failure offers explicit retry without viewport or scroll retries", async () => {
+  let calls = 0;
+  const viewport = mount(RoomMessageViewport, {
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: true,
+    loadingOlderMessages: false, olderMessagesError: "Earlier messages could not be loaded. Retry to load them.",
+    messages: [], threadMessages: [], messageNamespace: "history-retry", localAgentWork: [],
+    hasFilteredRoomActivity: true, roomIdentifier: "room", githubActivityAvailable: false,
+    roomLoading: false, searchQuery: "", taskReferenceIds: new Set(), onLoadOlder: () => { calls += 1; },
+  });
+  try {
+    const list = descendants(viewport.root).find(node => node.props["data-testid"] === "room-chat-list")!;
+    Object.assign(list, {
+      isConnected: true, getClientRects: () => [{}], getBoundingClientRect: () => ({ top: 0 }),
+      querySelectorAll: () => [],
+    });
+    list.clientHeight = 500;
+    list.scrollHeight = 200;
+    await nextTick();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(calls, 0, "a short viewport must not retry failed history automatically");
+    (list.props.onScroll as () => void)();
+    assert.equal(calls, 0, "scrolling near the top must not retry failed history");
+    assert.ok(descendants(viewport.root).some(node => node.props.role === "status"));
+    const retry = buttonByText(viewport.root, "Retry loading earlier messages");
+    assert.equal(retry.props.disabled, false);
+    (retry.props.onClick as () => void)();
+    assert.equal(calls, 1);
+  } finally { viewport.app.unmount(); }
+});
+
 test("mounted main viewport and thread panel forward the same retry event contract", async () => {
   const mainCalls: Array<[string, string]> = [];
   const viewport = mount(RoomMessageViewport, {

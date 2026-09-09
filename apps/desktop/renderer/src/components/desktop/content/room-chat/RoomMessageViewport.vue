@@ -1,6 +1,7 @@
 <template>
   <div class="room-message-viewport" data-testid="room-chat-viewport">
     <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
+      <p v-if="olderMessagesError" role="status" class="room-load-older-error">{{ olderMessagesError }}</p>
       <button
         v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
         class="room-load-older"
@@ -9,7 +10,7 @@
         data-testid="desktop-load-older-messages"
         @click="$emit('load-older')"
       >
-        {{ loadingOlderMessages ? "Loading earlier messages..." : "Load earlier messages" }}
+        {{ loadingOlderMessages ? "Loading earlier messages..." : olderMessagesError ? "Retry loading earlier messages" : "Load earlier messages" }}
       </button>
 
       <template v-for="entry in timelineEntries" :key="entry.id">
@@ -193,6 +194,7 @@ const props = defineProps<{
   activeThreadParentId: string | null;
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
+  olderMessagesError?: string | null;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
@@ -526,6 +528,7 @@ watch(
     () => props.roomLoading,
     () => props.hasOlderMessages,
     () => props.loadingOlderMessages,
+    () => props.olderMessagesError,
     () => props.messages.length,
     () => props.threadMessages.length,
     () => props.hasFilteredRoomActivity,
@@ -660,6 +663,7 @@ function canAutoFillViewport(): boolean {
     && !props.roomLoading
     && props.hasOlderMessages
     && !props.loadingOlderMessages
+    && !props.olderMessagesError
     && autoViewportBackfillCount.value < maxAutoViewportBackfillPages
   );
 }
@@ -718,7 +722,7 @@ function handleScroll(): void {
     unreadCount.value = 0;
   }
   emitScrollPosition();
-  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
+  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages && !props.olderMessagesError) {
     emit("load-older");
   }
 }
