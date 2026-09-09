@@ -10,6 +10,7 @@ import type {
   DesktopManagedAgentEffort,
 } from "../../ipc-types.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { validateCodexDefaultModel } from "./codex-default-model.js";
 import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
@@ -161,6 +162,14 @@ export async function validateDesktopManagedAgentModel(input: {
 }): Promise<{ model: string | null; error: string | null }> {
   const model = normalizeManagedAgentModel(input.model);
   if (!model) {
+    if (input.providerId === "codex") {
+      await desktopShellEnvironmentReady();
+      const env = desktopRuntimeEnvironment();
+      return { model: null, error: await validateCodexDefaultModel({
+        command: resolveCodexExecutable({ env }), env,
+        cwd: input.repoRootPath?.trim() || undefined,
+      }) };
+    }
     return { model: null, error: null };
   }
 
