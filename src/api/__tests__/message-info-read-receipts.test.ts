@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import express from "express";
+import type { RoomMessageRouteDeps } from "../routes/rooms/messages/types.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 
-const { formatActivationReason } = await import("../routes/rooms/messages/info.js");
+const { formatActivationReason, registerMessageInfoRoute } = await import("../routes/rooms/messages/info.js");
 const { requiredAgentSessionRouteCapability } = await import("../request/agent-session-route-capabilities.js");
 const { planObservationSpanUpdate } = await import("../routes/rooms/agents/observation.js");
 const { attachAgentMessageActivationsFromReceipts } = await import("../../shared/activation-routing.js");
@@ -13,6 +16,37 @@ const { attachAgentMessageActivationsFromReceipts } = await import("../../shared
 function routeSource(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
 }
+
+test("browser and canonical message-info URLs share room resolution and authorization", async (t) => {
+  const app = express();
+  const resolvedRooms: string[] = [];
+  registerMessageInfoRoute(app, {
+    resolveCanonicalRoomRequestId: async (roomId: string) => {
+      resolvedRooms.push(roomId);
+      return roomId;
+    },
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async (req, res, project) => {
+      res.status(403).json({ room: project.id, message: req.params[1] });
+      return false;
+    },
+  } as RoomMessageRouteDeps);
+  const server = app.listen(0, "127.0.0.1");
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  for (const roomId of ["focus_86", "github.com/emmymay/todo-app"]) {
+    for (const prefix of ["/rooms", "/api/rooms"]) {
+      const response = await fetch(`http://127.0.0.1:${address.port}${prefix}/${encodeURIComponent(roomId)}/messages/msg_5/info`);
+      assert.equal(response.status, 403, "both URLs must reach the participant authorization gate");
+      assert.deepEqual(await response.json(), { room: roomId, message: "msg_5" });
+    }
+  }
+  assert.deepEqual(resolvedRooms, ["focus_86", "focus_86", "github.com/emmymay/todo-app", "github.com/emmymay/todo-app"]);
+  const malformed = await fetch(`http://127.0.0.1:${address.port}/api/rooms/focus_86/messages/not-a-message/info`);
+  assert.equal(malformed.status, 404);
+});
 
 test("formatActivationReason maps all AgentMessageActivationReason values to human-friendly labels", () => {
   assert.equal(formatActivationReason("small_room"), "Included in this small room");
