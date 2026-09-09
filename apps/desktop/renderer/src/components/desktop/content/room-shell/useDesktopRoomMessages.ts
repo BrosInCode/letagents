@@ -40,7 +40,6 @@ export function useDesktopRoomMessages(options: {
   const loadingOlderMessages = ref(false);
   const olderMessagesError = ref<string | null>(null);
   let roomHistoryGeneration = 0;
-  const chatDraftText = ref("");
   const autoHistoryBackfillCount = ref(0);
   const ownMessageIds = new Set<string>();
 
@@ -88,7 +87,6 @@ export function useDesktopRoomMessages(options: {
       hasOlderMessages.value = true;
       loadingOlderMessages.value = false;
       sendError.value = null;
-      chatDraftText.value = "";
       autoHistoryBackfillCount.value = 0;
     },
   );
@@ -210,8 +208,7 @@ export function useDesktopRoomMessages(options: {
     hasOlderMessages,
     loadingOlderMessages,
     olderMessagesError,
-    chatDraftText,
-    ownMessageIds,
+      ownMessageIds,
     hasFilteredRoomActivity,
     visibleMessages,
     timelineMessages,

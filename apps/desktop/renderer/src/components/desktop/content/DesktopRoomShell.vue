@@ -124,7 +124,6 @@
       :supervisor-entries="supervisorEntries"
       :search-query="searchQuery"
       :active-search-message-id="activeSearchMessageId"
-      :initial-draft="chatDraftText"
       :initial-scroll-top="initialChatScrollTop ?? null"
       @send-message="sendRoomMessage"
       @discard-attachment="discardAttachment"
@@ -140,7 +139,6 @@
       @reveal-message="revealRoomMessage"
       @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
       @resolve-permission="resolveComposerPermission"
-      @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
       @open-task="openBoardTask"
@@ -778,7 +776,6 @@ const {
   hasOlderMessages,
   loadingOlderMessages,
   olderMessagesError,
-  chatDraftText,
   ownMessageIds,
   hasFilteredRoomActivity,
   visibleMessages,

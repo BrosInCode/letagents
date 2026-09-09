@@ -218,6 +218,7 @@
 </template>
 
 <script setup lang="ts">
+import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import RoomContribution from "./RoomContribution.vue";
 import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
 import { computed, nextTick, ref, watch } from "vue";
@@ -263,6 +264,7 @@ const props = defineProps<{
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
   roomIdentifier: string | null;
+  messageNamespace?: string;
   sending: boolean;
   sendError: string | null;
   attaching: boolean;
@@ -302,9 +304,9 @@ const emit = defineEmits<{
   "skip-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
-const draft = ref("");
-const quoteTarget = ref<DesktopRoomMessage | null>(null);
-const selectedQuoteText = ref<string | null>(null);
+const { text: draft, quote: quoteTarget, selectedQuoteText, captureSubmittedDraft } = useDesktopMessageDraft(
+  () => props.messageNamespace || props.roomIdentifier, () => props.parent.id,
+);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
 const bodyElement = ref<HTMLElement | null>(null);
@@ -364,9 +366,6 @@ watch(
 watch(
   () => props.parent.id,
   async () => {
-    draft.value = "";
-    quoteTarget.value = null;
-    selectedQuoteText.value = null;
     mentionQuery.value = null;
     await nextTick();
     panelElement.value?.focus({ preventScroll: true });
@@ -469,9 +468,7 @@ function handleAttachmentDrop(event: DragEvent): void {
 function submitThreadReply(): void {
   const text = draft.value.trim();
   if ((!text && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
-  const submittedDraft = draft.value;
-  const submittedQuote = quoteTarget.value;
-  const submittedSelection = selectedQuoteText.value;
+  const clearSubmittedText = captureSubmittedDraft();
   const roomIdentifier = props.roomIdentifier;
   const parentId = props.parent.id;
   emit(
@@ -483,12 +480,9 @@ function submitThreadReply(): void {
     quoteTarget.value?.id || props.parent.id,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
     (sent) => {
-      if (!sent || props.roomIdentifier !== roomIdentifier || draft.value !== submittedDraft || props.parent.id !== parentId) return;
-      draft.value = "";
-      if (quoteTarget.value === submittedQuote && selectedQuoteText.value === submittedSelection) {
-        quoteTarget.value = null;
-        selectedQuoteText.value = null;
-      }
+      if (!sent) return;
+      const cleared = clearSubmittedText();
+      if (!cleared || props.roomIdentifier !== roomIdentifier || props.parent.id !== parentId) return;
       mentionQuery.value = null;
       void nextTick(() => textareaElement.value?.focus());
     },
@@ -508,6 +502,7 @@ function insertNewlineAtCursor(): void {
 }
 
 function handleEnterKey(event: KeyboardEvent): void {
+  if (event.isComposing) return;
   event.preventDefault();
   if (mentionOpen.value) {
     const candidate = mentionCandidates.value[activeMentionIndex.value];
