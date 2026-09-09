@@ -222,6 +222,7 @@ export interface DesktopRentalProviderRuntime {
   enabled: boolean;
   authenticated: boolean;
   status: "ready" | "blocked" | "offline" | "checking";
+  rentalSandboxStatus: "verified" | "verification_required" | "unsupported";
   detail: string;
   permissionProfileIds: string[];
 }
@@ -521,6 +522,7 @@ export type DesktopRentalProviderEvent = {
 export interface DesktopRentalApi {
   getMarketplace: () => Promise<DesktopRentalMarketplace>;
   getProviderSettings: () => Promise<DesktopRentalProviderSettings>;
+  verifyProviderRuntime: (providerId: DesktopRentalRuntimeId) => Promise<DesktopRentalProviderSettings>;
   updateProviderSettings: (input: DesktopRentalProviderSettingsInput) => Promise<DesktopRentalProviderSettings>;
   onProviderEvent: (callback: (event: DesktopRentalProviderEvent) => void) => () => void;
   listListings: (input?: DesktopRentalListingQuery) => Promise<DesktopRentalListing[]>;

@@ -33,6 +33,7 @@ test("rental IPC registers the preload channel surface", () => {
     "desktop:rental:get-provider-dashboard",
     "desktop:rental:get-marketplace",
     "desktop:rental:get-provider-settings",
+    "desktop:rental:verify-provider-runtime",
     "desktop:rental:create-listing",
     "desktop:rental:update-listing",
     "desktop:rental:pause-listing",
