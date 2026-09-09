@@ -423,6 +423,7 @@ import {
 } from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
+import { clearDesktopMessageOutbox } from "./domain/message-outbox";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
@@ -1385,6 +1386,7 @@ function startSignedOutAuthFlow(): Promise<void> {
 }
 
 function clearDesktopSessionState(): void {
+  clearDesktopMessageOutbox();
   invalidateSession();
   clearLiveMetadataRefreshTimer();
   clearLiveMetadataRefreshInterval();

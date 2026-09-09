@@ -15,6 +15,8 @@ import {
 import { roomTimelineMessages } from "../room-chat/thread-utils";
 import { desktopIpc } from "../../../../ipc/index.js";
 
+import { desktopMessageOutbox, enqueueDesktopMessage, reconcileDesktopMessageOutbox, retryDesktopOutgoingMessage } from "../../../../domain/message-outbox";
+
 const messageHistoryPageSize = 150;
 const maxAutoHistoryBackfillPages = 5;
 const maxExplicitMessageRevealPages = 5;
@@ -30,7 +32,9 @@ export function useDesktopRoomMessages(options: {
   const sendingMessage = ref(false);
   const sendError = ref<string | null>(null);
   const olderMessages = ref<DesktopRoomMessage[]>([]);
-  const localMessages = ref<DesktopRoomMessage[]>([]);
+  const localMessages = computed(() => desktopMessageOutbox.value
+    .filter(entry => entry.roomIdentifier === options.room.value.identifier)
+    .map(entry => entry.message));
   const hasOlderMessages = ref(true);
   const loadingOlderMessages = ref(false);
   const chatDraftText = ref("");
@@ -62,12 +66,12 @@ export function useDesktopRoomMessages(options: {
   );
 
   watch(
-    () => options.messages.value.map((message) => message.id).join("|"),
+    () => options.messages.value.map((message) => `${message.id}:${message.clientMessageId || ""}`).join("|"),
     () => {
       autoHistoryBackfillCount.value = 0;
-      const serverIds = new Set(options.messages.value.map((message) => message.id));
-      localMessages.value = localMessages.value.filter((message) => !serverIds.has(message.id));
-    }
+      reconcileDesktopMessageOutbox(options.room.value.identifier, options.messages.value);
+    },
+    { immediate: true },
   );
 
   watch(
@@ -76,7 +80,6 @@ export function useDesktopRoomMessages(options: {
       roomGeneration += 1;
       sendingMessage.value = false;
       olderMessages.value = [];
-      localMessages.value = [];
       hasOlderMessages.value = true;
       loadingOlderMessages.value = false;
       sendError.value = null;
@@ -110,37 +113,33 @@ export function useDesktopRoomMessages(options: {
     complete: (sent: boolean) => void = () => undefined,
   ): Promise<void> {
     const trimmedText = text.trim();
-    if ((!trimmedText && attachments.length === 0) || sendingMessage.value) {
+    const roomIdentifier = options.room.value.identifier;
+    if ((!trimmedText && attachments.length === 0) || !roomIdentifier
+      || replyTo?.startsWith("pending:") || threadRootId?.startsWith("pending:")) {
       complete(false);
       return;
     }
     const generation = roomGeneration;
-    const roomIdentifier = options.room.value.identifier;
-    const isCurrentRoom = () => generation === roomGeneration && roomIdentifier === options.room.value.identifier;
-
-    sendingMessage.value = true;
+    const reply = visibleMessages.value.find(message => message.id === replyTo);
+    const clientMessageId = enqueueDesktopMessage({
+      roomIdentifier, text: trimmedText, replyTo, threadRootId, attachments,
+      replyPreview: reply ? {
+        id: reply.id, sender: reply.sender, text: reply.text, source: reply.source,
+        timestamp: reply.timestamp, agentIdentity: reply.agentIdentity,
+      } : null,
+      onConfirmed: (message) => {
+        if (generation !== roomGeneration || roomIdentifier !== options.room.value.identifier) return;
+        ownMessageIds.add(message.id);
+        options.onMessageSent(message);
+      },
+    });
+    ownMessageIds.add(`pending:${clientMessageId}`);
     sendError.value = null;
-    try {
-      const result = await desktopIpc.room.sendMessage(
-        roomIdentifier,
-        trimmedText,
-        replyTo,
-        attachments,
-        threadRootId,
-      );
-      if (!isCurrentRoom()) return;
-      ownMessageIds.add(result.message.id);
-      localMessages.value = mergeRoomMessages(localMessages.value, [result.message]);
-      options.playRoomSound("send");
-      options.onMessageSent(result.message);
-      complete(true);
-    } catch (error) {
-      if (!isCurrentRoom()) return;
-      sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
-      complete(false);
-    } finally {
-      if (isCurrentRoom()) sendingMessage.value = false;
-    }
+    // Local acceptance releases the composer synchronously. Delivery progress
+    // belongs to its message row, so the next draft remains editable.
+    complete(true);
+    options.playRoomSound("send");
+    await retryDesktopOutgoingMessage(clientMessageId);
   }
 
   async function discardAttachment(uploadId: string): Promise<void> {

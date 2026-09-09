@@ -16,7 +16,8 @@ export function mergeRoomMessages(
       byId.set(message.id, message);
     }
   }
-  return [...byId.values()].sort(compareRoomMessages);
+  const canonicalClientIds = new Set([...byId.values()].filter(message => !message.outgoing && message.clientMessageId).map(message => message.clientMessageId));
+  return [...byId.values()].filter(message => !message.outgoing || !canonicalClientIds.has(message.clientMessageId)).sort(compareRoomMessages);
 }
 
 export function isHiddenChatMessage(message: DesktopRoomMessage): boolean {

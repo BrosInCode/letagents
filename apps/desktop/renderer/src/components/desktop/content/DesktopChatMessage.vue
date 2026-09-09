@@ -61,6 +61,7 @@
             <Copy v-else :size="14" aria-hidden="true" />
           </button>
           <button
+            v-if="!message.outgoing"
             class="room-message-reply-action room-message-quote-action"
             type="button"
             title="Quote reply"
@@ -70,6 +71,7 @@
             <CornerUpLeft :size="14" aria-hidden="true" />
           </button>
           <button
+            v-if="!message.outgoing"
             class="room-message-reply-action room-message-thread-action"
             type="button"
             :title="tertiaryActionLabel"
@@ -86,6 +88,11 @@
         </div>
       </div>
 
+      <div v-if="message.outgoing" class="room-message-outgoing" role="status" aria-live="polite">
+        <span v-if="message.outgoing.attachmentCount">{{ message.outgoing.attachmentCount }} attachment{{ message.outgoing.attachmentCount === 1 ? "" : "s" }} · </span>
+        <span>{{ message.outgoing.status === "pending" ? "Sending…" : "Delivery not confirmed" }}</span>
+        <button v-if="message.outgoing.status === 'uncertain'" type="button" :title="message.outgoing.error || undefined" @click="retryDesktopOutgoingMessage(message.clientMessageId || '')">Retry safely</button>
+      </div>
       <div class="room-message-bubble">
         <button
           v-if="message.replyTo"
@@ -274,6 +281,7 @@
 </template>
 
 <script setup lang="ts">
+import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
@@ -521,6 +529,7 @@ function participantInitials(value: string): string {
 }
 
 function openContextMenu(event: MouseEvent): void {
+  if (props.message.outgoing) return;
   const target = event.target instanceof HTMLElement ? event.target : null;
   const linkHref = resolveExternalWebHref(
     target?.closest("a[href]")?.getAttribute("href"),
@@ -654,6 +663,7 @@ function messageCopyText(): string {
 }
 
 function handleSelectionPointerUp(event: PointerEvent): void {
+  if (props.message.outgoing) return;
   if (event.button !== 0) return;
   const article = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
   window.setTimeout(() => {

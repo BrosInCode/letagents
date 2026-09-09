@@ -12,7 +12,7 @@
         {{ loadingOlderMessages ? "Loading earlier messages..." : "Load earlier messages" }}
       </button>
 
-      <template v-for="entry in timelineEntries" :key="entry.id">
+      <template v-for="entry in timelineEntries" :key="entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id">
         <div
           v-if="entry.type === 'date'"
           class="room-date-separator"

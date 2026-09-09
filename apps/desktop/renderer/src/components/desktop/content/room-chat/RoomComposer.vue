@@ -410,6 +410,7 @@ function submitMessage(): void {
       if (!sent || props.roomIdentifier !== roomIdentifier || draft.value !== submittedDraft) return;
       draft.value = "";
       syncDraftToShell();
+      void nextTick(() => textareaElement.value?.focus());
     },
   );
 }

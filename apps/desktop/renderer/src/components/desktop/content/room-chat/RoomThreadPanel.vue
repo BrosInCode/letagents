@@ -81,7 +81,7 @@
         <span>Replies</span>
       </div>
 
-      <template v-for="reply in replies" :key="reply.id">
+      <template v-for="reply in replies" :key="reply.clientMessageId || reply.id">
         <div
           v-if="readState.firstUnreadReplyId === reply.id"
           class="room-thread-new-divider"
@@ -148,7 +148,7 @@
         ref="textareaElement"
         v-model="draft"
         rows="2"
-        :disabled="sending || !roomIdentifier"
+        :disabled="!roomIdentifier"
         :placeholder="composerPlaceholder"
         role="combobox"
         aria-autocomplete="list"
@@ -490,6 +490,7 @@ function submitThreadReply(): void {
         selectedQuoteText.value = null;
       }
       mentionQuery.value = null;
+      void nextTick(() => textareaElement.value?.focus());
     },
   );
 }
