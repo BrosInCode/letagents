@@ -844,7 +844,7 @@ test("acceptance after switching threads clears only the original submitted text
 test("attachment-only thread acceptance restores composer focus without requiring stored text", async () => {
   messageDrafts.clearDesktopMessageDrafts();
   const { root, app } = mount(RoomThreadPanel, {
-    parent: message(), replies: [], participants: [], roomIdentifier: "attachment-focus", draftNamespace: "attachment-focus:cloud:cloud",
+    parent: message(), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "attachment-focus", messageNamespace: "attachment-focus:cloud:cloud",
     sending: false, sendError: null, attaching: false,
     attachmentDrafts: [{ uploadId: "upload-focus", fileName: "note.txt", mimeType: "text/plain", sizeBytes: 3, previewDataUrl: null }],
     attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false,
@@ -852,6 +852,7 @@ test("attachment-only thread acceptance restores composer focus without requirin
     onSendThreadMessage: (...args: unknown[]) => (args.at(-1) as (accepted: boolean) => void)(true),
   });
   try {
+    await nextTick();
     const input = descendants(root).find(node => node.type === "textarea")!;
     let focused = false;
     input.focus = () => { focused = true; };
