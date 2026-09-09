@@ -1377,6 +1377,10 @@ const {
   onSignedOut: async () => undefined,
 });
 
+watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
+  if (next !== previous) clearDesktopMessageOutbox();
+}, { flush: "sync" });
+
 const showSignedOutGate = computed(() => (
   authSessionLocked.value || !authStatus.value?.authenticated
 ));
