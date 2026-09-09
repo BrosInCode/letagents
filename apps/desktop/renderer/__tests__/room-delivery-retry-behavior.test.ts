@@ -16,6 +16,7 @@ interface HostNode {
   children: HostNode[];
   parent: HostNode | null;
   props: Record<string, unknown>;
+  getRootNode: () => { activeElement: null };
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
@@ -30,6 +31,7 @@ interface HostNode {
 
 function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
   return {
+    getRootNode: () => ({ activeElement: null }),
     kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, style: {},
     classList: { add: () => undefined, remove: () => undefined }, focus: () => undefined, scrollTo: () => undefined,
     querySelector: () => null,
@@ -42,6 +44,8 @@ const teleportTarget = hostNode("element", "body");
 // shims cover lifecycle cleanup and scroll helpers while leaving all DOM
 // assertions below against the renderer's own host tree.
 Object.assign(globalThis, {
+  Document: class Document {},
+  ShadowRoot: class ShadowRoot {},
   window: {
     setTimeout, clearTimeout, addEventListener: () => undefined, removeEventListener: () => undefined,
     requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
@@ -596,4 +600,37 @@ test("viewport bounds scroll geometry work and preserves reading offsets through
     await nextTick();
     assert.equal(list.scrollTop, list.scrollHeight, "new messages continue following the bottom");
   } finally { app.unmount(); }
+});
+
+test("main and thread composers preserve failed drafts and only clear acknowledged text", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  for (const thread of [false, true]) {
+    let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
+    const props = thread ? {
+      parent: message(), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
+      sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
+      pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, revealMessageId: null,
+      searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(),
+      deliveryReceiptsByMessage: {}, deliveryRecoveryAvailable: true, deliveryRetryKeys: new Set(),
+    } : composerProps();
+    const mounted = mount(thread ? RoomThreadPanel : RoomComposer, {
+      ...props,
+      [thread ? "onSendThreadMessage" : "onSendMessage"]: (...args: unknown[]) => { complete = args.at(-1) as typeof complete; },
+    });
+    try {
+      const input = descendants(mounted.root).find(node => node.type === "textarea")!;
+      const form = descendants(mounted.root).find(node => node.type === "form")!;
+      const setDraft = input.props["onUpdate:modelValue"] as (text: string) => void;
+      const submit = () => (form.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+      setDraft("Investigate the flaky worker"); await nextTick(); submit(); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "Investigate the flaky worker");
+      complete(false); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "Investigate the flaky worker");
+      submit(); setDraft("A newer instruction"); complete(true); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "A newer instruction");
+      submit(); complete(true); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "");
+    } finally { mounted.app.unmount(); }
+  }
+  delete (window as unknown as Record<string, unknown>).letagentsDesktop;
 });

@@ -288,7 +288,7 @@ const emit = defineEmits<{
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   close: [];
   "open-image": [imageId: string];
-  "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>];
+  "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
   "open-github-event": [url: string];
   "open-agent": [target: AgentModalTarget];
   "open-task": [taskId: string];
@@ -469,6 +469,11 @@ function handleAttachmentDrop(event: DragEvent): void {
 function submitThreadReply(): void {
   const text = draft.value.trim();
   if ((!text && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
+  const submittedDraft = draft.value;
+  const submittedQuote = quoteTarget.value;
+  const submittedSelection = selectedQuoteText.value;
+  const roomIdentifier = props.roomIdentifier;
+  const parentId = props.parent.id;
   emit(
     "send-thread-message",
     selectedQuoteText.value
@@ -477,11 +482,16 @@ function submitThreadReply(): void {
     props.parent.id,
     quoteTarget.value?.id || props.parent.id,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
+    (sent) => {
+      if (!sent || props.roomIdentifier !== roomIdentifier || draft.value !== submittedDraft || props.parent.id !== parentId) return;
+      draft.value = "";
+      if (quoteTarget.value === submittedQuote && selectedQuoteText.value === submittedSelection) {
+        quoteTarget.value = null;
+        selectedQuoteText.value = null;
+      }
+      mentionQuery.value = null;
+    },
   );
-  draft.value = "";
-  quoteTarget.value = null;
-  selectedQuoteText.value = null;
-  mentionQuery.value = null;
 }
 
 function insertNewlineAtCursor(): void {
