@@ -124,8 +124,10 @@ const api: DesktopApi = {
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
+      clientMessageId?: string | null,
+      messageNamespace?: string | null,
     ) =>
-      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null),
+      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null, clientMessageId ?? null, messageNamespace ?? null),
     addTask: (roomIdentifier: string, input) =>
       ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>

@@ -4460,6 +4460,8 @@ test("a frozen pre-checkpoint Cursor Stop cannot roll the reserved invocation ba
     const reservation = delivery.captureActiveDeliveryInterrupt(cursorAgent, "stop-precheckpoint");
     assert.ok(reservation);
     delivery.resolveActiveDeliveryInterrupt(reservation, "freeze");
+    delivery.resolveActiveDeliveryInterrupt(reservation, "resume");
+    delivery.finishActiveDeliveryInterrupt(reservation, "resume");
     releaseProvider.resolve();
     await poll;
     await new Promise((resolve) => setTimeout(resolve, 40));

@@ -207,6 +207,7 @@ import type {
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import type { DesktopHostApproval, HostApprovalChoice, HostApprovalStatus } from "../../../../../../shared/host-approvals";
 import { roomMentionCandidates } from "../../../../domain/participants";
+import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import { desktopIpc } from "../../../../ipc";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
@@ -226,7 +227,7 @@ const props = defineProps<{
   attachmentDrafts: DesktopStagedAttachment[];
   attachmentError: string | null;
   eventPreviews: ComposerEventPreview[];
-  initialDraft?: string;
+  messageNamespace?: string;
   participants: DesktopParticipantSummary[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   permissionApprovals: ManagedAgentPermissionApproval[];
@@ -241,7 +242,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "clear-reply": [];
-  "draft-change": [text: string];
   "pick-attachments": [];
   "open-add-agent": [];
   "open-permission-detail": [approval: ManagedAgentPermissionApproval];
@@ -250,13 +250,13 @@ const emit = defineEmits<{
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
   ];
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
+  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
   "open-event-preview": [event: ComposerEventPreview];
   "dismiss-event-preview": [messageId: string];
 }>();
 
 const maxComposerInputHeight = 156;
-const draft = ref(props.initialDraft || "");
+const { text: draft, captureSubmittedDraft } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
@@ -356,8 +356,6 @@ watch(
     dismissedHostApprovalIds.value = new Set();
     hostApprovalError.value = null;
     void refreshHostApprovals();
-    draft.value = props.initialDraft || "";
-    emit("draft-change", draft.value);
     mentionQuery.value = null;
     void nextTick(syncTextareaHeight);
   },
@@ -389,37 +387,38 @@ onMounted(() => {
 onBeforeUnmount(() => {
   approvalEpoch += 1;
   if (approvalTimer) clearInterval(approvalTimer);
-  emit("draft-change", draft.value);
 });
 
 function submitMessage(): void {
   const text = draft.value.trim();
-  if (!text && props.attachmentDrafts.length === 0) return;
+  if ((!text && props.attachmentDrafts.length === 0) || props.sending) return;
   const replyTarget = props.replyTo;
   const messageText = replyTarget?.isSelection
     ? applySelectedTextQuoteToDraft(text, replyTarget.text, replyTarget.sourceMessageId)
     : text;
+  const clearSubmittedText = captureSubmittedDraft();
   emit(
     "send-message",
     messageText,
     replyTarget?.isSelection ? null : replyTarget?.id || null,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
+    (sent) => {
+      if (!sent) return;
+      clearSubmittedText();
+      void nextTick(() => textareaElement.value?.focus());
+    },
   );
-  draft.value = "";
-  syncDraftToShell();
 }
 
 function insertNewlineAtCursor(): void {
   const input = textareaElement.value;
   if (!input) {
     draft.value = `${draft.value}\n`;
-    syncDraftToShell();
     return;
   }
   const start = input.selectionStart ?? draft.value.length;
   const end = input.selectionEnd ?? draft.value.length;
   draft.value = `${draft.value.slice(0, start)}\n${draft.value.slice(end)}`;
-  syncDraftToShell();
   void nextTick(() => {
     input.selectionStart = start + 1;
     input.selectionEnd = start + 1;
@@ -427,6 +426,7 @@ function insertNewlineAtCursor(): void {
 }
 
 function handleEnterKey(event: KeyboardEvent): void {
+  if (event.isComposing) return;
   event.preventDefault();
   if (mentionOpen.value) {
     const candidate = mentionCandidates.value[activeMentionIndex.value];
@@ -447,7 +447,6 @@ function syncMentionQuery(): void {
 }
 
 function handleDraftInput(): void {
-  syncDraftToShell();
   syncMentionQuery();
 }
 
@@ -466,7 +465,6 @@ function closeMentionForTab(): void {
 function insertMention(mentionText: string): void {
   draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/, `$1@${mentionText} `);
   mentionQuery.value = null;
-  syncDraftToShell();
   void nextTick(() => textareaElement.value?.focus());
 }
 
@@ -475,17 +473,12 @@ function focusWithMention(mentionText: string): void {
   const separator = draft.value && !/\s$/.test(draft.value) ? " " : "";
   draft.value = `${draft.value}${separator}@${mentionText} `;
   mentionQuery.value = null;
-  syncDraftToShell();
   void nextTick(() => {
     syncTextareaHeight();
     const input = textareaElement.value;
     input?.focus();
     input?.setSelectionRange(draft.value.length, draft.value.length);
   });
-}
-
-function syncDraftToShell(): void {
-  emit("draft-change", draft.value);
 }
 
 function syncTextareaHeight(): void {

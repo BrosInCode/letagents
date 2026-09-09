@@ -30,6 +30,20 @@ type DaemonInternals = {
   publishNativeActivity: () => Promise<boolean>;
 };
 
+function holdDeliveryCleanup(daemon: SupervisorDaemon, inboxItemId: string): () => void {
+  const delivery = (daemon as unknown as { supervisedDelivery: {
+    releaseWorkspace?: (...args: unknown[]) => Promise<void>;
+  } }).supervisedDelivery;
+  const original = delivery.releaseWorkspace;
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  delivery.releaseWorkspace = async (...args) => {
+    if (args[2] === inboxItemId) await waiting;
+    await original?.(...args);
+  };
+  return release;
+}
+
 async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -457,6 +471,7 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
     publish: async (input: { roomId: string; clientMessageId: string }) => ({ messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }),
   };
   let daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, httpStub);
+  const releaseCleanup = holdDeliveryCleanup(daemon, originalInboxItemId);
   try {
     await daemon.start();
     const internals = daemon as unknown as DaemonInternals;
@@ -501,9 +516,11 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
     assert.deepEqual(receipts.map((item) => [item.source_message_id, item.fifo_sequence]), [
       ["prepared-A", 1], [`correction:${actionId}`, 2], ["prepared-B", 3],
     ]);
+    releaseCleanup();
     await eventually(async () => calls.includes(`room-turn:${correction.inbox_item_id}`), "durable correction after terminal fold");
     assert.equal(calls.includes(`room-turn:${successorInboxItemId}`), false, "B remains behind the accepted correction");
   } finally {
+    releaseCleanup();
     await daemon.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
@@ -583,6 +600,7 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
   const correctionText = "keep this exact correction after A";
   const actionId = "not-applied-fold-action";
   const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, httpStub);
+  let releaseCleanup = () => {};
   try {
     await daemon.start();
     const internals = daemon as unknown as DaemonInternals;
@@ -608,6 +626,7 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
     });
     await internals.attachLiveProvider(await internals.store.getEntry(entryId));
     const original = await internals.supervisedInbox.enqueueCorrection({ agent_id: entryId, room_id: roomId, source_message_id: "not-applied-A", source_message: { text: "A" }, activation: { decision: "activate" } });
+    releaseCleanup = holdDeliveryCleanup(daemon, original.inbox_item_id);
     const successor = await internals.supervisedInbox.enqueueCorrection({ agent_id: entryId, room_id: roomId, source_message_id: "not-applied-B", source_message: { text: "B" }, activation: { decision: "activate" } });
     await internals.startSupervisedDelivery(entryId);
     await eventually(async () => calls.includes(`room-turn:${original.inbox_item_id}`), "live A before not-applied control");
@@ -643,9 +662,11 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
     assert.deepEqual(receipts.map((item) => [item.source_message_id, item.fifo_sequence]), [
       ["not-applied-A", 1], [`correction:${actionId}`, 2], ["not-applied-B", 3],
     ]);
+    releaseCleanup();
     await eventually(async () => calls.includes(`room-turn:${correction.inbox_item_id}`), "correction starts after not-applied terminal fold");
     assert.equal(calls.includes(`room-turn:${successor.inbox_item_id}`), false);
   } finally {
+    releaseCleanup();
     await daemon.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }

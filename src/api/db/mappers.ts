@@ -215,6 +215,8 @@ export function toMessageAttachmentUpload(row: MessageAttachmentUploadRow): Mess
 export function toMessage(row: MessageRow): Message {
   return {
     id: formatMessageId(row.number),
+    ...(/^desktop-send:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(row.client_message_id || "")
+      ? { client_message_id: row.client_message_id! } : {}),
     agent_identity: row.publisher_agent_key
       ? {
           actor_label: row.sender,
@@ -270,27 +272,7 @@ export function toMessageWithReply(
   attachments: MessageAttachment[] = [],
   thread: MessageThreadSummary | null = null,
 ): Message {
-  return {
-    id: formatMessageId(row.number),
-    agent_identity: row.publisher_agent_key
-      ? {
-          actor_label: row.sender,
-          agent_key: row.publisher_agent_key,
-          agent_session_id: row.publisher_agent_session_id ?? null,
-        }
-      : null,
-    sender: row.sender,
-    text: row.text,
-    ...(row.display_text ? { display_text: row.display_text } : {}),
-    agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
-    source: row.source ?? null,
-    timestamp: row.timestamp,
-    thread_root_id: formatMessageId(row.thread_root_number ?? row.number),
-    thread_reply_to_id: row.reply_to_number ? formatMessageId(row.reply_to_number) : null,
-    thread,
-    reply_to: replyReference,
-    attachments,
-  };
+  return { ...toMessage(row), thread, reply_to: replyReference, attachments };
 }
 
 export function toTask(row: TaskRow): Task {

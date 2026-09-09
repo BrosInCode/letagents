@@ -1973,3 +1973,21 @@ test("local chat stores keep quote-replies top-level across a process restart", 
     );
   }
 });
+
+test("desktop outbox idempotency preserves attachments and rejects changed retry payload", async () => {
+  const { getLocalChatMessageByClientId } = await import("../main/rooms/messages/local-store.js");
+  const roomId = "local-outbox-idempotency";
+  const input = {
+    sender: "Desktop", text: "Look at this", source: "browser",
+    idempotency_key: "desktop-send:32571cb6-3fe9-48a1-9b3c-28f775bdc724",
+    attachments: [{ id: "local:upload-1", file_name: "note.txt", mime_type: "text/plain", size_bytes: 3, url: "file:///tmp/note.txt" }],
+  };
+  const first = await addLocalChatMessage(roomId, input);
+  const retried = await addLocalChatMessage(roomId, input);
+  assert.equal(first.id, retried.id);
+  assert.equal(retried.client_message_id, input.idempotency_key);
+  assert.equal(retried.attachments?.length, 1);
+  assert.equal((await getLocalChatMessageByClientId(roomId, input.idempotency_key))?.id, first.id);
+  await assert.rejects(addLocalChatMessage(roomId, { ...input, text: "Changed" }), /different content/);
+  await assert.rejects(addLocalChatMessage(roomId, { ...input, attachments: [] }), /different content/);
+});

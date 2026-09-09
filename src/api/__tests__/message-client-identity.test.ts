@@ -28,3 +28,13 @@ test("message projections expose only server-authenticated agent identity", asyn
   });
   assert.deepEqual(toMessageWithReply(row, null).agent_identity, toMessage(row).agent_identity);
 });
+
+test("message projection echoes random desktop submission IDs but keeps internal keys private", async () => {
+  process.env.DB_URL ||= "postgresql://postgres:postgres@localhost:5432/letagents";
+  const { toMessage, toMessageWithReply } = await import("../db/mappers.js");
+  const id = "desktop-send:32571cb6-3fe9-48a1-9b3c-28f775bdc724";
+  assert.equal(toMessage({ ...row, client_message_id: id }).client_message_id, id);
+  assert.equal(toMessageWithReply({ ...row, client_message_id: id }, null).client_message_id, id);
+  assert.equal(toMessage(row).client_message_id, undefined);
+  assert.equal(toMessage({ ...row, client_message_id: "desktop-send:private-internal-key" }).client_message_id, undefined);
+});

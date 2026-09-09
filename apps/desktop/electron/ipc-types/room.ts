@@ -313,6 +313,8 @@ export interface DesktopRoomMessage {
   id: string;
   /** Exact idempotency identity supplied by the message publisher. */
   clientMessageId?: string | null;
+  /** Renderer-only submission state; never a server message identity. */
+  outgoing?: { status: "pending" | "uncertain"; attachmentCount: number; error: string | null };
   sender: string;
   text: string;
   displayText?: string | null;

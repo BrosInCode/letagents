@@ -364,6 +364,7 @@ function toMessagePayload(
   );
   return {
     id: formatMessageId(row.number),
+    ...(row.sync_key?.startsWith("desktop-send:") ? { client_message_id: row.sync_key } : {}),
     agent_identity: row.publisher_agent_key
       ? {
           actor_label: row.sender,
@@ -694,7 +695,17 @@ export async function addLocalChatMessage(
         .get(trimmedRoomId, idempotencyKey)
       : null;
     if (existing) {
-      return mapRow(existing);
+      const row = mapRow(existing);
+      if (idempotencyKey?.startsWith("desktop-send:")) {
+        const attached = database.prepare("SELECT attachment_id FROM local_chat_attachments WHERE room_id = ? AND message_number = ?")
+          .all(trimmedRoomId, row.number) as Array<{ attachment_id: string }>;
+        if (row.sender !== sender || row.text !== text || row.reply_to_number !== replyToNumber
+          || row.thread_root_number !== threadRootNumber || row.source !== (input.source || null)
+          || attached.map(item => item.attachment_id).sort().join("|") !== attachmentRows.map(item => item.attachment_id).sort().join("|")) {
+          throw new Error("Outgoing message identity was reused with different content.");
+        }
+      }
+      return row;
     }
     const number = allocateLocalMessageNumber(database, trimmedRoomId);
     const insertedRow: LocalMessageRow = {
@@ -776,6 +787,14 @@ export async function addLocalChatMessage(
   });
 
   return (await hydrateMessageRows(database, [row], { readerKey: input.readerKey }))[0]!;
+}
+
+export async function getLocalChatMessageByClientId(
+  roomId: string, clientId: string, options: LocalReaderOptions = {},
+): Promise<RoomMessagePayload | null> {
+  const database = await getDb();
+  const row = database.prepare("SELECT * FROM local_chat_messages WHERE room_id = ? AND sync_key = ?").get(roomId, clientId);
+  return row ? (await hydrateMessageRows(database, [mapRow(row)], options))[0] ?? null : null;
 }
 
 export async function getLocalChatMessages(
