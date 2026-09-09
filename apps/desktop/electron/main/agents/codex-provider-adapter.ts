@@ -1284,19 +1284,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     handle.setLiveState("working");
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
-    // A bounded turn outcome does not describe the reusable app-server. The
-    // daemon settles the exact turn separately; only process/control evidence
-    // may make this handle failed.
-    handle.setLiveState("idle");
-    if (terminal.status !== "completed") {
-      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
-      throw new Error(`Codex bounded room turn ${turnId} ended ${terminal.status}.`);
-    }
-    const result = handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, terminal.turn);
-    const terminalResult = { turnId, ...result };
-    await options.checkpointTerminalResult?.(terminalResult);
-    handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
-    return terminalResult;
+    return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
   }
 
   /** Reattach only the durable exact turn; never issue a second turn/start. */
@@ -2497,12 +2485,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // A terminal native turn leaves the reusable app-server at an idle turn
     // boundary even when that turn failed or was interrupted.
     handle.setLiveState("idle");
-    if (status !== "completed") {
-      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
-      throw new CodexRoomTurnRecoveryError(`Codex bounded room turn ${turnId} ended ${status}.`);
-    }
-    const result = handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, turn);
-    const terminalResult = { turnId, ...result };
+    const terminalResult: ProviderRoomTurnResult = status === "completed"
+      ? { turnId, ...handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, turn) }
+      : { turnId, providerContinuationId: handle.providerContinuationId,
+        outcome: status === "failed" ? "failed" : "interrupted", text: null, evidence: "transcript",
+        error: String(safeStreamPayload(turn.error?.message || `Codex bounded room turn ended ${status}.`).payload).slice(0, 2000) };
     await checkpointTerminalResult?.(terminalResult);
     handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
     return terminalResult;

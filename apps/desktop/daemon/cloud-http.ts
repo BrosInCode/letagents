@@ -212,6 +212,58 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
 /** The daemon talks to the room API only through the live worker bearer. */
 export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
+  async ownedTasks(input) {
+    const tasks: Array<{ id: string; title: string; leaseId: string; epoch: number }> = [];
+    const read = async (suffix: string) => {
+      const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/tasks${suffix}`, {
+        headers: { authorization: `Bearer ${input.bearer}` }, signal: boundedCloudSignal(input.signal),
+      });
+      if (response.status === 404 && suffix.startsWith("/")) return null;
+      if (!response.ok) throw new Error(`Task ownership read failed with HTTP ${response.status}.`);
+      const body = await response.json() as Record<string, unknown>;
+      if (body.room_id !== input.roomId) throw new Error("Task ownership response belongs to another room.");
+      return body;
+    };
+    const retainOwned = (value: unknown) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid task ownership response.");
+      const task = value as Record<string, unknown>;
+      if (typeof task.id !== "string" || !task.id || typeof task.title !== "string" || !Array.isArray(task.active_leases)) throw new Error("Task ownership response omitted its identity or leases.");
+      if (task.status !== "assigned" && task.status !== "in_progress") return;
+      const leases = task.active_leases.filter((value: unknown) => {
+        if (!value || typeof value !== "object") return false;
+        const lease = value as Record<string, unknown>;
+        return lease.kind === "work" && lease.status === "active" && lease.task_id === task.id
+          && lease.room_id === input.roomId && lease.agent_session_id === input.agentSessionId
+          && (!input.heldBefore || (typeof lease.created_at === "string" && Date.parse(lease.created_at) <= Date.parse(input.heldBefore)))
+          && (lease.expires_at === null || (typeof lease.expires_at === "string" && Date.parse(lease.expires_at) > Date.now()));
+      }) as Array<Record<string, unknown>>;
+      if (leases.length !== 1) return;
+      const lease = leases[0]!;
+      if (typeof lease.id !== "string" || !lease.id || !Number.isSafeInteger(lease.epoch) || Number(lease.epoch) < 0) throw new Error("Task lease has no valid fence.");
+      tasks.push({ id: task.id, title: task.title.slice(0, 512), leaseId: lease.id, epoch: Number(lease.epoch) });
+      if (tasks.length > 100) throw new Error("Too many owned tasks to recover safely in one continuation.");
+    };
+    if (input.taskIds) {
+      for (const id of input.taskIds) {
+        const task = await read(`/${encodeURIComponent(id)}`);
+        if (task) { if (task.id !== id) throw new Error("Task lookup returned a different task."); retainOwned(task); }
+      }
+      return tasks;
+    }
+    let after: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const query = new URLSearchParams({ open: "true", limit: "100" });
+      if (after) query.set("after", after);
+      const body = await read(`?${query}`);
+      if (!body || !Array.isArray(body.tasks) || typeof body.has_more !== "boolean") throw new Error("Task list response is incomplete.");
+      for (const task of body.tasks) retainOwned(task);
+      if (!body.has_more) return tasks;
+      const next = (body.tasks.at(-1) as Record<string, unknown> | undefined)?.id;
+      if (typeof next !== "string" || !next || next === after) throw new Error("Task list cursor did not advance.");
+      after = next;
+    }
+    throw new Error("Task ownership inventory exceeded its bounded read budget.");
+  },
   async poll(input) {
     const query = new URLSearchParams({ timeout: String(SUPERVISED_ROOM_POLL_TIMEOUT_MS) });
     if (input.afterMessageId) query.set("after", input.afterMessageId);

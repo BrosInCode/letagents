@@ -381,7 +381,7 @@ function safeProviderErrorMessage(message: OpenCodeMessage | null): string | nul
   if (!failure) return null;
   const status = failure.statusCode ? ` (HTTP ${failure.statusCode})` : "";
   if (failure.statusCode === 402) {
-    return `Open Model request was rejected because the model provider account could not cover this turn's output budget${status}. Add provider credit or choose another model, then send a new message.`;
+    return `Open Model request was rejected because the model provider account could not cover this turn's output budget${status}. Add provider credit or choose another model, then retry the unfinished work in LetAgents.`;
   }
   if (failure.statusCode === 403) {
     // A forbidden response can require account attestation or model access,
@@ -392,13 +392,13 @@ function safeProviderErrorMessage(message: OpenCodeMessage | null): string | nul
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, 320);
-    return `Open Model access was denied by the provider${status}${detail ? `: ${detail}` : ". Check the provider's account requirements and model permissions, then send a new message."}`;
+    return `Open Model access was denied by the provider${status}${detail ? `: ${detail}` : ". Check the provider's account requirements and model permissions, then retry the unfinished work in LetAgents."}`;
   }
   if (failure.statusCode === 401) {
-    return `Open Model authentication or model access was rejected by the provider${status}. Check the API key and model access, then send a new message.`;
+    return `Open Model authentication or model access was rejected by the provider${status}. Check the API key and model access, then retry the unfinished work in LetAgents.`;
   }
   if (failure.statusCode === 429) {
-    return `Open Model was rate-limited by the model provider${status}. Wait for the provider limit to reset, then send a new message.`;
+    return `Open Model was rate-limited by the model provider${status}. Wait for the provider limit to reset, then retry the unfinished work in LetAgents.`;
   }
   const detail = failure.message
     ?.replace(/https?:\/\/\S+/gi, "provider settings")

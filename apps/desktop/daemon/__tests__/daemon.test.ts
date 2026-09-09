@@ -434,6 +434,49 @@ test("production room observation polls stay below common proxy idle cutoffs", a
   }
 });
 
+test("task continuity inventory uses exact worker leases, pagination and the failure-time cutoff", async () => {
+  const previousFetch = globalThis.fetch;
+  const roomId = "github.com/example/repo";
+  const input = { roomId, apiUrl: "https://letagents.test", bearer: "worker-secret", agentSessionId: "session-1",
+    heldBefore: "2026-09-09T00:00:00Z", signal: new AbortController().signal };
+  const task = (id: string, leasePatch: Record<string, unknown> = {}, status = "in_progress") => ({
+    id, title: id, status, active_leases: [{ id: `lease-${id}`, epoch: 2, kind: "work", status: "active",
+      room_id: roomId, task_id: id, agent_session_id: "session-1", expires_at: null,
+      created_at: "2026-09-08T00:00:00Z", ...leasePatch }],
+  });
+  const calls: URL[] = [];
+  try {
+    globalThis.fetch = (async (url, options) => {
+      assert.equal((options?.headers as Record<string, string>).authorization, "Bearer worker-secret");
+      const parsed = new URL(String(url)); calls.push(parsed);
+      const after = parsed.searchParams.get("after");
+      return Response.json({ room_id: roomId, has_more: !after, tasks: after ? [task("task-last")] : [
+        task("owned"), task("another-instance", { agent_session_id: "session-2" }),
+        task("finished", {}, "done"), task("reviewing", { kind: "review" }),
+        task("expired", { expires_at: "2020-01-01T00:00:00Z" }),
+        task("new-work", { created_at: "2026-09-09T00:00:01Z" }),
+        task("missing-creation", { created_at: undefined }),
+      ] });
+    }) as typeof fetch;
+    assert.deepEqual(await productionSupervisedDeliveryHttp.ownedTasks!(input), [
+      { id: "owned", title: "owned", leaseId: "lease-owned", epoch: 2 },
+      { id: "task-last", title: "task-last", leaseId: "lease-task-last", epoch: 2 },
+    ]);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]!.searchParams.get("open"), "true");
+    assert.equal(calls[1]!.searchParams.get("after"), "missing-creation");
+    assert.equal(decodeURIComponent(calls[0]!.pathname), `/rooms/${roomId}/tasks`);
+
+    globalThis.fetch = (async () => Response.json({ ...task("owned"), room_id: roomId })) as typeof fetch;
+    assert.equal((await productionSupervisedDeliveryHttp.ownedTasks!({ ...input, taskIds: ["owned"] })).length, 1);
+    await assert.rejects(productionSupervisedDeliveryHttp.ownedTasks!({ ...input, taskIds: ["wrong-id"] }), /different task/);
+    globalThis.fetch = (async () => Response.json({ ...task("owned"), room_id: "other-room" })) as typeof fetch;
+    await assert.rejects(productionSupervisedDeliveryHttp.ownedTasks!({ ...input, taskIds: ["owned"] }), /another room/);
+    globalThis.fetch = (async () => new Response(null, { status: 503 })) as typeof fetch;
+    await assert.rejects(productionSupervisedDeliveryHttp.ownedTasks!(input), /HTTP 503/);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test("continuation repair resumes every uncommitted journal phase from the original missing conversation", () => {
   const inboxItemId = "inbox_1";
   const originalContinuation = "thread_missing";

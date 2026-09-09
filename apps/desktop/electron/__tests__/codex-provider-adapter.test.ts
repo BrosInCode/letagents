@@ -1303,6 +1303,7 @@ test("a failed Codex room turn leaves the same runtime available for its success
       turns: [...statuses].map(([id, status]) => ({
         id,
         status,
+        error: status === "failed" ? { message: "HTTP 503 unavailable" } : null,
         items: id === "turn-successor"
           ? [{ type: "agentMessage", phase: "final", text: "Successor completed." }]
           : [],
@@ -1319,7 +1320,8 @@ test("a failed Codex room turn leaves the same runtime available for its success
   client.emit({ method: "turn/completed", params: {
     threadId: handle.providerContinuationId, turnId: "turn-failed", turn: { id: "turn-failed", status: "failed" },
   } });
-  await assert.rejects(failed, /turn-failed ended failed/);
+  assert.deepEqual(await failed, { turnId: "turn-failed", providerContinuationId: handle.providerContinuationId,
+    outcome: "failed", text: null, evidence: "transcript", error: "HTTP 503 unavailable" });
   assert.equal(handle.observedState(), "idle");
   assert.equal(harness.launches[0]?.alive, true);
 
@@ -1724,9 +1726,9 @@ test("Codex room-turn recovery treats an already-failed turn as idle runtime evi
     return originalRequest<T>(method, params);
   };
 
-  await assert.rejects(adapter.recoverRoomTurn!(handle, {
+  assert.equal((await adapter.recoverRoomTurn!(handle, {
     inboxItemId: "inbox-already-failed", providerTurnId: "turn-already-failed",
-  }), /turn-already-failed ended failed/);
+  })).outcome, "failed");
   assert.equal(handle.observedState(), "idle");
   assert.equal(harness.launches[0]?.alive, true);
   assert.deepEqual(harness.signals, []);
@@ -2422,7 +2424,7 @@ test("empty reattachment subscribes after first-turn checkpoint and never replay
       await assert.rejects(result, /subscription unavailable/);
       await adapter.recoverRoomTurn(attached, { inboxItemId: "first-turn", providerTurnId: `turn-${first.providerContinuationId}` });
     }
-    else if (status !== "completed") await assert.rejects(result, /ended (?:cancelled|STOPPED)/);
+    else if (status !== "completed") assert.equal((await result).outcome, "interrupted");
     else await result;
     const client = harness.clients[1]!;
     assert.equal(client.requests.filter(request => request.method === "turn/start").length, 1);

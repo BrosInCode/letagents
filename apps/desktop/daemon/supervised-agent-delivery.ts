@@ -1,6 +1,7 @@
 import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
+import { taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
 
 function providerFailureDisplayText(message: string): string {
   const normalized = message
@@ -65,6 +66,9 @@ export type SupervisedPollResponse = {
 };
 
 export interface SupervisedDeliveryHttp {
+  /** Existing task GETs, filtered to this exact worker's active work leases. */
+  ownedTasks?(input: { roomId: string; apiUrl: string; bearer: string; agentSessionId: string;
+    taskIds?: readonly string[]; heldBefore?: string; signal: AbortSignal }): Promise<ContinuityTask[]>;
   /** Production admission owns first-cursor creation before provider reachability. */
   admissionOwnsInitialCursor?: boolean;
   poll(input: { roomId: string; apiUrl: string; bearer: string; afterMessageId: string | null; signal: AbortSignal }): Promise<SupervisedPollResponse>;
@@ -1043,6 +1047,30 @@ export class SupervisedAgentDelivery {
         if (!(exactCursorRecovery
           ? await this.hasCursorTransitionAuthority(agent, controller)
           : await this.hasExecutionAuthority(agent, controller))) return;
+        if (!head && this.http.ownedTasks) {
+          const failed = await this.inbox.taskContinuityCandidate(agent.agentId);
+          if (failed && failed.room_id === agent.roomId && failed.activation.task_continuity_owner_session_id === agent.agentSessionId) {
+            const binding = await this.inbox.providerTurnBinding(failed.inbox_item_id);
+            if (binding?.work_attempt_id !== agent.workAttemptId || binding.provider_continuation_id !== agent.providerContinuationId) return;
+            const prior = await this.inbox.taskContinuation(failed.inbox_item_id);
+            const attempt = (prior?.attempt ?? 0) + 1;
+            const policy = taskFailurePolicy(failed.last_error, attempt);
+            let tasks: ContinuityTask[] = [];
+            let lookupError: string | null = null;
+            try { tasks = await this.http.ownedTasks({ ...agent, taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }
+            catch { lookupError = "Task ownership could not be verified. Check the room connection before continuing work."; }
+            if (!await this.hasExecutionAuthority(agent, controller)) return;
+            const queued = await this.inbox.enqueueTaskContinuation({ parentId: failed.inbox_item_id,
+              agentId: agent.agentId, roomId: agent.roomId, workAttemptId: agent.workAttemptId,
+              providerContinuationId: binding.provider_continuation_id, agentSessionId: agent.agentSessionId,
+              tasks: lookupError ? null : prior?.tasks ? tasks.filter((task) => prior.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)) : tasks,
+              blockReason: lookupError ?? (policy.automatic ? null : policy.detail), detail: policy.detail,
+              delayMs: this.retryDelayMs === 0 ? 0 : Math.min(60_000, 10_000 * 2 ** Math.min(attempt - 1, 3)),
+            });
+            if (queued) continue;
+          }
+          return;
+        }
         if (head?.state === "blocked" && head.failure_code === "provider_continuation_missing" && this.restoreMissingContinuation) {
           const restored = await this.restoreMissingContinuation({ agent, item: head, manual: false });
           // A replacement installs a successor handle and starts a successor
@@ -1050,6 +1078,38 @@ export class SupervisedAgentDelivery {
           // conversation can continue on the current exact handle.
           if (restored !== "restored") return;
           continue;
+        }
+        if (head?.state === "pending") {
+          let continuation = await this.inbox.taskContinuation(head.inbox_item_id);
+          if (continuation) {
+            if (continuation.workAttemptId !== agent.workAttemptId || continuation.agentSessionId !== agent.agentSessionId
+              || continuation.providerContinuationId !== agent.providerContinuationId || head.room_id !== agent.roomId) {
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "The original task owner changed; no continuation was started.");
+              continue;
+            }
+            const delay = await this.inbox.taskContinuationDelay(head.inbox_item_id);
+            if (delay > 0) await this.waitForPollDelay(delay, controller.signal);
+            if (!await this.hasExecutionAuthority(agent, controller)) return;
+            let tasks: ContinuityTask[];
+            try {
+              if (!this.http.ownedTasks) throw new Error("Task ownership lookup is unavailable.");
+              tasks = await this.http.ownedTasks({ ...agent, taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: controller.signal });
+            } catch {
+              if (await this.hasExecutionAuthority(agent, controller)) await this.inbox.transition(head.inbox_item_id, "blocked", { last_error: "Task ownership could not be verified. Check the room connection and use Retry delivery." });
+              return;
+            }
+            if (!await this.hasExecutionAuthority(agent, controller)) return;
+            const retained = continuation.tasks ? tasks.filter((task) => continuation!.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)) : tasks;
+            if (!retained.length) {
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "The task finished or its ownership changed; no continuation was started.");
+              continue;
+            }
+            continuation = await this.inbox.refreshTaskContinuationSnapshot(head.inbox_item_id, retained);
+            if (await this.inbox.taskContinuationHasUncertainEffects(head.inbox_item_id)) {
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.");
+              return;
+            }
+          }
         }
         const item = await this.inbox.claimHead(agent.agentId);
         if (!item) return; // blocked, in-flight, or empty: FIFO remains intact.
@@ -1292,6 +1352,7 @@ export class SupervisedAgentDelivery {
           text: publicationResult.text?.trim() || null,
           evidence,
           failure_detail: failureDetail,
+          task_owner_session_id: this.http.ownedTasks ? agent.agentSessionId : undefined,
           terminal_evidence: terminalEvidence,
         });
         // A late failure or unreadable re-read cannot replace a definitive
@@ -1400,12 +1461,22 @@ export class SupervisedAgentDelivery {
       let baselineObserved = false;
       const beforeDispatch = async () => {
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
+        const continuation = await this.inbox.taskContinuation(item.inbox_item_id);
+        if (continuation) {
+          const tasks = await this.http.ownedTasks?.({ ...agent, taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: turnController.signal });
+          if (!tasks || continuation.agentSessionId !== agent.agentSessionId || continuation.workAttemptId !== agent.workAttemptId
+            || continuation.providerContinuationId !== agent.providerContinuationId
+            || !continuation.tasks?.length || !continuation.tasks.every((old) => tasks.some((task) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch))
+            || await this.inbox.taskContinuationHasUncertainEffects(item.inbox_item_id)) {
+            throw new Error("Task continuation ownership or prior action evidence changed before dispatch. No task continuation was started.");
+          }
+        }
         if (!baselineObserved) {
           baselineObserved = true;
           try { workspaceBaseline = await this.observeStartingWorkspace?.(agent, item.source_message_id, item.inbox_item_id) || null; } catch { /* Optional observation. */ }
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
-        await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
+        await this.inbox.checkpointDispatchIntent(item.inbox_item_id, this.http.ownedTasks ? agent.agentSessionId : undefined);
       };
       providerCallEntered = true;
       const turn = recovering

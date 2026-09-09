@@ -23,6 +23,7 @@ export type ClaudeExactTurnResult =
   };
 
 export type ClaudeExactTurnFailure = {
+  nativeOutcome?: "failed" | "interrupted";
   turnId: string;
   error: string;
 };
@@ -88,6 +89,8 @@ export function exactClaudeStreamTerminal(
       : [];
     return {
       turnId,
+      ...(event.is_error === true && typeof event.subtype === "string" && /^(?:error_|interrupted$)/.test(event.subtype)
+        ? { nativeOutcome: event.subtype === "interrupted" ? "interrupted" as const : "failed" as const } : {}),
       error: errors.join("; ") || `Claude command ended ${String(event.subtype ?? "without success")}.`,
     };
   }

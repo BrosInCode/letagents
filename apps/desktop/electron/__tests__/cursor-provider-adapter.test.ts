@@ -2643,6 +2643,34 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   assert.equal(handle.observedState(), "idle");
 });
 
+test("Cursor checkpoints a proven native provider failure and reuses its exact session", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const checkpoints: unknown[] = [];
+  const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTerminalResult: async result => { checkpoints.push(result); },
+  });
+  await flush();
+  const child = harness.children[0]!;
+  child.emit({ type: "result", subtype: "error_during_execution", is_error: true,
+    result: "HTTP 503 service unavailable", session_id: "sess-cursor-1" });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  const failure = await pending;
+  assert.equal(failure.outcome, "failed");
+  assert.equal("providerContinuationId" in failure && failure.providerContinuationId, "sess-cursor-1");
+  assert.equal("error" in failure && failure.error, "HTTP 503 service unavailable");
+  assert.deepEqual(checkpoints, [failure]);
+  assert.equal(handle.observedState(), "idle");
+  const next = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "continuation" }));
+  await flush();
+  assert.equal(argValue(harness.launches[1]!.args, "--resume"), "sess-cursor-1");
+  harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false,
+    result: "finished", session_id: "sess-cursor-1" });
+  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await next).text, "finished");
+});
+
 test("writable Cursor turns launch only in their private generation and retire it before publication", async () => {
   const harness = createHarness();
   const createGeneration = harness.dependencies.createWorkspaceGeneration;
@@ -7414,8 +7442,9 @@ test("Cursor typed child loss differs from an exact user interruption", async ()
         assert.ok(events.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"));
       },
     });
-    const rejected = assert.rejects(running,
-      interrupted ? /interrupted before publication/ : /ended before.*terminal result/);
+    const rejected = interrupted
+      ? running.then(result => { assert.equal(result.outcome, "interrupted"); })
+      : assert.rejects(running, /ended before.*terminal result/);
     await flush();
     const child = harness.children[0]!;
     child.emit({ type: "tool_call", subtype: "started", call_id: "shell", session_id: "sess-cursor-1",

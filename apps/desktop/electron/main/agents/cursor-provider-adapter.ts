@@ -483,6 +483,7 @@ type CursorTurnTerminal = {
   exit: ProviderProcessExit;
   text: string | null;
   isError: boolean;
+  nativeFailure?: boolean;
   providerRequestId: string | null;
   attemptTerminal: ProviderTerminalPayload | null;
   publicationContract: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0";
@@ -973,7 +974,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
             terminal.attemptTerminal ?? this.synthesizeAttemptTerminal(handle, terminal.exit)),
         };
       }
-      const result = this.providerRoomTurnResult(turnId, terminal);
+      const result = this.providerRoomTurnResult(turnId, terminal, handle.providerContinuationId!);
       const disposition = await options.checkpointTerminalResult?.(result);
       const acceptedResult = disposition?.acceptedResult ?? result;
       const cleanupRecoveryEvidence = options.checkpointTerminalResult
@@ -1149,7 +1150,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       );
       terminal = { ...terminal, attemptTerminal };
     }
-    const result = this.providerRoomTurnResult(turnId, terminal);
+    const result = this.providerRoomTurnResult(turnId, terminal, handle.providerContinuationId!);
     const disposition = await options.checkpointTerminalResult?.(result);
     const acceptedResult = disposition?.acceptedResult ?? result;
     const cleanupRecoveryEvidence = options.checkpointTerminalResult
@@ -1300,6 +1301,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         exit,
         text,
         isError,
+        nativeFailure: resultMessage?.is_error === true && typeof resultMessage.subtype === "string" && resultMessage.subtype !== "success",
         providerRequestId,
         attemptTerminal: null,
         publicationContract,
@@ -2594,6 +2596,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       exit,
       text: turn.resultText,
       isError: turn.resultWasError,
+      nativeFailure: turn.executionTerminalCheckpoint?.isError === true,
       providerRequestId: turn.providerRequestId,
       attemptTerminal: null,
       publicationContract: "structured_room_turn_v1",
@@ -3005,9 +3008,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private providerRoomTurnResult(
     turnId: string,
     terminal: CursorTurnTerminal,
+    providerContinuationId: string,
   ): ProviderRoomTurnResult {
     if (terminal.state === "interrupted") {
-      throw new CursorRoomTurnTerminalError("Cursor bounded room turn was interrupted before publication.");
+      return { turnId, providerContinuationId, outcome: "interrupted", text: null, evidence: "stream" };
     }
     if (terminal.state === "attempt_terminal") {
       const cause = terminal.attemptTerminal?.terminalCause;
@@ -3020,7 +3024,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
       );
     }
     if (terminal.isError) {
-      throw new CursorRoomTurnTerminalError("Cursor returned an error result for the bounded room turn.");
+      if (!terminal.nativeFailure) throw new CursorRoomTurnTerminalError("Cursor returned an unproven error result for the bounded room turn.");
+      return { turnId, providerContinuationId, outcome: "failed", text: null, evidence: "stream",
+        error: redactCredentialText(terminal.text || "Cursor returned an error result for the bounded room turn.").value.slice(0, 2000),
+        publicationContract: terminal.publicationContract };
     }
     const text = terminal.text?.trim() || null;
     if (text === CURSOR_NO_ROOM_REPLY_SENTINEL) {

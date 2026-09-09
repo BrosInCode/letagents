@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection } from "node:net";
@@ -1113,6 +1113,301 @@ async function enqueue(store: SupervisedAgentInboxStore, id = "1") {
 async function ingest(store: SupervisedAgentInboxStore, id = "1") {
   await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id, messages: [{ source_message_id: id, source_message: { id }, activation: {} }] });
 }
+
+test("a transient provider failure continues its unfinished task without another room message", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-task-continuity-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let runs = 0;
+  let partialWrites = 0;
+  let completed = false;
+  const task = { id: "task_1", title: "Finish the existing change", leaseId: "lease-1", epoch: 0 };
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    const turnId = `turn-${runs}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    if (runs === 1) {
+      partialWrites += 1;
+      return { turnId, providerContinuationId: "thread", outcome: "failed", text: null,
+        evidence: "stream", error: "HTTP 503 Service Unavailable" };
+    }
+    assert.match(JSON.stringify(request.sourceMessage), /task_1/);
+    assert.match(JSON.stringify(request.sourceMessage), /existing work/i);
+    completed = true;
+    return { turnId, outcome: "reply", text: "The remaining work is finished." };
+  }), {
+    poll: async () => ({}),
+    ownedTasks: async () => completed ? [] : [task],
+    publish: async () => ({ roomId: agent.roomId, messageId: "msg_2" }),
+  }, currentAuthority, 0, async () => {});
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    assert.equal(runs, 2, "the failed turn must not strand the task when the room stays quiet");
+    assert.equal(partialWrites, 1, "the original turn and its completed work must not be replayed");
+    assert.equal(completed, true);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "1");
+  } finally {
+    await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+  }
+});
+
+const continuityTask = { id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 };
+
+test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-restart-"));
+  const path = join(root, "state.sqlite");
+  let store = new SupervisedAgentInboxStore(path);
+  const effectRequest = { agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: "generation-1",
+    provider_turn_id: "failed-turn", work_attempt_id: "attempt", current_execution_generation_id: "generation-2",
+    provider_continuation_id: "thread", mcp_request_id: "publish-pr", tool_name: "publish_room_artifact",
+    request: { url: "https://github.com/example/repo/pull/1" }, mutation: true };
+  const http = { poll: async () => ({}), ownedTasks: async () => [continuityTask],
+    publish: async () => ({ roomId: agent.roomId, messageId: "published" }) };
+  let runs = 0;
+  let delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs++;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("failed-turn");
+    await writeFile(join(root, "work.txt"), "partial implementation\n");
+    // An already executed external mutation has its durable receipt before the provider fails.
+    const db = new DatabaseSync(path);
+    db.prepare(`INSERT INTO supervised_agent_effects
+      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+      VALUES ('effect',?,?,?,?,?,?,?,1,'completed',?,NULL,?,?)`).run(agent.agentId, agent.roomId, "generation-1",
+      "failed-turn", effectRequest.mcp_request_id, effectRequest.tool_name, JSON.stringify(effectRequest.request),
+      JSON.stringify({ artifact_id: "pr-1" }), new Date().toISOString(), new Date().toISOString());
+    db.close();
+    const failed = { turnId: "failed-turn", providerContinuationId: "thread", outcome: "failed" as const,
+      text: null, evidence: "stream" as const, error: "HTTP 503 unavailable" };
+    await options?.checkpointTerminalResult?.(failed);
+    delivery.fence(); // Crash window: native failure is saved, child continuation does not yet exist.
+    return failed;
+  }), http, currentAuthority, 0);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    await delivery.fenceAndDrain(); await store.close();
+    store = new SupervisedAgentInboxStore(path);
+    const afterRestart = { ...agent, executionGenerationId: "generation-2", daemonGeneration: 2 };
+    delivery = new SupervisedAgentDelivery(store, provider(async (handle, request, options) => {
+      runs++;
+      assert.equal(handle.providerContinuationId, "thread");
+      assert.equal(request.activation.task_continuity !== undefined, true);
+      assert.equal(await readFile(join(root, "work.txt"), "utf8"), "partial implementation\n");
+      const replay = await store.prepareEffect(effectRequest);
+      assert.equal(replay.created, false);
+      assert.equal(replay.effect.state, "completed");
+      assert.deepEqual(replay.effect.result, { artifact_id: "pr-1" });
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.("new-continuation");
+      await writeFile(join(root, "work.txt"), "partial implementation\nremaining implementation\n");
+      return { turnId: "new-continuation", outcome: "reply", text: "Finished the existing task." };
+    }, async () => { throw new Error("The failed native turn must never be replayed or reattached."); }), http, currentAuthority, 0);
+    await delivery.pump(afterRestart);
+    await delivery.pump(afterRestart);
+    assert.equal(runs, 2);
+    assert.equal(await readFile(join(root, "work.txt"), "utf8"), "partial implementation\nremaining implementation\n");
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "1");
+    const receipts = await store.receipts(agent.agentId);
+    assert.deepEqual(receipts.map(r => r.state), ["acknowledged_failed", "acknowledged"]);
+    assert.equal((await store.taskContinuation(receipts[1]!.inbox_item_id))?.agentSessionId, "session-1");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("recovering a failed turn under a replacement worker session cannot inherit its task", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-recovered-owner-"));
+  const path = join(root, "state.sqlite"); let store = new SupervisedAgentInboxStore(path);
+  let nativeStarts = 0; let ownershipReads = 0;
+  const http = { poll: async () => ({}), publish: async () => {},
+    ownedTasks: async () => { ownershipReads++; return [continuityTask]; } };
+  let delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.(); nativeStarts++;
+    await options?.checkpointTurnStarted?.("old-turn");
+    delivery.fence();
+    return { turnId: "old-turn", outcome: "unreadable", text: null, evidence: "none" };
+  }), http, currentAuthority, 0);
+  try {
+    await ingest(store); await delivery.pump(agent);
+    await delivery.fenceAndDrain(); await store.close(); store = new SupervisedAgentInboxStore(path);
+    delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      nativeStarts++; throw new Error("must not run another native turn");
+    }, async () => ({ turnId: "old-turn", providerContinuationId: "thread", outcome: "failed", text: null,
+      evidence: "transcript", error: "HTTP 503" })), http, currentAuthority, 0);
+    await delivery.pump({ ...agent, daemonGeneration: 2, executionGenerationId: "generation-2", agentSessionId: "replacement-worker" });
+    assert.equal(nativeStarts, 1);
+    assert.equal(ownershipReads, 0);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
+    assert.equal(await store.head(agent.agentId), null);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("task continuity persists its delay and three-continuation budget across restarts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-budget-"));
+  const path = join(root, "state.sqlite");
+  let now = Date.parse("2026-09-09T00:00:00Z");
+  let store = new SupervisedAgentInboxStore(path, () => new Date(now).toISOString());
+  let runs = 0;
+  const port = provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.();
+    const turnId = `failed-${++runs}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    return { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 429 rate limit" };
+  });
+  const http = { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] };
+  let delivery: SupervisedAgentDelivery;
+  const makeDelivery = () => new SupervisedAgentDelivery(store, port, http, currentAuthority, 1, async () => {}, async () => { delivery.fence(); });
+  delivery = makeDelivery();
+  try {
+    await ingest(store);
+    for (let expected = 1; expected <= 4; expected++) {
+      await delivery.pump({ ...agent, daemonGeneration: expected });
+      assert.equal(runs, expected);
+      const head = (await store.head(agent.agentId))!;
+      if (expected < 4) {
+        const delay = 10_000 * 2 ** (expected - 1);
+        assert.equal(head.next_attempt_at_ms, now + delay);
+        await delivery.fenceAndDrain(); await store.close();
+        store = new SupervisedAgentInboxStore(path, () => new Date(now).toISOString());
+        assert.equal(await store.claimHead(agent.agentId), null, "restart cannot bypass the persisted due time");
+        now += delay;
+        delivery = makeDelivery();
+      } else {
+        assert.equal(head.state, "blocked");
+        assert.match(head.last_error!, /three continuations/);
+        await delivery.pump(agent);
+        assert.equal(runs, 4, "the original turn plus three automatic continuations is the hard bound");
+      }
+    }
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const [error, explanation] of [["HTTP 402 insufficient credits", /credit/], ["HTTP 401 unauthorized", /authentication/],
+  ["HTTP 429 insufficient_quota", /credit/], ["Unclassified native failure", /could not be established/]] as const) {
+  test(`task continuity pauses ${error} and resumes existing work through Retry delivery`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "continuity-account-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    let runs = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.();
+      const turnId = `turn-${++runs}`;
+      await options?.checkpointTurnStarted?.(turnId);
+      return runs === 1 ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error }
+        : { turnId, outcome: "no_reply", text: null };
+    }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] }, currentAuthority, 0);
+    try {
+      await ingest(store); await delivery.pump(agent);
+      const head = (await store.head(agent.agentId))!;
+      assert.equal(runs, 1); assert.equal(head.state, "blocked");
+      assert.match(head.last_error!, explanation); assert.match(head.last_error!, /Retry delivery/);
+      await store.retryBlocked(head.inbox_item_id); await delivery.pump(agent);
+      assert.equal(runs, 2);
+      assert.equal(await store.head(agent.agentId), null);
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("continuation survives an unavailable ownership snapshot and drops only tasks no longer owned", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-snapshot-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const second = { ...continuityTask, id: "task_2", leaseId: "lease-2" };
+  let owned = [continuityTask, second]; let unavailable = true; let runs = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    const turnId = `turn-${++runs}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    if (runs === 1) return { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 503" };
+    assert.match(JSON.stringify(request.sourceMessage), /task_2/);
+    assert.doesNotMatch(JSON.stringify(request.sourceMessage), /task_1/);
+    return { turnId, outcome: "no_reply", text: null };
+  }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async input => {
+    assert.ok(input.heldBefore);
+    if (unavailable) throw new Error("room offline");
+    return owned;
+  } }, currentAuthority, 0);
+  try {
+    await ingest(store); await delivery.pump(agent);
+    const head = (await store.head(agent.agentId))!;
+    assert.equal((await store.taskContinuation(head.inbox_item_id))?.tasks, null);
+    unavailable = false;
+    await store.retryBlocked(head.inbox_item_id);
+    await store.refreshTaskContinuationSnapshot(head.inbox_item_id, owned);
+    owned = [second];
+    await delivery.pump(agent);
+    assert.equal(runs, 2);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const changed of ["session", "workAttempt", "conversation", "lease", "epoch", "finished", "agentInstance"] as const) {
+  test(`task continuity refuses changed ${changed} after restart`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "continuity-owner-"));
+    const path = join(root, "state.sqlite"); let store = new SupervisedAgentInboxStore(path);
+    let runs = 0; let owned = [continuityTask];
+    const port = provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.(); runs++;
+      await options?.checkpointTurnStarted?.("failed");
+      return { turnId: "failed", providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 402" };
+    });
+    const http = { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => owned };
+    let delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority, 0);
+    try {
+      await ingest(store); await delivery.pump(agent);
+      const head = (await store.head(agent.agentId))!;
+      await store.retryBlocked(head.inbox_item_id);
+      await delivery.fenceAndDrain(); await store.close(); store = new SupervisedAgentInboxStore(path);
+      if (changed === "lease") owned = [{ ...continuityTask, leaseId: "new-lease" }];
+      if (changed === "epoch") owned = [{ ...continuityTask, epoch: 3 }];
+      if (changed === "finished") owned = [];
+      const nextAgent = { ...agent,
+        ...(changed === "session" ? { agentSessionId: "session-2" } : {}),
+        ...(changed === "workAttempt" ? { workAttemptId: "attempt-2" } : {}),
+        ...(changed === "conversation" ? { providerContinuationId: "thread-2" } : {}),
+        ...(changed === "agentInstance" ? { agentId: "another-stone" } : {}) };
+      delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority, 0);
+      await delivery.pump(nextAgent);
+      assert.equal(runs, 1);
+      owned = [{ ...continuityTask, id: "task-new" }];
+      await delivery.pump(nextAgent);
+      assert.equal(runs, 1, "an old failure cannot acquire subsequently assigned work");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("an uncertain mutation prevents automatic continuation across restart without blocking new instructions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-uncertain-"));
+  const path = join(root, "state.sqlite"); let store = new SupervisedAgentInboxStore(path);
+  let runs = 0;
+  const port = provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.(); runs++;
+    await options?.checkpointTurnStarted?.("failed");
+    const db = new DatabaseSync(path);
+    db.prepare(`INSERT INTO supervised_agent_effects
+      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+      VALUES ('effect',?,?,?,'failed','request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
+      .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString()); db.close();
+    return { turnId: "failed", providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 503" };
+  });
+  const http = { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] };
+  let delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority, 0);
+  try {
+    await ingest(store); await delivery.pump(agent);
+    assert.equal(await store.head(agent.agentId), null);
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(receipt.state, "acknowledged_failed"); assert.match(receipt.last_error!, /uncertain result/);
+    await delivery.fenceAndDrain(); await store.close(); store = new SupervisedAgentInboxStore(path);
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.(); runs++;
+      await options?.checkpointTurnStarted?.("human-follow-up");
+      return { turnId: "human-follow-up", outcome: "no_reply", text: null };
+    }), http, currentAuthority, 0);
+    await delivery.pump(agent);
+    assert.equal(runs, 1);
+    await ingest(store, "2"); await delivery.pump(agent);
+    assert.equal(runs, 2, "the uncertain result cannot silently replay work or deadlock later human instructions");
+    assert.equal(await store.head(agent.agentId), null);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
 
 test("supervised reply targets inherit true threads but not top-level quote replies", () => {
   assert.deepEqual(

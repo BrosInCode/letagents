@@ -4,11 +4,16 @@ import type { DaemonManifestEntry } from "./types.js";
 export type SupervisedWaitEvidence = { roomCursor: string; agentSessionId: string };
 type PollActivityLike = Pick<ProviderActionStreamEvent, "method" | "payload">;
 
-export function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
+export function providerStreamLifecycle(event: ProviderActionStreamEvent, daemonInbox = false): "failed" | "terminal" | "idle" | "working" {
   const method = event.method.trim();
   const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
     ? event.payload as Record<string, unknown>
     : {};
+  // Only adapter-attested exact native results end a bounded turn. Unbound
+  // errors and legacy polling retain their existing runtime-failure behavior.
+  if (daemonInbox && (event.provider === "claude-code" || event.provider === "cursor")
+    && event.nativeLifecyclePhase === "turn_terminal" && /^nlc1:/.test(event.nativeEventId ?? "")
+    && /^result(?:\/|$)/.test(method)) return "terminal";
   const nestedStatus = (value: unknown): unknown[] => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return [value];
     const record = value as Record<string, unknown>;
