@@ -60,15 +60,21 @@ export function useDesktopMessageDraft(namespace: () => string | null, threadRoo
     get: () => current().selectedQuoteText,
     set: (value: string | null) => update({ selectedQuoteText: value }),
   });
-  function captureSubmittedText(): () => boolean {
+  function captureSubmittedDraft(): () => boolean {
     const submittedKey = key.value;
     const submittedGeneration = generation;
     const submittedRevision = current().textRevision;
+    const submittedQuote = current().quote;
+    const submittedSelection = current().selectedQuoteText;
     return () => {
       if (generation !== submittedGeneration || drafts.get(submittedKey)?.textRevision !== submittedRevision) return false;
-      update({ text: "", textRevision: ++revision }, submittedKey);
+      const saved = drafts.get(submittedKey)!;
+      const quoteUnchanged = saved.quote === submittedQuote && saved.selectedQuoteText === submittedSelection;
+      update({ text: "", textRevision: ++revision,
+        ...(quoteUnchanged ? { quote: null, selectedQuoteText: null } : {}),
+      }, submittedKey);
       return true;
     };
   }
-  return { text, quote, selectedQuoteText, captureSubmittedText };
+  return { text, quote, selectedQuoteText, captureSubmittedDraft };
 }

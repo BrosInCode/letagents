@@ -256,7 +256,7 @@ const emit = defineEmits<{
 }>();
 
 const maxComposerInputHeight = 156;
-const { text: draft, captureSubmittedText } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
+const { text: draft, captureSubmittedDraft } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
@@ -396,7 +396,7 @@ function submitMessage(): void {
   const messageText = replyTarget?.isSelection
     ? applySelectedTextQuoteToDraft(text, replyTarget.text, replyTarget.sourceMessageId)
     : text;
-  const clearSubmittedText = captureSubmittedText();
+  const clearSubmittedText = captureSubmittedDraft();
   emit(
     "send-message",
     messageText,

@@ -304,7 +304,7 @@ const emit = defineEmits<{
   "skip-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
-const { text: draft, quote: quoteTarget, selectedQuoteText, captureSubmittedText } = useDesktopMessageDraft(
+const { text: draft, quote: quoteTarget, selectedQuoteText, captureSubmittedDraft } = useDesktopMessageDraft(
   () => props.messageNamespace || props.roomIdentifier, () => props.parent.id,
 );
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
@@ -468,9 +468,7 @@ function handleAttachmentDrop(event: DragEvent): void {
 function submitThreadReply(): void {
   const text = draft.value.trim();
   if ((!text && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
-  const clearSubmittedText = captureSubmittedText();
-  const submittedQuote = quoteTarget.value;
-  const submittedSelection = selectedQuoteText.value;
+  const clearSubmittedText = captureSubmittedDraft();
   const roomIdentifier = props.roomIdentifier;
   const parentId = props.parent.id;
   emit(
@@ -485,10 +483,6 @@ function submitThreadReply(): void {
       if (!sent) return;
       const cleared = clearSubmittedText();
       if (!cleared || props.roomIdentifier !== roomIdentifier || props.parent.id !== parentId) return;
-      if (quoteTarget.value === submittedQuote && selectedQuoteText.value === submittedSelection) {
-        quoteTarget.value = null;
-        selectedQuoteText.value = null;
-      }
       mentionQuery.value = null;
     },
   );
