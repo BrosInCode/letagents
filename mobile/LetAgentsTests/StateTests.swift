@@ -184,6 +184,9 @@ extension StateTests {
             if path.hasSuffix("/msg_1") {
                 return (200, #"{"message":{"id":"msg_1","sender":"Codex","text":"Original","timestamp":"","thread_root_id":"msg_1"}}"#)
             }
+            if path.hasSuffix("/msg_2") {
+                return (200, #"{"message":{"id":"msg_2","sender":"Claude","text":"Older quoted message","timestamp":"","thread_root_id":"msg_2"}}"#)
+            }
             let before = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "before" }!.value!
             historyCursors.append(before)
             if before == "latest" {
@@ -196,6 +199,11 @@ extension StateTests {
         let store = ConversationStore(room: Room(roomId: "repo", displayName: "Project"), session: session)
         await store.run()
         XCTAssertEqual(store.visibleMessages.map(\.id), ["msg_1"])
+        do {
+            let quoted = try await store.quotedMessage(id: "msg_2")
+            XCTAssertEqual(quoted.body, "Older quoted message")
+        } catch { XCTFail("The older quote should load: \(error)") }
+        XCTAssertEqual(store.visibleMessages.map(\.id), ["msg_1"], "Reading a quote must not insert a gap into the timeline")
         await store.loadOlder()
         XCTAssertEqual(historyCursors, ["latest", "msg_100"])
         XCTAssertEqual(store.visibleMessages.map(\.id), ["msg_1", "msg_99"])
@@ -278,10 +286,12 @@ extension StateTests {
     }
     func testReplyTargetSurvivesFailureAndNavigation() async {
         let accountJSON = accountJSON
+        var ids: [String] = [], quotes: [String?] = []
         MockURLProtocol.handler = { request in
             if request.url!.path == "/auth/session" { return (200, accountJSON) }
-            XCTAssertEqual(MockURLProtocol.body(request)["reply_to"] as? String, "msg_7")
-            XCTAssertEqual(MockURLProtocol.body(request)["thread_root_id"] as? String, "msg_1")
+            let body = MockURLProtocol.body(request)
+            ids.append(body["client_message_id"] as! String); quotes.append(body["reply_to"] as? String)
+            XCTAssertEqual(body["thread_root_id"] as? String, "msg_1")
             throw URLError(.networkConnectionLost)
         }
         let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token")); await session.restore()
@@ -292,5 +302,30 @@ extension StateTests {
         let reopened = ConversationStore(room: room, rootID: "msg_1", session: session)
         XCTAssertEqual(reopened.quote?.id, "msg_7"); XCTAssertEqual(reopened.draft, "Follow up")
         await reopened.send()
+        reopened.quote = ReplyPreview(message: .init(id: "msg_8", sender: "Codex", text: "New target", timestamp: ""))
+        await reopened.send()
+        reopened.quote = nil; await reopened.send()
+        XCTAssertEqual(quotes, ["msg_7", "msg_7", "msg_8", nil])
+        XCTAssertEqual(ids[0], ids[1], "Retry must reuse the original submission")
+        XCTAssertNotEqual(ids[1], ids[2], "Changing the quote creates a new submission")
+        XCTAssertNotEqual(ids[2], ids[3], "Removing the quote creates a new submission")
+        XCTAssertNil(ConversationStore(room: room, rootID: "msg_1", session: session).quote)
+    }
+    func testRoomQuoteStaysInRoomAndClearsOnlyTheSubmittedDraft() async {
+        let accountJSON = accountJSON
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            let body = MockURLProtocol.body(request)
+            XCTAssertNil(body["thread_root_id"])
+            XCTAssertEqual(body["reply_to"] as? String, "msg_7")
+            return (201, #"{"id":"msg_9","sender":"EmmyMay","text":"With context","timestamp":"","thread_root_id":"msg_9","reply_to":{"id":"msg_7","sender":"Claude","text":"Original","timestamp":""}}"#)
+        }
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token")); await session.restore()
+        let store = ConversationStore(room: .init(roomId: "room", displayName: "Room"), session: session)
+        store.quote = .init(message: .init(id: "msg_7", sender: "Claude", text: "Original", timestamp: ""))
+        store.draft = "With context"; await store.send()
+        XCTAssertEqual(store.visibleMessages.map(\.id), ["msg_9"])
+        XCTAssertEqual(store.visibleMessages.first?.replyTo?.id, "msg_7")
+        XCTAssertEqual(store.draft, ""); XCTAssertNil(store.quote); XCTAssertNil(store.sendError)
     }
 }

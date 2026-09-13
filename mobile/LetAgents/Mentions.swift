@@ -60,6 +60,7 @@ struct MessageEditor: UIViewRepresentable {
     @Binding var text: String
     @Binding var selection: NSRange
     @Binding var focused: Bool
+    var editRevision = 0
     var identifier = "message-composer"
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
@@ -78,14 +79,20 @@ struct MessageEditor: UIViewRepresentable {
     }
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.parent = self
-        guard view.markedTextRange == nil else { return }
-        context.coordinator.updating = true
-        defer { context.coordinator.updating = false }
-        let location = min(selection.location, (text as NSString).length)
-        let desired = NSRange(location: location, length: min(selection.length, (text as NSString).length - location))
-        if view.text != text { view.text = text }
-        context.coordinator.decorate(view)
-        if view.selectedRange != desired { view.selectedRange = desired }
+        // Native input owns text and selection between explicit composer commands.
+        // SwiftUI can deliver an older snapshot while UIKit is processing keystrokes.
+        if view.markedTextRange == nil {
+            if editRevision > (context.coordinator.appliedRevision ?? -1) {
+                context.coordinator.updating = true
+                context.coordinator.appliedRevision = editRevision
+                let location = min(selection.location, (text as NSString).length)
+                let desired = NSRange(location: location, length: min(selection.length, (text as NSString).length - location))
+                if view.text != text { view.text = text }
+                if view.selectedRange != desired { view.selectedRange = desired }
+                context.coordinator.updating = false
+            }
+            context.coordinator.decorate(view)
+        }
         if focused && !view.isFirstResponder { view.becomeFirstResponder() }
         else if !focused && view.isFirstResponder { view.resignFirstResponder() }
     }
@@ -100,19 +107,29 @@ struct MessageEditor: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: MessageEditor
         var updating = false
+        var appliedRevision: Int?
+        private var decoratedText: String?
+        private var decoratedFont: UIFont?
         init(_ parent: MessageEditor) { self.parent = parent }
         func textViewDidChange(_ view: UITextView) {
-            guard !updating else { return }
-            parent.selection = view.selectedRange; parent.text = view.text
-            if view.markedTextRange == nil { decorate(view) }
+            parent.text = view.text; parent.selection = view.selectedRange
+            if !updating && view.markedTextRange == nil { decorate(view) }
         }
-        func textViewDidChangeSelection(_ view: UITextView) { if !updating { parent.selection = view.selectedRange } }
+        func textViewDidChangeSelection(_ view: UITextView) {
+            if !updating { parent.selection = view.selectedRange }
+        }
         func textViewDidBeginEditing(_ view: UITextView) { if !updating { parent.focused = true } }
         func textViewDidEndEditing(_ view: UITextView) { if !updating { parent.focused = false } }
         func decorate(_ view: UITextView) {
             let selected = view.selectedRange
             let text = view.text ?? ""
-            let base: [NSAttributedString.Key: Any] = [.font: UIFont.preferredFont(forTextStyle: .body), .foregroundColor: UIColor(Theme.ink)]
+            let font = UIFont.preferredFont(forTextStyle: .body)
+            guard decoratedText != text || decoratedFont != font else { return }
+            let wasUpdating = updating
+            updating = true
+            defer { updating = wasUpdating }
+            decoratedText = text; decoratedFont = font
+            let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(Theme.ink)]
             view.textStorage.beginEditing()
             view.textStorage.setAttributes(base, range: NSRange(location: 0, length: (text as NSString).length))
             let pattern = #"(?<![\w/@])@"# + Mentions.handlePattern

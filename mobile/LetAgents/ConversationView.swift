@@ -2,7 +2,10 @@ import SwiftUI
 
 private struct ThreadDestination: Identifiable {
     let id: String
-    var quote: ReplyPreview? = nil
+}
+private struct QuoteDestination: Identifiable {
+    let quote: ReplyPreview
+    var id: String { quote.id }
 }
 private struct BottomPosition: PreferenceKey {
     static var defaultValue: CGFloat = .greatestFiniteMagnitude
@@ -12,7 +15,6 @@ private struct BottomPosition: PreferenceKey {
 struct ConversationView: View {
     let session: SessionStore
     let context: String
-    let initialQuote: ReplyPreview?
     @State private var model: ConversationStore
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -22,18 +24,22 @@ struct ConversationView: View {
     @State private var positionedInitially = false
     @State private var composing = false
     @State private var selection = NSRange(location: 0, length: 0)
+    @State private var editRevision = 0
     @State private var thread: ThreadDestination?
     @State private var showingThreads = false
     @State private var showingPeople = false
     @State private var selectedMention: MentionCandidate?
     @State private var mentionDismissed = false
+    @State private var quotedSource: QuoteDestination?
+    @State private var highlightedID: String?
+    @State private var returnToReplyID: String?
     @ScaledMetric(relativeTo: .subheadline) private var mentionRowHeight = 55.0
-    private var active: Bool { visible && scenePhase == .active && thread == nil && !showingThreads }
+    private var active: Bool { visible && scenePhase == .active && thread == nil && !showingThreads && quotedSource == nil }
     private var mentionQuery: MentionQuery? { composing && !mentionDismissed ? Mentions.query(in: model.draft, selection: selection) : nil }
     private var mentionCandidates: [MentionCandidate] { Mentions.candidates(model.participants, query: mentionQuery?.query ?? "") }
 
-    init(room: Room, rootID: String? = nil, context: String = "", initialQuote: ReplyPreview? = nil, session: SessionStore) {
-        self.session = session; self.context = context; self.initialQuote = initialQuote
+    init(room: Room, rootID: String? = nil, context: String = "", session: SessionStore) {
+        self.session = session; self.context = context
         _model = State(initialValue: ConversationStore(room: room, rootID: rootID, session: session))
     }
     var body: some View {
@@ -61,18 +67,31 @@ struct ConversationView: View {
                             if let event = GitHubEvent.parse(message) {
                                 VStack(alignment: .leading, spacing: 7) {
                                     GitHubEventCard(event: event)
-                                        .contextMenu { Button("Reply in thread", systemImage: "arrowshape.turn.up.left") { reply(to: message) } }
+                                        .contextMenu {
+                                            Button("Quote reply", systemImage: "arrowshape.turn.up.left") { reply(to: message) }
+                                            if model.rootID == nil { Button("Reply in thread", systemImage: "bubble.left.and.bubble.right") { openThread(message.rootID) } }
+                                            Button("Copy message", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.body }
+                                        }
+                                        .accessibilityAction(named: Text("Quote reply")) { reply(to: message) }
                                     if model.rootID == nil, let summary = message.thread, summary.replyCount > 0 {
                                         Button { openThread(message.rootID) } label: { ThreadPreview(summary: summary) }
                                             .buttonStyle(.plain).accessibilityIdentifier("thread-\(message.id)")
                                     }
-                                }.padding(.leading, 39).id(message.id)
+                                }.padding(.leading, 39).modifier(SwipeToReply(reply: { reply(to: message) }))
+                                    .overlay(highlight(for: message.id)).id(message.id)
                             } else {
                                 MessageBubble(message: message, mine: !message.isAgent && message.sender.caseInsensitiveCompare(session.account?.login ?? "") == .orderedSame,
                                     grouped: isGrouped(index), original: model.rootID == message.id,
                                     threadSummary: model.rootID == nil ? message.thread : nil,
                                     reply: { reply(to: message) }, openThread: model.rootID == nil ? { openThread(message.rootID) } : nil,
-                                    jumpTo: { proxy.scrollTo($0, anchor: .center) })
+                                    jumpTo: { id in
+                                        composing = false
+                                        if model.visibleMessages.contains(where: { $0.id == id }) {
+                                            returnToReplyID = message.id; highlightedID = id
+                                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) }
+                                        } else if let quote = message.replyTo { quotedSource = .init(quote: quote) }
+                                    })
+                                    .overlay(highlight(for: message.id))
                                     .id(message.id)
                             }
                         }
@@ -106,12 +125,23 @@ struct ConversationView: View {
                         }
                     }
                     .overlay(alignment: .bottomTrailing) {
+                        VStack(alignment: .trailing, spacing: 8) {
+                        if let returnID = returnToReplyID {
+                            Button {
+                                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo(returnID, anchor: .center) }
+                                returnToReplyID = nil; highlightedID = returnID
+                            } label: {
+                                Label("Back to reply", systemImage: "arrow.uturn.backward").font(.caption.weight(.semibold))
+                                    .padding(14).background(Theme.surface, in: Capsule()).overlay(Capsule().stroke(Theme.line, lineWidth: 0.5))
+                            }.accessibilityIdentifier("back-to-reply")
+                        }
                         if !atBottom && !model.isLoading {
                             Button { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("conversation-bottom", anchor: .bottom) } } label: {
                                 HStack(spacing: 6) { if hasUnread { Text("New messages").font(.caption.weight(.semibold)) }; Image(systemName: "arrow.down").font(.subheadline.weight(.semibold)) }
                                     .padding(13).background(Theme.surface, in: Capsule()).overlay(Capsule().stroke(Theme.line, lineWidth: 0.5))
-                            }.accessibilityLabel("Jump to latest messages").padding(14)
+                            }.accessibilityLabel("Jump to latest messages")
                         }
+                        }.padding(14)
                     }
             }.safeAreaInset(edge: .bottom, spacing: 0) { composer }
         }.background(Theme.background).navigationBarTitleDisplayMode(.inline)
@@ -125,10 +155,14 @@ struct ConversationView: View {
                 }
                 return ["https", "http", "mailto"].contains(url.scheme ?? "") ? .systemAction : .discarded
             })
-            .accessibilityHidden(thread != nil || showingThreads || showingPeople || selectedMention != nil)
+            .accessibilityHidden(thread != nil || showingThreads || showingPeople || selectedMention != nil || quotedSource != nil)
+            .sheet(item: $quotedSource) { destination in
+                QuotedMessageSheet(quote: destination.quote, model: model)
+                    .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+            }
             .sheet(item: $thread) { destination in
                 NavigationStack {
-                    ConversationView(room: model.room, rootID: destination.id, context: context, initialQuote: destination.quote, session: session)
+                    ConversationView(room: model.room, rootID: destination.id, context: context, session: session)
                         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { thread = nil } } }
                 }.presentationDragIndicator(.visible).presentationDetents([.large])
             }
@@ -148,10 +182,15 @@ struct ConversationView: View {
             }
             .onAppear {
                 visible = true; selection = NSRange(location: model.draft.utf16.count, length: 0)
-                if let initialQuote, model.quote == nil { model.quote = initialQuote }
+                editRevision += 1
             }
             .onDisappear { visible = false; composing = false }
             .onChange(of: model.draft) { _, _ in mentionDismissed = false }
+            .task(id: highlightedID) {
+                guard highlightedID != nil else { return }
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) { highlightedID = nil }
+            }
             .task(id: active) { if active { await model.run() } }
             .task(id: active) { if active { await model.watchParticipants() } }
             .task(id: "\(active)-\(atBottom)-\(model.visibleMessages.last?.id ?? "")") {
@@ -179,8 +218,10 @@ struct ConversationView: View {
             if let error = model.sendError { ErrorNotice(message: error) }
             if let quote = model.quote {
                 HStack(alignment: .top) {
-                    QuotePreview(quote: quote)
-                    Button { model.quote = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.muted).frame(width: 32, height: 44) }.accessibilityLabel("Cancel reply")
+                    Button { composing = false; quotedSource = .init(quote: quote) } label: { QuotePreview(quote: quote, composing: true) }
+                        .buttonStyle(.plain).accessibilityLabel("Replying to \(quote.author): \(quote.body)").accessibilityHint("Read the original message")
+                        .accessibilityIdentifier("reply-preview")
+                    Button { model.quote = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.muted).frame(width: 44, height: 44) }.accessibilityLabel("Cancel reply")
                 }
             }
             if mentionQuery != nil { mentionPanel }
@@ -190,17 +231,20 @@ struct ConversationView: View {
                         let location = min(selection.location, model.draft.utf16.count)
                         let prefix = location > 0 && !(model.draft as NSString).substring(to: location).hasSuffix(" ") ? " @" : "@"
                         model.draft = (model.draft as NSString).replacingCharacters(in: NSRange(location: location, length: 0), with: prefix)
-                        selection = NSRange(location: location + prefix.utf16.count, length: 0); composing = true; mentionDismissed = false
+                        selection = NSRange(location: location + prefix.utf16.count, length: 0); editRevision += 1; composing = true; mentionDismissed = false
                     } label: { Image(systemName: "at").font(.body).foregroundStyle(Theme.muted).frame(width: 32, height: 44) }.accessibilityLabel("Mention someone")
                     ZStack(alignment: .topLeading) {
                         if model.draft.isEmpty { Text(model.rootID == nil ? "Message…" : "Reply in thread…").foregroundStyle(Theme.secondary).padding(.top, 10).allowsHitTesting(false).accessibilityHidden(true) }
-                        MessageEditor(text: $model.draft, selection: $selection, focused: $composing,
+                        MessageEditor(text: $model.draft, selection: $selection, focused: $composing, editRevision: editRevision,
                                       identifier: model.rootID == nil ? "message-composer" : "thread-composer")
                     }
                 }.padding(.leading, 7).padding(.trailing, 13).background(Theme.surface, in: RoundedRectangle(cornerRadius: 23))
                 Button {
                     mentionDismissed = true
-                    Task { await model.send(); selection = NSRange(location: model.draft.utf16.count, length: 0) }
+                    Task {
+                        await model.send()
+                        if model.draft.isEmpty { selection = NSRange(location: 0, length: 0); editRevision += 1 }
+                    }
                 } label: {
                     Group { if model.isSending { ProgressView().tint(Color(red: 52/255, green: 37/255, blue: 27/255)) } else { Image(systemName: "arrow.up").font(.headline) } }
                         .foregroundStyle(Color(red: 52/255, green: 37/255, blue: 27/255)).frame(width: 44, height: 44).background(Theme.button, in: Circle())
@@ -268,12 +312,15 @@ struct ConversationView: View {
             let value = (model.draft.isEmpty || model.draft.hasSuffix(" ") ? "" : " ") + "@\(candidate.handle) "
             model.draft += value; selection = NSRange(location: model.draft.utf16.count, length: 0)
         }
-        composing = true; mentionDismissed = true
+        editRevision += 1; composing = true; mentionDismissed = true
     }
     private func openThread(_ id: String) { composing = false; thread = .init(id: id) }
     private func reply(to message: Message) {
-        if model.rootID == nil { composing = false; thread = .init(id: message.rootID, quote: ReplyPreview(message: message)) }
-        else { model.quote = ReplyPreview(message: message); composing = true }
+        model.quote = ReplyPreview(message: message); composing = true
+    }
+    private func highlight(for id: String) -> some View {
+        RoundedRectangle(cornerRadius: 16).stroke(Theme.accent.opacity(highlightedID == id ? 0.9 : 0), lineWidth: 2)
+            .allowsHitTesting(false).accessibilityHidden(true)
     }
     private func showsDate(_ index: Int) -> Bool {
         guard let current = model.visibleMessages[index].date else { return false }
@@ -291,6 +338,49 @@ struct ConversationView: View {
         if let date = message.date {
             Text(Calendar.current.isDateInToday(date) ? "Today" : date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()))
                 .font(.caption2.weight(.medium)).foregroundStyle(Theme.secondary).frame(maxWidth: .infinity).padding(.vertical, 6)
+        }
+    }
+}
+
+// An older quote can be read without inserting a disconnected message into the
+// timeline, skipping intervening history, or losing the reader's current place.
+private struct QuotedMessageSheet: View {
+    let quote: ReplyPreview
+    let model: ConversationStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var message: Message?
+    @State private var error: String?
+    @State private var attempt = 0
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if let message {
+                        HStack(spacing: 12) {
+                            AvatarView(name: message.author)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(message.author).font(.headline).foregroundStyle(Theme.accent)
+                                if let attribution = message.attribution { Text(attribution).font(.caption).foregroundStyle(Theme.muted) }
+                                if let date = message.date { Text(date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(Theme.secondary) }
+                            }
+                        }
+                        RichMessage(message.body).padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
+                        Button { UIPasteboard.general.string = message.body } label: { Label("Copy message", systemImage: "doc.on.doc").frame(minHeight: 44) }
+                    } else if let error {
+                        QuotePreview(quote: quote)
+                        Text(error).foregroundStyle(Theme.muted)
+                        Button("Try again") { self.error = nil; attempt += 1 }.frame(minHeight: 44)
+                    } else { ProgressView("Loading original message…").frame(maxWidth: .infinity).padding(.top, 30) }
+                }.padding(20)
+            }.background(Theme.background).navigationTitle("Quoted message").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                .task(id: attempt) {
+                    do { message = try await model.quotedMessage(id: quote.id) }
+                    catch is CancellationError { }
+                    catch let failure as URLError where failure.code == .cancelled { }
+                    catch { self.error = (error as? APIError)?.status == 404 ? "This message is no longer available." : "Couldn’t load the original message. Try again when you’re connected." }
+                }
         }
     }
 }

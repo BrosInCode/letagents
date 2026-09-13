@@ -28,6 +28,7 @@ import XCTest
         XCTAssertTrue(app.staticTexts["Yes. Replies stay in this thread."].waitForExistence(timeout: 5))
         let reply = app.textViews["thread-composer"]
         reply.tap(); reply.typeText("Keep going in this thread")
+        XCTAssertEqual(reply.value as? String, "Keep going in this thread")
         app.buttons["send-thread-message"].tap()
         XCTAssertTrue(app.staticTexts["Keep going in this thread"].waitForExistence(timeout: 5))
         app.buttons["Close"].tap()
@@ -90,7 +91,7 @@ extension CompanionFlowTests {
         XCTAssertTrue(app.buttons["inbox-thread-msg_1"].waitForExistence(timeout: 5)); capture("Thread inbox")
         app.buttons["inbox-thread-msg_1"].tap()
         XCTAssertTrue(app.buttons["actions-msg_4"].waitForExistence(timeout: 5)); app.buttons["actions-msg_4"].tap()
-        app.buttons["Reply to message"].tap()
+        app.buttons["Quote reply"].tap()
         XCTAssertTrue(app.buttons["Cancel reply"].exists)
         let composer = app.textViews["thread-composer"]; composer.tap(); composer.typeText("This reply keeps its context")
         app.buttons["send-thread-message"].tap()
@@ -98,6 +99,45 @@ extension CompanionFlowTests {
         XCTAssertTrue(app.staticTexts["This reply keeps its context"].isHittable)
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Quoted message from EmmyMay:")).firstMatch.exists)
         capture("Quoted reply")
+        app.buttons["quote-msg_11"].tap()
+        XCTAssertTrue(app.buttons["back-to-reply"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Can I reply to a specific message?"].firstMatch.isHittable)
+        capture("Jump to quoted original")
+        app.buttons["back-to-reply"].tap()
+        XCTAssertTrue(app.staticTexts["This reply keeps its context"].isHittable)
+    }
+    func testSwipeToQuoteChangeCancelAndRetryInRoom() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-testing", "--fail-first-send"]; app.launch(); signIn(app); openGeneral(app)
+        let message = app.staticTexts["On it. Your rooms will be waiting right here when you sign in."]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        let start = message.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 110, dy: 0)))
+        XCTAssertTrue(app.buttons["reply-preview"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["reply-preview"].label.contains("Claude"))
+        app.buttons["Cancel reply"].tap(); XCTAssertFalse(app.buttons["reply-preview"].exists)
+        app.buttons["actions-msg_3"].tap(); app.buttons["Quote reply"].tap()
+        let composer = app.textViews["message-composer"]
+        composer.tap(); composer.typeText("A room reply with context")
+        app.buttons["send-message"].tap()
+        XCTAssertTrue(app.staticTexts["Message wasn’t confirmed. Your draft is saved here. Tap Send to retry."].waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "A room reply with context")
+        XCTAssertTrue(app.buttons["reply-preview"].label.contains("Claude"))
+        capture("Quoted draft after failed send")
+        app.buttons["send-message"].tap()
+        XCTAssertTrue(app.buttons["quote-msg_11"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["reply-preview"].exists)
+        XCTAssertTrue(app.textViews["message-composer"].exists)
+        capture("Quote reply in the room")
+    }
+    func testOlderQuotedMessageLoadsAndRetriesWithoutLosingPosition() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-testing", "--older-quote", "--fail-first-quote"]; app.launch(); signIn(app); openGeneral(app)
+        XCTAssertTrue(app.buttons["quote-msg_100"].waitForExistence(timeout: 5)); app.buttons["quote-msg_100"].tap()
+        XCTAssertTrue(app.buttons["Try again"].waitForExistence(timeout: 5)); app.buttons["Try again"].tap()
+        XCTAssertTrue(app.buttons["Copy message"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["The mobile flow is ready to review. GitHub → projects → conversation."].firstMatch.exists)
+        capture("Older quoted original")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["An older message has the context."].isHittable)
     }
     func testRichMarkdownCodeAndGitHubCards() {
         let app = XCUIApplication(); app.launchArguments = ["--ui-testing", "--rich-messages"]; app.launch(); signIn(app); openGeneral(app)
@@ -106,6 +146,13 @@ extension CompanionFlowTests {
         for _ in 0..<5 where !app.buttons["Copy code"].isHittable { app.scrollViews.firstMatch.swipeDown() }
         XCTAssertTrue(app.buttons["Copy code"].isHittable)
         capture("Rich Markdown")
+        let code = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "let room = client.room(")).firstMatch
+        let originalX = code.frame.minX
+        let codePoint = app.buttons["Copy code"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: -20, dy: 45))
+        codePoint.press(forDuration: 0.05, thenDragTo: codePoint.withOffset(CGVector(dx: -140, dy: 0)))
+        XCTAssertLessThan(code.frame.minX, originalX - 40, "Wide code must still scroll horizontally")
+        codePoint.withOffset(CGVector(dx: -140, dy: 0)).press(forDuration: 0.05, thenDragTo: codePoint)
+        XCTAssertFalse(app.buttons["Cancel reply"].exists, "Swiping inside code must not quote its message")
         app.buttons["Copy code"].tap()
         XCTAssertTrue(app.staticTexts["Copied"].exists || app.buttons["Copy code"].exists)
         app.buttons["Expand code"].tap()

@@ -146,6 +146,12 @@ import Observation
             session.handleUnauthorized(error, token: token)
         }
     }
+    func quotedMessage(id: String) async throws -> Message {
+        if let message = messages.first(where: { $0.id == id }) { return message }
+        guard let token = session.token else { throw APIError(status: 401, message: "Sign in to read the original message.") }
+        do { return try await session.client.message(roomID: room.id, messageID: id, token: token) }
+        catch { session.handleUnauthorized(error, token: token); throw error }
+    }
     private func hydrateMissingRoots(token: String) async throws {
         guard rootID == nil else { return }
         let known = Set(messages.map(\.id)).union(unavailableRoots)

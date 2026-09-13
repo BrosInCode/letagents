@@ -20,6 +20,7 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
     private static var sent: [[String: Any]] = []
     private static var sequence = 10
     private static var attempts = 0
+    private static var quoteAttempts = 0
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -38,7 +39,7 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         - [ ] Check the small screen
 
         ```swift
-        let room = client.room("mobile")
+        let room = client.room("mobile-companion/quoted-replies/keep-horizontal-code-scrolling")
         await room.send(message)
         ```
 
@@ -56,10 +57,16 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
             "latest_reply": Self.message(5, sender: "Codex", text: "Yes. Replies stay in this thread.", root: "msg_1"),
             "participants": [["sender": "EmmyMay", "message_count": 1], ["sender": "Codex", "message_count": 1]]]
         rootWithReplies["thread"] = summary
+        let threadReplies = [Self.message(4, sender: "EmmyMay", text: "Can I reply to a specific message?", root: "msg_1"), Self.message(5, sender: "Codex", text: "Yes. Replies stay in this thread.", root: "msg_1")]
         var defaults = [rootWithReplies, Self.message(2, sender: "EmmyMay", text: "Keep it simple. I want to pick up the conversation on my phone."), Self.message(3, sender: "Claude", text: "On it. Your rooms will be waiting right here when you sign in.")]
         if rich {
             var event = Self.message(7, sender: "GitHub", text: "PR #1204 ready for review in BrosInCode/letagents linked to task_42: Native mobile companion https://github.com/BrosInCode/letagents/pull/1204")
             event["source"] = "github"; defaults.append(event)
+        }
+        if ProcessInfo.processInfo.arguments.contains("--older-quote") {
+            var quoted = Self.message(100, sender: "EmmyMay", text: "An older message has the context.")
+            quoted["reply_to"] = rootWithReplies
+            defaults = [quoted]
         }
         var result: [String: Any] = [:]
         var status = 200
@@ -95,7 +102,7 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
                 if let root = body["thread_root_id"] as? String { result["thread_root_id"] = root; result["thread"] = summary }
                 if let quoted = body["reply_to"] as? String {
                     result["thread_reply_to_id"] = quoted
-                    result["reply_to"] = quoted == "msg_4" ? Self.message(4, sender: "EmmyMay", text: "Can I reply to a specific message?", root: "msg_1") : rootWithReplies
+                    result["reply_to"] = (defaults + threadReplies + Self.sent).first { $0["id"] as? String == quoted } ?? rootWithReplies
                 }
                 Self.sent.append(result)
                 status = 201
@@ -112,13 +119,18 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
             var read = summary; read["has_unread"] = false; read["unread_count"] = 0; read["last_read_message_id"] = readBody()["message_id"] ?? "msg_5"
             result = ["thread": read]
         } else if path.hasSuffix("/thread") {
-            result = ["root": rootWithReplies, "replies": [Self.message(4, sender: "EmmyMay", text: "Can I reply to a specific message?", root: "msg_1"), Self.message(5, sender: "Codex", text: "Yes. Replies stay in this thread.", root: "msg_1")] + Self.sent.filter { ($0["thread_root_id"] as? String) == "msg_1" }, "has_older": false, "summary": summary]
+            result = ["root": rootWithReplies, "replies": threadReplies + Self.sent.filter { ($0["thread_root_id"] as? String) == "msg_1" }, "has_older": false, "summary": summary]
         } else if path.hasSuffix("/messages/poll") {
             let after = query.first { $0.name == "after" }?.value ?? "msg_0"
             let number = Int(after.replacingOccurrences(of: "msg_", with: "")) ?? 0
             let messages = Self.sent.filter { (Int(($0["id"] as! String).replacingOccurrences(of: "msg_", with: "")) ?? 0) > number }
             result = ["messages": messages, "has_more": false, "last_observed_message_id": messages.last?["id"] ?? after]
         } else if path.hasSuffix("/messages") { result = ["messages": defaults + Self.sent, "has_more": false, "has_older": false] }
+        else if path.hasSuffix("/messages/msg_1") {
+            Self.quoteAttempts += 1
+            if ProcessInfo.processInfo.arguments.contains("--fail-first-quote") && Self.quoteAttempts == 1 { status = 503; result = ["error": "Fixture unavailable"] }
+            else { result = ["message": rootWithReplies] }
+        }
         else { status = 404; result = ["error": "No fixture route"] }
         let data = try! JSONSerialization.data(withJSONObject: result)
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
