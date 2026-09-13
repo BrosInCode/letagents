@@ -29,10 +29,38 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let account: [String: Any] = ["id": "account-test", "login": "EmmyMay", "display_name": "Emmy Leke"]
         let roomID = "github.com/brosincode/letagents"
-        let root = Self.message(1, sender: "Codex", text: "The mobile flow is ready to review. GitHub → projects → conversation.")
+        let rich = ProcessInfo.processInfo.arguments.contains("--rich-messages")
+        let root = Self.message(1, sender: "Codex", text: rich ? """
+        ## Ready for review
+        @EmmyMay the conversation now has:
+        - [x] Clear room hierarchy
+        - [x] Replies with context
+        - [ ] Check the small screen
+
+        ```swift
+        let room = client.room("mobile")
+        await room.send(message)
+        ```
+
+        > Keep the conversation close to the work.
+
+        | Screen | Status |
+        | --- | --- |
+        | Projects | Ready |
+        | Threads | Ready |
+        """ : "The mobile flow is ready to review. GitHub → projects → conversation.")
         var rootWithReplies = root
-        rootWithReplies["thread"] = ["root_message_id": "msg_1", "reply_count": 2]
-        let defaults = [rootWithReplies, Self.message(2, sender: "EmmyMay", text: "Keep it simple. I want to pick up the conversation on my phone."), Self.message(3, sender: "Claude", text: "On it. Your rooms will be waiting right here when you sign in.")]
+        rootWithReplies["source"] = "agent"
+        rootWithReplies["agent_identity"] = ["display_name": "Codex", "owner_label": "EmmyMay", "agent_key": "codex-emmy"]
+        let summary: [String: Any] = ["root_message_id": "msg_1", "reply_count": 2, "unread_count": 1, "has_unread": true,
+            "latest_reply": Self.message(5, sender: "Codex", text: "Yes. Replies stay in this thread.", root: "msg_1"),
+            "participants": [["sender": "EmmyMay", "message_count": 1], ["sender": "Codex", "message_count": 1]]]
+        rootWithReplies["thread"] = summary
+        var defaults = [rootWithReplies, Self.message(2, sender: "EmmyMay", text: "Keep it simple. I want to pick up the conversation on my phone."), Self.message(3, sender: "Claude", text: "On it. Your rooms will be waiting right here when you sign in.")]
+        if rich {
+            var event = Self.message(7, sender: "GitHub", text: "PR #1204 ready for review in BrosInCode/letagents linked to task_42: Native mobile companion https://github.com/BrosInCode/letagents/pull/1204")
+            event["source"] = "github"; defaults.append(event)
+        }
         var result: [String: Any] = [:]
         var status = 200
         if path == "/auth/device/start" {
@@ -45,8 +73,13 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
             if ProcessInfo.processInfo.arguments.contains("--empty-rooms") { result = ["rooms": []] }
             else {
                 result = ["rooms": [["room_id": roomID, "display_name": "LetAgents", "pinned": true,
-                    "git_room": ["repository": ["owner": "BrosInCode", "name": "letagents"], "ref": ["name": "main"]],
-                    "focus_rooms": [["room_id": "focus-mobile", "display_name": "Mobile companion", "kind": "focus"]]],
+                    "git_room": ["repository": ["owner": "BrosInCode", "name": "letagents"], "ref": ["name": "main", "default_branch": "main", "is_default": true]],
+                    "role": "admin", "focus_rooms": [
+                        ["room_id": "focus-mobile", "display_name": "Mobile companion", "kind": "focus", "parent_room_id": roomID, "focus_status": "active", "source_task_id": "task_42"],
+                        ["room_id": "branch-mobile", "display_name": "mobile", "kind": "focus", "parent_room_id": roomID,
+                        "git_room": ["repository": ["owner": "BrosInCode", "name": "letagents"], "ref": ["name": "mobile", "default_branch": "main", "is_default": false]]],
+                        ["room_id": "focus-code", "display_name": "Code rendering", "kind": "focus", "parent_room_id": "branch-mobile", "focus_status": "active"],
+                        ["room_id": "focus-old", "display_name": "Finished exploration", "kind": "focus", "parent_room_id": roomID, "focus_status": "concluded"]]],
                     ["room_id": "design-notes", "display_name": "Design notes", "pinned": false, "focus_rooms": []]]]
             }
         } else if path.hasSuffix("/messages") && request.httpMethod == "POST" {
@@ -59,12 +92,27 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
                 Self.sequence += 1
                 result = Self.message(Self.sequence, sender: body["sender"] as? String ?? "EmmyMay", text: body["text"] as? String ?? "")
                 result["client_message_id"] = body["client_message_id"]
-                if let root = body["thread_root_id"] as? String { result["thread_root_id"] = root }
+                if let root = body["thread_root_id"] as? String { result["thread_root_id"] = root; result["thread"] = summary }
+                if let quoted = body["reply_to"] as? String {
+                    result["thread_reply_to_id"] = quoted
+                    result["reply_to"] = quoted == "msg_4" ? Self.message(4, sender: "EmmyMay", text: "Can I reply to a specific message?", root: "msg_1") : rootWithReplies
+                }
                 Self.sent.append(result)
                 status = 201
             }
+        } else if path.hasSuffix("/participants") {
+            result = ["participants": [
+                ["participant_key": "human-emmy", "kind": "human", "display_name": "EmmyMay", "github_login": "EmmyMay", "activity_state": "active"],
+                ["participant_key": "agent-emmy", "kind": "agent", "display_name": "Codex", "agent_key": "codex-emmy", "owner_label": "EmmyMay", "activity_state": "active"],
+                ["participant_key": "agent-noor", "kind": "agent", "display_name": "Codex", "agent_key": "codex-noor", "owner_label": "Noor", "activity_state": "active"],
+                ["participant_key": "agent-claude", "kind": "agent", "display_name": "Claude", "agent_key": "claude-emmy", "owner_label": "EmmyMay", "activity_state": "active"]]]
+        } else if path.hasSuffix("/messages/threads") {
+            result = ["threads": [["root": rootWithReplies, "summary": summary]], "has_more": false, "unread_thread_count": 1]
+        } else if path.hasSuffix("/thread/read") {
+            var read = summary; read["has_unread"] = false; read["unread_count"] = 0; read["last_read_message_id"] = readBody()["message_id"] ?? "msg_5"
+            result = ["thread": read]
         } else if path.hasSuffix("/thread") {
-            result = ["root": rootWithReplies, "replies": [Self.message(4, sender: "EmmyMay", text: "Can I reply to a specific message?", root: "msg_1"), Self.message(5, sender: "Codex", text: "Yes. Replies stay in this thread.", root: "msg_1")] + Self.sent.filter { ($0["thread_root_id"] as? String) == "msg_1" }, "has_older": false]
+            result = ["root": rootWithReplies, "replies": [Self.message(4, sender: "EmmyMay", text: "Can I reply to a specific message?", root: "msg_1"), Self.message(5, sender: "Codex", text: "Yes. Replies stay in this thread.", root: "msg_1")] + Self.sent.filter { ($0["thread_root_id"] as? String) == "msg_1" }, "has_older": false, "summary": summary]
         } else if path.hasSuffix("/messages/poll") {
             let after = query.first { $0.name == "after" }?.value ?? "msg_0"
             let number = Int(after.replacingOccurrences(of: "msg_", with: "")) ?? 0

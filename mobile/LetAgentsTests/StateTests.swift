@@ -172,3 +172,125 @@ final class MemoryCredentials: CredentialStore {
     }
 
 }
+
+extension StateTests {
+    func testReplyOnlyLatestPageRecoversRootWithoutSkippingOlderHistory() async {
+        let accountJSON = accountJSON
+        var historyCursors: [String] = []
+        MockURLProtocol.handler = { request in
+            let path = request.url!.path
+            if path == "/auth/session" { return (200, accountJSON) }
+            if path.hasSuffix("/poll") { throw URLError(.cancelled) }
+            if path.hasSuffix("/msg_1") {
+                return (200, #"{"message":{"id":"msg_1","sender":"Codex","text":"Original","timestamp":"","thread_root_id":"msg_1"}}"#)
+            }
+            let before = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "before" }!.value!
+            historyCursors.append(before)
+            if before == "latest" {
+                return (200, #"{"messages":[{"id":"msg_100","sender":"Emmy","text":"Reply","timestamp":"","thread_root_id":"msg_1"}],"has_older":true}"#)
+            }
+            return (200, #"{"messages":[{"id":"msg_99","sender":"Claude","text":"Another conversation","timestamp":"","thread_root_id":"msg_99"}],"has_older":false}"#)
+        }
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token"))
+        await session.restore()
+        let store = ConversationStore(room: Room(roomId: "repo", displayName: "Project"), session: session)
+        await store.run()
+        XCTAssertEqual(store.visibleMessages.map(\.id), ["msg_1"])
+        await store.loadOlder()
+        XCTAssertEqual(historyCursors, ["latest", "msg_100"])
+        XCTAssertEqual(store.visibleMessages.map(\.id), ["msg_1", "msg_99"])
+        XCTAssertFalse(store.hasOlder)
+    }
+    func testRepositoryGroupingPreservesBranchAndFocusLineage() throws {
+        let json = #"{"rooms":[{"room_id":"repo","display_name":"Renamed main","role":"admin","git_room":{"repository":{"owner":"BrosInCode","name":"letagents"},"ref":{"name":"main","is_default":true}},"focus_rooms":[{"room_id":"branch","display_name":"mobile","kind":"focus","parent_room_id":"repo","git_room":{"repository":{"owner":"brosincode","name":"letagents"},"ref":{"name":"mobile","is_default":false}}},{"room_id":"task","display_name":"Rendering","kind":"focus","parent_room_id":"branch"},{"room_id":"done","display_name":"Earlier work","kind":"focus","parent_room_id":"repo","focus_status":"concluded"}]}]}"#
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let projects = RoomProject.build(try decoder.decode(RoomsResponse.self, from: Data(json.utf8)).rooms)
+        XCTAssertEqual(projects.count, 1)
+        let project = try XCTUnwrap(projects.first)
+        XCTAssertEqual(project.general?.id, "repo"); XCTAssertEqual(project.branches.map(\.id), ["branch"])
+        XCTAssertEqual(project.focusRooms(for: project.branches[0]).map(\.id), ["task"])
+        XCTAssertEqual(project.activeFocuses.map(\.id), ["task"])
+        XCTAssertEqual(project.general?.membership, "Admin")
+    }
+    func testBranchOnlyProjectDoesNotInventAccessibleGeneralRoom() {
+        let branch = Room(roomId: "branch", displayName: "mobile", gitRoom: .init(repository: .init(owner: "org", name: "repo"), ref: .init(name: "mobile", isDefault: false)))
+        let projects = RoomProject.build([branch]); XCTAssertEqual(projects.count, 1)
+        XCTAssertNil(projects[0].general); XCTAssertEqual(projects[0].branches.map(\.id), ["branch"])
+    }
+    func testDuplicateFlatFocusKeepsItsProjectAndParent() {
+        let focus = Room(roomId: "focus", displayName: "Focus", kind: "focus")
+        let parent = Room(roomId: "project", displayName: "Project", focusRooms: [focus])
+        let projects = RoomProject.build([focus, parent])
+        XCTAssertEqual(projects.count, 1)
+        XCTAssertEqual(projects.first?.focuses.first?.parentRoomId, "project")
+    }
+    func testMentionHandlesDisambiguateAgentsAndExcludeHiddenAndOffline() {
+        let roster = [Participant(participantKey: "one", kind: "agent", displayName: "Codex", agentKey: "emmy/codex", ownerLabel: "Emmy", activityState: "active"),
+                      Participant(participantKey: "two", kind: "agent", displayName: "Codex", agentKey: "noor/codex", ownerLabel: "Noor", activityState: "active"),
+                      Participant(participantKey: "three", kind: "agent", displayName: "Hidden", agentKey: "h", hiddenAt: "today"),
+                      Participant(participantKey: "four", kind: "agent", displayName: "Offline", activityState: "offline")]
+        XCTAssertEqual(Mentions.candidates(roster, query: "Codex").map(\.handle), ["agent:emmy/codex", "agent:noor/codex"])
+        XCTAssertEqual(Mentions.candidates(roster, query: "Emmy").first?.handle, "agent:emmy/codex")
+        XCTAssertFalse(Mentions.candidates(roster, query: "").contains { ["Hidden", "Offline"].contains($0.name) })
+    }
+    func testMentionCompletionRespectsUnicodeCaretAndExistingSuffix() throws {
+        let text = "🙂 Ask @Claude about this"
+        let caret = ("🙂 Ask @Cla" as NSString).length
+        let query = try XCTUnwrap(Mentions.query(in: text, selection: NSRange(location: caret, length: 0)))
+        XCTAssertEqual(query.query, "Cla")
+        let value = Mentions.inserting(.init(id: "a", name: "Claude", handle: "Claude", detail: "Agent"), into: text, query: query)
+        XCTAssertEqual(value.0, "🙂 Ask @Claude about this")
+        XCTAssertEqual(value.1.location, ("🙂 Ask @Claude " as NSString).length)
+        XCTAssertNil(Mentions.query(in: "email@example.com", selection: NSRange(location: 17, length: 0)))
+        XCTAssertNil(Mentions.query(in: "@Claude ", selection: NSRange(location: 8, length: 0)))
+    }
+    func testMarkdownPreservesCodeAndBuildsListsQuotesAndTables() {
+        let text = "# Plan\n\n- [x] Done\n  1. Nested\n\n```swift\nlet x = \"@Codex\"\n```\n\n> A quote\n\n| Name | Value |\n| --- | --- |\n| one | `a|b` |"
+        let blocks = MessageMarkdown.blocks(text)
+        XCTAssertEqual(blocks, [.heading(1, "Plan"), .item("", "Done", 0, true), .item("1.", "Nested", 1, nil),
+                               .code("swift", "let x = \"@Codex\""), .quote("A quote"), .table([["Name", "Value"], ["one", "`a|b`"]])])
+    }
+    func testInlineMentionsAreInteractiveOutsideCodeAndLinksOnly() {
+        let value = MessageMarkdown.inline("**Ready** @Codex `@Claude` [@Link](https://github.com) [unsafe](javascript:alert)")
+        let mentionLinks = value.runs.compactMap { $0.link }.filter { $0.scheme == "letagents" }
+        XCTAssertEqual(mentionLinks.count, 1); XCTAssertEqual(mentionLinks.first?.path, "/Codex")
+        XCTAssertFalse(value.runs.compactMap { $0.link }.contains { $0.scheme == "javascript" })
+        XCTAssertTrue(value.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true })
+    }
+    func testGitHubEventsMatchDesktopWireFormats() throws {
+        let cases = [
+            ("PR #1204 merged in BrosInCode/letagents linked to task_42: Mobile https://github.com/BrosInCode/letagents/pull/1204", "Pull request", "merged"),
+            ("EmmyMay approved PR #1204 in BrosInCode/letagents", "Review", "approved"),
+            ("Check \"iOS\" (GitHub Actions) failure in BrosInCode/letagents", "Check run", "failure"),
+            ("EmmyMay commented on Issue #4 in BrosInCode/letagents: \"Looks good\"", "Comment", "new comment")]
+        for (text, kind, status) in cases {
+            let event = try XCTUnwrap(GitHubEvent.parse(Message(id: "msg_1", sender: "GitHub", text: text, source: "github", timestamp: "")))
+            XCTAssertEqual(event.kind, kind); XCTAssertEqual(event.status, status)
+        }
+        XCTAssertNil(GitHubEvent.parse(Message(id: "msg_2", sender: "Emmy", text: "PR #1 merged", timestamp: "")))
+    }
+    func testPostgresAndLiveTimestampFormatsRenderSameTime() {
+        let reference = MessageDate.parse("2026-09-13T09:41:00.123Z")
+        XCTAssertNotNil(reference)
+        XCTAssertEqual(MessageDate.parse("2026-09-13 09:41:00.123+00"), reference)
+        XCTAssertEqual(MessageDate.parse("2026-09-13T10:41:00.123+01:00"), reference)
+        XCTAssertNil(MessageDate.parse("unavailable"))
+    }
+    func testReplyTargetSurvivesFailureAndNavigation() async {
+        let accountJSON = accountJSON
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            XCTAssertEqual(MockURLProtocol.body(request)["reply_to"] as? String, "msg_7")
+            XCTAssertEqual(MockURLProtocol.body(request)["thread_root_id"] as? String, "msg_1")
+            throw URLError(.networkConnectionLost)
+        }
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token")); await session.restore()
+        let room = Room(roomId: "room", displayName: "Room")
+        let model = ConversationStore(room: room, rootID: "msg_1", session: session)
+        model.quote = ReplyPreview(message: .init(id: "msg_7", sender: "Claude", text: "The detail", timestamp: ""))
+        model.draft = "Follow up"; await model.send()
+        let reopened = ConversationStore(room: room, rootID: "msg_1", session: session)
+        XCTAssertEqual(reopened.quote?.id, "msg_7"); XCTAssertEqual(reopened.draft, "Follow up")
+        await reopened.send()
+    }
+}

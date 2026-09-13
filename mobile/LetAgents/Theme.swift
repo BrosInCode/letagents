@@ -2,14 +2,22 @@ import SwiftUI
 
 // Mobile · companion in Figma. System text styles retain Dynamic Type on iPhone.
 enum Theme {
-    static let background = color(light: 0xFAF7F2, dark: 0x151413)
-    static let surface = color(light: 0xFFFFFF, dark: 0x201E1C)
-    static let line = color(light: 0xE2DBD2, dark: 0x36322E)
-    static let ink = color(light: 0x25211D, dark: 0xF5F0E8)
-    static let muted = color(light: 0x736B63, dark: 0xAAA39B)
-    static let accent = color(light: 0x80512A, dark: 0xEAC5A0)
-    static let button = Color(red: 234 / 255, green: 197 / 255, blue: 160 / 255)
-    static let green = color(light: 0x356A46, dark: 0x91B89D)
+    // Figma: Welcome / Soft tangerine (21:652), Onboarding / First room (22:1151),
+    // Inbox / Conversation preview (41:6473). Dark values are sampled source colors.
+    static let background = color(light: 0xFAF7F2, dark: 0x1C1B1A)
+    static let surface = color(light: 0xFFFFFF, dark: 0x252422)
+    static let line = color(light: 0xE2DBD2, dark: 0x3A3835)
+    static let ink = color(light: 0x34251B, dark: 0xF3F0EA)
+    static let muted = color(light: 0x736B63, dark: 0xB5B0A8)
+    static let secondary = color(light: 0x857E75, dark: 0x8F8A83)
+    static let accent = color(light: 0x80512A, dark: 0xDFB895)
+    static let button = Color(red: 223 / 255, green: 184 / 255, blue: 149 / 255)
+    static let green = color(light: 0x356A46, dark: 0xACCBB2)
+    static let outgoing = color(light: 0xF0E2D4, dark: 0x39312A)
+    static let code = color(light: 0xF4EFE8, dark: 0x22211F)
+    static let violet = color(light: 0x80512A, dark: 0xDFB895)
+    static let danger = color(light: 0xA04D3A, dark: 0xDFB895)
+    static let blue = color(light: 0x45617C, dark: 0xAEC6DF)
     private static func color(light: UInt, dark: UInt) -> Color {
         Color(uiColor: UIColor { traits in
             let value = traits.userInterfaceStyle == .dark ? dark : light
@@ -23,18 +31,24 @@ enum Theme {
 struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.headline).frame(maxWidth: .infinity).padding(.vertical, 18)
-            .foregroundStyle(Color(red: 21 / 255, green: 20 / 255, blue: 19 / 255))
+            .foregroundStyle(Color(red: 52 / 255, green: 37 / 255, blue: 27 / 255))
             .background(Theme.button.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: 18))
     }
 }
 struct AvatarView: View {
     let name: String
     var size: CGFloat = 36
+    var url: String? = nil
+    private var tint: Color { Theme.accent }
     var body: some View {
-        Text(name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased())
-            .font(.system(size: size * 0.34, weight: .semibold)).foregroundStyle(Theme.accent)
-            .frame(width: size, height: size).background(Theme.surface, in: Circle())
-            .accessibilityHidden(true)
+        ZStack {
+            Circle().fill(tint.opacity(0.14))
+            Text(name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased())
+                .font(.system(size: size * 0.34, weight: .semibold)).foregroundStyle(tint)
+            if let url, let imageURL = URL(string: url), imageURL.scheme == "https" {
+                AsyncImage(url: imageURL) { image in image.resizable().scaledToFill() } placeholder: { Color.clear }
+            }
+        }.frame(width: size, height: size).clipShape(Circle()).accessibilityHidden(true)
     }
 }
 struct BrandMark: View {

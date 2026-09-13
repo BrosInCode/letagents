@@ -55,7 +55,9 @@ struct KeychainCredentialStore: CredentialStore {
     var error: String?
     var restoreFailed = false
     @ObservationIgnored var drafts: [String: String] = [:]
-    @ObservationIgnored var submissions: [String: (text: String, id: String)] = [:]
+    @ObservationIgnored var submissions: [String: (text: String, id: String, replyTo: String?)] = [:]
+    @ObservationIgnored var quotes: [String: ReplyPreview] = [:]
+    var threadReads: [String: ThreadSummary] = [:]
 
     init(client: APIClient = APIClient(), credentials: any CredentialStore = KeychainCredentialStore()) {
         self.client = client
@@ -153,6 +155,7 @@ struct KeychainCredentialStore: CredentialStore {
             try credentials.remove()
             drafts.removeAll()
             submissions.removeAll()
+            quotes.removeAll(); threadReads.removeAll()
             account = nil
             token = nil
         } catch { self.error = error.localizedDescription }
@@ -162,6 +165,7 @@ struct KeychainCredentialStore: CredentialStore {
         try? credentials.remove()
         drafts.removeAll()
         submissions.removeAll()
+        quotes.removeAll(); threadReads.removeAll()
         account = nil
         token = nil
         self.error = error.localizedDescription
