@@ -47,7 +47,7 @@ The palette comes from the existing **Welcome / Soft tangerine** (`21:652`), **O
 | Separator | `#3A3835` |
 | Outgoing message | `#39312A` |
 
-These are editable Figma text/vector layouts. Figma uses the available Inter font; SwiftUI uses native iOS text styles for Dynamic Type. `Theme.swift` preserves the dark source colors and supplies matching light-mode colors. Navigation and keyboard controls remain native iOS. The matching app icon is also editable in the Figma page (`45:8355`), with vector source in `Design/AppIcon.svg`. Its 1024px PNG is encoded without an alpha channel. `Design/mobile-flow.png` records the initial six-screen pass; `mobile-v2.png` is the current conversation and hierarchy direction.
+These are editable Figma text/vector layouts. Figma uses the available Inter font; SwiftUI uses native iOS text styles for Dynamic Type. `Theme.swift` preserves the dark source colors and supplies matching light-mode colors. Navigation and keyboard controls remain native iOS. The app icon reuses the desktop artwork from `../brand/letagents-app-icon.png`: the original white mark and green dot, at the same scale and position. Its 1024px iOS PNG fills the desktop asset’s transparent outer margin with black and removes the alpha channel; iOS supplies the corner mask. `Design/AppIcon.svg` preserves the same vector artwork with an opaque background. The earlier Figma icon (`45:8355`) is superseded by this desktop asset. `Design/mobile-flow.png` records the initial six-screen pass; `mobile-v2.png` is the current conversation and hierarchy direction.
 
 ## API contract
 
@@ -68,7 +68,7 @@ Authenticated requests use the existing `Authorization: Bearer` and `X-LetAgents
 
 ## TestFlight
 
-The iPhone app uses bundle ID `chat.letagents.mobile`, version `1.0`, and build `1`. Its [App Store Connect record](https://appstoreconnect.apple.com/apps/6811631290/distribution) is app `6811631290`, SKU `letagents-ios`, with English (U.S.) as its primary language. Signing is automatic for team `26836KWQM6`. The app uses only Apple-provided HTTPS and Keychain encryption, so its generated Info.plist declares `ITSAppUsesNonExemptEncryption = false`, following [Apple's encryption documentation](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
+The iPhone app uses bundle ID `chat.letagents.mobile`, version `1.0`, and build `2`. Its [App Store Connect record](https://appstoreconnect.apple.com/apps/6811631290/distribution) is app `6811631290`, SKU `letagents-ios`, with English (U.S.) as its primary language. Signing is automatic for team `26836KWQM6`. The app uses only Apple-provided HTTPS and Keychain encryption, so its generated Info.plist declares `ITSAppUsesNonExemptEncryption = false`, following [Apple's encryption documentation](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
 
 Run these commands from the repository root with the Apple Developer account signed into Xcode:
 
@@ -76,19 +76,19 @@ Run these commands from the repository root with the Apple Developer account sig
 xcodebuild -project mobile/LetAgents.xcodeproj -scheme LetAgents \
   -configuration Release -destination 'generic/platform=iOS' \
   -derivedDataPath mobile/build-release \
-  -archivePath mobile/build-release/LetAgents-1.0-1.xcarchive \
+  -archivePath mobile/build-release/LetAgents-1.0-2.xcarchive \
   -allowProvisioningUpdates archive
 
 xcodebuild -exportArchive \
-  -archivePath mobile/build-release/LetAgents-1.0-1.xcarchive \
+  -archivePath mobile/build-release/LetAgents-1.0-2.xcarchive \
   -exportOptionsPlist mobile/ExportOptions.plist \
-  -exportPath mobile/build-release/TestFlight \
+  -exportPath mobile/build-release/TestFlight-2 \
   -allowProvisioningUpdates
 ```
 
 The second command uploads the build to App Store Connect. After Apple processes it, assign it to the intended TestFlight group. Uploading does not submit an App Store release. Increment `CURRENT_PROJECT_VERSION` in both app configurations and use a new archive path before subsequent uploads; automatic build-number changes are disabled so the uploaded version matches the repository. Archives, export output, and signing credentials are not committed.
 
-Build **1.0 (1)** is available in the internal **Mobile Preview** group, with App Store Connect status **Testing**. The owner is invited; open the TestFlight invitation on an iPhone to install it. Automatic distribution is off, so assign later builds to this group explicitly.
+Build **1.0 (2)** is available in the internal **Mobile Preview** group for both existing testers. App Store Connect confirms the teammate installed build 2; the owner previously installed build 1 and can update through TestFlight. Automatic distribution is off, so assign later builds to this group explicitly.
 
 The successful upload used a fresh Apple Distribution certificate paired with the **LetAgents Mobile Distribution** private key in the local login keychain. The certificate expires September 13, 2027; its SHA-1 fingerprint is `13C78D08DB9E307D8A805F44001B43BC63F690A7`. Existing signing identities remain intact. A certificate download alone does not provide the matching private key on another Mac.
 
@@ -114,4 +114,6 @@ Verified on September 13, 2026: **30 API/state tests and all nine XCUITest flows
 
 Production smoke checks on September 13, 2026 confirmed GitHub device authorization and restored the signed-in account in the simulator. Its actual projects, branches, focus rooms, messages, agent attribution, and GitHub activity were inspected.
 
-Release verification on September 13, 2026: the signed `1.0 (1)` archive succeeded, passed `codesign --verify --deep --strict`, and contains the expected bundle ID, version, and Boolean encryption declaration. Export and upload succeeded with the fresh distribution certificate. App Store Connect finished processing the build, and **Mobile Preview** shows **Testing**, one build, and the owner with **Invited** status. Installation and runtime behavior on a physical iPhone remain to be verified by the owner. No App Store release was submitted; the branch remains `mobile` pending human inspection.
+Release verification on September 13, 2026: the signed `1.0 (1)` archive succeeded, passed `codesign --verify --deep --strict`, and contains the expected bundle ID, version, and Boolean encryption declaration. Export and upload succeeded with the fresh distribution certificate. App Store Connect finished processing build 1, which was distributed through **Mobile Preview**. App Store Connect confirms build 1 was installed on the owner’s iPhone 17 Pro Max and the teammate’s iPhone 13 Pro Max; this is installation evidence, not a full physical-device regression test. No App Store release was submitted; the branch remains `mobile` pending human inspection.
+
+Build **1.0 (2)** restores the existing desktop icon. Its signed archive and `codesign --verify --deep --strict` checks passed, export/upload succeeded, and Apple finished processing it. **Mobile Preview** has both builds and two testers, with the teammate already showing **Installed 1.0 (2)**. The simulator build installed and launched successfully; the compiled 120px icon was visually checked against the desktop artwork. The Figma icon frame still contains the superseded build 1 artwork; use the committed desktop-derived icon as the source of truth.
