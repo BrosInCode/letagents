@@ -88,6 +88,10 @@ xcodebuild -exportArchive \
 
 The second command uploads the build to App Store Connect. After Apple processes it, assign it to the intended TestFlight group. Uploading does not submit an App Store release. Increment `CURRENT_PROJECT_VERSION` in both app configurations and use a new archive path before subsequent uploads; automatic build-number changes are disabled so the uploaded version matches the repository. Archives, export output, and signing credentials are not committed.
 
+Build **1.0 (1)** is available in the internal **Mobile Preview** group, with App Store Connect status **Testing**. The owner is invited; open the TestFlight invitation on an iPhone to install it. Automatic distribution is off, so assign later builds to this group explicitly.
+
+The successful upload used a fresh Apple Distribution certificate paired with the **LetAgents Mobile Distribution** private key in the local login keychain. The certificate expires September 13, 2027; its SHA-1 fingerprint is `13C78D08DB9E307D8A805F44001B43BC63F690A7`. Existing signing identities remain intact. A certificate download alone does not provide the matching private key on another Mac.
+
 ## Verification
 
 ```sh
@@ -110,4 +114,4 @@ Verified on September 13, 2026: **30 API/state tests and all nine XCUITest flows
 
 Production smoke checks on September 13, 2026 confirmed GitHub device authorization and restored the signed-in account in the simulator. Its actual projects, branches, focus rooms, messages, agent attribution, and GitHub activity were inspected.
 
-Release preparation on September 13, 2026 registered the mobile bundle ID and App Store Connect record. The signed `1.0 (1)` archive succeeded, passed `codesign --verify --deep --strict`, and contains the expected bundle ID, version, and Boolean encryption declaration. The first upload attempt stopped before transfer because no Apple Account was signed into Xcode with App Store Connect access. Sign into **Xcode → Settings → Apple Accounts** and rerun the export command above. TestFlight processing, installation on a physical iPhone, and App Store distribution are not yet verified.
+Release verification on September 13, 2026: the signed `1.0 (1)` archive succeeded, passed `codesign --verify --deep --strict`, and contains the expected bundle ID, version, and Boolean encryption declaration. Export and upload succeeded with the fresh distribution certificate. App Store Connect finished processing the build, and **Mobile Preview** shows **Testing**, one build, and the owner with **Invited** status. Installation and runtime behavior on a physical iPhone remain to be verified by the owner. No App Store release was submitted; the branch remains `mobile` pending human inspection.
