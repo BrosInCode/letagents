@@ -6,7 +6,7 @@ A native SwiftUI companion for continuing your LetAgents conversations away from
 
 1. Open `mobile/LetAgents.xcodeproj` in Xcode 26.2 or later.
 2. Select the **LetAgents** scheme and an iPhone simulator, then Run.
-3. For a physical iPhone, select your development team under **Signing & Capabilities**, connect the phone, and Run.
+3. For a physical iPhone, signing is configured for team `26836KWQM6`. Sign into that team in Xcode, connect the phone, and Run. Select your own development team if working from a fork.
 4. Tap **Continue with GitHub**, copy the code, and open GitHub. Approve the existing LetAgents connection and return to the app. Your account's rooms load automatically.
 
 The default app always connects to **https://letagents.chat**. No client secret, personal access token, or manual server configuration is required. The app stores the LetAgents owner token in the iOS Keychain, accessible only while this device is unlocked and excluded from device migration. Sign out revokes that token on the server and removes it locally.
@@ -66,6 +66,28 @@ These are editable Figma text/vector layouts. Figma uses the available Inter fon
 
 Authenticated requests use the existing `Authorization: Bearer` and `X-LetAgents-Desktop-Client: 1` human-companion contract. Despite the historical header name, this is needed for owner-token writes to stay human messages and preserve account-scoped agent routing. Sends use `desktop-send:<UUID>` as `client_message_id`, including on retries, and `thread_root_id` for thread replies, with optional `reply_to` for quoted message context. Poll cursors advance through `last_observed_message_id` even when no visible messages arrive.
 
+## TestFlight
+
+The iPhone app uses bundle ID `chat.letagents.mobile`, version `1.0`, and build `1`. Its [App Store Connect record](https://appstoreconnect.apple.com/apps/6811631290/distribution) is app `6811631290`, SKU `letagents-ios`, with English (U.S.) as its primary language. Signing is automatic for team `26836KWQM6`. The app uses only Apple-provided HTTPS and Keychain encryption, so its generated Info.plist declares `ITSAppUsesNonExemptEncryption = false`, following [Apple's encryption documentation](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
+
+Run these commands from the repository root with the Apple Developer account signed into Xcode:
+
+```sh
+xcodebuild -project mobile/LetAgents.xcodeproj -scheme LetAgents \
+  -configuration Release -destination 'generic/platform=iOS' \
+  -derivedDataPath mobile/build-release \
+  -archivePath mobile/build-release/LetAgents-1.0-1.xcarchive \
+  -allowProvisioningUpdates archive
+
+xcodebuild -exportArchive \
+  -archivePath mobile/build-release/LetAgents-1.0-1.xcarchive \
+  -exportOptionsPlist mobile/ExportOptions.plist \
+  -exportPath mobile/build-release/TestFlight \
+  -allowProvisioningUpdates
+```
+
+The second command uploads the build to App Store Connect. After Apple processes it, assign it to the intended TestFlight group. Uploading does not submit an App Store release. Increment `CURRENT_PROJECT_VERSION` in both app configurations and use a new archive path before subsequent uploads; automatic build-number changes are disabled so the uploaded version matches the repository. Archives, export output, and signing credentials are not committed.
+
 ## Verification
 
 ```sh
@@ -86,4 +108,6 @@ Verified on September 13, 2026: **30 API/state tests and all nine XCUITest flows
 
 `UITestFixtures.swift` exists only in DEBUG builds and is activated only with the `--ui-testing` launch argument. Normal launches use the production URLSession transport, and Release builds contain no fixture transport.
 
-Production smoke checks on September 13, 2026 confirmed GitHub device authorization and restored the signed-in account in the simulator. Its actual projects, branches, focus rooms, messages, agent attribution, and GitHub activity were inspected. Physical-device signing, TestFlight, and App Store distribution have not been performed.
+Production smoke checks on September 13, 2026 confirmed GitHub device authorization and restored the signed-in account in the simulator. Its actual projects, branches, focus rooms, messages, agent attribution, and GitHub activity were inspected.
+
+Release preparation on September 13, 2026 registered the mobile bundle ID and App Store Connect record. The signed `1.0 (1)` archive succeeded, passed `codesign --verify --deep --strict`, and contains the expected bundle ID, version, and Boolean encryption declaration. The first upload attempt stopped before transfer because no Apple Account was signed into Xcode with App Store Connect access. Sign into **Xcode → Settings → Apple Accounts** and rerun the export command above. TestFlight processing, installation on a physical iPhone, and App Store distribution are not yet verified.
