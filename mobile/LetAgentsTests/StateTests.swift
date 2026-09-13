@@ -159,4 +159,16 @@ final class MemoryCredentials: CredentialStore {
         XCTAssertNotNil(session.account); XCTAssertEqual(session.token, "new-token")
     }
 
+    func testKeychainRoundTripOnSignedSimulator() throws {
+        let credentials = KeychainCredentialStore(account: "test-" + UUID().uuidString)
+        defer { try? credentials.remove() }
+        XCTAssertNil(try credentials.read())
+        try credentials.write("first-token")
+        XCTAssertEqual(try credentials.read(), "first-token")
+        try credentials.write("refreshed-token")
+        XCTAssertEqual(try credentials.read(), "refreshed-token")
+        try credentials.remove()
+        XCTAssertNil(try credentials.read())
+    }
+
 }

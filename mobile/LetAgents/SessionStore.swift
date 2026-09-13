@@ -9,10 +9,11 @@ protocol CredentialStore {
 }
 
 struct KeychainCredentialStore: CredentialStore {
+    var account = "owner-token"
     private var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: "chat.letagents.mobile",
-         kSecAttrAccount as String: "owner-token"]
+         kSecAttrAccount as String: account]
     }
     func read() throws -> String? {
         var query = query
