@@ -57,14 +57,16 @@ Authenticated requests use the existing `Authorization: Bearer` and `X-LetAgents
 ```sh
 xcodebuild -project mobile/LetAgents.xcodeproj -scheme LetAgents \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-  -derivedDataPath mobile/build test -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO
+  -derivedDataPath mobile/build test -parallel-testing-enabled NO
 
 xcodebuild -project mobile/LetAgents.xcodeproj -scheme LetAgents \
   -configuration Release -destination 'generic/platform=iOS' \
   -derivedDataPath mobile/build-release build CODE_SIGNING_ALLOWED=NO
 ```
 
-The unit tests cover API decoding/encoding, bearer and human-client headers, room path escaping, auth cancellation/restoration/revocation, polling cursor progress, thread isolation, duplicate-send prevention, draft restoration, and stale-session responses. The three XCUITest flows cover sign-in through a room and thread to sign-out, failed-send retry, and an empty account. The primary flow is also checked on the smaller iPhone 16e simulator. Test cases use an in-process URLProtocol transport; they never post test messages to production.
+Keep normal signing enabled for simulator builds and tests. Xcode uses **Sign to Run Locally** automatically; an unsigned simulator executable cannot access Keychain. `CODE_SIGNING_ALLOWED=NO` is only used above for the non-installable device Release build check.
+
+The unit tests cover a real isolated Keychain round-trip, API decoding/encoding, bearer and human-client headers, room path escaping, auth cancellation/restoration/revocation, polling cursor progress, thread isolation, duplicate-send prevention, draft restoration, and stale-session responses. The three XCUITest flows cover sign-in through a room and thread to sign-out, failed-send retry, and an empty account. The primary flow is also checked on the smaller iPhone 16e simulator. Test cases use an in-process URLProtocol transport; they never post test messages to production.
 
 `UITestFixtures.swift` exists only in DEBUG builds and is activated only with the `--ui-testing` launch argument. Normal launches use the production URLSession transport, and Release builds contain no fixture transport.
 
