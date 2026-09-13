@@ -4,6 +4,7 @@ struct APIError: LocalizedError, Sendable {
     let status: Int
     let message: String
     var interval: Int? = nil
+    var serverMessage: String? = nil
     var errorDescription: String? { message }
     var isUnauthorized: Bool { status == 401 }
 }
@@ -18,19 +19,23 @@ struct APIClient: Sendable {
         self.baseURL = baseURL
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 40
-        configuration.timeoutIntervalForResource = 45
+        configuration.timeoutIntervalForResource = 180
         configuration.httpShouldSetCookies = false
         configuration.urlCache = nil
         self.session = session ?? URLSession(configuration: configuration)
     }
 
-    func request<T: Decodable>(path: [String], token: String? = nil, method: String = "GET",
-                               query: [URLQueryItem] = [], body: Data? = nil) async throws -> T {
+    func endpoint(_ path: [String], query: [URLQueryItem] = []) -> URL {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
         let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         components.percentEncodedPath = "/" + path.map { $0.addingPercentEncoding(withAllowedCharacters: safe)! }.joined(separator: "/")
         components.queryItems = query.isEmpty ? nil : query
-        var request = URLRequest(url: components.url!)
+        return components.url!
+    }
+
+    func request<T: Decodable>(path: [String], token: String? = nil, method: String = "GET",
+                               query: [URLQueryItem] = [], body: Data? = nil) async throws -> T {
+        var request = URLRequest(url: endpoint(path, query: query))
         request.httpMethod = method
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -53,7 +58,7 @@ struct APIClient: Sendable {
             case 429: message = "Too many requests. Please try again in a moment."
             default: message = "LetAgents couldn’t complete the request. Please try again."
             }
-            throw APIError(status: response.statusCode, message: message, interval: detail?.interval)
+            throw APIError(status: response.statusCode, message: message, interval: detail?.interval, serverMessage: detail?.error)
         }
         return try decoder.decode(T.self, from: data)
     }

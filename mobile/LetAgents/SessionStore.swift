@@ -45,6 +45,7 @@ struct KeychainCredentialStore: CredentialStore {
 
 @MainActor @Observable final class SessionStore {
     let client: APIClient
+    private(set) var sessionID = UUID()
     private let credentials: any CredentialStore
     private(set) var token: String?
     private(set) var account: Account?
@@ -54,9 +55,11 @@ struct KeychainCredentialStore: CredentialStore {
     var authorizationDeadline: Date?
     var error: String?
     var restoreFailed = false
-    @ObservationIgnored var drafts: [String: String] = [:]
-    @ObservationIgnored var submissions: [String: (text: String, id: String, replyTo: String?)] = [:]
-    @ObservationIgnored var quotes: [String: ReplyPreview] = [:]
+    var drafts: [String: String] = [:]
+    @ObservationIgnored var submissions: [String: MessageSubmission] = [:]
+    var attachmentDrafts: [String: [DraftAttachment]] = [:]
+    var quotes: [String: ReplyPreview] = [:]
+    var sendingDrafts: Set<String> = []
     var threadReads: [String: ThreadSummary] = [:]
 
     init(client: APIClient = APIClient(), credentials: any CredentialStore = KeychainCredentialStore()) {
@@ -119,9 +122,11 @@ struct KeychainCredentialStore: CredentialStore {
                             throw APIError(status: 0, message: "GitHub sign-in did not return a complete session. Please try again.")
                         }
                         try credentials.write(token)
+                        clearAccountState()
                         self.token = token
                         self.account = account
                         authorization = nil
+                        authorizationDeadline = nil
                         error = nil
                         return
                     case "pending": interval = max(result.interval ?? interval, 1)
@@ -153,19 +158,20 @@ struct KeychainCredentialStore: CredentialStore {
             }
             guard token == signingOutToken else { return }
             try credentials.remove()
-            drafts.removeAll()
-            submissions.removeAll()
-            quotes.removeAll(); threadReads.removeAll()
+            clearAccountState()
             account = nil
             token = nil
         } catch { self.error = error.localizedDescription }
     }
+    private func clearAccountState() {
+        sessionID = UUID()
+        drafts.removeAll(); submissions.removeAll(); attachmentDrafts.removeAll()
+        quotes.removeAll(); threadReads.removeAll(); sendingDrafts.removeAll()
+    }
     func handleUnauthorized(_ error: Error, token requestToken: String) {
         guard token == requestToken, (error as? APIError)?.isUnauthorized == true else { return }
         try? credentials.remove()
-        drafts.removeAll()
-        submissions.removeAll()
-        quotes.removeAll(); threadReads.removeAll()
+        clearAccountState()
         account = nil
         token = nil
         self.error = error.localizedDescription

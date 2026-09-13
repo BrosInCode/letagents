@@ -66,9 +66,9 @@ struct ProjectsView: View {
                 .navigationTitle("Projects").navigationBarTitleDisplayMode(.large)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button { showingAccount = true } label: { AvatarView(name: account.name, size: 32, url: account.avatarUrl) }
+                        Button { showingAccount = true } label: { HStack(spacing: 6) { AvatarView(name: account.name, size: 26, url: account.avatarUrl); Text("Account").font(.subheadline.weight(.medium)) }.frame(minHeight: 44).contentShape(Rectangle()) }
                             .accessibilityLabel("Account").accessibilityIdentifier("account-button")
-                    }
+                    }.companionToolbarStyle()
                 }
                 .sheet(isPresented: $showingAccount) { AccountView(session: session, account: account) }
                 .refreshable { await refresh() }
@@ -213,7 +213,7 @@ struct AccountView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 26) {
-                    AvatarView(name: account.name, size: 76).padding(.top, 26)
+                    AvatarView(name: account.name, size: 76, url: account.avatarUrl).padding(.top, 26)
                     VStack(spacing: 10) {
                         Text(account.name).font(.title2.weight(.semibold))
                         Text("@\(account.login) · GitHub").foregroundStyle(Theme.muted)
@@ -237,8 +237,8 @@ struct AccountView: View {
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 24)
                     Text("LETAGENTS FOR IPHONE · 1.0").font(.caption2).foregroundStyle(Theme.muted).padding(.top, 28)
                 }.padding(24)
-            }.background(Theme.background).navigationTitle("Account").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            }.buttonStyle(.plain).background(Theme.background).navigationTitle("Account").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }.companionToolbarStyle() }
         }
     }
 }

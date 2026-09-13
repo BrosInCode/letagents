@@ -162,7 +162,7 @@ struct CodeBlockView: View {
                     ScrollView([.horizontal, .vertical]) { Text(highlighted).font(.system(.body, design: .monospaced)).textSelection(.enabled).padding(20) }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(Theme.code)
                         .navigationTitle(language.isEmpty ? "Code" : language).navigationBarTitleDisplayMode(.inline)
-                        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { expanded = false } } }
+                        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { expanded = false } }.companionToolbarStyle() }
                 }
             }
             .task(id: copied) { if copied { try? await Task.sleep(for: .seconds(2)); copied = false } }

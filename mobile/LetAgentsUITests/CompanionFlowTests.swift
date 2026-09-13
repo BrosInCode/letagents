@@ -5,6 +5,8 @@ import XCTest
     private func signIn(_ app: XCUIApplication) {
         app.buttons["github-sign-in"].tap()
         XCTAssertTrue(app.textFields["room-search"].waitForExistence(timeout: 10))
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: app.buttons["account-button"])
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed)
     }
     private func openGeneral(_ app: XCUIApplication) {
         app.buttons["project-github.com/brosincode/letagents"].tap()
@@ -159,5 +161,80 @@ extension CompanionFlowTests {
         XCTAssertTrue(app.navigationBars["swift"].waitForExistence(timeout: 3))
         capture("Expanded code")
         app.buttons["Done"].tap()
+    }
+}
+
+extension CompanionFlowTests {
+    func testAccountButtonShowsSignOutAndReturnsToSignIn() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-testing"]; app.launch(); signIn(app)
+        let account = app.buttons["account-button"]
+        XCTAssertTrue(account.isHittable); XCTAssertEqual(account.label, "Account"); account.tap()
+        XCTAssertTrue(app.staticTexts["@EmmyMay · GitHub"].waitForExistence(timeout: 5))
+        capture("Account and sign out")
+        app.buttons["sign-out"].tap()
+        XCTAssertTrue(app.buttons["github-sign-in"].waitForExistence(timeout: 5))
+        signIn(app); XCTAssertTrue(app.buttons["account-button"].isHittable)
+    }
+    func testConnectedNowIsSeparateFromRoomHistory() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-testing"]; app.launch(); signIn(app); openGeneral(app)
+        app.buttons["Conversation options"].tap(); app.buttons["People & agents"].tap()
+        XCTAssertTrue(app.staticTexts["Working on the mobile companion"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Past agent"].exists)
+        capture("Connected now")
+        app.buttons["History"].tap()
+        XCTAssertTrue(app.staticTexts["Past agent"].waitForExistence(timeout: 5) || app.otherElements["history-past-agent"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Working on the mobile companion"].exists)
+        app.buttons["Load more history"].tap()
+        XCTAssertTrue(app.staticTexts["Noor"].waitForExistence(timeout: 5) || app.otherElements["history-past-human"].waitForExistence(timeout: 5))
+        capture("Participant history")
+    }
+    func testComposerAndMessageFitTheScreenAndFilePickerOpens() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-testing", "--rich-messages"]; app.launch(); signIn(app); openGeneral(app)
+        let composer = app.textViews["message-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(composer.frame.minX, 0)
+        XCTAssertLessThanOrEqual(composer.frame.maxX, app.frame.maxX)
+        XCTAssertTrue(app.buttons["add-attachment"].isHittable)
+        XCTAssertTrue(app.buttons["send-message"].isHittable)
+        capture("Room controls and alignment")
+        app.buttons["add-attachment"].tap(); app.buttons["Choose files"].tap()
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
+        capture("Native file picker")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.buttons["add-attachment"].waitForExistence(timeout: 5))
+    }
+}
+
+extension CompanionFlowTests {
+    func testPhotoAttachmentDraftSendRetryAndPreview() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-testing", "--fail-first-send"]; app.launch(); signIn(app); openGeneral(app)
+        app.buttons["add-attachment"].tap(); app.buttons["Photo library"].tap()
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
+        capture("Photo picker")
+        let photo = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
+        XCTAssertTrue(photo.waitForExistence(timeout: 5)); photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap(); app.buttons["Done"].tap()
+        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove ")).firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 10))
+        capture("Photo attachment draft")
+        remove.tap(); XCTAssertFalse(remove.exists)
+        XCTAssertFalse(app.buttons["send-message"].isEnabled)
+        app.buttons["add-attachment"].tap(); app.buttons["Photo library"].tap()
+        XCTAssertTrue(photo.waitForExistence(timeout: 5)); photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap(); app.buttons["Done"].tap()
+        XCTAssertTrue(remove.waitForExistence(timeout: 10))
+        app.buttons["send-message"].tap()
+        XCTAssertTrue(app.staticTexts["Message wasn’t confirmed. Your draft is saved here. Tap Send to retry."].waitForExistence(timeout: 10))
+        XCTAssertTrue(remove.exists)
+        app.buttons["send-message"].tap()
+        let attachment = app.buttons["attachment-att_1"]
+        XCTAssertTrue(attachment.waitForExistence(timeout: 10)); XCTAssertFalse(remove.exists)
+        capture("Sent photo attachment")
+        attachment.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.otherElements["QLPreviewControllerView"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Share attachment"].exists)
+        XCTAssertTrue(app.otherElements["QLPreviewControllerView"].images.firstMatch.waitForExistence(timeout: 5))
+        capture("Attachment preview")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(attachment.waitForExistence(timeout: 5))
     }
 }

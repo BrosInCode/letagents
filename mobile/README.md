@@ -22,10 +22,12 @@ The default app always connects to **https://letagents.chat**. No client secret,
 - Caret-aware @ mention completion from the room roster, owner labels for agents with the same name, highlighted mentions, and participant details.
 - Structured GitHub cards for pull requests, issues, reviews, comments, and checks, with status and source links.
 - Drafts retained during navigation while the app is open. Failed sends keep their submission ID so retrying cannot duplicate an accepted message.
-- Account details, session restoration, explicit connection errors, empty states, and sign-out.
+- An **Account** button on the signed-in Projects screen, with account details and **Sign out**. Signing out revokes this phone’s token and clears its drafts and attachments.
+- Separate **Connected now** and **History** views under **People & agents**, using live delivery presence and paginated activity history. Message/status history alone never counts as a current connection.
+- Native photo and file pickers, removable attachment drafts, attachment-only messages, authenticated Quick Look previews, and sharing/saving through the iOS share sheet. Up to four attachments per message, 25 MB each, including in threads and quote replies.
 - Native navigation, software-keyboard avoidance, Dynamic Type, accessibility labels, and light/dark appearance.
 
-Project/agent administration, background push notifications, and attachment upload/download are outside this first companion release. Existing attachments display their filenames; open them in the desktop app. Drafts and message history are held in memory, not persisted offline. Account room discovery uses the existing server's maximum of 100 parent rooms.
+Project/agent administration and background push notifications remain outside this companion release. Drafts, selected attachment bytes, and message history are held in memory while the app is open. Attachment picking offers images from Photos and other files through Files. Live presence covers agents; human participation is shown in History. Account room discovery uses the existing server's maximum of 100 parent rooms.
 
 ## Design
 
@@ -49,6 +51,8 @@ The palette comes from the existing **Welcome / Soft tangerine** (`21:652`), **O
 
 These are editable Figma text/vector layouts. Figma uses the available Inter font; SwiftUI uses native iOS text styles for Dynamic Type. `Theme.swift` preserves the dark source colors and supplies matching light-mode colors. Navigation and keyboard controls remain native iOS. The app icon reuses the desktop artwork from `../brand/letagents-app-icon.png`: the original white mark and green dot, at the same scale and position. Its 1024px iOS PNG fills the desktop asset’s transparent outer margin with black and removes the alpha channel; iOS supplies the corner mask. `Design/AppIcon.svg` preserves the same vector artwork with an opaque background. The earlier Figma icon (`45:8355`) is superseded by this desktop asset. `Design/mobile-flow.png` records the initial six-screen pass; `mobile-v2.png` is the current conversation and hierarchy direction.
 
+Build 3 UI-test captures: [Account and Sign out](Design/build3-account.png), [room controls](Design/build3-room.png), [connected agents](Design/build3-connected.png), and [attachment preview with larger text](Design/build3-attachment-preview.png). These use the fixture account and local test image, not production messages. The existing Figma frames remain the palette/layout reference; this follow-up is captured from the running Swift app.
+
 ## API contract
 
 | Flow | Existing endpoint |
@@ -60,15 +64,18 @@ These are editable Figma text/vector layouts. Figma uses the available Inter fon
 | Live catch-up | `GET /rooms/:roomId/messages/poll?after=msg_N&timeout=25000` |
 | Original-message recovery | `GET /rooms/:roomId/messages/:messageId` |
 | Room roster | `GET /rooms/:roomId/participants` |
+| Current connections / history | `GET /rooms/:roomId/presence`, `GET /rooms/:roomId/activity-history?page=N` |
+| Stage / discard attachments | `POST /rooms/:roomId/attachments/uploads`, `DELETE /rooms/:roomId/attachments/uploads/:uploadId` |
+| Read attachments | `GET /rooms/:roomId/messages/:messageId/attachments/:attachmentId` |
 | Thread history / inbox | `GET /rooms/:roomId/messages/:rootId/thread`, `GET /rooms/:roomId/messages/threads` |
 | Thread read position | `PUT /rooms/:roomId/messages/:rootId/thread/read` |
 | Send/reply | `POST /rooms/:roomId/messages` |
 
-Authenticated requests use the existing `Authorization: Bearer` and `X-LetAgents-Desktop-Client: 1` human-companion contract. Despite the historical header name, this is needed for owner-token writes to stay human messages and preserve account-scoped agent routing. Sends use `desktop-send:<UUID>` as `client_message_id`, including on retries, and `thread_root_id` for thread replies, with optional `reply_to` for quoted message context. Poll cursors advance through `last_observed_message_id` even when no visible messages arrive.
+Authenticated requests use the existing `Authorization: Bearer` and `X-LetAgents-Desktop-Client: 1` human-companion contract. Despite the historical header name, this is needed for owner-token writes to stay human messages and preserve account-scoped agent routing. Sends use `desktop-send:<UUID>` as `client_message_id`, including on retries, and `thread_root_id` for thread replies, with optional `reply_to` for quoted message context. Poll cursors advance through `last_observed_message_id` even when no visible messages arrive. Attachments upload to the existing signed PUT target and are sent as `attachments: [{ upload_id }]`. Ambiguous send failures retain both upload IDs and message identity. A definite expired-upload rejection allows re-upload on retry. The owner token never accompanies storage uploads or cross-origin download redirects; previews use temporary protected files that are removed on dismissal.
 
 ## TestFlight
 
-The iPhone app uses bundle ID `chat.letagents.mobile`, version `1.0`, and build `2`. Its [App Store Connect record](https://appstoreconnect.apple.com/apps/6811631290/distribution) is app `6811631290`, SKU `letagents-ios`, with English (U.S.) as its primary language. Signing is automatic for team `26836KWQM6`. The app uses only Apple-provided HTTPS and Keychain encryption, so its generated Info.plist declares `ITSAppUsesNonExemptEncryption = false`, following [Apple's encryption documentation](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
+The iPhone app uses bundle ID `chat.letagents.mobile`, version `1.0`, and build `3`. Its [App Store Connect record](https://appstoreconnect.apple.com/apps/6811631290/distribution) is app `6811631290`, SKU `letagents-ios`, with English (U.S.) as its primary language. Signing is automatic for team `26836KWQM6`. The app uses only Apple-provided HTTPS and Keychain encryption, so its generated Info.plist declares `ITSAppUsesNonExemptEncryption = false`, following [Apple's encryption documentation](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
 
 Run these commands from the repository root with the Apple Developer account signed into Xcode:
 
@@ -76,19 +83,19 @@ Run these commands from the repository root with the Apple Developer account sig
 xcodebuild -project mobile/LetAgents.xcodeproj -scheme LetAgents \
   -configuration Release -destination 'generic/platform=iOS' \
   -derivedDataPath mobile/build-release \
-  -archivePath mobile/build-release/LetAgents-1.0-2.xcarchive \
+  -archivePath mobile/build-release/LetAgents-1.0-3.xcarchive \
   -allowProvisioningUpdates archive
 
 xcodebuild -exportArchive \
-  -archivePath mobile/build-release/LetAgents-1.0-2.xcarchive \
+  -archivePath mobile/build-release/LetAgents-1.0-3.xcarchive \
   -exportOptionsPlist mobile/ExportOptions.plist \
-  -exportPath mobile/build-release/TestFlight-2 \
+  -exportPath mobile/build-release/TestFlight-3 \
   -allowProvisioningUpdates
 ```
 
 The second command uploads the build to App Store Connect. After Apple processes it, assign it to the intended TestFlight group. Uploading does not submit an App Store release. Increment `CURRENT_PROJECT_VERSION` in both app configurations and use a new archive path before subsequent uploads; automatic build-number changes are disabled so the uploaded version matches the repository. Archives, export output, and signing credentials are not committed.
 
-Build **1.0 (2)** is available in the internal **Mobile Preview** group for both existing testers. App Store Connect confirms the teammate installed build 2; the owner previously installed build 1 and can update through TestFlight. Automatic distribution is off, so assign later builds to this group explicitly.
+Build **1.0 (3)** is available in the internal **Mobile Preview** group for both existing testers. App Store Connect confirms build 3 is **Testing** and both testers previously installed build 2. They can update through TestFlight. Automatic distribution is off, so assign later builds to this group explicitly.
 
 The successful upload used a fresh Apple Distribution certificate paired with the **LetAgents Mobile Distribution** private key in the local login keychain. The certificate expires September 13, 2027; its SHA-1 fingerprint is `13C78D08DB9E307D8A805F44001B43BC63F690A7`. Existing signing identities remain intact. A certificate download alone does not provide the matching private key on another Mac.
 
@@ -106,6 +113,8 @@ xcodebuild -project mobile/LetAgents.xcodeproj -scheme LetAgents \
 
 Keep normal signing enabled for simulator builds and tests. Xcode uses **Sign to Run Locally** automatically; an unsigned simulator executable cannot access Keychain. `CODE_SIGNING_ALLOWED=NO` is only used above for the non-installable device Release build check.
 
+The photo-picker UI test requires at least one image in the target simulator’s Photos library. After booting that simulator, seed the existing desktop icon with `xcrun simctl addmedia <simulator-UDID> brand/letagents-app-icon.png` from the repository root. Test uploads and messages still use the fixture transport.
+
 The API/state tests cover a real isolated Keychain round-trip, authentication and request encoding, session lifecycle, polling cursors, pagination when the latest page contains only thread replies, repository/branch/focus lineage, mention disambiguation and Unicode insertion, Markdown, GitHub events, timestamps, and retry/draft preservation. XCUITest covers sign-in through a room and thread to sign-out, failed-send retry, an empty account, branch focus-room navigation, selecting the correct agent mention, thread inbox and quoted replies, and code/GitHub rendering. Test cases use an in-process URLProtocol transport; they never post test messages to production.
 
 Verified on September 13, 2026: **30 API/state tests and all nine XCUITest flows passed on iPhone 17 Pro**. Five messaging, quote, and code flows also passed on iPhone 16e with accessibility-size text in light appearance. Checks include rapid typing, swipe-to-quote, cancellation, quote-preserving retries, original-message jumps and return, older-quote fetch/retry, and horizontal code scrolling. Dark and large-text light screenshots were inspected. The generic iPhone Release build passed. The earlier project hierarchy and agent-selection flows also passed on iPhone 16e before the quote-reply update.
@@ -117,3 +126,7 @@ Production smoke checks on September 13, 2026 confirmed GitHub device authorizat
 Release verification on September 13, 2026: the signed `1.0 (1)` archive succeeded, passed `codesign --verify --deep --strict`, and contains the expected bundle ID, version, and Boolean encryption declaration. Export and upload succeeded with the fresh distribution certificate. App Store Connect finished processing build 1, which was distributed through **Mobile Preview**. App Store Connect confirms build 1 was installed on the owner’s iPhone 17 Pro Max and the teammate’s iPhone 13 Pro Max; this is installation evidence, not a full physical-device regression test. No App Store release was submitted; the branch remains `mobile` pending human inspection.
 
 Build **1.0 (2)** restores the existing desktop icon. Its signed archive and `codesign --verify --deep --strict` checks passed, export/upload succeeded, and Apple finished processing it. **Mobile Preview** has both builds and two testers, with the teammate already showing **Installed 1.0 (2)**. The simulator build installed and launched successfully; the compiled 120px icon was visually checked against the desktop artwork. The Figma icon frame still contains the superseded build 1 artwork; use the committed desktop-derived icon as the source of truth.
+
+Build 3 verification on September 13, 2026: **39 API/state tests and 13 XCUITest flows passed on iPhone 17 Pro**. Five focused flows passed on iPhone 16e in light appearance with accessibility-medium text: Account → Sign out → Sign in, live/history separation with pagination, chat bounds and native Files picking, native Photos picking/removal/attachment-only send/retry/Quick Look, and swipe-to-quote with retry. A focused photo/preview flow passed again after shortening the preview title to preserve the Done button at larger text sizes. Dark and larger-text light screenshots were inspected. The final signed `1.0 (3)` archive and signature verification passed. Export/upload succeeded, Apple finished processing it, and **Mobile Preview** confirms **Testing** for build 3 with two testers. Build-specific testing notes are saved in App Store Connect.
+
+The new API/state checks exercise file limits, authenticated attachment downloads and clean redirect headers, upload/message identity on retries, expired-upload recovery, isolated account drafts after logout, and returning to a room while a send is in flight. Native picker tests transfer a real local image through the fixture upload/download transport; they do not prove production object-storage availability or a physical-device attachment round trip.

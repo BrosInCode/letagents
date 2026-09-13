@@ -86,3 +86,40 @@ final class APIClientTests: XCTestCase {
         XCTAssertFalse(message.isThreadReply)
     }
 }
+
+extension APIClientTests {
+    func testLivePresenceDoesNotTreatHistoryOrStatusAsAConnection() async throws {
+        MockURLProtocol.handler = { request in
+            XCTAssertTrue(request.url!.path.hasSuffix("/presence"))
+            return (200, #"{"presence":[{"actor_label":"live","session_kind":"worker","display_name":"Live","freshness":"active","source_flags":["delivery"],"status":"idle"},{"actor_label":"stale","session_kind":"worker","display_name":"Stale","freshness":"stale","source_flags":["delivery"]},{"actor_label":"history","session_kind":"worker","display_name":"History only","freshness":"active","source_flags":["messages","presence"]},{"actor_label":"controller","session_kind":"controller","display_name":"Controller","freshness":"active","source_flags":["delivery"]}]}"#)
+        }
+        let result = try await MockURLProtocol.client().presence(roomID: "repo", token: "token")
+        XCTAssertEqual(result.connected.map(\.id), ["live"]); XCTAssertEqual(result.connected.first?.connectionLabel, "Idle")
+    }
+    func testActivityHistoryUsesItsOwnEndpointAndPage() async throws {
+        MockURLProtocol.handler = { request in
+            XCTAssertTrue(request.url!.path.hasSuffix("/activity-history"))
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "page" }?.value, "2")
+            return (200, #"{"entries":[{"id":"historic","participant":{"participant_key":"old","kind":"agent","display_name":"Past agent","hidden_at":"2026-01-01"},"first_seen_at":"2026-01-01","last_seen_at":"2026-01-02","last_room_activity_at":"2026-01-02","message_count":10}],"page":2,"page_count":3,"total":70}"#)
+        }
+        let result = try await MockURLProtocol.client().activityHistory(roomID: "repo", token: "token", page: 2)
+        XCTAssertEqual(result.entries.first?.participant.displayName, "Past agent"); XCTAssertEqual(result.pageCount, 3)
+    }
+    func testAttachmentDownloadUsesAuthenticatedRoomPathAndCleansRedirectHeaders() async throws {
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.url!.host, "letagents.chat")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.percentEncodedPath, "/rooms/owner%2Frepo/messages/msg_1/attachments/att_1")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer owner-token")
+            return (200, "Preview contents")
+        }
+        let file = try await MockURLProtocol.client().downloadAttachment(roomID: "owner/repo", messageID: "msg_1", attachment: .init(id: "att_1", filename: "notes.txt", downloadUrl: "https://untrusted.example/file"), token: "owner-token")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "Preview contents")
+        var redirect = URLRequest(url: URL(string: "https://storage.example/signed-file")!)
+        redirect.setValue("Bearer owner-token", forHTTPHeaderField: "Authorization")
+        redirect.setValue("session=secret", forHTTPHeaderField: "Cookie")
+        let clean = AttachmentRedirect.redirectedRequest(redirect)
+        XCTAssertNil(clean?.value(forHTTPHeaderField: "Authorization")); XCTAssertNil(clean?.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertNil(AttachmentRedirect.redirectedRequest(URLRequest(url: URL(string: "http://storage.example/file")!)))
+    }
+}

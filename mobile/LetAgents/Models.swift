@@ -81,6 +81,8 @@ struct Message: Codable, Identifiable, Hashable, Sendable {
         let id: String
         let filename: String
         let downloadUrl: String
+        var contentType: String? = nil
+        var byteSize: Int? = nil
     }
 }
 
@@ -171,6 +173,8 @@ struct SendMessageBody: Encodable, Sendable {
     let threadRootId: String?
     let clientMessageId: String
     var replyTo: String? = nil
+    var attachments: [AttachmentReference]? = nil
+    struct AttachmentReference: Encodable, Sendable { let uploadId: String }
 }
 
 
