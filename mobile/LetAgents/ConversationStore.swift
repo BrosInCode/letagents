@@ -5,10 +5,12 @@ import Observation
     let room: Room
     let rootID: String?
     private let session: SessionStore
+    private let sessionID: UUID
+    private var isCurrentSession: Bool { session.sessionID == sessionID }
     private(set) var messages: [Message] = []
     private(set) var isLoading = true
     private(set) var isLoadingOlder = false
-    private(set) var isSending = false
+    var isSending: Bool { isCurrentSession && session.sendingDrafts.contains(draftKey) }
     private(set) var lastSentMessageID: String?
     private(set) var hasOlder = false
     private(set) var isConnected = false
@@ -16,25 +18,37 @@ import Observation
     private(set) var sendError: String?
     private(set) var participants: [Participant] = []
     private(set) var participantsError: String?
-    var quote: ReplyPreview? { didSet { session.quotes[draftKey] = quote } }
-    var draft = "" { didSet { session.drafts[draftKey] = draft } }
+    var quote: ReplyPreview? {
+        get { isCurrentSession ? session.quotes[draftKey] : nil }
+        set { if isCurrentSession { session.quotes[draftKey] = newValue } }
+    }
+    var draft: String {
+        get { isCurrentSession ? session.drafts[draftKey] ?? "" : "" }
+        set { if isCurrentSession { session.drafts[draftKey] = newValue } }
+    }
+    private(set) var attachments: [DraftAttachment] {
+        get { isCurrentSession ? session.attachmentDrafts[draftKey] ?? [] : [] }
+        set { if isCurrentSession { session.attachmentDrafts[draftKey] = newValue } }
+    }
+    var attachmentError: String?
+    private(set) var uploadProgress: String?
+    var canSend: Bool { isCurrentSession && !isSending && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
     private var draftKey: String { room.id + "|" + (rootID ?? "room") }
     private var cursor: String?
     private var historyBefore: String?
     private var loaded = false
     private var unavailableRoots: Set<String> = []
     // Retain the id after an ambiguous network failure so retry cannot duplicate a message.
-    private var submission: (text: String, id: String, replyTo: String?)? {
-        get { session.submissions[draftKey] }
-        set { session.submissions[draftKey] = newValue }
+    private var submission: MessageSubmission? {
+        get { isCurrentSession ? session.submissions[draftKey] : nil }
+        set { if isCurrentSession { session.submissions[draftKey] = newValue } }
     }
 
     init(room: Room, rootID: String? = nil, session: SessionStore) {
         self.room = room
         self.rootID = rootID
         self.session = session
-        draft = session.drafts[room.id + "|" + (rootID ?? "room")] ?? ""
-        quote = session.quotes[room.id + "|" + (rootID ?? "room")]
+        self.sessionID = session.sessionID
     }
     var visibleMessages: [Message] {
         (rootID == nil ? messages.filter { !$0.isThreadReply } : messages).map { message in
@@ -47,7 +61,7 @@ import Observation
         }
     }
     func run() async {
-        guard let token = session.token else { return }
+        guard isCurrentSession, let token = session.token else { return }
         defer { isConnected = false }
         var retrySeconds = 1
         while !Task.isCancelled {
@@ -106,7 +120,7 @@ import Observation
         if let observed, number(observed) > number(cursor) { cursor = observed }
     }
     func loadOlder() async {
-        guard hasOlder, !isLoadingOlder, let token = session.token else { return }
+        guard isCurrentSession, hasOlder, !isLoadingOlder, let token = session.token else { return }
         isLoadingOlder = true
         defer { isLoadingOlder = false }
         do {
@@ -125,24 +139,76 @@ import Observation
             }
         } catch { self.error = error.localizedDescription; session.handleUnauthorized(error, token: token) }
     }
+    func addAttachments(_ files: [DraftAttachment]) {
+        guard isCurrentSession, !isSending else { return }
+        let available = max(0, DraftAttachment.maximumCount - attachments.count)
+        attachments.append(contentsOf: files.prefix(available))
+        attachmentError = files.count > available ? "You can attach up to four files per message." : nil
+    }
+    func removeAttachment(_ id: UUID) {
+        guard isCurrentSession, !isSending else { return }
+        attachments.removeAll { $0.id == id }; attachmentError = nil
+        if let token = session.token, let uploads = submission?.uploads.values.map({ $0 }), !uploads.isEmpty {
+            let client = session.client, roomID = room.id
+            Task { for uploadID in uploads { try? await client.discardAttachment(roomID: roomID, uploadID: uploadID, token: token) } }
+        }
+        submission = nil
+    }
+    func downloadAttachment(_ destination: AttachmentDestination) async throws -> URL {
+        guard isCurrentSession, let token = session.token else { throw CancellationError() }
+        do {
+            let file = try await session.client.downloadAttachment(roomID: room.id, messageID: destination.messageID, attachment: destination.attachment, token: token)
+            guard isCurrentSession, !Task.isCancelled else {
+                try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+                throw CancellationError()
+            }
+            return file
+        } catch { session.handleUnauthorized(error, token: token); throw error }
+    }
     func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isSending, let token = session.token, let account = session.account else { return }
-        isSending = true
-        sendError = nil
-        if submission?.text != text || submission?.replyTo != quote?.id { submission = (text, "desktop-send:" + UUID().uuidString, quote?.id) }
-        let id = submission!.id
-        let quoteID = quote?.id
-        defer { isSending = false }
+        guard canSend, let token = session.token, let account = session.account else { return }
+        session.sendingDrafts.insert(draftKey); sendError = nil; attachmentError = nil
+        let selectedFiles = attachments
+        let attachmentIDs = selectedFiles.map(\.id)
+        if submission?.text != text || submission?.replyTo != quote?.id || submission?.attachmentIDs != attachmentIDs {
+            let previousUploads = submission?.uploads.values.map { $0 } ?? []
+            submission = MessageSubmission(text: text, id: "desktop-send:" + UUID().uuidString, replyTo: quote?.id, attachmentIDs: attachmentIDs)
+            if !previousUploads.isEmpty {
+                let client = session.client, roomID = room.id
+                Task { for uploadID in previousUploads { try? await client.discardAttachment(roomID: roomID, uploadID: uploadID, token: token) } }
+            }
+        }
+        let id = submission!.id, quoteID = quote?.id
+        var requestedSend = false
+        defer { if isCurrentSession { session.sendingDrafts.remove(draftKey) }; uploadProgress = nil }
         do {
+            for (index, attachment) in selectedFiles.enumerated() where submission?.uploads[attachment.id] == nil {
+                uploadProgress = "Uploading \(index + 1) of \(selectedFiles.count)…"
+                let uploadID = try await session.client.uploadAttachment(roomID: room.id, token: token, attachment: attachment)
+                guard isCurrentSession else { try? await session.client.discardAttachment(roomID: room.id, uploadID: uploadID, token: token); return }
+                submission?.uploads[attachment.id] = uploadID
+            }
+            guard isCurrentSession else { return }
+            let references = selectedFiles.compactMap { submission?.uploads[$0.id] }.map { SendMessageBody.AttachmentReference(uploadId: $0) }
+            uploadProgress = nil; requestedSend = true
             let sent = try await session.client.send(roomID: room.id, token: token,
-                message: SendMessageBody(sender: account.login, text: text, threadRootId: rootID, clientMessageId: id, replyTo: quoteID))
+                message: SendMessageBody(sender: account.login, text: text, threadRootId: rootID, clientMessageId: id, replyTo: quoteID, attachments: references.isEmpty ? nil : references))
+            guard isCurrentSession else { return }
             lastSentMessageID = sent.id
             messages = sortedUnique(messages + [sent])
             if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text && quote?.id == quoteID { draft = ""; quote = nil }
+            attachments.removeAll { attachmentIDs.contains($0.id) }
             submission = nil
         } catch {
-            sendError = "Message wasn’t confirmed. Your draft is saved here. Tap Send to retry."
+            guard isCurrentSession else { return }
+            if let failure = error as? APIError, failure.status == 400, failure.serverMessage == "attachment upload not found or expired" {
+                // The server rejected the transaction, so it is safe to upload again.
+                submission?.uploads = [:]
+                sendError = "The attachments expired. Tap Send to upload them again."
+            } else if requestedSend {
+                sendError = "Message wasn’t confirmed. Your draft is saved here. Tap Send to retry."
+            } else { sendError = "Couldn’t upload the attachments. Your files are saved here. Tap Send to retry." }
             session.handleUnauthorized(error, token: token)
         }
     }
@@ -184,7 +250,7 @@ import Observation
         }
     }
     func refreshParticipants() async {
-        guard let token = session.token else { return }
+        guard isCurrentSession, let token = session.token else { return }
         do {
             let result = try await session.client.participants(roomID: room.id, token: token)
             try Task.checkCancellation(); participants = result; participantsError = nil
@@ -192,12 +258,12 @@ import Observation
         catch { participantsError = "Couldn’t refresh the room roster."; session.handleUnauthorized(error, token: token) }
     }
     func markRead(through message: Message) async {
-        guard let rootID, message.isThreadReply, let token = session.token else { return }
+        guard isCurrentSession, let rootID, message.isThreadReply, let token = session.token else { return }
         let key = room.id + "|" + rootID
         guard number(session.threadReads[key]?.lastReadMessageId) < message.sequence else { return }
         do {
             let read = try await session.client.markThreadRead(roomID: room.id, rootID: rootID, messageID: message.id, token: token)
-            if number(read.lastReadMessageId) > number(session.threadReads[key]?.lastReadMessageId) { session.threadReads[key] = read }
+            if isCurrentSession && number(read.lastReadMessageId) > number(session.threadReads[key]?.lastReadMessageId) { session.threadReads[key] = read }
         } catch { session.handleUnauthorized(error, token: token) }
     }
     private func sortedUnique(_ input: [Message]) -> [Message] {

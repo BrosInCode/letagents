@@ -329,3 +329,149 @@ extension StateTests {
         XCTAssertEqual(store.draft, ""); XCTAssertNil(store.quote); XCTAssertNil(store.sendError)
     }
 }
+
+extension StateTests {
+    func testAccountSignOutClearsDraftsAndOldConversationCannotSend() async throws {
+        let accountJSON = accountJSON
+        var sends = 0
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            if request.url!.path == "/auth/logout" { return (200, #"{"success":true}"#) }
+            sends += 1; return (500, "{}")
+        }
+        let credentials = MemoryCredentials("first-token")
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: credentials)
+        await session.restore()
+        let room = Room(roomId: "repo", displayName: "Room")
+        let old = ConversationStore(room: room, session: session)
+        old.draft = "Private draft"
+        old.addAttachments([try DraftAttachment(filename: "notes.txt", contentType: "text/plain", data: Data("Private file".utf8))])
+        await session.signOut()
+        XCTAssertNil(session.account); XCTAssertNil(credentials.token)
+        XCTAssertTrue(session.drafts.isEmpty); XCTAssertTrue(session.attachmentDrafts.isEmpty)
+        credentials.token = "second-token"; await session.restore()
+        old.draft = "A late edit"; await old.send()
+        let reopened = ConversationStore(room: room, session: session)
+        XCTAssertEqual(sends, 0); XCTAssertTrue(reopened.draft.isEmpty); XCTAssertTrue(reopened.attachments.isEmpty)
+    }
+    func testFailedSignOutKeepsAccountAndAllowsRetry() async {
+        let accountJSON = accountJSON
+        var failures = 1
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            if failures > 0 { failures -= 1; throw URLError(.notConnectedToInternet) }
+            return (200, #"{"success":true}"#)
+        }
+        let credentials = MemoryCredentials("token")
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: credentials)
+        await session.restore(); await session.signOut()
+        XCTAssertNotNil(session.account); XCTAssertEqual(credentials.token, "token"); XCTAssertNotNil(session.error)
+        await session.signOut(); XCTAssertNil(session.account); XCTAssertNil(credentials.token)
+    }
+    func testAttachmentOnlySendRetryKeepsUploadsAndMessageIdentityInThread() async throws {
+        let accountJSON = accountJSON
+        var uploads = 0
+        var identifiers: [String] = []
+        var references: [[String]] = []
+        MockURLProtocol.handler = { request in
+            let path = request.url!.path
+            if path == "/auth/session" { return (200, accountJSON) }
+            if path.hasSuffix("/uploads") {
+                return (201, #"{"upload_id":"upl_1234567890123456","upload_url":"https://storage.example/upload","method":"PUT","headers":{"Content-Type":"text/plain"}}"#)
+            }
+            if request.httpMethod == "PUT" { uploads += 1; XCTAssertNil(request.value(forHTTPHeaderField: "Authorization")); return (200, "") }
+            let body = MockURLProtocol.body(request)
+            XCTAssertEqual(body["text"] as? String, "")
+            XCTAssertEqual(body["thread_root_id"] as? String, "msg_1")
+            XCTAssertEqual(body["reply_to"] as? String, "msg_2")
+            identifiers.append(body["client_message_id"] as! String)
+            references.append((body["attachments"] as! [[String: String]]).map { $0["upload_id"]! })
+            if identifiers.count == 1 { throw URLError(.networkConnectionLost) }
+            return (201, #"{"id":"msg_3","sender":"EmmyMay","text":"","timestamp":"","thread_root_id":"msg_1","attachments":[{"id":"att_1","filename":"notes.txt","download_url":"/rooms/repo/messages/msg_3/attachments/att_1"}]}"#)
+        }
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token"))
+        await session.restore()
+        let room = Room(roomId: "repo", displayName: "Room")
+        let first = ConversationStore(room: room, rootID: "msg_1", session: session)
+        first.quote = ReplyPreview(message: .init(id: "msg_2", sender: "Codex", text: "Please attach the notes", timestamp: ""))
+        first.addAttachments([try DraftAttachment(filename: "notes.txt", contentType: "text/plain", data: Data("Notes".utf8))])
+        XCTAssertTrue(first.canSend); await first.send()
+        XCTAssertNotNil(first.sendError); XCTAssertEqual(first.attachments.count, 1)
+        let reopened = ConversationStore(room: room, rootID: "msg_1", session: session)
+        XCTAssertEqual(reopened.attachments.count, 1); await reopened.send()
+        XCTAssertEqual(uploads, 1); XCTAssertEqual(identifiers.count, 2); XCTAssertEqual(identifiers[0], identifiers[1]); XCTAssertEqual(references[0], references[1])
+        XCTAssertTrue(reopened.attachments.isEmpty); XCTAssertNil(reopened.quote); XCTAssertFalse(reopened.canSend)
+    }
+    func testExpiredAttachmentCanBeUploadedAgainAfterDefiniteRejection() async throws {
+        let accountJSON = accountJSON
+        var uploadCount = 0, sends = 0
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            if request.url!.path.hasSuffix("/uploads") {
+                uploadCount += 1
+                return (201, "{\"upload_id\":\"upl_\(uploadCount)234567890123456\",\"upload_url\":\"https://storage.example/upload\",\"method\":\"PUT\",\"headers\":{}}")
+            }
+            if request.httpMethod == "PUT" { return (200, "") }
+            sends += 1
+            if sends == 1 { return (400, #"{"error":"attachment upload not found or expired"}"#) }
+            return (201, #"{"id":"msg_3","sender":"EmmyMay","text":"","timestamp":""}"#)
+        }
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token"))
+        await session.restore()
+        let model = ConversationStore(room: .init(roomId: "room", displayName: "Room"), session: session)
+        model.addAttachments([try DraftAttachment(filename: "notes.txt", contentType: "text/plain", data: Data("Notes".utf8))])
+        await model.send(); XCTAssertTrue(model.sendError?.contains("expired") == true)
+        await model.send(); XCTAssertEqual(uploadCount, 2); XCTAssertTrue(model.attachments.isEmpty)
+    }
+    func testAttachmentLimitsRemovalAndNativeFileImport() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".txt")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data("A real imported file".utf8).write(to: url)
+        let file = try DraftAttachment.read(url)
+        XCTAssertEqual(String(data: file.data, encoding: .utf8), "A real imported file")
+        XCTAssertEqual(file.contentType, "text/plain")
+        XCTAssertThrowsError(try DraftAttachment(filename: "empty", contentType: "text/plain", data: Data()))
+        XCTAssertThrowsError(try DraftAttachment(filename: "large", contentType: "text/plain", data: Data(count: DraftAttachment.maximumBytes + 1)))
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials())
+        let model = ConversationStore(room: .init(roomId: "room", displayName: "Room"), session: session)
+        let files = try (0..<5).map { try DraftAttachment(filename: "\($0).txt", contentType: "text/plain", data: Data("hello".utf8)) }
+        model.addAttachments(files)
+        XCTAssertEqual(model.attachments.count, 4); XCTAssertNotNil(model.attachmentError)
+        model.removeAttachment(files[0].id)
+        XCTAssertEqual(model.attachments.count, 3); XCTAssertNil(model.attachmentError)
+    }
+}
+
+extension StateTests {
+    func testReturningDuringAttachmentSendSharesProgressAndClearsTheSameDraft() async throws {
+        let accountJSON = accountJSON
+        let finish = DispatchSemaphore(value: 0)
+        var messageRequests = 0
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            if request.url!.path.hasSuffix("/uploads") {
+                return (201, #"{"upload_id":"upl_1234567890123456","upload_url":"https://storage.example/upload","method":"PUT","headers":{}}"#)
+            }
+            if request.httpMethod == "PUT" { return (200, "") }
+            messageRequests += 1
+            _ = finish.wait(timeout: .now() + 5)
+            return (201, #"{"id":"msg_3","sender":"EmmyMay","text":"A file","timestamp":""}"#)
+        }
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token"))
+        await session.restore()
+        let room = Room(roomId: "repo", displayName: "Room")
+        let original = ConversationStore(room: room, session: session)
+        original.draft = "A file"
+        original.addAttachments([try DraftAttachment(filename: "notes.txt", contentType: "text/plain", data: Data("Notes".utf8))])
+        let sending = Task { await original.send() }
+        let deadline = Date().addingTimeInterval(3)
+        while !original.isSending && Date() < deadline { await Task.yield() }
+        let reopened = ConversationStore(room: room, session: session)
+        XCTAssertTrue(reopened.isSending); XCTAssertFalse(reopened.canSend)
+        XCTAssertEqual(reopened.attachments.count, 1)
+        await reopened.send()
+        finish.signal(); await sending.value
+        XCTAssertEqual(messageRequests, 1)
+        XCTAssertTrue(reopened.attachments.isEmpty); XCTAssertTrue(reopened.draft.isEmpty); XCTAssertFalse(reopened.isSending)
+    }
+}

@@ -13,7 +13,7 @@ import SwiftUI
     }
     var body: some Scene {
         WindowGroup {
-            RootView(session: session).tint(Theme.accent).foregroundStyle(Theme.ink)
+            RootView(session: session).buttonStyle(.plain).tint(Theme.accent).foregroundStyle(Theme.ink)
         }
     }
 }
@@ -29,7 +29,7 @@ struct RootView: View {
                 } description: { Text(session.error ?? "Check your connection and try again.") }
                 actions: { Button("Try again") { Task { await session.restore() } }.buttonStyle(.borderedProminent) }
             } else if let account = session.account {
-                ProjectsView(session: session, account: account).id(account.id)
+                ProjectsView(session: session, account: account).id(session.sessionID)
             } else {
                 WelcomeView(session: session)
             }

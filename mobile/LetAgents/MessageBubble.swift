@@ -8,6 +8,7 @@ struct MessageBubble: View {
     var threadSummary: ThreadSummary? = nil
     let reply: () -> Void
     var openThread: (() -> Void)? = nil
+    var openAttachment: ((Message.Attachment) -> Void)? = nil
     var jumpTo: ((String) -> Void)? = nil
     @State private var expanded = false
     var body: some View {
@@ -40,13 +41,11 @@ struct MessageBubble: View {
                     if message.body.count > 2400 && !expanded {
                         Text(String(message.body.prefix(400)) + "…").font(.body).lineSpacing(3)
                         Button("Read full message") { expanded = true }.font(.subheadline.weight(.semibold))
-                    } else { RichMessage(message.body) }
+                    } else if !message.body.isEmpty { RichMessage(message.body) }
                     if let attachments = message.attachments, !attachments.isEmpty {
                         ForEach(attachments) { attachment in
-                            Label(attachment.filename, systemImage: "doc.text").font(.caption).foregroundStyle(Theme.muted)
-                                .padding(10).frame(maxWidth: .infinity, alignment: .leading).background(Theme.code, in: RoundedRectangle(cornerRadius: 8))
+                            MessageAttachmentButton(attachment: attachment) { openAttachment?(attachment) }
                         }
-                        Text("Attachments are available on desktop.").font(.caption2).foregroundStyle(Theme.muted)
                     }
                     HStack(spacing: 4) {
                         Spacer()
@@ -63,7 +62,7 @@ struct MessageBubble: View {
                 }
             }
             if !mine && !original { Spacer(minLength: 2) }
-        }.modifier(SwipeToReply(reply: reply))
+        }.buttonStyle(.plain).modifier(SwipeToReply(reply: reply))
     }
     @ViewBuilder private var messageActions: some View {
         Button("Quote reply", systemImage: "arrowshape.turn.up.left", action: reply)
@@ -79,7 +78,7 @@ struct QuotePreview: View {
             RoundedRectangle(cornerRadius: 2).fill(Theme.accent).frame(width: 3)
             VStack(alignment: .leading, spacing: 3) {
                 Text(composing ? "Replying to \(quote.author)" : quote.author).font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
-                Text(quote.body).font(.caption).foregroundStyle(Theme.muted).lineLimit(2)
+                Text(quote.body.isEmpty ? "Attachment" : quote.body).font(.caption).foregroundStyle(Theme.muted).lineLimit(2)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.fixedSize(horizontal: false, vertical: true).padding(9).background(Theme.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }

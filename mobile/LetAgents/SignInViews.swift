@@ -86,7 +86,7 @@ struct DeviceSignInView: View {
                     }
                 }.padding(24)
             }.background(Theme.background).navigationTitle("Sign in").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { session.cancelSignIn() } } }
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { session.cancelSignIn() } }.companionToolbarStyle() }
                 .sheet(isPresented: $showBrowser) {
                     if let url = session.authorization?.verificationURL { GitHubBrowser(url: url).ignoresSafeArea() }
                 }

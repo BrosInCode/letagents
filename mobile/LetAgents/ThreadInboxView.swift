@@ -50,7 +50,7 @@ struct ThreadInboxView: View {
                 if hasMore { Button("Load earlier threads") { Task { await load(older: true) } }.disabled(loading).frame(maxWidth: .infinity) }
             }.listStyle(.insetGrouped).scrollContentBackground(.hidden).background(Theme.background)
                 .navigationTitle("Threads").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }.companionToolbarStyle() }
                 .refreshable { await load() }
                 .task(id: unreadOnly) { items = []; await load() }
         }
