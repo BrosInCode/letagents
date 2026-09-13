@@ -85,6 +85,26 @@ struct APIClient: Sendable {
         if let before { query.append(.init(name: "before", value: before)) }
         return try await request(path: ["rooms", roomID, "messages", rootID, "thread"], token: token, query: query)
     }
+    func participants(roomID: String, token: String) async throws -> [Participant] {
+        let response: ParticipantsResponse = try await request(path: ["rooms", roomID, "participants"], token: token)
+        return response.participants
+    }
+    func message(roomID: String, messageID: String, token: String) async throws -> Message {
+        struct Response: Decodable { let message: Message }
+        let response: Response = try await request(path: ["rooms", roomID, "messages", messageID], token: token)
+        return response.message
+    }
+    func threads(roomID: String, token: String, unreadOnly: Bool = false, before: String? = nil) async throws -> ThreadsResponse {
+        var query = [URLQueryItem(name: "limit", value: "50"), .init(name: "filter", value: unreadOnly ? "unread" : "all")]
+        if let before { query.append(.init(name: "before", value: before)) }
+        return try await request(path: ["rooms", roomID, "messages", "threads"], token: token, query: query)
+    }
+    func markThreadRead(roomID: String, rootID: String, messageID: String, token: String) async throws -> ThreadSummary {
+        struct Response: Decodable { let thread: ThreadSummary }
+        let body = try JSONSerialization.data(withJSONObject: ["message_id": messageID])
+        let result: Response = try await request(path: ["rooms", roomID, "messages", rootID, "thread", "read"], token: token, method: "PUT", body: body)
+        return result.thread
+    }
     func send(roomID: String, token: String, message: SendMessageBody) async throws -> Message {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
