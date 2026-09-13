@@ -19,6 +19,7 @@ struct ConversationView: View {
     @State private var visible = false
     @State private var atBottom = true
     @State private var hasUnread = false
+    @State private var positionedInitially = false
     @State private var composing = false
     @State private var selection = NSRange(location: 0, length: 0)
     @State private var thread: ThreadDestination?
@@ -96,6 +97,14 @@ struct ConversationView: View {
                         else { hasUnread = true }
                     }
                     .onChange(of: composing) { _, focused in if focused && atBottom { proxy.scrollTo("conversation-bottom", anchor: .bottom) } }
+                    .onChange(of: model.isConnected) { _, connected in
+                        // Root recovery can prepend history after the latest page has appeared.
+                        // Finish the initial positioning only once that recovery is complete.
+                        if connected && !positionedInitially {
+                            positionedInitially = true
+                            proxy.scrollTo("conversation-bottom", anchor: .bottom)
+                        }
+                    }
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom && !model.isLoading {
                             Button { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("conversation-bottom", anchor: .bottom) } } label: {
