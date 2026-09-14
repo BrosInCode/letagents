@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { Express } from 'express';
 import { createKnowledgeRecord, reviseKnowledgeRecord, type KnowledgeRecord } from '../../../shared/room-knowledge.mjs';
 import { requiredAgentSessionRouteCapability } from '../request/agent-session-route-capabilities.js';
+import { parseCreateMessageBody } from '../messages/inputs.js';
 process.env.DB_URL ??= 'postgresql://test:test@127.0.0.1:1/test';
 const { registerRoomKnowledgeRoutes } = await import('../routes/rooms/knowledge.js');
 const actor = { id: 'human-1', label: 'Emmy', kind: 'human' as const };
@@ -28,7 +29,10 @@ function harness(options: { skipPublish?: boolean; denied?: boolean } = {}) {
       createRoomKnowledge: async next => { record = next; return next; },
       roomKnowledgeHistory: async () => [record],
     },
-    emitMessage: async (_room, _sender, _text, opts) => { published++; if (!options.skipPublish) await opts?.with_created_message_in_transaction?.({} as any); return {} as any; },
+    emitMessage: async (_room, _sender, _text, opts) => {
+      assert.throws(() => parseCreateMessageBody({ client_message_id: opts?.client_message_id }), /reserved namespace/);
+      published++; if (!options.skipPublish) await opts?.with_created_message_in_transaction?.({} as any); return {} as any;
+    },
   });
   async function request(method: string, path: string, body: any = {}, auth: string | null = 'session') {
     const route = routes.find(route => route.method === method && route.path.test(path))!;

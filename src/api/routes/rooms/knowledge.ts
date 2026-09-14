@@ -82,7 +82,7 @@ export function registerRoomKnowledgeRoutes(app: Express, deps: KnowledgeRouteDe
         if (type === 'attention') {
           await publish(project.id, person.label, formatAttentionResponse(next), {
             source: 'browser', reply_to: old.source_message_id || null,
-            client_message_id: `attention-response:${id}`,
+            client_message_id: `internal:attention-response:${id}`,
             account_id: person.id,
             with_created_message_in_transaction: tx => db.reviseRoomKnowledgeInTransaction(tx, next, old.version),
           });

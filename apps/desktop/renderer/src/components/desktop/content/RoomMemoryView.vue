@@ -9,7 +9,7 @@
     <div class="memory-workspace" :data-editing="Boolean(editor)">
       <div class="memory-main">
         <div v-if="loading && !page.records.length" class="knowledge-empty" role="status"><LoaderCircle class="knowledge-spin" :size="24" /><h3>Loading shared context</h3></div>
-        <div v-else-if="!filtered.length" class="knowledge-empty"><BookOpen :size="30" /><h3>{{ search || category || showArchived ? 'No matching memories' : 'Give every agent a shared starting point' }}</h3><p>{{ search || category || showArchived ? 'Try a different search or category.' : 'Keep goals, decisions and constraints here. Agents can read them when they join or resume work.' }}</p><div v-if="!search && !category && !showArchived" class="memory-starters"><button class="knowledge-button" @click="startNew('goal')">Set a goal <ArrowRight :size="14" /></button><button class="knowledge-button" @click="startNew('decision')">Record a decision <ArrowRight :size="14" /></button></div></div>
+        <div v-else-if="!filtered.length" class="knowledge-empty"><BookOpen :size="30" /><h3>{{ search || category || showArchived ? 'No matching memories' : 'Give every agent a shared starting point' }}</h3><p>{{ search || category || showArchived ? 'Try a different search or category.' : 'Keep goals, decisions and constraints here. Agents can read them when they join or resume work.' }}</p><div v-if="!search && !category && !showArchived" class="memory-starters"><button class="knowledge-button" :disabled="saving" @click="startNew('goal')">Set a goal <ArrowRight :size="14" /></button><button class="knowledge-button" :disabled="saving" @click="startNew('decision')">Record a decision <ArrowRight :size="14" /></button></div></div>
         <TransitionGroup v-else name="knowledge-list" tag="div" class="memory-grid">
           <article v-for="record in filtered" :key="record.id" class="memory-card" :data-archived="record.archived">
             <div class="memory-card-heading"><span class="knowledge-category">{{ labels[record.category as MemoryCategory] }}</span><span class="memory-version">v{{ record.version }}{{ record.archived ? ' · Archived' : '' }}</span></div>
@@ -65,9 +65,10 @@ async function refresh() {
 }
 watch(() => props.roomIdentifier, () => { editor.value = null; page.value = { records: [], truncated: false }; notice.value = ''; historyEpoch++; void refresh(); }, { immediate: true });
 onBeforeUnmount(() => { epoch++; historyEpoch++; });
-function startNew(kind: MemoryCategory = 'decision') { historyEpoch++; historyMode.value = false; editError.value = ''; editor.value = { record: null, clientId: crypto.randomUUID(), input: { category: kind, title: '', body: '', source_url: '', source_message_id: '' } }; }
-function edit(record: KnowledgeRecord) { startNew(); editor.value = { record, clientId: record.id, input: { category: record.category, title: record.title, body: record.body, source_url: record.source_url, source_message_id: record.source_message_id } }; }
+function startNew(kind: MemoryCategory = 'decision') { if (saving.value) return; historyEpoch++; historyMode.value = false; editError.value = ''; editor.value = { record: null, clientId: crypto.randomUUID(), input: { category: kind, title: '', body: '', source_url: '', source_message_id: '' } }; }
+function edit(record: KnowledgeRecord) { if (saving.value) return; startNew(); editor.value = { record, clientId: record.id, input: { category: record.category, title: record.title, body: record.body, source_url: record.source_url, source_message_id: record.source_message_id } }; }
 async function showHistory(record: KnowledgeRecord) {
+  if (saving.value) return;
   edit(record); historyMode.value = true; history.value = []; historyLoading.value = true; const current = ++historyEpoch;
   try { if (!desktopIpc.room.getMemoryHistory) throw new Error(desktopBridgeUpgradeMessage()); const result = await desktopIpc.room.getMemoryHistory(props.roomIdentifier, record.id); if (current === historyEpoch) { history.value = result.records; historyTruncated.value = result.truncated; } }
   catch (cause) { if (current === historyEpoch) editError.value = String(cause); }
