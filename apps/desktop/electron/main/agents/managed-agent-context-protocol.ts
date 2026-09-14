@@ -24,6 +24,8 @@ export type ManagedAgentContextResult =
       messages?: unknown[];
       tasks?: unknown[];
       artifacts?: unknown[];
+      memory?: unknown[];
+      memoryStatus?: "ready" | "unavailable" | "truncated";
       hasMore?: boolean;
       nextCursor?: string;
       note?: string;

@@ -1,3 +1,4 @@
+import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
@@ -492,6 +493,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
+  registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
   registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
   registerExecutionDelegationRoutes(app, roomPresenceRouteDeps);
