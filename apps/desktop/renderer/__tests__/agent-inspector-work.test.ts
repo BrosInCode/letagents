@@ -144,7 +144,7 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(shell, /capabilities\.agentInspectorDetail/);
   assert.match(shell, /agentInspectorDetailRequestIsCurrent/);
   assert.match(shell, /agentInspectorWorkResource\.value = \{ status: "loading", detail: null, error: null, sourceMessageId \}/);
-  assert.match(shell, /void loadAgentInspectorWorkDetail\(sourceMessageId, true\)/);
+  assert.match(shell, /loadDetail: \(source, followDefault\) => loadAgentInspectorWorkDetail\(source, true, followDefault\)/);
   assert.match(shell, /void loadAgentInspectorWorkDetail\(null, false, false\)/);
   assert.match(shell, /followDefaultSource && sourceMessageId === null/);
   assert.match(shell, /refreshOpenAgentInspectorRuntimeControl\(snapshot\)/);

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { ref } from "vue";
+import type { SupervisorEntriesResource } from "../src/domain/agent-inspector-identity";
+import { useAgentInspectorObservations } from "../src/components/desktop/content/room-shell/useAgentInspectorObservations";
 import { fileURLToPath } from "node:url";
 import {
   AGENT_INSPECTOR_DIAGNOSTICS_EVENT_LIMIT,
@@ -336,4 +339,86 @@ test("new explanations and report extensions retain the redaction boundary", () 
   });
   assert.doesNotMatch(report, new RegExp(CANARY));
   assert.ok(report.length <= AGENT_INSPECTOR_DIAGNOSTICS_REPORT_LIMIT);
+});
+
+function observationFixture() {
+  const fixture = diagnosticFixture();
+  let version = 0;
+  const calls: string[] = [];
+  const options = {
+    selectedProjection: ref(fixture.project()), requestVersion: ref(1), daemonStatus: ref(fixture.daemon),
+    workSource: ref<string | null>(null), workResource: ref(fixture.resource), entriesState: ref<SupervisorEntriesResource["state"]>("ready"), entriesError: ref<string | null>(null),
+    observationVersion: () => String(version),
+    refreshStatus: async () => { calls.push("status"); return fixture.daemon; },
+    readAgents: async room => { calls.push(`agents:${room}`); return [fixture.entry]; },
+    loadDetail: async (source, follow) => { calls.push(`detail:${source}:${follow}`); },
+    upsert: (_entry, request) => { calls.push(`upsert:${request}`); version++; },
+  } satisfies Parameters<typeof useAgentInspectorObservations>[0];
+  return { fixture, options, calls, push: () => { version++; }, ...useAgentInspectorObservations(options) };
+}
+
+test("explicit checks read status, exact agent, and settled work in order", async () => {
+  const test = observationFixture();
+  assert.equal(await test.refreshDiagnostics(), true);
+  assert.deepEqual(test.calls, ["status", "agents:room_1", "upsert:1", "detail:null:false"]);
+});
+
+test("failed explicit observations invalidate cached freshness without deleting evidence", async () => {
+  for (const failure of ["status", "agents", "missing"] as const) {
+    const test = observationFixture();
+    const retained = test.options.selectedProjection.value;
+    if (failure === "status") test.options.refreshStatus = async () => null;
+    else test.options.readAgents = async () => { if (failure === "agents") throw new Error("Unavailable"); return []; };
+    assert.equal(await test.refreshDiagnostics(), false, failure);
+    assert.equal(test.options.entriesState.value, "error");
+    assert.match(test.options.entriesError.value!, /Couldn’t refresh/);
+    assert.equal(test.options.selectedProjection.value, retained);
+  }
+});
+
+test("newer pushes and selection changes win over failed or late manual reads", async () => {
+  for (const change of ["push", "selection"] as const) {
+    const test = observationFixture();
+    test.options.readAgents = async () => {
+      if (change === "push") test.push(); else test.options.requestVersion.value++;
+      throw new Error("Late failure");
+    };
+    assert.equal(await test.refreshDiagnostics(), false);
+    assert.equal(test.options.entriesState.value, "ready", change);
+  }
+  const test = observationFixture();
+  test.options.readAgents = async () => { test.push(); return [test.fixture.entry]; };
+  assert.equal(await test.refreshDiagnostics(), true);
+  assert.equal(test.calls.some(call => call.startsWith("upsert")), false);
+});
+
+test("verification never accepts an unsettled or discarded detail read", async () => {
+  for (const state of ["loading", "refreshing", "error", "idle", "ready", "unavailable"] as const) {
+    const test = observationFixture();
+    test.options.loadDetail = async () => { test.fixture.resource.status = state; };
+    assert.equal(await test.refreshDiagnostics(), ["ready", "unavailable"].includes(state), state);
+  }
+});
+
+test("verification rejects changed agent, runtime, daemon, source, or stale evidence", async () => {
+  for (const change of ["selection", "execution", "runtime", "daemon", "source", "stale"] as const) {
+    const test = observationFixture();
+    test.options.loadDetail = async () => {
+      if (change === "selection") test.options.requestVersion.value++;
+      if (change === "execution") test.options.selectedProjection.value!.entry.executionGenerationId = "replacement";
+      if (change === "runtime") test.options.selectedProjection.value!.entry.runtimeGenerationId = "replacement";
+      if (change === "daemon") test.options.daemonStatus.value = { ...test.fixture.daemon, generation: 4 };
+      if (change === "source") test.options.workSource.value = "new_message";
+      if (change === "stale") test.options.selectedProjection.value!.resourceFreshness = "stale";
+    };
+    assert.equal(await test.refreshDiagnostics(), false, change);
+  }
+});
+
+test("opening Work or Diagnostics follows the current active message", () => {
+  const test = observationFixture();
+  test.options.selectedProjection.value!.entry.roomAgentState!.turn.sourceMessageId = "current_message";
+  test.openWork();
+  assert.equal(test.options.workSource.value, "current_message");
+  assert.deepEqual(test.calls, ["detail:current_message:true"]);
 });
