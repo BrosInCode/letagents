@@ -6,6 +6,7 @@ import { getLocalChatDatabase } from './local-db.js';
 import { cloudRoomIdentifierForStorage, listLocalRoomEntries, listLocalTasks, localRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from './local-store.js';
 import { listDesktopAccountRooms } from './account-rooms.js';
 import { addLocalChatMessage } from './messages/local-store.js';
+import { getDesktopInboxUpdates } from './inbox.js';
 
 async function target(roomIdentifier: string) {
   if (!roomIdentifier?.trim()) throw new Error('Choose a room.');
@@ -65,7 +66,7 @@ export async function getDesktopMemoryHistory(roomIdentifier: string, id: string
   const db = await getLocalChatDatabase();
   return { records: localKnowledgeHistory(db, room.id, id), truncated: (getLocalKnowledge(db, room.id, id)?.version ?? 0) > 100 };
 }
-export async function getDesktopNeedsYou(): Promise<DesktopNeedsYou> {
+export async function getDesktopNeedsYou(includeUpdates = false): Promise<DesktopNeedsYou> {
   const auth = await readStoredAuth();
   let cloudUnavailable = false;
   const accountRooms = await listDesktopAccountRooms({ limit: 100 }).catch(async () => {
@@ -78,8 +79,13 @@ export async function getDesktopNeedsYou(): Promise<DesktopNeedsYou> {
   await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
     for (let room = queue.shift(); room; room = queue.shift()) {
       try {
-        const page = await getDesktopKnowledge(room.roomIdentifier, 'attention');
-        result.rooms.push({ ...page, tasks: page.tasks ?? [], roomIdentifier: room.roomIdentifier, displayName: room.displayName } satisfies DesktopAttentionRoom);
+        const [attention, updates] = await Promise.allSettled([
+          getDesktopKnowledge(room.roomIdentifier, 'attention'),
+          includeUpdates ? getDesktopInboxUpdates(room.roomIdentifier) : Promise.resolve(undefined),
+        ]);
+        if (attention.status === 'rejected' || updates.status === 'rejected') result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName });
+        const page = attention.status === 'fulfilled' ? attention.value : { records: [], truncated: false, tasks: [] };
+        result.rooms.push({ ...page, tasks: page.tasks ?? [], updates: updates.status === 'fulfilled' ? updates.value : undefined, roomIdentifier: room.roomIdentifier, displayName: room.displayName } satisfies DesktopAttentionRoom);
       } catch { result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName }); }
     }
   }));

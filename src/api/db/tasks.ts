@@ -225,7 +225,7 @@ export async function approveTaskCreateBoardIntent(input: {
 export async function getTasks(
   roomId: string,
   statusFilter?: string,
-  options?: { limit?: number; after?: string }
+  options?: { limit?: number; after?: string; order?: "recent" }
 ): Promise<{ tasks: Task[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const afterNumber = options?.after ? parseScopedId(options.after, "task") : null;
@@ -238,7 +238,7 @@ export async function getTasks(
     .select()
     .from(tasks)
     .where(and(...conditions))
-    .orderBy(asc(tasks.number))
+    .orderBy(...(options?.order === "recent" ? [desc(tasks.updated_at), desc(tasks.number)] : [asc(tasks.number)]))
     .limit(limit + 1);
 
   const rows = (await query) as TaskRow[];
