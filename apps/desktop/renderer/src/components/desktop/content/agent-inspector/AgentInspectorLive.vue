@@ -1,81 +1,60 @@
 <template>
   <div ref="liveElement" class="agent-inspector-live">
-    <section class="agent-inspector-live-summary" :data-running="isFollowing">
-      <div class="agent-inspector-live-summary-head">
-        <span class="agent-inspector-live-summary-dot" aria-hidden="true"></span>
-        <div>
-          <span class="agent-inspector-live-eyebrow">Live work</span>
-          <strong>{{ workDurationLabel }}</strong>
-        </div>
-        <span class="agent-inspector-live-state">{{ workStateLabel }}</span>
+    <section class="agent-live-now" :data-running="isFollowing">
+      <div class="agent-live-now-meta">
+        <span class="agent-live-state" role="status"><span aria-hidden="true"></span>{{ workStateLabel }}</span>
+        <span class="agent-live-duration">{{ workDurationLabel }}</span>
       </div>
-      <p v-if="currentStep">{{ currentStep }}</p>
+      <p v-if="currentStep" class="agent-live-current-step">{{ currentStep }}</p>
     </section>
 
-    <div v-if="canShowCurrent" class="agent-inspector-live-trigger">
-      <span class="agent-inspector-live-label">Current turn</span>
-      <template v-if="currentRequest">
-        <strong>{{ currentRequest.sender }}</strong>
-        <p>{{ currentRequest.text || 'Message text unavailable.' }}</p>
-      </template>
+    <details v-if="canShowCurrent && currentRequest" class="agent-inspector-live-trigger" :key="activeSourceMessageId ?? undefined">
+      <summary><MessageSquare :size="14" aria-hidden="true" /><span>Current request</span><span class="agent-live-request-sender">{{ currentRequest.sender }}</span></summary>
+      <p>{{ currentRequest.text || 'Message text unavailable.' }}</p>
+    </details>
+
+    <div class="agent-live-timeline-heading">
+      <h3>{{ canShowCurrent ? 'Activity' : 'Recent actions' }}</h3>
+      <span v-if="actionCount">{{ actionCount }} {{ actionCount === 1 ? 'action' : 'actions' }}</span>
     </div>
-    <p v-if="presented.length && !canShowCurrent" class="agent-inspector-settings-note">Recent actions — these are saved updates, not current activity.</p>
-    <p v-if="transcript.lastActivityAt" class="agent-inspector-settings-note">Last update: {{ formatFullTimestamp(transcript.lastActivityAt) }}</p>
-    <ol v-if="presented.length" class="agent-inspector-live-items">
-      <li
-        v-for="entry in presented"
-        :key="`${entry.item.kind}:${entry.item.id}`"
-        class="agent-inspector-live-item"
-        :data-kind="entry.item.kind"
-        :data-status="entry.item.kind === 'tool' ? entry.item.status : null"
-        :data-work-kind="workKind(entry)"
-      >
-        <span class="agent-inspector-live-marker" aria-hidden="true"></span>
-        <div class="agent-inspector-live-item-content">
-          <template v-if="entry.item.kind === 'reasoning'">
-            <span class="agent-inspector-live-label">Work note</span>
-            <p class="agent-inspector-live-reasoning">{{ entry.item.text }}</p>
-          </template>
-          <template v-else-if="entry.item.kind === 'message'">
-            <span
-              class="agent-inspector-live-label"
-              title="Public-safe commentary emitted by the provider while it works. The room receives only the reply recorded for the completed turn."
-            >Agent commentary</span>
-            <p class="agent-inspector-live-message">{{ entry.item.text }}</p>
-          </template>
-          <template v-else-if="entry.tool">
-            <div class="agent-inspector-live-tool-head">
-              <span class="agent-inspector-live-label">{{ entry.tool.kind === "reply" ? "Room result" : "Action" }}</span>
-              <strong>{{ entry.tool.headline }}</strong>
-              <span class="agent-inspector-live-tool-status" :data-status="entry.item.status">{{ toolStatusLabel(entry.item.status) }}</span>
-            </div>
-            <blockquote v-if="entry.tool.replyText" class="agent-inspector-live-reply">{{ entry.tool.replyText }}</blockquote>
-            <p v-else-if="entry.tool.detail" class="agent-inspector-live-tool-detail">{{ entry.tool.detail }}</p>
-            <p v-if="entry.item.error" class="agent-inspector-live-tool-error">{{ entry.item.error }}</p>
-            <details
-              v-if="formatValue(entry.item.input) || formatValue(entry.item.output)"
-              class="agent-inspector-live-tool-raw"
-            >
-              <summary>Technical details · {{ entry.tool.toolName }}</summary>
-              <pre v-if="formatValue(entry.item.input)" class="agent-inspector-live-tool-io">{{ formatValue(entry.item.input) }}</pre>
-              <pre v-if="formatValue(entry.item.output)" class="agent-inspector-live-tool-io">{{ formatValue(entry.item.output) }}</pre>
-            </details>
-          </template>
-        </div>
+    <p v-if="entries.length && !canShowCurrent" class="agent-live-notice">Saved updates from recent work.</p>
+    <p v-if="feed.droppedEvents > 0" class="agent-live-notice">Earlier live updates were omitted. This trace starts with the updates still available.</p>
+
+    <ol v-if="entries.length" class="agent-live-timeline" aria-label="Agent work activity">
+      <li v-for="entry in entries" :key="`${entry.kind}:${entry.id}`" class="agent-live-entry" :data-kind="entry.kind" @pointerdown="preserveInspectedGroup(entry)" @focusin="preserveInspectedGroup(entry)">
+        <AgentInspectorLiveActions v-if="entry.kind === 'actions'" :entry="entry" :current="isFollowing" />
+        <template v-else>
+          <span class="agent-live-icon" aria-hidden="true"><component :is="entry.kind === 'reasoning' ? NotebookPen : MessageSquare" :size="14" :stroke-width="1.6" /></span>
+          <div class="agent-live-note">
+            <span class="agent-live-caption">{{ entry.kind === 'reasoning' ? 'Work note' : 'Agent update' }}</span>
+            <div class="agent-live-prose" v-html="renderDesktopMarkdown(entry.text, { block: true, mentions: false })"></div>
+          </div>
+        </template>
       </li>
     </ol>
+    <div v-else class="agent-live-empty">
+      <MessageSquare :size="22" :stroke-width="1.4" aria-hidden="true" />
+      <p>{{ emptyStateLabel }}</p>
+      <span>Actions and agent updates will appear here as they arrive.</span>
+    </div>
 
-    <p v-if="!presented.length" class="agent-inspector-live-empty">{{ emptyStateLabel }}</p>
-    <p v-if="feed.droppedEvents > 0" class="agent-inspector-settings-note">Earlier live updates were omitted.</p>
+    <div v-if="entries.length" class="agent-live-follow-bar">
+      <span v-if="lastUpdateLabel" :title="formatFullTimestamp(transcript.lastActivityAt!)">Last update: {{ lastUpdateLabel }}</span>
+      <button v-if="!followingLatest" type="button" @click="scrollFollower?.resume()"><ArrowDown :size="14" aria-hidden="true" />Follow latest</button>
+      <span v-else class="agent-live-following"><span v-if="isFollowing" aria-hidden="true"></span>{{ isFollowing ? 'Following live' : 'Latest activity' }}</span>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { ArrowDown, MessageSquare, NotebookPen } from "@lucide/vue";
+import AgentInspectorLiveActions from "./AgentInspectorLiveActions.vue";
+import { renderDesktopMarkdown } from "../formatting/markdown";
 import { followAgentLiveScroll } from "../../../../domain/agent-inspector-live-scroll";
 import { formatFullTimestamp } from "../../../../domain/time";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
-import { canPresentCurrentAgentStream, currentAgentRequest } from "../../../../domain/agent-inspector-live-trace";
+import { canPresentCurrentAgentStream, currentAgentRequest, presentAgentTrace, type LiveTraceEntry } from "../../../../domain/agent-inspector-live-trace";
 import {
   agentLiveAvailability,
   describeLiveToolCall,
@@ -96,13 +75,14 @@ const props = defineProps<{
 }>();
 
 const liveElement = ref<HTMLElement | null>(null);
-let stopScrollFollowing: (() => void) | undefined;
+const followingLatest = ref(true);
+let scrollFollower: ReturnType<typeof followAgentLiveScroll> | undefined;
 onMounted(() => {
   const content = liveElement.value;
   const viewport = content?.closest<HTMLElement>(".agent-inspector-scroll-region");
-  if (content && viewport) stopScrollFollowing = followAgentLiveScroll(viewport, content);
+  if (content && viewport) scrollFollower = followAgentLiveScroll(viewport, content, following => { followingLatest.value = following; });
 });
-onUnmounted(() => stopScrollFollowing?.());
+onUnmounted(() => scrollFollower?.dispose());
 
 const canShowCurrent = computed(() => canPresentCurrentAgentStream({ ...props.work, activeSourceMessageId: props.activeSourceMessageId }));
 const currentRequest = computed(() => currentAgentRequest(props.resource, props.activeSourceMessageId));
@@ -111,7 +91,7 @@ const transcript = computed(() => foldAgentStreamEvents(scopedEvents.value, prop
 const now = ref(Date.now());
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 
-const isFollowing = computed(() => props.work.active && !props.feed.ended);
+const isFollowing = computed(() => availability.value === "active" && canShowCurrent.value);
 const availability = computed(() => agentLiveAvailability(props.work, props.feed.ended));
 
 const presented = computed((): { item: LiveTranscriptItem; tool: LiveToolPresentation | null }[] =>
@@ -119,6 +99,21 @@ const presented = computed((): { item: LiveTranscriptItem; tool: LiveToolPresent
     item,
     tool: item.kind === "tool" ? describeLiveToolCall(item.tool, item.input, item) : null,
   })));
+
+const inspectedGroups = ref(new Map<string, string>());
+const entries = computed(() => presentAgentTrace(transcript.value.items, props.supportsReasoning, inspectedGroups.value));
+function preserveInspectedGroup(entry: LiveTraceEntry): void {
+  if (entry.kind !== "actions" || inspectedGroups.value.has(entry.id)) return;
+  const groups = new Map(inspectedGroups.value);
+  for (const action of entry.actions) groups.set(action.item.id, entry.id);
+  inspectedGroups.value = groups;
+}
+const actionCount = computed(() => transcript.value.items.filter(item => item.kind === "tool").length);
+const lastUpdateLabel = computed(() => {
+  const value = transcript.value.lastActivityAt;
+  if (!value || !Number.isFinite(Date.parse(value))) return null;
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+});
 
 const workDurationLabel = computed(() => {
   if (availability.value === "closed") return "Work stream closed";
@@ -129,6 +124,7 @@ const workDurationLabel = computed(() => {
   if (availability.value === "attention") return "Agent needs attention";
   if (availability.value === "transitioning") return transitionTitle(props.work.agentState);
   if (availability.value !== "active") return "Ready for a message";
+  if (!canShowCurrent.value) return "Identifying current work";
   const duration = formatLiveWorkDuration(
     props.work.startedAt,
     null,
@@ -158,6 +154,7 @@ const currentStep = computed(() => {
   if (availability.value === "attention") return "Resolve the agent's blocked state before work can continue.";
   if (availability.value === "transitioning") return transitionDetail(props.work.agentState);
   if (availability.value === "idle") return null;
+  if (!canShowCurrent.value) return null;
   const runningTool = [...presented.value].reverse().find((entry) =>
     entry.item.kind === "tool" && ["running", "pending"].includes(entry.item.status));
   const entry = runningTool ?? presented.value[presented.value.length - 1];
@@ -170,6 +167,7 @@ const currentStep = computed(() => {
 });
 
 const emptyStateLabel = computed(() => {
+  if (["stale", "closed", "disconnected", "paused", "stopped", "attention"].includes(availability.value)) return "No recent actions are available.";
   if (props.work.active && !canShowCurrent.value) return "Current activity unavailable: waiting for the current request to be identified.";
   if (canShowCurrent.value) return "The agent is working. No public actions have arrived yet.";
   return "No recent actions are available.";
@@ -177,7 +175,7 @@ const emptyStateLabel = computed(() => {
 
 onMounted(syncElapsedTimer);
 
-watch([() => props.feed.ended, () => props.work.active, () => props.work.startedAt], syncElapsedTimer);
+watch([isFollowing, () => props.work.startedAt], syncElapsedTimer);
 
 onUnmounted(() => {
   stopElapsedTimer();
@@ -219,37 +217,8 @@ function stopElapsedTimer(): void {
   elapsedTimer = null;
 }
 
-function toolStatusLabel(status: string): string {
-  if (!canShowCurrent.value && ["pending", "running"].includes(status)) return "No finish recorded";
-  if (status === "pending") return "Requested";
-  if (status === "running") return "In progress";
-  if (status === "completed") return "Completed";
-  if (status === "error" || status === "failed") return "Failed";
-  if (status === "interrupted") return "Interrupted";
-  return status.replace(/[_-]+/g, " ");
-}
-
-function workKind(entry: { item: LiveTranscriptItem; tool: LiveToolPresentation | null }): string {
-  if (entry.tool?.kind === "reply") return "result";
-  if (entry.item.kind === "tool") return "action";
-  if (entry.item.kind === "message") return "commentary";
-  return "note";
-}
-
-function formatValue(input: unknown): string {
-  if (input === null || input === undefined) return "";
-  if (typeof input === "string") return input;
-  try {
-    const text = JSON.stringify(input, null, 2);
-    return text === "{}" ? "" : text;
-  } catch {
-    return "";
-  }
-}
 </script>
 
-<style scoped>
-.agent-inspector-live-trigger { display: grid; gap: 6px; padding: 10px 12px; border-left: 2px solid rgba(96,165,250,.4); }
-.agent-inspector-live-trigger strong { font-size: 12px; color: var(--text, #fafafa); }
-.agent-inspector-live-trigger p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; color: var(--text-secondary, #a1a1aa); max-height: 140px; overflow: auto; }
+<style>
+@import "./agent-inspector-live.css";
 </style>

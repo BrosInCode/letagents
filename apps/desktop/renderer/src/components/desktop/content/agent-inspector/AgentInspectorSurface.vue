@@ -320,8 +320,8 @@ function handleKeydown(event: KeyboardEvent): void {
   }
   if (!props.compact || event.key !== "Tab" || !surfaceElement.value) return;
   const focusable = [...surfaceElement.value.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  )];
+    'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+  )].filter(element => element.tabIndex >= 0 && element.checkVisibility({ visibilityProperty: true }));
   if (!focusable.length) return;
   const first = focusable[0]!;
   const last = focusable.at(-1)!;
