@@ -1,5 +1,6 @@
 import type { DaemonActivityEvent } from "./types.js";
 import { isAgentInspectorLiveDisplayEvent } from "./provider-stream-policy.js";
+import { redactCredentialText } from "./credential-redaction.js";
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -8,11 +9,27 @@ function id(value: unknown): string | null {
   return typeof value === "string" && value.trim() && !/[\r\n\0]/.test(value) ? value : null;
 }
 
+function errorMessage(value: unknown): string | null {
+  const message = typeof value === "string" ? value : record(value)?.message;
+  return typeof message === "string" && message.trim() ? message.trim() : null;
+}
+
+function toolResultError(value: unknown): string | null {
+  const content = record(value)?.content;
+  if (!Array.isArray(content)) return null;
+  const text = content.flatMap((block) => {
+    const part = record(block);
+    return part?.type === "text" && typeof part.text === "string" ? [part.text] : [];
+  }).join("\n").trim();
+  return text || null;
+}
+
 /** Display-only projection of already-redacted evidence from one exact installation. */
 export class ProviderLiveDisplay {
   private claudeTurn: string | null = null;
   private readonly texts = new Map<string, string>();
   private readonly tools = new Map<string, { name: string; completed: boolean }>();
+  private readonly commandOutputs = new Map<string, { turn: string; text: string; truncated: boolean; redacted: boolean; unavailable: boolean }>();
 
   private readonly finishedTurns = new Set<string>();
 
@@ -23,23 +40,64 @@ export class ProviderLiveDisplay {
     const emit = (method: string, kind: DaemonActivityEvent["kind"], value: Record<string, unknown>): DaemonActivityEvent =>
       ({ ...event, method, kind, summary: "", payload: value });
     if (event.provider === "codex") {
-      if (payload?.threadId !== this.continuation || !id(payload.turnId)) return [];
+      const nativeTurnId = record(payload?.turn)?.id;
+      const turnId = id(payload?.turnId ?? nativeTurnId);
+      if (payload?.threadId !== this.continuation || !turnId
+        || (payload.turnId !== undefined && nativeTurnId !== undefined && payload.turnId !== nativeTurnId)) return [];
+      const commandKey = (itemId: string) => JSON.stringify([turnId, itemId]);
+      if (event.method === "item/commandExecution/outputDelta" && id(payload.itemId) && typeof payload.delta === "string") {
+        const output = this.commandOutputs.get(commandKey(payload.itemId as string));
+        if (output) {
+          // Redaction or upstream truncation breaks the original text boundary.
+          // Joining later fragments could reveal a suffix of an already-masked secret.
+          output.unavailable ||= event.payload_redacted || event.payload_truncated;
+          output.redacted ||= event.payload_redacted;
+          output.truncated ||= event.payload_truncated;
+          const combined = output.unavailable ? "" : output.text + payload.delta;
+          output.truncated ||= combined.length > 6_000;
+          output.unavailable ||= combined.length > 6_000;
+          output.text = output.unavailable ? "" : combined;
+        }
+        return [];
+      }
+      if (/^turn\/(completed|failed|interrupted|cancelled|stopped)$/.test(event.method)) {
+        for (const [key, output] of this.commandOutputs) if (output.turn === turnId) this.commandOutputs.delete(key);
+      }
       const item = record(payload.item);
       if ((event.method === "item/started" || event.method === "item/completed") && item && id(item.id)) {
+        const key = commandKey(item.id as string);
+        if (item.type === "commandExecution" && event.method === "item/started" && !this.commandOutputs.has(key)) {
+          // Bound unfinished commands independently of the lifetime of the provider session.
+          if (this.commandOutputs.size >= 128) this.commandOutputs.delete(this.commandOutputs.keys().next().value!);
+          this.commandOutputs.set(key, { turn: turnId, text: "", truncated: false, redacted: false, unavailable: false });
+        }
+        const streamed = item.type === "commandExecution" ? this.commandOutputs.get(key) : undefined;
+        if (event.method === "item/completed") this.commandOutputs.delete(key);
+        const failed = item.status === "failed" || item.status === "declined" || Boolean(item.error)
+          || record(item.result)?.isError === true
+          || (item.type === "commandExecution" && typeof item.exitCode === "number" && item.exitCode !== 0);
         const tool = item.type === "commandExecution" ? "shellToolCall" : item.type === "fileChange" ? "editToolCall"
           : item.type === "mcpToolCall" && typeof item.tool === "string" ? item.tool : null;
-        if (tool) return [emit("item/toolCall/updated", "tool_lifecycle", {
-          callID: `codex:${this.continuation}:${payload.turnId}:${item.id}`, tool,
+        const fallbackOutput = streamed?.text ? redactCredentialText(streamed.text) : null;
+        const explicitError = errorMessage(item.error);
+        const failureMessage = event.method !== "item/completed" || !failed ? null : explicitError
+          ?? (item.type === "mcpToolCall" ? toolResultError(item.result) : null)
+          ?? (item.type === "commandExecution" && typeof item.exitCode === "number" && item.exitCode !== 0
+            ? `Command exited with code ${item.exitCode}.` : "The tool failed without providing an error message.");
+        // Re-sanitize only newly composed text. The input and result are already
+        // bounded/redacted; sanitizing their duplicated envelope can erase its call ID.
+        const failure = failureMessage ? redactCredentialText(failureMessage, explicitError ? 8_192 : 1_200) : null;
+        if (tool) return [{ ...emit("item/toolCall/updated", "tool_lifecycle", {
+          callID: `codex:${this.continuation}:${turnId}:${item.id}`, tool,
           status: event.method === "item/started" ? "running"
             : item.status === "interrupted" || item.status === "cancelled" ? "interrupted"
-            : item.status === "failed" || item.status === "declined" || item.error
-              || (item.type === "commandExecution" && typeof item.exitCode === "number" && item.exitCode !== 0) ? "error" : "completed",
+            : failed ? "error" : "completed",
           input: item.type === "commandExecution" ? { command: item.command, cwd: item.cwd }
             : item.type === "fileChange" ? { changes: item.changes } : item.arguments ?? null,
-          output: item.aggregatedOutput ?? item.result ?? null,
-          error: typeof item.error === "string" ? item.error : item.error ? "Provider reported a tool error."
-            : item.type === "commandExecution" && typeof item.exitCode === "number" && item.exitCode !== 0 ? `Command exited with code ${item.exitCode}.` : null,
-        })];
+          output: item.aggregatedOutput ?? fallbackOutput?.value ?? item.result ?? null,
+          error: failure?.value ?? null,
+        }), payload_truncated: event.payload_truncated || Boolean(streamed?.truncated || fallbackOutput?.truncated || failure?.truncated),
+          payload_redacted: event.payload_redacted || Boolean(streamed?.redacted || fallbackOutput?.redacted || failure?.redacted) }];
       }
       if (event.method === "item/agentMessage/delta" && id(payload.itemId)) {
         return [emit(event.method, event.kind, { ...payload, partId: `codex:${this.continuation}:${payload.turnId}:${payload.itemId}` })];
