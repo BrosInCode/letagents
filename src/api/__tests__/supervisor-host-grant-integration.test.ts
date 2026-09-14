@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import test from "node:test";
@@ -1964,8 +1965,8 @@ test('the independent publisher migration preserves populated supervisor custody
   const f = await setupWork();
   await publishRoomAgentWork(f.input);
   await client!.pool.query('ALTER TABLE room_agent_work DROP CONSTRAINT room_agent_work_publisher_check, DROP COLUMN publisher_kind, ALTER COLUMN host_id SET NOT NULL, ALTER COLUMN installation_id SET NOT NULL');
-  await client!.pool.query('DELETE FROM drizzle.__drizzle_migrations WHERE id = (SELECT max(id) FROM drizzle.__drizzle_migrations)');
-  await migrate(client!.db, { migrationsFolder: path.resolve(process.cwd(), 'drizzle') });
+  // Replay the migration under test, regardless of which migration is newest.
+  await client!.pool.query(await readFile(path.resolve(process.cwd(), 'drizzle/0094_mcp_workspace_publications.sql'), 'utf8'));
   const [row] = await client!.db.select().from(schema!.room_agent_work);
   assert.equal(row.publisher_kind, 'supervisor'); assert.equal(row.host_id, 'host_route'); assert.equal(row.installation_id, 'install_route');
   assert.equal((await publishRoomAgentWork(f.input)).status, 'replayed');

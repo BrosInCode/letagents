@@ -1292,3 +1292,6 @@ export async function releaseLocalTaskReviewLease(
       : null,
   };
 }
+
+/** Shared local collaboration records use the same database as room chat. */
+export async function getLocalKnowledgeDatabase(): Promise<SqliteDatabase> { return getDb(); }

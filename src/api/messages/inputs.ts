@@ -67,6 +67,12 @@ export function parseCreateMessageBody(body: unknown): CreateMessageBody {
     throw new RequestValidationError("request body must be a JSON object");
   }
   const record = body as Record<string, unknown>;
+  const clientMessageId = optionalStringField(record, "client_message_id");
+  // Human answers commit their record and message together. Ordinary messages
+  // must not claim the key first and bypass that transaction on deduplication.
+  if (clientMessageId?.trim().startsWith("internal:attention-response:")) {
+    throw new RequestValidationError("client_message_id uses a reserved namespace");
+  }
   return {
     sender: optionalStringField(record, "sender"),
     text: optionalStringField(record, "text"),
@@ -76,7 +82,7 @@ export function parseCreateMessageBody(body: unknown): CreateMessageBody {
     attachments: record.attachments,
     agent_session_id: optionalStringField(record, "agent_session_id"),
     agent_session_token: optionalStringField(record, "agent_session_token"),
-    client_message_id: optionalStringField(record, "client_message_id"),
+    client_message_id: clientMessageId,
   };
 }
 

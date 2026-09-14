@@ -147,8 +147,9 @@
     />
 
     <Transition name="room-panel" mode="out-in">
+      <RoomMemoryView v-if="activeTab === 'memory'" :key="`memory:${messageNamespace}`" :room-identifier="room.identifier" @open-message="(id) => { activeTab = 'chat'; revealRoomMessage(id); }" />
       <RoomInboxView
-        v-if="activeTab === 'inbox'"
+        v-else-if="activeTab === 'inbox'"
         key="inbox"
         v-model:filter="inboxFilter"
         :items="inboxItems"
@@ -461,6 +462,7 @@ import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
+import RoomMemoryView from "./RoomMemoryView.vue";
 import RoomInboxView from "./RoomInboxView.vue";
 import { ownerAttribution as ownerAttributionLabel } from "./room-activity/agentTarget";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
@@ -473,7 +475,7 @@ import {
   rememberGitHubEventsVisible,
 } from "./room-shell/preferences";
 import { exportRoomChat } from "./room-shell/roomExport";
-import type { RoomTab, RoomTabId } from "./room-shell/types";
+import { isRoomTabId, type AttentionNavigationIntent, type RoomTab, type RoomTabId } from "./room-shell/types";
 import { useAgentInspectorObservations } from "./room-shell/useAgentInspectorObservations";
 import { useAgentInspectorConfigurationApply } from "./room-shell/useAgentInspectorConfigurationApply";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
@@ -522,6 +524,7 @@ const props = defineProps<{
   openAddAgentRequested?: boolean;
   notificationRevealMessageId?: string | null;
   notificationRevealNonce?: number;
+  attentionIntent?: AttentionNavigationIntent | null;
   initialChatScrollTop?: number | null;
   onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
@@ -529,6 +532,7 @@ const { pushActionToast } = useDesktopActionToasts();
 const notifiedManagedAgentFailures = new Set<string>();
 
 const emit = defineEmits<{
+  "attention-opened": [];
   "cycle-sidebar": [];
   "message-sent": [message: DesktopRoomMessage];
   "room-renamed": [room: DesktopRoomInfo];
@@ -1070,6 +1074,13 @@ watch(() => props.messages.at(-1)?.id || null, () => {
   }
 });
 
+watch(() => [props.attentionIntent, props.roomLoading] as const, ([intent, loading]) => {
+  if (!intent || loading || props.room.identifier !== intent.roomIdentifier) return;
+  if (intent.taskId) openBoardTask(intent.taskId);
+  else if (intent.messageId) { activeTab.value = "chat"; void revealRoomMessage(intent.messageId); }
+  emit("attention-opened");
+}, { immediate: true });
+
 watch(
   () => [props.notificationRevealMessageId, props.notificationRevealNonce, props.roomLoading] as const,
   ([messageId, _nonce, roomLoading]) => {
@@ -1321,6 +1332,7 @@ const tabs = computed<RoomTab[]>(() => {
     });
   }
   nextTabs.push(
+    { id: "memory", label: "Memory", count: null },
     { id: "board", label: "Board", count: null },
     { id: "activity", label: "Activity", count: null },
   );
@@ -1339,17 +1351,6 @@ function selectTab(tabId: RoomTabId): void {
 
 function roomActiveTabStorageKey(roomIdentifier: string): string {
   return `letagents-desktop:room-active-tab:${roomIdentifier}`;
-}
-
-function isRoomTabId(value: string | null): value is RoomTabId {
-  return (
-    value === "chat"
-    || value === "inbox"
-    || value === "events"
-    || value === "board"
-    || value === "activity"
-    || value === "rooms"
-  );
 }
 
 function readRoomActiveTab(roomIdentifier: string): RoomTabId {

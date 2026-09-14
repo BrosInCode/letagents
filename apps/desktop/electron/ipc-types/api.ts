@@ -1,3 +1,5 @@
+import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
+import type { DesktopNeedsYou } from "./knowledge.js";
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
 import type { DesktopNotificationStatus, DesktopNotificationTarget } from "./notifications.js";
 import type {
@@ -163,6 +165,11 @@ export interface DesktopApi {
     saveSettings: (input: DesktopOpenModelSaveSettingsInput) => Promise<DesktopOpenModelSettingsStatus>;
   };
   room: {
+    getNeedsYou?: () => Promise<DesktopNeedsYou>;
+    getKnowledge?: (room: string, type: KnowledgeType) => Promise<KnowledgePage>;
+    createKnowledge?: (room: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }) => Promise<KnowledgeRecord>;
+    reviseKnowledge?: (room: string, type: KnowledgeType, id: string, input: KnowledgeRevisionInput) => Promise<KnowledgeRecord>;
+    getMemoryHistory?: (room: string, id: string) => Promise<KnowledgePage>;
     listAccountRooms: (options?: DesktopAccountRoomListOptions) => Promise<DesktopAccountRoomEntry[]>;
     updateAccountRoom: (
       roomIdentifier: string,

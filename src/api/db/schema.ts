@@ -17,3 +17,5 @@ export * from "./schema/desktop-push.js";
 export * from "./schema/agent-work.js";
 export * from "./schema/execution-approvals.js";
 export * from "./schema/execution-approval-publications.js";
+
+export * from "./schema/room-knowledge.js";

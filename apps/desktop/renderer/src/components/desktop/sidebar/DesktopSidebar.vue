@@ -211,6 +211,9 @@
             {{ rentalRequestCount > 99 ? '99+' : rentalRequestCount }}
           </span>
         </button>
+        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'inbox'" data-testid="sidebar-needs-you" @click="$emit('open-needs-you')">
+          <span class="cta-plus" aria-hidden="true"><Inbox /></span><span>Needs you</span><span v-if="needsYouCount" class="sidebar-rent-count" :aria-label="`${needsYouCount} items need your attention`">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
+        </button>
       </div>
 
       <div class="sidebar-room-sections">
@@ -642,6 +645,7 @@ import {
   ExternalLink,
   GitBranch,
   Handshake,
+  Inbox,
   House,
   ListChecks,
   MessageSquare,
@@ -704,6 +708,7 @@ const props = defineProps<{
   selectedEntryIds: string[];
   batchActionBusy: SidebarRoomBatchActionId | null;
   rentalRequestCount?: number;
+  needsYouCount?: number;
   updateStatus: DesktopUpdateStatus | null;
   authStatus: DesktopAuthStatus | null;
   authBusy: boolean;
@@ -713,6 +718,7 @@ const emit = defineEmits<{
   "cycle-sidebar": [];
   "new-room": [];
   "open-rent": [];
+  "open-needs-you": [];
   "open-updates": [];
   "open-settings": [];
   "connect-account": [];

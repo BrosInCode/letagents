@@ -178,6 +178,9 @@ jobs:
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
 
+      - name: Test room memory and human request persistence
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-knowledge-routes.test.ts src/api/__tests__/room-knowledge-db.test.ts
+
       - name: Run message attachment tests
         run: >-
           node
