@@ -16,6 +16,24 @@ const input = { client_id: 'record-0001', category: 'decision' as const, title: 
 test.before(async () => { if (client) await migrate(client.db, { migrationsFolder: resolve('drizzle') }); });
 test.after(async () => { await client?.pool.end(); });
 const options = { skip: !url ? 'Set TEST_DB_URL to run PostgreSQL integration tests.' : false };
+test('room-ID cascades preserve memory edits, request answers, history and creation retries', options, async () => {
+  const room = await messages!.createProjectWithName(`knowledge-rename-${Date.now()}`);
+  const memory = await store!.createRoomKnowledge(createKnowledgeRecord(room.id, 'memory', input, agent));
+  const requestInput = { ...input, client_id: 'request-rename-0001' };
+  const request = await store!.createRoomKnowledge(createKnowledgeRecord(room.id, 'attention', requestInput, agent));
+  const renamed = `${room.id}-renamed`;
+  await client!.pool.query('UPDATE rooms SET id = $1 WHERE id = $2', [renamed, room.id]);
+  assert.equal(await store!.getRoomKnowledge(room.id, memory.id), null);
+  assert.equal((await store!.listRoomKnowledge(renamed, 'memory')).records[0].room_id, renamed);
+  assert.equal((await store!.roomKnowledgeHistory(renamed, memory.id))[0].room_id, renamed);
+  assert.equal((await store!.createRoomKnowledge(createKnowledgeRecord(renamed, 'memory', input, agent))).room_id, renamed);
+  const currentMemory = (await store!.getRoomKnowledge(renamed, memory.id))!;
+  await store!.reviseRoomKnowledge(reviseKnowledgeRecord(currentMemory, { ...input, expected_version: 1, body: 'Corrected after rename.' }, human), 1);
+  const currentRequest = (await store!.getRoomKnowledge(renamed, request.id))!;
+  await store!.reviseRoomKnowledge(reviseKnowledgeRecord(currentRequest, { expected_version: 1, response: 'Confirmed after rename.' }, human), 1);
+  assert.equal((await store!.getRoomKnowledge(renamed, request.id))!.response!.body, 'Confirmed after rename.');
+  assert.deepEqual((await store!.roomKnowledgeHistory(renamed, memory.id)).map(row => [row.room_id, row.version]), [[renamed, 2], [renamed, 1]]);
+});
 test('PostgreSQL stores revisions, rejects stale writes, and deduplicates creation', options, async () => {
   const room = await messages!.createProjectWithName(`memory-${Date.now()}`);
   const old = await store!.createRoomKnowledge(createKnowledgeRecord(room.id, 'memory', input, agent));
