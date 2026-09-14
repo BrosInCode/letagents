@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+process.env.DB_URL ??= process.env.TEST_DB_URL || "postgresql://test:test@127.0.0.1:1/test";
 const {
   getTaskBoardStalePromptState,
   isDesktopHumanTaskWriteForTest,
@@ -445,4 +445,37 @@ test("lease action denies parent board writes from hard-isolated Focus Rooms", a
     error: "blocked by focus settings",
     code: "focus_parent_board_read_only",
   });
+});
+
+test('recent task reads reject incompatible board cursors after access checks', async () => {
+  const { app, handlers } = createRouteApp();
+  let checked = 0;
+  registerRoomTaskRoutes(app as never, { ...createDeps(), resolveCanonicalRoomRequestId: async (id: string) => id, resolveRoomOrReply: async () => ({ id: 'room' }), requireParticipant: async () => { checked++; return true; } } as never);
+  const handler = handlers.get.get('/^\\/rooms\\/(.+)\\/tasks$/')!;
+  for (const query of [{ order: 'recent', after: 'task_1' }, { order: 'recent', open: 'true' }]) {
+    const response = createResponseRecorder();
+    await handler({ params: { 0: 'room' }, query }, response);
+    assert.equal(response.statusCode, 400);
+  }
+  assert.equal(checked, 2);
+});
+
+test('recent completed tasks include new work beyond the first 200 and recently finished old tasks', { skip: !process.env.TEST_DB_URL }, async () => {
+  const { migrate } = await import('drizzle-orm/node-postgres/migrator');
+  const { db, pool } = await import('../db/client.js');
+  const { createProjectWithName, getTasks } = await import('../db.js');
+  await migrate(db, { migrationsFolder: 'drizzle' });
+  const room = await createProjectWithName(`inbox-recency-${Date.now()}`);
+  try {
+    await pool.query(`INSERT INTO tasks (room_id, number, title, status, created_by, created_at, updated_at)
+      SELECT $1, i, 'Completed ' || i, 'done', 'test', NOW() - INTERVAL '1 day',
+        CASE WHEN i = 1 THEN NOW() ELSE NOW() - (206 - i) * INTERVAL '1 minute' END
+      FROM generate_series(1, 205) i`, [room.id]);
+    const recent = await getTasks(room.id, 'done', { limit: 2, order: 'recent' });
+    assert.deepEqual(recent.tasks.map(task => task.id), ['task_1', 'task_205']);
+    assert.equal(recent.has_more, true);
+    assert.ok(recent.tasks.every(task => !task.assignee));
+    const original = await getTasks(room.id, 'done', { limit: 2 });
+    assert.deepEqual(original.tasks.map(task => task.id), ['task_1', 'task_2'], 'existing board order stays stable');
+  } finally { await pool.query('DELETE FROM rooms WHERE id = $1', [room.id]); await pool.end(); }
 });

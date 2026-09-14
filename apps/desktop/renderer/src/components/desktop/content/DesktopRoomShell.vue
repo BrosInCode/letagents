@@ -11,6 +11,8 @@
       :storage="storage"
       :tabs="tabs"
       :active-tab="activeTab"
+      :attention-count="attentionCount"
+      @open-inbox="emit('open-inbox')"
       :search-open="searchOpen"
       :action-panel-open="actionPanelOpen"
       :project-connection-needed="Boolean(projectRoom && !durableProjectRootPath)"
@@ -143,33 +145,10 @@
       @open-task="openBoardTask"
       @dismiss-event-preview="dismissComposerGitHubEventPreview"
       @scroll-position="rememberChatScrollPosition"
-      @thread-read="handleThreadRead"
     />
 
     <Transition name="room-panel" mode="out-in">
       <RoomMemoryView v-if="activeTab === 'memory'" :key="`memory:${messageNamespace}`" :room-identifier="room.identifier" @open-message="(id) => { activeTab = 'chat'; revealRoomMessage(id); }" />
-      <RoomInboxView
-        v-else-if="activeTab === 'inbox'"
-        key="inbox"
-        v-model:filter="inboxFilter"
-        :items="inboxItems"
-        :loading="inboxLoading"
-        :loading-older="inboxLoadingOlder"
-        :error="inboxError"
-        :has-more="inboxHasMore"
-        :last-cleared-item="lastClearedInboxItem"
-        :degraded-sources="inboxDegradation.sources"
-        @refresh="handleInboxRefresh"
-        @load-older="loadOlderInboxThreads"
-        @open-thread="openInboxThread"
-        @clear-item="clearInboxItem"
-        @restore-item="restoreInboxItem"
-        @open-task="openBoardTask"
-        @open-github-event="openInboxGitHubEvent"
-        @open-reasoning="openReasoningInspector"
-        @open-rental-request="emit('open-rental-request')"
-      />
-
       <RoomBoardView
         v-else-if="activeTab === 'board'"
         key="board"
@@ -463,7 +442,6 @@ import RoomChatView from "./RoomChatView.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomMemoryView from "./RoomMemoryView.vue";
-import RoomInboxView from "./RoomInboxView.vue";
 import { ownerAttribution as ownerAttributionLabel } from "./room-activity/agentTarget";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
@@ -486,14 +464,12 @@ import type {
 } from "./desktop-chat-message/types";
 import { useDesktopRoomGitHub } from "./room-shell/useDesktopRoomGitHub";
 import { useDesktopRoomGitHubEvents } from "./room-shell/useDesktopRoomGitHubEvents";
-import { useDesktopRoomInbox } from "./room-shell/useDesktopRoomInbox";
 import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
 import {
   useDesktopRoomPreferences,
   watchRoomNotifications,
 } from "./room-shell/useDesktopRoomPreferences";
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
-import { isThreadReplyMessage } from "./room-shell/threading";
 import { desktopIpc } from "../../../ipc/index.js";
 
 const props = defineProps<{
@@ -525,6 +501,7 @@ const props = defineProps<{
   notificationRevealMessageId?: string | null;
   notificationRevealNonce?: number;
   attentionIntent?: AttentionNavigationIntent | null;
+  attentionCount?: number;
   initialChatScrollTop?: number | null;
   onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
@@ -548,7 +525,7 @@ const emit = defineEmits<{
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
   "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
   "message-reveal-unavailable": [messageId: string];
-  "open-rental-request": [];
+  "open-inbox": [];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -946,50 +923,10 @@ const localAgentWork = computed(() =>
 const pendingPermissionApprovals = computed(() =>
   pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)
 );
-const {
-  inboxFilter,
-  inboxLoading,
-  inboxLoadingOlder,
-  inboxError,
-  lastClearedInboxItem,
-  inboxUnseenCount,
-  inboxItems,
-  inboxActionableCount,
-  inboxHasMore,
-  inboxDegradation,
-  loadOlderInboxThreads,
-  handleInboxRefresh,
-  openInboxThread,
-  clearInboxItem,
-  restoreInboxItem,
-  handleThreadRead,
-  openBoardTask,
-  openInboxGitHubEvent,
-  scheduleInboxRefresh,
-} = useDesktopRoomInbox({
-  room: roomRef,
-  namespace: messageNamespace,
-  activeTab,
-  tasks: toRef(props, "tasks"),
-  githubEvents: eventsPage,
-  reasoningSessions: reasoningSessionsRef,
-  presence: roomPresence,
-  sourceStates: computed(() => props.sourceStates ?? null),
-  fallbackRepository: githubRepository,
-  openThread: async (rootMessageId) => {
-    activeTab.value = "chat";
-    await nextTick();
-    roomChatView.value?.openThread(rootMessageId);
-  },
-  openBoardTask: (taskId) => {
-    boardSelectedTaskId.value = taskId;
-    activeTab.value = "board";
-  },
-  openGitHubEvent: (eventId) => {
-    openEventById(eventId);
-  },
-  refreshRoom: () => emit("refresh-room"),
-});
+function openBoardTask(taskId: string): void {
+  boardSelectedTaskId.value = taskId;
+  activeTab.value = "board";
+}
 
 watch(() => props.room.identifier, () => {
   selectedAgentDetailRequestVersion.value += 1;
@@ -1066,17 +1003,17 @@ watch(activeTab, (tab) => {
   rememberRoomActiveTab(props.room.identifier, tab);
 }, { flush: "sync" });
 
-watch(() => props.messages.at(-1)?.id || null, () => {
-  const latestMessage = props.messages.at(-1);
-  if (!latestMessage) return;
-  if (isThreadReplyMessage(latestMessage)) {
-    scheduleInboxRefresh(activeTab.value === "inbox" ? 200 : 700);
-  }
-});
-
 watch(() => [props.attentionIntent, props.roomLoading] as const, ([intent, loading]) => {
   if (!intent || loading || props.room.identifier !== intent.roomIdentifier) return;
   if (intent.taskId) openBoardTask(intent.taskId);
+  else if (intent.threadRootId) { activeTab.value = "chat"; void nextTick(() => roomChatView.value?.openThread(intent.threadRootId!)); }
+  else if (intent.eventId) {
+    if (intent.eventUrl && !eventsPage.value?.events.some(event => event.id === intent.eventId)) {
+      void desktopIpc.app.openExternalUrl(intent.eventUrl);
+    } else openEventById(intent.eventId);
+  }
+  else if (intent.reasoningSessionId) openReasoningInspector(intent.reasoningSessionId);
+  else if (intent.activity) activeTab.value = "activity";
   else if (intent.messageId) { activeTab.value = "chat"; void revealRoomMessage(intent.messageId); }
   emit("attention-opened");
 }, { immediate: true });
@@ -1300,20 +1237,6 @@ watchRoomNotifications({
 const tabs = computed<RoomTab[]>(() => {
   const nextTabs: RoomTab[] = [
     { id: "chat", label: "Chat", count: null },
-    {
-      id: "inbox",
-      label: "Inbox",
-      count: inboxActionableCount.value || null,
-      indicator: inboxUnseenCount.value > 0 && activeTab.value !== "inbox"
-        ? {
-            label: inboxUnseenCount.value === 1 ? "New inbox item" : "New inbox items",
-            count: inboxUnseenCount.value,
-            tone: "info",
-            pulse: true,
-            mode: "dot",
-          }
-        : null,
-    },
   ];
   if (showEventsTab.value) {
     nextTabs.push({

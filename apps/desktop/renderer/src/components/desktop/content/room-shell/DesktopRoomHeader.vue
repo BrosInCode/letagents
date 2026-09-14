@@ -33,6 +33,7 @@
     </div>
 
     <div class="desktop-room-header-actions">
+      <button v-if="attentionCount" class="desktop-room-project-connect" type="button" :aria-label="`Open Inbox for ${room.displayName}, ${attentionCount} requests need you`" data-testid="room-inbox-shortcut" @click="emit('openInbox')">Needs you · {{ attentionCount }} ↗</button>
       <button
         v-if="projectConnectionNeeded"
         class="desktop-room-project-connect"
@@ -121,14 +122,6 @@
               stroke-linejoin="round"
             />
             <path
-              v-else-if="tab.id === 'inbox'"
-              d="M3.25 3.5h9.5v5.25l-1.5 3.75h-6.5l-1.5-3.75V3.5Zm0 5.25h3l.75 1.5h2l.75-1.5h3"
-              stroke="currentColor"
-              stroke-width="1.4"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-            <path
               v-else-if="tab.id === 'events'"
               d="M2.5 8h2.25l1.5-3.5 3 7 1.25-3.5h3M11.5 3.5h2v2"
               stroke="currentColor"
@@ -203,6 +196,7 @@ const props = defineProps<{
   searchOpen: boolean;
   actionPanelOpen: boolean;
   projectConnectionNeeded?: boolean;
+  attentionCount?: number;
 }>();
 
 const emit = defineEmits<{
@@ -211,6 +205,7 @@ const emit = defineEmits<{
   toggleActionPanel: [];
   selectTab: [tabId: RoomTabId];
   connectProject: [];
+  openInbox: [];
 }>();
 
 const overflowMenuOpen = ref(false);
