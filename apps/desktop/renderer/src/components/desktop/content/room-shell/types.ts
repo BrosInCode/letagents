@@ -1,4 +1,4 @@
-export type RoomTabId = "chat" | "memory" | "inbox" | "events" | "board" | "activity" | "rooms";
+export type RoomTabId = "chat" | "memory" | "events" | "board" | "activity" | "rooms";
 
 export interface RoomTabIndicator {
   label: string;
@@ -19,7 +19,6 @@ export function isRoomTabId(value: string | null): value is RoomTabId {
   return (
     value === "chat"
     || value === "memory"
-    || value === "inbox"
     || value === "events"
     || value === "board"
     || value === "activity"
@@ -28,4 +27,4 @@ export function isRoomTabId(value: string | null): value is RoomTabId {
 }
 
 
-export type AttentionNavigationIntent = { roomIdentifier: string; taskId?: string; messageId?: string };
+export type AttentionNavigationIntent = { roomIdentifier: string; taskId?: string; messageId?: string; threadRootId?: string; eventId?: string; eventUrl?: string; reasoningSessionId?: string; activity?: boolean };
