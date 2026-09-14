@@ -1,5 +1,9 @@
 /** Follow the Live transcript until the reader takes control of its viewport. */
-export function followAgentLiveScroll(viewport: HTMLElement, content: HTMLElement): () => void {
+export function followAgentLiveScroll(
+  viewport: HTMLElement,
+  content: HTMLElement,
+  onFollowingChange: (following: boolean) => void = () => {},
+): { dispose(): void; resume(): void } {
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   let following = true;
   let frame: number | null = null;
@@ -14,6 +18,7 @@ export function followAgentLiveScroll(viewport: HTMLElement, content: HTMLElemen
 
   function pause(): void {
     following = false;
+    onFollowingChange(false);
     if (frame !== null) cancelAnimationFrame(frame);
     frame = null;
   }
@@ -46,6 +51,7 @@ export function followAgentLiveScroll(viewport: HTMLElement, content: HTMLElemen
     if (top < lastTop - 1) pause();
     else if (frame === null && top > lastTop) {
       following = viewport.scrollHeight - viewport.clientHeight - top <= 24;
+      onFollowingChange(following);
       follow();
     }
     lastTop = top;
@@ -56,6 +62,7 @@ export function followAgentLiveScroll(viewport: HTMLElement, content: HTMLElemen
   }
 
   function onKey(event: KeyboardEvent): void {
+    if (["Enter", " "].includes(event.key) && event.target instanceof Element && event.target.closest("summary")) pause();
     if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) pause();
   }
 
@@ -72,6 +79,7 @@ export function followAgentLiveScroll(viewport: HTMLElement, content: HTMLElemen
     if (window.getSelection()?.isCollapsed === false) return;
     if (viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 1) {
       following = true;
+      onFollowingChange(true);
       follow();
     }
   }
@@ -88,7 +96,11 @@ export function followAgentLiveScroll(viewport: HTMLElement, content: HTMLElemen
   observer.observe(content);
   observer.observe(viewport);
 
-  return () => {
+  return { resume() {
+    following = true;
+    onFollowingChange(true);
+    follow();
+  }, dispose() {
     pause();
     observer.disconnect();
     viewport.style.overflowAnchor = previousAnchor;
@@ -99,5 +111,5 @@ export function followAgentLiveScroll(viewport: HTMLElement, content: HTMLElemen
     viewport.removeEventListener("keydown", onKey);
     window.removeEventListener("pointerup", onInteractionEnd);
     window.removeEventListener("touchend", onInteractionEnd);
-  };
+  } };
 }

@@ -155,7 +155,7 @@ export function foldAgentStreamEvents(
 
   if (ended) {
     for (const item of items) {
-      if (item.kind === "tool" && item.status === "running") item.status = "interrupted";
+      if (item.kind === "tool" && ["pending", "running"].includes(item.status)) item.status = "interrupted";
     }
   }
 
@@ -210,7 +210,7 @@ export interface LiveToolPresentation {
 const MCP_SERVER_ALIAS_PREFIX = /^letagents[-_]supervised[-_][0-9a-f]{12,}[-_]/i;
 
 const SALIENT_ARG_KEYS = [
-  "command", "text", "message", "title", "name", "description", "path",
+  "command", "cmd", "text", "message", "title", "name", "description", "path",
   "file_path", "query", "pattern", "status", "room", "room_id", "url",
 ] as const;
 
@@ -347,7 +347,20 @@ export function describeLiveToolCall(
   if (nativeHeadlines) {
     const headline = outcome?.status === "pending" ? `Requested: ${nativeHeadlines.running}`
       : outcome?.status === "running" ? nativeHeadlines.running : nativeHeadlines.complete;
-    return action(headline, inputRecord, bareTool);
+    const status = outcome?.status;
+    const operation = /shell|terminal/.test(bareTool) ? "Command"
+      : /read/.test(bareTool) ? "File read" : /edit|write/.test(bareTool) ? "File change" : "Search";
+    const title = status === "error" || status === "failed" || outcome?.error ? `${operation} failed`
+      : status === "interrupted" ? `${operation} interrupted` : headline;
+    const changes = Array.isArray(inputRecord?.changes) ? inputRecord.changes : [];
+    const paths = changes.flatMap(change => {
+      const value = argsRecord(change);
+      return typeof value?.path === "string" ? [value.path] : [];
+    });
+    const detail = ["grepToolCall", "searchToolCall", "globToolCall"].includes(bareTool)
+      ? [stringArg(inputRecord, "pattern") ?? stringArg(inputRecord, "query"), stringArg(inputRecord, "path")].filter(Boolean).join(" · ")
+      : paths.length ? paths.join(", ") : null;
+    return { ...action(title, inputRecord, bareTool), ...(detail ? { detail: truncateDetail(detail) } : {}) };
   }
   return action(bareTool, inputRecord, bareTool);
 }
