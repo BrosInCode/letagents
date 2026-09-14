@@ -5,17 +5,21 @@ import { room_knowledge as records, room_knowledge_revisions as revisions, messa
 import { assertKnowledgeReplay, RoomKnowledgeError, type KnowledgeRecord, type KnowledgeType } from '../../../shared/room-knowledge.mjs';
 import type { MessageCreateTransaction } from './messages/create.js';
 
+// Room-ID cascades update the relational keys, not the historical JSON payload.
+function inRoom(roomId: string, value: KnowledgeRecord): KnowledgeRecord { return { ...value, room_id: roomId }; }
+
 export async function listRoomKnowledge(roomId: string, type: KnowledgeType) {
   const rows = await db.select({ value: records.value }).from(records)
     .where(and(eq(records.room_id, roomId), eq(records.type, type)))
     .orderBy(sql`(${records.value}->>'archived')::boolean ASC`, sql`(${records.value}->'response' = 'null'::jsonb) DESC`, sql`${records.value}->>'updated_at' DESC`).limit(201);
-  return { records: rows.slice(0, 200).map(row => row.value), truncated: rows.length > 200 };
+  return { records: rows.slice(0, 200).map(row => inRoom(roomId, row.value)), truncated: rows.length > 200 };
 }
 export async function getRoomKnowledge(roomId: string, id: string) {
-  return (await db.select().from(records).where(and(eq(records.room_id, roomId), eq(records.id, id))).limit(1))[0]?.value ?? null;
+  const value = (await db.select().from(records).where(and(eq(records.room_id, roomId), eq(records.id, id))).limit(1))[0]?.value;
+  return value ? inRoom(roomId, value) : null;
 }
 export async function roomKnowledgeHistory(roomId: string, id: string) {
-  return (await db.select().from(revisions).where(and(eq(revisions.room_id, roomId), eq(revisions.id, id))).orderBy(desc(revisions.version)).limit(100)).map(row => row.value);
+  return (await db.select().from(revisions).where(and(eq(revisions.room_id, roomId), eq(revisions.id, id))).orderBy(desc(revisions.version)).limit(100)).map(row => inRoom(roomId, row.value));
 }
 export async function assertKnowledgeSource(roomId: string, source: string) {
   if (!source) return;
@@ -29,8 +33,8 @@ export async function createRoomKnowledge(record: KnowledgeRecord) {
     if (!inserted.length) {
       const initial = (await tx.select().from(revisions).where(and(eq(revisions.room_id, record.room_id), eq(revisions.id, record.id), eq(revisions.version, 1))))[0];
       if (!initial) throw new RoomKnowledgeError('This record is being created. Retry with the same client ID.', 409);
-      assertKnowledgeReplay(initial.value, record);
-      return (await tx.select().from(records).where(and(eq(records.room_id, record.room_id), eq(records.id, record.id))))[0].value;
+      assertKnowledgeReplay(inRoom(record.room_id, initial.value), record);
+      return inRoom(record.room_id, (await tx.select().from(records).where(and(eq(records.room_id, record.room_id), eq(records.id, record.id))))[0].value);
     }
     await tx.insert(revisions).values({ room_id: record.room_id, id: record.id, version: record.version, value: record });
     return record;
