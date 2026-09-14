@@ -195,8 +195,9 @@ export function projectAgentInspectorDiagnostics(projection: Pick<AgentInspector
 }
 
 /** The copy payload is built solely from the safe diagnostics projection. */
-export function agentInspectorDiagnosticsReport(projection: AgentInspectorDiagnosticsProjection): string {
-  const compose = (activity: readonly AgentInspectorDiagnosticEvent[]) => JSON.stringify({ format: "letagents-agent-diagnostics-v1", identity: projection.identity, runtime: projection.runtime, recovery: projection.recovery, recentActivity: activity, activityTruncated: projection.activityTruncated || activity.length < projection.activity.length }, null, 2);
+export function agentInspectorDiagnosticsReport(projection: AgentInspectorDiagnosticsProjection, troubleshooting?: Record<string, unknown>): string {
+  const safeTroubleshooting = troubleshooting ? sanitizeAgentInspectorDiagnosticsValue(troubleshooting).value : undefined;
+  const compose = (activity: readonly AgentInspectorDiagnosticEvent[]) => JSON.stringify({ format: "letagents-agent-diagnostics-v1", troubleshooting: safeTroubleshooting, identity: projection.identity, runtime: projection.runtime, recovery: projection.recovery, recentActivity: activity, activityTruncated: projection.activityTruncated || activity.length < projection.activity.length }, null, 2);
   for (const count of [projection.activity.length, 16, 8, 0]) { const report = compose(projection.activity.slice(0, count)); if (report.length <= AGENT_INSPECTOR_DIAGNOSTICS_REPORT_LIMIT) return report; }
-  return JSON.stringify({ format: "letagents-agent-diagnostics-v1", identity: projection.identity, runtime: projection.runtime, recovery: projection.recovery, recentActivity: [], activityTruncated: true }, null, 2);
+  return JSON.stringify({ format: "letagents-agent-diagnostics-v1", troubleshooting: safeTroubleshooting, identity: projection.identity, runtime: projection.runtime, recovery: projection.recovery, recentActivity: [], activityTruncated: true }, null, 2);
 }

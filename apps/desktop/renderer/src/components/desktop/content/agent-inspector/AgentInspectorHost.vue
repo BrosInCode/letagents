@@ -89,6 +89,8 @@ const compactBreakpoint = 920;
 const props = defineProps<{
   open: boolean;
   projection: AgentInspectorProjection | null;
+  daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
+  refreshDiagnostics?: () => Promise<boolean>;
   selection: AgentInspectorSelection;
   actionState: AgentInspectorActionState | null;
   workResource: AgentInspectorWorkResource;
@@ -191,6 +193,8 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
     return {
       ...workspace,
       projection: props.projection,
+      daemonStatus: props.daemonStatus,
+      refreshDiagnostics: props.refreshDiagnostics,
       requestVersion: props.requestVersion,
       actionState: props.actionState,
       compact: compactPresentation,

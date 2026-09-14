@@ -225,6 +225,7 @@ async function attachClientRender(component: object, modulePath: string): Promis
 
 let vite: ViteDevServer;
 let AgentInspectorSettings: object;
+let AgentInspectorDiagnostics: object;
 let AgentInspectorLifecycleActions: object;
 let AgentInspectorHost: object;
 let AgentInspectorStatusSurface: object;
@@ -240,6 +241,7 @@ before(async () => {
     logLevel: "silent",
     server: { middlewareMode: true },
   });
+  AgentInspectorDiagnostics = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorDiagnostics.vue")).default;
   AgentInspectorSettings = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorSettings.vue")).default;
   AgentInspectorLifecycleActions = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue")).default;
   AgentInspectorSurface = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue")).default;
@@ -251,6 +253,7 @@ before(async () => {
   AgentInspectorNow = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorNow.vue")).default;
   ProviderBadge = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/desktop-chat-message/ProviderBadge.vue")).default;
   await Promise.all([
+    attachClientRender(AgentInspectorDiagnostics, "components/desktop/content/agent-inspector/AgentInspectorDiagnostics.vue"),
     attachClientRender(AgentInspectorSettings, "components/desktop/content/agent-inspector/AgentInspectorSettings.vue"),
     attachClientRender(AgentInspectorLifecycleActions, "components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue"),
     attachClientRender(AgentInspectorSurface, "components/desktop/content/agent-inspector/AgentInspectorSurface.vue"),
@@ -1021,5 +1024,91 @@ test("compact Host gives the overflow menu first Escape ownership before closing
   assert.equal(secondPrevented, true);
   assert.equal(closeCount, 1);
   assert.equal(descendants(testBody).some((node) => node.props.role === "dialog"), false);
+  mounted.app.unmount();
+});
+
+function troubleshootingProps() {
+  const entry = {
+    id: "diagnostic_a", roomId: "room_a", provider: "codex", createdAt: "2026-09-14T10:00:00Z",
+    desiredState: "running", observedState: "idle", condition: "none", agentSessionBindingState: "active",
+    providerPid: 123, executionGenerationId: "generation_a", restartCount: 0,
+    workplaceLiveness: { state: "reachable" }, nativeLiveness: { state: "idle" }, activity: [],
+    roomAgentState: {
+      connection: { state: "disconnected", detail: "Room connection lost", observedAt: null },
+      ingress: { state: "blocked", detail: null, observedAt: null },
+      inbox: { state: "empty", pendingCount: 0 }, turn: { state: "idle" },
+    },
+  };
+  return {
+    projection: { entryId: entry.id, roomId: entry.roomId, entry, resourceFreshness: "fresh", overallState: "needs_attention",
+      actions: [{ kind: "reconnect", label: "Reconnect", available: true }], turnControl: null },
+    workResource: { status: "ready", detail: null, error: null, sourceMessageId: null },
+    daemonStatus: { healthy: true, generation: 1, capabilities: {} },
+  } as any;
+}
+
+test("diagnostic verification survives live projection updates and waits for a fresh read", async () => {
+  const state = Vue.ref(troubleshootingProps());
+  const actions: unknown[] = [];
+  let finish: (fresh: boolean) => void = () => undefined;
+  let refreshes = 0;
+  const mounted = mount({ setup: () => () => Vue.h(AgentInspectorDiagnostics, {
+    ...state.value,
+    onAction: (intent: unknown) => actions.push(intent),
+    refreshDiagnostics: () => { refreshes++; return new Promise<boolean>(resolve => { finish = resolve; }); },
+  }) }, {});
+  (buttonByText(mounted.root, "Troubleshoot this issue").props.onClick as () => void)();
+  await nextTick();
+  (buttonByText(mounted.root, "Reconnect").props.onClick as () => void)();
+  await nextTick();
+  assert.deepEqual(actions, [{ entryId: "diagnostic_a", roomId: "room_a", kind: "reconnect" }]);
+  assert.match(textContent(mounted.root), /accepted request alone does not confirm/);
+  state.value = { ...state.value, actionState: { status: "error", message: "The recovery request timed out." } };
+  await nextTick();
+  assert.match(textContent(mounted.root), /Recovery needs attention/);
+  const pending = (buttonByText(mounted.root, "Check again").props.onClick as () => Promise<void>)();
+  await nextTick();
+  await nextTick();
+  state.value = { ...state.value, projection: { ...state.value.projection, entry: {
+    ...state.value.projection.entry,
+    roomAgentState: { ...state.value.projection.entry.roomAgentState,
+      connection: { state: "connected" }, ingress: { state: "observing" } },
+  } } };
+  await nextTick();
+  assert.match(textContent(mounted.root), /Recovery needs attention/);
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/);
+  assert.equal(refreshes, 1);
+  finish(true);
+  await pending;
+  await nextTick();
+  assert.match(textContent(mounted.root), /Check confirmed/);
+  assert.doesNotMatch(textContent(mounted.root), /Recovery needs attention|recovery request timed out/);
+  assert.match(textContent(mounted.root), /Connected and listening/);
+  assert.ok(buttonByText(mounted.root, "Back to all checks"));
+  state.value = troubleshootingProps();
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/);
+  assert.match(textContent(mounted.root), /state changed after verification/);
+  mounted.app.unmount();
+});
+
+test("diagnostics never confirms recovery after a failed refresh or an agent switch", async () => {
+  const state = Vue.ref(troubleshootingProps());
+  let finish: (fresh: boolean) => void = () => undefined;
+  const mounted = mount({ setup: () => () => Vue.h(AgentInspectorDiagnostics, {
+    ...state.value, refreshDiagnostics: () => new Promise<boolean>(resolve => { finish = resolve; }),
+  }) }, {});
+  (buttonByText(mounted.root, "Background service").props.onClick as () => void)();
+  await nextTick();
+  const failed = (buttonByText(mounted.root, "Refresh and verify").props.onClick as () => Promise<void>)();
+  await nextTick(); await nextTick(); finish(false); await failed; await nextTick();
+  assert.match(textContent(mounted.root), /Couldn’t confirm fresh checks/);
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/);
+  const late = (buttonByText(mounted.root, "Check again").props.onClick as () => Promise<void>)();
+  await nextTick(); await nextTick();
+  state.value = { ...state.value, projection: { ...state.value.projection, entryId: "diagnostic_b", entry: { ...state.value.projection.entry, id: "diagnostic_b" } } };
+  await nextTick(); finish(true); await late; await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed|Verify the result|Checks refreshed/);
+  assert.match(textContent(mounted.root), /Troubleshoot this issue/);
   mounted.app.unmount();
 });

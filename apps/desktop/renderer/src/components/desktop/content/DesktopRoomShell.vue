@@ -272,6 +272,8 @@
       v-if="selectedAgentDetailTarget"
       :open="true"
       :projection="selectedAgentDetailProjection"
+      :daemon-status="supervisorStatus"
+      :refresh-diagnostics="refreshAgentInspectorDiagnostics"
       :selection="selectedAgentDetailTarget"
       :action-state="selectedAgentInspectorActionState"
       :work-resource="agentInspectorWorkResource"
@@ -472,6 +474,7 @@ import {
 } from "./room-shell/preferences";
 import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
+import { useAgentInspectorObservations } from "./room-shell/useAgentInspectorObservations";
 import { useAgentInspectorConfigurationApply } from "./room-shell/useAgentInspectorConfigurationApply";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
 import type {
@@ -2522,16 +2525,15 @@ function selectAgentInspectorWorkSource(sourceMessageId: string): void {
   void loadAgentInspectorWorkDetail(sourceMessageId);
 }
 
-function openAgentInspectorWork(): void {
-  const projection = selectedAgentDetailProjection.value;
-  const sourceMessageId = projection
-    ? defaultAgentInspectorWorkSource(projection.entry, agentInspectorWorkResource.value.detail)
-    : null;
-  agentInspectorWorkSourceMessageId.value = sourceMessageId;
-  // Re-entering Work reconciles the exact active source and receipt; manifest
-  // activity may have advanced while another tab was selected.
-  void loadAgentInspectorWorkDetail(sourceMessageId, true);
-}
+const { refreshDiagnostics: refreshAgentInspectorDiagnostics, openWork: openAgentInspectorWork } = useAgentInspectorObservations({
+  selectedProjection: selectedAgentDetailProjection, requestVersion: selectedAgentDetailRequestVersion,
+  daemonStatus: supervisorStatus, workSource: agentInspectorWorkSourceMessageId, workResource: agentInspectorWorkResource,
+  observationVersion: () => `${supervisorEntriesMutationVersion}:${supervisorStateSequence}`,
+  refreshStatus: refreshSupervisorStatus, readAgents: room => desktopIpc.supervisor.listAgents(room),
+  loadDetail: (source, followDefault) => loadAgentInspectorWorkDetail(source, true, followDefault),
+  upsert: (entry, version) => upsertSupervisorEntry({ entry, roomIdentifier: entry.roomId, inspectorRequestVersion: version }),
+  entriesState: supervisorEntriesState, entriesError: supervisorEntriesError,
+});
 
 async function loadAgentInspectorWorkDetail(
   sourceMessageId: string | null = agentInspectorWorkSourceMessageId.value,
