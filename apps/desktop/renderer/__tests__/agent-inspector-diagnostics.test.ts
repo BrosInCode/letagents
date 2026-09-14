@@ -153,7 +153,187 @@ test("the diagnostics tab is lazy and participates in roving Home/End tab behavi
 });
 
 test("the high-frequency diagnostics copy action has no transform motion", () => {
-  const styles = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/agent-inspector.css", import.meta.url)), "utf8");
+  const styles = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/agent-inspector-diagnostics.css", import.meta.url)), "utf8");
   assert.doesNotMatch(styles, /\.agent-inspector-diagnostics-copy[^{}]*\{[^}]*transition:[^;}]*transform/s);
   assert.doesNotMatch(styles, /\.agent-inspector-diagnostics-copy:active\s*\{[^}]*transform/s);
+});
+
+// Troubleshooting must explain separate truths and reuse exact existing actions.
+import { projectAgentInspector } from "../src/domain/agent-inspector";
+import { projectAgentTroubleshooting } from "../src/domain/agent-inspector-troubleshooting";
+
+function diagnosticFixture() {
+  const entry = {
+    ...projection().entry, runtimeGenerationId: "runtime_1", workAttemptId: "attempt_1",
+    agentSessionId: "session_1", providerContinuationId: "thread_1", lastError: null,
+    createdBy: "EmmyMay", displayName: "GardenSignal", charter: "Investigate failures", workspacePath: "/tmp/work",
+    lastTurnControlSequence: 0, deliveryMode: "daemon_inbox", deliveryReceipts: [],
+    roomAgentState: {
+      connection: { state: "connected", detail: null, observedAt: "2026-09-14T10:00:00Z" },
+      ingress: { state: "observing", detail: null, observedAt: "2026-09-14T10:00:00Z" },
+      inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+      task: { state: "none", taskId: null, title: null },
+    },
+  } as any;
+  const daemon = { healthy: true, generation: 3, capabilities: { agentRuntimeRecovery: true } } as any;
+  const resource = { status: "ready", error: null, sourceMessageId: null, detail: {
+    entry_id: entry.id, room_id: entry.roomId, runtime_control: {
+      runtime_generation_id: "runtime_1", execution_generation_id: entry.executionGenerationId,
+      daemon_generation_id: "3", control_state: "responsive", runtime_state: "ready", observed_at: "2026-09-14T10:00:00Z",
+    }, uncertain_effects: [], receipt: null,
+  } } as any;
+  const project = (freshness: "fresh" | "stale" = "fresh") => projectAgentInspector(entry, {
+    roomId: entry.roomId, resourceFreshness: freshness, deliveryRetryAvailable: true,
+    continuationRepairAvailable: true, roomDeliverySkipAvailable: true,
+  });
+  const assess = (freshness: "fresh" | "stale" = "fresh") => projectAgentTroubleshooting(project(freshness), resource, daemon);
+  return { entry, daemon, resource, project, assess };
+}
+
+test("healthy checks distinguish connectivity from message completion", () => {
+  const result = diagnosticFixture().assess();
+  assert.equal(result.passedCount, 4);
+  assert.equal(result.state, "passed");
+  assert.match(result.checks[3]!.detail, /does not mean every earlier request succeeded/);
+  assert.equal(result.checks[3]!.destination, "work");
+});
+
+test("stale snapshots never display cached checks as healthy or offer recovery", () => {
+  const result = diagnosticFixture().assess("stale");
+  assert.equal(result.primaryCheckId, "service");
+  assert.equal(result.passedCount, 0);
+  assert.ok(result.checks.every(check => check.state === "unknown" && check.action === null));
+});
+
+test("daemon reachability does not mask a lost provider", () => {
+  const fixture = diagnosticFixture();
+  fixture.resource.detail.runtime_control.control_state = "lost";
+  fixture.entry.observedState = "failed";
+  fixture.entry.nativeLiveness.state = "terminal";
+  const result = fixture.assess();
+  assert.equal(result.checks[0]!.state, "passed");
+  assert.equal(result.checks[1]!.state, "attention");
+  assert.equal(result.primaryCheckId, "provider");
+  assert.equal(result.checks[1]!.action?.kind, "recover");
+  fixture.daemon.capabilities.agentRuntimeRecovery = false;
+  assert.equal(fixture.assess().checks[1]!.action, null);
+});
+
+test("silence, a missing PID, and inconclusive checks never authorize a restart", () => {
+  for (const state of ["degraded", "unprobeable"]) {
+    const fixture = diagnosticFixture();
+    fixture.entry.provider = "cursor";
+    fixture.entry.providerPid = null;
+    fixture.resource.detail.runtime_control.control_state = state;
+    const check = fixture.assess().checks[1]!;
+    assert.equal(check.state, "unknown");
+    assert.equal(check.action, null);
+    assert.doesNotMatch(check.summary, /stopped/i);
+  }
+});
+
+test("provider health is fenced by daemon, execution, runtime, entry, and room identity", () => {
+  for (const key of ["daemon_generation_id", "execution_generation_id", "runtime_generation_id"]) {
+    const fixture = diagnosticFixture();
+    fixture.resource.detail.runtime_control[key] = "obsolete";
+    assert.equal(fixture.assess().checks[1]!.state, "unknown", key);
+  }
+  for (const key of ["entry_id", "room_id"]) {
+    const fixture = diagnosticFixture();
+    fixture.resource.detail[key] = "other";
+    assert.equal(fixture.assess().checks[1]!.state, "unknown", key);
+  }
+  const fixture = diagnosticFixture();
+  fixture.resource.status = "error";
+  assert.equal(fixture.assess().checks[1]!.state, "unknown");
+});
+
+test("room credential recovery explains the running provider separately", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.observedState = "recovering";
+  fixture.entry.lastError = "Restoring room access (retrying automatically)";
+  fixture.entry.roomAgentState.inbox.state = "waiting_for_desktop_credentials";
+  const result = fixture.assess();
+  assert.equal(result.checks[1]!.state, "passed");
+  assert.equal(result.checks[2]!.state, "pending");
+  assert.match(result.checks[2]!.detail, /restoring this agent’s room access automatically/);
+  fixture.resource.detail.runtime_control.control_state = "lost";
+  assert.doesNotMatch(fixture.assess().checks[2]!.detail, /provider is running/i);
+  assert.equal(result.checks[2]!.action, null);
+});
+
+test("a generic auth blocker does not invent which credentials failed", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.condition = "auth_blocked";
+  const check = fixture.assess().checks[2]!;
+  assert.equal(check.state, "attention");
+  assert.match(check.detail, /provider sign-in or room access/);
+  assert.equal(check.action, null);
+});
+
+test("paused and retired agents are intentional holds, not healthy or failed runtimes", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.desiredState = "paused";
+  assert.equal(fixture.assess().checks[1]!.state, "paused");
+  assert.equal(fixture.assess().checks[1]!.action?.kind, "resume");
+  fixture.entry.desiredState = "stopped";
+  assert.equal(fixture.assess().checks[1]!.action, null);
+});
+
+test("conversation repair targets only the exact eligible blocked message", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.roomAgentState.inbox = { state: "blocked", pendingCount: 2, blockedByMessageId: "msg_1", detail: null };
+  fixture.entry.deliveryReceipts = [{ state: "blocked", failureCode: "provider_continuation_missing", sourceMessageId: "msg_1", attemptCount: 0, providerTurnId: null, fifoSequence: 1, timeline: [] }];
+  const check = fixture.assess().checks[3]!;
+  assert.equal(check.action?.kind, "restore_conversation");
+  assert.equal(check.action?.sourceMessageId, "msg_1");
+  assert.match(check.actionImpact!, /private context cannot be recovered/);
+  fixture.entry.deliveryReceipts[0].attemptCount = 1;
+  assert.equal(fixture.assess().checks[3]!.action, null);
+});
+
+test("uncertain side effects suppress retry and send the user to evidence", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.roomAgentState.inbox.state = "blocked";
+  fixture.resource.detail.uncertain_effects = [{ tool_name: "publish" }];
+  const check = fixture.assess().checks[3]!;
+  assert.equal(check.state, "attention");
+  assert.equal(check.action, null);
+  assert.equal(check.destination, "work");
+  assert.match(check.nextStep, /verify/);
+});
+
+test("retry schedules are only shown from fresh, exact retained receipts", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.roomAgentState.turn.sourceMessageId = "msg_1";
+  fixture.resource.detail.requested_source_message_id = "msg_1";
+  fixture.resource.detail.receipt = { state: "retryable", next_attempt_at_ms: Date.parse("2026-09-14T10:01:00Z") };
+  assert.equal(fixture.assess().nextAttemptAt, "2026-09-14T10:01:00.000Z");
+  assert.equal(fixture.assess("stale").nextAttemptAt, null);
+  fixture.resource.status = "error";
+  assert.equal(fixture.assess().nextAttemptAt, null);
+  fixture.resource.status = "ready";
+  for (const state of ["acknowledged", "acknowledged_failed", "acknowledged_no_reply", "cancelled_by_user", "blocked"]) {
+    fixture.resource.detail.receipt.state = state;
+    assert.equal(fixture.assess().nextAttemptAt, null, state);
+  }
+  fixture.resource.detail.receipt.state = "retryable";
+  fixture.resource.detail.requested_source_message_id = "older_message";
+  assert.equal(fixture.assess().nextAttemptAt, null);
+  fixture.resource.detail.requested_source_message_id = "msg_1";
+  fixture.resource.detail.receipt.next_attempt_at_ms = Infinity;
+  assert.equal(fixture.assess().nextAttemptAt, null);
+});
+
+test("new explanations and report extensions retain the redaction boundary", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.roomAgentState.inbox.detail = `NPM_TOKEN=${CANARY}`;
+  assert.doesNotMatch(JSON.stringify(fixture.assess()), new RegExp(CANARY));
+  const report = agentInspectorDiagnosticsReport(projectAgentInspectorDiagnostics(fixture.project()), {
+    conversationRepair: { error: `Authorization: Bearer ${CANARY}` }, runtime: { secret: CANARY },
+    huge: "x".repeat(100_000),
+  });
+  assert.doesNotMatch(report, new RegExp(CANARY));
+  assert.ok(report.length <= AGENT_INSPECTOR_DIAGNOSTICS_REPORT_LIMIT);
 });

@@ -385,18 +385,7 @@
 .agent-inspector-context-list .agent-inspector-provider-status { min-block-size: 3lh; }
 .agent-inspector-provider-status small { display: block; min-block-size: 1lh; }
 
-.agent-inspector-diagnostics { display: grid; gap: 12px; }
-.agent-inspector-diagnostics-copy { min-height: 44px; padding: 0 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; background: rgba(255,255,255,.055); color: var(--text,#fafafa); font: inherit; font-size: .7rem; font-weight: 670; cursor: pointer; transition: background-color 140ms ease, border-color 140ms ease; }
-.agent-inspector-diagnostics-copy:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
-.agent-inspector-diagnostics-events { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
-.agent-inspector-diagnostics-events li { display: grid; gap: 5px; padding: 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
-.agent-inspector-diagnostics-events li > div:first-child { display: grid; gap: 3px; }
-.agent-inspector-diagnostics-events strong { overflow: hidden; font-size: .75rem; font-weight: 690; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-.agent-inspector-diagnostics-events span, .agent-inspector-diagnostics-events p, .agent-inspector-diagnostics-flags { color: var(--text-secondary,#a1a1aa); font-size: .67rem; line-height: 1.35; }
-.agent-inspector-diagnostics-events p { margin: 0; overflow-wrap: anywhere; }
-.agent-inspector-diagnostics-payload { display: grid; gap: 5px; margin-top: 3px; }
-.agent-inspector-diagnostics-payload > span, .agent-inspector-diagnostics-flags { color: #fde68a; font-weight: 650; }
-.agent-inspector-diagnostics-payload pre { max-height: 180px; margin: 0; overflow: auto; padding: 9px; border-radius: 8px; background: rgba(0,0,0,.24); color: #d4d4da; font: 500 .65rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 
 .agent-inspector-scrim { position: fixed; z-index: 120; inset: 0; padding: 0; border: 0; background: rgba(0, 0, 0, 0.58); backdrop-filter: blur(3px); }
 
@@ -451,7 +440,6 @@
   .agent-inspector-overview-retire button:hover:not(:disabled) { background: rgba(255,255,255,.09); }
   .agent-inspector-overview-retire button.danger:hover:not(:disabled) { border-color: rgba(251,113,133,.72); background: rgba(225,29,72,.32); }
   .agent-inspector-danger button.danger:hover:not(:disabled) { background: rgba(251,113,133,.1); }
-  .agent-inspector-diagnostics-copy:hover { border-color: rgba(255,255,255,.2); background: rgba(255,255,255,.09); }
   .agent-inspector-inline-action:hover { background: rgba(96,165,250,.1); color: #dbeafe; }
 }
 

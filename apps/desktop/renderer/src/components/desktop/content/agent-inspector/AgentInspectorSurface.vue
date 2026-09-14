@@ -30,13 +30,14 @@
       </button>
     </header>
 
-    <p v-if="projection.overallDetail" class="agent-inspector-status-copy">{{ projection.overallDetail }}</p>
+    <p v-if="projection.overallDetail && selectedTab !== 'diagnostics'" class="agent-inspector-status-copy">{{ projection.overallDetail }}</p>
 
     <p v-if="projection.resourceFreshness === 'stale'" class="agent-inspector-stale-banner" role="status">
       Showing the last known agent state. Controls that depend on live state are unavailable until the supervisor reconnects.
     </p>
 
     <AgentInspectorLifecycleActions
+      v-if="selectedTab !== 'diagnostics'"
       :entry-id="projection.entryId"
       :room-id="projection.roomId"
       :actions="projection.actions"
@@ -47,7 +48,7 @@
     />
 
     <p
-      v-if="visibleActionMessage"
+      v-if="visibleActionMessage && selectedTab !== 'diagnostics'"
       class="agent-inspector-action-message"
       :data-state="actionState?.status"
     >
@@ -57,7 +58,7 @@
     <div class="agent-inspector-tabs" role="tablist" aria-label="Agent inspector sections" @keydown="handleTabKeydown">
       <button ref="overviewTab" id="agent-inspector-overview-tab" type="button" role="tab" :aria-selected="selectedTab === 'overview'" aria-controls="agent-inspector-overview-panel" :tabindex="selectedTab === 'overview' ? 0 : -1" @click="selectTab('overview')">Overview</button>
       <button id="agent-inspector-live-tab" type="button" role="tab" :aria-selected="selectedTab === 'live'" aria-controls="agent-inspector-live-panel" :tabindex="selectedTab === 'live' ? 0 : -1" @click="selectTab('live')">Live</button>
-      <button id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
+      <button ref="workTab" id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
       <button id="agent-inspector-workspace-tab" type="button" role="tab" :aria-selected="selectedTab === 'workspace'" aria-controls="agent-inspector-workspace-panel" :tabindex="selectedTab === 'workspace' ? 0 : -1" @click="selectTab('workspace')">Workspace</button>
       <button id="agent-inspector-settings-tab" type="button" role="tab" :aria-selected="selectedTab === 'settings'" aria-controls="agent-inspector-settings-panel" :tabindex="selectedTab === 'settings' ? 0 : -1" @click="selectTab('settings')">Settings</button>
       <button id="agent-inspector-diagnostics-tab" type="button" role="tab" :aria-selected="selectedTab === 'diagnostics'" aria-controls="agent-inspector-diagnostics-panel" :tabindex="selectedTab === 'diagnostics' ? 0 : -1" @click="selectTab('diagnostics')">Diagnostics</button>
@@ -131,7 +132,8 @@
       <AgentInspectorDiagnostics
         v-else id="agent-inspector-diagnostics-panel" role="tabpanel" aria-labelledby="agent-inspector-diagnostics-tab"
         :projection="projection"
-        :work-resource="workResource"
+        :work-resource="workResource" :daemon-status="daemonStatus" :action-state="actionState" :busy="lifecycleActionBusy" :refresh-diagnostics="refreshDiagnostics"
+        @action="emit('action', $event)" @navigate="navigateFromDiagnostics"
       />
     </div>
 
@@ -165,6 +167,8 @@ const AgentInspectorLive = defineAsyncComponent(() => import("./AgentInspectorLi
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
+  daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
+  refreshDiagnostics?: () => Promise<boolean>;
   initialTab?: "overview" | "work" | "workspace";
   roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
@@ -206,6 +210,7 @@ const emit = defineEmits<{
 const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
+const workTab = ref<HTMLButtonElement | null>(null);
 const retireButton = ref<HTMLButtonElement | null>(null);
 const keepAgentButton = ref<HTMLButtonElement | null>(null);
 const selectedTab = ref<InspectorTab>(props.initialTab ?? "overview");
@@ -272,8 +277,13 @@ function selectTab(tab: InspectorTab): void {
   if (tab !== "overview") confirmRetire.value = false;
   selectedTab.value = tab;
   if (tab === "live") emit("live-selected");
-  if (tab === "work") emit("work-selected");
+  if (tab === "work" || tab === "diagnostics") emit("work-selected");
   if (tab === "settings") emit("settings-selected");
+}
+
+function navigateFromDiagnostics(tab: "overview" | "work"): void {
+  selectTab(tab);
+  void nextTick(() => (tab === "work" ? workTab.value : overviewTab.value)?.focus());
 }
 
 function emitTurnControl(
@@ -319,9 +329,11 @@ function handleKeydown(event: KeyboardEvent): void {
     return;
   }
   if (!props.compact || event.key !== "Tab" || !surfaceElement.value) return;
+  const closedDetails = [...surfaceElement.value.querySelectorAll<HTMLDetailsElement>('details:not([open])')];
   const focusable = [...surfaceElement.value.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  )];
+    'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+  )].filter(element => element.getClientRects().length > 0
+    && !closedDetails.some(details => details.contains(element) && !details.querySelector("summary")?.contains(element)));
   if (!focusable.length) return;
   const first = focusable[0]!;
   const last = focusable.at(-1)!;

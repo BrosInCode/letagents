@@ -272,6 +272,8 @@
       v-if="selectedAgentDetailTarget"
       :open="true"
       :projection="selectedAgentDetailProjection"
+      :daemon-status="supervisorStatus"
+      :refresh-diagnostics="refreshAgentInspectorDiagnostics"
       :selection="selectedAgentDetailTarget"
       :action-state="selectedAgentInspectorActionState"
       :work-resource="agentInspectorWorkResource"
@@ -2520,6 +2522,50 @@ function selectAgentInspectorWorkSource(sourceMessageId: string): void {
   // leave the previous message visible while the exact new source is loading.
   agentInspectorWorkResource.value = { status: "loading", detail: null, error: null, sourceMessageId };
   void loadAgentInspectorWorkDetail(sourceMessageId);
+}
+
+/** An explicit diagnostic refresh reads the service before its exact agent detail. */
+async function refreshAgentInspectorDiagnostics(): Promise<boolean> {
+  const selected = selectedAgentDetailProjection.value;
+  const requestVersion = selectedAgentDetailRequestVersion.value;
+  if (!selected) return false;
+  const isCurrent = () => selectedAgentDetailRequestVersion.value === requestVersion
+    && selectedAgentDetailProjection.value?.entryId === selected.entryId
+    && selectedAgentDetailProjection.value?.roomId === selected.roomId;
+  let mutationVersion = supervisorEntriesMutationVersion;
+  let sequence = supervisorStateSequence;
+  const markObservationUnavailable = () => {
+    // Retain the evidence, but don't present a failed observation as live.
+    // A newer push or action owns its own freshness and must win this race.
+    if (!isCurrent() || mutationVersion !== supervisorEntriesMutationVersion || sequence !== supervisorStateSequence) return;
+    supervisorEntriesState.value = "error";
+    supervisorEntriesError.value = "Couldn’t refresh this agent from the background service.";
+  };
+  const status = await refreshSupervisorStatus();
+  if (!status) { markObservationUnavailable(); return false; }
+  if (!isCurrent()) return false;
+  mutationVersion = supervisorEntriesMutationVersion;
+  sequence = supervisorStateSequence;
+  let entries: DesktopSupervisorManifestEntry[];
+  try { entries = await desktopIpc.supervisor.listAgents(selected.roomId); }
+  catch { markObservationUnavailable(); return false; }
+  if (!isCurrent() || supervisorStatus.value?.generation !== status.generation) return false;
+  const entry = entries.find(candidate => candidate.id === selected.entryId && candidate.roomId === selected.roomId);
+  if (!entry) { markObservationUnavailable(); return false; }
+  // A newer push or user action wins over this read; never roll it back.
+  if (mutationVersion === supervisorEntriesMutationVersion && sequence === supervisorStateSequence) {
+    upsertSupervisorEntry({ entry, roomIdentifier: selected.roomId, inspectorRequestVersion: requestVersion });
+  }
+  const source = agentInspectorWorkSourceMessageId.value;
+  const key = agentInspectorDetailKey(selectedAgentDetailProjection.value!.entry, source, status.generation);
+  await loadAgentInspectorWorkDetail(source, true, false);
+  const current = selectedAgentDetailProjection.value;
+  const resource = agentInspectorWorkResource.value;
+  return isCurrent() && supervisorStatus.value?.generation === status.generation
+    && current?.resourceFreshness === "fresh"
+    && agentInspectorDetailKey(current.entry, agentInspectorWorkSourceMessageId.value, status.generation) === key
+    && resource.sourceMessageId === source
+    && (resource.status === "ready" || resource.status === "unavailable");
 }
 
 function openAgentInspectorWork(): void {
