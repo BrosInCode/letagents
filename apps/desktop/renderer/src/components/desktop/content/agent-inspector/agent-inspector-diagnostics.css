@@ -6,6 +6,7 @@
   color: var(--text);
   font-size: .78rem;
   line-height: 1.5;
+  --diagnostic-ease: cubic-bezier(.23, 1, .32, 1);
   --diagnostic-soft: color-mix(in srgb, var(--text) 4%, transparent);
 }
 .agent-inspector-diagnostics button,
@@ -43,7 +44,9 @@
 .diagnostics-trace > span:nth-child(2) { display: grid; flex: 1; gap: 2px; }
 .diagnostics-trace strong { color: var(--text); font-size: .75rem; font-weight: 580; }
 .diagnostics-trace span span { font-size: .68rem; }
-.diagnostics-guide { display: grid; gap: 18px; }
+.diagnostics-overview { display: grid; gap: 16px; }
+.diagnostics-guide, .diagnostics-step-content { display: grid; gap: 18px; }
+.diagnostics-confirmation { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--green-text) 12%, transparent); color: var(--green-text); }
 .diagnostics-back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; min-height: 44px; margin: 0 0 0 -6px; padding: 0 6px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: .7rem !important; }
 .diagnostics-steps { display: flex; align-items: center; gap: 14px; margin: 0; padding: 0 0 18px; border-bottom: 1px solid var(--border); list-style: none; }
 .diagnostics-steps li { display: flex; align-items: center; gap: 6px; color: var(--text-tertiary); font-size: .67rem; }
@@ -51,6 +54,7 @@
 .diagnostics-steps li > span { display: grid; place-items: center; width: 21px; height: 21px; border: 1px solid var(--border-strong); border-radius: 50%; font-size: .63rem; font-variant-numeric: tabular-nums; }
 .diagnostics-steps [aria-current="step"] { color: var(--text); }
 .diagnostics-steps [aria-current="step"] > span { color: var(--bg); background: var(--text); }
+.diagnostics-steps [data-complete="true"] > span { color: var(--green-text); border-color: color-mix(in srgb, var(--green-text) 40%, transparent); background: transparent; }
 .diagnostics-guide-heading { display: flex; align-items: center; gap: 9px; }
 .diagnostics-guide-heading > svg { color: var(--text-secondary); }
 .diagnostics-guide-heading h3 { margin: 0; font-size: 1.13rem; font-weight: 610; letter-spacing: -.025em; }
@@ -105,7 +109,37 @@
   .diagnostics-trace:hover, .diagnostics-back:hover, .diagnostics-technical > summary:hover { color: var(--text); }
   .diagnostics-primary:hover:not(:disabled) { opacity: .88; }
 }
+/* Navigation arrives immediately; no outgoing view delays focus or recovery.
+   Starting styles are interruptible transitions, scoped to pointer interaction. */
 @media (prefers-reduced-motion: no-preference) {
+  .agent-inspector-diagnostics[data-motion="true"] :is(.diagnostics-view, .diagnostics-step-content) {
+    opacity: 1; transform: translate(0, 0);
+    transition: opacity 160ms var(--diagnostic-ease), transform 220ms var(--diagnostic-ease);
+  }
+  .agent-inspector-diagnostics[data-motion="true"] .diagnostics-confirmation {
+    opacity: 1; transform: scale(1);
+    transition: opacity 160ms var(--diagnostic-ease), transform 240ms var(--diagnostic-ease);
+  }
+  @starting-style {
+    .agent-inspector-diagnostics[data-motion="true"] .diagnostics-overview { opacity: 0; transform: translateX(-6px); }
+    .agent-inspector-diagnostics[data-motion="true"] .diagnostics-guide { opacity: 0; transform: translateX(8px); }
+    .agent-inspector-diagnostics[data-motion="true"] .diagnostics-step-content { opacity: 0; transform: translateY(4px); }
+    .agent-inspector-diagnostics[data-motion="true"] .diagnostics-confirmation { opacity: 0; transform: scale(.85); }
+  }
+  .agent-inspector-diagnostics[data-motion="true"] .diagnostics-primary {
+    transition: opacity 140ms ease, transform 160ms var(--diagnostic-ease);
+  }
+  .agent-inspector-diagnostics[data-motion="true"] .diagnostics-primary:active:not(:disabled):not(:focus-visible) {
+    transform: scale(.985); transition-duration: 70ms;
+  }
+  .agent-inspector-diagnostics[data-motion="true"] .diagnostics-steps li > span {
+    transition: transform 180ms var(--diagnostic-ease), color 140ms ease, background-color 140ms ease, border-color 140ms ease;
+  }
+  .agent-inspector-diagnostics[data-motion="true"] .diagnostics-steps [aria-current="step"] > span { transform: scale(1.06); }
+  .diagnostics-coverage > span { transition: background-color 180ms ease; }
+  .diagnostics-technical > summary > .diagnostics-chevron, .diagnostics-events summary > .diagnostics-chevron { transition: transform 160ms var(--diagnostic-ease); }
+  .agent-inspector-diagnostics[data-motion="false"] summary > .diagnostics-chevron { transition: none; }
+
   .diagnostics-spinning { animation: diagnostics-spin 1s linear infinite; }
   @keyframes diagnostics-spin { to { transform: rotate(360deg); } }
 }

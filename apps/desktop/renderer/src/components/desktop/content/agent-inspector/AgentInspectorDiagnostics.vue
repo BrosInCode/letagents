@@ -1,5 +1,5 @@
 <template>
-  <div ref="rootElement" class="agent-inspector-diagnostics" :aria-busy="checking">
+  <div ref="rootElement" class="agent-inspector-diagnostics" :aria-busy="checking" :data-motion="motionEnabled" @pointerdown.capture="motionEnabled = true" @keydown.capture="motionEnabled = false">
     <header class="diagnostics-heading">
       <button v-if="selectedCheck" type="button" class="diagnostics-back" :disabled="busy || checking" @click="closeCheck"><ArrowLeft :size="14" aria-hidden="true" />All checks</button>
       <div v-else class="diagnostics-eyebrow"><Activity :size="14" aria-hidden="true" /> Agent health</div>
@@ -8,7 +8,7 @@
       </button>
     </header>
 
-    <template v-if="!selectedCheck">
+    <div v-if="!selectedCheck" class="diagnostics-overview diagnostics-view">
       <section class="diagnostics-intro" aria-labelledby="diagnostics-headline">
         <h3 id="diagnostics-headline">{{ assessment.headline }}</h3>
         <p>{{ assessment.detail }}</p>
@@ -36,13 +36,13 @@
         <span><strong>Missing a reply?</strong><span>Trace a message from receipt to response.</span></span>
         <ArrowUpRight :size="16" aria-hidden="true" />
       </button>
-    </template>
+    </div>
 
-    <section v-else class="diagnostics-guide" aria-labelledby="diagnostics-guide-title">
+    <section v-else class="diagnostics-guide diagnostics-view" aria-labelledby="diagnostics-guide-title">
       <ol class="diagnostics-steps" aria-label="Troubleshooting progress">
         <li><span><Check :size="12" aria-hidden="true" /></span>Check</li>
         <li :aria-current="stage === 'resolve' ? 'step' : undefined" :data-complete="stage === 'verify'"><span><Check v-if="stage === 'verify'" :size="12" aria-hidden="true" /><template v-else>2</template></span>Resolve</li>
-        <li :aria-current="stage === 'verify' ? 'step' : undefined"><span>3</span>Verify</li>
+        <li :aria-current="stage === 'verify' ? 'step' : undefined" :data-complete="verification === 'passed'"><span><Check v-if="verification === 'passed'" :size="12" aria-hidden="true" /><template v-else>3</template></span>Verify</li>
       </ol>
       <div class="diagnostics-guide-heading"><component :is="checkIcons[selectedCheck.id]" :size="20" aria-hidden="true" /><h3 id="diagnostics-guide-title" ref="guideTitle" tabindex="-1">{{ selectedCheck.label }}</h3></div>
       <div class="diagnostics-finding" :data-state="selectedCheck.state">
@@ -50,7 +50,7 @@
         <p>{{ selectedCheck.detail }}</p>
         <time v-if="selectedCheck.observedAt" :datetime="selectedCheck.observedAt">Observed {{ formatFullTimestamp(selectedCheck.observedAt) }}</time>
       </div>
-      <template v-if="stage === 'resolve'">
+      <div v-if="stage === 'resolve'" key="resolve" class="diagnostics-step-content">
         <div class="diagnostics-next"><p class="diagnostics-eyebrow">Next step</p><p>{{ selectedCheck.nextStep }}</p></div>
         <p v-if="selectedCheck.id === 'delivery' && assessment.nextAttemptAt" class="diagnostics-retry-time"><Clock3 :size="14" aria-hidden="true" /> Retry scheduled for {{ formatFullTimestamp(assessment.nextAttemptAt) }}</p>
         <div v-if="selectedCheck.action" class="diagnostics-remedy">
@@ -59,17 +59,17 @@
         </div>
         <button v-if="selectedCheck.destination" type="button" class="diagnostics-secondary" @click="emit('navigate', selectedCheck.destination)">{{ selectedCheck.destination === 'work' ? 'Inspect message history' : 'Review turn controls' }}<ArrowUpRight :size="14" aria-hidden="true" /></button>
         <button type="button" class="diagnostics-secondary" :disabled="checking || busy || !refreshDiagnostics" @click="verify"><RefreshCw :size="14" aria-hidden="true" />{{ selectedCheck.action ? 'Check again' : 'Refresh and verify' }}</button>
-      </template>
-      <template v-else>
+      </div>
+      <div v-else key="verify" class="diagnostics-step-content">
         <div class="diagnostics-next" role="status" aria-live="polite">
-          <p class="diagnostics-eyebrow">{{ busy ? 'Applying recovery' : recoveryError ? 'Recovery needs attention' : verification === 'passed' ? 'Check confirmed' : 'Verify the result' }}</p>
+          <p class="diagnostics-eyebrow"><span v-if="verification === 'passed'" class="diagnostics-confirmation" aria-hidden="true"><Check :size="14" /></span>{{ busy ? 'Applying recovery' : recoveryError ? 'Recovery needs attention' : verification === 'passed' ? 'Check confirmed' : 'Verify the result' }}</p>
           <p>{{ verificationMessage }}</p>
         </div>
         <p v-if="recoveryError" class="diagnostics-error" role="alert">{{ recoveryError }}</p>
         <button v-if="verification === 'passed'" type="button" class="diagnostics-primary" @click="closeCheck">Back to all checks<ArrowRight :size="15" aria-hidden="true" /></button>
         <button v-else type="button" class="diagnostics-primary" :disabled="checking || busy || !refreshDiagnostics" @click="verify"><RefreshCw :size="15" :class="{ 'diagnostics-spinning': checking }" aria-hidden="true" />{{ checking ? 'Checking…' : 'Check again' }}</button>
         <button type="button" class="diagnostics-secondary" :disabled="checking || busy" @click="reviewCheck">{{ verification === 'passed' ? 'Review this check' : 'Back to recovery' }}</button>
-      </template>
+      </div>
     </section>
 
     <p v-if="refreshMessage" class="diagnostics-refresh-result" :data-error="refreshFailed" role="status">{{ refreshMessage }}</p>
@@ -133,6 +133,7 @@ const verification = ref<"idle" | "passed" | "unresolved">("idle");
 const guideTitle = ref<HTMLElement | null>(null);
 const rootElement = ref<HTMLElement | null>(null);
 const checking = ref(false);
+const motionEnabled = ref(false);
 const refreshMessage = ref("");
 const refreshFailed = ref(false);
 const recoveryRequested = ref(false);
