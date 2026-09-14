@@ -1,3 +1,4 @@
+import { registerRoomKnowledgeTools } from "./tools/knowledge.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAgentSessionTools } from "./tools/agent-sessions.js";
 import { registerMessageTools, registerStatusTools } from "./tools/messages.js";
@@ -33,6 +34,7 @@ export function registerTools(
   registerRoomJoinTools(tools);
   if (surface.agentSessionLifecycle) registerAgentSessionTools(tools);
   registerRoomInspectionTools(tools);
+  registerRoomKnowledgeTools(tools);
   registerStatusTools(tools);
   if (profile === "autonomous_mcp_worker" || profile === "interactive_desktop") registerWorkspaceTools(tools);
   registerTaskTools(tools);

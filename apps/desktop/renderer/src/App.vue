@@ -76,6 +76,7 @@
           :project-entries="sidebarProjectEntries"
           :settings-entry="settingsEntry"
           :rental-request-count="rentalRequestCount"
+          :needs-you-count="needsYouCount"
           :pinned-collapsed="pinnedCollapsed"
           :rooms-collapsed="roomsCollapsed"
           :collapsed-projects="collapsedProjects"
@@ -88,6 +89,7 @@
           @cycle-sidebar="cycleSidebar"
           @new-room="selectNewRoomEntry"
           @open-rent="openRentMarketplace"
+          @open-needs-you="openNeedsYou"
           @open-updates="openUpdatesSurface"
           @open-settings="openSettingsSurface"
           @connect-account="openAccountAuthFlow"
@@ -186,6 +188,8 @@
           :open-add-agent-requested="openAddAgentAfterRepoPick"
           :notification-reveal-message-id="notificationRevealMessageId"
           :notification-reveal-nonce="notificationRevealNonce"
+          :attention-intent="attentionIntent"
+          @attention-opened="attentionIntent = null"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
           :on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @chat-scroll-position="rememberChatScrollPosition"
@@ -255,6 +259,8 @@
         @sign-out="signOut"
         @start-auth="openAccountAuthFlow"
       />
+
+      <NeedsYouView v-else-if="activeEntry.type === 'inbox'" :data="needsYouData" :loading="needsYouLoading" :error="needsYouError" @refresh="refreshNeedsYou" @open-room="openNeedsYouRoom" />
 
       <RentMarketplaceView
         v-else-if="activeEntry.type === 'marketplace'"
@@ -432,7 +438,7 @@ import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
 import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
-import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, needsYouEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
   deriveSidebarLatestMessages,
@@ -471,6 +477,9 @@ import {
 import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
 import { APP_IDLE_ATTRIBUTE, isAppIdle } from "./domain/app-idle";
 import { shouldSkipPollTick } from "./domain/visibility-polling";
+import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
+import NeedsYouView from "./components/desktop/content/NeedsYouView.vue";
+import { useNeedsYou } from "./composables/useNeedsYou";
 import { desktopIpc } from "./ipc/index.js";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -522,6 +531,18 @@ const loadingChatScrollRoomIdentifiers = ref<Set<string>>(new Set());
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const rentalRequestCount = ref(0);
+const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: needsYouCount, refresh: refreshNeedsYou, reset: resetNeedsYou } = useNeedsYou();
+const attentionIntent = ref<AttentionNavigationIntent | null>(null);
+let needsYouInterval: number | null = null;
+async function openNeedsYouRoom(room: string, messageId?: string, taskId?: string) {
+  attentionIntent.value = null;
+  notificationRevealMessageId.value = null;
+  try {
+    await openRoomFromAppAgent(room);
+    if (messageId || taskId) attentionIntent.value = { roomIdentifier: room, messageId, taskId };
+  } catch (error) { needsYouError.value = String(error); }
+}
+function openNeedsYou() { activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
 const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
 const notificationRevealMessageId = ref<string | null>(null);
@@ -1381,7 +1402,7 @@ const {
 });
 
 watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
-  if (next !== previous) clearDesktopMessageOutbox();
+  if (next !== previous) { clearDesktopMessageOutbox(); resetNeedsYou(); if (next) void refreshNeedsYou(); }
 }, { flush: "sync" });
 
 const showSignedOutGate = computed(() => (
@@ -1393,6 +1414,8 @@ function startSignedOutAuthFlow(): Promise<void> {
 }
 
 function clearDesktopSessionState(): void {
+  attentionIntent.value = null;
+  resetNeedsYou();
   clearDesktopMessageOutbox();
   clearDesktopMessageDrafts();
   invalidateSession();
@@ -2451,6 +2474,8 @@ watch(
 );
 
 onMounted(() => {
+  void refreshNeedsYou();
+  needsYouInterval = window.setInterval(() => { if (!document.hidden) void refreshNeedsYou(); }, 60_000);
   unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
   unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
   unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
@@ -2481,6 +2506,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (needsYouInterval) window.clearInterval(needsYouInterval);
   clearAuthPollTimer();
   clearLiveMetadataRefreshTimer();
   clearLiveMetadataRefreshInterval();

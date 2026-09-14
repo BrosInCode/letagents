@@ -7,6 +7,8 @@ import type { AgentSessionBearerCapability } from "../../shared/agent-session-be
 // must be authorized for exactly the requests those routes accept. With the
 // old single-segment `[^/]+` every worker call in a Git room failed 403.
 const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSessionBearerCapability }> = [
+  { method: "GET", path: /^\/rooms\/.+\/(?:memory|attention|memory\/[^/]+\/history)$/, capability: "coordination.read" },
+  { method: "POST", path: /^\/rooms\/.+\/(?:memory|attention)$/, capability: "coordination.propose" },
   { method: "GET", path: /^\/rooms\/.+\/messages$/, capability: "messages.read" },
   { method: "GET", path: /^\/rooms\/.+\/messages\/(?:poll|stream|threads|msg_\d+|msg_\d+\/thread|msg_\d+\/info)$/, capability: "messages.read" },
   { method: "PUT", path: /^\/rooms\/.+\/messages\/read$/, capability: "messages.read" },

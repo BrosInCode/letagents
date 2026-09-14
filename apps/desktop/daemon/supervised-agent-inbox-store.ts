@@ -141,6 +141,7 @@ const MAX_EFFECT_ERROR_BYTES = 16 * 1024;
 const READ_ONLY_EFFECT_TOOLS = new Set([
   "get_current_room", "check_repo", "check_repo_visibility",
   "read_messages", "wait_for_messages", "get_board", "get_board_settings",
+  "get_room_memory", "get_human_requests",
   "get_room_artifacts", "get_room_events", "list_board_intents",
   "get_onboarding_status", "status_local_codex_session", "rental_list_requests",
 ]);

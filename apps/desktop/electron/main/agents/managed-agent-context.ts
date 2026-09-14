@@ -1,3 +1,4 @@
+import { getDesktopKnowledge } from "../rooms/knowledge.js";
 import type { DesktopTaskSummary } from "../../ipc-types.js";
 import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
 import {
@@ -675,6 +676,9 @@ async function getRoomContextSummary(
   args: Record<string, unknown>,
 ): Promise<ManagedAgentContextResult> {
   const messageLimit = numberArg(args, "message_limit", 12, MAX_CONTEXT_MESSAGES);
+  const memoryPage = await getDesktopKnowledge(roomIdentifier, 'memory').catch(() => null);
+  const activeMemory = memoryPage?.records.filter(entry => !entry.archived) ?? [];
+  const memoryContext = { memory: activeMemory.slice(0, 30), memoryStatus: !memoryPage ? 'unavailable' as const : memoryPage.truncated || activeMemory.length > 30 ? 'truncated' as const : 'ready' as const };
   if (storage === "local") {
     const recentMessages = await getLatestLocalChatMessages(roomIdentifier, { limit: messageLimit });
     const artifactPage = await getLocalRoomArtifacts(roomIdentifier, {
@@ -683,6 +687,7 @@ async function getRoomContextSummary(
     return {
       ok: true,
       tool: "get_room_context_summary",
+      ...memoryContext,
       roomIdentifier,
       storage,
       messages: recentMessages.messages.map(compactMessage),
@@ -700,6 +705,7 @@ async function getRoomContextSummary(
   const result: Extract<ManagedAgentContextResult, { ok: true }> = {
     ok: true,
     tool: "get_room_context_summary",
+    ...memoryContext,
     roomIdentifier,
     storage,
     messages: recentMessages.messages.map(compactMessage),
