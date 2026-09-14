@@ -1546,6 +1546,98 @@ test("Codex display projects exact native tool shapes without changing lifecycle
   assert.deepEqual(display.project(displayEvent("codex", "item/reasoning/textDelta", { threadId: "thread", turnId: "turn", delta: "private thought" })), []);
 });
 
+test("Codex failures expose structured and MCP result errors without treating successful text as failure", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const project = (item: Record<string, unknown>) => display.project(displayEvent("codex", "item/completed", {
+    threadId: "thread", turnId: "turn", item: { id: "tool", type: "mcpToolCall", tool: "list_pages", arguments: {}, ...item },
+  }))[0]?.payload as Record<string, unknown>;
+  const message = "Could not connect to Chrome.\nCause: Failed to fetch browser webSocket URL from http://127.0.0.1:56561/json/version: fetch failed";
+  const result = { content: [{ type: "text", text: message }] };
+  assert.equal(project({ status: "failed", result, error: null }).error, message);
+  assert.equal(project({ status: "completed", result: { ...result, isError: true } }).status, "error");
+  assert.equal(project({ status: "failed", error: { message: "Permission denied", code: -1 } }).error, "Permission denied");
+  const fullError = "Request context ".repeat(200) + "Distinct final cause: permission denied";
+  assert.equal(project({ status: "failed", error: { message: fullError }, result: null }).error, fullError);
+  assert.equal(project({ status: "failed", error: fullError, result: null }).error, fullError);
+  assert.equal(project({ status: "failed", error: { code: -1 } }).error, "The tool failed without providing an error message.");
+  assert.equal(project({ status: "completed", result }).error, null);
+  assert.equal(project({ status: "completed", result }).status, "completed");
+  const redacted = project({ status: "failed", result: { content: [{ type: "text", text: "Authorization: Bearer secret_canary_not_real_1234567890" }] } });
+  assert.match(String(redacted.error), /REDACTED/);
+  assert.doesNotMatch(JSON.stringify(redacted), /secret_canary/);
+  const largeResult = { content: Array.from({ length: 4 }, () => ({ type: "text", text: "x".repeat(7_000) })) };
+  const large = project({ status: "failed", result: largeResult });
+  assert.equal(large.callID, "codex:thread:turn:tool");
+  assert.equal(large.tool, "list_pages");
+  assert.equal(large.status, "error");
+  assert.ok(String(large.error).length <= 1_201);
+  assert.deepEqual(large.output, largeResult, "the full bounded result remains available behind disclosure");
+});
+
+test("Codex command output deltas survive a completion without aggregated output and retain exact ownership", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const lifecycle = (method: string, turnId = "turn", overrides = {}) => display.project(displayEvent("codex", method, {
+    threadId: "thread", turnId, item: { id: "shell", type: "commandExecution", command: "rg --files && rg pattern missing*", ...overrides },
+  }));
+  const delta = (text: string, turnId = "turn", threadId = "thread") => display.project(displayEvent("codex", "item/commandExecution/outputDelta", {
+    threadId, turnId, itemId: "shell", delta: text,
+  }));
+  delta("unowned output");
+  lifecycle("item/started");
+  delta("README.md\n");
+  lifecycle("item/started");
+  delta("foreign thread", "turn", "other");
+  delta("foreign turn", "other");
+  delta("zsh:1: no matches found: missing*\n");
+  const completed = lifecycle("item/completed", "turn", { status: "failed", exitCode: 1, aggregatedOutput: null })[0]?.payload as any;
+  assert.equal(completed.output, "README.md\nzsh:1: no matches found: missing*\n");
+  assert.equal(completed.error, "Command exited with code 1.");
+  delta("late output");
+  assert.equal((lifecycle("item/completed", "other", { status: "failed", exitCode: 1 })[0]?.payload as any).output, null);
+
+  lifecycle("item/started", "next");
+  delta("stream fragment", "next");
+  assert.equal((lifecycle("item/completed", "next", { aggregatedOutput: "authoritative complete output", exitCode: 0 })[0]?.payload as any).output, "authoritative complete output");
+  lifecycle("item/started", "unfinished");
+  delta("abandoned", "unfinished");
+  display.project(displayEvent("codex", "turn/completed", { threadId: "thread", turn: { id: "unfinished" } }));
+  assert.equal((lifecycle("item/completed", "unfinished", { exitCode: 1 })[0]?.payload as any).output, null);
+});
+
+test("Codex captured command output is bounded and redacted again after joining chunks", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const project = (method: string, itemId: string, extra = {}) => display.project(displayEvent("codex", method, {
+    threadId: "thread", turnId: "turn", itemId, item: { id: itemId, type: "commandExecution", exitCode: 1 }, ...extra,
+  }));
+  project("item/started", "secret");
+  project("item/commandExecution/outputDelta", "secret", { delta: "LETAGENTS_TO" });
+  project("item/commandExecution/outputDelta", "secret", { delta: "KEN=secret_canary_not_real_1234567890" });
+  const redacted = project("item/completed", "secret")[0]!;
+  assert.doesNotMatch(JSON.stringify(redacted), /secret_canary/);
+  assert.equal(redacted.payload_redacted, true);
+  project("item/started", "redacted-suffix");
+  project("item/commandExecution/outputDelta", "redacted-suffix", { delta: "LETAGENTS_TOKEN=canary_first" });
+  project("item/commandExecution/outputDelta", "redacted-suffix", { delta: "_CANARY_UNREDACTED_TAIL\n" });
+  const suppressed = project("item/completed", "redacted-suffix")[0]!;
+  assert.equal((suppressed.payload as any).output, null);
+  assert.doesNotMatch(JSON.stringify(suppressed), /canary_first|CANARY_UNREDACTED_TAIL/);
+  project("item/started", "truncated-chunk");
+  project("item/commandExecution/outputDelta", "truncated-chunk", { delta: "x".repeat(9_000) });
+  project("item/commandExecution/outputDelta", "truncated-chunk", { delta: "unknown continuation" });
+  assert.equal((project("item/completed", "truncated-chunk")[0]?.payload as any).output, null);
+  project("item/started", "long");
+  for (let n = 0; n < 3; n++) project("item/commandExecution/outputDelta", "long", { delta: "x".repeat(4_000) });
+  const bounded = project("item/completed", "long")[0]!;
+  assert.equal(bounded.payload_truncated, true);
+  assert.equal((bounded.payload as any).output, null, "partial captured text cannot preserve redaction boundaries");
+  for (let n = 0; n < 129; n++) {
+    project("item/started", `pending-${n}`);
+    project("item/commandExecution/outputDelta", `pending-${n}`, { delta: `output ${n}` });
+  }
+  assert.equal((project("item/completed", "pending-0")[0]?.payload as any).output, null);
+  assert.equal((project("item/completed", "pending-128")[0]?.payload as any).output, "output 128");
+});
+
 test("Claude display scopes full assistant messages and tool results to proven native turns", () => {
   const display = new ProviderLiveDisplay("session");
   const event = (payload: Record<string, unknown>) => displayEvent("claude-code", String(payload.type), { session_id: "session", ...payload });

@@ -21,6 +21,10 @@
             <span class="agent-live-caption">Output</span>
             <pre>{{ formatLiveValue(single.item.output) }}</pre>
           </template>
+          <template v-if="single.item.error && failure?.message !== single.item.error">
+            <span class="agent-live-caption">Full error</span>
+            <pre>{{ single.item.error }}</pre>
+          </template>
           <p v-if="!formatLiveValue(single.item.input) && !formatLiveValue(single.item.output)" class="agent-live-caption">No additional details received.</p>
         </template>
         <ol v-else class="agent-live-group-items" aria-label="Individual actions">
@@ -36,7 +40,14 @@
         </ol>
       </div>
     </details>
-    <p v-if="single?.item.error" class="agent-live-error">{{ single.item.error }}</p>
+    <div v-if="failure" class="agent-live-error">
+      <p>{{ failure.message }}</p>
+      <template v-if="failure.outputPreview">
+        <span class="agent-live-caption">Output excerpt</span>
+        <pre>{{ failure.outputPreview }}</pre>
+      </template>
+      <p v-if="failure.detail" class="agent-live-failure-detail">{{ failure.detail }}</p>
+    </div>
     <div v-if="single?.tool.replyText" class="agent-live-prose agent-live-reply" v-html="renderDesktopMarkdown(single.tool.replyText, { block: true, mentions: false })"></div>
   </div>
 </template>
@@ -44,11 +55,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Check, ChevronRight, CircleAlert, FilePenLine, FileText, Hourglass, Search, SquareTerminal, Wrench } from "@lucide/vue";
-import { formatLiveValue, liveActionStatus, type LiveTraceEntry } from "../../../../domain/agent-inspector-live-trace";
+import { formatLiveValue, liveActionFailure, liveActionStatus, type LiveTraceEntry } from "../../../../domain/agent-inspector-live-trace";
 import { renderDesktopMarkdown } from "../formatting/markdown";
 
 const props = defineProps<{ entry: Extract<LiveTraceEntry, { kind: "actions" }>; current: boolean }>();
 const single = computed(() => props.entry.actions.length === 1 ? props.entry.actions[0]! : null);
+const failure = computed(() => single.value ? liveActionFailure(single.value) : null);
 const status = computed(() => single.value?.item.error ? "error" : single.value?.item.status ?? "completed");
 const ongoing = computed(() => ["pending", "running"].includes(status.value));
 const headline = computed(() => {

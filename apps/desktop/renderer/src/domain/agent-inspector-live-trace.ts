@@ -63,6 +63,22 @@ export function liveActionStatus(status: string, current: boolean): string {
   return status.replace(/[_-]+/g, " ");
 }
 
+export function liveActionFailure(action: LiveAction) {
+  const { item, tool } = action;
+  if (!["error", "failed"].includes(item.status) && !item.error) return null;
+  const message = item.error?.trim() || "The tool failed without providing an error message.";
+  const shell = tool.toolName === "shellToolCall";
+  const output = typeof item.output === "string" ? item.output.trim() : "";
+  const outputPreview = shell && output ? output.split("\n").slice(-4).join("\n").slice(-600) : null;
+  return {
+    message: message.length > 1_200 ? `${message.slice(0, 1_200)}…` : message,
+    outputPreview,
+    detail: shell && !output
+      ? "Command output is unavailable, so the failing step could not be identified."
+      : null,
+  };
+}
+
 export function formatLiveValue(input: unknown): string {
   if (input === null || input === undefined) return "";
   if (typeof input === "string") return input;

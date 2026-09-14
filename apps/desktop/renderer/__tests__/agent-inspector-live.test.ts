@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import { createSSRApp } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
-import { canPresentCurrentAgentStream, currentAgentRequest, presentAgentTrace, liveActionStatus } from "../src/domain/agent-inspector-live-trace";
+import { ProviderLiveDisplay } from "../../daemon/provider-live-display";
+import { sanitizeDaemonActivityEvent } from "../../daemon/credential-redaction";
+import { canPresentCurrentAgentStream, currentAgentRequest, presentAgentTrace, liveActionStatus, liveActionFailure } from "../src/domain/agent-inspector-live-trace";
 
 import {
   agentLiveAvailability,
@@ -588,5 +590,50 @@ test("Live renders readable markdown and expandable action groups without execut
     const stale = await render("stale");
     assert.doesNotMatch(stale, /Following live|data-running="true"|data-current="true"/);
     assert.match(stale, /Live status unavailable/);
+  } finally { await vite.close(); }
+});
+
+test("Live failures show received errors and output excerpts outside disclosure and explain missing output", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLiveActions.vue")).default;
+    const render = async (overrides: Record<string, unknown>) => {
+      const item = { kind: "tool" as const, id: "call", tool: "shellToolCall", status: "error", input: { command: "git status -sb && test -d node_modules", cwd: "/project" }, output: null, error: "Command exited with code 1.", ...overrides };
+      const entry = presentAgentTrace([item], false)[0]!;
+      assert.ok(entry.kind === "actions");
+      return { html: await renderToString(createSSRApp(component, { entry, current: true })), failure: liveActionFailure(entry.actions[0]!) };
+    };
+    const shell = await render({ output: "README.md\nzsh:1: no matches found: content/AgentInspector*\n" });
+    const visibleShell = shell.html.split('</details>')[1]!;
+    assert.match(visibleShell, /Command exited with code 1/);
+    assert.match(visibleShell, /Output excerpt/);
+    assert.match(visibleShell, /zsh:1: no matches found/);
+    assert.doesNotMatch(visibleShell, /Command output is unavailable/);
+    const missing = await render({});
+    assert.match(missing.html.split('</details>')[1]!, /Command output is unavailable/);
+    assert.match(missing.html, /git status -sb &amp;&amp; test -d node_modules/);
+    assert.match(missing.html, /\/project/);
+    assert.equal(missing.failure?.outputPreview, null);
+    const browser = await render({ tool: "list_pages", error: "Could not connect to Chrome.\nCause: http://127.0.0.1:56561/json/version", output: { content: [{ type: "text", text: "Could not connect to Chrome." }] } });
+    assert.match(browser.html.split('</details>')[1]!, /Could not connect to Chrome/);
+    assert.match(browser.html.split('</details>')[1]!, /56561/);
+    assert.doesNotMatch(browser.html, /Command output is unavailable/);
+    const hostile = await render({ error: '<img src=x onerror=alert(1)>', output: '<script>alert(1)</script>' });
+    assert.doesNotMatch(hostile.html, /<img|<script/);
+    assert.match(hostile.html, /&lt;img/);
+    const native = sanitizeDaemonActivityEvent({ provider: "codex", method: "item/completed", kind: "item_lifecycle", summary: "",
+      observed_at: "2026-09-14T14:58:30Z", sequence: 1, status: "working", payload_redacted: false, payload_truncated: false, durable_payload_ref: null,
+      payload: { threadId: "thread", turnId: "turn", item: { type: "commandExecution", id: "call", status: "failed", exitCode: 1,
+        error: { message: "Error ".repeat(300) + "full error ending" }, aggregatedOutput: "a\n".repeat(500) } },
+    });
+    const projected = new ProviderLiveDisplay("thread").project(native)[0]!.payload as Record<string, unknown>;
+    const long = await render(projected);
+    assert.ok(long.failure!.message.length <= 1_201);
+    assert.ok(long.failure!.outputPreview!.length <= 600);
+    assert.match(long.html.split('</details>')[0]!, /Full error/);
+    assert.match(long.html.split('</details>')[0]!, /full error ending/);
+    const success = await render({ status: "completed", error: null, output: "done" });
+    assert.equal(success.failure, null);
+    assert.doesNotMatch(success.html, /class="agent-live-error"/);
   } finally { await vite.close(); }
 });
