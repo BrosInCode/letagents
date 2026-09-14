@@ -329,11 +329,9 @@ function handleKeydown(event: KeyboardEvent): void {
     return;
   }
   if (!props.compact || event.key !== "Tab" || !surfaceElement.value) return;
-  const closedDetails = [...surfaceElement.value.querySelectorAll<HTMLDetailsElement>('details:not([open])')];
   const focusable = [...surfaceElement.value.querySelectorAll<HTMLElement>(
     'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
-  )].filter(element => element.getClientRects().length > 0
-    && !closedDetails.some(details => details.contains(element) && !details.querySelector("summary")?.contains(element)));
+  )].filter(element => element.tabIndex >= 0 && element.checkVisibility({ visibilityProperty: true }));
   if (!focusable.length) return;
   const first = focusable[0]!;
   const last = focusable.at(-1)!;

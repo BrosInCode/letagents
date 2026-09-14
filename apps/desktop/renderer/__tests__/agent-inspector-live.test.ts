@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createSSRApp } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
-import { canPresentCurrentAgentStream, currentAgentRequest } from "../src/domain/agent-inspector-live-trace";
+import { canPresentCurrentAgentStream, currentAgentRequest, presentAgentTrace, liveActionStatus } from "../src/domain/agent-inspector-live-trace";
 
 import {
   agentLiveAvailability,
@@ -82,6 +82,7 @@ test("Live keeps captured actions after work finishes and separates them from a 
     const activeWork = { ...work, active: true, state: "awaiting_result", agentState: "responding", startedAt: "2026-09-05T10:01:00Z" };
     const active = await render({ work: activeWork, activeSourceMessageId: "msg_new" });
     assert.match(active, /Check the tests/);
+    assert.match(active, /Current request/);
     assert.match(active, /Checking the test configuration/);
     assert.doesNotMatch(active, /Previous request finished|Recent actions/);
     assert.match(active.split('class="agent-inspector-live-trigger"')[0], /Requested: Reading a file · package.json/,
@@ -355,28 +356,13 @@ test("describeLiveToolCall truncates long details but never truncates the room r
   assert.equal(reply.replyText, longText);
 });
 
-test("the live surface presents a work narrative and keeps technical payloads behind disclosure", () => {
+test("the live surface keeps provider authority separate from presentation", () => {
   const surface = source("../src/components/desktop/content/agent-inspector/AgentInspectorLive.vue");
-  assert.match(surface, /Live work/);
-  assert.match(surface, /Working for/);
-  assert.match(surface, /props\.work\.active && !props\.feed\.ended/);
   assert.match(surface, /scopeAgentStreamEventsToWork\(props\.feed\.events, props\.work\)/);
   assert.match(surface, /agentLiveAvailability\(props\.work, props\.feed\.ended\)/);
-  assert.match(surface, /This agent is retired and cannot receive new room work/);
-  assert.match(surface, /The agent is still starting and cannot receive room work yet/);
-  assert.match(surface, /Ready for a message/);
-  assert.doesNotMatch(surface, /AgentInspectorLiveHistory/);
-  assert.doesNotMatch(surface, /Hidden chain of thought|supervisor's room-turn lifecycle owns|Waiting for room work/);
-  assert.doesNotMatch(surface, /transcript\.value\.ended \? "Ended" : "In progress"/);
-  assert.match(surface, /Agent commentary/);
-  assert.match(surface, /Work note/);
+  assert.match(surface, /availability\.value === "active" && canShowCurrent\.value/);
+  assert.match(surface, /Follow latest/);
   assert.doesNotMatch(surface, />Thinking</);
-  assert.doesNotMatch(surface, /Working aloud/);
-  assert.doesNotMatch(surface, />Response</);
-  assert.match(surface, /agent-inspector-live-reply/);
-  assert.match(surface, /<details/);
-  assert.match(surface, /Technical details · \{\{ entry\.tool\.toolName \}\}/);
-  assert.match(surface, /describeLiveToolCall/);
 });
 
 test("running native actions use present-progressive copy", () => {
@@ -461,8 +447,12 @@ test("Live smoothly follows growing content, yields to readers, and cleans up", 
     assert.equal(frames.size, 0, "animation settles instead of running forever");
   }
   let dispose: (() => void) | undefined;
+  let resume: (() => void) | undefined;
+  const followingChanges: boolean[] = [];
   try {
-    dispose = followAgentLiveScroll(viewport as unknown as HTMLElement, {} as HTMLElement);
+    const follower = followAgentLiveScroll(viewport as unknown as HTMLElement, {} as HTMLElement, value => followingChanges.push(value));
+    dispose = follower.dispose;
+    resume = follower.resume;
     assert.equal(top, 600, "opening Live starts at the latest activity");
     viewport.scrollHeight += 200;
     resize(); tick();
@@ -490,6 +480,12 @@ test("Live smoothly follows growing content, yields to readers, and cleans up", 
     viewport.scrollHeight += 200;
     resize(); tick();
     assert.equal(top, readingTop, "new content leaves the reader's position alone");
+    assert.equal(followingChanges.at(-1), false, "the UI can offer Follow latest while reading");
+    resume(); settle();
+    assert.equal(followingChanges.at(-1), true);
+    assert.equal(top, viewport.scrollHeight - viewport.clientHeight, "Follow latest explicitly returns to new work");
+    viewport.scrollTop -= 200;
+    viewport.dispatchEvent(new Event("scroll"));
 
     viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight;
     viewport.dispatchEvent(new Event("scroll"));
@@ -529,4 +525,68 @@ test("Live smoothly follows growing content, yields to readers, and cleans up", 
       else Reflect.deleteProperty(globalThis, key);
     }
   }
+});
+
+test("readable traces group only adjacent successful exploration and retain every action", () => {
+  const action = (id: string, tool = "readToolCall", status = "completed", error: string | null = null) => ({
+    kind: "tool" as const, id, tool, status, input: { path: `${id}.ts` }, output: "source", error,
+  });
+  const items = [action("a"), action("b"), { kind: "message" as const, id: "note", text: "Found it." },
+    action("c"), action("d", "readToolCall", "error", "Read failed"), action("e"),
+    action("f", "readToolCall", "running"), action("g", "editToolCall"), action("h", "editToolCall"),
+    action("i", "grepToolCall"), action("j", "globToolCall"),
+    action("k", "readToolCall", "completed", "Provider reported an error")];
+  const entries = presentAgentTrace(items, true);
+  assert.deepEqual(entries.map(entry => entry.kind === "actions" ? entry.actions.map(action => action.item.id) : entry.id),
+    [["a", "b"], "note", ["c"], ["d"], ["e"], ["f"], ["g"], ["h"], ["i", "j"], ["k"]]);
+  const flattened = entries.flatMap(entry => entry.kind === "actions" ? entry.actions.map(action => action.item) : [entry]);
+  assert.deepEqual(flattened, items, "compaction never drops evidence or changes its order");
+  assert.deepEqual(presentAgentTrace([{ kind: "reasoning", id: "r", text: "Summary" }], false), []);
+  const inspected = new Map([["b", "b"], ["c", "b"], ["d", "d"]]);
+  const before = presentAgentTrace([action("a", "readToolCall", "running"), action("b"), action("c"), action("d", "readToolCall", "running")], true, inspected);
+  const after = presentAgentTrace([action("a"), action("b"), action("c"), action("d"), action("e"), action("f")], true, inspected);
+  assert.deepEqual(before.map(entry => entry.id), ["a", "b", "d"]);
+  assert.deepEqual(after.map(entry => entry.kind === "actions" ? entry.actions.map(action => action.item.id) : entry.id),
+    [["a"], ["b", "c"], ["d"], ["e", "f"]], "inspected entries retain their keys and membership when neighboring calls finish");
+});
+
+test("native failures and unavailable pending actions never imply completed or current work", () => {
+  for (const tool of ["shellToolCall", "editToolCall", "readToolCall", "searchToolCall"]) {
+    assert.match(describeLiveToolCall(tool, {}, { status: "error", error: "failed", output: null }).headline, /failed$/);
+    assert.match(describeLiveToolCall(tool, {}, { status: "interrupted", error: null, output: null }).headline, /interrupted$/);
+  }
+  assert.equal(liveActionStatus("running", false), "No finish recorded");
+  assert.equal(liveActionStatus("pending", false), "No finish recorded");
+  assert.equal(liveActionStatus("running", true), "Running");
+  const pending = foldAgentStreamEvents([event({ sequence: 1, kind: "tool_lifecycle", method: "item/toolCall/updated",
+    payload: { callID: "pending", tool: "readToolCall", status: "pending" } })], true).items[0];
+  assert.ok(pending?.kind === "tool");
+  assert.equal(pending.status, "interrupted");
+  assert.equal(describeLiveToolCall("editToolCall", {changes: [{path: "src/auth.ts"}, {path:"src/auth.test.ts"}]}).detail, "src/auth.ts, src/auth.test.ts");
+  assert.equal(describeLiveToolCall("grepToolCall", {pattern:"timeout",path:"src"}).detail, "timeout · src");
+});
+
+test("Live renders readable markdown and expandable action groups without executing supplied HTML", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLive.vue")).default;
+    const events = [event({sequence:1,payload:{partId:"note",delta:'**Found it.** Check `auth.ts`.\n\n- Keep the count\n- Verify retries\n\n<img src=x onerror=alert(1)>'}}),
+      ...["a", "b", "c"].map((id,i) => event({sequence:i+2,kind:"tool_lifecycle",method:"item/toolCall/updated",payload:{callID:id,tool:"readToolCall",status:"completed",input:{path:`${id}.ts`},output:`export const ${id} = true;`}}))];
+    const render = (freshness = "fresh") => renderToString(createSSRApp(component, {feed:{events,ended:false,droppedEvents:0},
+      work:{active:true,startedAt:"2026-07-30T00:00:00Z",state:"awaiting_result",freshness,agentState:"responding"},
+      resource:{status:"ready",detail:null},supportsReasoning:true,activeSourceMessageId:"msg_1"}));
+    const html = await render();
+    assert.match(html, /<strong>Found it\.<\/strong>/);
+    assert.match(html, /<code>auth\.ts<\/code>/);
+    assert.match(html, /<li>Verify retries<\/li>/);
+    assert.match(html, /&lt;img/);
+    assert.doesNotMatch(html, /<img/);
+    assert.match(html, /3 file reads/);
+    assert.match(html, /aria-label="Individual actions"/);
+    for (const id of ["a", "b", "c"]) assert.match(html, new RegExp(`export const ${id} = true;`));
+    assert.match(html, /Following live/);
+    const stale = await render("stale");
+    assert.doesNotMatch(stale, /Following live|data-running="true"|data-current="true"/);
+    assert.match(stale, /Live status unavailable/);
+  } finally { await vite.close(); }
 });
