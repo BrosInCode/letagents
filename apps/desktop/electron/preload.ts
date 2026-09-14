@@ -73,7 +73,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:open-model:save-settings", input),
   },
   room: {
-    getNeedsYou: () => ipcRenderer.invoke("desktop:room:needs-you"),
+    getNeedsYou: (includeUpdates = false) => ipcRenderer.invoke("desktop:room:needs-you", includeUpdates),
     getKnowledge: (room, type) => ipcRenderer.invoke("desktop:room:knowledge", room, type),
     createKnowledge: (room, type, input) => ipcRenderer.invoke("desktop:room:knowledge-create", room, type, input),
     reviseKnowledge: (room, type, id, input) => ipcRenderer.invoke("desktop:room:knowledge-revise", room, type, id, input),
