@@ -65,6 +65,10 @@
 .agent-live-action[data-status="interrupted"] :is(.agent-live-icon,.agent-live-action-status) { color: var(--amber-text); }
 .agent-live-action[data-result="true"] :is(.agent-live-icon,.agent-live-action-status) { color: var(--green-text); }
 .agent-live-error { margin: 3px 0 5px 33px; padding: 8px 10px; border-radius: 7px; background: var(--red-dim); color: var(--red-text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-live-error p { margin: 0; white-space: pre-line; }
+.agent-live-error .agent-live-caption { margin-top: 8px; color: inherit; }
+.agent-live-error pre { margin: 3px 0 0; font: 11px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-live-error .agent-live-failure-detail { margin-top: 6px; color: var(--text-secondary); }
 .agent-live-reply { margin: 4px 0 8px 33px; }
 .agent-live-action-body { margin: 0 0 8px 33px; padding: 10px; border: 1px solid var(--live-border); border-radius: 8px; min-width: 0; background: var(--bg-card); }
 .agent-live-action-body > .agent-live-caption + .agent-live-caption { margin-top: 8px; }
