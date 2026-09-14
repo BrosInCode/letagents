@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { workspaceFilePatches } from '../src/domain/workspace-diff.js';
 import type { WorkspaceChangedFile } from '../../../../shared/workspace-change-summary.mjs';
+import { workspaceCodeLineNumber, workspaceCodeText } from '../src/domain/workspace-code-reader';
 const file = (path: string): WorkspaceChangedFile => ({ path, previous_path: null, status: 'modified', additions: 1, deletions: 1, binary: false });
 test('workspace review associates files by path and counts context, added, and removed lines', () => {
   const patches = workspaceFilePatches('diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -8,2 +8,2 @@\n-old\n+new\n context\n', [file('b.ts'), file('a.ts')]);
@@ -70,4 +71,17 @@ test('a diff page has a total character budget even when every line is enormous'
     assert.ok(page.nextOffset > offset); offset = page.nextOffset;
   } while (true);
   assert.equal(rows, 601);
+});
+
+test('Monaco code pages keep original before/after numbers and mark truncated text', async () => {
+  const { createWorkspaceDiffIndex, readWorkspaceDiffPage } = await import('../src/domain/workspace-diff.js');
+  const patch = 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -98,2 +101,2 @@\n-old()\n+new()\n context\n';
+  const page = readWorkspaceDiffPage(createWorkspaceDiffIndex(patch, [file('a.ts')]), 'a.ts', { offset: 1 });
+  assert.equal(workspaceCodeText(page.lines), 'old()\nnew()\ncontext');
+  assert.equal(workspaceCodeLineNumber(page.lines[0]), '    98        −');
+  assert.equal(workspaceCodeLineNumber(page.lines[1]), '          101 +');
+  assert.equal(workspaceCodeLineNumber(page.lines[2]), '    99    102  ');
+  const truncated = { ...page.lines[1], text: '<script>untrusted()</script>', nextTextOffset: 4096 };
+  assert.equal(workspaceCodeText([truncated]), '<script>untrusted()</script>…');
+  assert.equal(workspaceCodeText([{ ...truncated, nextTextOffset: null }]), '<script>untrusted()</script>');
 });

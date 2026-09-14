@@ -293,7 +293,7 @@ watch(surfaceKind, () => {
 function handleHostKeydown(event: KeyboardEvent): void {
   if (!props.open || !compact.value || event.key !== "Escape") return;
   const target = event.target as (EventTarget & { closest?: (selector: string) => Element | null }) | null;
-  if (target?.closest?.('[role="menu"]')) return;
+  if (target?.closest?.('[role="menu"]') || target?.closest?.('.workspace-reader-backdrop')) return;
   event.preventDefault();
   event.stopPropagation();
   emit("close");
@@ -301,6 +301,10 @@ function handleHostKeydown(event: KeyboardEvent): void {
 
 function handleDocumentPointerDown(event: PointerEvent): void {
   if (!props.open || compact.value || event.button !== 0) return;
+  // The workspace reader belongs to this inspector but is teleported to body.
+  // Its own dialog handles dismissal, including pointer presses on its scrim.
+  const target = event.target as (EventTarget & { closest?: (selector: string) => Element | null }) | null;
+  if (target?.closest?.('.workspace-reader-backdrop')) return;
   const host = wideHostElement.value;
   if (!host || (event.target && host.contains(event.target as Node))) return;
   // The pointer target is the user's new focus destination. Escape and the
