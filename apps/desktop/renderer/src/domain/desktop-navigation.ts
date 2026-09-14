@@ -65,4 +65,4 @@ export const systemEntries: SystemEntry[] = [
   diagnosticsEntry,
 ];
 
-export const needsYouEntry: NeedsYouEntry = { id: "inbox:needs-you", type: "inbox", title: "Needs you", description: "Questions, decisions and work awaiting your attention", sectionLabel: "LetAgents" };
+export const needsYouEntry: NeedsYouEntry = { id: "inbox:needs-you", type: "inbox", title: "Inbox", description: "Requests and updates across your rooms", sectionLabel: "LetAgents" };

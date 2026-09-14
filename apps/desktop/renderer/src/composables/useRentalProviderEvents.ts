@@ -4,13 +4,20 @@ import type { DesktopRentalProviderDashboard, DesktopRentalProviderEvent } from 
 import { desktopIpc } from "../ipc/index.js";
 
 let dashboardRequest: Promise<DesktopRentalProviderDashboard> | null = null;
+let dashboardGeneration = 0;
 const DASHBOARD_REQUEST_TIMEOUT_MS = 15_000;
+
+export function invalidateRentalProviderDashboard(): void {
+  dashboardGeneration++;
+  dashboardRequest = null;
+}
 
 /** Coalesce a single provider event across the app badge, inbox and dashboard. */
 export function loadRentalProviderDashboard(
   timeoutMs = DASHBOARD_REQUEST_TIMEOUT_MS,
 ): Promise<DesktopRentalProviderDashboard> {
   if (dashboardRequest) return dashboardRequest;
+  const generation = dashboardGeneration;
   const bridge = desktopIpc.rental;
   if (!bridge?.getProviderDashboard) {
     return Promise.reject(new Error("Restart LetAgents Desktop to use renting."));
@@ -22,7 +29,10 @@ export function loadRentalProviderDashboard(
       timeout = setTimeout(() => reject(new Error("Rental dashboard refresh timed out.")), timeoutMs);
     }),
   ]);
-  const tracked = request.finally(() => {
+  const tracked = request.then(result => {
+    if (generation !== dashboardGeneration) throw new Error('Account changed while checking rental requests.');
+    return result;
+  }).finally(() => {
     if (timeout) clearTimeout(timeout);
     if (dashboardRequest === tracked) dashboardRequest = null;
   });

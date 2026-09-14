@@ -165,7 +165,7 @@ export interface DesktopApi {
     saveSettings: (input: DesktopOpenModelSaveSettingsInput) => Promise<DesktopOpenModelSettingsStatus>;
   };
   room: {
-    getNeedsYou?: () => Promise<DesktopNeedsYou>;
+    getNeedsYou?: (includeUpdates?: boolean) => Promise<DesktopNeedsYou>;
     getKnowledge?: (room: string, type: KnowledgeType) => Promise<KnowledgePage>;
     createKnowledge?: (room: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }) => Promise<KnowledgeRecord>;
     reviseKnowledge?: (room: string, type: KnowledgeType, id: string, input: KnowledgeRevisionInput) => Promise<KnowledgeRecord>;

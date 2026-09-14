@@ -23,30 +23,23 @@ import {
   shouldRefreshEventsForMessage,
   useDesktopRoomGitHubEvents,
 } from "../src/components/desktop/content/room-shell/useDesktopRoomGitHubEvents";
-import {
-  mergeThreadInboxPages,
-  useDesktopRoomInbox,
-} from "../src/components/desktop/content/room-shell/useDesktopRoomInbox";
+import { mergeThreadInboxPages } from "../src/composables/useNeedsYou";
 
 const shellSource = read("../src/components/desktop/content/DesktopRoomShell.vue");
-const inboxSource = read("../src/components/desktop/content/room-shell/useDesktopRoomInbox.ts");
 const githubEventsSource = read("../src/components/desktop/content/room-shell/useDesktopRoomGitHubEvents.ts");
 
-test("the desktop room shell composes bounded inbox and GitHub event owners", () => {
+test("the desktop room shell keeps GitHub events and no longer owns an inbox", () => {
   assert.ok(shellSource.split("\n").length < 3_000);
-  assert.match(shellSource, /useDesktopRoomInbox\(/);
+  assert.doesNotMatch(shellSource, /useDesktopRoomInbox|RoomInboxView|id: "inbox"/);
   assert.match(shellSource, /useDesktopRoomGitHubEvents\(/);
   assert.doesNotMatch(shellSource, /desktopIpc\.room\.getThreads/);
   assert.doesNotMatch(shellSource, /desktopIpc\.room\.getGitHubEvents/);
   assert.doesNotMatch(shellSource, /letagents-desktop:room-inbox-seen/);
-  assert.match(inboxSource, /roomApi\.getThreads/);
-  assert.match(inboxSource, /letagents-desktop:room-inbox-seen/);
   assert.match(githubEventsSource, /desktopIpc\.room\.getGitHubEvents/);
   assert.match(githubEventsSource, /parseGitHubEvent/);
 });
 
 test("extracted room shell domains do not import the shell component", () => {
-  assert.doesNotMatch(inboxSource, /DesktopRoomShell/);
   assert.doesNotMatch(githubEventsSource, /DesktopRoomShell/);
 });
 
@@ -85,67 +78,6 @@ test("GitHub room and event routing keeps exact and object URL identities distin
   assert.equal(shouldPreviewComposerEvent(githubMessage, Date.parse("2026-08-12T12:00:30.000Z")), false);
 });
 
-test("mounted inbox fences stale room loads and releases subscriptions and timers", async () => {
-  const first = deferred<DesktopRoomThreadInboxPage>();
-  const second = deferred<DesktopRoomThreadInboxPage>();
-  const calls: string[] = [];
-  let rentalUnsubscribes = 0;
-  const clearedTimers: unknown[] = [];
-  installWindow({
-    room: {
-      getThreads: async (roomIdentifier: string) => {
-        calls.push(roomIdentifier);
-        return roomIdentifier === "room-a" ? first.promise : second.promise;
-      },
-    },
-    rental: {
-      getProviderDashboard: async () => ({ pendingRequests: [] }),
-      onProviderEvent: () => () => { rentalUnsubscribes += 1; },
-    },
-  }, clearedTimers);
-
-  const room = ref({ identifier: "room-a" } as never);
-  const namespace = ref("room-a:cloud");
-  const activeTab = ref<"chat" | "inbox">("chat");
-  let inbox!: ReturnType<typeof useDesktopRoomInbox>;
-  const mounted = mountHarness(() => {
-    inbox = useDesktopRoomInbox({
-      room,
-      namespace,
-      activeTab,
-      tasks: ref([]),
-      githubEvents: ref(null),
-      reasoningSessions: ref([]),
-      presence: ref([]),
-      sourceStates: ref(null),
-      fallbackRepository: ref(null),
-      openThread: () => undefined,
-      openBoardTask: () => undefined,
-      openGitHubEvent: () => undefined,
-      refreshRoom: () => undefined,
-    });
-  });
-  await nextTick();
-  assert.deepEqual(calls, ["room-a"]);
-
-  room.value = { identifier: "room-b" } as never;
-  namespace.value = "room-b:cloud";
-  await nextTick();
-  assert.deepEqual(calls, ["room-a", "room-b"]);
-  second.resolve(threadPage("room-b-message"));
-  await nextTick();
-  await nextTick();
-  first.resolve(threadPage("room-a-message"));
-  await nextTick();
-  await nextTick();
-  assert.equal(inbox.inboxItems.value[0]?.id, "thread:room-b-message");
-
-  inbox.scheduleInboxRefresh(60_000);
-  mounted.unmount();
-  assert.equal(rentalUnsubscribes, 1);
-  assert.ok(clearedTimers.length >= 1, "unmount clears its pending inbox timer");
-});
-
 test("mounted GitHub events owns readonly selection and resets it on room change", async () => {
   installWindow({ room: {} }, []);
   const room = ref({ identifier: "github.com/a/one" } as never);
@@ -180,28 +112,6 @@ test("mounted GitHub events owns readonly selection and resets it on room change
 
 function thread(id: string, text: string) {
   return { root: { id, text }, summary: { unreadCount: 1 } };
-}
-
-function threadPage(id: string): DesktopRoomThreadInboxPage {
-  return {
-    threads: [{
-      root: {
-        id,
-        text: id,
-        sender: "Emmy",
-        timestamp: "2026-08-12T12:00:00.000Z",
-      },
-      summary: { unreadCount: 1, hasUnread: true, latestReply: null },
-    }],
-    hasMore: false,
-    unreadThreadCount: 1,
-  } as unknown as DesktopRoomThreadInboxPage;
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
 }
 
 interface HostNode { parent: HostNode | null; children: HostNode[] }

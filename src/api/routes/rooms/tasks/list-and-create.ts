@@ -39,7 +39,12 @@ export function registerTaskListAndCreateRoutes(
     const open = req.query.open === "true";
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
-    const result = open ? await getOpenTasks(project.id, { limit, after }) : await getTasks(project.id, status, { limit, after });
+    const order = req.query.order === "recent" ? "recent" as const : undefined;
+    if (order && (after || open)) {
+      res.status(400).json({ error: "Recent tasks cannot be combined with an after cursor or the open filter." });
+      return;
+    }
+    const result = open ? await getOpenTasks(project.id, { limit, after }) : await getTasks(project.id, status, { limit, after, order });
 
     const tasksWithDetails = await attachTaskListDetails(project.id, result.tasks);
 

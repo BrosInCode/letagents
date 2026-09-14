@@ -211,8 +211,8 @@
             {{ rentalRequestCount > 99 ? '99+' : rentalRequestCount }}
           </span>
         </button>
-        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'inbox'" data-testid="sidebar-needs-you" @click="$emit('open-needs-you')">
-          <span class="cta-plus" aria-hidden="true"><Inbox /></span><span>Needs you</span><span v-if="needsYouCount" class="sidebar-rent-count" :aria-label="`${needsYouCount} items need your attention`">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
+        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'inbox'" data-testid="sidebar-inbox" @click="$emit('open-needs-you')">
+          <span class="cta-plus" aria-hidden="true"><Inbox /></span><span>Inbox</span><span v-if="needsYouCount" class="sidebar-rent-count" :aria-label="`${needsYouCount} items need your attention`">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
         </button>
       </div>
 
