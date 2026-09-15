@@ -59,7 +59,7 @@ export function registerMessageInfoRoute(
   app: Express,
   deps: RoomMessageRouteDeps
 ): void {
-  app.get(/^\/rooms\/(.+)\/messages\/(msg_\d+)\/info$/, async (req: AuthenticatedRequest, res: Response) => {
+  app.get(/^(?:\/api)?\/rooms\/(.+)\/messages\/(msg_\d+)\/info$/, async (req: AuthenticatedRequest, res: Response) => {
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
 
