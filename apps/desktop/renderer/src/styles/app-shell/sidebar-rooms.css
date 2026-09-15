@@ -487,3 +487,43 @@
     transition: none;
   }
 }
+
+/* Short or zoomed windows need room to read a complete row. Keep the
+   toolbar and footer fixed while navigation shares a single scroll area. */
+@media (max-height: 640px) {
+  .sidebar-navigation {
+    grid-template-rows: max-content max-content;
+    align-content: start;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block: 4px;
+  }
+
+  .sidebar-pinned-section,
+  .sidebar-section {
+    flex: 0 0 auto;
+    grid-template-rows: max-content max-content;
+  }
+
+  .sidebar-room-sections,
+  .sidebar-pinned-section,
+  .sidebar-section {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .sidebar-room-sections:has(
+      > .sidebar-section > .sidebar-section-header[data-collapsed="true"],
+      > .sidebar-section[data-empty="true"]
+    ) > .sidebar-pinned-section {
+    max-height: none;
+  }
+
+  .project-list,
+  .pinned-list {
+    overflow: visible;
+    padding-bottom: 0;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+}
