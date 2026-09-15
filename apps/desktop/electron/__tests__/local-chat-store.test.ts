@@ -70,6 +70,7 @@ const {
   setLocalRoomPinned,
   updateLocalTask,
 } = await import("../main/rooms/local-store.js");
+const { updateDesktopRoomTask } = await import("../main/rooms/tasks.js");
 const {
   buildLocalRoomArtifactIdentityKey,
   getLocalRoomArtifacts,
@@ -1586,6 +1587,37 @@ test("desktop local profile id is stable across concurrent first reads", async (
   assert.equal(new Set(ids).size, 1);
 });
 
+test("desktop task content baselines preserve partial edits and reject stale edits atomically", async () => {
+  const room = "content_baseline_room";
+  await createLocalRoom({ roomIdentifier: room, displayName: "Content baseline" });
+  const task = await addLocalTask(room, { title: "Original", createdBy: "Emmy" });
+  await updateDesktopRoomTask(room, task.id, { status: "accepted" });
+  await Promise.all([
+    updateDesktopRoomTask(room, task.id, { title: "Renamed", expected_content: { title: task.title } }),
+    updateDesktopRoomTask(room, task.id, { description: "# Body", expected_content: { description: "" } }),
+  ]);
+  let current = (await getLocalTask(room, task.id))!;
+  assert.equal(current.title, "Renamed");
+  assert.equal(current.description, "# Body");
+  assert.equal(current.status, "accepted");
+  for (const field of ["title", "description"] as const) {
+    const results = await Promise.allSettled(["One", "Two"].map(value => updateDesktopRoomTask(room, task.id,
+      { [field]: value, expected_content: { [field]: current[field] ?? "" } })));
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    const failed = results.find(result => result.status === "rejected") as PromiseRejectedResult;
+    assert.equal(failed.reason.code, "task_content_conflict");
+    current = (await getLocalTask(room, task.id))!;
+  }
+  await assert.rejects(updateDesktopRoomTask(room, task.id, { title: "Stale", description: "No write", status: "cancelled",
+    expected_content: { title: "Original", description: current.description! } }), { code: "task_content_conflict" });
+  assert.deepEqual(await getLocalTask(room, task.id), current);
+  await updateDesktopRoomTask(room, task.id, { description: "", expected_content: { description: current.description! } });
+  assert.equal((await getLocalTask(room, task.id))!.description, "");
+  for (const expected_content of [null, [], {}, { title: null }, { description: "" }, { title: "One", extra: "Bad" }]) {
+    await assert.rejects(updateDesktopRoomTask(room, task.id, { title: "Invalid", expected_content } as never), /expected_content/);
+  }
+});
+
 test("desktop local room task store supports board create and lifecycle updates", async () => {
   await createLocalRoom({
     roomIdentifier: "task_room",
@@ -1622,6 +1654,21 @@ test("desktop local room task store supports board create and lifecycle updates"
   assert.equal(updated.assigneeAgentKey, "local/agent");
   assert.equal(updated.prUrl, "https://github.com/BrosInCode/letagents/pull/1");
   assert.equal(updated.workflowArtifacts?.[0]?.provider, "git");
+  const description = "# Local plan\n\n- [ ] Keep Markdown\n";
+  const { task: edited } = await updateDesktopRoomTask("task_room", task.id, { title: "  Edited local task  ", description });
+  assert.equal(edited.title, "Edited local task");
+  assert.equal(edited.description, description);
+  assert.equal(edited.status, updated.status);
+  assert.equal(edited.assignee, updated.assignee);
+  assert.deepEqual(edited.workflowArtifacts, updated.workflowArtifacts);
+  assert.equal((await getLocalTask("task_room", task.id))?.description, description);
+  await updateDesktopRoomTask("task_room", task.id, { description: "" });
+  assert.equal((await getLocalTask("task_room", task.id))?.description, "");
+  await assert.rejects(updateLocalTask("task_room", task.id, { title: "  " }), /nonblank/);
+  await assert.rejects(updateLocalTask("task_room", task.id, { description: null } as never), /must be a string/);
+  await assert.rejects(updateLocalTask("task_room", task.id, { title: "Worker edit" }, {
+    agent_key: "local/agent", session_id: "worker", actor_label: "Local Agent",
+  }), /only be edited by the desktop user/);
   assert.equal(
     (await getLocalRoomArtifacts("task_room", { taskId: task.id })).artifacts?.[0]?.identity_key,
     "git:commit:id:def456",

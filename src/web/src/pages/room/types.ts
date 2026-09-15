@@ -11,5 +11,5 @@ export const ROOM_TABS: readonly RoomTab[] = [
 export type {
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
-  TaskStatusUpdatePayload,
+  TaskUpdatePayload,
 } from '@/components/room/task-board/types'

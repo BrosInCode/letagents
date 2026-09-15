@@ -117,6 +117,9 @@ export async function updateDesktopRoomTask(
   roomIdentifier: string,
   taskId: string,
   updates: {
+    title?: string;
+    description?: string;
+    expected_content?: { title?: string; description?: string };
     status?: string;
     assignee?: string | null;
     pr_url?: string | null;
@@ -134,6 +137,9 @@ export async function updateDesktopRoomTask(
     );
     return {
       task: await updateLocalTask(localRoomIdentifier, taskId.trim(), {
+        title: updates.title,
+        description: updates.description,
+        expectedContent: updates.expected_content,
         status: updates.status,
         assignee: updates.assignee,
         prUrl: updates.pr_url,
