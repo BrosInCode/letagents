@@ -39,7 +39,7 @@ test("Claude Code executable resolution has one explicit precedence", () => {
   );
 });
 
-test("Claude Code preflight gives an update message before auth or launch", async () => {
+for (const approval of [false, true]) test(`Claude Code ${approval ? "tool approval" : "runtime"} preflight gives an update message before auth or launch`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-version-"));
   const bin = join(root, "claude");
   const priorBin = process.env.LETAGENTS_CLAUDE_CODE_BIN;
@@ -47,7 +47,7 @@ test("Claude Code preflight gives an update message before auth or launch", asyn
     bin,
     [
       "#!/usr/bin/env node",
-      "if (process.argv[2] === '--version') { console.log('2.1.69 (Claude Code)'); process.exit(0); }",
+      `if (process.argv[2] === '--version') { console.log('${approval ? "2.1.220" : "2.1.69"} (Claude Code)'); process.exit(0); }`,
       "process.stderr.write('auth and launch must not be reached');",
       "process.exit(9);",
       "",
@@ -58,14 +58,14 @@ test("Claude Code preflight gives an update message before auth or launch", asyn
   try {
     const result = await runDesktopAgentProviderPreflight(
       "claude-code",
-      { repoRootPath: root },
+      { repoRootPath: root, ...(approval ? { launchMode: "supervised" as const, permissionProfileId: "ask_before_write" as const } : {}) },
       { commandTimeoutMs: 0 },
     );
     assert.equal(result.status, "error");
     assert.equal(result.canStart, false);
     assert.equal(result.message, "Claude Code needs an update.");
-    assert.match(result.detail ?? "", /2\.1\.69 is too old.*claude update/);
-    assert.equal(result.version, "2.1.69 (Claude Code)");
+    assert.match(result.detail ?? "", approval ? /Ask before writes.*2\.1\.272.*claude update/ : /2\.1\.69 is too old.*claude update/);
+    assert.equal(result.version, `${approval ? "2.1.220" : "2.1.69"} (Claude Code)`);
   } finally {
     if (priorBin === undefined) {
       delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
@@ -112,4 +112,11 @@ test("Claude Code preflight truthfully includes the managed LetAgents connection
     }
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("tool approvals require the verified native version without raising existing Claude profile minimums", () => {
+  assert.equal(inspectClaudeCodeVersion("2.1.220 (Claude Code)").supported, true);
+  assert.equal(inspectClaudeCodeVersion("2.1.220 (Claude Code)", true).supported, false);
+  assert.match(inspectClaudeCodeVersion("2.1.220 (Claude Code)", true).error!, /Ask before writes.*2\.1\.272.*claude update/);
+  assert.equal(requireSupportedClaudeCodeVersion("2.1.272 (Claude Code)", true), "2.1.272");
 });

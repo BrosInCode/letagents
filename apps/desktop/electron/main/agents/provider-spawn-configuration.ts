@@ -47,7 +47,18 @@ export function attestProviderSpawnPolicy(
       }
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
-        : { permissionMode: "acceptEdits", dangerouslySkipPermissions: false };
+        : {
+          permissionMode: "default", dangerouslySkipPermissions: false,
+          allowDangerouslySkipPermissions: false,
+          tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
+          allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+        };
+    if (profile === "ask_before_write") {
+      const authorityFlags = new Set(Object.keys(authority).map(key => key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)));
+      for (const key of Object.keys(policy)) {
+        if (key.includes("-") && authorityFlags.has(key)) throw new Error(`Claude approval profile cannot override '${key}'.`);
+      }
+    }
     for (const [key, value] of Object.entries(authority)) {
       requireMatch(policy, key, value, provider);
     }

@@ -7,7 +7,7 @@ export type HostApprovalReference = {
 };
 export type HostApprovalChoice = "allow_once" | "deny";
 export type HostApprovalPresentation = {
-  agentId: string; displayName: string; provider: "codex" | "open-model";
+  agentId: string; displayName: string; provider: "codex" | "open-model" | "claude-code";
   title: "Run a command" | "Run a tool" | "Change files" | "Grant for this turn" | "Approval unavailable";
   /** Plain text, host-ephemeral only. Control characters are displayed literally. */
   details: string;
