@@ -22,7 +22,10 @@ test('Needs you presents a human decision with context and escapes agent content
     const eventHtml = await renderToString(createSSRApp(eventsView, { roomIdentifier: 'room', repository: 'a/b', currentBranch: 'main', githubConnected: true, githubLoading: false, githubBusy: false, githubError: null, loading: false, loadingOlder: false, error: null, linkedTaskId: null, selectedEventId: event.id, eventsPage: { roomIdentifier: 'room', githubRoomIdentifier: null, events: [event], hasMore: false } }));
     assert.match(eventHtml, /GitHub event details for Build/, 'cross-view navigation opens the selected check on the first mount');
     const unavailable = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }] }, loading: false, error: '' }));
-    assert.match(unavailable, /Some sources still need checking/); assert.match(unavailable, /<details class="inbox-source-notice"/); assert.match(unavailable, /Couldn’t fully check Product launch/); assert.doesNotMatch(unavailable, /You’re clear for now/);
+    assert.match(unavailable, /Dismiss loading notice/); assert.match(unavailable, /Some updates couldn’t be loaded/);
+    assert.match(unavailable, /Some inbox data is unavailable/); assert.match(unavailable, /<details class="inbox-source-notice"/); assert.match(unavailable, /Couldn’t load all inbox data for Product launch/); assert.doesNotMatch(unavailable, /You’re clear for now/);
+    const emptyUpdates = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }] }, section: 'updates', loading: false, error: '' }));
+    assert.match(emptyUpdates, /No unread updates to show/); assert.match(emptyUpdates, /Some room data is still unavailable/); assert.doesNotMatch(emptyUpdates, /You’re caught up/);
   } finally { await vite.close(); }
 });
 test('account reset rejects old in-flight inbox reads and clears private cached content', async () => {
@@ -65,6 +68,34 @@ test('answered requests move out of Needs you and remain attached to their room'
   const items = buildUniversalInbox({ ...data, rooms: [{ ...data.rooms[0], records: [answered] }] });
   assert.equal(filterUniversalInbox(items, 'needs-you', [], {}).length, 0);
   assert.equal(filterUniversalInbox(items, 'answered', ['room'], {})[0].record?.response?.body, 'Start with product teams');
+});
+
+test('bulk read clears a large backlog, preserves requests, and allows new activity to return', async () => {
+  const { buildUniversalInbox, filterUniversalInbox, markInboxUpdatesRead, undoInboxRead } = await import('../src/components/desktop/content/room-inbox/universal');
+  const backlog = { ...data, rooms: [{ ...data.rooms[0], tasks: Array.from({ length: 1400 }, (_, i) => ({ id: `task_${i}`, title: `Completed work ${i}`, status: 'done', description: null, updated_at: '2026-09-14T12:00:00Z' })) }] };
+  const items = buildUniversalInbox(backlog);
+  const read = markInboxUpdatesRead(items, {});
+  assert.equal(read.changes.length, 1400);
+  const persisted = JSON.parse(JSON.stringify(read.dismissals));
+  assert.equal(filterUniversalInbox(items, 'updates', [], persisted).length, 0);
+  assert.equal(filterUniversalInbox(items, 'needs-you', [], persisted).length, 1);
+  backlog.rooms[0].tasks[0].updated_at = '2026-09-15T12:00:00Z';
+  assert.equal(filterUniversalInbox(buildUniversalInbox(backlog), 'updates', [], persisted).length, 1);
+  assert.equal(filterUniversalInbox(items, 'updates', [], undoInboxRead(read.changes, persisted)).length, 1400);
+});
+
+test('bulk read follows the room filter and undo preserves earlier and later read versions', async () => {
+  const { buildUniversalInbox, filterUniversalInbox, markInboxUpdatesRead, undoInboxRead } = await import('../src/components/desktop/content/room-inbox/universal');
+  const task = { id: 'same_id', title: 'Work ready', status: 'in_review', description: null, updated_at: '2026-09-14T12:00:00Z' };
+  const items = buildUniversalInbox({ ...data, rooms: [{ ...data.rooms[0], tasks: [task] }, { ...data.rooms[0], roomIdentifier: 'second', tasks: [task] }] });
+  const selected = filterUniversalInbox(items, 'updates', ['room'], {});
+  const previous = { [selected[0].key]: 'earlier-version', unrelated: 'keep' };
+  const read = markInboxUpdatesRead(selected, previous);
+  assert.equal(filterUniversalInbox(items, 'updates', [], read.dismissals)[0].roomIdentifier, 'second');
+  assert.deepEqual(undoInboxRead(read.changes, read.dismissals), previous);
+  const newerRead = { ...read.dismissals, [selected[0].key]: 'later-version' };
+  assert.deepEqual(undoInboxRead(read.changes, newerRead), newerRead);
+  assert.equal(markInboxUpdatesRead(selected, read.dismissals).changes.length, 0);
 });
 
 test('opening Inbox during a badge refresh queues its update sources instead of losing the request', async () => {
