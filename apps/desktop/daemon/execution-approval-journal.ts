@@ -16,11 +16,12 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 // Native process birth witnesses are ps lstart strings on macOS, not journal IDs.
 const processBirth = z.string().min(1).max(512);
 const connection = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("claude_cli"), pid: time.min(1), processIdentity: processBirth }),
   z.strictObject({ kind: z.literal("codex_app_server"), url: z.string().min(1).max(4096), pid: time.min(1), processIdentity: processBirth }),
   z.strictObject({ kind: z.literal("opencode_server"), url: z.string().min(1).max(4096), pid: time.min(1), processIdentity: processBirth, serverAuthPath: z.string().min(1).max(4096) }),
 ]);
 const authority = z.strictObject({ inboxItemId: executionIdentity, workAttemptId: executionIdentity,
-  executionGenerationId: executionIdentity, provider: z.enum(["codex", "open-model"]),
+  executionGenerationId: executionIdentity, provider: z.enum(["codex", "open-model", "claude-code"]),
   providerConnection: connection, configurationRevision: time.min(1) });
 const reference = z.strictObject({
   requestId: executionIdentity, requestVersion: time.min(1), requestSha256: digest,
@@ -140,7 +141,7 @@ function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agent
     || current.work_attempt_id !== owned.workAttemptId || current.provider_ref?.work_attempt_id !== owned.workAttemptId
     || current.provider_ref.execution_generation_id !== owned.executionGenerationId
     || current.provider_ref.provider_continuation_id !== expected.providerContinuationId
-    || owned.providerConnection.kind !== (owned.provider === "codex" ? "codex_app_server" : "opencode_server")
+    || owned.providerConnection.kind !== (owned.provider === "codex" ? "codex_app_server" : owned.provider === "claude-code" ? "claude_cli" : "opencode_server")
     || !sameProviderActionConnectionIdentity(current.provider_ref.provider_connection, owned.providerConnection)) reject("missing_turn");
   const configuration = db.prepare("SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(expected.agentId);
   if (configuration?.config_revision !== owned.configurationRevision || configuration.runtime_configuration_revision !== owned.configurationRevision
