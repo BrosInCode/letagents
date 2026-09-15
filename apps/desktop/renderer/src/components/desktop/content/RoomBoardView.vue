@@ -9,6 +9,11 @@
       :search-query="searchQuery"
       :active-filter="activeFilter"
       :filter-options="filterOptions"
+      :owner-filter="ownerFilter"
+      :owner-options="ownerOptions"
+      :status-filter="statusFilter"
+      :status-options="statusOptions"
+      :sort="sort"
       :busy="busyAction !== null"
       :manager-mode="boardManagerMode"
       :manager-title="boardManagerTitle"
@@ -16,6 +21,10 @@
       :governance-open="governanceOpen"
       @update:search-query="searchQuery = $event"
       @update:active-filter="setActiveFilter"
+      @update:owner-filter="ownerFilter = $event"
+      @update:status-filter="setStatusFilter"
+      @update:sort="setSort"
+      @clear-filters="clearFilters"
       @open-governance="openGovernance"
       @add-task="openCreateTaskDialog"
     />
@@ -58,6 +67,8 @@
       :error="errorMessage"
       :review-assignment-candidates="modalReviewAssignmentCandidates"
       :selected-reviewer="modalSelectedReviewer"
+      :can-edit="canEditTasks"
+      @save="saveModalTask"
       @close="clearTaskSelection"
       @assign-review="assignModalReview"
       @run-action="runModalTaskAction"
@@ -100,6 +111,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import type { TaskContentPatch } from '../../../../../../../shared/task-markdown-editing.mjs';
 import type {
   DesktopAgentPresence,
   DesktopBoardSettingsSummary,
@@ -129,6 +141,7 @@ const props = defineProps<{
   presence: DesktopAgentPresence[];
   workers: WorkerSnapshot[];
   selectedTaskId?: string | null;
+  canEditTasks?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -148,22 +161,31 @@ const {
   errorMessage,
   reviewAssignmentCandidates,
   runTaskAction,
+  saveTaskContent,
   selectedReviewerByTask,
   setSelectedReviewer,
 } = useRoomBoardController(props, emit);
 
 const {
   activeFilter,
+  clearFilters,
   clearTaskSelection,
   collapsedGroups,
   emptyState,
   filterOptions,
   localSelectedTaskId,
   modalTask,
+  ownerFilter,
+  ownerOptions,
   runEmptyStateAction,
   searchQuery,
   selectTask,
   setActiveFilter,
+  setSort,
+  setStatusFilter,
+  sort,
+  statusFilter,
+  statusOptions,
   toggleGroup,
   visibleGroups,
   visibleTaskCount,
@@ -260,6 +282,11 @@ function runModalTaskAction(action: TaskAction): void {
 
 function setModalReviewer(value: string): void {
   if (modalTask.value) setSelectedReviewer(modalTask.value.id, value);
+}
+
+async function saveModalTask(input: TaskContentPatch, onSettled: (saved: boolean) => void): Promise<void> {
+  const task = modalTask.value;
+  onSettled(Boolean(task && await saveTaskContent(task, input)));
 }
 
 async function handleAssignManager(agentSessionId: string): Promise<void> {

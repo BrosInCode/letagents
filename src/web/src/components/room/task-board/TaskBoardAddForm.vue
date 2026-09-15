@@ -14,6 +14,7 @@
       variant="secondary"
       size="sm"
       type="button"
+      :disabled="!newTaskTitle.trim()"
       @click="handleAdd"
     >
       Add task

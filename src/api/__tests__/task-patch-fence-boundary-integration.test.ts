@@ -311,6 +311,7 @@ async function workflowHttp(t: import("node:test").TestContext, effects: Record<
   const { registerHttpMiddleware } = await import("../http/middleware.js");
   const { registerRoomBoardRoutes } = await import("../routes/rooms/board.js");
   const { registerTaskRecordRoutes } = await import("../routes/rooms/tasks/task-record.js");
+  const { registerLegacyProjectTaskRoutes } = await import("../routes/legacy/tasks.js");
   const { registerTaskLeaseActionRoute } = await import("../routes/rooms/tasks/lease-action.js");
   const { resolveCanonicalRoomRequestId, resolveRoomOrReply } = await import("../rooms/resolution.js");
   const { requireAdmin, requireParticipant } = await import("../rooms/access.js");
@@ -328,15 +329,20 @@ async function workflowHttp(t: import("node:test").TestContext, effects: Record<
     ...effects,
   };
   registerTaskRecordRoutes(app, taskDeps as never);
+  registerLegacyProjectTaskRoutes(app, { ...taskDeps, getProjectById: db!.getProjectById } as never);
   registerTaskLeaseActionRoute(app, taskDeps as never);
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
   const address = server.address();
   assert.ok(address && typeof address === "object");
-  const request = async (token: string | null, suffix: string, body: unknown, method = "POST", roomId = seeded.room.id) => {
-    const response = await fetch(`http://127.0.0.1:${address.port}/rooms/${roomId}/${suffix}`, {
-      method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body),
+  const request = async (token: string | { sessionToken: string } | null, suffix: string, body: unknown,
+    method = "POST", roomId = seeded.room.id, namespace = "rooms") => {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (typeof token === "string") headers.authorization = `Bearer ${token}`;
+    else if (token) headers.cookie = `letagents_session=${encodeURIComponent(token.sessionToken)}`;
+    const response = await fetch(`http://127.0.0.1:${address.port}/${namespace}/${roomId}/${suffix}`, {
+      method, headers, body: JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as any };
   };
@@ -366,6 +372,178 @@ async function workflowHttp(t: import("node:test").TestContext, effects: Record<
     status: "assigned", assignee: worker.actor_label, ...(intentId ? { board_intent_id: intentId } : {}),
   }, "PATCH");
   return { ...seeded, request, manager, freshTask, approveClaim, claim };
+}
+
+test("HTTP admin edits persist Markdown and clearing through PATCH and GET without changing workflow", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const sessionToken = randomUUID();
+  await db!.createSession(f.ownerId, sessionToken, new Date(Date.now() + 60_000).toISOString());
+  await db!.assignProjectAdmin(f.room.id, f.ownerId);
+  const auth = { sessionToken };
+  const before = await getTaskById(f.room.id, f.task.id);
+  const leases = await db!.getActiveTaskLeases(f.room.id, f.task.id);
+  const description = "# Acceptance\n\n- [ ] Keep **Markdown**\n\n```ts\nconst ok = true;\n```\n";
+  const edited = await f.request(auth, `tasks/${f.task.id}`, { title: "  Edited ticket  ", description }, "PATCH");
+  assert.equal(edited.status, 200, JSON.stringify(edited.body));
+  assert.equal(edited.body.title, "Edited ticket");
+  assert.equal(edited.body.description, description);
+  const read = await f.request(auth, `tasks/${f.task.id}`, undefined, "GET");
+  assert.equal(read.status, 200);
+  assert.equal(read.body.title, "Edited ticket");
+  assert.equal(read.body.description, description);
+  assert.equal(read.body.status, before!.status);
+  assert.equal(read.body.assignee, before!.assignee);
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, f.task.id), leases);
+  const cleared = await f.request(auth, `tasks/${f.task.id}`, { description: "" }, "PATCH");
+  assert.equal(cleared.status, 200);
+  assert.equal((await getTaskById(f.room.id, f.task.id))!.description, "");
+  assert.equal((await getTaskById(f.room.id, f.task.id))!.title, "Edited ticket");
+  const accepted = await f.request(auth, `tasks/${f.task.id}`, { status: "accepted" }, "PATCH");
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.status, "accepted");
+  assert.equal(accepted.body.title, "Edited ticket");
+  assert.equal(accepted.body.description, "");
+  const ownerToken = randomUUID();
+  await db!.createOwnerToken({ accountId: f.ownerId, githubUserId: f.ownerId, token: ownerToken });
+  const desktopEdit = await f.request(ownerToken, `tasks/${f.task.id}`, {
+    title: "Desktop edit", desktop_human_client: true,
+  }, "PATCH");
+  assert.equal(desktopEdit.status, 200, JSON.stringify(desktopEdit.body));
+  assert.equal((await getTaskById(f.room.id, f.task.id))!.title, "Desktop edit");
+  const workerEdit = await f.request(ownerToken, `tasks/${f.task.id}`, {
+    title: "Worker edit", agent_session_id: f.from.session_id, agent_session_token: f.from.session_token,
+  }, "PATCH");
+  assert.equal(workerEdit.status, 403, JSON.stringify(workerEdit.body));
+  assert.equal((await getTaskById(f.room.id, f.task.id))!.title, "Desktop edit");
+});
+
+test("HTTP content edits require human admin even for manager workers and intent-bearing requests", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const sessionToken = randomUUID();
+  await db!.createSession(f.ownerId, sessionToken, new Date(Date.now() + 60_000).toISOString());
+  const before = await getTaskById(f.room.id, f.task.id);
+  for (const namespace of ["rooms", "projects"]) {
+    for (const [auth, status] of [[null, 401], [{ sessionToken }, 403], [f.from.worker_bearer, 403], [f.manager.worker_bearer, 403]] as const) {
+      const response = await f.request(auth, `tasks/${f.task.id}`, {
+        title: "Unauthorized edit", status: "accepted", board_intent_id: "intent_not_authority",
+      }, "PATCH", f.room.id, namespace);
+      assert.equal(response.status, status, JSON.stringify(response.body));
+      assert.deepEqual(await getTaskById(f.room.id, f.task.id), before);
+    }
+  }
+});
+
+test("HTTP concurrent admin content edits merge different fields and conflict only on edited content", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const editors = [{ sessionToken: randomUUID() }, { sessionToken: randomUUID() }];
+  for (const editor of editors) await db!.createSession(f.ownerId, editor.sessionToken, new Date(Date.now() + 60_000).toISOString());
+  await db!.assignProjectAdmin(f.room.id, f.ownerId);
+  const patch = (index: number, body: unknown) => f.request(editors[index]!, `tasks/${f.task.id}`, body, "PATCH");
+  const separateFields = await Promise.all([
+    patch(0, { title: "Renamed", expected_content: { title: f.task.title } }),
+    patch(1, { description: "# Body", expected_content: { description: "" } }),
+  ]);
+  assert.deepEqual(separateFields.map(result => result.status), [200, 200]);
+  let current = (await getTaskById(f.room.id, f.task.id))!;
+  assert.equal(current.title, "Renamed");
+  assert.equal(current.description, "# Body", "null descriptions compare as empty strings");
+
+  for (const field of ["title", "description"] as const) {
+    const baseline = current[field] ?? "";
+    const results = await Promise.all([
+      patch(0, { [field]: "Editor one", expected_content: { [field]: baseline } }),
+      patch(1, { [field]: "Editor two", expected_content: { [field]: baseline } }),
+    ]);
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+    assert.equal(results.find(result => result.status === 409)!.body.code, "task_content_conflict");
+    current = (await getTaskById(f.room.id, f.task.id))!;
+    assert.equal(current[field], results.find(result => result.status === 200)!.body[field]);
+  }
+
+  const mixedConflict = await patch(0, { title: "Stale title", description: "Must not persist", status: "accepted",
+    expected_content: { title: "Renamed", description: current.description } });
+  assert.equal(mixedConflict.status, 409);
+  assert.deepEqual(await getTaskById(f.room.id, f.task.id), current, "a conflict rejects the entire patch");
+  const workflowAndBody = await Promise.all([
+    patch(0, { status: "accepted" }),
+    patch(1, { description: "", expected_content: { description: current.description } }),
+  ]);
+  assert.deepEqual(workflowAndBody.map(result => result.status), [200, 200]);
+  const read = await f.request(editors[0]!, `tasks/${f.task.id}`, undefined, "GET");
+  assert.equal(read.body.status, "accepted");
+  assert.equal(read.body.title, current.title);
+  assert.equal(read.body.description, "");
+});
+
+test("HTTP invalid content rejects the entire update with 400", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const sessionToken = randomUUID();
+  await db!.createSession(f.ownerId, sessionToken, new Date(Date.now() + 60_000).toISOString());
+  await db!.assignProjectAdmin(f.room.id, f.ownerId);
+  const before = await getTaskById(f.room.id, f.task.id);
+  for (const body of [
+    { title: "" }, { title: " \n " }, { title: null }, { title: 42 }, { title: "x".repeat(513) },
+    { description: null }, { description: {} }, { description: "x".repeat(100_001) },
+    { title: "Next", expected_content: null }, { title: "Next", expected_content: [] },
+    { title: "Next", expected_content: {} }, { title: "Next", expected_content: { title: 42 } },
+    { title: "Next", expected_content: { description: "" } },
+    { title: "Next", description: "Body", expected_content: { title: "Original" } },
+    { title: "Next", expected_content: { title: "Original", extra: "Not allowed" } },
+    { expected_content: { title: "Original" } },
+  ]) {
+    const response = await f.request({ sessionToken }, `tasks/${f.task.id}`, { ...body, status: "accepted" }, "PATCH");
+    assert.equal(response.status, 400, JSON.stringify(response.body));
+    assert.match(response.body.error, /^(title|description|expected_content)/);
+    assert.deepEqual(await getTaskById(f.room.id, f.task.id), before);
+  }
+});
+
+for (const conflict of [false, true]) {
+test(`DB content baseline ${conflict ? "rejects a concurrent same-field edit" : "preserves concurrent workflow and omitted content"}`, { skip: requiresDatabase }, async () => {
+  const { room, task } = await seed();
+  const holder = await client!.pool.connect();
+  const artifacts = [
+    { provider: "git", kind: "branch", ref: "concurrent-work" },
+    { provider: "unknown", kind: "pull_request", url: "https://example.com/pr/new" },
+  ];
+  let pending: ReturnType<typeof updateTask> | undefined;
+  try {
+    await holder.query("BEGIN");
+    const { rows: [connection] } = await holder.query("SELECT pg_backend_pid() AS pid");
+    await holder.query(`UPDATE tasks SET title = $3, status = 'accepted', assignee = 'Other worker',
+      assignee_agent_key = 'owner/other', pr_url = 'https://example.com/pr/new',
+      workflow_artifacts = $1, description = 'Concurrent body' WHERE room_id = $2 AND number = 1`,
+      [JSON.stringify(artifacts), room.id, conflict ? "Concurrent title" : task.title]);
+    pending = updateTask(room.id, task.id, { title: "New title", expected_content: { title: task.title } });
+    let blocked = false;
+    for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+      const { rows: [state] } = await client!.pool.query(
+        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS blocked", [connection.pid]);
+      blocked = state.blocked;
+      if (!blocked) await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await holder.query("COMMIT");
+    if (conflict) await assert.rejects(pending, { code: "task_content_conflict" });
+    const updated = conflict ? await getTaskById(room.id, task.id) : await pending;
+    assert.equal(blocked, true, "the content writer read the pre-commit row and waited behind the concurrent update");
+    assert.ok(updated);
+    assert.equal(updated.title, conflict ? "Concurrent title" : "New title");
+    assert.equal(updated.description, "Concurrent body");
+    assert.equal(updated.status, "accepted");
+    assert.equal(updated.assignee, "Other worker");
+    assert.equal(updated.assignee_agent_key, "owner/other");
+    assert.equal(updated.pr_url, "https://example.com/pr/new");
+    assert.deepEqual(updated.workflow_artifacts, artifacts);
+    assert.deepEqual(await getTaskById(room.id, task.id), updated);
+    const cleared = await updateTask(room.id, task.id, { description: "", expected_content: { description: "Concurrent body" } });
+    assert.equal(cleared!.title, updated.title);
+    assert.equal(cleared!.description, "");
+  } finally {
+    await holder.query("ROLLBACK");
+    holder.release();
+    await pending?.catch(() => {});
+  }
+});
 }
 
 test("HTTP worker releases its own lease with an approved intent and no token handoff", { skip: requiresDatabase }, async t => {
@@ -466,6 +644,14 @@ test("HTTP exact progress retries preserve committed state and reject changed fi
     assert.deepEqual(await getTaskById(f.room.id, task.id), before);
     assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), leases);
     assert.equal(notifications, count);
+    const workLease = leases.find(lease => lease.kind === "work")!;
+    for (const content of [{ title: "Not an exact retry" }, { description: "Not an exact retry" }]) {
+      await assert.rejects(updateTask(f.room.id, task.id, { ...patch, ...content } as Parameters<typeof updateTask>[2], {
+        leaseFence: { lease_id: workLease.id, room_id: f.room.id, task_id: task.id, kind: "work",
+          expected_epoch: workLease.epoch, agent_session_id: f.from.session_id },
+      }), /Invalid transition/);
+      assert.deepEqual(await getTaskById(f.room.id, task.id), before);
+    }
     assert.equal((await f.request(f.from.worker_bearer, `tasks/${task.id}`, { ...patch, pr_url: "https://github.com/example/repo/pull/2" }, "PATCH")).status, 400);
     assert.equal((await f.request(f.manager.worker_bearer, `tasks/${task.id}`, patch, "PATCH")).status, 409);
   }

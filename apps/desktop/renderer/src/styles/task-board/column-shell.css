@@ -2,13 +2,13 @@
   --task-accent: var(--text-tertiary);
   display: grid;
   align-content: start;
-  gap: 8px;
-  min-height: 360px;
+  gap: 14px;
+  min-height: 160px;
   height: max-content;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-subtle);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
   transition:
     border-color var(--duration-fast) ease,
     background-color var(--duration-fast) ease,
@@ -31,9 +31,8 @@
   gap: 10px;
   width: 100%;
   min-height: 32px;
-  padding: 0 2px 6px;
+  padding: 0 2px;
   border: 0;
-  border-bottom: 1px solid var(--border);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -47,11 +46,10 @@
   gap: 7px;
   min-width: 0;
   color: var(--text-secondary);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-size: 0.8125rem;
+  font-weight: 550;
+  letter-spacing: 0;
   line-height: 1.3;
-  text-transform: uppercase;
 }
 
 .desktop-task-column-chevron {
@@ -74,14 +72,14 @@
   background: var(--task-accent);
 }
 
-.desktop-task-column-header > strong {
+.desktop-task-column-title > strong {
   display: inline-grid;
   place-items: center;
   min-width: 24px;
   height: 22px;
   padding: 0 6px;
-  border-radius: 999px;
-  background: var(--accent-dim);
+  border-radius: 4px;
+  background: transparent;
   color: var(--text-secondary);
   font-size: 0.7rem;
   font-weight: 650;
@@ -90,7 +88,7 @@
 
 .desktop-task-column-list {
   display: grid;
-  gap: 8px;
+  gap: 12px;
 }
 
 .desktop-task-column-empty {
@@ -106,9 +104,9 @@
 
 .desktop-task-card,
 .desktop-task-empty {
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
 }
 
 @media (hover: hover) and (pointer: fine) {

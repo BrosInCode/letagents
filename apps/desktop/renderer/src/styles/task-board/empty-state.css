@@ -3,14 +3,13 @@
 }
 
 .desktop-board-empty-state {
+  display: grid;
   align-content: center;
   justify-items: center;
   gap: 16px;
   min-height: min(360px, 48vh);
   padding: clamp(28px, 5vw, 56px);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-subtle);
+  background: var(--bg);
   text-align: center;
 }
 
@@ -30,7 +29,7 @@
   color: var(--text);
   font-size: 1rem;
   font-weight: 680;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   line-height: 1.3;
 }
 

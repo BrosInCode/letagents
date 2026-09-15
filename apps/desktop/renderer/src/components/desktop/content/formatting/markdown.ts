@@ -2,6 +2,7 @@ export interface DesktopMarkdownOptions {
   highlightQuery?: string;
   block?: boolean;
   mentions?: boolean;
+  preservePaths?: boolean;
 }
 
 const MAX_BLOCKQUOTE_DEPTH = 8;
@@ -16,7 +17,7 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
   // File references are display text here. Only the receipt's verified file actions
   // may open a local workspace; never turn a path supplied in prose into a URL.
   let tokenized = value.replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_match, code: string) =>
-    markdownToken(tokens, `<code>${escapeHtml(localFileName(code) ?? code)}</code>`)
+    markdownToken(tokens, `<code>${escapeHtml(options.preservePaths ? code : localFileName(code) ?? code)}</code>`)
   );
   tokenized = tokenized.replace(/\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)/g, (match, label: string, target: string) => {
     const path = target.replace(/^<|>$/g, "");
@@ -24,7 +25,7 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
       return markdownToken(tokens, `<a href="${escapeAttr(path)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`);
     }
     const filename = localFileName(path, true);
-    return filename ? markdownToken(tokens, `<code>${escapeHtml(filename)}</code>`) : match;
+    return filename ? markdownToken(tokens, `<code>${escapeHtml(options.preservePaths ? path : filename)}</code>`) : match;
   });
   tokenized = tokenized.replace(/(https?:\/\/[^\s<>"']+)/g, (_match, url: string) =>
     markdownToken(tokens, `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`)
@@ -32,6 +33,7 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
   // Web links and inline code are already protected by tokens. Match only file
   // paths in prose, preserving punctuation and leaving API routes alone.
   tokenized = tokenized.replace(/(^|[\s(])((?:file:\/\/\/|~?\/|\.\.?\/|[A-Za-z]:[\\/]|(?:[\w.-]+\/)+)[^\s<>"'`()[\]]+)/g, (match, before: string, path: string) => {
+    if (options.preservePaths) return match;
     const punctuation = path.match(/[.,;!?]+$/)?.[0] ?? "";
     const filename = localFileName(path.slice(0, path.length - punctuation.length));
     return filename ? before + markdownToken(tokens, `<code>${escapeHtml(filename)}</code>`) + punctuation : match;

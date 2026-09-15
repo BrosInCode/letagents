@@ -152,6 +152,7 @@
         :room-identifier="room.identifier"
         :tasks="tasks"
         :board-settings="boardSettings"
+        :can-edit-tasks="room.role === 'admin'"
         :presence="roomPresence"
         :workers="workers"
         :supervisor-entries="supervisorEntries"

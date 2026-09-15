@@ -6,7 +6,7 @@ import type {
 import type {
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
-  TaskStatusUpdatePayload,
+  TaskUpdatePayload,
 } from './types'
 
 interface RoomTaskHandlerDeps {
@@ -32,12 +32,17 @@ export function useRoomTaskHandlers(deps: RoomTaskHandlerDeps) {
     await deps.addTask(title)
   }
 
-  async function handleUpdateTask(payload: TaskStatusUpdatePayload) {
+  async function handleUpdateTask(payload: TaskUpdatePayload) {
     let updated = false
     try {
-      updated = await deps.updateTask(payload.taskId, { status: payload.status })
+      const updates = 'status' in payload ? { status: payload.status } : {
+        ...(payload.title !== undefined ? { title: payload.title } : {}),
+        ...(payload.description !== undefined ? { description: payload.description } : {}),
+        expected_content: payload.expected_content,
+      }
+      updated = await deps.updateTask(payload.taskId, updates)
       if (!updated) {
-        deps.toast.error('Task status could not be updated.')
+        deps.toast.error('Task could not be updated.')
       }
     } finally {
       payload.onSettled?.(updated)
@@ -45,8 +50,9 @@ export function useRoomTaskHandlers(deps: RoomTaskHandlerDeps) {
   }
 
   async function handleTaskLeaseAction(payload: TaskLeaseActionPayload) {
+    let updated = false
     try {
-      const updated = await deps.updateTaskLease(
+      updated = await deps.updateTaskLease(
         payload.taskId,
         taskLeaseInputFromPayload(payload),
       )
@@ -54,13 +60,14 @@ export function useRoomTaskHandlers(deps: RoomTaskHandlerDeps) {
         deps.toast.error('Task lease could not be updated.')
       }
     } finally {
-      payload.onSettled?.()
+      payload.onSettled?.(updated)
     }
   }
 
   async function handleTaskReviewLeaseAction(payload: TaskReviewLeaseActionPayload) {
+    let updated = false
     try {
-      const updated = await deps.updateTaskReviewLease(
+      updated = await deps.updateTaskReviewLease(
         payload.taskId,
         taskReviewLeaseInputFromPayload(payload),
       )
@@ -68,7 +75,7 @@ export function useRoomTaskHandlers(deps: RoomTaskHandlerDeps) {
         deps.toast.error('Task review authority could not be updated.')
       }
     } finally {
-      payload.onSettled?.()
+      payload.onSettled?.(updated)
     }
   }
 

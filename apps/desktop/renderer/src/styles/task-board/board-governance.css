@@ -11,14 +11,14 @@
 .desktop-board-governance-panel {
   display: grid;
   align-content: start;
-  gap: 18px;
-  width: min(520px, 100vw);
+  gap: 28px;
+  width: min(480px, 100vw);
   max-height: 100%;
   overflow: auto;
-  padding: 22px;
+  padding: 28px;
   border-left: 1px solid var(--border-strong);
   outline: none;
-  background: var(--bg-elevated);
+  background: var(--bg);
   color: var(--text);
   box-shadow: var(--shadow-xl);
 }
@@ -35,7 +35,7 @@
   color: var(--text);
   font-size: 1.15rem;
   font-weight: 700;
-  letter-spacing: -0.015em;
+  letter-spacing: 0;
   line-height: 1.25;
 }
 
@@ -142,7 +142,7 @@
 .desktop-board-governance-section,
 .desktop-board-governance-section-panel {
   display: grid;
-  gap: 14px;
+  gap: 24px;
 }
 
 .desktop-board-governance-warnings {
@@ -182,8 +182,8 @@
 
 .desktop-board-governance-mode > span {
   color: var(--text-secondary);
-  font-size: 0.68rem;
-  font-weight: 620;
+  font-size: 0.75rem;
+  font-weight: 550;
 }
 
 .desktop-board-governance-mode-control {
@@ -198,7 +198,9 @@
 
 .desktop-board-governance-candidates {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
 }
 
 .desktop-board-governance-candidates-heading {
@@ -332,6 +334,7 @@
 }
 
 .desktop-board-governance-actions {
+  padding-top: 8px;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -348,7 +351,7 @@
 .desktop-board-governance-audit-entry {
   display: grid;
   gap: 8px;
-  padding: 10px;
+  padding: 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-subtle);

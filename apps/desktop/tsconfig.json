@@ -12,6 +12,8 @@
     "types": ["vite/client"]
   },
   "include": [
+    "demos/board/**/*.ts",
+    "demos/board/**/*.vue",
     "renderer/src/**/*.ts",
     "renderer/src/**/*.d.ts",
     "renderer/src/**/*.tsx",

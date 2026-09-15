@@ -99,6 +99,7 @@
       @toggleStalePromptMute="handleToggleStalePromptMute"
       @addTask="handleAddTask"
       @updateTask="handleUpdateTask"
+      @closeTask="clearBoardTask"
       @leaseAction="handleTaskLeaseAction"
       @reviewLeaseAction="handleTaskReviewLeaseAction"
       @focusTask="handleFocusTask"
@@ -284,6 +285,10 @@ function openBoardTask(taskId: string) {
       task: taskId,
     },
   })
+}
+
+function clearBoardTask() {
+  if (route.query.task) void router.replace({ query: { ...route.query, task: undefined } })
 }
 const {
   senderName,

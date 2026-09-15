@@ -79,6 +79,9 @@ export type LocalTaskInput = {
 };
 
 export type LocalTaskPatch = {
+  title?: string;
+  description?: string;
+  expectedContent?: { title?: string; description?: string };
   /** Fence legacy lease actions against a claim made after their initial read. */
   expectedNoWorkLease?: boolean;
   status?: string | null;
@@ -795,6 +798,28 @@ export async function updateLocalTask(
   patch: LocalTaskPatch,
   worker?: LocalWorkLeaseWorker,
 ): Promise<DesktopTaskSummary> {
+  const expected = patch.expectedContent;
+  if (expected !== undefined) {
+    if (!expected || typeof expected !== "object" || Array.isArray(expected)
+      || Object.keys(expected).length === 0
+      || Object.keys(expected).some((key) => key !== "title" && key !== "description")) {
+      throw new Error("expected_content must be an object containing only the edited content fields");
+    }
+    for (const field of ["title", "description"] as const) {
+      const supplied = Object.prototype.hasOwnProperty.call(expected, field);
+      if (supplied !== (patch[field] !== undefined)) throw new Error("expected_content must match the edited content fields");
+      if (supplied && typeof expected[field] !== "string") throw new Error(`expected_content.${field} must be a string`);
+    }
+  }
+  if (patch.title !== undefined || patch.description !== undefined) {
+    if (worker) throw new Error("Task content can only be edited by the desktop user.");
+    if (patch.title !== undefined && (typeof patch.title !== "string" || !patch.title.trim() || patch.title.length > 512)) {
+      throw new Error("Task title must be a nonblank string of at most 512 characters.");
+    }
+    if (patch.description !== undefined && (typeof patch.description !== "string" || patch.description.length > 100_000)) {
+      throw new Error("Task description must be a string of at most 100000 characters.");
+    }
+  }
   const database = await getDb();
   const nextWorkflowArtifactInputs = patch.workflowArtifacts === undefined
     ? null : (patch.workflowArtifacts || []) as Record<string, unknown>[];
@@ -856,10 +881,12 @@ export async function updateLocalTask(
         roomId, taskId, artifacts: nextWorkflowArtifactInputs, worker,
       }).identityKeys;
     }
-    database
+    const result = database
       .prepare(`
         UPDATE local_tasks
-        SET status = ?,
+        SET title = ?,
+            description = ?,
+            status = ?,
             assignee = ?,
             assignee_agent_key = ?,
             assignee_agent_instance_id = ?,
@@ -869,8 +896,12 @@ export async function updateLocalTask(
             sync_dirty = 1,
             updated_at = ?
         WHERE room_id = ? AND task_id = ?
+          AND (? IS NULL OR title = ?)
+          AND (? IS NULL OR coalesce(description, '') = ?)
       `)
       .run(
+        patch.title === undefined ? current.title : patch.title.trim(),
+        patch.description === undefined ? current.description : patch.description,
         nextStatus,
         patch.assignee === undefined ? current.assignee : patch.assignee,
         nextAssigneeAgentKey,
@@ -881,7 +912,14 @@ export async function updateLocalTask(
         now,
         roomId,
         taskId,
+        expected?.title ?? null,
+        expected?.title ?? null,
+        expected?.description ?? null,
+        expected?.description ?? null,
       );
+    if (expected && Number((result as { changes: number | bigint }).changes) === 0) {
+      throw Object.assign(new Error("Task content changed. Reload the task before saving."), { code: "task_content_conflict" });
+    }
     touchLocalRoom(database, roomId, now);
     updated = toTaskSummary(mapTaskRow(database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId)!), database);
     database.exec("COMMIT");

@@ -329,6 +329,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       roomIdentifier: string,
       taskId: string,
       updates: {
+        title?: string;
+        description?: string;
+        expected_content?: { title?: string; description?: string };
         status?: string;
         assignee?: string | null;
         pr_url?: string | null;
