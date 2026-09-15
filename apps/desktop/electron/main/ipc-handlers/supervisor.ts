@@ -136,9 +136,6 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
         if (provider !== "codex" && provider !== "claude-code" && provider !== "cursor" && provider !== "open-model") {
           throw new LaunchBlockedError(`Supervised ${provider} is not available yet: no background lifecycle is supported for this provider.`, "retry");
         }
-        if (provider === "claude-code" && input.permissionProfileId === "ask_before_write") {
-          throw new LaunchBlockedError("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged. Choose Read-only or Full access.", "retry");
-        }
         try {
           assertManagedAgentPermissionProfileAvailable(provider, input.permissionProfileId, "supervised");
         } catch (error) {

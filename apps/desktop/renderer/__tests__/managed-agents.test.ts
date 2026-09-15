@@ -2153,3 +2153,12 @@ test("unregistered agents stay hidden while unknown agents remain visible but un
   assert.equal(unknownPresence[0]?.freshness, "stale");
   assert.equal(unknownPresence[0]?.activityState, "offline");
 });
+
+test("supervised Claude exposes one-time native approval without enabling its legacy profile", () => {
+  const legacy = { id: "ask_before_write", label: "Ask before writes", description: "Unavailable", status: "gated", risk: "medium", detail: "Unavailable", isDefault: false } as const;
+  const supervised = supervisedPermissionProfilePresentation("claude-code", legacy);
+  assert.equal(supervised.status, "available");
+  assert.match(supervised.description, /Claude.*change files/);
+  assert.match(supervised.detail!, /one-time.*ambient settings disabled/);
+  assert.equal(legacy.status, "gated");
+});
