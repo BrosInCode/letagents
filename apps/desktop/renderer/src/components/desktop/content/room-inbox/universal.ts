@@ -64,3 +64,38 @@ export function filterUniversalInbox(items: UniversalInboxItem[], section: Inbox
   return items.filter(item => item.section === section && (!rooms.length || (item.roomIdentifier !== null && rooms.includes(item.roomIdentifier)))
     && (item.section !== 'updates' || dismissals[item.key] !== item.fingerprint));
 }
+
+/** Room names are not unique; acknowledge failures by source identity. */
+export function inboxSourceFailureKey(data: DesktopNeedsYou | null, rooms: string[], rentalError: string): string {
+  return JSON.stringify([
+    (data?.failures ?? []).map(room => room.roomIdentifier).sort(),
+    (data?.rooms ?? []).filter(room => (!rooms.length || rooms.includes(room.roomIdentifier)) && room.updates?.unavailable.length)
+      .map(room => [room.roomIdentifier, [...room.updates!.unavailable].sort()] as const)
+      .sort((a, b) => a[0].localeCompare(b[0])),
+    Boolean(data?.managedSessionsUnavailable), Boolean(data?.cloudUnavailable), rentalError,
+  ]);
+}
+
+export interface InboxReadChange { key: string; fingerprint: string; previous: string | undefined }
+
+/** Read the exact update versions shown to the user; requests need an explicit answer. */
+export function markInboxUpdatesRead(items: UniversalInboxItem[], dismissals: Record<string, string>) {
+  const changes: InboxReadChange[] = [];
+  const next = { ...dismissals };
+  for (const item of items) {
+    if (item.section !== 'updates' || next[item.key] === item.fingerprint) continue;
+    changes.push({ key: item.key, fingerprint: item.fingerprint, previous: next[item.key] });
+    next[item.key] = item.fingerprint;
+  }
+  return { dismissals: next, changes };
+}
+
+export function undoInboxRead(changes: InboxReadChange[], dismissals: Record<string, string>) {
+  const next = { ...dismissals };
+  for (const change of changes) {
+    if (next[change.key] !== change.fingerprint) continue;
+    if (change.previous === undefined) delete next[change.key];
+    else next[change.key] = change.previous;
+  }
+  return next;
+}
