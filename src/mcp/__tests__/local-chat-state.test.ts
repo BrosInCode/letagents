@@ -48,6 +48,7 @@ const { toAgentReadableMessages } = await import("../server/runtime/messages.js"
 const {
   ensureLocalThreadRoutingProjectionSchema,
   ensureLocalThreadRoutingProjectionSchemaAsync,
+  ensureRequestedRootsProjected,
   getLocalThreadRoutingAgentKeysForRoots,
   projectLocalThreadRoutingMessage,
   runLocalSqliteWriteTransactionAsync,
@@ -1066,8 +1067,15 @@ test("MCP local routing projection backfills an existing database idempotently",
     throw error;
   }
 
-  await ensureLocalThreadRoutingProjection(database as never);
-  await ensureLocalThreadRoutingProjection(database as never);
+  // Complete each backfill pass before checking its contents and idempotence.
+  // Foreground repair deadlines are exercised by the dedicated budget tests.
+  for (let pass = 0; pass < 2; pass += 1) {
+    await ensureLocalThreadRoutingProjection(database as never);
+    await ensureRequestedRootsProjected(database as never, room, [1], {
+      foregroundTimeBudgetMs: Number.POSITIVE_INFINITY,
+      scheduleOnTimeout: false,
+    });
+  }
   const membership = await getLocalChatThreadRoutingMembership(room, ["msg_1"], {
     actor_label: "Legacy old member | Test owner | Codex",
     agent_key: "test/legacy-old",
