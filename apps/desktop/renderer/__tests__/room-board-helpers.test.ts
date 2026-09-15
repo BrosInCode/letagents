@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import { createSSRApp, effectScope, h, nextTick, reactive } from "vue";
+import { renderToString } from "@vue/server-renderer";
+import { createServer, type ViteDevServer } from "vite";
 
 import type {
   DesktopAgentPresence,
@@ -11,10 +15,14 @@ import {
   BOARD_HANDOFF_STAGE_LABELS,
   boardEmptyState,
   boardFilterCount,
+  boardOwnerOptions,
+  boardOwnerValue,
+  boardStatusOptions,
   deriveTaskTitle,
   visibleBoardGroups,
 } from "../src/components/desktop/content/room-board/board-presentation";
 import { findLocalRoomWorker } from "../src/components/desktop/content/room-board/board-workers";
+import { useRoomBoardPresentation } from "../src/components/desktop/content/room-board/useRoomBoardPresentation";
 import {
   activeBoardManagerAgents,
   managerCandidateName,
@@ -29,7 +37,238 @@ import {
 } from "../src/components/desktop/content/room-board/task-state";
 import { TASK_STATUS_ORDER, sortTasks } from "../src/domain/tasks";
 
+let vite: ViteDevServer;
+let TaskCard: object;
+let Kanban: object;
+let Toolbar: object;
+before(async () => {
+  vite = await createServer({
+    root: fileURLToPath(new URL("../..", import.meta.url)),
+    appType: "custom",
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  TaskCard = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardTaskCard.vue")).default;
+  Kanban = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardKanban.vue")).default;
+  Toolbar = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardToolbar.vue")).default;
+});
+after(async () => { await vite?.close(); });
+
+describe("board card hierarchy", () => {
+  it("renders labelled filters and shows Clear filters only for active refinements", async () => {
+    const render = (filters: { searchQuery?: string; ownerFilter?: string; statusFilter?: string; sort?: string } = {}) => renderToString(createSSRApp({
+      render: () => h(Toolbar, {
+        searchQuery: "", activeFilter: "open", filterOptions: [], busy: false,
+        managerMode: "off", managerTitle: "Off", pendingIntentCount: 0, governanceOpen: false,
+        ownerFilter: "all", ownerOptions: boardOwnerOptions([task({ assignee: "Alex" })]),
+        statusFilter: "all", statusOptions: boardStatusOptions(), sort: "recent",
+        ...filters,
+      }),
+    }));
+    const html = await render();
+    for (const label of ["Filter by owner", "Filter by status", "Sort tasks"]) {
+      assert.match(html, new RegExp(`<select[^>]*aria-label="${label}"`));
+    }
+    assert.match(html, /value="label:Alex"/);
+    assert.match(html, /value="unassigned"/);
+    assert.match(html, /value="oldest">Oldest first/);
+    assert.match(html, /value="done"/);
+    assert.doesNotMatch(html, /Clear filters/);
+    assert.doesNotMatch(await render({ sort: "oldest", searchQuery: "   " }), /Clear filters/);
+    for (const filters of [{ searchQuery: "Test" }, { ownerFilter: "unassigned" }, { statusFilter: "done" }]) {
+      assert.match(await render(filters), /<button[^>]*class="desktop-board-clear-filter"[^>]*>[\s\S]*?Clear filters\s*<\/button>/);
+    }
+  });
+
+  it("keeps the primary action visible without making cancellation the default", async () => {
+    const render = (actions: object[]) => renderToString(createSSRApp({
+      render: () => h(TaskCard, { task: task(), actions, busyAction: null, draggableTask: false, selected: false }),
+    }));
+    const cancel = { id: "cancel", label: "Cancel task", tone: "danger" };
+    const html = await render([cancel, { id: "accept", label: "Accept", tone: "primary" }]);
+    assert.match(html, />Accept<\/button>/);
+    assert.doesNotMatch(html, /Cancel task/);
+    assert.match(await render([cancel]), /aria-label="Open Test task"/);
+  });
+
+  it("preserves reviewers, lock detail, and access to overflow links", async () => {
+    const html = await renderToString(createSSRApp({
+      render: () => h(TaskCard, {
+        task: task({
+          activeLeases: [lease({ kind: "review", holderLabel: "Casey" })],
+          activeLocks: [{ id: "lock", scope: "task", reason: "Access", message: "Needs repo access", createdBy: "Emmy" }],
+          workflowRefs: [1, 2, 3].map(number => ({
+            provider: "github", kind: "pull_request", label: `PR #${number}`, url: `https://github.com/org/repo/pull/${number}`,
+          })),
+        }),
+        actions: [], busyAction: null, draggableTask: false, selected: false,
+      }),
+    }));
+    assert.match(html, /Reviewer: Casey/);
+    assert.match(html, /task lock: Access - Needs repo access/);
+    assert.match(html, /<button[^>]*desktop-task-more-links[^>]*>\s*\+1 links/);
+  });
+
+  it("retains a labelled target for collapsed columns", async () => {
+    const html = await renderToString(createSSRApp({
+      render: () => h(Kanban, {
+        groups: [{ status: "accepted", label: "Accepted", tasks: [task()] }],
+        activeFilter: "open", selectedTaskId: null, busyAction: null,
+        collapsedGroups: new Set(["accepted"]), actionsFor: () => [],
+      }),
+    }));
+    assert.match(html, /aria-expanded="false"/);
+    assert.match(html, /aria-controls="desktop-task-group-accepted"/);
+    assert.match(html, /id="desktop-task-group-accepted"/);
+    assert.match(html, /display:none/);
+  });
+});
+
 describe("room board helpers", () => {
+  it("uses stable owner identities and keeps known owners distinct from unassigned", () => {
+    const tasks = [
+      task(),
+      task({ id: "task_2", assignee: "Alex", assigneeAgentKey: "codex/alex" }),
+      task({ id: "task_3", assignee: "Alex", assigneeAgentKey: "codex/alex" }),
+      task({ id: "task_4", assignee: "Alex", assigneeAgentKey: "claude/alex" }),
+      task({ id: "task_5", assignee: "all" }),
+      task({ id: "task_6", assigneeAgentKey: "codex/key-only" }),
+    ];
+    assert.equal(boardOwnerValue(tasks[0]), "unassigned");
+    assert.equal(boardOwnerValue(tasks[5]), "key:codex/key-only");
+    assert.deepEqual(new Set(boardOwnerOptions(tasks).map(option => option.id)), new Set([
+      "all", "unassigned", "key:codex/alex", "key:claude/alex", "label:all", "key:codex/key-only",
+    ]));
+  });
+
+  it("combines owner, status, search and board-view filters without mutating tasks", () => {
+    const tasks = [
+      task({ id: "task_1", title: "Ship tests", assignee: "Alex", assigneeAgentKey: "codex/alex" }),
+      task({ id: "task_2", title: "Ship tests", assignee: "Blake", status: "in_review" }),
+      task({ id: "task_3", title: "Ship tests", assignee: "Alex", assigneeAgentKey: "codex/alex", status: "done" }),
+      task({ id: "task_4", title: "Ship tests" }),
+    ];
+    const input = { tasks, filter: "open" as const, searchQuery: "ship", localWorker: null };
+    assert.deepEqual(visibleBoardGroups({ ...input, ownerFilter: "key:codex/alex", statusFilter: "accepted" })
+      .flatMap(group => group.tasks.map(entry => entry.id)), ["task_1"]);
+    assert.deepEqual(visibleBoardGroups({ ...input, ownerFilter: "unassigned" })
+      .flatMap(group => group.tasks.map(entry => entry.id)), ["task_4"]);
+    assert.deepEqual(visibleBoardGroups({ ...input, filter: "closeout", statusFilter: "done" })
+      .flatMap(group => group.tasks.map(entry => entry.id)), ["task_3"]);
+    assert.equal(visibleBoardGroups({ ...input, searchQuery: "missing" }).flatMap(group => group.tasks).length, 0);
+    assert.deepEqual(tasks.map(entry => entry.id), ["task_1", "task_2", "task_3", "task_4"]);
+  });
+
+  it("sorts recent by update time, oldest by creation time, and title with deterministic ties", () => {
+    const tasks = [
+      task({ id: "task_2", title: "Beta", createdAt: "2026-05-26T00:00:00Z", updatedAt: "2026-05-29T00:00:00Z" }),
+      task({ id: "task_1", title: "Alpha", updatedAt: "", createdAt: "2026-05-27T00:00:00Z" }),
+      task({ id: "task_3", title: "Beta", updatedAt: "2026-05-29T00:00:00Z" }),
+    ];
+    const input = { tasks, filter: "open" as const, searchQuery: "", localWorker: null };
+    const ids = (sort: "recent" | "oldest" | "title") => visibleBoardGroups({ ...input, sort })
+      .flatMap(group => group.tasks.map(entry => entry.id));
+    assert.deepEqual(ids("recent"), ["task_2", "task_3", "task_1"]);
+    assert.deepEqual(ids("oldest"), ["task_2", "task_1", "task_3"]);
+    assert.deepEqual(ids("title"), ["task_1", "task_2", "task_3"]);
+    assert.deepEqual(tasks.map(entry => entry.id), ["task_2", "task_1", "task_3"]);
+  });
+
+  it("resets room filters and recovers empty views without dropping the selected modal", async () => {
+    const props = reactive({ roomIdentifier: "room_1", tasks: [task()], workers: [] as WorkerSnapshot[] });
+    const scope = effectScope();
+    const board = scope.run(() => useRoomBoardPresentation(props, () => {}))!;
+    try {
+      board.selectTask("task_1");
+      board.ownerFilter.value = "label:nobody";
+      board.setStatusFilter("in_review");
+      board.searchQuery.value = "missing";
+      board.setSort("title");
+      assert.equal(board.visibleTaskCount.value, 0);
+      assert.equal(board.modalTask.value?.id, "task_1");
+      assert.equal(board.emptyState.value.actionLabel, "Clear filters");
+      board.runEmptyStateAction(board.emptyState.value.action);
+      assert.equal(board.visibleTaskCount.value, 1);
+      assert.equal(board.ownerFilter.value, "all");
+      assert.equal(board.statusFilter.value, "all");
+      assert.equal(board.searchQuery.value, "");
+      assert.equal(board.sort.value, "title");
+
+      board.ownerFilter.value = "unassigned";
+      board.setStatusFilter("accepted");
+      board.searchQuery.value = "Test";
+      board.setSort("oldest");
+      assert.equal(board.visibleTaskCount.value, 1);
+      board.clearFilters();
+      assert.equal(board.ownerFilter.value, "all");
+      assert.equal(board.statusFilter.value, "all");
+      assert.equal(board.searchQuery.value, "");
+      assert.equal(board.sort.value, "oldest");
+      assert.equal(board.visibleTaskCount.value, 1);
+
+      board.setStatusFilter("accepted");
+      board.setActiveFilter("closeout");
+      assert.equal(board.statusFilter.value, "all");
+      assert.deepEqual(board.statusOptions.value.map(option => option.id), ["all", ...TASK_STATUS_ORDER]);
+      board.ownerFilter.value = "unassigned";
+      board.setStatusFilter("done");
+      board.searchQuery.value = "again";
+      props.roomIdentifier = "room_2";
+      await nextTick();
+      assert.equal(board.activeFilter.value, "open");
+      assert.equal(board.ownerFilter.value, "all");
+      assert.equal(board.statusFilter.value, "all");
+      assert.equal(board.searchQuery.value, "");
+      assert.equal(board.sort.value, "recent");
+
+      props.tasks = [task({ status: "done" })];
+      board.ownerFilter.value = "label:nobody";
+      board.runEmptyStateAction("clear-filters");
+      assert.equal(board.activeFilter.value, "closeout");
+      assert.equal(board.visibleTaskCount.value, 1);
+    } finally {
+      scope.stop();
+    }
+  });
+
+  it("keeps quick views compatible with specific statuses in both directions", () => {
+    const props = reactive({
+      roomIdentifier: "room_1", workers: [] as WorkerSnapshot[],
+      tasks: TASK_STATUS_ORDER.map(status => task({ id: `task_${status}`, status })),
+    });
+    const scope = effectScope();
+    const board = scope.run(() => useRoomBoardPresentation(props, () => {}))!;
+    try {
+      for (const status of TASK_STATUS_ORDER) {
+        board.setActiveFilter("mine");
+        board.setStatusFilter(status);
+        assert.equal(board.activeFilter.value, ["merged", "done", "cancelled"].includes(status) ? "closeout" : "open");
+        assert.equal(board.statusFilter.value, status);
+        assert.deepEqual(board.visibleGroups.value.flatMap(group => group.tasks.map(entry => entry.id)), [`task_${status}`]);
+      }
+      for (const filter of ["open", "mine", "unclaimed", "needs-review", "closeout"]) {
+        board.setStatusFilter("accepted");
+        board.setActiveFilter(filter);
+        assert.equal(board.activeFilter.value, filter);
+        assert.equal(board.statusFilter.value, "all");
+      }
+      board.ownerFilter.value = "unassigned";
+      board.searchQuery.value = "Test";
+      board.setSort("title");
+      board.setStatusFilter("done");
+      board.setStatusFilter("all");
+      assert.equal(board.activeFilter.value, "closeout");
+      assert.equal(board.visibleTaskCount.value, 3);
+      assert.equal(board.ownerFilter.value, "unassigned");
+      assert.equal(board.searchQuery.value, "Test");
+      assert.equal(board.sort.value, "title");
+      board.setStatusFilter("not-a-status");
+      assert.equal(board.statusFilter.value, "all");
+    } finally {
+      scope.stop();
+    }
+  });
+
   it("falls back to the legacy pull request URL when workflow refs are absent", () => {
     assert.deepEqual(workflowRefs(task({ prUrl: "https://github.com/org/repo/pull/12" })), [
       {

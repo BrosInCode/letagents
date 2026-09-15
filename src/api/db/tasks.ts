@@ -416,10 +416,22 @@ export async function findTaskByWorkflowArtifactMatches(
   return undefined;
 }
 
+export class TaskContentConflictError extends Error {
+  readonly code = "task_content_conflict";
+
+  constructor() {
+    super("Task content changed. Reload the task before saving.");
+    this.name = "TaskContentConflictError";
+  }
+}
+
 export async function updateTask(
   roomId: string,
   taskId: string,
   updates: {
+    title?: string;
+    description?: string;
+    expected_content?: { title?: string; description?: string };
     status?: TaskStatus;
     assignee?: string | null;
     assignee_agent_key?: string | null;
@@ -447,6 +459,8 @@ export async function updateTask(
     && fence.task_id === taskId && !options?.boardIntentApproval && !options?.workLeaseCreation);
   const isExactProgressRetry = (current: TaskRow) => progressRetryEligible
     && updates.status === current.status && ["in_progress", "in_review"].includes(current.status)
+    && (updates.title === undefined || updates.title === current.title)
+    && (updates.description === undefined || updates.description === current.description)
     && (updates.assignee === undefined || updates.assignee === current.assignee)
     && (updates.assignee_agent_key === undefined || updates.assignee_agent_key === current.assignee_agent_key)
     && (updates.pr_url === undefined || updates.pr_url === current.pr_url)
@@ -455,6 +469,8 @@ export async function updateTask(
         prUrl: updates.pr_url ?? current.pr_url }), current.workflow_artifacts));
   const retryingProgress = isExactProgressRetry(task);
   const retryingOwnClaim = task.status === "assigned" && updates.status === "assigned"
+    && (updates.title === undefined || updates.title === task.title)
+    && (updates.description === undefined || updates.description === task.description)
     && Boolean(task.assignee_agent_key)
     && updates.assignee_agent_key === task.assignee_agent_key
     && updates.assignee === task.assignee
@@ -490,19 +506,33 @@ export async function updateTask(
         nextPrUrl: newPrUrl,
       });
   const now = new Date().toISOString();
+  const expectedContent = updates.expected_content;
+  const writesWorkflow = updates.pr_url !== undefined || updates.workflow_artifacts !== undefined;
+  let writtenTask: TaskRow | undefined;
 
   const writeTaskUpdate = async (executor: Pick<typeof db, "update">) => {
-    await executor
+    // Omitted fields must not replay the earlier read over a concurrent write.
+    [writtenTask] = await executor
       .update(tasks)
       .set({
-        status: assignment.status,
-        assignee: assignment.assignee,
-        assignee_agent_key: assignment.assignee_agent_key,
-        pr_url: newPrUrl,
-        workflow_artifacts: newWorkflowArtifacts,
+        title: updates.title,
+        description: updates.description,
+        status: updates.status,
+        assignee: Object.prototype.hasOwnProperty.call(updates, "assignee") ? assignment.assignee : undefined,
+        assignee_agent_key: Object.prototype.hasOwnProperty.call(updates, "assignee")
+          ? assignment.assignee_agent_key : updates.assignee_agent_key,
+        pr_url: updates.pr_url,
+        workflow_artifacts: writesWorkflow ? newWorkflowArtifacts : undefined,
         updated_at: now,
       })
-      .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+      .where(and(
+        eq(tasks.room_id, roomId), eq(tasks.number, taskNumber),
+        expectedContent?.title === undefined ? undefined : eq(tasks.title, expectedContent.title),
+        expectedContent?.description === undefined ? undefined
+          : sql`coalesce(${tasks.description}, '') = ${expectedContent.description}`,
+      ))
+      .returning();
+    if (!writtenTask && expectedContent) throw new TaskContentConflictError();
   };
 
   const writeWorkLeaseCreation = async (executor: Pick<typeof db, "insert">) => {
@@ -530,6 +560,7 @@ export async function updateTask(
     executor: Parameters<typeof syncRoomSharedArtifactsForTask>[1] &
       Parameters<typeof updateTaskLeaseWorkflowRefs>[3]
   ) => {
+    if (!writesWorkflow) return;
     if (options?.leaseFence && updates.pr_url !== undefined) {
       await updateTaskLeaseWorkflowRefs(
         roomId,
@@ -560,6 +591,10 @@ export async function updateTask(
             .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber))).for("update");
           if (!current) throw new LeaseFenceStaleError();
           if (isExactProgressRetry(current)) {
+            if ((expectedContent?.title !== undefined && expectedContent.title !== current.title)
+              || (expectedContent?.description !== undefined && expectedContent.description !== (current.description ?? ""))) {
+              throw new TaskContentConflictError();
+            }
             const [session] = await tx.select().from(room_agent_sessions)
               .where(eq(room_agent_sessions.session_id, options.leaseFence.agent_session_id)).for("share");
             if (held.agent_key !== current.assignee_agent_key
@@ -619,15 +654,7 @@ export async function updateTask(
   }
 
   if (progressRetryResult) return progressRetryResult;
-  return toTask({
-    ...task,
-    status: assignment.status,
-    assignee: assignment.assignee,
-    assignee_agent_key: assignment.assignee_agent_key,
-    pr_url: newPrUrl,
-    workflow_artifacts: newWorkflowArtifacts,
-    updated_at: now,
-  });
+  return writtenTask ? toTask(writtenTask) : null;
 }
 
 export async function setTaskAssignmentStateForLeaseAction(

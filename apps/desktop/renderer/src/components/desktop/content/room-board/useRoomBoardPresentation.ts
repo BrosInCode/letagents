@@ -5,12 +5,16 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import {
   BOARD_FILTERS,
+  CLOSEOUT_BOARD_STATUSES,
   boardEmptyState,
   boardFilterCount,
+  boardOwnerOptions,
+  boardStatusOptions,
   isBoardFilter,
   visibleBoardGroups,
   type BoardEmptyStateAction,
   type BoardFilter,
+  type BoardSort,
 } from "./board-presentation";
 import { findLocalRoomWorker } from "./board-workers";
 
@@ -31,6 +35,9 @@ export function useRoomBoardPresentation(
 ) {
   const searchQuery = ref("");
   const activeFilter = ref<BoardFilter>("open");
+  const ownerFilter = ref("all");
+  const statusFilter = ref("all");
+  const sort = ref<BoardSort>("recent");
   const localSelectedTaskId = ref<string | null>(props.selectedTaskId || null);
   const collapsedGroups = ref(new Set<string>());
 
@@ -42,11 +49,16 @@ export function useRoomBoardPresentation(
     filter: activeFilter.value,
     searchQuery: searchQuery.value,
     localWorker: localWorker.value,
+    ownerFilter: ownerFilter.value,
+    statusFilter: statusFilter.value,
+    sort: sort.value,
   }));
   const visibleTasks = computed(() =>
     visibleGroups.value.flatMap((group) => group.tasks)
   );
   const visibleTaskCount = computed(() => visibleTasks.value.length);
+  const ownerOptions = computed(() => boardOwnerOptions(props.tasks));
+  const statusOptions = computed(() => boardStatusOptions());
   const filterOptions = computed(() => BOARD_FILTERS.map((filter) => ({
     ...filter,
     count: boardFilterCount(props.tasks, filter.id, localWorker.value),
@@ -56,6 +68,7 @@ export function useRoomBoardPresentation(
     hasSearchQuery: Boolean(searchQuery.value.trim()),
     filter: activeFilter.value,
     closeoutTaskCount: boardFilterCount(props.tasks, "closeout", localWorker.value),
+    hasFilters: activeFilter.value !== "open" || ownerFilter.value !== "all" || statusFilter.value !== "all" || Boolean(searchQuery.value.trim()),
   }));
   const modalTask = computed(() =>
     visibleTasks.value.find((task) => task.id === localSelectedTaskId.value)
@@ -65,6 +78,14 @@ export function useRoomBoardPresentation(
 
   watch(() => props.selectedTaskId || null, (taskId) => {
     localSelectedTaskId.value = taskId;
+  });
+
+  watch(() => props.roomIdentifier, () => {
+    searchQuery.value = "";
+    activeFilter.value = "open";
+    ownerFilter.value = "all";
+    statusFilter.value = "all";
+    sort.value = "recent";
   });
 
   function selectTask(taskId: string): void {
@@ -78,7 +99,21 @@ export function useRoomBoardPresentation(
   }
 
   function setActiveFilter(filter: string): void {
-    if (isBoardFilter(filter)) activeFilter.value = filter;
+    if (!isBoardFilter(filter)) return;
+    activeFilter.value = filter;
+    statusFilter.value = "all";
+  }
+
+  function setStatusFilter(value: string): void {
+    if (!statusOptions.value.some((option) => option.id === value)) return;
+    statusFilter.value = value;
+    if (value !== "all") {
+      activeFilter.value = CLOSEOUT_BOARD_STATUSES.some((status) => status === value) ? "closeout" : "open";
+    }
+  }
+
+  function setSort(value: string): void {
+    if (value === "recent" || value === "oldest" || value === "title") sort.value = value;
   }
 
   function toggleGroup(status: string): void {
@@ -88,7 +123,19 @@ export function useRoomBoardPresentation(
     collapsedGroups.value = next;
   }
 
+  function clearFilters(): void {
+    searchQuery.value = "";
+    ownerFilter.value = "all";
+    statusFilter.value = "all";
+    activeFilter.value = props.tasks.length > 0 && boardFilterCount(props.tasks, "open", localWorker.value) === 0
+      ? "closeout" : "open";
+  }
+
   function runEmptyStateAction(action: BoardEmptyStateAction): "add-task" | null {
+    if (action === "clear-filters") {
+      clearFilters();
+      return null;
+    }
     if (action === "clear-search") {
       searchQuery.value = "";
       return null;
@@ -106,16 +153,24 @@ export function useRoomBoardPresentation(
 
   return {
     activeFilter,
+    clearFilters,
     clearTaskSelection,
     collapsedGroups,
     emptyState,
     filterOptions,
     localSelectedTaskId,
     modalTask,
+    ownerFilter,
+    ownerOptions,
     runEmptyStateAction,
     searchQuery,
     selectTask,
     setActiveFilter,
+    setSort,
+    setStatusFilter,
+    sort,
+    statusFilter,
+    statusOptions,
     toggleGroup,
     visibleGroups,
     visibleTaskCount,

@@ -5,7 +5,7 @@
       <DesktopSegmentedControl
         class="desktop-board-governance-mode-control"
         :model-value="governance.managerMode"
-        :options="managerModeOptions"
+        :options="managerModeOptions.map(option => ({ ...option, disabled: busy }))"
         label="Board manager mode"
         size="compact"
         @update:model-value="emit('set-manager-mode', $event as DesktopBoardManagerMode)"

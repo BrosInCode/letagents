@@ -2,7 +2,7 @@
   <div class="desktop-board-toolbar">
     <header class="desktop-board-header">
       <div class="desktop-board-heading">
-        <h2>Tasks</h2>
+        <h2>Board</h2>
         <p>{{ summaryText }}</p>
       </div>
       <div class="desktop-board-header-actions">
@@ -19,8 +19,7 @@
         >
           <span class="desktop-board-manager-dot" aria-hidden="true"></span>
           <span class="desktop-board-manager-copy">
-            <strong>Board manager</strong>
-            <small>{{ managerModeLabel }}</small>
+            <strong>Manager</strong>
           </span>
           <span
             v-if="pendingIntentCount > 0"
@@ -36,27 +35,12 @@
           :disabled="busy"
           @click="emit('add-task')"
         >
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
-          </svg>
+          <Plus :size="16" aria-hidden="true" />
           New task
         </button>
       </div>
     </header>
     <div class="desktop-board-controls">
-      <label class="desktop-board-search" for="room-board-search">
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="m21 21-4.35-4.35M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
-        </svg>
-        <span class="sr-only">Search tasks</span>
-        <input
-          id="room-board-search"
-          :value="searchQuery"
-          type="search"
-          placeholder="Search tasks, owners, or links"
-          @input="onSearchInput"
-        />
-      </label>
       <div class="desktop-board-filter-groups">
         <DesktopSegmentedControl
           class="desktop-board-segmented"
@@ -66,18 +50,58 @@
           @update:model-value="emit('update:active-filter', $event)"
         />
       </div>
+      <label class="desktop-board-search" for="room-board-search">
+        <Search :size="16" aria-hidden="true" />
+        <span class="sr-only">Search tasks</span>
+        <input
+          id="room-board-search"
+          ref="searchInput"
+          :value="searchQuery"
+          type="search"
+          placeholder="Search tasks..."
+          @input="onSearchInput"
+        />
+      </label>
+      <div class="desktop-board-refinements" role="group" aria-label="Task filters and sorting">
+        <select :value="ownerFilter" aria-label="Filter by owner" @change="emit('update:owner-filter', selectValue($event))">
+          <option v-for="option in ownerOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
+        </select>
+        <select :value="statusFilter" aria-label="Filter by status" @change="emit('update:status-filter', selectValue($event))">
+          <option v-for="option in statusOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
+        </select>
+        <select :value="sort" aria-label="Sort tasks" @change="emit('update:sort', selectValue($event))">
+          <option value="recent">Recently updated</option>
+          <option value="oldest">Oldest first</option>
+          <option value="title">Title A-Z</option>
+        </select>
+        <button
+          v-if="hasFilters"
+          class="desktop-board-clear-filter"
+          type="button"
+          @click="clearFilters"
+        >
+          <X :size="14" aria-hidden="true" />
+          Clear filters
+        </button>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import { Plus, Search, X } from "@lucide/vue";
 import DesktopSegmentedControl from "../../controls/DesktopSegmentedControl.vue";
 
 const props = defineProps<{
   searchQuery: string;
   activeFilter: string;
   filterOptions: Array<{ id: string; label: string; count?: number }>;
+  ownerFilter: string;
+  ownerOptions: Array<{ id: string; label: string }>;
+  statusFilter: string;
+  statusOptions: Array<{ id: string; label: string }>;
+  sort: string;
   busy: boolean;
   managerMode: string;
   managerTitle: string;
@@ -85,20 +109,17 @@ const props = defineProps<{
   governanceOpen: boolean;
 }>();
 
-const managerModeLabel = computed(() => {
-  if (props.managerMode === "intent_required") return "Approval required";
-  if (props.managerMode === "off") return "Off";
-  return "Optional";
-});
-
 const countFor = (id: string): number => Number(
   props.filterOptions.find((option) => option.id === id)?.count || 0
 );
+const searchInput = ref<HTMLInputElement | null>(null);
+const hasFilters = computed(() => Boolean(props.searchQuery.trim())
+  || props.ownerFilter !== "all" || props.statusFilter !== "all");
 const summaryText = computed(() => {
   const open = countFor("open");
   const review = countFor("needs-review");
   const closeout = countFor("closeout");
-  if (open === 0 && closeout === 0) return "Track ownership and move work through review.";
+  if (open === 0 && closeout === 0) return "No tasks yet";
   const openText = `${open} active ${open === 1 ? "task" : "tasks"}`;
   if (review > 0) return `${openText} · ${review} ${review === 1 ? "needs" : "need"} review`;
   if (open === 0) return `${closeout} ${closeout === 1 ? "task" : "tasks"} in closeout`;
@@ -108,11 +129,24 @@ const summaryText = computed(() => {
 const emit = defineEmits<{
   "update:search-query": [value: string];
   "update:active-filter": [value: string];
+  "update:owner-filter": [value: string];
+  "update:status-filter": [value: string];
+  "update:sort": [value: string];
+  "clear-filters": [];
   "open-governance": [];
   "add-task": [];
 }>();
 
+function clearFilters(): void {
+  emit("clear-filters");
+  searchInput.value?.focus();
+}
+
 function onSearchInput(event: Event): void {
   emit("update:search-query", (event.target as HTMLInputElement).value);
+}
+
+function selectValue(event: Event): string {
+  return (event.target as HTMLSelectElement).value;
 }
 </script>
