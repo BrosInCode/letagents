@@ -79,7 +79,7 @@
 .knowledge-search { display: flex; align-items: center; flex: 1; gap: 8px; min-width: 0; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-subtle); color: var(--text-tertiary); }
 .knowledge-search:focus-within { border-color: var(--border-accent); }
 .knowledge-search input { width: 100%; padding: 8px 0; border: 0; background: none; }
-.memory-library { display: grid; grid-template-columns: 164px minmax(0, 1fr); align-items: start; gap: 24px; min-height: 0; }
+.memory-library { display: grid; flex-shrink: 0; grid-template-columns: 164px minmax(0, 1fr); align-items: start; gap: 24px; min-height: 0; }
 .memory-categories { display: flex; flex-direction: column; gap: 3px; padding-top: 8px; }
 .memory-categories > .knowledge-eyebrow { margin: 0 10px 10px; }
 .memory-categories > button { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text-secondary); font: 12px/1.5 var(--font-sans); text-align: left; cursor: pointer; }
