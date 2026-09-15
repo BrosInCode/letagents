@@ -49,12 +49,34 @@
         <time v-if="selectedCheck.observedAt" :datetime="selectedCheck.observedAt">Observed {{ formatFullTimestamp(selectedCheck.observedAt) }}</time>
       </div>
       <div v-if="stage === 'resolve'" key="resolve" class="diagnostics-step-content">
-        <div class="diagnostics-next"><p class="diagnostics-eyebrow">Next step</p><p>{{ selectedCheck.nextStep }}</p></div>
+        <div v-if="!showRuntimeRecovery" class="diagnostics-next"><p class="diagnostics-eyebrow">Next step</p><p>{{ selectedCheck.nextStep }}</p></div>
         <p v-if="selectedCheck.id === 'delivery' && assessment.nextAttemptAt" class="diagnostics-retry-time"><Clock3 :size="14" aria-hidden="true" /> Retry scheduled for {{ formatFullTimestamp(assessment.nextAttemptAt) }}</p>
-        <div v-if="selectedCheck.action" class="diagnostics-remedy">
+        <div v-if="selectedCheck.action && !showRuntimeRecovery" class="diagnostics-remedy">
           <p>{{ selectedCheck.actionImpact }}</p>
           <button type="button" class="diagnostics-primary" :disabled="busy || checking" @click="runRecovery"><Wrench :size="15" aria-hidden="true" />{{ selectedCheck.action.label }}<ArrowRight :size="15" aria-hidden="true" /></button>
         </div>
+        <section v-if="showRuntimeRecovery" class="diagnostics-runtime-recovery" aria-label="Runtime recovery">
+          <template v-if="!confirmRuntimeRecovery">
+            <fieldset :disabled="busy || checking">
+              <legend>Recovery options</legend>
+              <label v-for="choice in runtimeChoices" :key="choice.kind" class="diagnostics-recovery-choice" :data-selected="runtimeChoice === choice.kind">
+                <input v-model="runtimeChoice" type="radio" name="runtime-recovery" :value="choice.kind" />
+                <span><strong>{{ choice.label }}</strong><span>{{ choice.detail }}</span></span>
+              </label>
+            </fieldset>
+            <p v-if="projection.entry.runtimeRecovery" class="diagnostics-footnote">Recovery paused before completion. Continue the recorded action to finish safely.</p>
+            <button type="button" class="diagnostics-primary" :disabled="busy || checking || !selectedRuntimeChoice" @click="reviewRuntimeRecovery">
+              <RefreshCw :size="15" aria-hidden="true" />{{ runtimeChoice === 'reconnect_runtime' ? 'Reconnect now' : 'Review restart' }}<ArrowRight :size="15" aria-hidden="true" />
+            </button>
+          </template>
+          <div v-else class="diagnostics-recovery-confirm diagnostics-step-content">
+            <h4 ref="recoveryConfirmTitle" tabindex="-1">{{ selectedRuntimeChoice?.label }}?</h4>
+            <p>{{ runtimeChoice === 'fresh_runtime' ? 'The current runtime will stop and a new conversation will open. Its private conversation context will not carry over.' : 'The current runtime will stop. LetAgents will reopen the saved provider conversation in a replacement runtime.' }}</p>
+            <p>Your workspace, agent settings, room memory, and saved history stay available. Unfinished work may be interrupted. Unconfirmed actions will need review before they are repeated.</p>
+            <button type="button" class="diagnostics-primary" :disabled="busy || checking" @click="runRuntimeRecovery"><RefreshCw :size="15" aria-hidden="true" />{{ selectedRuntimeChoice?.label }}</button>
+            <button type="button" class="diagnostics-secondary" :disabled="busy || checking" @click="cancelRuntimeRecovery">Cancel</button>
+          </div>
+        </section>
         <button v-if="selectedCheck.destination" type="button" class="diagnostics-secondary" @click="emit('navigate', selectedCheck.destination)">{{ selectedCheck.destination === 'work' ? 'Inspect message history' : 'Review turn controls' }}<ArrowUpRight :size="14" aria-hidden="true" /></button>
         <button type="button" class="diagnostics-secondary" :disabled="checking || busy || !refreshDiagnostics" @click="verify"><RefreshCw :size="14" aria-hidden="true" />{{ selectedCheck.action ? 'Check again' : 'Refresh and verify' }}</button>
       </div>
@@ -135,12 +157,62 @@ const motionEnabled = ref(false);
 const refreshMessage = ref("");
 const refreshFailed = ref(false);
 const recoveryRequested = ref(false);
+const runtimeRecoveryRequested = ref(false);
+const recoveryChecksPassed = computed(() => runtimeRecoveryRequested.value
+  ? assessment.value.checks.filter(check => check.id === "provider" || check.id === "room").every(check => check.state === "passed")
+  : selectedCheck.value?.state === "passed");
+type RuntimeRecoveryKind = "reconnect_runtime" | "restart_runtime" | "fresh_runtime";
+const runtimeChoice = ref<RuntimeRecoveryKind>("reconnect_runtime");
+const confirmRuntimeRecovery = ref(false);
+const recoveryConfirmTitle = ref<HTMLElement | null>(null);
+const runtimeChoices = computed(() => {
+  if (!props.daemonStatus?.capabilities.agentRuntimeRecoveryV2) return [];
+  const descriptions: Record<RuntimeRecoveryKind, string> = {
+    reconnect_runtime: "Request fresh runtime observations and restart room listening. Keeps the current conversation running.",
+    restart_runtime: "Replace the runtime and reopen its saved conversation. Use this if reconnecting does not help.",
+    fresh_runtime: "Open a new conversation in the same workspace. Use this if the saved conversation cannot resume.",
+  };
+  return props.projection.actions.filter(action => action.available && Object.hasOwn(descriptions, action.kind))
+    .map(action => ({ ...action, kind: action.kind as RuntimeRecoveryKind, detail: descriptions[action.kind as RuntimeRecoveryKind] }));
+});
+const selectedRuntimeChoice = computed(() => runtimeChoices.value.find(choice => choice.kind === runtimeChoice.value));
+const showRuntimeRecovery = computed(() => runtimeChoices.value.length > 0 && ["provider", "room"].includes(selectedCheck.value?.id ?? ""));
+watch(() => [props.projection.entry.executionGenerationId, props.projection.entry.runtimeGenerationId], () => {
+  confirmRuntimeRecovery.value = false;
+});
+async function cancelRuntimeRecovery(): Promise<void> {
+  confirmRuntimeRecovery.value = false;
+  await nextTick();
+  rootElement.value?.querySelector<HTMLInputElement>('.diagnostics-recovery-choice[data-selected="true"] input')?.focus();
+}
+watch(runtimeChoices, choices => {
+  if (!choices.some(choice => choice.kind === runtimeChoice.value)) {
+    runtimeChoice.value = choices[0]?.kind ?? "reconnect_runtime";
+    confirmRuntimeRecovery.value = false;
+  }
+}, { immediate: true });
+async function reviewRuntimeRecovery(): Promise<void> {
+  if (!selectedRuntimeChoice.value || props.busy || checking.value) return;
+  if (runtimeChoice.value === "reconnect_runtime") { runRuntimeRecovery(); return; }
+  confirmRuntimeRecovery.value = true;
+  await nextTick();
+  recoveryConfirmTitle.value?.focus({ preventScroll: true });
+}
+function runRuntimeRecovery(): void {
+  if (!selectedRuntimeChoice.value || props.busy || checking.value || props.projection.resourceFreshness !== "fresh") return;
+  runtimeRecoveryRequested.value = true; recoveryRequested.value = true; stage.value = "verify"; verification.value = "idle";
+  confirmRuntimeRecovery.value = false;
+  emit("action", { entryId: props.projection.entryId, roomId: props.projection.roomId, kind: runtimeChoice.value });
+  void focusGuide();
+}
 let requestVersion = 0;
 const recoveryError = computed(() => recoveryRequested.value && props.actionState?.status === "error" ? safeDiagnosticText(props.actionState.message) : null);
 const verificationMessage = computed(() => props.busy ? "LetAgents is processing the request. Wait for it to finish before checking again."
   : recoveryError.value ? "LetAgents could not confirm this recovery request. Review the error below before trying again."
+  : verification.value === "passed" && runtimeRecoveryRequested.value ? "Fresh observations confirm the agent is reachable and its room connection is clear."
   : verification.value === "passed" && selectedCheck.value?.state === "passed" ? "A fresh observation confirms this check is clear. The other checks still describe their own part of the connection."
   : verification.value === "unresolved" && refreshFailed.value ? "Fresh verification is unavailable. The finding above may be from an earlier observation. Try again when the background service is reachable."
+  : verification.value === "unresolved" && runtimeRecoveryRequested.value ? `Recovery is not fully verified. Still to check: ${assessment.value.checks.filter(check => ["provider", "room"].includes(check.id) && check.state !== "passed").map(check => check.label).join(" and ").toLowerCase()}.`
   : verification.value === "unresolved" ? "This check is not clear yet. The finding above shows the latest available state. Review the recovery guidance if it still needs attention."
   : "Refresh the observations to see whether this check recovered. An accepted request alone does not confirm the problem is resolved.");
 
@@ -150,6 +222,8 @@ async function focusGuide(): Promise<void> {
   guideTitle.value?.focus({ preventScroll: true });
 }
 function openCheck(id: DiagnosticCheckId): void {
+  confirmRuntimeRecovery.value = false;
+  runtimeRecoveryRequested.value = false;
   refreshMessage.value = ""; refreshFailed.value = false;
   selectedId.value = id; stage.value = "resolve"; verification.value = "idle"; recoveryRequested.value = false;
   void focusGuide();
@@ -164,6 +238,7 @@ function reviewCheck(): void {
   void focusGuide();
 }
 function runRecovery(): void {
+  runtimeRecoveryRequested.value = false;
   const action = selectedCheck.value?.action;
   if (!action || props.busy || checking.value || props.projection.resourceFreshness !== "fresh") return;
   const current = props.projection.actions.find(candidate => candidate.available && candidate.kind === action.kind && candidate.sourceMessageId === action.sourceMessageId);
@@ -186,7 +261,7 @@ async function refresh(verifyResult = false): Promise<void> {
     refreshFailed.value = !fresh;
     refreshMessage.value = fresh ? "Checks refreshed from the latest available observations." : "Couldn’t confirm fresh checks. The available evidence is shown above.";
     if (verifyResult) {
-      verification.value = fresh && selectedCheck.value?.state === "passed" ? "passed" : "unresolved";
+      verification.value = fresh && recoveryChecksPassed.value && !recoveryError.value ? "passed" : "unresolved";
       if (verification.value === "passed") recoveryRequested.value = false;
     }
   } catch {
@@ -200,13 +275,14 @@ async function verify(): Promise<void> {
   await focusGuide();
   await refresh(true);
 }
-watch(() => selectedCheck.value?.state, state => {
-  if (verification.value === "passed" && state !== "passed") {
+watch(recoveryChecksPassed, passed => {
+  if (verification.value === "passed" && !passed) {
     verification.value = "unresolved";
     refreshMessage.value = "The agent’s state changed after verification. Review the latest finding above.";
   }
 });
 watch([() => props.projection.entryId, () => props.projection.roomId], () => {
+  confirmRuntimeRecovery.value = false; runtimeChoice.value = "reconnect_runtime";
   requestVersion++; selectedId.value = null; checking.value = false; refreshMessage.value = "";
   verification.value = "idle"; recoveryRequested.value = false; copyState.value = "idle"; copying.value = false;
 });

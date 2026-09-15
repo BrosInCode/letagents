@@ -58,7 +58,9 @@ test("explicit provider recovery prepares authority without entering activation 
   );
   assert.match(recoveryHandler, /prepareEntryForRuntimeRecovery\(entry\)/);
   assert.doesNotMatch(recoveryHandler, /prepareEntryForActivation\(entry\)/);
-  assert.match(recoveryHandler, /recoverAgentRuntime\(entry\.id\)/);
+  assert.match(recoveryHandler, /input\.recovery\?\.mode === "reconnect"/);
+  assert.match(recoveryHandler, /reconnectEntry\(entry\)/);
+  assert.match(recoveryHandler, /recoverAgentRuntime\(entry\.id, input\.recovery\)/);
 });
 
 test("supervisor ownership claims before legacy teardown and activates last", async () => {

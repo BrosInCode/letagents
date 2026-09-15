@@ -194,6 +194,38 @@ function diagnosticFixture() {
   return { entry, daemon, resource, project, assess };
 }
 
+test("an unknown working runtime has explicit recovery choices without claiming a failure", () => {
+  const fixture = diagnosticFixture();
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = true;
+  fixture.resource.detail.runtime_control = null;
+  fixture.entry.roomAgentState.ingress.state = "backoff";
+  const result = fixture.assess();
+  assert.equal(result.checks[1]!.state, "unknown");
+  assert.match(result.checks[1]!.nextStep, /Reconnect.*restart and resume/);
+  const choices = fixture.project().actions.filter(action => ["reconnect_runtime", "restart_runtime", "fresh_runtime"].includes(action.kind));
+  assert.equal(choices.length, 3);
+  assert.ok(choices.every(choice => choice.available));
+  assert.ok(choices.filter(choice => choice.kind !== "reconnect_runtime").every(choice => choice.danger));
+  assert.ok(fixture.project("stale").actions.filter(action => choices.some(choice => choice.kind === action.kind)).every(choice => !choice.available));
+});
+
+test("unfinished recovery offers only its exact recorded restart, including after fresh intent cleared the old reference", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.desiredState = "paused";
+  fixture.entry.executionGenerationId = null;
+  fixture.entry.runtimeGenerationId = null;
+  fixture.entry.runtimeRecovery = { mode: "fresh", phase: "stopped", operationId: "operation",
+    roomId: fixture.entry.roomId, executionGenerationId: "old-execution", runtimeGenerationId: "old-runtime" };
+  const result = fixture.assess();
+  assert.equal(result.checks[1]!.summary, "Recovery is paused");
+  const choices = fixture.project().actions;
+  assert.equal(choices.find(action => action.kind === "resume")?.available, false);
+  assert.equal(choices.find(action => action.kind === "reconnect_runtime")?.available, false);
+  assert.equal(choices.find(action => action.kind === "restart_runtime")?.available, false);
+  assert.equal(choices.find(action => action.kind === "fresh_runtime")?.available, true);
+  assert.equal(choices.find(action => action.kind === "fresh_runtime")?.label, "Continue fresh start");
+});
+
 test("healthy checks distinguish connectivity from message completion", () => {
   const result = diagnosticFixture().assess();
   assert.equal(result.passedCount, 4);

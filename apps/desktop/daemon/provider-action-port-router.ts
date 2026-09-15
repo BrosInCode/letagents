@@ -95,7 +95,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   async capabilities(workAttemptId: string, requestedProvider?: string): Promise<ProviderActionCapabilities> {
     const provider = this.resolveProvider(this.handles.get(workAttemptId)?.provider, requestedProvider);
-    return (await this.adapter(provider)).capabilities();
+    const adapter = await this.adapter(provider);
+    return { ...adapter.capabilities(), exactProcessStop: typeof adapter.stopRef === "function" };
   }
 
   async spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle> {
@@ -394,9 +395,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       providerFromConnection(ref.providerConnection),
     );
     const adapter = await this.adapter(provider);
-    // Codex protocol terminals can precede OS death. Its exact-reference path
+    // Protocol terminals can precede OS death. The exact-reference path
     // must prove the frozen birth is gone even when a cached handle exists.
-    if (provider === "codex" && adapter.stopRef) {
+    if (adapter.stopRef && (provider === "codex" || options?.force)) {
       const terminal = await adapter.stopRef(ref, options);
       if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
       return terminal;

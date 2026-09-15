@@ -19,6 +19,13 @@ import type {
 import type { WorkerAuthorityCoordinator } from "./worker-authority-coordinator.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
+import { assertRecoveryCoordinates, type RuntimeRestartRequest } from "./runtime-recovery-journal.js";
+import type { ProviderStreamCoordinator } from "./provider-stream-coordinator.js";
+import type { ProviderTerminalCoordinator } from "./provider-terminal-coordinator.js";
+import { processBirthState, type ProcessIdentity } from "./process-identity.js";
+import { serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
+
+export type AgentRuntimeRecoveryRequest = Omit<RuntimeRestartRequest, "entryId" | "mode"> & { mode: "reconnect" | "resume" | "fresh" };
 
 type RuntimeRecoveryAuthority = {
   currentDaemonGeneration: () => number;
@@ -40,6 +47,11 @@ export type RuntimeRecoveryCoordinatorOptions = {
   delivery: SupervisedAgentDelivery | null;
   supervisorGrantHttp: SupervisorGrantHttp;
   provider?: ProviderActionPort;
+  streams?: Pick<ProviderStreamCoordinator, "currentInstallation" | "install">;
+  terminals?: Pick<ProviderTerminalCoordinator, "handleTerminal">;
+  restartDelivery?: (entryId: string) => Promise<void>;
+  releaseRecoveredObservation?: (entryId: string, runtimeId: string) => void;
+  processIdentity?: ProcessIdentity;
   liveHandles: Map<string, ProviderActionHandle>;
   authority: RuntimeRecoveryAuthority;
   beginLifecycle: (entryId: string) => () => void;
@@ -81,7 +93,7 @@ export class RuntimeRecoveryCoordinator {
   private readonly entryWithDerivedLiveness: RuntimeRecoveryCoordinatorOptions["entryWithDerivedLiveness"];
   private readonly nowMs: () => number;
 
-  constructor(options: RuntimeRecoveryCoordinatorOptions) {
+  constructor(private readonly options: RuntimeRecoveryCoordinatorOptions) {
     this.store = options.store;
     this.durability = options.durability;
     this.inbox = options.inbox;
@@ -307,16 +319,161 @@ export class RuntimeRecoveryCoordinator {
     return checkpoint.entry;
   }
 
-  async recoverAgentRuntime(entryId: string, daemonGeneration: number) {
+  async recoverAgentRuntime(entryId: string, daemonGeneration: number, recovery?: AgentRuntimeRecoveryRequest) {
     const release = this.beginLifecycle(entryId);
     try {
+      if (recovery) return await this.repairRuntime(entryId, daemonGeneration, recovery);
       return await this.recoverAgentRuntimeExclusive(entryId, daemonGeneration);
     } finally {
       release();
+      if (recovery) {
+        this.requestConvergence(entryId);
+        void this.options.restartDelivery?.(entryId).catch(() => undefined);
+      }
     }
   }
 
+  private async repairRuntime(entryId: string, daemonGeneration: number, input: AgentRuntimeRecoveryRequest) {
+    const assertAuthority = async () => {
+      await this.authority.assertCurrent();
+      if (daemonGeneration !== this.authority.currentDaemonGeneration() || this.authority.isHandoffScheduled()) {
+        throw new Error("Runtime recovery lost daemon authority. Refresh checks and retry.");
+      }
+    };
+    await assertAuthority();
+    this.bumpControlEpoch(entryId);
+    this.clearRecovery(entryId);
+    const request = { ...input, entryId, mode: input.mode === "fresh" ? "fresh" as const : "resume" as const };
+    const recorded = input.mode === "reconnect" ? null : await this.store.getRuntimeRecovery(input.operationId);
+    if (recorded?.phase === "complete") {
+      if (recorded.agent_id !== entryId || recorded.room_id !== input.roomId || recorded.mode !== input.mode
+        || recorded.execution_generation_id !== input.executionGenerationId || recorded.runtime_generation_id !== input.runtimeGenerationId) {
+        throw new Error("The recovery operation ID belongs to a different request.");
+      }
+      const entry = await this.store.getEntry(entryId);
+      if (!entry) throw new Error("This agent is no longer available.");
+      return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(entry) };
+    }
+    let entry = await this.store.getEntry(entryId);
+    const pending = await this.store.pendingRuntimeRecovery(entryId);
+    if (pending?.phase !== "stopped") assertRecoveryCoordinates(entry, request);
+    if (!entry || entry.delivery_mode !== "daemon_inbox" || entry.desired_state === "stopped") {
+      throw new Error("Recovery is available for saved supervised agents.");
+    }
+    if (input.mode === "reconnect") {
+      if (pending) throw new Error("A restart is paused partway through. Retry its original recovery action.");
+      if (entry.desired_state !== "running" || !this.options.streams || !this.delivery) throw new Error("Resume this agent before reconnecting it.");
+      const installation = this.options.streams.currentInstallation(entryId);
+      if (!installation || installation.executionGenerationId !== input.executionGenerationId) {
+        throw new Error("The saved runtime is no longer attached. Use Restart and resume.");
+      }
+      if (!await this.delivery.stopIfIdle(entryId)) throw new Error("The agent has an active turn. Wait for it to finish, or restart it to interrupt the turn.");
+      await this.serializeEntry(entryId, async () => {
+        await assertAuthority();
+        assertRecoveryCoordinates(await this.store.getEntry(entryId), request);
+        await this.options.streams!.install(entryId, installation.handle, input.executionGenerationId, () => false);
+      });
+      return { outcome: "reconnecting", entry: await this.entryWithDerivedLiveness((await this.store.getEntry(entryId))!) };
+    }
+    if (!this.provider) throw new Error("Provider recovery is unavailable.");
+    const capabilities = await this.provider.capabilities(entry.work_attempt_id!, entry.provider);
+    if (input.mode === "resume" && !capabilities.resume) {
+      throw new Error("This provider cannot resume a saved conversation. Use Start fresh to keep the workspace and open a new conversation.");
+    }
+    const preflightRef = pending ? JSON.parse(pending.provider_ref_json) as NonNullable<DaemonManifestEntry["provider_ref"]> : entry.provider_ref!;
+    const preflightBirth = processBirthState(preflightRef.provider_connection?.pid ?? null,
+      preflightRef.provider_connection?.processIdentity ?? null, this.options.processIdentity);
+    if (pending?.phase !== "stopped") {
+      if (preflightBirth === "unknown") throw new Error("The saved process identity cannot be verified. Refresh checks before restarting it.");
+      if (preflightBirth === "live" && (!capabilities.exactProcessStop || !this.provider.stopRef)) {
+        throw new Error("This provider does not yet support stopping an unreachable runtime safely. Stop it in its provider app, then retry recovery.");
+      }
+    }
+    const record = await this.serializeEntry(entryId, () => this.authority.serializeManifest(async () => {
+      await assertAuthority();
+      const prepared = await this.store.prepareRuntimeRecovery(this.authority.currentManifestGeneration(), request,
+        commit => this.authority.fenceCommit(commit));
+      this.authority.acceptManifestGeneration(prepared.generation);
+      return prepared.record;
+    }));
+    const savedRef = JSON.parse(record.provider_ref_json) as NonNullable<DaemonManifestEntry["provider_ref"]>;
+    const exactRef: ProviderActionRef = { workAttemptId: savedRef.work_attempt_id, provider: entry.provider,
+      providerContinuationId: savedRef.provider_continuation_id, providerConnection: savedRef.provider_connection };
+    const birthState = () => processBirthState(savedRef.provider_connection?.pid ?? null,
+      savedRef.provider_connection?.processIdentity ?? null, this.options.processIdentity);
+    if (record.phase === "prepared") {
+      if (birthState() === "unknown") throw new Error("The saved process identity cannot be verified. Recovery is paused; no replacement will start until ownership is confirmed.");
+      // Cancel ingress first; do not hold the entry lock while joining callbacks.
+      // Stopping the process also releases a provider turn that cannot respond.
+      const deliveryStopped = this.delivery?.stop(entryId) ?? Promise.resolve();
+      void deliveryStopped.catch(() => undefined);
+      await assertAuthority();
+      assertRecoveryCoordinates(await this.store.getEntry(entryId), request);
+      const installation = this.options.streams?.currentInstallation(entryId);
+      const currentBirth = birthState();
+      if (currentBirth === "unknown") throw new Error("The saved process identity changed before stopping. Recovery remains paused.");
+      const terminal: ProviderActionTerminal = currentBirth === "gone"
+        ? { endedAt: new Date(this.nowMs()).toISOString(), exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: savedRef.provider_continuation_id }
+        : await this.provider.stopRef!(exactRef, { force: true, graceMs: 5_000, actionId: record.operation_id });
+      if (terminal.providerContinuationId && terminal.providerContinuationId !== savedRef.provider_continuation_id) {
+        throw new Error("The stop result belongs to a different conversation. Recovery remains paused.");
+      }
+      if (installation) await this.options.terminals?.handleTerminal(installation, terminal);
+      await boundedRecoveryWait(deliveryStopped);
+      await this.serializeEntry(entryId, async () => {
+        await assertAuthority();
+        assertRecoveryCoordinates(await this.store.getEntry(entryId), request);
+        const attempt = await this.durability.getAttempt(savedRef.work_attempt_id);
+        const execution = attempt.execution_generations.find(value => value.execution_generation_id === savedRef.execution_generation_id);
+        if (!execution) throw new Error("The original execution record is missing. Recovery remains paused.");
+        if (!execution.terminal) await this.durability.recordTerminal(savedRef.work_attempt_id, savedRef.execution_generation_id,
+          terminalPayload(terminal, execution.actor, execution.generation));
+        await this.durability.releaseTerminalExecutionFence(savedRef.work_attempt_id, savedRef.execution_generation_id);
+        await this.store.checkpointRuntimeStopped(record.operation_id, commit => this.authority.fenceCommit(async () => {
+          // The durable boundary requires current host proof, not a cached terminal.
+          if (birthState() !== "gone") throw new Error("The old process has not been proven stopped. Recovery remains paused; no replacement was started.");
+          await commit();
+        }));
+      });
+    }
+    this.options.releaseRecoveredObservation?.(entryId, record.runtime_generation_id);
+    entry = await this.serializeEntry(entryId, async () => {
+      await assertAuthority();
+      const current = await this.store.getEntry(entryId);
+      if (!current || current.room_id !== record.room_id || current.work_attempt_id !== savedRef.work_attempt_id) {
+        throw new Error("The agent moved during recovery. No replacement was started.");
+      }
+      const binding = await this.bindings.get(entryId);
+      if (binding && binding.execution_generation_id !== record.execution_generation_id) throw new Error("A different worker binding is present. Recovery remains paused.");
+      const sessionId = binding?.agent_session_id ?? current.last_worker_binding?.agent_session_id;
+      if (sessionId) {
+        const grant = this.workerAuthority.currentHostGrant(current);
+        if (!grant || !this.supervisorGrantHttp.endWorkerSession) throw new Error("Desktop credentials are needed to finish recovery. Reconnect the desktop and retry.");
+        await this.supervisorGrantHttp.endWorkerSession({ apiUrl: grant.apiUrl, grantId: grant.grantId,
+          supervisorGrant: grant.supervisorGrant, grantGeneration: grant.grantGeneration, sessionId });
+      }
+      await assertAuthority();
+      if (binding) await this.bindings.unbind(entryId, binding.agent_session_id, binding.execution_generation_id);
+      this.runtimeCustody.deleteLiveBinding(entryId);
+      this.runtimeCustody.deletePendingResumeBinding(entryId);
+      this.runtimeCustody.deleteWorkerAuthorization(entryId);
+      const updated = await this.updateEntry(entryId, currentEntry => ({ ...currentEntry,
+        desired_state: "running", observed_state: "recovering", condition: "none", last_error: null,
+        run_id: input.mode === "resume" ? savedRef.execution_generation_id : null,
+        deployment_id: input.mode === "resume" ? serializeDaemonDeploymentId(entryId, savedRef.execution_generation_id) : null,
+        last_worker_binding: null,
+        provider_ref: input.mode === "resume" ? savedRef : null,
+        native_liveness: { state: "unknown", observed_at: new Date(this.nowMs()).toISOString(),
+          detail: input.mode === "resume" ? "Restarting the saved conversation." : "Starting a new conversation in the existing workspace." },
+      }));
+      await this.store.completeRuntimeRecovery(record.operation_id, commit => this.authority.fenceCommit(commit));
+      return updated;
+    });
+    return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(entry) };
+  }
+
   private async recoverAgentRuntimeExclusive(entryId: string, daemonGeneration: number) {
+    if (await this.store.pendingRuntimeRecovery(entryId)) throw new Error("Continue the recorded recovery action in Diagnostics.");
     if (!entryId || daemonGeneration !== this.authority.currentDaemonGeneration()) {
       throw new Error("Agent runtime recovery is fenced by a stale daemon generation.");
     }
@@ -431,6 +588,15 @@ export class RuntimeRecoveryCoordinator {
     this.requestConvergence(entryId);
     return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(updated) };
   }
+}
+
+async function boundedRecoveryWait(pending: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([pending, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("The runtime stopped, but delivery cleanup has not finished. Recovery remains paused; retry shortly.")), 10_000);
+    })]);
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 function providerRef(entry: DaemonManifestEntry): ProviderActionRef {

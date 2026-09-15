@@ -2596,6 +2596,18 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
       updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "running");
     } else if (intent.kind === "recover") {
       updated = await desktopIpc.supervisor.recoverAgentRuntime({ entryId: intent.entryId });
+    } else if (["reconnect_runtime", "restart_runtime", "fresh_runtime"].includes(intent.kind)) {
+      const status = await refreshSupervisorStatus();
+      if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
+      if (!status?.capabilities.agentRuntimeRecoveryV2) throw new Error("Update the background service to use runtime recovery controls.");
+      const pending = projection.entry.runtimeRecovery;
+      const executionGenerationId = pending?.executionGenerationId ?? projection.entry.executionGenerationId;
+      const runtimeGenerationId = pending?.runtimeGenerationId ?? projection.entry.runtimeGenerationId;
+      if (!executionGenerationId || !runtimeGenerationId) throw new Error("The runtime changed. Refresh checks before recovering it.");
+      updated = await desktopIpc.supervisor.recoverAgentRuntime({ entryId: intent.entryId, recovery: {
+        mode: intent.kind === "reconnect_runtime" ? "reconnect" : intent.kind === "restart_runtime" ? "resume" : "fresh",
+        operationId: pending?.operationId ?? operationId, roomId: intent.roomId, executionGenerationId, runtimeGenerationId,
+      } });
     } else if (intent.kind === "retire_agent") {
       const status = await refreshSupervisorStatus();
       if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
@@ -2859,6 +2871,9 @@ function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string
     resume: "Resuming this agent…",
     reconnect: "Restoring the existing agent connection…",
     recover: "Starting a replacement provider for this agent…",
+    reconnect_runtime: "Reconnecting observation and room delivery…",
+    restart_runtime: "Stopping the old runtime and resuming its conversation…",
+    fresh_runtime: "Stopping the old runtime and opening a fresh conversation…",
     stop_turn: "Stopping the current turn…",
     steer_turn: "Applying correction to this session…",
     retry_turn_control: "Retrying the exact previous turn control…",
@@ -2881,6 +2896,9 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
     resume: "Agent resumed.",
     reconnect: "Connection handoff requested.",
     recover: "Provider recovery started. The agent identity and workspace were preserved.",
+    reconnect_runtime: "Reconnection requested. Verify the latest runtime and room checks.",
+    restart_runtime: "Restart requested with the saved conversation. Verify the new runtime before continuing work.",
+    fresh_runtime: "Fresh start requested. Your workspace and saved history are preserved. Verify the new runtime before continuing work.",
     stop_turn: "Current turn stopped.",
     steer_turn: "Correction applied to the same agent session.",
     retry_turn_control: "Previous turn control completed.",
