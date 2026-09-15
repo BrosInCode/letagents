@@ -189,6 +189,7 @@ export class RoomMoveCoordinator {
     return this.ports.serializeEntry(input.entryId, async () => {
       await this.ports.authority.assertCurrent();
       const entry = await this.ports.store.getEntry(input.entryId);
+      if (entry?.local_room_id) throw new Error("Moving a local agent to another room is not supported yet. Start an agent in the destination room.");
       const binding = await this.ports.bindings.get(input.entryId);
       const credential = binding ? await this.ports.bindings.credentialFor(binding) : null;
       const handle = this.ports.currentHandle(input.entryId);

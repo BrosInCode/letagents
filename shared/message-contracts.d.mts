@@ -30,3 +30,5 @@ export type ParsedAccountAgentRouting =
 export function parseAccountAgentRoutingEnvelope(
   routing: unknown,
 ): ParsedAccountAgentRouting | undefined;
+
+export function parseSupervisedReplySourceNumber(clientMessageId: string | null): number | null;

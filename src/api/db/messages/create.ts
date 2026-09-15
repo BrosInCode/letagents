@@ -14,6 +14,7 @@ import {
   MESSAGE_SENDER_MAX_CODE_POINTS,
   MESSAGE_SENDER_MAX_UTF8_BYTES,
   isMessageSenderWithinBounds,
+  parseSupervisedReplySourceNumber,
 } from "../../../../shared/message-contracts.mjs";
 import {
   isAgentDeliverySessionReachable,
@@ -973,12 +974,4 @@ export async function addMessage(
  * Only this exact shape identifies a reply target; arbitrary client ids never
  * influence receipt state.
  */
-export function parseSupervisedReplySourceNumber(clientMessageId: string | null): number | null {
-  if (!clientMessageId) return null;
-  const parts = clientMessageId.split(":");
-  if (parts[0] !== "supervised-room" || parts.at(-2) !== "reply" || parts.at(-1) !== "v1") return null;
-  const body = parts.slice(1, -2);
-  if (body.length !== 2 && body.length !== 3) return null;
-  const source = body.at(-1);
-  return source ? parseScopedId(source, "msg") : null;
-}
+export { parseSupervisedReplySourceNumber };

@@ -199,9 +199,7 @@
   place-items: center;
   padding: 28px;
   background:
-    radial-gradient(circle at 28% 12%, rgba(255, 255, 255, 0.08), transparent 28%),
-    rgba(5, 5, 5, 0.82);
-  backdrop-filter: blur(18px);
+    var(--overlay-scrim);
   animation: room-panel-in 160ms var(--ease-out);
 }
 

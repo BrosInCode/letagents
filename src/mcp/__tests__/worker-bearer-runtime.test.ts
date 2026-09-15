@@ -315,6 +315,22 @@ test("blank worker bearer does not activate worker mode", async () => {
   });
 });
 
+test("local room origin is admitted only for credential-free bounded supervision", async () => {
+  await withAuthEnv({ apiUrl: "letagents-local://rooms", boundedTurns: "1", supervisorRoomId: "local_room" }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), { mode: "supervised" });
+  });
+  for (const apiUrl of ["letagents-local://other", "letagents-local://rooms/path", "letagents-local://rooms#fragment", "letagents-local://user@rooms"]) {
+    await withAuthEnv({ apiUrl, boundedTurns: "1", supervisorRoomId: "local_room" }, async () => {
+      assert.equal(getWorkerBearerRuntime().mode, "invalid");
+    });
+  }
+  for (const values of [{ bearer: "worker-secret" }, { executionProfile: "supervised_mcp_polling" }]) {
+    await withAuthEnv({ apiUrl: "letagents-local://rooms", ...values }, async () => {
+      assert.equal(getWorkerBearerRuntime().mode, "invalid");
+    });
+  }
+});
+
 test("worker bearer mode requires an explicit valid API URL", async () => {
   await withAuthEnv({ bearer: "worker-secret", owner: undefined, apiUrl: null }, async () => {
     assert.deepEqual(getWorkerBearerRuntime(), {

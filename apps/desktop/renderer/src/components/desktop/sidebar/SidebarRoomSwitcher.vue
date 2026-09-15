@@ -92,7 +92,6 @@ function chooseActive(): void {
   align-items: flex-start;
   padding: clamp(40px, 14vh, 145px) 20px 20px;
   background: var(--overlay-scrim);
-  backdrop-filter: blur(5px);
 }
 .sidebar-switcher {
   display: flex;
@@ -220,6 +219,6 @@ function chooseActive(): void {
 .sidebar-switcher-empty { margin: 0; padding: 40px 20px; color: var(--text-tertiary); font-size: 0.82rem; text-align: center; }
 .sidebar-switcher button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 @media (prefers-reduced-transparency: reduce) {
-  .sidebar-switcher-backdrop { backdrop-filter: none; }
+  .sidebar-switcher-backdrop { }
 }
 </style>

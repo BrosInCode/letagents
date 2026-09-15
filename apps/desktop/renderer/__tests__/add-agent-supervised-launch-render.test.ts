@@ -282,7 +282,7 @@ test("mounted ready supervised button dispatches dismiss and restores Start with
   assert.match(beforeRelease, /desktop-add-agent-add-another-supervised/);
   assert.match(beforeRelease, /Add another Codex agent/);
   assert.doesNotMatch(beforeRelease, /desktop-add-agent-stop-supervised-runtime/);
-  assert.doesNotMatch(beforeRelease, />Start supervised agent</);
+  assert.doesNotMatch(beforeRelease, />Start agent</);
 
   const root = hostNode("root");
   const app = testRenderer.createApp(defineComponent({
@@ -320,7 +320,7 @@ test("mounted ready supervised button dispatches dismiss and restores Start with
   assert.equal(ready.counts().dismissCalls, 1);
   assert.equal(ready.counts().stopCalls, 0);
   assert.doesNotMatch(afterRelease, /desktop-add-agent-add-another-supervised/);
-  assert.match(afterRelease, />Start supervised agent</);
+  assert.match(afterRelease, />Start agent</);
 });
 
 test("pre-durable failures are compact, actionable, and explicit that nothing changed", async () => {

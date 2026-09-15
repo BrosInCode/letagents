@@ -1,3 +1,4 @@
+import { isLocalRoomApi, localRoomRuntime } from "./local-room-runtime.js";
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -127,5 +128,11 @@ export async function supervisedToolRuntime(): Promise<SupervisedToolRuntime> {
     loadedRuntime = null;
     throw error;
   });
-  return loadedRuntime;
+  const cloudRuntime = await loadedRuntime;
+  return {
+    supervisedToolIsMutation: (name) => cloudRuntime.supervisedToolIsMutation(name),
+    executeDaemonTool: async (input) => isLocalRoomApi(input.apiUrl)
+      ? (await localRoomRuntime()).executeLocalSupervisorTool(input)
+      : cloudRuntime.executeDaemonTool(input),
+  };
 }

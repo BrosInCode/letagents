@@ -1,3 +1,4 @@
+import { roomApiOrigin, isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname } from "node:path";
@@ -234,7 +235,7 @@ export class WorkerBindingStore {
       const binding: WorkerSessionBinding = {
         entry_id: input.entry_id, room_id: input.room_id, work_attempt_id: input.work_attempt_id,
         execution_generation_id: input.execution_generation_id, agent_session_id: input.agent_session_id,
-        credential_ref: input.credential_ref?.trim() || randomUUID(), api_url: new URL(input.api_url).origin,
+        credential_ref: input.credential_ref?.trim() || randomUUID(), api_url: roomApiOrigin(input.api_url),
         room_cursor: custodialPolling ? custodialPolling.roomCursor : sameSession ? prior!.room_cursor : null,
         // Credentials may rotate, but the native API's sequence authority is
         // per durable agent entry. Never reuse a journal/API sequence.
@@ -487,7 +488,7 @@ export class WorkerBindingStore {
       updated_at: String(row.updated_at),
     } : null;
   }
-  private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); if (input.credential_ref !== undefined && !input.credential_ref.trim()) throw new Error("Worker binding credential_ref is required when supplied."); const url = new URL(input.api_url); if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
+  private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); if (input.credential_ref !== undefined && !input.credential_ref.trim()) throw new Error("Worker binding credential_ref is required when supplied."); const url = new URL(input.api_url); if (!isLocalRoomApi(input.api_url) && url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
   private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }
   private async transaction<T>(database: DatabaseSync, operation: () => T): Promise<T> {
     let open = false; let committed = false; let result!: T;
@@ -587,7 +588,7 @@ export class WorkerBindingStore {
       if (existing) return String(existing.checksum);
       if (database.prepare("SELECT 1 FROM migration_failures WHERE migration_key=?").get(key)) throw new Error("Legacy worker binding import is quarantined.");
       for (const binding of Object.values(parsed.bindings)) {
-        run(database.prepare("INSERT INTO worker_session_bindings (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, credential_ref, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"), binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id, randomUUID(), new URL(binding.api_url).origin, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
+        run(database.prepare("INSERT INTO worker_session_bindings (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, credential_ref, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"), binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id, randomUUID(), roomApiOrigin(binding.api_url), binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
         this.upsertWatermark(database, binding.entry_id, 1, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
       }
       run(database.prepare("INSERT INTO migration_records (migration_key, checksum, imported_at) VALUES (?, ?, ?)"), key, checksum, new Date().toISOString());
@@ -922,7 +923,7 @@ function redactedLegacyBackup(raw: string, checksum: string): string {
   const bindings = Object.values(parsed.bindings).map((binding) => ({
     entry_id: binding.entry_id, room_id: binding.room_id, work_attempt_id: binding.work_attempt_id,
     execution_generation_id: binding.execution_generation_id, agent_session_id: binding.agent_session_id,
-    api_url: new URL(binding.api_url).origin, room_cursor: binding.room_cursor,
+    api_url: roomApiOrigin(binding.api_url), room_cursor: binding.room_cursor,
     last_sequence: binding.last_sequence, last_observed_at_ms: binding.last_observed_at_ms, updated_at: binding.updated_at,
   }));
   return `${JSON.stringify({ version: 1, source_checksum: checksum, bindings })}\n`;

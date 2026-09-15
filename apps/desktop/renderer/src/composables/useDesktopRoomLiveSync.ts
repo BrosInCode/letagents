@@ -62,7 +62,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     refreshSequence: number,
     roomIdentifier: string,
     sessionGeneration: number,
-    accountId: string,
+    accountId: string | null,
   ): boolean {
     return refreshSequence === roomAgentWorkRefreshSequence
       && sessionGeneration === options.sessionGeneration.value
@@ -73,7 +73,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   async function refreshSelectedRoomAgentWork(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
     const accountId = options.accountId.value;
-    if (!roomIdentifier || !accountId) {
+    if (!roomIdentifier || (!accountId && options.selectedSnapshot.value?.storage.effectiveMode !== "local")) {
       clearSelectedRoomAgentWork();
       return;
     }
@@ -136,7 +136,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
 
   function invalidateSelectedRoomAgentWork(roomIdentifier: string): void {
     if (
-      !options.accountId.value
+      (!options.accountId.value && options.selectedSnapshot.value?.storage.effectiveMode !== "local")
       || (
         normalizeRoomIdentifier(roomIdentifier) !== normalizeRoomIdentifier(options.selectedRoomIdentifier.value)
         && !snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)

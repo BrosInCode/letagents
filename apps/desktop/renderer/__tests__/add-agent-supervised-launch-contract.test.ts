@@ -196,7 +196,7 @@ test("Add Agent modal requires first recovery consent and restores previously at
 });
 
 test("failed recovery scans allow a new launch without hiding real setup blockers", () => {
-  assert.match(actionBarSource, /recoveryScanStatus\.value === "error"[\s\S]*?"Start new supervised agent"/);
+  assert.match(actionBarSource, /recoveryScanStatus\.value === "error"[\s\S]*?"Start new agent"/);
   assert.ok(
     actionBarSource.indexOf('v-else-if="launchMode === \'supervised\' && charterMissing"')
       < actionBarSource.indexOf('recoveryScanStatus !== \'ready\''),
@@ -272,8 +272,8 @@ test("the supervised action island owns complete responsive interaction styles",
   assert.match(launchActionStyles, /@media \(max-width: 680px\)[\s\S]*?\.actions/);
 });
 
-test("legacy start feedback is assigned only after the modal request guard", () => {
-  assert.match(controllerSource, /const startMessage = await managedLaunch\.start\([\s\S]*?if \(!setupActions\.isCurrentRequest\(requestVersion\)\) return;[\s\S]*?setSetupMessage\(startMessage\);/);
+test("new launches cannot call the desktop-owned execution path", () => {
+  assert.doesNotMatch(controllerSource, /managedLaunch\.start|useManagedAgentLaunch/);
   assert.match(controllerSource, /const requestLaunchMode = launchMode\.value;/);
   assert.match(setupSource, /onBeforeUnmount\(resetTransientState\)/);
 });
@@ -283,7 +283,7 @@ test("supervised start rechecks secure storage before creating a launch", () => 
   const launchBoundary = controllerSource.indexOf("supervisedLaunch.begin()", storageCheck);
   assert.ok(storageCheck >= 0, "supervised Start should perform a secure-storage round-trip");
   assert.ok(launchBoundary > storageCheck, "secure storage must be checked before the launch boundary");
-  assert.match(controllerSource, /if \(!latestStorageStatus\.available\) \{[\s\S]*?return;/);
+  assert.match(controllerSource, /if \(props\.roomStorageMode !== "local" && !latestStorageStatus\.available\) \{[\s\S]*?return;/);
 });
 
 test("an in-flight Start remains fenced across modal close and provider reset", () => {

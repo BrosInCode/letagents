@@ -7,8 +7,7 @@
     <header class="app-agent-header" @pointerdown="$emit('drag-start', $event)">
       <AppAgentOrb
         :label="`${kicker}: ${statusLabel}`"
-        root-class="app-agent-liquid-orb"
-        :show-icon="false"
+        :show-icon="true"
         :state="surfaceState"
         decorative
         variant="header"

@@ -15,7 +15,7 @@ import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLed
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
 import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 39;
+export const DAEMON_STATE_SCHEMA_VERSION = 40;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -306,7 +306,7 @@ createSchema(database: DatabaseSync): void {
     this.migrateExecutionApprovalProjectionStorage(database);
     return;
   }
-  if (existingVersion === 35 || existingVersion === 36 || existingVersion === 37 || existingVersion === 38) {
+  if (existingVersion === 35 || existingVersion === 36 || existingVersion === 37 || existingVersion === 38 || existingVersion === 39) {
     this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
@@ -314,6 +314,7 @@ createSchema(database: DatabaseSync): void {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
+    this.validateLocalRoomMembershipShape(database);
     this.repairAndValidateCurrentShape(database);
     return;
   }
@@ -398,7 +399,8 @@ createSchema(database: DatabaseSync): void {
     ) STRICT;
     CREATE TABLE IF NOT EXISTS agent_room_memberships (
       agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      room_id TEXT NOT NULL
+      room_id TEXT NOT NULL,
+      local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id))
     ) STRICT;
     CREATE TABLE IF NOT EXISTS agent_configurations (
       agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
@@ -593,6 +595,7 @@ createSchema(database: DatabaseSync): void {
     ) STRICT;
     `);
     this.schemaInitializationHook?.(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
     if (version !== SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${version}.`);
@@ -636,6 +639,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     if (requiresScrub) this.completeV6SecretScrub(database);
@@ -663,6 +667,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     if (requiresScrub) this.completeV6SecretScrub(database);
@@ -690,6 +695,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     if (requiresScrub) this.completeV6SecretScrub(database);
@@ -756,6 +762,7 @@ migrateV4ToV5(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     if (requiresScrub) this.completeV6SecretScrub(database);
@@ -809,6 +816,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     // The old table contained a credential. secure_delete clears freed cells;
@@ -833,6 +841,7 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -854,6 +863,7 @@ migrateV7ToV8(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -873,6 +883,7 @@ migrateV8ToV9(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -891,6 +902,7 @@ migrateV9ToV10(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -909,6 +921,7 @@ migrateV10ToV11(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -927,6 +940,7 @@ migrateV11ToV12(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -957,6 +971,7 @@ migrateV12ToV13(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -985,6 +1000,7 @@ migrateV13ToV14(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1011,6 +1027,7 @@ migrateV14ToV15(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1035,6 +1052,7 @@ migrateV15ToV16(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1057,6 +1075,7 @@ migrateV16ToV17(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1077,6 +1096,7 @@ migrateV17ToV18(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1103,6 +1123,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1128,6 +1149,7 @@ migrateV19ToV20(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1154,6 +1176,7 @@ migrateV20ToV21(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1179,6 +1202,7 @@ migrateV21ToV22(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1200,6 +1224,7 @@ migrateV22ToV23(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1221,6 +1246,7 @@ migrateV23ToV24(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1242,6 +1268,7 @@ migratePollingOfferStorage(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1268,6 +1295,7 @@ private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
     validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1292,6 +1320,7 @@ private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
     validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1315,6 +1344,7 @@ private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1337,6 +1367,7 @@ private migrateLifecycleEffectStorage(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1358,6 +1389,7 @@ private migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1377,6 +1409,7 @@ private migrateIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1398,6 +1431,7 @@ private migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
     validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1416,6 +1450,7 @@ private migrateExecutionDelegationAuthorityStorage(database: DatabaseSync): void
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1433,6 +1468,7 @@ private migrateExecutionApprovalProjectionStorage(database: DatabaseSync): void 
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -1451,11 +1487,27 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
     validateExecutionApprovalPublicationSchema(database);
     applyRoomWorkPublicationSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
+  }
+}
+
+/** Existing memberships stay cloud-backed. Never reconstruct a missing current authority column. */
+private applyLocalRoomMembershipShape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "agent_room_memberships").has("local_room_id")) {
+    database.exec("ALTER TABLE agent_room_memberships ADD COLUMN local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id))");
+  }
+  this.validateLocalRoomMembershipShape(database);
+}
+
+private validateLocalRoomMembershipShape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "agent_room_memberships").has("local_room_id")
+    || database.prepare("SELECT 1 FROM agent_room_memberships WHERE local_room_id IS NOT NULL AND (local_room_id != room_id OR length(trim(local_room_id)) = 0) LIMIT 1").get()) {
+    throw new Error("Daemon room transport identity is missing or invalid.");
   }
 }
 
@@ -3036,6 +3088,7 @@ validateCurrentShape(database: DatabaseSync): void {
   if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION) {
     throw new Error("Daemon observation storage requires the already-current schema.");
   }
+  this.validateLocalRoomMembershipShape(database);
   if (this.hasPendingV6SecretScrub(database)) {
     throw new Error("Daemon observation storage requires completed credential cleanup.");
   }

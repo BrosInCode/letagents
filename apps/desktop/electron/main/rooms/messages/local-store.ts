@@ -1,3 +1,4 @@
+import { captureLocalSupervisedRouting, ensureLocalSupervisedRoutingSchema, runLocalSupervisedMessageWrite } from "../../../../../../shared/local-supervised-routing.mjs";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -136,6 +137,7 @@ async function getDb(): Promise<SqliteDatabase> {
     schemaInitialization ??= (async () => {
       schemaInitializationObserverForTest?.();
       await runLocalSqliteWriteTransactionAsync(database, () => {
+        ensureLocalSupervisedRoutingSchema(database);
         database.exec(`
       CREATE TABLE IF NOT EXISTS local_chat_room_sequences (
         room_id TEXT PRIMARY KEY,
@@ -687,7 +689,7 @@ export async function addLocalChatMessage(
 
   const timestamp = new Date().toISOString();
   const attachmentRows = (input.attachments || []).map(normalizeAttachmentPayload);
-  const row = await runLocalSqliteWriteTransactionAsync(database, () => {
+  const row = await runLocalSupervisedMessageWrite(database, trimmedRoomId, threadRootNumber, () => {
     const idempotencyKey = input.idempotency_key?.trim() || null;
     const existing = idempotencyKey
       ? database
@@ -696,6 +698,11 @@ export async function addLocalChatMessage(
       : null;
     if (existing) {
       const row = mapRow(existing);
+      if (idempotencyKey?.startsWith("local-supervised") && (
+        row.text !== text || row.reply_to_number !== replyToNumber || row.thread_root_number !== threadRootNumber
+        || row.publisher_agent_key !== (input.publisher_agent_key ?? null))) {
+        throw new Error("Local supervised message identity was reused with different content.");
+      }
       if (idempotencyKey?.startsWith("desktop-send:")) {
         const attached = database.prepare("SELECT attachment_id FROM local_chat_attachments WHERE room_id = ? AND message_number = ?")
           .all(trimmedRoomId, row.number) as Array<{ attachment_id: string }>;
@@ -760,6 +767,7 @@ export async function addLocalChatMessage(
         insertedRow.sync_key,
       );
     projectLocalThreadRoutingMessage(database, insertedRow);
+    captureLocalSupervisedRouting(database, insertedRow);
     for (const attachment of attachmentRows) {
       database
         .prepare(`

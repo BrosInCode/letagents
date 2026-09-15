@@ -698,6 +698,7 @@ test("exact retirement remains idempotent when restart reconciliation later obse
     let exactRetired = false;
     const daemonCalls: string[] = [];
     const daemon = {
+      async list() { return [entry(entryId)]; },
       async retireAgent(_id: string, _generation: number, sessionId: string | null = null, grantOnly = false) {
         daemonCalls.push(sessionId ?? (grantOnly ? "grant" : "prepare"));
         if (!exactRetired) {

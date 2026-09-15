@@ -213,7 +213,9 @@ async function codexPreflight(
     };
   }
 
-  if (mcpStatus !== "installed") {
+  // Supervised Codex installs an exact, bounded MCP override for each launch.
+  // Only the compatibility runtime depends on the user's global connection.
+  if (input.launchMode !== "supervised" && mcpStatus !== "installed") {
     return {
       providerId: provider.id,
       status: "bridge_required",

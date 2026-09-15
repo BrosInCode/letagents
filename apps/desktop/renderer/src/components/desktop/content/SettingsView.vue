@@ -1,7 +1,6 @@
 <template>
   <section class="settings-shell" data-testid="settings-view">
     <SettingsSidebar
-      :groups="settingsNavGroups"
       :active-pane="activePane"
       @back="$emit('back-to-app')"
       @select="selectPane"
@@ -25,6 +24,12 @@
           <span>{{ busy ? "Refreshing" : "Refresh" }}</span>
         </button>
       </header>
+
+      <nav v-if="subsections.length" class="settings-subsections" aria-label="Settings pages">
+        <button v-for="item in subsections" :key="item.id" type="button"
+          :data-active="activePane === item.id" :aria-current="activePane === item.id ? 'page' : undefined"
+          @click="selectPane(item.id)">{{ item.title }}</button>
+      </nav>
 
       <SettingsProfilePane
         v-if="activePane === 'account:profile'"
@@ -127,24 +132,7 @@
 </template>
 
 <script setup lang="ts">
-import {
-  Activity,
-  ArchiveRestore,
-  Bot,
-  CircleUser,
-  Cloud,
-  CloudUpload,
-  Database,
-  GitBranch,
-  KeyRound,
-  Handshake,
-  RefreshCw,
-  ServerCog,
-  Sparkles,
-  SlidersHorizontal,
-  Trash2,
-  Wrench,
-} from "@lucide/vue";
+import { RefreshCw } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -173,7 +161,8 @@ import SettingsSetupPane from "../settings/panes/SettingsSetupPane.vue";
 import SettingsStoragePane from "../settings/panes/SettingsStoragePane.vue";
 import SettingsSupervisorGrantPane from "../settings/panes/SettingsSupervisorGrantPane.vue";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
-import type { SettingsFeedback, SettingsNavGroup, SettingsPaneId } from "../settings/types";
+import type { SettingsFeedback, SettingsPaneId } from "../settings/types";
+import { settingsNavGroups, settingsSubsections, settingsSectionFor } from "../settings/navigation";
 import type { DesktopMcpWizardStep } from "../setup/types";
 
 const props = defineProps<{
@@ -231,54 +220,18 @@ defineEmits<{
 
 const activePane = ref<SettingsPaneId>(props.initialPane);
 
-const settingsNavGroups: SettingsNavGroup[] = [
-  {
-    label: "Account",
-    items: [
-      { id: "account:profile", title: "Profile", description: "Identity and sign-in", icon: CircleUser },
-      { id: "account:renting", title: "Renting", description: "Availability and local runtimes", icon: Handshake },
-    ],
-  },
-  {
-    label: "Rooms",
-    items: [
-      { id: "rooms:defaults", title: "Rooms", description: "Active, pinned, and joined", icon: SlidersHorizontal },
-      { id: "rooms:left", title: "Left rooms", description: "Restore rooms you left", icon: ArchiveRestore },
-      { id: "rooms:danger", title: "Room removal", description: "Leave and delete rooms", icon: Trash2 },
-    ],
-  },
-  {
-    label: "Storage",
-    items: [
-      { id: "storage:chat", title: "Chat storage", description: "Cloud or local messages", icon: Cloud },
-      { id: "storage:sync", title: "Publishing", description: "Manual cloud upload", icon: CloudUpload },
-      { id: "storage:database", title: "Local database", description: "Local database files", icon: Database },
-    ],
-  },
-  {
-    label: "System",
-    items: [
-      { id: "system:setup", title: "Setup", description: "Install LetAgents", icon: Wrench },
-      { id: "system:app-agent", title: "App Agent", description: "App control", icon: KeyRound },
-      { id: "system:supervisor", title: "Supervisor", description: "Host grants and scope", icon: KeyRound },
-      { id: "system:runtime", title: "Runtime", description: "Repo and desktop state", icon: GitBranch },
-      { id: "system:updates", title: "Updates", description: "Versions and safe restarts", icon: Sparkles },
-      { id: "system:mcp", title: "Agent app connections", description: "Connected apps", icon: ServerCog },
-      { id: "system:agents", title: "Agents", description: "Status and availability", icon: Bot },
-      { id: "system:diagnostics", title: "Troubleshooting", description: "Local truth and recovery", icon: Activity },
-    ],
-  },
-];
+const activeSection = computed(() => settingsSectionFor(activePane.value));
+const subsections = computed(() => settingsSubsections[activeSection.value] ?? []);
 
 const isRoomPane = computed(() => activePane.value.startsWith("rooms:"));
 const isStoragePane = computed(() => activePane.value.startsWith("storage:"));
 
 const activePaneItem = computed(() =>
-  settingsNavGroups.flatMap((group) => group.items).find((item) => item.id === activePane.value) || settingsNavGroups[2].items[0],
+  settingsNavGroups.flatMap((group) => group.items).find((item) => item.id === activeSection.value) || settingsNavGroups[0].items[0],
 );
 
 const activePaneBreadcrumb = computed(() => {
-  const group = settingsNavGroups.find((navGroup) => navGroup.items.some((item) => item.id === activePane.value));
+  const group = settingsNavGroups.find((navGroup) => navGroup.items.some((item) => item.id === activeSection.value));
   return `Settings / ${group?.label || "Storage"}`;
 });
 
@@ -286,10 +239,10 @@ const activePaneTitle = computed(() => activePaneItem.value.title);
 const activePaneDescription = computed(() => {
   if (activePane.value === "rooms:defaults") return "Manage active, pinned, and joined rooms.";
   if (activePane.value === "rooms:left") return "Restore rooms you previously left.";
-  if (activePane.value === "storage:chat") return "Choose where room messages are stored before upload.";
+  if (activePane.value === "storage:chat") return "Choose where room messages are stored.";
   if (activePane.value === "rooms:danger") return "Review actions that remove access or delete rooms you created.";
   if (activePane.value === "system:app-agent") return "Configure the app assistant and see what it can do in the app.";
-  return activePaneItem.value.description;
+  return subsections.value.find(item => item.id === activePane.value)?.description ?? activePaneItem.value.description;
 });
 
 watch(

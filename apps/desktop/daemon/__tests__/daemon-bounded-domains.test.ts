@@ -90,7 +90,7 @@ test("the daemon entrypoint delegates control-protocol parsing to one router", (
 
 test("cloud requests are isolated from the daemon authority owner", () => {
   assert.equal(matches(mainSource, /\bfetch\s*\(/g).length, 0);
-  assert.ok(matches(cloudSource, /\bfetch\s*\(/g).length >= 8);
+  assert.ok(matches(cloudSource, /\broomRequest\s*\(/g).length >= 8);
 });
 
 test("daemon policy and projection domains remain extracted", () => {
@@ -169,7 +169,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // coalescing, exact reconciliation, and policy remain in the extracted coordinator.
   // 1575 -> 1585 for independently reviewed workspace snapshot composition;
   // Git capture, persistence, and publication policy remain in their own modules.
-  assert.ok(mainSource.split("\n").length < 1_585, "main.ts must remain a thin composition root");
+  // 1585 -> 1587: independently reviewed local authority restoration at startup;
+  // credential and storage policy remain in local-room-runtime.ts.
+  assert.ok(mainSource.split("\n").length < 1_587, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

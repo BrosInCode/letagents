@@ -1,3 +1,4 @@
+import { roomRequest } from "./local-room-runtime.js";
 import {
   executionApprovalPublicationSha256,
   parseExecutionApprovalPublicationCloseInput,
@@ -43,7 +44,7 @@ export async function publishExecutionApproval(
     || !Number.isSafeInteger(input.grantGeneration) || input.grantGeneration < 1) {
     throw new Error("Invalid execution approval publication.");
   }
-  const response = await fetch(`${input.apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}`
+  const response = await roomRequest(`${input.apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}`
     + `/worker-sessions/${encodeURIComponent(input.sessionId)}/execution-approval-publications`, {
     method: "POST",
     redirect: "error",
@@ -102,7 +103,7 @@ export async function closeExecutionApprovalPublication(
     || !Number.isSafeInteger(input.grantGeneration) || input.grantGeneration < 1) {
     throw new Error("Invalid execution approval publication closure.");
   }
-  const response = await fetch(`${input.apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}`
+  const response = await roomRequest(`${input.apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}`
     + `/worker-sessions/${encodeURIComponent(input.sessionId)}/execution-approval-publications/`
     + `${encodeURIComponent(input.publicationId)}/close`, {
     method: "POST",
