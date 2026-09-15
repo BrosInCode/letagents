@@ -40,6 +40,8 @@ import {
   type SelectDelegatedApproval,
 } from "./execution-delegated-approval.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import { prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery,
+  type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "./runtime-recovery-journal.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
   getPollingActivation, markPollingActivationDispatch, markPollingActivationUncertain, preparePollingActivation, unresolvedPollingActivation,
@@ -1404,6 +1406,52 @@ export class ManifestStore {
    * links that already-admitted row; if this transaction wins first, a pending
    * row remains unlinked and the journal barrier prevents it from starting.
    */
+  async getRuntimeRecovery(operationId: string): Promise<RuntimeRecoveryRecord | null> {
+    return readRuntimeRecovery(await this.getDatabase(), operationId);
+  }
+
+  async pendingRuntimeRecovery(agentId: string): Promise<RuntimeRecoveryRecord | null> {
+    return pendingRuntimeRecovery(await this.getDatabase(), agentId);
+  }
+
+  async prepareRuntimeRecovery(expectedGeneration: number, input: RuntimeRestartRequest,
+    commitFence: (commit: () => Promise<void>) => Promise<void>) {
+    const result = await this.writeTargeted(expectedGeneration, database => {
+      assertNoDeliveryDrain(database, input.entryId);
+      assertNoPollingActivation(database, input.entryId);
+      if (database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(input.entryId)) {
+        throw new Error("Finish the room move before restarting this agent.");
+      }
+      const current = this.readEntryFromDatabase(database, input.entryId);
+      if (current?.turn_control && current.turn_control.status !== "completed") {
+        throw new Error("Resolve the pending turn control before restarting this agent.");
+      }
+      return prepareRuntimeRecovery(database, input, current);
+    }, commitFence);
+    return { generation: result.generation, record: result.value };
+  }
+
+  async checkpointRuntimeStopped(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {
+    return this.writeOperationalJournal(database => {
+      const record = readRuntimeRecovery(database, operationId);
+      return checkpointRuntimeStopped(database, operationId, record ? this.readEntryFromDatabase(database, record.agent_id) : undefined);
+    }, commitFence);
+  }
+
+  async completeRuntimeRecovery(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {
+    return this.writeOperationalJournal(database => {
+      const record = readRuntimeRecovery(database, operationId);
+      if (!record || record.phase === "prepared") throw new Error("The old runtime has not been proven stopped.");
+      const entry = this.readEntryFromDatabase(database, record.agent_id);
+      if (!entry || entry.room_id !== record.room_id || entry.desired_state !== "running"
+        || (record.mode === "fresh" ? entry.provider_ref != null : entry.provider_ref?.execution_generation_id !== record.execution_generation_id)) {
+        throw new Error("The replacement runtime intent changed before recovery completed.");
+      }
+      database.prepare("UPDATE agent_runtime_recoveries SET phase='complete',updated_at=? WHERE operation_id=?")
+        .run(new Date().toISOString(), operationId);
+    }, commitFence);
+  }
+
   async prepareTurnControlState(
     expectedGeneration: number,
     input: {

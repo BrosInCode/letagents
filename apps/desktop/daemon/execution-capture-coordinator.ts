@@ -3,6 +3,7 @@ import type { NativeExecutionObservation, NativeExecutionSubscription } from "..
 import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } from "./execution-protocol.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
+import { recoveredRuntime } from "./runtime-recovery-journal.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
 import { unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
@@ -80,6 +81,21 @@ export class ExecutionCaptureCoordinator {
 
   constructor(private readonly database: DatabaseSync, private readonly options: CaptureOptions) {
     this.store = new ExecutionShadowStore(database);
+  }
+
+  /** Discard queued callbacks only after their exact dead runtime was archived. */
+  releaseRecoveredRuntime(agentId: string, runtimeId: string): void {
+    if (!recoveredRuntime(this.database, agentId, runtimeId)) throw new Error("The runtime has no verified recovery boundary.");
+    for (const lane of [this.lanes.get(agentId), this.retiring.get(agentId)]) {
+      if (!lane) continue;
+      const connection = lane.handle.providerConnection;
+      if (!connection?.pid || !connection.processIdentity || executionRuntimeStorageIdentity(agentId, lane.generation,
+        connection.kind, connection.pid, connection.processIdentity) !== runtimeId) {
+        throw new Error("Runtime recovery cannot discard a different observer.");
+      }
+      this.remove(lane);
+    }
+    this.suspendedAgents.delete(agentId);
   }
 
   /** Start subscribing before raw listeners without letting optional capture block delivery. */

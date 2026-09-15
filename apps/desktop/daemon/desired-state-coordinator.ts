@@ -63,6 +63,7 @@ export class DesiredStateCoordinator {
 
   async setExclusive(id: string, desiredState: DesiredState): Promise<DaemonManifestEntry> {
     validateDesiredStateInput(id, desiredState);
+    if (await this.store.pendingRuntimeRecovery(id)) throw new Error("Runtime recovery is paused partway through. Retry its original action in Diagnostics.");
     this.entryConcurrency.bumpControlEpoch(id);
     const deliveryStopped = desiredState !== "running" && Boolean(this.delivery);
     if (deliveryStopped) {

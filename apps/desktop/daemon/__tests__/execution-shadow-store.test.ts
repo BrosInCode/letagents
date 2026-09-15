@@ -12,6 +12,65 @@ import { ExecutionShadowStore, type ShadowObserver } from "../execution-shadow-s
 import { lifecycleAuthorityModeForProvider } from "../lifecycle-authority-mode.js";
 import { applyLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../../shared/room-agent-work.mjs";
+import { applyRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
+
+test("verified runtime replacement crosses an old source gap without erasing lost work or admitting late callbacks", () => {
+  const { db, store } = fixture();
+  try {
+    applyRuntimeRecoverySchema(db);
+    seed(store);
+    const old = observer(store);
+    store.ingest(old.sourceId, old, turnFact(1));
+    store.ingest(old.sourceId, old, operationFact(2, { sideEffects: "possible" }));
+    store.observeSourcePosition(old.sourceId, old, 776);
+    store.registerRuntime({ agentId: "agent", executionGenerationId: "new-generation", runtimeGenerationId: "new-runtime",
+      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+    const newAttempt = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "new-message",
+      executionGenerationId: "new-generation", workspaceId: "workspace", createdAtMs: 200 });
+    const bindNew = () => store.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "new-runtime",
+      observerRuntimeGenerationId: "new-runtime", daemonGenerationId: "new-daemon", sourceId: "new-source", expectedEpoch: 1, boundAtMs: 200 });
+    const newTurn = { agentId: "agent", roomId: "room", attemptId: newAttempt, executionGenerationId: "new-generation",
+      runtimeGenerationId: "new-runtime", turnId: "new-turn", providerContinuationId: "conversation",
+      providerTurnId: "new-native-turn", createdAtMs: 200 };
+    assert.throws(bindNew, /source_gap/);
+    assert.throws(() => store.trackNativeTurn(newTurn), /invalid_transition/);
+    const archived = JSON.stringify(db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
+    db.prepare("INSERT INTO agent_runtime_recoveries VALUES('recovery','agent','room','generation','runtime','resume','prepared','{}',?, 'now','now')").run(archived);
+    assert.throws(bindNew, /source_gap/, "accepted stop intent is not death proof");
+    db.exec("UPDATE agent_runtime_recoveries SET phase='stopped'; UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=200 WHERE runtime_generation_id='runtime'; UPDATE execution_turns SET state='lost',ended_at_ms=200 WHERE runtime_generation_id='runtime'");
+    const next = bindNew();
+    store.trackNativeTurn(newTurn);
+    store.ingest(next.sourceId, next, turnFact(1, { factId: "new-fact", executionGenerationId: "new-generation",
+      runtimeGenerationId: "new-runtime", observerEpoch: 2, turnId: "new-turn", providerContinuationId: "conversation", providerTurnId: "new-native-turn" }));
+    assert.throws(() => store.ingest(old.sourceId, old, operationFact(3)), /stale_observer/);
+    const retained = store.retainedMessageExecution("agent", "room", "message");
+    assert.equal(retained.availability, "available");
+    if (retained.availability !== "available") assert.fail();
+    assert.equal(retained.evidenceIncomplete, true);
+    assert.equal(retained.turns[0]!.state, "lost");
+    assert.equal(retained.turns[0]!.operations[0]!.outcome, null, "death does not invent an operation result");
+    assert.equal(roomSummary(store).evidence_incomplete, true);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM execution_facts WHERE runtime_generation_id='runtime'").get()!.n, 2);
+    const snapshot = JSON.parse(String(db.prepare("SELECT observer_json FROM agent_runtime_recoveries").get()!.observer_json));
+    assert.equal(snapshot.last_source_sequence, 2);
+    assert.equal(snapshot.max_observed_sequence, 776);
+  } finally { db.close(); }
+});
+
+test("forced recovery retains unknown final-tail evidence even if the durable cursor was caught up", () => {
+  const { db, store } = fixture();
+  try {
+    applyRuntimeRecoverySchema(db); seed(store); const token = observer(store);
+    store.ingest(token.sourceId, token, turnFact(1, { state: "terminal", turnOutcome: "completed" }));
+    const archived = JSON.stringify(db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
+    db.prepare("INSERT INTO agent_runtime_recoveries VALUES('recovery','agent','room','generation','runtime','fresh','complete','{}',?,'now','now')").run(archived);
+    const detail = store.retainedMessageExecution("agent", "room", "message");
+    assert.equal(detail.availability, "available");
+    if (detail.availability !== "available") assert.fail();
+    assert.equal(detail.turns[0]!.state, "terminal", "known native completion stays intact");
+    assert.equal(detail.evidenceIncomplete, true, "the killed process may have had an undrained final observation");
+  } finally { db.close(); }
+});
 
 function fixture(path = ":memory:") {
   const db = new DatabaseSync(path);

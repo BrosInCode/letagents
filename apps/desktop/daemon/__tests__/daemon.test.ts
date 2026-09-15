@@ -49,6 +49,173 @@ import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provide
 import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
 import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
 import { OpenCodeRuntimeGoneError } from "../../electron/main/agents/open-model-provider-adapter.js";
+import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
+import type { RuntimeRecoveryCoordinator } from "../runtime-recovery-coordinator.js";
+import type { ProcessIdentity } from "../process-identity.js";
+
+for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery is fenced, durable, and idempotent`, async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root };
+  const id = `operator_${mode}`;
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined,
+    join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0,
+    workspacePath: workspace.path, workAttemptId: workspace.id });
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+  await durability.close();
+  const connection = { kind: "codex_app_server" as const, pid: 45550,
+    processIdentity: "Mon Sep 14 15:50:00 2026", url: "ws://127.0.0.1:45550" };
+  const runtimeId = executionRuntimeStorageIdentity(id, execution.execution_generation_id, connection.kind, connection.pid, connection.processIdentity);
+  let stopCalls = 0;
+  let gone = false;
+  let allowStop = false;
+  let exactStopSupported = false;
+  let actualBirth = connection.processIdentity;
+  const processIdentity: ProcessIdentity = {
+    probe: () => { if (gone) throw Object.assign(new Error("gone"), { code: "ESRCH" }); },
+    readBirthIdentity: () => actualBirth,
+    sameBirthIdentity: (actual, expected) => actual === expected,
+  };
+  const terminal = { endedAt: new Date().toISOString(), exitCode: null, signal: "SIGKILL",
+    terminalCause: "killed" as const, providerContinuationId: "saved-conversation" };
+  const provider: ProviderActionPort = {
+    capabilities: async () => ({ deliveryModes: ["daemon_inbox"], resume: true, exactProcessStop: exactStopSupported, midTurnInjection: false,
+      transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { throw new Error("No launch during the recovery transaction"); },
+    resume: async () => { throw new Error("No launch during the recovery transaction"); },
+    attach: async () => { throw new Error("A cached attachment is not process-death proof"); },
+    attachAction: async () => ({ state: "absent" }), poke: async () => {},
+    stop: async () => terminal,
+    stopRef: async ref => {
+      stopCalls++;
+      assert.deepEqual(ref.providerConnection, connection);
+      if (allowStop) gone = true;
+      return terminal; // Simulate a cached terminal while the process is alive.
+    },
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", provider, false, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { requestConvergence: (id: string) => void; durability: WorkDurabilityStore;
+      runtimeRecovery: RuntimeRecoveryCoordinator & { options: { processIdentity: ProcessIdentity } };
+      providerExecution: { converge(id: string): Promise<void> } };
+    internals.requestConvergence = () => {};
+    (internals.runtimeRecovery as unknown as { options: { processIdentity: ProcessIdentity } }).options.processIdentity = processIdentity;
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, id,
+      provider: "codex", delivery_mode: "daemon_inbox", desired_state: "running", observed_state: "working", condition: "none",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      run_id: execution.execution_generation_id, deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id), provider_ref: { work_attempt_id: attempt.work_attempt_id,
+        execution_generation_id: execution.execution_generation_id, provider_continuation_id: "saved-conversation", provider_connection: connection } } });
+    assert.equal(put.ok, true, put.error);
+    const beforeDb = new DatabaseSync(paths.manifestPath);
+    try {
+      const at = new Date().toISOString();
+      const outcome = JSON.stringify(mode === "resume" ? { kind: "reply", text: "Saved answer", evidence: "stream" }
+        : { kind: "unreadable", text: null, evidence: "none" });
+      beforeDb.prepare(`INSERT INTO supervised_agent_inbox
+        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
+        VALUES('inbox',?,?,'source','{}','{}',1,'awaiting_result',1,'action','reply','turn',?,?,?)`)
+        .run(id, entry.room_id, outcome, at, at);
+      beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES('inbox',?,?,?,?,'saved-conversation','turn')")
+        .run(id, entry.room_id, attempt.work_attempt_id, execution.execution_generation_id);
+      for (const [inboxId, sequence, providerTurn] of [["pending_old", 2, "retried-turn"], ["pending_new", 3, null]] as const) {
+        beforeDb.prepare(`INSERT INTO supervised_agent_inbox
+          (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
+          VALUES(?,?,?,?,'{}','{}',?,'pending',1,?,?,?,NULL,?,?)`)
+          .run(inboxId, id, entry.room_id, inboxId, sequence, `action-${inboxId}`, `reply-${inboxId}`, providerTurn, at, at);
+      }
+      beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES('pending_old',?,?,?,?,'saved-conversation','retried-turn')")
+        .run(id, entry.room_id, attempt.work_attempt_id, execution.execution_generation_id);
+      beforeDb.prepare(`INSERT INTO supervised_agent_effects(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,created_at,updated_at)
+        VALUES('effect',?,?,?,'turn','request','send_message','{}',1,'executing',?,?)`)
+        .run(id, entry.room_id, execution.execution_generation_id, at, at);
+      const shadow = new ExecutionShadowStore(beforeDb);
+      shadow.registerRuntime({ agentId: id, executionGenerationId: execution.execution_generation_id, runtimeGenerationId: runtimeId,
+        provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
+      const capturedAttempt = shadow.trackMessage({ agentId: id, roomId: entry.room_id, sourceMessageId: "source",
+        executionGenerationId: execution.execution_generation_id, workspaceId: attempt.work_attempt_id, createdAtMs: 100 });
+      shadow.trackNativeTurn({ agentId: id, roomId: entry.room_id, attemptId: capturedAttempt, executionGenerationId: execution.execution_generation_id,
+        runtimeGenerationId: runtimeId, turnId: "captured-turn", providerContinuationId: "saved-conversation", providerTurnId: "turn", createdAtMs: 100 });
+      const token = shadow.bindObserver({ agentId: id, subjectRuntimeGenerationId: runtimeId, observerRuntimeGenerationId: runtimeId,
+        daemonGenerationId: "old-daemon", sourceId: "old-source", expectedEpoch: 0, boundAtMs: 100 });
+      shadow.ingest(token.sourceId, token, { factId: "active", agentId: id, executionGenerationId: execution.execution_generation_id,
+        runtimeGenerationId: runtimeId, sourceSequence: 1, observerEpoch: 1, observedAtMs: 101,
+        domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", turnId: "captured-turn",
+        providerContinuationId: "saved-conversation", providerTurnId: "turn" });
+      shadow.observeSourcePosition(token.sourceId, token, 776);
+    } finally { beforeDb.close(); }
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const request = { entry_id: id, daemon_generation: generation, mode, operation_id: `restart-${mode}`,
+      room_id: entry.room_id, execution_generation_id: execution.execution_generation_id, runtime_generation_id: runtimeId };
+    const stale = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", { ...request, runtime_generation_id: "other-runtime" });
+    assert.equal(stale.ok, false);
+    assert.equal(stopCalls, 0);
+    const unsupported = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", request);
+    assert.equal(unsupported.ok, false);
+    assert.match(unsupported.error!, /does not yet support/);
+    assert.equal(stopCalls, 0);
+    const unchanged = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+    assert.equal(unchanged.desired_state, "running");
+    assert.equal(unchanged.runtime_recovery, null, "unsupported providers cannot be trapped in prepared recovery");
+    exactStopSupported = true;
+    const unsafe = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", request);
+    assert.equal(unsafe.ok, false);
+    assert.match(unsafe.error!, /not been proven stopped/);
+    const paused = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+    assert.equal(paused.desired_state, "paused");
+    assert.equal(paused.runtime_recovery?.phase, "prepared");
+    const afterRejectedStop = await internals.durability.getAttempt(attempt.work_attempt_id);
+    assert.equal(afterRejectedStop.execution_generations.find(value => value.execution_generation_id === execution.execution_generation_id)?.terminal, null,
+      "a cached terminal cannot release the old workspace execution fence while its process is alive");
+    const resume = await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: "running" });
+    assert.equal(resume.ok, false, "ordinary Resume cannot bypass an unfinished recovery");
+    const callsBeforeConvergence = stopCalls;
+    await internals.providerExecution.converge(id);
+    assert.equal(stopCalls, callsBeforeConvergence, "a restarted daemon must not automatically replay the stop");
+    allowStop = true;
+    if (mode === "fresh") actualBirth = "Tue Sep 15 15:50:00 2026";
+    const repaired = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", request);
+    assert.equal(repaired.ok, true, repaired.error);
+    if (mode === "fresh") assert.equal(stopCalls, callsBeforeConvergence, "a reused PID must never be signalled");
+    const recovered = (repaired.result as { entry: DaemonManifestEntryView }).entry;
+    assert.equal(recovered.id, id);
+    assert.equal(recovered.workspace_path, attempt.workspace_path);
+    assert.equal(recovered.work_attempt_id, attempt.work_attempt_id);
+    assert.equal(recovered.desired_state, "running");
+    assert.equal(recovered.runtime_recovery, null);
+    assert.equal(recovered.provider_ref?.provider_continuation_id ?? null, mode === "resume" ? "saved-conversation" : null);
+    const afterDb = new DatabaseSync(paths.manifestPath);
+    try {
+      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='inbox'").get()!.state,
+        mode === "resume" ? "awaiting_result" : "cancelled_by_user",
+        "a saved answer remains publishable; an unreadable result cannot block or replay in the fresh conversation");
+      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id='effect'").get()!.state, "uncertain");
+      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='pending_old'").get()!.state, "cancelled_by_user",
+        "an unresolved old turn returned to pending by a retry must not follow the replacement conversation");
+      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='pending_new'").get()!.state, "pending",
+        "genuinely undispatched messages stay queued");
+      assert.equal(afterDb.prepare("SELECT state FROM execution_turns WHERE turn_id='captured-turn'").get()!.state, "lost");
+      assert.equal(afterDb.prepare("SELECT state FROM execution_message_attempts WHERE source_message_id='source'").get()!.state,
+        mode === "resume" ? "active" : "lost");
+      const archive = JSON.parse(String(afterDb.prepare("SELECT observer_json FROM agent_runtime_recoveries").get()!.observer_json));
+      assert.equal(archive.max_observed_sequence, 776);
+      assert.equal(archive.last_source_sequence, 1);
+    } finally { afterDb.close(); }
+    const callsAfterRecovery = stopCalls;
+    const retry = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", request);
+    assert.equal(retry.ok, true, retry.error);
+    assert.equal(stopCalls, callsAfterRecovery, "a lost response cannot stop a successor on retry");
+    const reused = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", { ...request, room_id: "other-room" });
+    assert.equal(reused.ok, false);
+    assert.equal(stopCalls, callsAfterRecovery);
+  } finally { await daemon.stop().catch(() => undefined); await env.cleanup(); }
+});
 
 /**
  * Unit ports stand in for the production router, whose successful spawn and
