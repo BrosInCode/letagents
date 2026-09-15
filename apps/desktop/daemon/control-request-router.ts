@@ -49,7 +49,7 @@ export interface DaemonControlOperations {
   rollbackInspectorRoomMove(input: RoomMoveIdentity & { detail: string }): unknown;
   getInspectorRoomMove(input: RoomMoveIdentity): unknown;
   getCurrentInspectorRoomMove(input: { entryId: string; daemonGeneration: number }): unknown;
-  recoverAgentRuntime(entryId: string, daemonGeneration: number): unknown;
+  recoverAgentRuntime(entryId: string, daemonGeneration: number, recovery?: import("./runtime-recovery-coordinator.js").AgentRuntimeRecoveryRequest): unknown;
   retireAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
   purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
   putManifestEntry(entry: DaemonManifestEntry): unknown;
@@ -134,6 +134,12 @@ function desiredStateParam(params: Record<string, unknown>, key: string, error: 
   const value = params[key];
   if (value !== "running" && value !== "paused" && value !== "stopped") throw new Error(error);
   return value;
+}
+
+function runtimeRecoveryMode(params: Record<string, unknown>, error: string): "reconnect" | "resume" | "fresh" {
+  const mode = params.mode;
+  if (mode !== "reconnect" && mode !== "resume" && mode !== "fresh") throw new Error(error);
+  return mode;
 }
 
 function paramsEntry(value: unknown): DaemonManifestEntry {
@@ -416,6 +422,13 @@ export function createDaemonControlRequestHandler(
       return operations.recoverAgentRuntime(
         requiredStringParam(params, "entry_id", error),
         positiveIntegerParam(params, "daemon_generation", error),
+        params.mode === undefined ? undefined : {
+          mode: runtimeRecoveryMode(params, error),
+          operationId: requiredStringParam(params, "operation_id", error),
+          roomId: requiredStringParam(params, "room_id", error),
+          executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
+          runtimeGenerationId: requiredStringParam(params, "runtime_generation_id", error),
+        },
       );
     }
     if (request.method === "supervisor.retire_agent") {

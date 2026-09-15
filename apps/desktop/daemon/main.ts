@@ -638,6 +638,7 @@ export class SupervisorDaemon {
       manifest: {
         load: () => this.store.load(),
         getEntry: (entryId) => this.store.getEntry(entryId),
+        pendingRuntimeRecovery: (entryId) => this.store.pendingRuntimeRecovery(entryId),
       },
       bindings: this.workerBindings,
       inbox: this.supervisedInbox,
@@ -732,6 +733,10 @@ export class SupervisorDaemon {
       requestConvergence: (entryId) => this.requestConvergence(entryId),
     });
     this.runtimeRecovery = new RuntimeRecoveryCoordinator({
+      releaseRecoveredObservation: (entryId, runtimeId) => this.executionCapture?.releaseRecoveredRuntime(entryId, runtimeId),
+      streams: this.providerStreams,
+      terminals: this.providerTerminals,
+      restartDelivery: (entryId) => this.restartSupervisedDeliveryOrConverge(entryId),
       store: this.store,
       durability: this.durability,
       inbox: this.supervisedInbox,

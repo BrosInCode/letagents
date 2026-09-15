@@ -333,8 +333,9 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       // Electron restores secret custody first. The daemon then proves the
       // saved provider absent, retires the exact old worker session, and only
       // afterwards permits convergence to create a successor runtime.
-      await supervisorGrantCoordinator.prepareEntryForRuntimeRecovery(entry);
-      return supervisorDaemonClient.recoverAgentRuntime(entry.id);
+      if (input.recovery?.mode === "reconnect") await supervisorGrantCoordinator.reconnectEntry(entry);
+      else await supervisorGrantCoordinator.prepareEntryForRuntimeRecovery(entry);
+      return supervisorDaemonClient.recoverAgentRuntime(entry.id, input.recovery);
     },
   );
   targetIpcMain.handle(

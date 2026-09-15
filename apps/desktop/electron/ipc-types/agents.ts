@@ -411,6 +411,7 @@ export interface DesktopSupervisorDaemonStatus {
     agentRoomMove: boolean;
     agentLifecycle: boolean;
     agentRuntimeRecovery?: boolean;
+    agentRuntimeRecoveryV2?: boolean;
     agentStateSubscription: boolean;
     agentActivityStream?: boolean;
   };
@@ -643,6 +644,10 @@ export interface DesktopRoomAgentStateProjection {
 export interface DesktopSupervisorManifestEntry {
   /** Opaque exact native process birth, used only to fence cached read evidence. */
   runtimeGenerationId?: string | null;
+  runtimeRecovery?: {
+    operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
+    mode: "resume" | "fresh"; phase: "prepared" | "stopped";
+  } | null;
   id: string;
   roomId: string;
   /** Pinned local storage identity; omitted for cloud agents. */
@@ -772,6 +777,13 @@ export interface DesktopSupervisorReconnectInput {
 /** Replace only a provider runtime that the daemon has durably proved absent. */
 export interface DesktopSupervisorRuntimeRecoveryInput {
   entryId: string;
+  recovery?: {
+    mode: "reconnect" | "resume" | "fresh";
+    operationId: string;
+    roomId: string;
+    executionGenerationId: string;
+    runtimeGenerationId: string;
+  };
 }
 
 export interface DesktopSupervisorTurnControlResult {
