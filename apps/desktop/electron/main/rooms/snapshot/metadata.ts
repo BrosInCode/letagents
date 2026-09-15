@@ -1,8 +1,9 @@
+import { readLocalSupervisorPresence } from "../local-supervision-authority.js";
 import type {
   DesktopRoomLiveMetadata,
   DesktopSnapshotSourceState,
 } from "../../../ipc-types.js";
-import { cloudRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from "../local-store.js";
+import { localRoomIdentifierForStorage, cloudRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from "../local-store.js";
 import { isDesktopSmokeCheck } from "../../smoke.js";
 import {
   loadActivityHistory,
@@ -45,11 +46,8 @@ export interface RoomLiveMetadataSources {
  * rebuild pulls. Every other room section is event-fed after PR #823, so the
  * periodic refresh no longer needs to re-download it.
  *
- * Local rooms carry no cloud presence/participants/focus/activity/board data —
- * the full local snapshot returns empties for exactly these sections — so the
- * metadata fetch returns the same empties, keeping the renderer's periodic-tick
- * path uniform (no local/cloud branching) while leaving the local room's
- * already-loaded messages and tasks untouched by the apply.
+ * Local rooms read the daemon's local agent observations. No cloud authority
+ * is needed, and messages and tasks stay untouched by this metadata refresh.
  */
 export async function fetchRoomLiveMetadata(
   roomIdentifier: string,
@@ -63,7 +61,8 @@ export async function fetchRoomLiveMetadata(
 
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
   if (storage.effectiveMode === "local") {
-    return emptyRoomLiveMetadata(trimmedRoomIdentifier);
+    return { ...emptyRoomLiveMetadata(trimmedRoomIdentifier),
+      ...await readLocalSupervisorPresence(localRoomIdentifierForStorage(storage, trimmedRoomIdentifier)) };
   }
 
   const apiRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);

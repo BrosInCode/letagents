@@ -29,6 +29,7 @@ import type { useAddAgentSetup } from "./useAddAgentSetup";
 
 interface AddAgentPresentationProps {
   roomIdentifier: string;
+  roomStorageMode?: "local" | "cloud";
   roomGitRoom: DesktopGitRoomInfo | null;
   gitRoomMatchesActiveRepo: boolean;
   roomDisplayName: string | null;
@@ -85,7 +86,7 @@ export function useAddAgentPresentation(
   const canStartManagedAgent = computed(() =>
     Boolean(
       preflight.value?.canStart &&
-      (launchMode.value !== "supervised" || secureStorageStatus.value?.available === true) &&
+      (props.roomStorageMode === "local" || launchMode.value !== "supervised" || secureStorageStatus.value?.available === true) &&
       (!loadingPreflight.value || Boolean(preflight.value)) &&
       (selectedModelMode.value !== "option" || !loadingProviderModels.value) &&
       (
@@ -122,7 +123,7 @@ export function useAddAgentPresentation(
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking setup";
     if (loadError.value) return "Provider check failed";
     if (!preflight.value) return "Choose a provider";
-    if (launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
+    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
       return "Unlock secure credential storage";
     }
     if (preflight.value.status === "ready") return "Choose how it works here";
@@ -131,7 +132,7 @@ export function useAddAgentPresentation(
   const statusDescription = computed(() => {
     if (loadError.value) return "We couldn't verify this provider's setup. Use Check again to retry.";
     if (!preflight.value) return "Checking provider readiness...";
-    if (launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
+    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
       return secureStorageStatus.value.detail;
     }
     if (preflight.value.status !== "ready") {
@@ -147,13 +148,13 @@ export function useAddAgentPresentation(
       return "Use the handoff below to bring it into this room.";
     }
     return hasSupervisedRuntime(selectedProvider.value)
-      ? "Set its model, lifecycle, and access before launch."
+      ? "Choose a model, set its access, and give it something to work on."
       : "Set its model and access before launch.";
   });
   const preflightStatusLabel = computed(() => {
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking";
     if (loadError.value || preflight.value?.status === "error") return "Needs attention";
-    if (launchMode.value === "supervised" && secureStorageStatus.value?.available === false) return "Needs attention";
+    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) return "Needs attention";
     if (preflight.value?.status === "ready") return "Ready";
     if (!preflight.value) return "Not checked";
     return "Setup needed";
@@ -169,7 +170,7 @@ export function useAddAgentPresentation(
   });
   const bridgeLabel = computed(() => {
     if (
-      selectedProviderId.value === "claude-code" &&
+      (selectedProviderId.value === "claude-code" || selectedProviderId.value === "codex") &&
       launchMode.value === "supervised"
     ) return "Managed at launch";
     if (preflight.value?.mcpStatus === "installed") return "Installed";
@@ -192,7 +193,7 @@ export function useAddAgentPresentation(
     if (props.roomGitRoom == null) return "Private scratch workspace";
     return "Required before local agents can start";
   });
-  const showSecureStorage = computed(() => launchMode.value === "supervised");
+  const showSecureStorage = computed(() => props.roomStorageMode !== "local" && launchMode.value === "supervised");
   const secureStorageLabel = computed(() => {
     if (!showSecureStorage.value) return null;
     if (!secureStorageStatus.value) return "Checking";
@@ -236,15 +237,9 @@ export function useAddAgentPresentation(
       ? "This desktop app sends room updates to the local agent."
       : "The agent app joins the room through its LetAgents connection."
   );
-  const lifecycleDescription = computed(() => {
-    if (launchMode.value === "legacy") {
-      return "The current app-owned path stays unchanged and stops with its normal lifecycle.";
-    }
-    if (/^local[_-]/i.test(props.roomIdentifier) || /^git-room:local:/i.test(props.roomIdentifier)) {
-      return "Supervision needs a cloud room for durable workplace reachability. Local-only rooms keep the existing path.";
-    }
-    return "A detached daemon owns desired state and recovery. Closing this app does not stop the supervised agent.";
-  });
+  const lifecycleDescription = computed(() => props.roomStorageMode === "local"
+    ? "Runs on this Mac and keeps working after you quit LetAgents. Room history is stored on this Mac."
+    : "Runs on this Mac and keeps working after you quit LetAgents. Room messages are shared in the cloud.");
   const showCursorMcpPolicySelector = computed(() =>
     launchMode.value === "legacy" && shouldShowCursorMcpPolicySelector(selectedProvider.value)
   );

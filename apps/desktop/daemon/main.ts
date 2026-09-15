@@ -1,3 +1,4 @@
+import { restoreLocalRoomAuthorities } from "./local-room-runtime.js";
 import { dirname } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
@@ -965,6 +966,7 @@ export class SupervisorDaemon {
     await this.roomMoves.reconcilePrepared();
     await this.lifecycleAdministration.recoverPreparedPurges();
     await this.lifecycleAdministration.recoverEphemeralWorkspaces();
+    await restoreLocalRoomAuthorities((await this.store.load()).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
     await this.socket.start();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);

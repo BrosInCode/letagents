@@ -110,7 +110,7 @@
         : activeSupervisedLaunch.failed
           ? "This launch needs attention."
           : activeSupervisedLaunch.stopped
-            ? "This supervised launch has stopped."
+            ? "This agent has stopped."
             : activeSupervisedLaunch.status === "stopping"
               ? `${activeSupervisedLaunch.providerLabel} is stopping.`
               : `${activeSupervisedLaunch.providerLabel} setup is in progress.` }}
@@ -122,12 +122,12 @@
       {{ externalInstruction }}
     </span>
     <span v-else-if="launchMode === 'supervised' && charterMissing" class="desktop-add-agent-confirmation">
-      Add an initial message before starting the supervised agent.
+      Add an initial message before starting the agent.
     </span>
     <span v-else-if="launchMode === 'supervised' && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
       {{ recoveryScanStatus === "error"
-        ? "Previous launches could not be checked. Starting now creates a new supervised agent."
-        : "Checking for a previous supervised agent before enabling Start..." }}
+        ? "Previous launches could not be checked. Starting now creates a new agent."
+        : "Checking for a previous agent before enabling Start..." }}
     </span>
     <span v-else-if="permissionWarning" class="desktop-add-agent-confirmation">
       {{ permissionWarning }}
@@ -219,8 +219,8 @@ const startButtonLabel = computed(() => {
   if (props.startingAgent) return "Starting...";
   if (props.launchMode === "supervised") {
     return recoveryScanStatus.value === "error"
-      ? "Start new supervised agent"
-      : "Start supervised agent";
+      ? "Start new agent"
+      : "Start agent";
   }
   if (!hasDesktopManagedRuntime(props.provider)) return "Start agent";
   const providerName = props.provider?.name?.trim() || "agent";

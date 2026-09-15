@@ -76,6 +76,7 @@ export function projectDaemonManifestEntry(entry: DaemonManifestEntry): DaemonMa
     membership: {
       agent_id: entry.id,
       room_id: entry.room_id,
+      ...(entry.local_room_id ? { local_room_id: entry.local_room_id } : {}),
     },
     configuration: {
       agent_id: entry.id,
@@ -175,6 +176,7 @@ export function composeDaemonManifestEntry(projection: DaemonManifestDomainProje
   return {
     id: identity.agent_id,
     room_id: membership.room_id,
+    ...(membership.local_room_id ? { local_room_id: membership.local_room_id } : {}),
     display_name: profile.display_name,
     provider: configuration.provider,
     model: configuration.model,
@@ -218,6 +220,7 @@ export function projectDaemonCreateRequestReplayParameters(entry: DaemonManifest
   return {
     id: projection.identity.agent_id,
     room_id: projection.membership.room_id,
+    local_room_id: projection.membership.local_room_id ?? null,
     display_name: projection.profile.display_name,
     provider: projection.configuration.provider,
     model: projection.configuration.model,

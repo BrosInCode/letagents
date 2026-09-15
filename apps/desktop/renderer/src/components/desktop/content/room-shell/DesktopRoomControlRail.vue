@@ -12,7 +12,6 @@
           :sound-enabled="soundEnabled"
           :notifications-enabled="notificationsEnabled"
           :notification-permission="notificationPermission"
-          :liquid-glass-enabled="liquidGlassEnabled"
           :rename-busy="renameBusy"
           :rename-error="renameError"
           :github-status="githubStatus"
@@ -26,7 +25,6 @@
           @open-rules="emit('openRules')"
           @toggle-sound="emit('toggleSound')"
           @toggle-notifications="emit('toggleNotifications')"
-          @toggle-liquid-glass="emit('toggleLiquidGlass')"
           @toggle-github-events-visible="emit('toggleGithubEventsVisible')"
           @set-room-storage-mode="emit('setRoomStorageMode', $event)"
           @fork-room-to-local="emit('forkRoomToLocal')"
@@ -84,7 +82,6 @@ const props = defineProps<{
   soundEnabled: boolean;
   notificationsEnabled: boolean;
   notificationPermission: NotificationPermission | "unsupported";
-  liquidGlassEnabled: boolean;
   renameBusy: boolean;
   renameError: string | null;
   githubStatus: DesktopGitHubIntegrationStatus | null;
@@ -103,7 +100,6 @@ const emit = defineEmits<{
   openRules: [];
   toggleSound: [];
   toggleNotifications: [];
-  toggleLiquidGlass: [];
   toggleGithubEventsVisible: [];
   setRoomStorageMode: [mode: DesktopRoomStorageState["overrideMode"]];
   forkRoomToLocal: [];

@@ -131,7 +131,7 @@ test("secure credential storage is a supervised readiness prerequisite", () => {
 
 test("ready provider copy separates identity, state, and next action", () => {
   assert.match(presentation, /status === "ready"\) return "Choose how it works here"/);
-  assert.match(presentation, /Set its model, lifecycle, and access before launch/);
+  assert.match(presentation, /Choose a model, set its access, and give it something to work on/);
   assert.match(presentation, /Set its model and access before launch/);
   assert.match(presentation, /Use the handoff below to bring it into this room/);
   assert.match(setupStatus, /\{\{ statusDescription \}\}/);

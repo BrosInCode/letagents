@@ -150,7 +150,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 :deep(.desktop-device-auth-backdrop) {
-  backdrop-filter: blur(8px);
+  background: var(--bg-elevated);
 }
 
 :deep(.desktop-device-auth-dialog) {

@@ -1,3 +1,4 @@
+import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type {
   SupervisedEffectRecord,
@@ -251,7 +252,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
         provider: context.entry.provider,
         toolName: input.toolName,
         input: input.input,
-        requestId: input.mcpRequestId,
+        requestId: isLocalRoomApi(context.agent.apiUrl) ? prepared.effect_id : input.mcpRequestId,
         roomId: context.entry.room_id,
         apiUrl: context.agent.apiUrl,
         bearer: context.agent.bearer,
@@ -304,6 +305,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       }
     }
     if (input.toolName === "join_room") {
+      if (isLocalRoomApi(context.agent.apiUrl)) throw new Error("Moving a local agent to another room is not supported yet. Start an agent in the destination room.");
       const destination = typeof args.name === "string" ? args.name.trim() : "";
       if (!destination || destination.length > 1_024
         || /[\u0000-\u001f\u007f]/.test(destination)

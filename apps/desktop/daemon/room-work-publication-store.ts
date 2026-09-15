@@ -1,3 +1,4 @@
+import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { applyRoomWorkspaceSchema } from "./room-workspace-store.js";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -73,6 +74,7 @@ function sourceId(value: unknown): string {
 function origin(value: RoomWorkOrigin): RoomWorkOrigin {
   if (!value || typeof value !== "object") invalid();
   const result = Object.fromEntries(Object.keys(originColumns).map(key => [key, text(value[key as keyof RoomWorkOrigin])])) as RoomWorkOrigin;
+  if (isLocalRoomApi(result.apiOrigin)) return result;
   let url: URL;
   try { url = new URL(result.apiOrigin); } catch { return invalid(); }
   if (url.origin !== result.apiOrigin || url.username || url.password

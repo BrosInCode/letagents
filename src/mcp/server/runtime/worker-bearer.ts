@@ -1,3 +1,4 @@
+import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
 import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
 
 export const LETAGENTS_AGENT_SESSION_BEARER_ENV = "LETAGENTS_AGENT_SESSION_BEARER";
@@ -54,6 +55,7 @@ export function getWorkerBearerRuntime(): WorkerBearerRuntime {
   }
   try {
     const parsed = new URL(apiUrl);
+    if (isLocalRoomApi(apiUrl) && supervised && profile === "supervised_room_turn" && !bearer) return { mode: "supervised" };
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("unsupported protocol");
     }

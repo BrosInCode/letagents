@@ -16,7 +16,6 @@ import {
 import { desktopIpc } from "../../../../ipc/index.js";
 import { useManagedAgentSessionsContext } from "./managed-agent-sessions-context";
 import { useSupervisedAgentLaunch } from "./useSupervisedAgentLaunch";
-import { useManagedAgentLaunch } from "./useManagedAgentLaunch";
 import { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import { useAddAgentSetup } from "./useAddAgentSetup";
 import { useAddAgentPresentation } from "./useAddAgentPresentation";
@@ -29,6 +28,7 @@ import {
 
 export interface AddAgentModalProps {
   open: boolean;
+  roomStorageMode?: "local" | "cloud";
   roomIdentifier: string;
   roomGitRoom: DesktopGitRoomInfo | null;
   gitRoomMatchesActiveRepo: boolean;
@@ -136,9 +136,6 @@ export function useAddAgentController(
 ) {
 
 const managedSessionsContext = useManagedAgentSessionsContext();
-const managedLaunch = useManagedAgentLaunch({
-  onStarted: (session) => emit("managed-session-started", session),
-});
 
 const startingAgent = ref(false);
 let startOperationInFlight = false;
@@ -458,7 +455,7 @@ async function startManagedAgent(
       const latestStorageStatus = await desktopIpc.supervisorGrant.getStorageStatus();
       if (!setupActions.isCurrentRequest(requestVersion)) return;
       secureStorageStatus.value = latestStorageStatus;
-      if (!latestStorageStatus.available) {
+      if (props.roomStorageMode !== "local" && !latestStorageStatus.available) {
         setSetupMessage(latestStorageStatus.detail, "warning");
         return;
       }
@@ -528,33 +525,7 @@ async function startManagedAgent(
       void managedSessionsContext.refresh();
       return;
     }
-    // The legacy desktop-managed path always requires a resolved repo. Repo-less
-    // rooms are a supervised-only capability, so never fall through to it with a
-    // null path (the runtime gate above already permits a repo-less supervised
-    // launch; a repo-less legacy launch is not supported).
-    if (!requestRepoRootPath) {
-      setSetupMessage(
-        "Repo-less agents need the supervised runtime. This provider's basic launch requires a local repository.",
-        "warning",
-      );
-      return;
-    }
-    const startMessage = await managedLaunch.start({
-      providerId: selectedProviderId.value,
-      roomIdentifier: props.roomIdentifier,
-      roomGitRoom: props.roomGitRoom,
-      roomDisplayName: props.roomDisplayName,
-      repoRootPath: requestRepoRootPath,
-      deliveryMode: deliveryMode.value,
-      permissionProfileId: selectedPermissionProfile.value?.id ?? null,
-      cursorMcpPolicy: selectedProviderId.value === "cursor" ? selectedCursorMcpPolicy.value : null,
-      model: selectedModel.value,
-      modelSource: selectedModelSource.value,
-      effort: selectedEffort.value || null,
-    });
-    if (!setupActions.isCurrentRequest(requestVersion)) return;
-    setSetupMessage(startMessage);
-    await setupActions.runPreflight();
+    throw new Error("Choose a provider that supports background execution, or connect your existing agent app.");
   } catch (error) {
     if (!setupActions.isCurrentRequest(requestVersion)) {
       if (

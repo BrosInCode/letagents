@@ -83,7 +83,6 @@ async function renderPanel(overrides: Record<string, unknown> = {}): Promise<str
     soundEnabled: true,
     notificationsEnabled: true,
     notificationPermission: "granted",
-    liquidGlassEnabled: false,
     renameBusy: false,
     renameError: null,
     githubStatus: null,

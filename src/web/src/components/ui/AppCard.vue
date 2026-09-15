@@ -24,22 +24,20 @@ withDefaults(defineProps<{
 
 <style scoped>
 .card {
-  background: var(--card-bg, rgba(255, 255, 255, 0.03));
+  background: var(--card-bg, var(--bg-elevated));
   border-radius: var(--radius-lg, 16px);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   overflow: hidden;
-  transition: all 300ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+  transition: border-color 150ms ease-out;
 }
 
 .card--bordered {
   border: 1px solid var(--card-border, rgba(255, 255, 255, 0.06));
 }
 
-.card--hoverable:hover {
-  border-color: rgba(255, 255, 255, 0.12);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.2));
+@media (hover: hover) and (pointer: fine) {
+  .card--hoverable:hover {
+    border-color: var(--border-strong);
+  }
 }
 
 .card__header {

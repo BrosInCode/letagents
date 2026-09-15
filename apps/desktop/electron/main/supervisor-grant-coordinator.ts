@@ -1,3 +1,4 @@
+import { prepareLocalSupervisorGrant, revokeLocalSupervisorEntry } from "./rooms/local-supervision-authority.js";
 import { apiFetch } from "./auth.js";
 import { getOrCreateDesktopHostId } from "./agents/state.js";
 import {
@@ -183,6 +184,20 @@ export class SupervisorGrantCoordinator {
     }
     if (supervisedDeliveryModeForProvider(input.providerId) !== "daemon_inbox") {
       return { entry: await this.daemon.create(input), agentKey: "" };
+    }
+    if (input.localRoomId) {
+      return this.serialize(entryId, async () => {
+        if (input.localRoomId !== input.roomIdentifier) throw new Error("Local launch storage identity changed.");
+        const status = await this.daemon.ensureRunning();
+        const existingEntries = await this.daemon.list(input.roomIdentifier);
+        const displayName = hasGenericSupervisedDisplayName(input.displayName, input.providerId)
+          ? existingEntries.find((entry) => entry.id === entryId)?.displayName
+            ?? suggestLetAgentsCodename(existingEntries.map((entry) => entry.displayName), entryId)
+          : input.displayName.trim();
+        const entry = await this.daemon.create({ ...input, displayName });
+        const agentKey = await this.installLocal(entry, status.generation, false, false, input.charter);
+        return { entry, agentKey };
+      });
     }
     return this.serialize(entryId, async () => {
       await this.daemon.ensureRunning();
@@ -398,29 +413,34 @@ export class SupervisorGrantCoordinator {
    * durable in Electron before the daemon removes its exact local binding.
    */
   async retireEntry(entryId: string, daemonGeneration: number): Promise<void> {
-    await this.serialize(entryId, () => this.retireEntryWithinEntryTail(entryId, daemonGeneration));
+    await this.serialize(entryId, async () => {
+      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === entryId);
+      await this.retireEntryWithinEntryTail(entryId, daemonGeneration, entry);
+    });
   }
 
   /** Startup cleanup must not retire an entry resumed after its stale list snapshot. */
   private async retireStoppedEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number): Promise<void> {
     await this.serialize(entry.id, async () => {
-      const attestation = await this.operations.readRevocationAttestation(entry.id);
+      const attestation = entry.localRoomId ? null : await this.operations.readRevocationAttestation(entry.id);
       if (attestation !== null && desktopRetirementDurablyCompleted(entry, true)) return;
       const current = (await this.daemon.list(null)).find((candidate) => candidate.id === entry.id);
       if (!current || current.desiredState !== "stopped") return;
-      await this.retireEntryWithinEntryTail(entry.id, daemonGeneration);
+      await this.retireEntryWithinEntryTail(entry.id, daemonGeneration, current);
     });
   }
 
-  private async retireEntryWithinEntryTail(entryId: string, daemonGeneration: number): Promise<void> {
+  private async retireEntryWithinEntryTail(entryId: string, daemonGeneration: number, entry?: DesktopSupervisorManifestEntry): Promise<void> {
     let result = await this.daemon.retireAgent(entryId, daemonGeneration);
     if (result.outcome === "invalid") throw new Error(result.error || "Agent retirement could not be completed.");
     if (result.outcome === "revocation_required") {
       if (result.revocationKind === "worker_session" && result.agentSessionId) {
-        await this.operations.revokeEntry(entryId, result.agentSessionId, { apiFetch: this.request });
+        if (entry?.localRoomId) await revokeLocalSupervisorEntry(entryId, result.agentSessionId);
+        else await this.operations.revokeEntry(entryId, result.agentSessionId, { apiFetch: this.request });
         result = await this.daemon.retireAgent(entryId, daemonGeneration, result.agentSessionId);
       } else if (result.revocationKind === "grant_only") {
-        await this.operations.revokeEntryWithoutWorkerSession(entryId, { apiFetch: this.request });
+        if (entry?.localRoomId) await revokeLocalSupervisorEntry(entryId);
+        else await this.operations.revokeEntryWithoutWorkerSession(entryId, { apiFetch: this.request });
         result = await this.daemon.retireAgent(entryId, daemonGeneration, null, true);
       } else {
         throw new Error("Agent retirement returned incomplete revocation coordinates.");
@@ -475,12 +495,20 @@ export class SupervisorGrantCoordinator {
 
   /** Complete the external half of the daemon's durable purge journal. */
   async revokeEntryForPurge(entryId: string, agentSessionId: string): Promise<void> {
-    await this.serialize(entryId, () => revokeDesktopSupervisorGrantForEntry(entryId, agentSessionId, { apiFetch: this.request }));
+    await this.serialize(entryId, async () => {
+      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === entryId);
+      if (entry?.localRoomId) return revokeLocalSupervisorEntry(entryId, agentSessionId);
+      return revokeDesktopSupervisorGrantForEntry(entryId, agentSessionId, { apiFetch: this.request });
+    });
   }
 
   /** Revoke only the parent grant after the daemon durably proves no worker session was minted. */
   async revokeEntryForPurgeWithoutWorkerSession(entryId: string): Promise<void> {
-    await this.serialize(entryId, () => revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, { apiFetch: this.request }));
+    await this.serialize(entryId, async () => {
+      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === entryId);
+      if (entry?.localRoomId) return revokeLocalSupervisorEntry(entryId);
+      return revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, { apiFetch: this.request });
+    });
   }
 
   /**
@@ -520,6 +548,10 @@ export class SupervisorGrantCoordinator {
     discoverPendingRoomMove = false,
     recoveryOnly = false,
   ): Promise<void> {
+    if (entry.localRoomId) {
+      await this.installLocal(entry, daemonGeneration, credentialOnly, recoveryOnly);
+      return;
+    }
     entry = await this.repairGenericDisplayName(entry);
     // A room-move journal owns both membership and credential convergence.
     // In particular, a restart can expose destination membership while the
@@ -837,6 +869,19 @@ export class SupervisorGrantCoordinator {
     return authority;
   }
 
+  private async installLocal(entry: DesktopSupervisorManifestEntry, daemonGeneration: number,
+    credentialOnly = false, recoveryOnly = false, initialMessage?: string): Promise<string> {
+    if (!entry.localRoomId || entry.localRoomId !== entry.roomId) throw new Error("Invalid saved local room identity.");
+    const grant = await prepareLocalSupervisorGrant({ entryId: entry.id, roomId: entry.localRoomId,
+      displayName: entry.displayName, provider: entry.provider });
+    await this.install(entry, grant.agentKey, {
+      metadata: { grantId: grant.grantId, hostId: grant.hostId, installationId: grant.installationId,
+        allowedRoomIds: [grant.roomId], allowedAgentKeys: [grant.agentKey], generation: grant.grantGeneration, expiresAt: grant.expiresAt },
+      authority: null, token: grant.supervisorGrant, entryId: entry.id, lastInstalledDaemonGeneration: null, apiUrl: grant.apiUrl,
+    }, daemonGeneration, credentialOnly, recoveryOnly, initialMessage);
+    return grant.agentKey;
+  }
+
   private async install(
     entry: DesktopSupervisorManifestEntry,
     agentKey: string,
@@ -846,6 +891,7 @@ export class SupervisorGrantCoordinator {
       token: string;
       entryId: string | null;
       lastInstalledDaemonGeneration: number | null;
+      apiUrl?: string;
     },
     daemonGeneration: number,
     credentialOnly = false,
@@ -880,6 +926,7 @@ export class SupervisorGrantCoordinator {
       ownerAccountId: grant.authority?.ownerAccountId ?? null,
       scopeKey: grant.authority?.scopeKey ?? null,
       expiresAt: grant.metadata.expiresAt,
+      ...(grant.apiUrl ? { apiUrl: grant.apiUrl } : {}),
       credentialOnly,
       recoveryOnly,
     });
@@ -900,6 +947,7 @@ export class SupervisorGrantCoordinator {
     // Only a confirmed exact-generation socket install advances the durable
     // marker. This write contains encrypted storage only; the renderer and
     // manifest never see the bearer.
+    if (entry.localRoomId) return;
     await this.operations.replaceGrant({
       agentKey, metadata: grant.metadata, authority: grant.authority, token: grant.token, entryId: entry.id,
       lastInstalledDaemonGeneration: daemonGeneration,

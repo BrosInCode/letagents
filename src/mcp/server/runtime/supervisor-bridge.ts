@@ -1,3 +1,4 @@
+import { isLocalRoomApi, roomApiOrigin } from "../../../../shared/room-api-origin.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { createConnection } from "node:net";
@@ -464,6 +465,8 @@ export async function borrowSupervisedWorkerCredential(
 
 function normalizedWorkerApiOrigin(env: NodeJS.ProcessEnv): string {
   const apiUrl = env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
+  if (isLocalRoomApi(apiUrl) && env.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1"
+    && env.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn") return apiUrl;
   let parsed: URL;
   try {
     parsed = new URL(apiUrl);
@@ -574,7 +577,7 @@ function bindingRequestKey(
     session.session_id,
     session.room_id,
     tokenDigest,
-    new URL(env.LETAGENTS_API_URL?.trim() || "https://letagents.chat").origin,
+    roomApiOrigin(env.LETAGENTS_API_URL?.trim() || "https://letagents.chat"),
   ].join("\u0000");
 }
 

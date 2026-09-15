@@ -72,12 +72,6 @@
   padding: 0;
 }
 
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-header {
-  border-color: var(--border);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-sm);
-}
-
 .desktop-room-title {
   display: flex;
   align-items: center;
@@ -190,14 +184,6 @@
     transform var(--duration-fast) var(--ease-out);
 }
 
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-overflow-button,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-badge,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tabs {
-  border-color: var(--border);
-  background: var(--accent-dim);
-  box-shadow: none;
-}
-
 .desktop-room-overflow-button svg {
   width: 14px;
   height: 14px;
@@ -211,14 +197,6 @@
   color: var(--text);
 }
 
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-overflow-button:hover,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-overflow-button[data-active="true"],
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tab[data-active="true"] {
-  border-color: var(--border-strong);
-  background: var(--accent-active);
-  color: var(--text);
-}
-
 .desktop-room-overflow-menu {
   position: absolute;
   top: calc(100% + 8px);
@@ -228,7 +206,6 @@
   gap: 4px;
   min-width: 176px;
   padding: 6px;
-  backdrop-filter: none;
   transform-origin: top right;
   will-change: opacity, transform;
 }
@@ -409,11 +386,6 @@
   display: grid;
   min-height: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-elevated);
-}
-
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-control-rail {
-  border-bottom-color: var(--border);
   background: var(--bg-elevated);
 }
 

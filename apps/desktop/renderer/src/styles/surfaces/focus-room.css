@@ -766,7 +766,7 @@
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 999px;
   color: var(--text);
-  background: rgba(24, 24, 24, 0.92);
+  background: var(--bg-elevated);
   box-shadow:
     0 18px 48px rgba(0, 0, 0, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -776,7 +776,6 @@
   text-align: center;
   transform: translateX(-50%);
   pointer-events: none;
-  backdrop-filter: blur(18px);
 }
 
 .focus-room-toast[data-state="success"] {
@@ -809,11 +808,10 @@
   padding: 7px;
   border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 14px;
-  background: rgba(22, 22, 22, 0.96);
+  background: var(--bg-elevated);
   box-shadow:
     0 24px 70px rgba(0, 0, 0, 0.42),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(18px);
   animation: focus-room-feedback-in 120ms var(--ease-out) both;
 }
 

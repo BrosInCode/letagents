@@ -1,3 +1,4 @@
+import { readLocalSupervisorPresence } from "./local-supervision-authority.js";
 import type { DesktopRoomSnapshot } from "../../ipc-types.js";
 import { basename } from "node:path";
 import { resolveWorkspaceRoom } from "../../repo-status.js";
@@ -56,12 +57,13 @@ export async function fetchRoomSnapshot(
       const nextStorage = await resolveLocalAwareRoomStorageMode(
         visibleRoomIdentifier,
       );
-      const [tasks, messages] = await Promise.all([
+      const [tasks, messages, agents] = await Promise.all([
         listLocalTasks(localRoom.roomIdentifier),
         getLatestLocalChatMessages(localRoom.roomIdentifier, {
           limit: 150,
           readerKey: await resolveLocalThreadReaderKey(),
         }).then((page) => page.messages),
+        readLocalSupervisorPresence(localRoom.roomIdentifier),
       ]);
       return createLocalReadyRoomSnapshot({
         roomIdentifier: visibleRoomIdentifier,
@@ -69,6 +71,7 @@ export async function fetchRoomSnapshot(
         storage: nextStorage,
         tasks,
         messages,
+        ...agents,
       });
     }
 

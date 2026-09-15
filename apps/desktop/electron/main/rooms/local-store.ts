@@ -66,6 +66,8 @@ type LocalTaskRow = {
 };
 
 export type LocalTaskInput = {
+  /** Stable logical task identity for supervised tool retries. */
+  clientTaskId?: string;
   title: string;
   description?: string | null;
   createdBy?: string | null;
@@ -428,14 +430,15 @@ export async function getLocalRoomByCloudRoom(
 }
 
 export async function listLocalRoomEntries(
-  options: { includeArchived?: boolean; linkedIdentity?: "local" | "cloud" } = {},
+  options: { includeArchived?: boolean; linkedIdentity?: "local" | "cloud"; unpublishedOnly?: boolean } = {},
 ): Promise<DesktopAccountRoomEntry[]> {
   const database = await getDb();
   const rows = database
     .prepare(`
       SELECT *
       FROM local_rooms
-      ${options.includeArchived ? "" : "WHERE archived_at IS NULL"}
+      WHERE (${options.includeArchived ? "1" : "archived_at IS NULL"})
+        ${options.unpublishedOnly ? "AND cloud_room_id IS NULL" : ""}
       ORDER BY updated_at DESC
     `)
     .all()
@@ -689,6 +692,17 @@ export async function addLocalTask(
   let taskId = "";
   beginImmediate(database);
   try {
+    if (input.clientTaskId) {
+      const existing = database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND sync_key=?")
+        .get(trimmedRoomId, `local-task-request:${input.clientTaskId}`);
+      if (existing) {
+        if (existing.title !== title || existing.description !== (input.description?.trim() || null)) {
+          throw new Error("Local task identity was reused with different content.");
+        }
+        database.exec("COMMIT");
+        return toTaskSummary(mapTaskRow(existing));
+      }
+    }
     taskId = allocateTaskId(database, trimmedRoomId);
     database
       .prepare(`
@@ -706,7 +720,7 @@ export async function addLocalTask(
         title,
         input.description?.trim() || null,
         input.createdBy || "human",
-        `local-task:${trimmedRoomId}:${taskId}`,
+        input.clientTaskId ? `local-task-request:${input.clientTaskId}` : `local-task:${trimmedRoomId}:${taskId}`,
         now,
         now,
       );

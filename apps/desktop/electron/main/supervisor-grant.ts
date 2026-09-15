@@ -965,12 +965,12 @@ export async function readDesktopSupervisorGrantAgentKeysForEntries(
 }
 
 /** Both list reads and live snapshots need the same durable renderer identity. */
-export async function projectDesktopSupervisorAgentKeys<T extends { id: string; agentKey?: string | null }>(
+export async function projectDesktopSupervisorAgentKeys<T extends { id: string; agentKey?: string | null; localRoomId?: string }>(
   entries: readonly T[],
 ): Promise<Array<T & { agentKey: string | null }>> {
-  const agentKeys = await readDesktopSupervisorGrantAgentKeysForEntries(entries.map(entry => entry.id))
+  const agentKeys = await readDesktopSupervisorGrantAgentKeysForEntries(entries.filter(entry => !entry.localRoomId).map(entry => entry.id))
     .catch(() => new Map<string, string>());
-  return entries.map(entry => ({ ...entry, agentKey: entry.agentKey ?? agentKeys.get(entry.id) ?? null }));
+  return entries.map(entry => ({ ...entry, agentKey: entry.localRoomId ? `local/supervised/${entry.id}` : entry.agentKey ?? agentKeys.get(entry.id) ?? null }));
 }
 
 /**

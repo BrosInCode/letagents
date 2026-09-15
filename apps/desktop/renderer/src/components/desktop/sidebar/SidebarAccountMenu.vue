@@ -300,9 +300,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", handleOutsideP
   padding: 6px;
   border: 1px solid var(--border-strong);
   border-radius: 14px;
-  background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
+  background: var(--bg-elevated);
   box-shadow: var(--shadow-lg);
-  backdrop-filter: blur(18px) saturate(1.18);
 }
 
 .sidebar-account-card {
