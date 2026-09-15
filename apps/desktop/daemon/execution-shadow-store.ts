@@ -7,6 +7,7 @@ import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgent
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
 import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import { hasRuntimeRecoveryBoundary, recoveredRuntime, runtimeRecoveryStorageAvailable } from "./runtime-recovery-journal.js";
 import { LifecycleProjectionLedger, type LifecycleProjectionDiagnostics, type LifecycleProjectionObservation,
   type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 
@@ -353,7 +354,10 @@ export class ExecutionShadowStore {
       }
       if (attempt.state !== "active") throw new ExecutionProtocolError("attempt_settled");
       if (runtime.runtime_state === "exited" || !isTypedCaptureAuthority(runtime.authority_mode)
-        || this.row("SELECT 1 FROM execution_turns WHERE agent_id=? AND state IN ('none','active','lost')", input.agentId)) {
+        || this.row(runtimeRecoveryStorageAvailable(this.database) ? `SELECT 1 FROM execution_turns t WHERE t.agent_id=? AND t.state IN ('none','active','lost')
+          AND NOT EXISTS (SELECT 1 FROM agent_runtime_recoveries r WHERE r.agent_id=t.agent_id
+            AND r.runtime_generation_id=t.runtime_generation_id AND r.phase IN ('stopped','complete'))`
+          : "SELECT 1 FROM execution_turns WHERE agent_id=? AND state IN ('none','active','lost')", input.agentId)) {
         throw new ExecutionProtocolError("invalid_transition");
       }
       materializeTurn(this.database, input);
@@ -386,8 +390,10 @@ export class ExecutionShadowStore {
       }
       // A migrated cursor has no known source. Neither a new subscription nor
       // a matching process birth can prove its provenance retroactively.
-      if (current && current.source_id === null) throw new ExecutionProtocolError("source_unverified");
-      if (current && !this.row("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?", input.agentId, current.source_id)) {
+      const recoveredBoundary = current && hasRuntimeRecoveryBoundary(this.database, input.agentId,
+        String(current.observer_runtime_generation_id), input.observerRuntimeGenerationId, current.source_id as string | null);
+      if (current && current.source_id === null && !recoveredBoundary) throw new ExecutionProtocolError("source_unverified");
+      if (current && !recoveredBoundary && !this.row("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?", input.agentId, current.source_id)) {
         throw new ExecutionProtocolError("source_unverified");
       }
       const sameSource = current?.source_id === input.sourceId;
@@ -400,7 +406,7 @@ export class ExecutionShadowStore {
         || this.row("SELECT 1 FROM execution_facts WHERE agent_id=? LIMIT 1", input.agentId))) {
         throw new ExecutionProtocolError("source_unverified");
       }
-      if (current && !sameSource && Number(current.max_observed_sequence) > Number(current.last_source_sequence)) {
+      if (current && !sameSource && !recoveredBoundary && Number(current.max_observed_sequence) > Number(current.last_source_sequence)) {
         throw new ExecutionProtocolError("source_gap");
       }
       const lastSourceSequence = sameSource ? Number(current.last_source_sequence) : 0;
@@ -683,6 +689,8 @@ export class ExecutionShadowStore {
             runtime = this.projectRuntime(runtimeId); runtimes.set(runtimeId, runtime);
           }
           evidenceIncomplete ||= runtime.unverifiedFacts > 0;
+          const recovered = recoveredRuntime(this.database, agentId, runtimeId);
+          evidenceIncomplete ||= recovered?.incomplete ?? false;
           const turn = runtime.projection.turns.get(String(row.turn_id));
           if (!turn) { evidenceIncomplete = true; continue; }
           const operations = [...turn.operations.entries()].slice(0, operationsLeft).map(([executionId, operation]) => ({
@@ -691,7 +699,9 @@ export class ExecutionShadowStore {
           }));
           if (operations.length < turn.operations.size) truncated = true;
           operationsLeft -= operations.length;
-          turns.push({ turnId: turn.turnId, state: turn.state, outcome: turn.outcome, operations });
+          const lost = Boolean(recovered && turn.state !== "terminal");
+          evidenceIncomplete ||= lost;
+          turns.push({ turnId: turn.turnId, state: lost ? "lost" : turn.state, outcome: turn.outcome, operations });
         }
         result = { availability: "available", truncated, evidenceIncomplete, turns };
       }
@@ -733,9 +743,12 @@ export class ExecutionShadowStore {
           captured = true;
           const runtime = this.replayRows(runtimeRows);
           incomplete ||= runtime.unverifiedFacts > 0;
+          const recovered = recoveredRuntime(this.database, agentId, String(runtimeRows[0]!.runtime_generation_id));
+          incomplete ||= recovered?.incomplete ?? false;
           for (const turnId of selected) {
             const turn = runtime.projection.turns.get(turnId);
             if (!turn) { incomplete = true; continue; }
+            incomplete ||= Boolean(recovered && turn.state !== "terminal");
             for (const operation of turn.operations.values()) counts[operation.outcome ?? "unresolved"]++;
           }
         };

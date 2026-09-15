@@ -171,7 +171,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // Git capture, persistence, and publication policy remain in their own modules.
   // 1585 -> 1587: independently reviewed local authority restoration at startup;
   // credential and storage policy remain in local-room-runtime.ts.
-  assert.ok(mainSource.split("\n").length < 1_587, "main.ts must remain a thin composition root");
+  // 1587 -> 1592: runtime recovery composes existing stream, terminal, capture,
+  // and delivery coordinators; recovery policy and its journal remain extracted.
+  assert.ok(mainSource.split("\n").length < 1_592, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {
