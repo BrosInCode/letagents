@@ -159,22 +159,6 @@
             <span class="desktop-room-status-chip" :data-state="notificationShortLabel.toLowerCase()">{{ notificationShortLabel }}</span>
           </button>
 
-          <button class="desktop-room-property-row" type="button" data-testid="desktop-room-liquid-glass-card" @click="$emit('toggle-liquid-glass')">
-            <span class="desktop-room-action-icon is-glass" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M5 7.5A2.5 2.5 0 0 1 7.5 5h9A2.5 2.5 0 0 1 19 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 5 16.5v-9Z" stroke="currentColor" stroke-width="1.8"/>
-                <path d="M8 9h8M8 12h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-            </span>
-            <span class="desktop-room-property-copy">
-              <strong>Glass surfaces</strong>
-              <small>{{ liquidGlassEnabled ? "Use layered translucent panels." : "Use simpler high-contrast panels." }}</small>
-            </span>
-            <span class="desktop-room-toggle" :data-active="liquidGlassEnabled">
-              <span />
-            </span>
-          </button>
-
           <button
             v-if="githubEventsAvailable"
             class="desktop-room-property-row"
@@ -266,7 +250,6 @@ const props = defineProps<{
   soundEnabled: boolean;
   notificationsEnabled: boolean;
   notificationPermission: NotificationPermission | "unsupported";
-  liquidGlassEnabled: boolean;
   renameBusy: boolean;
   renameError: string | null;
   githubStatus: DesktopGitHubIntegrationStatus | null;
@@ -283,7 +266,6 @@ const emit = defineEmits<{
   "open-rules": [];
   "toggle-sound": [];
   "toggle-notifications": [];
-  "toggle-liquid-glass": [];
   "toggle-github-events-visible": [];
   "set-room-storage-mode": [mode: DesktopRoomStorageOverrideMode];
   "fork-room-to-local": [mode: "local"];

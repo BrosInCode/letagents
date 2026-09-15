@@ -10,9 +10,8 @@
   padding: 6px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
-  background: rgba(18, 18, 18, 0.98);
+  background: var(--bg-elevated);
   box-shadow: 0 18px 54px rgba(0, 0, 0, 0.38);
-  backdrop-filter: blur(18px);
 }
 
 .desktop-context-menu-title {

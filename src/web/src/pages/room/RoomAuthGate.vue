@@ -212,9 +212,8 @@ defineEmits<{
   margin: auto;
   border: 1px solid var(--auth-line-strong);
   border-radius: 24px;
-  background: rgba(13, 15, 20, 0.82);
+  background: var(--bg-elevated);
   box-shadow: 0 36px 100px rgba(0, 0, 0, 0.38);
-  backdrop-filter: blur(22px);
 }
 
 .auth-copy,

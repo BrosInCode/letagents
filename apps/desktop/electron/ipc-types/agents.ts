@@ -645,6 +645,8 @@ export interface DesktopSupervisorManifestEntry {
   runtimeGenerationId?: string | null;
   id: string;
   roomId: string;
+  /** Pinned local storage identity; omitted for cloud agents. */
+  localRoomId?: string;
   displayName: string;
   /** Canonical server-owned room identity. This is routing metadata, never a credential. */
   agentKey?: string | null;
@@ -714,6 +716,8 @@ export interface DesktopSupervisorManifestEntry {
 }
 
 export interface DesktopSupervisorCreateInput {
+  /** Main-process resolved storage identity. Renderer values are ignored. */
+  localRoomId?: string;
   /** Stable across retries of one Start action; a new intentional agent gets a new id. */
   creationRequestId?: string | null;
   roomIdentifier: string;

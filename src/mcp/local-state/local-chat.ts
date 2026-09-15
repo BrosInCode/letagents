@@ -1,3 +1,4 @@
+import { captureLocalSupervisedRouting, ensureLocalSupervisedRoutingSchema, runLocalSupervisedMessageWrite } from "../../../shared/local-supervised-routing.mjs";
 import { createRequire } from "node:module";
 import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -362,6 +363,7 @@ async function initializeDb(): Promise<SqliteDatabase> {
     database.exec("PRAGMA foreign_keys = ON");
     database.exec("PRAGMA busy_timeout = 5000");
     await runLocalSqliteWriteTransactionAsync(database, () => {
+      ensureLocalSupervisedRoutingSchema(database);
       database.exec(`
     CREATE TABLE IF NOT EXISTS local_chat_room_sequences (
       room_id TEXT PRIMARY KEY,
@@ -750,7 +752,7 @@ export async function addLocalChatMessage(
   }
 
   const timestamp = new Date().toISOString();
-  const row = await runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => {
+  const row = await runLocalSupervisedMessageWrite(database, trimmedRoomId, threadRootNumber, () => withWorkerStateFence(() => {
     const number = allocateLocalMessageNumber(database, trimmedRoomId);
     const insertedRow: LocalMessageRow = {
       room_id: trimmedRoomId,
@@ -795,6 +797,7 @@ export async function addLocalChatMessage(
         insertedRow.timestamp,
       );
     projectLocalThreadRoutingMessage(database, insertedRow);
+    captureLocalSupervisedRouting(database, insertedRow);
     return insertedRow;
   }));
 

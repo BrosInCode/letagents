@@ -233,7 +233,7 @@ test("configuration invalidation rejects a stale model-catalog response", async 
   assert.equal(configuration.providerModels.value, null);
 });
 
-test("Cursor keeps legacy read-only and supervised repo-write defaults independent", async () => {
+test("Cursor defaults to supervision and retains legacy permission compatibility", async () => {
   const configuration = useAddAgentConfiguration();
   const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("cursor");
   const roomIdentifier = ref("room-1");
@@ -279,8 +279,9 @@ test("Cursor keeps legacy read-only and supervised repo-write defaults independe
     onMessage: () => undefined,
   });
 
+  assert.equal(configuration.launchMode.value, "supervised");
   actions.syncPermissionProfileSelection();
-  assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
+  assert.equal(configuration.selectedPermissionProfileId.value, "sandboxed_write");
 
   configuration.launchMode.value = "supervised";
   assert.equal(configuration.selectedPermissionProfileId.value, "sandboxed_write");

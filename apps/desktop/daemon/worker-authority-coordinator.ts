@@ -1,3 +1,4 @@
+import { roomApiOrigin, isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import {
   hostGrantApiOrigin,
   lastRoomMessageId,
@@ -555,7 +556,7 @@ export class WorkerAuthorityCoordinator {
     const currentCredential = currentBinding
       ? await this.options.bindings.credentialFor(currentBinding)
       : null;
-    const normalizedApiUrl = new URL(input.api_url).origin;
+    const normalizedApiUrl = roomApiOrigin(input.api_url);
     const exactCurrentBinding = Boolean(currentBinding
       && currentBinding.entry_id === input.entry_id
       && currentBinding.room_id === input.room_id
@@ -1073,6 +1074,8 @@ export class WorkerAuthorityCoordinator {
       }
       let entry = await this.options.store.getEntry(input.entry_id);
       if (!entry || !await this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
+      if (Boolean(entry.local_room_id) !== isLocalRoomApi(apiUrl)
+        || (entry.local_room_id && entry.local_room_id !== entry.room_id)) throw new Error("Host grant transport does not match the saved room authority.");
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
       const currentGrant = this.currentHostGrant(entry);
       const isSameGrant = currentGrant?.grantId === input.grant_id;
@@ -1274,7 +1277,7 @@ export class WorkerAuthorityCoordinator {
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
     const binding = await this.options.bindings.get(input.entry_id);
     const credential = binding ? await this.options.bindings.credentialFor(binding) : null;
-    const normalizedApiUrl = new URL(input.api_url).origin;
+    const normalizedApiUrl = roomApiOrigin(input.api_url);
     if (!binding
       || binding.entry_id !== input.entry_id
       || binding.room_id !== input.room_id
@@ -1469,7 +1472,7 @@ export class WorkerAuthorityCoordinator {
     let normalizedApiUrl: string | null = null;
     if (input.api_url !== undefined) {
       try {
-        normalizedApiUrl = new URL(input.api_url).origin;
+        normalizedApiUrl = roomApiOrigin(input.api_url);
       } catch {
         return false;
       }

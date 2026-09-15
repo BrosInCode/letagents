@@ -6552,3 +6552,23 @@ test("v6 repair adds bounded delivery columns without shifting exact turn or cut
     await env.cleanup();
   }
 });
+
+test("physical schema 39 gains explicit local routing without changing an existing cloud manifest", async () => {
+  const env = await fixture();
+  const original = new ManifestStore(env.databasePath);
+  try {
+    const expected = await original.write(0, [entry]);
+    await original.close();
+    const old = new DatabaseSync(env.databasePath);
+    old.exec("ALTER TABLE agent_room_memberships DROP COLUMN local_room_id; UPDATE manifest_metadata SET schema_version=39; PRAGMA user_version=39");
+    old.close();
+    const migrated = new ManifestStore(env.databasePath);
+    try {
+      assert.deepEqual(await migrated.load(), expected);
+      const inspection = new DatabaseSync(env.databasePath);
+      assert.equal(inspection.prepare("SELECT local_room_id FROM agent_room_memberships WHERE agent_id=?").get(entry.id)?.local_room_id, null);
+      assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
+      inspection.close();
+    } finally { await migrated.close(); }
+  } finally { await original.close(); await env.cleanup(); }
+});

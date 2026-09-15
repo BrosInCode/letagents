@@ -39,12 +39,6 @@
   align-content: stretch;
 }
 
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
-  border-right-color: var(--border-strong);
-  background: var(--bg-subtle);
-  box-shadow: inset -1px 0 0 var(--border);
-}
-
 .sidebar-topbar {
   display: flex;
   grid-row: 1;
@@ -631,16 +625,6 @@
   outline-offset: 1px;
 }
 
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) :is(
-  .cta-plus,
-  .project-icon,
-  .project-toggle,
-  .pin-mark,
-  .system-icon
-) {
-  color: var(--text-secondary);
-}
-
 .sidebar-footer {
   grid-row: 3;
   align-self: end;
@@ -809,26 +793,6 @@
   color: var(--blue);
 }
 
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-cta,
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pinned-room,
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .project-row,
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-row,
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-row {
-  border-color: transparent;
-  box-shadow: none;
-  backdrop-filter: none;
-}
-
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) :is(
-  .pinned-room,
-  .project-row,
-  .room-row,
-  .sidebar-row
-)[data-active="true"] {
-  background: var(--sidebar-selected);
-  box-shadow: inset 2px 0 0 var(--sidebar-selection);
-}
-
 @media (hover: hover) and (pointer: fine) {
   .sidebar-collapse-button:hover,
   .sidebar-search-button:hover,
@@ -902,8 +866,7 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .app-sidebar,
-  .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
+  .app-sidebar {
     background: var(--bg-subtle);
   }
 }

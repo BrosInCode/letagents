@@ -1,3 +1,4 @@
+import { readLocalSupervisorWork } from "./local-supervision-runtime.js";
 import {
   isClearedRoomAgentWorkSummary,
   parseRoomAgentWorkSummary,
@@ -13,6 +14,7 @@ import type {
 import { apiFetch, DesktopApiError } from "../auth.js";
 import {
   cloudRoomIdentifierForStorage,
+  localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
 } from "./local-store.js";
 
@@ -142,7 +144,11 @@ export async function pollDesktopRoomAgentWork(
   if (cursor && !CURSOR_PATTERN.test(cursor)) return { status: "invalid", response: null };
 
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
-  if (storage.effectiveMode === "local") return { status: "local", response: null };
+  if (storage.effectiveMode === "local") {
+    const localRoomId = localRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
+    const response = mapDesktopRoomAgentWorkPollPayload(await readLocalSupervisorWork(localRoomId, cursor), localRoomId);
+    return response ? { status: "ready", response } : { status: "invalid", response: null };
+  }
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
   const query = cursor ? `?after=${encodeURIComponent(cursor)}&timeout=0&include_workspace=1&include_contribution=1` : "?timeout=0&include_workspace=1&include_contribution=1";
   try {

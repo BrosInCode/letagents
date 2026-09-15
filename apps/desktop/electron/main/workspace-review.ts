@@ -1,3 +1,6 @@
+import { LOCAL_ROOM_API_ORIGIN } from '../../../../shared/room-api-origin.mjs';
+import { localRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from './rooms/local-store.js';
+import { readLocalSupervisorWorkEntry } from './rooms/local-supervision-runtime.js';
 import { Worker } from 'node:worker_threads';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -23,13 +26,23 @@ export class WorkspaceReviewSession {
   private closing?: Promise<unknown>;
   private pageAbort?: AbortController;
   private review?: WorkspaceReview;
+  private localRoomId: string | null | undefined;
   constructor(readonly input: WorkspaceReviewRequest, private options: { fetch?: typeof apiFetch; databasePath?: string } = {}) {
     if (!input || typeof input.roomId !== 'string' || !input.roomId || input.roomId.length > 512
       || typeof input.agentKey !== 'string' || !input.agentKey || input.agentKey.length > 512
       || !/^msg_[1-9]\d{0,9}$/.test(input.sourceMessageId) || !validId(input.attemptId) || !validId(input.requestId)) throw new Error('Invalid workspace review.');
   }
-  private fetch<T>(suffix: string, signal = this.abort.signal): Promise<T> {
+  private async fetch<T>(suffix: string, signal = this.abort.signal): Promise<T> {
     signal.throwIfAborted();
+    if (this.localRoomId === undefined) {
+      const storage = this.options.fetch ? null : await resolveLocalAwareRoomStorageMode(this.input.roomId);
+      this.localRoomId = storage?.effectiveMode === 'local' ? localRoomIdentifierForStorage(storage, this.input.roomId) : null;
+    }
+    if (this.localRoomId) {
+      const query = new URLSearchParams(suffix);
+      return await readLocalSupervisorWorkEntry(this.localRoomId, this.input.attemptId,
+        query.has('review_page') ? Number(query.get('review_page')) : undefined) as T;
+    }
     return (this.options.fetch ?? apiFetch)<T>(`/rooms/${encodeURIComponent(this.input.roomId)}/agent-work/${encodeURIComponent(this.input.attemptId)}${suffix}`,
       { signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
   }
@@ -37,7 +50,7 @@ export class WorkspaceReviewSession {
     const work = await this.fetch<{ attempt_id: string; room_id: string; agent_key: string; source_message_id: string; summary: unknown }>('?include_workspace=1&include_contribution=1', signal);
     signal.throwIfAborted();
     const summary = parseRoomAgentWorkSummary(work.summary);
-    if (work.attempt_id !== this.input.attemptId || work.room_id !== this.input.roomId || work.agent_key !== this.input.agentKey
+    if (work.attempt_id !== this.input.attemptId || work.room_id !== (this.localRoomId ?? this.input.roomId) || work.agent_key !== this.input.agentKey
       || work.source_message_id !== this.input.sourceMessageId || !summary?.workspace || !summary.contribution) throw new InvalidatedReviewError('This review is no longer available.');
     return summary;
   }
@@ -66,7 +79,7 @@ export class WorkspaceReviewSession {
   async open(): Promise<WorkspaceReviewResult> {
     try {
       const summary = await this.authorize();
-      let review = await this.rpc<WorkspaceReview | null>('local', { ...this.input, apiOrigin: apiUrl, databasePath: this.options.databasePath ?? join(homedir(), '.letagents', 'daemon-state.sqlite') });
+      let review = await this.rpc<WorkspaceReview | null>('local', { ...this.input, roomId: this.localRoomId ?? this.input.roomId, apiOrigin: this.localRoomId ? LOCAL_ROOM_API_ORIGIN : apiUrl, databasePath: this.options.databasePath ?? join(homedir(), '.letagents', 'daemon-state.sqlite') });
       if (review) { try { this.verify(review, summary); } catch { review = null; } }
       if (!review) {
         const status = await loadWorkspaceReviewPages(index => this.fetch(`?review_page=${index}`), pages => this.rpc('append', pages), this.abort.signal);

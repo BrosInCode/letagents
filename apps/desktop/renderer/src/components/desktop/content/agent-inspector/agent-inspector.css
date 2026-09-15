@@ -29,13 +29,12 @@
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 18px;
-  background: color-mix(in srgb, var(--bg-subtle) 96.5%, transparent);
+  background: var(--bg-elevated);
   color: var(--text, #fafafa);
   box-shadow:
     -20px 0 56px light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.32)),
     0 24px 72px light-dark(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.48)),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(24px) saturate(1.08);
   pointer-events: auto;
 }
 
@@ -387,7 +386,7 @@
 
 
 
-.agent-inspector-scrim { position: fixed; z-index: 120; inset: 0; padding: 0; border: 0; background: rgba(0, 0, 0, 0.58); backdrop-filter: blur(3px); }
+.agent-inspector-scrim { position: fixed; z-index: 120; inset: 0; padding: 0; border: 0; background: var(--overlay-scrim); }
 
 .agent-inspector-live-region {
   position: fixed;
@@ -473,8 +472,8 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .agent-inspector-surface { background: var(--bg-subtle); backdrop-filter: none; }
-  .agent-inspector-scrim { backdrop-filter: none; }
+  .agent-inspector-surface { background: var(--bg-subtle); }
+  .agent-inspector-scrim { }
 }
 
 @media (prefers-contrast: more) {

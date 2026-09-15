@@ -194,8 +194,7 @@ function formatTimestamp(value: string): string {
   display: grid;
   place-items: center;
   padding: clamp(12px, 3vw, 24px);
-  background: rgba(9, 9, 11, 0.84);
-  backdrop-filter: blur(6px);
+  background: rgba(0, 0, 0, 0.65);
 }
 
 .image-viewer-dialog {

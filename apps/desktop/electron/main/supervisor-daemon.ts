@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.137";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.138";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -150,6 +150,7 @@ export function onSupervisorDaemonGeneration(
 
 type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
 type WireEntry = {
+  local_room_id?: string;
   runtime_generation_id?: string | null;
   id: string;
   room_id: string;
@@ -392,6 +393,10 @@ const SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS = [
   "LETAGENTS_CLAUDE_CODE_BIN",
   "LETAGENTS_CURSOR_AGENT_BIN",
   "LETAGENTS_OPENCODE_BIN",
+  "LETAGENTS_LOCAL_CHAT_DB",
+  "LETAGENTS_LOCAL_FILES_DIR",
+  "LETAGENTS_LOCAL_PROFILE_PATH",
+  "LETAGENTS_STATE_PATH",
   "LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY",
   "LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256",
   "LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV",
@@ -814,6 +819,7 @@ export class SupervisorDaemonClient {
     const entry: WireEntry = {
       id: `supervised_${creationRequestId}`,
       room_id: input.roomIdentifier,
+      ...(input.localRoomId ? { local_room_id: input.localRoomId } : {}),
       display_name: input.displayName.trim() || "Supervised agent",
       provider: input.providerId,
       model: input.model?.trim() || null,
@@ -2088,6 +2094,7 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
   return {
     id: entry.id,
     roomId: entry.room_id,
+    ...(entry.local_room_id ? { localRoomId: entry.local_room_id } : {}),
     displayName: entry.display_name,
     provider: entry.provider,
     model: entry.model,

@@ -234,7 +234,6 @@ export function useAddAgentSetup() {
           : nextProviders.find((provider) => provider.id === "codex")?.id || nextProviders[0]?.id || null;
         if (
           hasSupervisedRuntime(bindings.selectedProvider.value)
-          && !hasDesktopManagedRuntime(bindings.selectedProvider.value)
         ) {
           bindings.launchMode.value = "supervised";
         }
@@ -272,7 +271,6 @@ export function useAddAgentSetup() {
       selectedProviderId.value = providerId;
       if (
         hasSupervisedRuntime(bindings.selectedProvider.value)
-        && !hasDesktopManagedRuntime(bindings.selectedProvider.value)
       ) {
         bindings.launchMode.value = "supervised";
       } else if (!hasSupervisedRuntime(bindings.selectedProvider.value)) {

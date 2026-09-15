@@ -70,3 +70,7 @@ export function getLocalThreadRoutingAgentKeysForRoots(
     signal?: AbortSignal;
   },
 ): Promise<Map<number, Set<string>>>;
+
+export function ensureRequestedRootsProjected(database: SqliteRoutingDatabase, roomId: string, rootNumbers: readonly number[], options?: { foregroundTimeBudgetMs?: number; scheduleOnTimeout?: boolean; signal?: AbortSignal }): Promise<void>;
+export function readProjectedLocalThreadRoutingAgentKeys(database: SqliteRoutingDatabase, roomId: string, rootNumbers: readonly number[], identities: readonly RoutingIdentityLike[]): Map<number, Set<string>>;
+export class LocalThreadRoutingProjectionChangedError extends LocalThreadRoutingProjectionUnavailableError {}

@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.137";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.138";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -91,6 +91,8 @@ export type DaemonAgentProfile = {
 export type DaemonAgentRoomMembership = {
   agent_id: string;
   room_id: string;
+  /** Pinned local storage identity; absent means the existing cloud transport. */
+  local_room_id?: string;
 };
 
 export type DaemonRoomMovePhase = "prepared" | "waiting_for_current_turn" | "joining_destination" | "membership_committed" | "rotating_credentials" | "bootstrapping_destination_tail" | "active" | "failed" | "rollback_required";
@@ -301,6 +303,7 @@ export type DaemonReconciliationRecord = {
 export type DaemonManifestEntry = {
   id: string;
   room_id: string;
+  local_room_id?: string;
   display_name: string;
   provider: string;
   model: string | null;

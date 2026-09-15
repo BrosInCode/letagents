@@ -27,7 +27,6 @@ import {
 import {
   readEnvironmentPanelOpen,
   readGitHubEventsVisible,
-  readLiquidGlassEnabled,
   readNotificationPermission,
   readNotificationsEnabled,
   readSoundEnabled,
@@ -567,7 +566,6 @@ describe("desktop room shell preferences", () => {
     withLocalStorage({
       "letagents-desktop:sound": "off",
       "letagents-desktop:notifications": "on",
-      "letagents-desktop:liquid-glass": "off",
       "letagents-desktop:github-events-visible": JSON.stringify({
         "github.com/brosincode/letagents": true,
       }),
@@ -577,7 +575,6 @@ describe("desktop room shell preferences", () => {
     }, () => {
       assert.equal(readSoundEnabled(), false);
       assert.equal(readNotificationsEnabled(), true);
-      assert.equal(readLiquidGlassEnabled(), false);
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/other"), false);
       assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
@@ -586,7 +583,6 @@ describe("desktop room shell preferences", () => {
     withLocalStorage({}, () => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
-      assert.equal(readLiquidGlassEnabled(), true);
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
       assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
     });
@@ -624,7 +620,6 @@ describe("desktop room shell preferences", () => {
     withThrowingLocalStorage(() => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
-      assert.equal(readLiquidGlassEnabled(), true);
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
       assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
     });

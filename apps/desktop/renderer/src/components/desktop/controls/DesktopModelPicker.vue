@@ -319,10 +319,9 @@ async function scrollActiveOptionIntoView(): Promise<void> {
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
   border-radius: 14px;
-  background: rgba(20, 20, 20, 0.985);
+  background: var(--bg-elevated);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.44);
   transform-origin: top center;
-  backdrop-filter: blur(20px) saturate(1.08);
 }
 
 .desktop-model-picker[data-placement="above"] .desktop-model-picker-popover {
@@ -423,7 +422,6 @@ async function scrollActiveOptionIntoView(): Promise<void> {
 @media (prefers-reduced-transparency: reduce) {
   .desktop-model-picker-popover {
     background: #141414;
-    backdrop-filter: none;
   }
 }
 </style>

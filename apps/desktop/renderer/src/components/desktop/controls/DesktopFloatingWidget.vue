@@ -102,7 +102,6 @@ function handleDocumentPointerDown(event: PointerEvent): void {
     0 16px 38px rgba(0, 0, 0, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
   cursor: pointer;
-  backdrop-filter: blur(18px) saturate(1.12);
   transition:
     border-color var(--duration-fast) var(--ease-out),
     background var(--duration-fast) var(--ease-out),
@@ -223,7 +222,6 @@ function handleDocumentPointerDown(event: PointerEvent): void {
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   .desktop-floating-widget-trigger {
     background: var(--bg-elevated);
-    backdrop-filter: none;
   }
 }
 </style>

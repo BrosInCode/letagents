@@ -476,7 +476,6 @@ import {
   appAgentRefreshTargets,
 } from "./domain/app-agent";
 import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
-import { APP_IDLE_ATTRIBUTE, isAppIdle } from "./domain/app-idle";
 import { shouldSkipPollTick } from "./domain/visibility-polling";
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -1033,29 +1032,12 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
 }
 
 function handleVisibilityChange(): void {
-  syncAppIdleAttribute();
   if (document.visibilityState !== "visible") return;
   refreshForegroundData();
 }
 
 function handleWindowFocus(): void {
-  syncAppIdleAttribute();
   refreshForegroundData();
-}
-
-function handleWindowBlur(): void {
-  syncAppIdleAttribute();
-}
-
-// Pause the launcher orb's decorative ink animations while the window is hidden
-// or blurred (see domain/app-idle + styles/app-agent.css). Toggling one
-// attribute on the document root keeps the choreography in one place and lets
-// CSS scope the paused state to the launcher ink animations.
-function syncAppIdleAttribute(): void {
-  document.documentElement.toggleAttribute(
-    APP_IDLE_ATTRIBUTE,
-    isAppIdle({ hidden: document.hidden, focused: document.hasFocus() }),
-  );
 }
 
 async function refreshSidebarLatestMessages(): Promise<void> {
@@ -2508,9 +2490,7 @@ onMounted(() => {
     void refreshSidebarRoomMetadata();
   }, SIDEBAR_METADATA_REFRESH_INTERVAL_MS);
   window.addEventListener("focus", handleWindowFocus);
-  window.addEventListener("blur", handleWindowBlur);
   document.addEventListener("visibilitychange", handleVisibilityChange);
-  syncAppIdleAttribute();
   void loadChatStorageSettings();
   void loadAppAgentSettingsStatus();
   void loadAppAgentActions();
@@ -2529,9 +2509,7 @@ onBeforeUnmount(() => {
     accountRoomsRefreshInterval = null;
   }
   window.removeEventListener("focus", handleWindowFocus);
-  window.removeEventListener("blur", handleWindowBlur);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
-  document.documentElement.removeAttribute(APP_IDLE_ATTRIBUTE);
   unsubscribeRoomStream?.();
   unsubscribeRoomStream = null;
   unsubscribeOpenSettings?.();

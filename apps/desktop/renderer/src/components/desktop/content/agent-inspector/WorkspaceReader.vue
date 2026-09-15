@@ -22,7 +22,7 @@ defineProps<{ open: boolean; snapshot: WorkspaceChangeSummary; viewKey: string; 
 const emit = defineEmits<{ close: []; retry: [] }>();
 </script>
 <style>
-.workspace-reader-backdrop { position: fixed; inset: 0; z-index: 1300; display: grid; place-items: center; padding: 32px 24px; background: var(--overlay-scrim); backdrop-filter: blur(8px); }
+.workspace-reader-backdrop { position: fixed; inset: 0; z-index: 1300; display: grid; place-items: center; padding: 32px 24px; background: var(--overlay-scrim); }
 .workspace-reader-dialog { display: flex; flex-direction: column; width: min(1440px, 100%); height: 100%; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--bg); color: var(--text); box-shadow: var(--shadow-xl); outline: none; }
 .workspace-reader-header { display: flex; align-items: center; gap: 24px; padding: 20px 24px; border-bottom: 1px solid var(--border); }
 .workspace-reader-title { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }

@@ -41,13 +41,11 @@
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 18px;
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.095), rgba(255, 255, 255, 0.032) 54%, rgba(255, 255, 255, 0.014)),
-    rgba(10, 10, 10, 0.52);
+    var(--bg-elevated);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.13),
     0 16px 44px rgba(0, 0, 0, 0.26);
   color: #fff;
-  backdrop-filter: blur(18px) saturate(1.2);
 }
 
 .room-attachment-drop-overlay span {
@@ -107,13 +105,6 @@
   border-radius: 999px;
   background: rgba(10, 10, 10, 0.92);
   line-height: 1.9;
-}
-
-.desktop-room-shell[data-liquid-glass="true"] .room-date-separator span {
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.032) 54%, rgba(255, 255, 255, 0.014)),
-    rgba(10, 10, 10, 0.72);
-  backdrop-filter: blur(16px) saturate(1.16);
 }
 
 .room-loading-state {
@@ -352,17 +343,6 @@
   opacity: 0.6;
 }
 
-.desktop-room-shell[data-liquid-glass="true"] .room-load-older {
-  border-color: rgba(255, 255, 255, 0.14);
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.04) 56%, rgba(255, 255, 255, 0.018)),
-    rgba(255, 255, 255, 0.055);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.13),
-    0 10px 26px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(16px) saturate(1.2);
-}
-
 .room-chat-avatar {
   width: 8px;
   height: 8px;
@@ -403,7 +383,6 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.055),
     0 7px 24px rgba(0, 0, 0, 0.09);
-  backdrop-filter: none;
 }
 
 .room-chat-message.is-compact-continuation .room-message-bubble {
@@ -533,48 +512,46 @@
   border: 0;
   background: transparent;
   box-shadow: none;
-  backdrop-filter: none;
 }
 
 .room-chat-message[data-owner-kind="github"] .room-message-bubble::before {
   display: none;
 }
 
-.desktop-room-shell[data-liquid-glass="false"] .room-message-bubble {
+.desktop-room-shell .room-message-bubble {
   padding: 11px 15px 12px;
   border: 0;
   border-radius: 16px 16px 16px 6px;
   background: rgba(255, 255, 255, 0.035);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
-  backdrop-filter: none;
 }
 
-.desktop-room-shell[data-liquid-glass="false"] .room-message-bubble::before {
+.desktop-room-shell .room-message-bubble::before {
   display: none;
 }
 
-.desktop-room-shell[data-liquid-glass="false"] .room-chat-message.is-github-message .room-message-bubble,
-.desktop-room-shell[data-liquid-glass="false"] .room-chat-message.is-system-message .room-message-bubble {
+.desktop-room-shell .room-chat-message.is-github-message .room-message-bubble,
+.desktop-room-shell .room-chat-message.is-system-message .room-message-bubble {
   border: 0;
   border-radius: 16px 16px 16px 6px;
   background: rgba(255, 255, 255, 0.034);
 }
 
-.desktop-room-shell[data-liquid-glass="false"] .room-chat-message[data-owner-kind="human"] .room-message-bubble {
+.desktop-room-shell .room-chat-message[data-owner-kind="human"] .room-message-bubble {
   background: rgba(255, 255, 255, 0.034);
 }
 
-.desktop-room-shell[data-liquid-glass="false"] .room-chat-message[data-owner-kind="agent"] .room-message-bubble {
+.desktop-room-shell .room-chat-message[data-owner-kind="agent"] .room-message-bubble {
   background: rgba(255, 255, 255, 0.03);
 }
 
-.desktop-room-shell[data-liquid-glass="false"] .room-chat-message[data-owner-kind="github"] .room-message-bubble {
+.desktop-room-shell .room-chat-message[data-owner-kind="github"] .room-message-bubble {
   padding: 0;
   border: 0;
   background: transparent;
 }
 
-.desktop-room-shell[data-liquid-glass="false"] .room-chat-message.is-ambient-system-message .room-message-bubble {
+.desktop-room-shell .room-chat-message.is-ambient-system-message .room-message-bubble {
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -622,12 +599,10 @@
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.092), rgba(255, 255, 255, 0.032) 56%, rgba(255, 255, 255, 0.014)),
-    rgba(16, 16, 16, 0.9);
+    var(--bg-elevated);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 14px 38px rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(16px) saturate(1.15);
 }
 
 .room-thread-activity-open,
@@ -697,29 +672,16 @@
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 999px;
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.095), rgba(255, 255, 255, 0.03) 56%, rgba(255, 255, 255, 0.014)),
-    rgba(255, 255, 255, 0.038);
+    var(--bg-elevated);
   color: #ffffff;
   font-size: 0.76rem;
   font-weight: 900;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 10px 28px rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(16px) saturate(1.18);
   animation: room-panel-in 180ms var(--ease-out);
 }
 
 .room-new-messages-pill:hover {
   transform: translateY(-1px);
-}
-
-.desktop-room-shell[data-liquid-glass="true"] .room-new-messages-pill {
-  border-color: rgba(255, 255, 255, 0.14);
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.04) 56%, rgba(255, 255, 255, 0.018)),
-    rgba(255, 255, 255, 0.055);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.13),
-    0 10px 26px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(16px) saturate(1.2);
 }

@@ -1,7 +1,6 @@
 <template>
   <section
     class="desktop-room-shell"
-    :data-liquid-glass="liquidGlassEnabled"
     :data-agent-inspector-open="Boolean(selectedAgentDetailTarget && !agentInspectorCompact)"
     data-testid="desktop-room-shell"
   >
@@ -34,7 +33,6 @@
       :sound-enabled="soundEnabled"
       :notifications-enabled="notificationsEnabled"
       :notification-permission="notificationPermission"
-      :liquid-glass-enabled="liquidGlassEnabled"
       :rename-busy="renameBusy"
       :rename-error="renameError"
       :github-status="githubStatus"
@@ -50,7 +48,6 @@
       @open-rules="openRules"
       @toggle-sound="toggleSound"
       @toggle-notifications="toggleNotifications"
-      @toggle-liquid-glass="toggleLiquidGlass"
       @toggle-github-events-visible="toggleGitHubEventsVisible"
       @set-room-storage-mode="setRoomStorageMode"
       @fork-room-to-local="forkRoomToLocal"
@@ -295,6 +292,7 @@
     />
 
     <AddAgentModal
+      :room-storage-mode="storage.effectiveMode"
       :open="addAgentModalOpen"
       :room-identifier="room.identifier"
       :room-git-room="room.gitRoom"
@@ -744,11 +742,9 @@ const messageNamespace = computed(() =>
 const {
   soundEnabled,
   notificationsEnabled,
-  liquidGlassEnabled,
   notificationPermission,
   toggleSound,
   toggleNotifications,
-  toggleLiquidGlass,
   playRoomSound,
   showRoomNotification,
 } = useDesktopRoomPreferences();

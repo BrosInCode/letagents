@@ -140,7 +140,14 @@ test("local rooms and invalid cursors do not call the cloud", async () => {
     throw new Error("unexpected cloud call");
   }) as typeof fetch;
   try {
-    assert.deepEqual(await pollDesktopRoomAgentWork(room.roomIdentifier), { status: "local", response: null });
+    const local = await pollDesktopRoomAgentWork(room.roomIdentifier);
+    assert.equal(local.status, "ready");
+    if (local.status === "ready") {
+      assert.deepEqual(local.response.snapshot, { work: [], truncated: false });
+      assert.deepEqual(await pollDesktopRoomAgentWork(room.roomIdentifier, local.response.cursor), {
+        status: "ready", response: { roomId: room.roomIdentifier, cursor: local.response.cursor, changed: false, snapshot: null },
+      });
+    }
     assert.deepEqual(await pollDesktopRoomAgentWork(ROOM, "wrong"), { status: "invalid", response: null });
     assert.equal(calls, 0);
   } finally {

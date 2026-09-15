@@ -31,10 +31,9 @@
   padding: 8px 10px;
   border: 1px solid var(--activity-border);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--activity-surface) 88%, transparent);
+  background: var(--bg-elevated);
   color: var(--activity-text-secondary);
   font-size: 0.78rem;
-  backdrop-filter: blur(10px);
 }
 
 .activity-spinner {

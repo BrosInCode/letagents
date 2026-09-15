@@ -1,3 +1,4 @@
+import { createLocalRoom, localRoomIdentifierForStorage } from "../rooms/local-store.js";
 import type { IpcMain } from "electron";
 import { randomUUID } from "node:crypto";
 
@@ -79,8 +80,8 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     if (typeof roomIdentifier !== "string" || !roomIdentifier.trim() || roomIdentifier.length > 256) throw new Error("Choose an approval room.");
     const storage = await getDesktopRoomStorage(roomIdentifier);
     assertHostApprovalSender(event);
-    if (storage.effectiveMode !== "cloud") return { available: false, approvals: [], error: null };
-    const result = await supervisorDaemonClient.listHostApprovals(roomIdentifier);
+    const approvalRoom = storage.effectiveMode === "local" ? localRoomIdentifierForStorage(storage, roomIdentifier) : roomIdentifier;
+    const result = await supervisorDaemonClient.listHostApprovals(approvalRoom);
     assertHostApprovalSender(event);
     return result;
   });
@@ -113,7 +114,7 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       // id (`supervised_<launchId>`) — shares one stable key across retries and
       // reopen. The renderer normally supplies it; fall back defensively.
       const launchId = normalizeLaunchId(rawInput.creationRequestId);
-      const input: DesktopSupervisorCreateInput = { ...rawInput, creationRequestId: launchId };
+      const input: DesktopSupervisorCreateInput = { ...rawInput, localRoomId: undefined, creationRequestId: launchId };
       const entryId = `supervised_${launchId}`;
       const provider = input.providerId;
       const roomIdentifier = input.roomIdentifier;
@@ -127,8 +128,10 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       launchFact("launch.requested", { entryId, detail: "You asked LetAgents to add this agent." });
       try {
         const storage = await getDesktopRoomStorage(roomIdentifier);
-        if (storage.effectiveMode !== "cloud") {
-          throw new LaunchBlockedError("Supervised agents need a cloud room. Publish or join a cloud room, or use the existing local agent path.", "choose_project");
+        if (storage.effectiveMode === "local") {
+          input.localRoomId = localRoomIdentifierForStorage(storage, roomIdentifier);
+          input.roomIdentifier = input.localRoomId;
+          if (!storage.localRoom) await createLocalRoom({ roomIdentifier: input.localRoomId, displayName: roomIdentifier });
         }
         if (provider !== "codex" && provider !== "claude-code" && provider !== "cursor" && provider !== "open-model") {
           throw new LaunchBlockedError(`Supervised ${provider} is not available yet: no background lifecycle is supported for this provider.`, "retry");
@@ -371,6 +374,8 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
   });
   targetIpcMain.handle("desktop:supervisor:prepare-room-move", async (_event, input: import("../../ipc-types.js").DesktopSupervisorRoomMovePrepareInput) => {
     assertDesktopUpdateMutationAllowed();
+    const destination = await getDesktopRoomStorage(input.destinationRoomId);
+    if (destination.effectiveMode === "local") throw new Error("Moving an existing agent into a local room is not supported yet. Start an agent in this room.");
     return supervisorDaemonClient.prepareRoomMove(input);
   });
   targetIpcMain.handle("desktop:supervisor:commit-room-move", async (_event, input: import("../../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) => {

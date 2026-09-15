@@ -1,3 +1,4 @@
+import { roomRequest, isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "./local-room-runtime.js";
 import type { WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
 import type { SupervisedDeliveryHttp, SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
@@ -77,6 +78,7 @@ function supervisedRoomPath(roomId: string): string {
 }
 
 export function hostGrantApiOrigin(value: string): string {
+  if (isLocalRoomApi(value)) return LOCAL_ROOM_API_ORIGIN;
   const url = new URL(value);
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
@@ -184,7 +186,7 @@ export type RoomWorkPublishResult = "acknowledged" | "cleared" | "conflict";
 export async function publishRoomWork(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult> {
   const summary = parseRoomAgentWorkSummary(input.summary);
   if (!summary || hostGrantApiOrigin(input.apiOrigin) !== input.apiOrigin) throw new Error("Invalid room work publication.");
-  const response = await fetch(`${input.apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions/${encodeURIComponent(input.sessionId)}/agent-work`, {
+  const response = await roomRequest(`${input.apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions/${encodeURIComponent(input.sessionId)}/agent-work`, {
     method: "POST", redirect: "error",
     headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
     body: JSON.stringify({ generation: input.grantGeneration, room_id: input.roomId,
@@ -215,7 +217,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   async ownedTasks(input) {
     const tasks: Array<{ id: string; title: string; leaseId: string; epoch: number }> = [];
     const read = async (suffix: string) => {
-      const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/tasks${suffix}`, {
+      const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/tasks${suffix}`, {
         headers: { authorization: `Bearer ${input.bearer}` }, signal: boundedCloudSignal(input.signal),
       });
       if (response.status === 404 && suffix.startsWith("/")) return null;
@@ -267,7 +269,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   async poll(input) {
     const query = new URLSearchParams({ timeout: String(SUPERVISED_ROOM_POLL_TIMEOUT_MS) });
     if (input.afterMessageId) query.set("after", input.afterMessageId);
-    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
       headers: { authorization: `Bearer ${input.bearer}` },
       signal: boundedCloudSignal(input.signal, SUPERVISED_ROOM_POLL_TIMEOUT_MS + 20_000),
     });
@@ -275,14 +277,14 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     return await response.json() as SupervisedPollResponse;
   },
   async latest(input) {
-    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?limit=1&before=latest`, {
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?limit=1&before=latest`, {
       headers: { authorization: `Bearer ${input.bearer}` }, signal: boundedCloudSignal(input.signal),
     });
     if (!response.ok) throw new Error(`Supervised room tail read failed with HTTP ${response.status}.`);
     return await response.json() as { messages?: Array<Record<string, unknown>> };
   },
   async joinRoom(input) {
-    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/join`, {
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/join`, {
       method: "POST", headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" }, body: "{}", signal: boundedCloudSignal(input.signal),
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Destination room join");
@@ -292,7 +294,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     return { roomId };
   },
   async publish(input) {
-    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages`, {
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages`, {
       method: "POST",
       headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
       body: JSON.stringify({
@@ -319,7 +321,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
   "getExecutionDelegationDecision" | "listExecutionDelegationDecisionIds">> = {
   async createWorkerSession(input) {
     const ideLabel = supervisedProviderLabel(input.provider);
-    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions`, {
+    const response = await roomRequest(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions`, {
       method: "POST",
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
       body: JSON.stringify({
@@ -365,7 +367,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
     };
   },
   async endWorkerSession(input) {
-    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions/${encodeURIComponent(input.sessionId)}/end`, {
+    const response = await roomRequest(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions/${encodeURIComponent(input.sessionId)}/end`, {
       method: "POST",
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
       body: JSON.stringify({ generation: input.grantGeneration }),
@@ -374,7 +376,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session end");
   },
   async renewHostGrant(input) {
-    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/renew`, {
+    const response = await roomRequest(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/renew`, {
       method: "POST",
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
       body: JSON.stringify({
@@ -399,7 +401,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
   },
   async getExecutionDelegation(input) {
     const apiOrigin = hostGrantApiOrigin(input.apiUrl);
-    const response = await fetch(
+    const response = await roomRequest(
       `${apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/execution-delegations/${encodeURIComponent(input.delegationInstanceId)}`,
       {
         headers: {
@@ -416,7 +418,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
     const apiOrigin = hostGrantApiOrigin(input.apiUrl);
     const query = new URLSearchParams({ room_id: input.roomId, agent_key: input.agentKey });
     if (input.after) query.set("after", input.after);
-    const response = await fetch(
+    const response = await roomRequest(
       `${apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/execution-delegations?${query}`,
       {
         headers: {
@@ -432,7 +434,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
   },
   async getExecutionDelegationDecision(input) {
     const apiOrigin = hostGrantApiOrigin(input.apiUrl);
-    const response = await fetch(
+    const response = await roomRequest(
       `${apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/execution-delegation-decisions/${encodeURIComponent(input.decisionId)}`,
       {
         headers: {
@@ -458,7 +460,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
     const apiOrigin = hostGrantApiOrigin(input.apiUrl);
     const query = new URLSearchParams({ room_id: input.roomId, agent_key: input.agentKey });
     if (input.after) query.set("after", input.after);
-    const response = await fetch(
+    const response = await roomRequest(
       `${apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/execution-delegation-decisions?${query}`,
       {
         headers: {
@@ -487,7 +489,7 @@ export async function publishWorkerNativeActivity(input: {
 }): Promise<boolean> {
   const roomPath = supervisedRoomPath(input.roomId);
   const endpoint = `${input.apiUrl}/rooms/${roomPath}/agent-sessions/${encodeURIComponent(input.agentSessionId)}/native-activity`;
-  const response = await fetch(endpoint, {
+  const response = await roomRequest(endpoint, {
     method: "POST",
     headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
     body: JSON.stringify({

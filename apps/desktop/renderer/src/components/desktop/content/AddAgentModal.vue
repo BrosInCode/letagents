@@ -35,13 +35,18 @@
               <X aria-hidden="true" />
             </button>
           </header>
+          <div class="desktop-add-agent-choice" role="group" aria-label="How to add an agent">
+            <button type="button" :aria-pressed="!connectExisting" @click="connectExisting = false">Start an agent</button>
+            <button type="button" :aria-pressed="connectExisting" @click="connectExisting = true">Connect an existing agent</button>
+          </div>
           <div class="desktop-add-agent-body">
             <AddAgentProviderRail
               :providers="providers"
               :selected-provider-id="selectedProviderId"
               @select="selectProvider"
             />
-            <AddAgentSetupStatus
+            <AddAgentConnection v-if="connectExisting" :provider="selectedProvider" :room-identifier="roomIdentifier" :repo-root-path="repoRootPath" :local-room="roomStorageMode === 'local'" />
+            <AddAgentSetupStatus v-else
               :provider-name="selectedProvider?.name || null"
               :preflight="preflight"
               :loading="loadingProviders || loadingPreflight"
@@ -97,25 +102,12 @@
             />
             <AddAgentRuntimeSettings
               :provider="selectedProvider"
-              :launch-mode="launchMode"
-              :lifecycle-description="lifecycleDescription"
+              :execution-description="lifecycleDescription"
               :charter="supervisedCharter"
-              :show-delivery="showDeliverySelector"
-              :delivery-mode="deliveryMode"
-              :delivery-description="deliveryModeDescription"
               :permission-profiles="selectedPermissionProfiles"
               :selected-permission-profile="selectedPermissionProfile"
-              :show-cursor-policy="showCursorMcpPolicySelector"
-              :cursor-policy="selectedCursorMcpPolicy"
-              :cursor-policy-description="selectedCursorMcpPolicyDescription"
-              :external-prompt="externalJoinPrompt"
-              :copying-external-prompt="copyingExternalPrompt"
-              @update:launch-mode="launchMode = $event"
               @update:charter="supervisedCharter = $event"
-              @update:delivery-mode="deliveryMode = $event"
               @select-permission="selectPermissionProfile"
-              @update:cursor-policy="selectedCursorMcpPolicy = $event"
-              @copy-external-prompt="copyExternalJoinPrompt"
             />
             <AddAgentManagedSessions
               :room-identifier="roomIdentifier"
@@ -184,6 +176,7 @@ import AddAgentOpenModelSettings from "./add-agent/AddAgentOpenModelSettings.vue
 import AddAgentModelSettings from "./add-agent/AddAgentModelSettings.vue";
 import AddAgentRuntimeSettings from "./add-agent/AddAgentRuntimeSettings.vue";
 import AddAgentSupervisedLaunch from "./add-agent/AddAgentSupervisedLaunch.vue";
+import AddAgentConnection from "./add-agent/AddAgentConnection.vue";
 import AddAgentFeedback from "./add-agent/AddAgentFeedback.vue";
 import {
   useAddAgentController,
@@ -204,6 +197,7 @@ import {
 const props = defineProps<AddAgentModalProps>();
 const emit = defineEmits<AddAgentModalEvents>();
 const dialogElement = ref<HTMLElement | null>(null);
+const connectExisting = ref(false);
 let previousFocusElement: HTMLElement | null = null;
 
 watch(() => props.open, (open) => {
@@ -230,5 +224,5 @@ async function handleRecoverSupervisedLaunch(): Promise<void> {
   dialogElement.value?.querySelector<HTMLElement>('[data-testid="desktop-add-agent-supervised-runtime"], [data-testid="desktop-add-agent-supervised-lookup-error"]')?.focus();
 }
 
-const { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, showDeliverySelector, deliveryMode, deliveryModeDescription, selectedPermissionProfiles, selectedPermissionProfile, showCursorMcpPolicySelector, selectedCursorMcpPolicy, selectedCursorMcpPolicyDescription, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
+const { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
 </script>

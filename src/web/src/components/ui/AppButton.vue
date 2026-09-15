@@ -87,11 +87,9 @@ withDefaults(defineProps<{
 }
 
 .btn--secondary {
-  background: var(--btn-secondary-bg, rgba(255, 255, 255, 0.06));
+  background: var(--btn-secondary-bg, var(--bg-elevated));
   color: var(--btn-secondary-color, #e4e4e7);
   border: 1px solid var(--btn-secondary-border, rgba(255, 255, 255, 0.1));
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
 }
 
 .btn--secondary:hover:not(:disabled) {

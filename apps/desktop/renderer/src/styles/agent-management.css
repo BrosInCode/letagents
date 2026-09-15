@@ -79,23 +79,19 @@
   place-items: center;
   padding: 28px;
   background:
-    radial-gradient(circle at 50% 10%, rgba(255, 255, 255, 0.05), transparent 36%),
-    rgba(3, 3, 3, 0.74);
-  backdrop-filter: blur(20px) saturate(1.08);
+    var(--overlay-scrim);
 }
 
 .desktop-add-agent-modal {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   width: min(1120px, calc(100vw - 56px));
   height: min(820px, calc(100vh - 56px));
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
   border-radius: 20px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 28%),
-    rgba(11, 11, 12, 0.985);
+  background: var(--bg-elevated);
   color: var(--text);
   box-shadow:
     0 34px 100px rgba(0, 0, 0, 0.58),
@@ -326,13 +322,11 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .desktop-add-agent-backdrop {
-    backdrop-filter: none;
   }
 
   .desktop-add-agent-modal,
   .desktop-add-agent-actions {
     background: #0d0d0e;
-    backdrop-filter: none;
   }
 }
 
@@ -358,8 +352,7 @@
     max(12px, env(safe-area-inset-right))
     max(12px, env(safe-area-inset-bottom))
     max(12px, env(safe-area-inset-left));
-  background: rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(18px);
+  background: var(--overlay-scrim);
 }
 
 .desktop-agent-detail-modal {
@@ -1187,3 +1180,14 @@
     transition-property: border-color, background, color, opacity;
   }
 }
+
+.desktop-add-agent-choice { display: flex; gap: 4px; margin: 16px 24px; padding: 4px; width: min(410px, calc(100% - 48px)); border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); }
+.desktop-add-agent-choice button { flex: 1; min-height: 36px; border: 0; border-radius: 7px; background: transparent; color: var(--text-secondary); font: inherit; font-weight: 500; cursor: pointer; }
+.desktop-add-agent-choice button[aria-pressed="true"] { background: var(--bg-elevated); color: var(--text); box-shadow: 0 1px 3px rgb(0 0 0 / 10%); }
+.desktop-add-agent-choice button:focus-visible, .desktop-add-agent-connect button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.desktop-add-agent-connect { padding: 24px 34px; min-height: 0; overflow: auto; background: var(--bg-elevated); }
+.desktop-add-agent-connect h4 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.desktop-add-agent-connect p { color: var(--text-secondary); line-height: 1.55; }
+.desktop-add-agent-connect button { padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); color: var(--text); font: inherit; cursor: pointer; }
+.desktop-add-agent-connect details { margin-top: 16px; color: var(--text-secondary); }
+.desktop-add-agent-connect pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
