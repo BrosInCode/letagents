@@ -124,6 +124,14 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
         .run(id, entry.room_id, outcome, at, at);
       beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES('inbox',?,?,?,?,'saved-conversation','turn')")
         .run(id, entry.room_id, attempt.work_attempt_id, execution.execution_generation_id);
+      for (const [inboxId, sequence, providerTurn] of [["pending_old", 2, "retried-turn"], ["pending_new", 3, null]] as const) {
+        beforeDb.prepare(`INSERT INTO supervised_agent_inbox
+          (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
+          VALUES(?,?,?,?,'{}','{}',?,'pending',1,?,?,?,NULL,?,?)`)
+          .run(inboxId, id, entry.room_id, inboxId, sequence, `action-${inboxId}`, `reply-${inboxId}`, providerTurn, at, at);
+      }
+      beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES('pending_old',?,?,?,?,'saved-conversation','retried-turn')")
+        .run(id, entry.room_id, attempt.work_attempt_id, execution.execution_generation_id);
       beforeDb.prepare(`INSERT INTO supervised_agent_effects(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,created_at,updated_at)
         VALUES('effect',?,?,?,'turn','request','send_message','{}',1,'executing',?,?)`)
         .run(id, entry.room_id, execution.execution_generation_id, at, at);
@@ -188,6 +196,10 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
         mode === "resume" ? "awaiting_result" : "cancelled_by_user",
         "a saved answer remains publishable; an unreadable result cannot block or replay in the fresh conversation");
       assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id='effect'").get()!.state, "uncertain");
+      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='pending_old'").get()!.state, "cancelled_by_user",
+        "an unresolved old turn returned to pending by a retry must not follow the replacement conversation");
+      assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='pending_new'").get()!.state, "pending",
+        "genuinely undispatched messages stay queued");
       assert.equal(afterDb.prepare("SELECT state FROM execution_turns WHERE turn_id='captured-turn'").get()!.state, "lost");
       assert.equal(afterDb.prepare("SELECT state FROM execution_message_attempts WHERE source_message_id='source'").get()!.state,
         mode === "resume" ? "active" : "lost");

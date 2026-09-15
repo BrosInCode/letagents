@@ -120,7 +120,7 @@ export function checkpointRuntimeStopped(database: DatabaseSync, operationId: st
     WHERE agent_id=? AND room_id=?
     AND COALESCE(CASE WHEN json_valid(outcome) THEN json_extract(outcome,'$.kind') END,'') NOT IN ('reply','no_reply','failed','interrupted')
     AND NOT EXISTS (SELECT 1 FROM supervised_agent_terminal_results terminal WHERE terminal.inbox_item_id=supervised_agent_inbox.inbox_item_id AND terminal.outcome IN ('reply','no_reply','failed','interrupted'))
-    AND state NOT IN ('pending','publishing','acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+    AND state NOT IN ('publishing','acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
     AND ((state='dispatching' AND provider_turn_id IS NULL) OR inbox_item_id IN
       (SELECT inbox_item_id FROM supervised_agent_provider_turn_bindings WHERE agent_id=? AND origin_execution_generation_id=?))`)
     .run("Stopped by runtime recovery. Unconfirmed work was not replayed; review the saved results before continuing.",
