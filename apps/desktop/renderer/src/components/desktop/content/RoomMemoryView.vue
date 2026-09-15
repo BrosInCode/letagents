@@ -25,6 +25,7 @@
         <div class="memory-workspace" :data-editing="Boolean(editor)">
           <div class="memory-main">
             <div v-if="loading && !page.records.length" class="knowledge-empty" role="status"><LoaderCircle class="knowledge-spin" :size="24" aria-hidden="true" /><h3>Loading shared context</h3></div>
+            <div v-else-if="error && !page.records.length" class="knowledge-empty" role="status"><h3>Shared context is unavailable</h3><p>Retry when the room connection is available to see your saved memories.</p></div>
             <div v-else-if="!filtered.length" class="memory-empty">
               <span class="memory-empty-icon"><BookOpen :size="24" aria-hidden="true" /></span>
               <h3>{{ search || category || showArchived ? 'No matching memories' : 'Give your agents a starting point' }}</h3>
