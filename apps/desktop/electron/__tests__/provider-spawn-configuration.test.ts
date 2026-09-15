@@ -76,6 +76,12 @@ test("managed provider spawn attestation preserves the resolved native authority
 });
 
 test("managed provider spawn attestation rejects downgraded or unsupported authority", () => {
+  assert.throws(() => attestProviderSpawnPolicy("cursor", {
+    ...request,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: { force: false, sandbox: "enabled" },
+  }), /does not request approval for every workspace edit/);
+
   assert.throws(() => attestProviderSpawnPolicy("codex", {
     ...request,
     launchPolicy: {

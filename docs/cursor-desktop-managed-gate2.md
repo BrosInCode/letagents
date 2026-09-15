@@ -2,7 +2,7 @@
 
 Date: 2026-06-30
 
-Status: passed for macOS desktop-managed Cursor MCP isolation and workspace-write smoke coverage. Read-only remains the default; `sandboxed_write` and `full_access` are selectable permission profiles, while `ask_before_write` stays gated until headless approval events can be bridged.
+Status: passed for macOS desktop-managed Cursor MCP isolation and workspace-write smoke coverage. Read-only remains the default; `sandboxed_write` and `full_access` are selectable permission profiles, while `ask_before_write` stays gated pending verified approval before every write.
 
 This note records the Gate 2 probes for managed Cursor config/auth isolation. The goal is to prove that a desktop-managed Cursor session can run without seeing or calling LetAgents MCP room/control-plane tools. The desktop app should own room I/O; Cursor should only receive desktop-delivered prompts and return text to the supervisor.
 
@@ -200,7 +200,7 @@ Managed Cursor launches now use:
   - `read_only` (default): `cursor-agent -p --output-format stream-json --mode ask --trust --workspace <repo>`.
   - `sandboxed_write`: `cursor-agent -p --output-format stream-json --trust --workspace <repo> --force --sandbox enabled`. Cursor's sandbox applies to Cursor operations; selected MCP tools still follow the chosen MCP policy.
   - `full_access`: `cursor-agent -p --output-format stream-json --trust --workspace <repo> --force --sandbox disabled`. Use only with trusted repositories and trusted MCP configurations.
-  - `ask_before_write`: still gated because Cursor headless approval prompts are not bridged into the desktop or room.
+  - `ask_before_write`: still gated because ordinary workspace edits do not request approval; see the [current native approval findings](cursor-supervised-approval-gate.md).
 - MCP policy selector:
   - `filter_letagents` (default): managed profile, copied user Cursor MCP config, LetAgents-looking servers removed.
   - `none`: managed profile, empty managed Cursor MCP config at `<managed home>/.cursor/mcp.json`, and no project-level MCP entries.
@@ -216,4 +216,4 @@ The runtime rejects workspaces that have a project-level `.cursor/mcp.json` ment
 
 ## Remaining Gates
 
-Keep Cursor `ask_before_write` gated until Cursor exposes approval events cleanly enough for desktop/room Allow/Deny. Continue treating `sandboxed_write` and `full_access` as explicit user choices with high-visibility risk copy and live smoke coverage because they run with `--force`.
+Keep Cursor `ask_before_write` gated until every write-capable operation can be paused for a verified approval. ACP callbacks alone are insufficient: the [September 2026 native probe](cursor-supervised-approval-gate.md) found ordinary workspace edits executing without an approval request. Continue treating `sandboxed_write` and `full_access` as explicit user choices with high-visibility risk copy and live smoke coverage because they run with `--force`.
