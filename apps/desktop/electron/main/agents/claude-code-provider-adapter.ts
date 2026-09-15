@@ -1567,7 +1567,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       handle.clearPermissions();
       return nativeLifecycle;
     } else if (handle.executionTurnStarted && (message.type === "assistant" || message.type === "user")
-      && message.parent_tool_use_id == null) {
+      && message.parent_tool_use_id == null
+      && (message.user_message_uuid == null || message.user_message_uuid === turnId)) {
       // Tool messages carry session/tool identity, not the caller's turn UUID.
       // Do not attribute a bootstrap or previous-turn tail before exact receipt.
       const body = message.message as { content?: unknown } | undefined;

@@ -366,8 +366,8 @@ test("host approval rejects uncorrelated turns, stale presentations and replaced
   } finally { await f.close(); }
 });
 
-test("host approval dispatch uncertainty survives request disappearance and broker restart without resend", async () => {
-  const f = await fixture();
+for (const provider of ["codex", "claude-code"] as const) test(`${provider} host approval dispatch uncertainty survives request disappearance and broker restart without resend`, async () => {
+  const f = await fixture(provider);
   try {
     const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
     f.state.failAfter = true;

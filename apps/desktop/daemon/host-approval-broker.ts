@@ -241,9 +241,9 @@ export class HostApprovalBroker {
     for (const record of durable) {
       if (shown.has(record.request.requestId) || !["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state)) continue;
       const entry = await this.options.store.getEntry(record.request.agentId);
-      if (!entry || entry.room_id !== roomId || !["codex", "open-model"].includes(entry.provider)) continue;
+      if (!entry || entry.room_id !== roomId || !["codex", "open-model", "claude-code"].includes(entry.provider)) continue;
       result.push({ reference: reference(record), recordedDecision: recordedDecision(record),
-        presentation: { agentId: entry.id, displayName: entry.display_name, provider: entry.provider as "codex" | "open-model",
+        presentation: { agentId: entry.id, displayName: entry.display_name, provider: entry.provider as "codex" | "open-model" | "claude-code",
           title: "Approval unavailable", details: "The native request is no longer available to inspect on this connection.",
           denyScope: entry.provider === "open-model" ? "session_pending" : "request" },
         status: record.decision?.dispatchId && record.request.applicationCertainty !== "impossible" ? "uncertain" : "unavailable",

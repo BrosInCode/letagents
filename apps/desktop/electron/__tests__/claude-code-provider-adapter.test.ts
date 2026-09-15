@@ -1836,3 +1836,21 @@ test("Claude cancellation at a native approval uses its exact aborted-tools turn
     await assert.rejects(h.adapter.replyPermission(h.handle, pending, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
   } finally { await h.close(); }
 });
+
+test("Claude explicit foreign tool-turn UUID cannot create or resolve approval authority", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool({ user_message_uuid: "previous-turn" }); h.permission();
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, h.requests[0]!), { outcome: "correlation_unproven" });
+    await assert.rejects(h.adapter.replyPermission(h.handle, h.requests[0]!, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+    h.child.emit({ type: "control_cancel_request", request_id: "native-request" });
+    h.tool({ user_message_uuid: h.turnId }); h.permission({ request_id: "current-request" });
+    const expected = h.requests[0]!;
+    const result = { type: "user", session_id: h.handle.providerContinuationId, parent_tool_use_id: null,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", content: "Done" }] } };
+    h.child.emit({ ...result, user_message_uuid: "previous-turn" });
+    assert.equal((await h.adapter.correlatePermissionTurn(h.handle, expected)).outcome, "correlated");
+    h.child.emit({ ...result, user_message_uuid: h.turnId });
+    assert.equal((await h.adapter.correlatePermissionTurn(h.handle, expected)).outcome, "correlation_unproven");
+  } finally { await h.close(); }
+});
