@@ -76,8 +76,13 @@ export function projectAgentTroubleshooting(
 
   let provider = check("provider", "Agent runtime", "unknown", "Current check unavailable",
     "No current provider control check is available. A process ID or a quiet activity feed does not establish whether the agent is reachable.",
-    "Refresh checks. If live checks remain unavailable, use the Live and Work tabs to inspect the evidence that this provider does expose.", null, null, "work");
-  if (held) provider = check("provider", "Agent runtime", "paused", paused ? "Paused by request" : "Agent stopped",
+    daemon?.capabilities.agentRuntimeRecoveryV2
+      ? "Try Reconnect to request fresh observations. If it remains unreachable, restart and resume the saved conversation using Recovery options below."
+      : "Refresh checks. If live checks remain unavailable, use the Live and Work tabs to inspect the evidence that this provider does expose.", null, null, "work");
+  if (entry.runtimeRecovery) provider = check("provider", "Agent runtime", "attention", "Recovery is paused",
+    "The previous recovery did not finish. Automatic runtime starts are held so another process cannot take over partway through.",
+    "Continue the recorded recovery action below. Your workspace and saved history remain available.", null, null, "work");
+  else if (held) provider = check("provider", "Agent runtime", "paused", paused ? "Paused by request" : "Agent stopped",
     paused ? "This agent is intentionally paused. Room work is held until it resumes." : "This saved agent has been stopped. Its retained work is still available.",
     paused ? "Resume the agent when you want it to receive work again." : "Open Work to inspect its saved history.", null, paused ? action("resume") : null, "work");
   else if (["quarantined", "security_blocked", "budget_blocked", "coordination_blocked"].includes(entry.condition)) {

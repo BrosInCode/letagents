@@ -72,6 +72,9 @@ export type AgentInspectorActionKind =
   | "resume"
   | "reconnect"
   | "recover"
+  | "reconnect_runtime"
+  | "restart_runtime"
+  | "fresh_runtime"
   | "stop_turn"
   | "steer_turn"
   | "retry_turn_control"
@@ -899,12 +902,18 @@ function actionAvailability(
   );
   const stateDependentActionsAvailable = resourceFreshness === "fresh";
   const canStopTurn = turnControl?.canStop === true;
+  const canRestartRuntime = stateDependentActionsAvailable && entry.deliveryMode === "daemon_inbox"
+    && entry.desiredState !== "stopped"
+    && Boolean(entry.runtimeRecovery || (entry.executionGenerationId && entry.runtimeGenerationId));
   return [
     { kind: "mention", label: "Mention", available: entry.desiredState !== "stopped" && Boolean(mentionInsertText) },
     { kind: "pause", label: "Pause", available: stateDependentActionsAvailable && entry.desiredState === "running" },
-    { kind: "resume", label: "Resume", available: stateDependentActionsAvailable && entry.desiredState === "paused" },
+    { kind: "resume", label: "Resume", available: stateDependentActionsAvailable && entry.desiredState === "paused" && !entry.runtimeRecovery },
     { kind: "reconnect", label: "Reconnect", available: stateDependentActionsAvailable && canReconnectRoomAgent(entry) },
     { kind: "recover", label: "Recover agent", available: stateDependentActionsAvailable && canRecoverSavedRoomAgent(entry) },
+    { kind: "reconnect_runtime", label: "Reconnect", available: canRestartRuntime && entry.desiredState === "running" && !entry.runtimeRecovery },
+    { kind: "restart_runtime", label: entry.runtimeRecovery?.mode === "resume" ? "Continue restart" : "Restart and resume", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "resume"), danger: true },
+    { kind: "fresh_runtime", label: entry.runtimeRecovery?.mode === "fresh" ? "Continue fresh start" : "Start fresh", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "fresh"), danger: true },
     { kind: "stop_turn", label: "Stop current turn", available: stateDependentActionsAvailable && canStopTurn },
     { kind: "retry_turn_control", label: "Retry previous turn control", available: stateDependentActionsAvailable && turnControl?.canRetry === true },
     {

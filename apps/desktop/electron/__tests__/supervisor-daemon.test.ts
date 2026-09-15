@@ -977,6 +977,7 @@ async function startWireDaemon(
   const legacyOwners: Array<Record<string, any>> = [];
   const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
   const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
+  const runtimeRecoveryCapability = { v2: true };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
   let handoffPrepared = false;
   const server = createServer((socket) => {
@@ -991,7 +992,7 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
@@ -1122,7 +1123,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, statusRecoveryDiagnostics };
+  return { server, entries, requests, hostApprovals, statusRecoveryDiagnostics, runtimeRecoveryCapability };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -1527,6 +1528,19 @@ test("runtime recovery sends exact daemon authority and returns the durable repl
       entry_id: "agent_dead",
       daemon_generation: 40,
     });
+    for (const mode of ["reconnect", "resume", "fresh"] as const) {
+      await client.recoverAgentRuntime("agent_dead", { mode, operationId: `operation-${mode}`, roomId: "room_1",
+        executionGenerationId: "execution_1", runtimeGenerationId: "runtime_1" });
+      assert.deepEqual(wire.requests.filter(request => request.method === "supervisor.recover_agent_runtime").at(-1)?.params, {
+        entry_id: "agent_dead", daemon_generation: 40, mode, operation_id: `operation-${mode}`,
+        room_id: "room_1", execution_generation_id: "execution_1", runtime_generation_id: "runtime_1",
+      });
+    }
+    wire.runtimeRecoveryCapability.v2 = false;
+    const requestsBefore = wire.requests.filter(request => request.method === "supervisor.recover_agent_runtime").length;
+    await assert.rejects(() => client.recoverAgentRuntime("agent_dead", { mode: "fresh", operationId: "too-old", roomId: "room_1",
+      executionGenerationId: "execution_1", runtimeGenerationId: "runtime_1" }), /Update the background service/);
+    assert.equal(wire.requests.filter(request => request.method === "supervisor.recover_agent_runtime").length, requestsBefore);
     await assert.rejects(() => client.recoverAgentRuntime(" agent_dead"), /exact/);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
@@ -2487,7 +2501,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.138");
+    assert.equal(status.implementationVersion, "2.0.139");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

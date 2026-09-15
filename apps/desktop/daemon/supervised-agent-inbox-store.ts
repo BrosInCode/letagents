@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
+import { pendingRuntimeRecovery } from "./runtime-recovery-journal.js";
 import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
 
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
@@ -700,6 +701,7 @@ export class SupervisedAgentInboxStore {
   }
   async claimHead(agentId: string): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
+      if (pendingRuntimeRecovery(database, agentId)) return null;
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
@@ -2219,7 +2221,7 @@ export class SupervisedAgentInboxStore {
       FROM agent_room_memberships m JOIN agent_launch_intents l USING(agent_id)
       JOIN runtime_deployments d USING(agent_id) JOIN agent_lifecycle_states s USING(agent_id)
       WHERE m.agent_id=?`).get(input.agent_id) as Row | undefined;
-    if (!runtime || String(runtime.room_id) !== input.room_id || String(runtime.desired_state) !== "running"
+    if (pendingRuntimeRecovery(database, input.agent_id) || !runtime || String(runtime.room_id) !== input.room_id || String(runtime.desired_state) !== "running"
       || String(runtime.condition) !== "none" || Number(runtime.work_attempt_id_present) !== 1
       || String(runtime.work_attempt_id) !== input.work_attempt_id || Number(runtime.provider_ref_present) !== 1
       || String(runtime.provider_work_attempt_id) !== input.work_attempt_id

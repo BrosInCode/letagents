@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.138";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.139";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -341,6 +341,10 @@ export type DaemonManifestEntry = {
 };
 
 export type DaemonManifestEntryView = DaemonManifestEntry & {
+  runtime_recovery?: {
+    operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
+    mode: "resume" | "fresh"; phase: "prepared" | "stopped";
+  } | null;
   /** Opaque exact native process birth; absent on older supervisors. */
   runtime_generation_id?: string | null;
   /** Read-only credential contract from configuration, never caller-owned manifest input. */

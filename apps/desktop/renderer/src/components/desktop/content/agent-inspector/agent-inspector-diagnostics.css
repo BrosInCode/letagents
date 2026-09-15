@@ -17,6 +17,21 @@
 .agent-inspector-diagnostics button:focus-visible,
 .agent-inspector-diagnostics summary:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 3px; }
 .agent-inspector-diagnostics svg { flex: 0 0 auto; stroke-width: 1.6; }
+.diagnostics-runtime-recovery { display: grid; gap: 14px; padding-top: 20px; border-top: 1px solid var(--border); }
+.diagnostics-runtime-recovery fieldset { display: grid; gap: 8px; min-width: 0; padding: 0; margin: 0; border: 0; }
+.diagnostics-runtime-recovery legend { margin-bottom: 12px; padding: 0; font-weight: 620; }
+.diagnostics-recovery-choice { display: flex; align-items: flex-start; gap: 12px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 12px; cursor: pointer; }
+.diagnostics-recovery-choice[data-selected="true"] { border-color: var(--text-tertiary); background: var(--diagnostic-soft); }
+.diagnostics-recovery-choice input { flex: 0 0 auto; width: 15px; height: 15px; margin: 3px 0 0; accent-color: var(--text); }
+.diagnostics-recovery-choice:focus-within { outline: 2px solid var(--text-secondary); outline-offset: 3px; }
+.diagnostics-recovery-choice > span { display: grid; gap: 3px; min-width: 0; }
+.diagnostics-recovery-choice strong { font-weight: 620; }
+.diagnostics-recovery-choice span > span { color: var(--text-secondary); font-size: .72rem; line-height: 1.55; }
+.diagnostics-runtime-recovery fieldset:disabled { opacity: .55; }
+.diagnostics-runtime-recovery fieldset:disabled label { cursor: default; }
+.diagnostics-recovery-confirm { display: grid; gap: 14px; }
+.diagnostics-recovery-confirm h4 { margin: 0; font-size: .92rem; font-weight: 620; }
+.diagnostics-recovery-confirm p { margin: 0; color: var(--text-secondary); }
 .diagnostics-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .diagnostics-eyebrow { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--text-secondary); font-size: .66rem; font-weight: 620; letter-spacing: .045em; text-transform: uppercase; }
 .diagnostics-refresh { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; margin-right: -7px; padding: 0 7px; border: 0; border-radius: 8px; color: var(--text-secondary); background: transparent; font-size: .7rem !important; transition: color 140ms ease, background-color 140ms ease; }
