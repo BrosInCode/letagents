@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -26,6 +26,85 @@ const {
   parseCursorModelsOutput,
   validateDesktopManagedAgentModel,
 } = await import("../main/agents/managed-agent-models.js");
+const { validateCodexDefaultModel } = await import("../main/agents/codex-default-model.js");
+
+function codexDefaultFixture(name: string, config: unknown, pages: unknown[], mode = "ready") {
+  const command = join(tempDir, `codex-default-${name}`);
+  const log = `${command}.log`;
+  writeFileSync(command, [
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs');",
+    `const log = ${JSON.stringify(log)}, config = ${JSON.stringify(config)}, pages = ${JSON.stringify(pages)}, mode = ${JSON.stringify(mode)};`,
+    "if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(['app-server','--listen','stdio://'])) process.exit(2);",
+    "let initialized = false, page = 0;",
+    "fs.appendFileSync(log, JSON.stringify({cwd:process.cwd(),home:process.env.CODEX_HOME,pid:process.pid})+'\\n');",
+    "require('node:readline').createInterface({input:process.stdin}).on('line', line => {",
+    "  const request = JSON.parse(line); fs.appendFileSync(log,line+'\\n');",
+    "  if (mode === 'hang') return;",
+    "  if (request.method === 'initialized') { initialized = true; return; }",
+    "  let result;",
+    "  if (request.method === 'initialize') result = {};",
+    "  else if (!initialized) process.exit(3);",
+    "  else if (request.method === 'config/read') {",
+    "    if (mode === 'config-error') { console.log(JSON.stringify({id:request.id,error:{message:'config migration required'}})); return; }",
+    "    result = {config};",
+    "  } else if (request.method === 'model/list') result = pages[page++];",
+    "  else process.exit(4);",
+    "  console.log(JSON.stringify({id:request.id,result}));",
+    "});",
+  ].join("\n"), { mode: 0o755 });
+  return { command, log };
+}
+
+test("blank Codex selection validates the inherited model through the selected CLI and repository", async () => {
+  const fixture = codexDefaultFixture("unsupported", {model: "gpt-6-astra", model_provider: null}, [
+    { data: [{model:"gpt-5.6-sol",isDefault:true}], nextCursor:null },
+  ]);
+  process.env.LETAGENTS_CODEX_BIN = fixture.command;
+  const result = await validateDesktopManagedAgentModel({ providerId:"codex", model:" ", repoRootPath:tempDir });
+  assert.equal(result.model, null, "validation does not persist a default override");
+  assert.match(result.error!, /gpt-6-astra.*not available/);
+  assert.ok(result.error!.includes(fixture.command));
+  assert.match(result.error!, /Update.*select a supported model/);
+  const log = readFileSync(fixture.log, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(log[0].cwd, realpathSync(tempDir));
+  assert.deepEqual(log.slice(1).map(row => row.method), ["initialize","initialized","config/read","model/list"]);
+  assert.deepEqual(log[3].params, {includeLayers:false,cwd:tempDir});
+  assert.equal(log[4].params.includeHidden, true);
+  assert.throws(() => process.kill(log[0].pid, 0), "preflight process exits before validation resolves");
+});
+
+test("Codex inherited validation accepts hidden paginated models and CLI defaults without changing explicit custom semantics", async () => {
+  const fixture = codexDefaultFixture("supported", {model:"internal-model"}, [
+    {data:[{model:"other",isDefault:true}],nextCursor:"page-2"},
+    {data:[{model:"internal-model",hidden:true}],nextCursor:null},
+  ]);
+  assert.equal(await validateCodexDefaultModel({command:fixture.command,env:{...process.env,CODEX_HOME:tempDir},cwd:tempDir}), null);
+  const log = readFileSync(fixture.log,"utf8").trim().split("\n").map(line=>JSON.parse(line));
+  assert.equal(log[0].home,tempDir);
+  assert.equal(log.at(-1).params.cursor,"page-2");
+  const noOverride = codexDefaultFixture("no-override", {model:null}, [{data:[{model:"default-model",isDefault:true}]}]);
+  assert.equal(await validateCodexDefaultModel({command:noOverride.command,env:process.env}),null);
+  process.env.LETAGENTS_CODEX_BIN = join(tempDir,"missing-codex");
+  assert.deepEqual(await validateDesktopManagedAgentModel({providerId:"codex",model:"custom-model",modelSource:"custom"}),{model:"custom-model",error:null});
+  assert.deepEqual(await validateDesktopManagedAgentModel({providerId:"claude-code",model:null}),{model:null,error:null});
+});
+
+test("Codex custom-provider defaults bypass the OpenAI namespace; unknown catalogs and failed config reads cannot claim compatibility", async () => {
+  const custom = codexDefaultFixture("custom-provider", {model:"local-model",model_provider:"local"}, []);
+  assert.equal(await validateCodexDefaultModel({command:custom.command,env:process.env}),null);
+  assert.ok(!readFileSync(custom.log,"utf8").includes('"model/list"'));
+  for (const mode of ["ready","config-error"]) {
+    const fixture = codexDefaultFixture(`unknown-${mode}`, {model:"model"}, [{data:[]}],mode);
+    const error = await validateCodexDefaultModel({command:fixture.command,env:process.env});
+    assert.match(error!,/Could not verify/);
+    assert.doesNotMatch(error!,/not available/);
+  }
+  const hanging = codexDefaultFixture("timeout", {}, [], "hang");
+  assert.match((await validateCodexDefaultModel({command:hanging.command,env:process.env,timeoutMs:1500}))!,/Could not verify/);
+  const first = JSON.parse(readFileSync(hanging.log,"utf8").split("\n")[0]!);
+  assert.throws(() => process.kill(first.pid,0));
+});
 
 test("managed agent model normalization trims blanks to null", () => {
   assert.equal(normalizeManagedAgentModel("  sonnet  "), "sonnet");
