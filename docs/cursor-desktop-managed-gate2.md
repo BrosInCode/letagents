@@ -216,4 +216,4 @@ The runtime rejects workspaces that have a project-level `.cursor/mcp.json` ment
 
 ## Remaining Gates
 
-Keep Cursor `ask_before_write` gated until Cursor exposes approval events cleanly enough for desktop/room Allow/Deny. Continue treating `sandboxed_write` and `full_access` as explicit user choices with high-visibility risk copy and live smoke coverage because they run with `--force`.
+Keep Cursor `ask_before_write` gated until every write-capable operation can be paused for a verified approval. ACP callbacks alone are insufficient: the [September 2026 native probe](cursor-supervised-approval-gate.md) found ordinary workspace edits executing without an approval request. Continue treating `sandboxed_write` and `full_access` as explicit user choices with high-visibility risk copy and live smoke coverage because they run with `--force`.

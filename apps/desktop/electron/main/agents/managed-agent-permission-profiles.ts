@@ -95,10 +95,10 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "ask_before_write",
     label: "Ask before writes",
-    description: "Cursor approval prompts are not bridged into the desktop or room yet.",
+    description: "Unavailable because Cursor can edit ordinary workspace files without asking.",
     status: "gated",
     risk: "medium",
-    detail: "Needs verified headless approval events before this can be honest user approval.",
+    detail: "Cursor does not request approval for every workspace edit. Use Read-only to prevent edits, or a write profile to allow them.",
     isDefault: false,
   },
   {
