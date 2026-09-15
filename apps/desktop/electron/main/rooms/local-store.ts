@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
+import { ensureLocalWorkLeaseSchema, readLocalWorkLeases, claimLocalWorkLease, changeLocalWorkLease,
+  assertLocalTaskLeaseMutation, assertLocalWorkLeaseWorker, type LocalWorkLeaseWorker, type LocalWorkLeaseAction } from "../../../../../shared/local-work-leases.mjs";
 
 import type {
   DesktopAccountRoomEntry,
@@ -16,6 +18,9 @@ import {
 } from "../chat-storage/settings.js";
 import {
   syncLocalRoomArtifactsForTask,
+  prepareLocalArtifactDatabase,
+  syncLocalRoomArtifactsForTaskTx,
+  emitLocalRoomArtifactUpdatesForIdentityKeys,
   validateLocalRoomArtifactInputs,
 } from "./artifacts/local-store.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
@@ -74,6 +79,8 @@ export type LocalTaskInput = {
 };
 
 export type LocalTaskPatch = {
+  /** Fence legacy lease actions against a claim made after their initial read. */
+  expectedNoWorkLease?: boolean;
   status?: string | null;
   assignee?: string | null;
   assigneeAgentKey?: string | null;
@@ -175,10 +182,13 @@ async function getDb(): Promise<SqliteDatabase> {
     addColumnIfMissing(database, "local_tasks", "review_agent_key", "TEXT");
     addColumnIfMissing(database, "local_tasks", "review_agent_session_id", "TEXT");
     addColumnIfMissing(database, "local_tasks", "review_updated_at", "TEXT");
+    ensureLocalWorkLeaseSchema(database);
     schemaInitialized = true;
   }
   return database;
 }
+
+export { getDb as getLocalTaskDatabase };
 
 function mapRoomRow(row: Record<string, unknown>): LocalRoomRow {
   return {
@@ -305,8 +315,10 @@ function toLocalRoomInfo(row: LocalRoomRow): DesktopLocalRoomInfo {
   };
 }
 
-function toTaskSummary(row: LocalTaskRow): DesktopTaskSummary {
-  const activeLeases: DesktopTaskSummary["activeLeases"] = [];
+function toTaskSummary(row: LocalTaskRow, database: SqliteDatabase): DesktopTaskSummary {
+  const activeLeases: DesktopTaskSummary["activeLeases"] = readLocalWorkLeases(database, row.room_id, row.task_id)
+    .map(lease => ({ id: lease.id, kind: lease.kind, holderLabel: lease.actor_label, agentKey: lease.agent_key,
+      agentSessionId: lease.agent_session_id, status: lease.status, updatedAt: lease.updated_at }));
   if (row.review_lease_id) {
     activeLeases.push({
       id: row.review_lease_id,
@@ -676,7 +688,7 @@ export async function listLocalTasks(roomId: string): Promise<DesktopTaskSummary
     .prepare("SELECT * FROM local_tasks WHERE room_id = ? ORDER BY created_at ASC")
     .all(roomId)
     .map(mapTaskRow)
-    .map(toTaskSummary);
+    .map(row => toTaskSummary(row, database));
 }
 
 export async function addLocalTask(
@@ -700,7 +712,7 @@ export async function addLocalTask(
           throw new Error("Local task identity was reused with different content.");
         }
         database.exec("COMMIT");
-        return toTaskSummary(mapTaskRow(existing));
+        return toTaskSummary(mapTaskRow(existing), database);
       }
     }
     taskId = allocateTaskId(database, trimmedRoomId);
@@ -743,85 +755,140 @@ export async function getLocalTask(
   const row = database
     .prepare("SELECT * FROM local_tasks WHERE room_id = ? AND task_id = ?")
     .get(roomId, taskId);
-  return row ? toTaskSummary(mapTaskRow(row)) : null;
+  return row ? toTaskSummary(mapTaskRow(row), database) : null;
+}
+
+export async function claimLocalTaskWorkLease(roomId: string, taskId: string, worker: LocalWorkLeaseWorker) {
+  const database = await getDb();
+  beginImmediate(database);
+  try {
+    const lease = claimLocalWorkLease(database, roomId, taskId, worker);
+    const row = database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId)!;
+    touchLocalRoom(database, roomId, String(row.updated_at));
+    const task = toTaskSummary(mapTaskRow(row), database);
+    database.exec("COMMIT");
+    return { task, lease };
+  } catch (error) { rollback(database); throw error; }
+}
+
+export async function changeLocalTaskWorkLease(roomId: string, taskId: string, input: LocalWorkLeaseAction,
+  worker: LocalWorkLeaseWorker | null = null) {
+  const database = await getDb();
+  const observed = readLocalWorkLeases(database, roomId, taskId)[0];
+  if (!observed) throw new Error("This task has no active work lease.");
+  beginImmediate(database);
+  try {
+    const result = changeLocalWorkLease(database, roomId, taskId, {
+      ...input, lease_id: input.lease_id ?? observed.id, epoch: input.epoch ?? observed.epoch,
+    }, worker);
+    const row = database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId)!;
+    touchLocalRoom(database, roomId, String(row.updated_at));
+    const task = toTaskSummary(mapTaskRow(row), database);
+    database.exec("COMMIT");
+    return { task, ...result };
+  } catch (error) { rollback(database); throw error; }
 }
 
 export async function updateLocalTask(
   roomId: string,
   taskId: string,
   patch: LocalTaskPatch,
+  worker?: LocalWorkLeaseWorker,
 ): Promise<DesktopTaskSummary> {
   const database = await getDb();
-  const currentRow = database
-    .prepare("SELECT * FROM local_tasks WHERE room_id = ? AND task_id = ?")
-    .get(roomId, taskId);
-  if (!currentRow) throw new Error("Task not found.");
-  const current = mapTaskRow(currentRow);
-  const nextStatus =
-    patch.validateStatus === false
-      ? patch.status?.trim() || current.status
-      : resolveLocalTaskStatus(current.status, patch.status);
-  const now = new Date().toISOString();
-  const workflowArtifacts =
-    patch.workflowArtifacts === undefined
-      ? current.workflow_artifacts_json
-      : JSON.stringify(patch.workflowArtifacts || []);
   const nextWorkflowArtifactInputs = patch.workflowArtifacts === undefined
-    ? null
-    : (patch.workflowArtifacts || []) as Record<string, unknown>[];
-  if (nextWorkflowArtifactInputs) {
-    validateLocalRoomArtifactInputs(nextWorkflowArtifactInputs, {
-      requireStableIdentity: false,
-    });
-  }
-  const nextAssigneeAgentKey =
-    patch.assigneeAgentKey === undefined
-      ? current.assignee_agent_key
-      : patch.assigneeAgentKey;
-  const nextAssigneeAgentInstanceId =
-    patch.assigneeAgentKey === undefined
-      ? current.assignee_agent_instance_id
-      : null;
-  const nextAssigneeAgentSessionId =
-    patch.assigneeAgentKey === undefined
-      ? current.assignee_agent_session_id
-      : null;
-  database
-    .prepare(`
-      UPDATE local_tasks
-      SET status = ?,
-          assignee = ?,
-          assignee_agent_key = ?,
-          assignee_agent_instance_id = ?,
-          assignee_agent_session_id = ?,
-          pr_url = ?,
-          workflow_artifacts_json = ?,
-          sync_dirty = 1,
-          updated_at = ?
-      WHERE room_id = ? AND task_id = ?
-    `)
-    .run(
-      nextStatus,
-      patch.assignee === undefined ? current.assignee : patch.assignee,
-      nextAssigneeAgentKey,
-      nextAssigneeAgentInstanceId,
-      nextAssigneeAgentSessionId,
-      patch.prUrl === undefined ? current.pr_url : patch.prUrl,
-      workflowArtifacts,
-      now,
-      roomId,
-      taskId,
-    );
-  touchLocalRoom(database, roomId, now);
+    ? null : (patch.workflowArtifacts || []) as Record<string, unknown>[];
+  if (nextWorkflowArtifactInputs) validateLocalRoomArtifactInputs(nextWorkflowArtifactInputs, { requireStableIdentity: false });
+  if (nextWorkflowArtifactInputs) await prepareLocalArtifactDatabase();
+  let artifactIdentityKeys: string[] = [];
+  let observed = worker ? readLocalWorkLeases(database, roomId, taskId)[0] ?? null : undefined;
+  beginImmediate(database);
+  let updated: DesktopTaskSummary;
+  try {
+    let supervisedWorker = false;
+    let currentRow = database
+      .prepare("SELECT * FROM local_tasks WHERE room_id = ? AND task_id = ?")
+      .get(roomId, taskId);
+    if (!currentRow) throw new Error("Task not found.");
+    if (patch.expectedNoWorkLease && readLocalWorkLeases(database, roomId, taskId).length) {
+      throw new Error("The task lease changed. Refresh the task before trying again.");
+    }
+    if (worker) {
+      supervisedWorker = assertLocalWorkLeaseWorker(database, roomId, worker);
+      if (supervisedWorker && patch.status === "assigned") {
+        if ((patch.assigneeAgentKey != null && patch.assigneeAgentKey !== worker.agent_key)
+          || (patch.assignee != null && patch.assignee !== worker.actor_label)) {
+          throw new Error("Use handoff_task_lease to assign work to another worker.");
+        }
+        observed = claimLocalWorkLease(database, roomId, taskId, worker);
+        currentRow = database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId)!;
+      }
+      assertLocalTaskLeaseMutation(database, currentRow, worker, observed);
+      if ((supervisedWorker || observed) && ((patch.assignee !== undefined && patch.assignee !== currentRow.assignee)
+        || (patch.assigneeAgentKey !== undefined && patch.assigneeAgentKey !== currentRow.assignee_agent_key))) {
+        throw new Error("Use claim_task or handoff_task_lease to change task ownership.");
+      }
+    }
+    const current = mapTaskRow(currentRow);
+    const nextStatus =
+      patch.validateStatus === false
+        ? patch.status?.trim() || current.status
+      : resolveLocalTaskStatus(current.status, supervisedWorker && patch.status === "assigned" ? undefined : patch.status);
+    const now = new Date().toISOString();
+    const workflowArtifacts =
+      patch.workflowArtifacts === undefined
+        ? current.workflow_artifacts_json
+        : JSON.stringify(patch.workflowArtifacts || []);
+    const nextAssigneeAgentKey =
+      patch.assigneeAgentKey === undefined
+        ? current.assignee_agent_key
+        : patch.assigneeAgentKey;
+    const nextAssigneeAgentInstanceId =
+      patch.assigneeAgentKey === undefined || (worker && patch.assigneeAgentKey === current.assignee_agent_key)
+        ? current.assignee_agent_instance_id
+        : null;
+    const nextAssigneeAgentSessionId =
+      patch.assigneeAgentKey === undefined || (worker && patch.assigneeAgentKey === current.assignee_agent_key)
+        ? current.assignee_agent_session_id
+        : null;
+    if (nextWorkflowArtifactInputs) {
+      artifactIdentityKeys = syncLocalRoomArtifactsForTaskTx(database, {
+        roomId, taskId, artifacts: nextWorkflowArtifactInputs, worker,
+      }).identityKeys;
+    }
+    database
+      .prepare(`
+        UPDATE local_tasks
+        SET status = ?,
+            assignee = ?,
+            assignee_agent_key = ?,
+            assignee_agent_instance_id = ?,
+            assignee_agent_session_id = ?,
+            pr_url = ?,
+            workflow_artifacts_json = ?,
+            sync_dirty = 1,
+            updated_at = ?
+        WHERE room_id = ? AND task_id = ?
+      `)
+      .run(
+        nextStatus,
+        patch.assignee === undefined ? current.assignee : patch.assignee,
+        nextAssigneeAgentKey,
+        nextAssigneeAgentInstanceId,
+        nextAssigneeAgentSessionId,
+        patch.prUrl === undefined ? current.pr_url : patch.prUrl,
+        workflowArtifacts,
+        now,
+        roomId,
+        taskId,
+      );
+    touchLocalRoom(database, roomId, now);
+    updated = toTaskSummary(mapTaskRow(database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId)!), database);
+    database.exec("COMMIT");
+  } catch (error) { rollback(database); throw error; }
   if (patch.workflowArtifacts !== undefined) {
-    await syncLocalRoomArtifactsForTask({
-      roomId,
-      taskId,
-      artifacts: nextWorkflowArtifactInputs || [],
-    });
+    await emitLocalRoomArtifactUpdatesForIdentityKeys(roomId, artifactIdentityKeys);
   }
-  const updated = await getLocalTask(roomId, taskId);
-  if (!updated) throw new Error("Task not found.");
   return updated;
 }
 
@@ -1059,7 +1126,7 @@ export async function claimLocalTasksForPublish(
         .run(now, roomId, row.task_id);
     }
     database.exec("COMMIT");
-    return rows.map(toTaskSummary);
+    return rows.map(row => toTaskSummary(row, database));
   } catch (error) {
     rollback(database);
     throw error;
