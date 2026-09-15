@@ -177,7 +177,7 @@ const runtimeChoices = computed(() => {
 });
 const selectedRuntimeChoice = computed(() => runtimeChoices.value.find(choice => choice.kind === runtimeChoice.value));
 const showRuntimeRecovery = computed(() => runtimeChoices.value.length > 0 && ["provider", "room"].includes(selectedCheck.value?.id ?? ""));
-watch(() => [props.projection.entry.executionGenerationId, props.projection.entry.runtimeGenerationId], () => {
+watch([() => props.projection.entry.executionGenerationId, () => props.projection.entry.runtimeGenerationId], () => {
   confirmRuntimeRecovery.value = false;
 });
 async function cancelRuntimeRecovery(): Promise<void> {
