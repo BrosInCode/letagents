@@ -6,6 +6,8 @@ import type {
   DesktopRoomSharedArtifactSource,
 } from "../../../ipc-types.js";
 import type { RoomArtifactsResponse } from "../snapshot/payloads.js";
+import { assertLocalTaskLeaseMutation, assertLocalWorkLeaseWorker, readLocalWorkLeases,
+  type LocalWorkLeaseWorker } from "../../../../../../shared/local-work-leases.mjs";
 import {
   addColumnIfMissing,
   beginImmediate,
@@ -68,6 +70,7 @@ const localArtifactKinds = new Set<DesktopRoomSharedArtifactKind>([
   "merge",
 ]);
 let schemaInitialized = false;
+export { getDb as prepareLocalArtifactDatabase };
 
 async function getDb(): Promise<SqliteDatabase> {
   const database = await getLocalChatDatabase();
@@ -370,6 +373,7 @@ export async function publishLocalRoomArtifact(input: {
   artifact: Record<string, unknown>;
   taskId?: string | null;
   linkedTaskIds?: unknown[];
+  worker?: LocalWorkLeaseWorker;
 }): Promise<{ room_id: string; artifact: NonNullable<RoomArtifactsResponse["artifacts"]>[number] }> {
   return upsertLocalRoomArtifact({
     ...input,
@@ -392,7 +396,7 @@ export async function publishLocalRoomWorkflowArtifact(input: {
   });
 }
 
-async function upsertLocalRoomArtifact(input: {
+type LocalArtifactWrite = {
   roomId: string;
   artifact: Record<string, unknown>;
   taskId?: string | null;
@@ -400,7 +404,24 @@ async function upsertLocalRoomArtifact(input: {
   replaceLinkedTaskIds?: boolean;
   source: DesktopRoomSharedArtifactSource;
   requireStableIdentity: boolean;
-}): Promise<{ room_id: string; artifact: NonNullable<RoomArtifactsResponse["artifacts"]>[number] }> {
+  worker?: LocalWorkLeaseWorker;
+};
+
+type ArtifactResult = { room_id: string; artifact: NonNullable<RoomArtifactsResponse["artifacts"]>[number] };
+
+async function upsertLocalRoomArtifact(input: LocalArtifactWrite): Promise<ArtifactResult> {
+  const database = await getDb();
+  beginImmediate(database);
+  let result: ArtifactResult;
+  try {
+    result = upsertLocalRoomArtifactTx(database, input);
+    database.exec("COMMIT");
+  } catch (error) { rollback(database); throw error; }
+  await emitLocalRoomArtifactUpdate(result.room_id, result.artifact);
+  return result;
+}
+
+function upsertLocalRoomArtifactTx(database: SqliteDatabase, input: LocalArtifactWrite): ArtifactResult {
   const roomId = input.roomId.trim();
   if (!roomId) throw new Error("Choose a room before publishing an artifact.");
   const artifact = normalizeLocalArtifact(input.artifact, {
@@ -426,113 +447,120 @@ async function upsertLocalRoomArtifact(input: {
   const detailJson = detailAction === "set" ? JSON.stringify(artifact.detail) : null;
   const detailUpdateClause =
     detailAction === "preserve" ? "" : "detail = excluded.detail,\n          ";
-  const database = await getDb();
   const now = new Date().toISOString();
-  beginImmediate(database);
-  try {
-    database
-      .prepare(`
-        INSERT INTO local_room_artifacts (
-          room_id, identity_key, provider, kind, artifact_id, artifact_number,
-          title, url, ref, state, detail, source, first_seen_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(room_id, identity_key) DO UPDATE SET
-          provider = excluded.provider,
-          kind = excluded.kind,
-          artifact_id = CASE
-            WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
-              THEN COALESCE(local_room_artifacts.artifact_id, excluded.artifact_id)
-            ELSE COALESCE(excluded.artifact_id, local_room_artifacts.artifact_id)
-          END,
-          artifact_number = CASE
-            WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
-              THEN COALESCE(local_room_artifacts.artifact_number, excluded.artifact_number)
-            ELSE COALESCE(excluded.artifact_number, local_room_artifacts.artifact_number)
-          END,
-          title = CASE
-            WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
-              THEN COALESCE(local_room_artifacts.title, excluded.title)
-            ELSE COALESCE(excluded.title, local_room_artifacts.title)
-          END,
-          url = CASE
-            WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
-              THEN COALESCE(local_room_artifacts.url, excluded.url)
-            ELSE COALESCE(excluded.url, local_room_artifacts.url)
-          END,
-          ref = CASE
-            WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
-              THEN COALESCE(local_room_artifacts.ref, excluded.ref)
-            ELSE COALESCE(excluded.ref, local_room_artifacts.ref)
-          END,
-          state = CASE
-            WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
-              THEN COALESCE(local_room_artifacts.state, excluded.state)
-            ELSE COALESCE(excluded.state, local_room_artifacts.state)
-          END,
-          ${detailUpdateClause}source = CASE
-            WHEN excluded.source = 'manual' OR local_room_artifacts.source = 'manual'
-              THEN local_room_artifacts.source
-            ELSE excluded.source
-          END,
-          updated_at = excluded.updated_at
-      `)
-      .run(
-        roomId,
-        identityKey,
-        artifact.provider,
-        artifact.kind,
-        artifact.id ?? null,
-        artifact.number ?? null,
-        artifact.title ?? null,
-        artifact.url ?? null,
-        artifact.ref ?? null,
-        artifact.state ?? null,
-        detailJson,
-        input.source,
-        now,
-        now,
-      );
-
-    for (const taskId of linkedTaskIds) {
-      database
-        .prepare(`
-          INSERT INTO local_room_artifact_tasks (
-            room_id, artifact_identity_key, task_id, source, linked_at, updated_at
-          )
-          VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(room_id, artifact_identity_key, task_id) DO UPDATE SET
-            source = excluded.source,
-            updated_at = excluded.updated_at
-        `)
-        .run(roomId, identityKey, taskId, input.source, now, now);
-    }
-    if (input.replaceLinkedTaskIds) {
-      const deleteBase = `
-        DELETE FROM local_room_artifact_tasks
-        WHERE room_id = ?
-          AND artifact_identity_key = ?
-          AND source = ?
-      `;
-      if (linkedTaskIds.length) {
-        const placeholders = linkedTaskIds.map(() => "?").join(", ");
-        database
-          .prepare(`${deleteBase} AND task_id NOT IN (${placeholders})`)
-          .run(roomId, identityKey, input.source, ...linkedTaskIds);
-      } else {
-        database.prepare(deleteBase).run(roomId, identityKey, input.source);
+  if (input.worker) {
+    const supervised = assertLocalWorkLeaseWorker(database, roomId, input.worker);
+    const affected = new Set([...linkedTaskIds, ...database.prepare(
+      "SELECT task_id FROM local_room_artifact_tasks WHERE room_id=? AND artifact_identity_key=?"
+    ).all(roomId, identityKey).map(row => String(row.task_id))]);
+    for (const taskId of affected) {
+      const task = database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId);
+      if (!task) throw new Error("Linked task not found.");
+      assertLocalTaskLeaseMutation(database, task, input.worker);
+      const reviewOwner = task.review_lease_id && task.review_agent_session_id === input.worker.session_id
+        && task.review_agent_key === input.worker.agent_key && task.status === "in_review";
+      if (supervised && !readLocalWorkLeases(database, roomId, taskId).length && !reviewOwner) {
+        throw new Error("An active task lease is required to publish task artifacts.");
       }
     }
-    database.exec("COMMIT");
-  } catch (error) {
-    rollback(database);
-    throw error;
   }
+  database
+    .prepare(`
+      INSERT INTO local_room_artifacts (
+        room_id, identity_key, provider, kind, artifact_id, artifact_number,
+        title, url, ref, state, detail, source, first_seen_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(room_id, identity_key) DO UPDATE SET
+        provider = excluded.provider,
+        kind = excluded.kind,
+        artifact_id = CASE
+          WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
+            THEN COALESCE(local_room_artifacts.artifact_id, excluded.artifact_id)
+          ELSE COALESCE(excluded.artifact_id, local_room_artifacts.artifact_id)
+        END,
+        artifact_number = CASE
+          WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
+            THEN COALESCE(local_room_artifacts.artifact_number, excluded.artifact_number)
+          ELSE COALESCE(excluded.artifact_number, local_room_artifacts.artifact_number)
+        END,
+        title = CASE
+          WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
+            THEN COALESCE(local_room_artifacts.title, excluded.title)
+          ELSE COALESCE(excluded.title, local_room_artifacts.title)
+        END,
+        url = CASE
+          WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
+            THEN COALESCE(local_room_artifacts.url, excluded.url)
+          ELSE COALESCE(excluded.url, local_room_artifacts.url)
+        END,
+        ref = CASE
+          WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
+            THEN COALESCE(local_room_artifacts.ref, excluded.ref)
+          ELSE COALESCE(excluded.ref, local_room_artifacts.ref)
+        END,
+        state = CASE
+          WHEN local_room_artifacts.source = 'manual' AND excluded.source != 'manual'
+            THEN COALESCE(local_room_artifacts.state, excluded.state)
+          ELSE COALESCE(excluded.state, local_room_artifacts.state)
+        END,
+        ${detailUpdateClause}source = CASE
+          WHEN excluded.source = 'manual' OR local_room_artifacts.source = 'manual'
+            THEN local_room_artifacts.source
+          ELSE excluded.source
+        END,
+        updated_at = excluded.updated_at
+    `)
+    .run(
+      roomId,
+      identityKey,
+      artifact.provider,
+      artifact.kind,
+      artifact.id ?? null,
+      artifact.number ?? null,
+      artifact.title ?? null,
+      artifact.url ?? null,
+      artifact.ref ?? null,
+      artifact.state ?? null,
+      detailJson,
+      input.source,
+      now,
+      now,
+    );
 
-  const published = await getLocalRoomArtifactByIdentityKey(roomId, identityKey);
-  if (!published) throw new Error("Local room artifact could not be published.");
-  await emitLocalRoomArtifactUpdate(roomId, published);
-  return { room_id: roomId, artifact: published };
+  for (const taskId of linkedTaskIds) {
+    database
+      .prepare(`
+        INSERT INTO local_room_artifact_tasks (
+          room_id, artifact_identity_key, task_id, source, linked_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(room_id, artifact_identity_key, task_id) DO UPDATE SET
+          source = excluded.source,
+          updated_at = excluded.updated_at
+      `)
+      .run(roomId, identityKey, taskId, input.source, now, now);
+  }
+  if (input.replaceLinkedTaskIds) {
+    const deleteBase = `
+      DELETE FROM local_room_artifact_tasks
+      WHERE room_id = ?
+        AND artifact_identity_key = ?
+        AND source = ?
+    `;
+    if (linkedTaskIds.length) {
+      const placeholders = linkedTaskIds.map(() => "?").join(", ");
+      database
+        .prepare(`${deleteBase} AND task_id NOT IN (${placeholders})`)
+        .run(roomId, identityKey, input.source, ...linkedTaskIds);
+    } else {
+      database.prepare(deleteBase).run(roomId, identityKey, input.source);
+    }
+  }
+  const row = database.prepare("SELECT * FROM local_room_artifacts WHERE room_id=? AND identity_key=?").get(roomId, identityKey)!;
+  const linked = database.prepare("SELECT task_id FROM local_room_artifact_tasks WHERE room_id=? AND artifact_identity_key=? ORDER BY task_id")
+    .all(roomId, identityKey).map(row => String(row.task_id));
+  return { room_id: roomId, artifact: toPayload(mapArtifactRow(row), linked) };
 }
 
 async function emitLocalRoomArtifactUpdate(
@@ -543,18 +571,33 @@ async function emitLocalRoomArtifactUpdate(
   emitPersistedLocalRoomArtifactUpdate(localRoomIdentifier, artifact);
 }
 
-export async function syncLocalRoomArtifactsForTask(input: {
+type TaskArtifactSync = {
   roomId: string;
   taskId: string;
   artifacts: Record<string, unknown>[];
-}): Promise<NonNullable<RoomArtifactsResponse["artifacts"]>> {
+  worker?: LocalWorkLeaseWorker;
+};
+
+export async function syncLocalRoomArtifactsForTask(input: TaskArtifactSync): Promise<NonNullable<RoomArtifactsResponse["artifacts"]>> {
+  const database = await getDb();
+  beginImmediate(database);
+  let result: ReturnType<typeof syncLocalRoomArtifactsForTaskTx>;
+  try {
+    result = syncLocalRoomArtifactsForTaskTx(database, input);
+    database.exec("COMMIT");
+  } catch (error) { rollback(database); throw error; }
+  await emitLocalRoomArtifactUpdatesForIdentityKeys(input.roomId, result.identityKeys);
+  return result.artifacts;
+}
+
+/** Schema must be prepared before entering the caller's task write transaction. */
+export function syncLocalRoomArtifactsForTaskTx(database: SqliteDatabase, input: TaskArtifactSync) {
   const roomId = input.roomId.trim();
   const taskId = input.taskId.trim();
-  if (!roomId || !taskId) return [];
+  if (!roomId || !taskId) return { artifacts: [], identityKeys: [] };
   const source: DesktopRoomSharedArtifactSource = "task_workflow_artifact";
   const synced: NonNullable<RoomArtifactsResponse["artifacts"]> = [];
   const identityKeys: string[] = [];
-  const database = await getDb();
   const previousIdentityKeys = getLocalTaskArtifactIdentityKeys(database, {
     roomId,
     taskId,
@@ -562,12 +605,13 @@ export async function syncLocalRoomArtifactsForTask(input: {
   });
 
   for (const artifact of input.artifacts) {
-    const result = await upsertLocalRoomArtifact({
+    const result = upsertLocalRoomArtifactTx(database, {
       roomId,
       artifact,
       taskId,
       source,
       requireStableIdentity: false,
+      worker: input.worker,
     });
     synced.push(result.artifact);
     const identityKey = result.artifact.identity_key;
@@ -590,12 +634,7 @@ export async function syncLocalRoomArtifactsForTask(input: {
     database.prepare(deleteBase).run(roomId, taskId, source);
   }
 
-  await emitLocalRoomArtifactUpdatesForIdentityKeys(
-    roomId,
-    previousIdentityKeys.filter((identityKey) => !identityKeys.includes(identityKey)),
-  );
-
-  return synced;
+  return { artifacts: synced, identityKeys: [...new Set([...previousIdentityKeys, ...identityKeys])] };
 }
 
 function getLocalTaskArtifactIdentityKeys(
@@ -616,7 +655,7 @@ function getLocalTaskArtifactIdentityKeys(
     .filter((identityKey): identityKey is string => Boolean(identityKey));
 }
 
-async function emitLocalRoomArtifactUpdatesForIdentityKeys(
+export async function emitLocalRoomArtifactUpdatesForIdentityKeys(
   roomId: string,
   identityKeys: string[],
 ): Promise<void> {
