@@ -69,6 +69,7 @@ export type ProviderExecutionConfiguration = {
 };
 
 export type ProviderExecutionStore = {
+  pendingRuntimeRecovery(agentId: string): Promise<unknown>;
   unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
   unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null>;
   load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
@@ -940,6 +941,7 @@ export class ProviderExecutionCoordinator {
 
   async converge(entryId: string): Promise<void> {
     if (this.options.authority.isHandoffScheduled()) return;
+    if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
     let entry = await this.options.store.getEntry(entryId);
     if (!entry) return;
@@ -1210,7 +1212,8 @@ export class ProviderExecutionCoordinator {
     initialControlEpoch: number,
   ): Promise<void> {
     // Unresolved native dispatch may recover its exact handle, never replay in a successor.
-    if (await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
+    if (await this.options.store.pendingRuntimeRecovery(initialEntry.id)
+      || await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
       || await this.options.store.unresolvedPollingActivation(initialEntry.id)) return;
     let entry = initialEntry;
     let launchControlEpoch = initialControlEpoch;

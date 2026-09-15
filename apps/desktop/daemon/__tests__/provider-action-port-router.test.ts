@@ -505,6 +505,7 @@ test("provider router selects the native adapter by manifest provider and fences
   };
 
   assert.deepEqual(await router.capabilities("claude-attempt", "claude-code"), {
+    exactProcessStop: false,
     resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt",
   });
   const handle = await router.spawn(claudeSpawn);

@@ -36,6 +36,7 @@ export type DaemonReadModelPorts = {
   };
   recoveryDiagnostics(): ProviderRecoveryDiagnostics;
   manifest: {
+    pendingRuntimeRecovery(agentId: string): Promise<import("./runtime-recovery-journal.js").RuntimeRecoveryRecord | null>;
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
     getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
   };
@@ -72,6 +73,7 @@ export class DaemonReadModel {
         agent_room_move_v1: true,
         agent_lifecycle_v1: true,
         agent_runtime_recovery_v1: true,
+        agent_runtime_recovery_v2: true,
         agent_state_subscription_v1: true,
         agent_activity_stream_v1: true,
         custodialPollingV1: true,
@@ -183,7 +185,11 @@ export class DaemonReadModel {
       nativeLivenessStaleAfterMs: NATIVE_LIVENESS_STALE_AFTER_MS,
     });
     const pollingContract = await this.ports.workerAuthority.pollingContract(entry);
+    const recovery = await this.ports.manifest.pendingRuntimeRecovery(entry.id);
     return { ...projected, runtime_generation_id: this.runtimeGenerationId(entry),
+      runtime_recovery: recovery ? { operationId: recovery.operation_id, roomId: recovery.room_id,
+        executionGenerationId: recovery.execution_generation_id, runtimeGenerationId: recovery.runtime_generation_id,
+        mode: recovery.mode, phase: recovery.phase as "prepared" | "stopped" } : null,
       ...(pollingContract ? { polling_contract: pollingContract } : {}) };
   }
 
