@@ -1083,6 +1083,7 @@ test("diagnostic verification survives live projection updates and waits for a f
   (buttonByText(mounted.root, "Reconnect").props.onClick as () => void)();
   await nextTick();
   assert.deepEqual(actions, [{ entryId: "diagnostic_a", roomId: "room_a", kind: "reconnect" }]);
+  assert.equal(descendants(mounted.root).filter(node => node.props["data-check"]).length, 4, "all connection checks stay visible during recovery");
   assert.match(textContent(mounted.root), /accepted request alone does not confirm/);
   state.value = { ...state.value, actionState: { status: "error", message: "The recovery request timed out." } };
   await nextTick();
