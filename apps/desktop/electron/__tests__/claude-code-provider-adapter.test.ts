@@ -102,6 +102,7 @@ interface HarnessOptions {
   initSessionId?: string;
   noInit?: boolean;
   noLetagents?: boolean;
+  noApprovalLifecycle?: boolean;
   bootstrapResultSubtype?: string;
   /** Overrides per pid; undefined entries mean "cannot verify". */
   identities?: Map<number, string | null | undefined>;
@@ -168,6 +169,7 @@ function createHarness(options: HarnessOptions = {}) {
             subtype: "init",
             session_id: initSessionId,
             model: "claude-fable-5",
+            capabilities: options.noApprovalLifecycle ? [] : ["msg_lifecycle_v1"],
             permissionMode: "default",
             cwd: input.cwd,
             mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: "connected" }],
@@ -1574,7 +1576,7 @@ test("Claude typed observations correlate native turns and completed tools witho
     domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none",
   }], "subscription replays verified runtime readiness, never bootstrap room work");
   assert.deepEqual(adapter.capabilities().execution, {
-    controlProbe: "unsupported", approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
+    controlProbe: "unsupported", approvals: { kinds: ["command"], recovery: "native_instance_only", denyScope: "request" },
   });
   assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
   assert.deepEqual(events.map(({ fact }) => fact), [
@@ -1697,4 +1699,158 @@ test("Claude shadow native terminal remains observable behind a legacy failed-st
   assert.deepEqual(harness.signals, []);
   child.resolveExit({ type: "exit", code: 1, signal: null });
   await rejected;
+});
+
+const claudeAskPolicy = {
+  permissionMode: "default", dangerouslySkipPermissions: false, allowDangerouslySkipPermissions: false,
+  tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
+  allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+};
+
+async function approvalHarness() {
+  const harness = createHarness({ versionOutput: "2.1.272 (Claude Code)" });
+  const streams: ProviderStreamEvent[] = [];
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, streamSink: event => streams.push(event) });
+  const handle = await adapter.spawn(spawnRequest({ permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: claudeAskPolicy }));
+  const child = harness.children[0]!;
+  const controller = new AbortController();
+  let requests: import("../../shared/provider-permissions.js").ClaudeNativePermissionRequest[] = [];
+  const observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") requests = [...event.requests]; }, controller.signal);
+  const running = adapter.runRoomTurn(handle, { inboxItemId: "approval-inbox", actionId: "approval-action", sourceMessage: { text: "Write a file" }, activation: {} });
+  void running.catch(() => {});
+  await flush();
+  const turnId = JSON.parse(child.written.at(-1)!).uuid as string;
+  const started = () => child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: handle.providerContinuationId });
+  const tool = (over: Record<string, unknown> = {}) => child.emit({ type: "assistant", session_id: handle.providerContinuationId, parent_tool_use_id: null,
+    message: { content: [{ type: "tool_use", id: "tool-write", name: "Write", input: { file_path: "/tmp/output", content: "private approval content" } }] }, ...over });
+  const permission = (over: Record<string, unknown> = {}) => child.emit({ type: "control_request", request_id: "native-request",
+    request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: "tool-write", input: { file_path: "/tmp/output", content: "private approval content" },
+      permission_suggestions: [{ type: "setMode", mode: "bypassPermissions", destination: "session" }] }, ...over });
+  return { harness, adapter, handle, child, streams, turnId, started, tool, permission,
+    get requests() { return requests; },
+    async close() {
+      child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId, result: "Done" });
+      await running.catch(() => {}); controller.abort(); await observing; await adapter.stop(handle);
+    } };
+}
+
+test("Claude Ask before writes owns prompting policy and requires native exact-turn capability", async () => {
+  const h = await approvalHarness();
+  try {
+    assert.equal(argValue(h.harness.launches[0]!.args, "--permission-prompt-tool"), "stdio");
+    assert.equal(argValue(h.harness.launches[0]!.args, "--permission-mode"), "default");
+    assert.equal(argValue(h.harness.launches[0]!.args, "--setting-sources"), "");
+    assert.equal(h.adapter.capabilities().execution?.approvals.denyScope, "request");
+  } finally { await h.close(); }
+  const old = createHarness({ noApprovalLifecycle: true, versionOutput: "2.1.272 (Claude Code)" });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: old.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest({ permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: claudeAskPolicy })), /exact native turn lifecycle/);
+  assert.equal(old.children[0]!.alive, false);
+  for (const override of [{ permissionMode: "acceptEdits" }, { allowedTools: ["*"] }, { settings: '{"permissions":{"allow":["Bash"]}}' }, { "permission-mode": "bypassPermissions" }]) {
+    await assert.rejects(adapter.spawn(spawnRequest({ permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: { ...claudeAskPolicy, ...override } })), /authority|cannot override/);
+  }
+});
+
+for (const reply of ["once", "reject"] as const) test(`Claude native ${reply} applies once to the exact tool and never persists permission suggestions`, async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); const expected = h.requests[0]!;
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, expected), { outcome: "correlated", providerContinuationId: h.handle.providerContinuationId, providerTurnId: h.turnId });
+    h.permission(); assert.equal(h.requests.length, 1);
+    const order: string[] = [];
+    assert.deepEqual(await h.adapter.replyPermission(h.handle, expected, reply, { beforeNativeDispatch: async () => { order.push("journal"); }, assertNativeDispatch: () => { order.push("fence"); } }), { outcome: "sent", scope: "request" });
+    assert.deepEqual(order, ["journal", "fence"]);
+    const response = JSON.parse(h.child.written.at(-1)!).response;
+    assert.equal(response.request_id, expected.id);
+    assert.deepEqual(response.response, reply === "once" ? { behavior: "allow", updatedInput: expected.request.input } : { behavior: "deny", message: "The host rejected this action." });
+    assert.equal(h.requests.length, 0);
+    assert.equal(h.streams.some(event => event.method === "control_request"), false);
+    h.permission(); assert.equal(h.requests.length, 0, "resolved IDs cannot be reused");
+    await assert.rejects(h.adapter.replyPermission(h.handle, expected, reply, { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+test("Claude approval correlation excludes pre-start, foreign, subagent, changed and completed tools", async () => {
+  const h = await approvalHarness();
+  try {
+    h.tool(); h.permission(); assert.equal(h.requests.length, 0);
+    h.started(); h.tool({ session_id: "foreign" }); h.permission();
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, h.requests[0]!), { outcome: "correlation_unproven" });
+    h.child.emit({ type: "control_cancel_request", request_id: "native-request" });
+    h.tool({ parent_tool_use_id: "subagent" }); h.permission({ request_id: "subagent-request" });
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, h.requests[0]!), { outcome: "correlation_unproven" });
+    h.tool(); h.permission({ request_id: "valid-request" });
+    const expected = h.requests.find(request => request.id === "valid-request")!;
+    const changed = structuredClone(expected); changed.request.input.content = "changed";
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, changed), { outcome: "correlation_unproven" });
+    await assert.rejects(h.adapter.replyPermission(h.handle, changed, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+    h.child.emit({ type: "user", session_id: h.handle.providerContinuationId, parent_tool_use_id: null,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", content: "Denied", is_error: true }] } });
+    await assert.rejects(h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+for (const invalidation of ["cancel", "disconnect", "process-replaced", "terminal"] as const) {
+  test(`Claude approval is fenced when ${invalidation} arrives during durable admission`, async () => {
+    const h = await approvalHarness();
+    try {
+      h.started(); h.tool(); h.permission(); const expected = h.requests[0]!;
+      const before = h.child.written.length;
+      await assert.rejects(h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: async () => {
+        if (invalidation === "cancel") h.child.emit({ type: "control_cancel_request", request_id: expected.id });
+        if (invalidation === "disconnect") h.child.disconnect();
+        if (invalidation === "process-replaced") h.harness.identities.set(h.handle.pid!, "other-birth");
+        if (invalidation === "terminal") h.child.emit({ type: "result", subtype: "success", is_error: false, session_id: h.handle.providerContinuationId, user_message_uuid: h.turnId, result: "Done" });
+      } }), { outcome: "not_dispatched" });
+      assert.equal(h.child.written.length, before);
+    } finally { await h.close(); }
+  });
+}
+
+test("Claude approval serializes replies and refuses retry after an uncertain stdin write", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); const expected = h.requests[0]!;
+    let release!: () => void; const admitted = new Promise<void>(resolve => { release = resolve; });
+    const first = h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: () => admitted });
+    await assert.rejects(h.adapter.replyPermission(h.handle, expected, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+    const original = h.child.writeLine.bind(h.child);
+    h.child.writeLine = () => { throw new Error("pipe lost after write attempt"); };
+    release(); await assert.rejects(first, { outcome: "uncertain" });
+    h.child.writeLine = original;
+    await assert.rejects(h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+test("Claude cancellation at a native approval uses its exact aborted-tools turn boundary", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); const pending = h.requests[0]!;
+    const interrupted = h.adapter.controlTurn(h.handle, null, { targetTurnId: h.turnId });
+    await flush();
+    h.child.emit({ type: "control_cancel_request", request_id: pending.id });
+    h.child.emit({ type: "result", subtype: "error_during_execution", terminal_reason: "aborted_tools", is_error: true,
+      session_id: h.handle.providerContinuationId, user_message_uuid: h.turnId });
+    assert.equal((await interrupted).interrupted, true);
+    assert.equal(h.handle.observedState(), "idle");
+    await assert.rejects(h.adapter.replyPermission(h.handle, pending, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+test("Claude explicit foreign tool-turn UUID cannot create or resolve approval authority", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool({ user_message_uuid: "previous-turn" }); h.permission();
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, h.requests[0]!), { outcome: "correlation_unproven" });
+    await assert.rejects(h.adapter.replyPermission(h.handle, h.requests[0]!, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+    h.child.emit({ type: "control_cancel_request", request_id: "native-request" });
+    h.tool({ user_message_uuid: h.turnId }); h.permission({ request_id: "current-request" });
+    const expected = h.requests[0]!;
+    const result = { type: "user", session_id: h.handle.providerContinuationId, parent_tool_use_id: null,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", content: "Done" }] } };
+    h.child.emit({ ...result, user_message_uuid: "previous-turn" });
+    assert.equal((await h.adapter.correlatePermissionTurn(h.handle, expected)).outcome, "correlated");
+    h.child.emit({ ...result, user_message_uuid: h.turnId });
+    assert.equal((await h.adapter.correlatePermissionTurn(h.handle, expected)).outcome, "correlation_unproven");
+  } finally { await h.close(); }
 });

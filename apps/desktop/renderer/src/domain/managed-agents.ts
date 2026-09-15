@@ -1183,7 +1183,12 @@ export function supervisedPermissionProfilePresentation(
 ): DesktopManagedAgentPermissionProfile {
   if (providerId === "cursor") return supervisedCursorPermissionProfilePresentation(profile);
   if (profile.id !== "ask_before_write"
-    || (providerId !== "codex" && providerId !== "open-model")) return profile;
+    || (providerId !== "codex" && providerId !== "open-model" && providerId !== "claude-code")) return profile;
+  if (providerId === "claude-code") {
+    return { ...profile, status: "available",
+      description: "Requires approval before Claude can change files or run write-capable commands.",
+      detail: "Claude asks for one-time tool approval with ambient settings disabled; daemon-mediated room tools remain available." };
+  }
   if (providerId === "open-model") {
     return {
       ...profile,

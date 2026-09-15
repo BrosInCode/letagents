@@ -279,7 +279,7 @@ async function claudeCodePreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const versionReadiness = inspectClaudeCodeVersion(version ?? "");
+  const versionReadiness = inspectClaudeCodeVersion(version ?? "", input.launchMode === "supervised" && input.permissionProfileId === "ask_before_write");
   if (!versionReadiness.supported) {
     return {
       providerId: provider.id,

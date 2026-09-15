@@ -273,14 +273,14 @@ test("provider configuration rejects unsupported and conflicting native settings
     configurationRevision: 1,
   }), /cannot override 'sandbox'/);
 
-  assert.throws(() => deriveProviderConfigurationSnapshot({
+  assert.equal(deriveProviderConfigurationSnapshot({
     provider: "claude-code", model: null, reasoningEffort: null, permissionProfileId: "ask_before_write", configurationRevision: 1,
-  }, {}), /Claude supervised prompt bridging is not available/);
+  }, {}).launchPolicy.permissionMode, "default");
 });
 
-test("supervised profile contract gates Claude prompt approval without changing generic provider policy", () => {
+test("supervised profile contract exposes Claude prompt approval while retaining existing provider profiles", () => {
   const claude = supervisedPermissionProfilesForProvider("claude-code");
-  assert.equal(claude.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.equal(claude.find((profile) => profile.id === "ask_before_write")?.status, "available");
   assert.equal(claude.find((profile) => profile.id === "read_only")?.status, "available");
   assert.match(claude.find((profile) => profile.id === "read_only")?.detail ?? "", /shell tools are unavailable/);
   assert.equal(claude.find((profile) => profile.id === "full_access")?.status, "available");
@@ -295,6 +295,11 @@ test("supervised profile contract gates Claude prompt approval without changing 
   const cursor = supervisedPermissionProfilesForProvider("cursor");
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.status, "available");
   assert.equal(cursor.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.match(cursor.find((profile) => profile.id === "ask_before_write")?.detail ?? "", /does not request approval for every workspace edit/);
+  assert.throws(() => deriveProviderConfigurationSnapshot({
+    provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "ask_before_write", configurationRevision: 1,
+    launchPolicy: { force: false, sandbox: "enabled" },
+  }, {}), /does not request approval for every workspace edit/);
   assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.status, "available");
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.isDefault, false);
   assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.isDefault, true);
@@ -322,4 +327,22 @@ test("isolated supervised provider runtimes admit multiple agents in one room", 
   assert.equal(providerSupportsConcurrentSupervisedAgents("claude"), true);
   assert.equal(providerSupportsConcurrentSupervisedAgents("open-model"), true);
   assert.equal(providerSupportsConcurrentSupervisedAgents("cursor"), true);
+});
+
+test("Claude approval profile strips previous broad authority and can return to existing profiles", () => {
+  const selection = { provider: "claude-code", model: null, reasoningEffort: null, configurationRevision: 2 } as const;
+  const ask = deriveProviderConfigurationSnapshot({ ...selection, permissionProfileId: "ask_before_write" }, {
+    permissionMode: "bypassPermissions", dangerouslySkipPermissions: true, allowedTools: ["*"],
+    settings: '{"permissions":{"allow":["Bash"]}}', settingSources: "user,project", maxTurns: 9,
+  });
+  assert.equal(ask.launchPolicy.permissionMode, "default");
+  assert.deepEqual(ask.launchPolicy.allowedTools, ["mcp__letagents__*"]);
+  assert.equal(ask.launchPolicy.settings, "{}");
+  assert.equal(ask.launchPolicy.settingSources, "");
+  assert.equal(ask.launchPolicy.maxTurns, 9);
+  const full = deriveProviderConfigurationSnapshot({ ...selection, permissionProfileId: "full_access" }, ask.launchPolicy);
+  assert.deepEqual(full.launchPolicy, { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true, maxTurns: 9 });
+  const read = deriveProviderConfigurationSnapshot({ ...selection, permissionProfileId: "read_only" }, ask.launchPolicy);
+  assert.equal(read.launchPolicy.permissionMode, "dontAsk");
+  assert.deepEqual(read.launchPolicy.tools, ["Read", "Glob", "Grep"]);
 });

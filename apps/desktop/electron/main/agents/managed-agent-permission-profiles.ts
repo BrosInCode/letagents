@@ -95,10 +95,10 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "ask_before_write",
     label: "Ask before writes",
-    description: "Cursor approval prompts are not bridged into the desktop or room yet.",
+    description: "Unavailable because Cursor can edit ordinary workspace files without asking.",
     status: "gated",
     risk: "medium",
-    detail: "Needs verified headless approval events before this can be honest user approval.",
+    detail: "Cursor does not request approval for every workspace edit. Use Read-only to prevent edits, or a write profile to allow them.",
     isDefault: false,
   },
   {
@@ -209,6 +209,11 @@ export function assertManagedAgentPermissionProfileAvailable(
     throw new Error(`Unknown permission profile '${requested}' for ${providerId}.`);
   }
   const profile = managedAgentPermissionProfileForProvider(providerId, requestedProfileId);
+  if (launchMode === "supervised" && providerId === "claude-code" && profile.id === "ask_before_write") {
+    return { ...profile, status: "available",
+      description: "Requires approval before Claude can change files or run write-capable commands.",
+      detail: "Uses native one-time tool approvals with ambient settings disabled; daemon-mediated room tools remain available." };
+  }
   if (
     launchMode === "supervised"
     && (providerId === "codex" || providerId === "open-model")

@@ -95,6 +95,48 @@ Desktop preflight and the adapter both require Claude Code 2.1.70 or newer.
 - provider registry and desktop tests: Claude advertises only supervised
   `daemon_inbox`; the former app-owned Claude runtime is unavailable.
 
+## Supervised one-time tool approvals (2026-09-15)
+
+Ask before writes now uses Claude's native `--permission-prompt-tool stdio`
+conversation. The desktop and daemon share the existing host approval journal;
+only one-time allow or deny is supported. Neither permission suggestions nor
+session-wide permission updates are returned to Claude. Native approval payloads
+remain host-ephemeral and are not published as room activity.
+
+This profile requires **Claude Code 2.1.272 or newer**, the version verified for
+this path. Preflight gives an update-needed message before authentication or
+launch on older versions. Startup also requires `msg_lifecycle_v1`. Existing
+read-only and full-access minimums and policies are unchanged.
+
+The profile uses `permissionMode=default`, disables ambient settings, restricts
+native tools to file inspection/change, shell, and web tools, and keeps the
+strict daemon-mediated LetAgents MCP tools available. Interactive question and
+subagent tools are not exposed by this profile. Every pending approval is bound
+to the current process birth, exact native-started room turn, tool-use ID, tool
+name, and original input. Cancellation, terminal results, control loss, and
+replacement invalidate that authority. A resumed continuation cannot inherit a
+pending approval from its previous process.
+
+Native conformance was exercised with the actual **2.1.272 CLI and production
+Claude adapter** in a disposable local workspace, using a loopback Anthropic
+API fixture with synthetic tool-use responses and a fake key. It proved:
+
+- a real native Write request pauses with the target file absent;
+- allow creates the file once, and a later Write requests approval again;
+- deny leaves the target absent;
+- interruption emits cancellation and an exact `aborted_tools` terminal, leaves
+  the target absent, and rejects a late approval;
+- stop/resume retains the session ID and rejects the old process's approval.
+
+This exercises native tool execution and permission handling, not real-model
+behavior or a signed-in Claude account. The host's installed 2.1.69 CLI had no
+active Claude login; it was not upgraded or reconfigured. Focused adapter,
+router, broker/journal, profile-transition, preflight, and renderer tests cover
+stale/mutated requests, duplicate responses, subagent/foreign correlation,
+uncertain stdin writes, and preservation of existing provider behavior.
+
+The historical feasibility section below records the earlier disabled state.
+
 ## Typed-observation and approval feasibility (2026-08-31)
 
 PR3 adds future-only structural observations alongside the legacy lifecycle;
