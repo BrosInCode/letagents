@@ -124,7 +124,18 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
       }
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
-        : { permissionMode: "acceptEdits", dangerouslySkipPermissions: false };
+        : {
+          permissionMode: "default", dangerouslySkipPermissions: false,
+          allowDangerouslySkipPermissions: false,
+          tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
+          allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+        };
+    if (profile === "ask_before_write") {
+      const authorityFlags = new Set(Object.keys(authority).map(key => key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)));
+      for (const key of Object.keys(policy)) {
+        if (key.includes("-") && authorityFlags.has(key)) throw new Error(`Claude approval profile cannot override '${key}'.`);
+      }
+    }
     for (const [key, value] of Object.entries(authority)) {
       requirePolicyMatch(policy, key, value, provider);
     }
@@ -208,6 +219,7 @@ function stripProfileAuthority(
 ): Record<string, unknown> {
   const previousClaudeProfileWasReadOnly = (policy.permissionMode === "plan" || policy.permissionMode === "dontAsk")
     && policy.dangerouslySkipPermissions === false;
+  const previousClaudeProfileAsked = policy.permissionMode === "default" && policy.dangerouslySkipPermissions === false;
   const authorityKeys = provider === "codex"
     ? ["approvalPolicy", "sandboxPolicy"]
     : provider === "open-model"
@@ -216,9 +228,11 @@ function stripProfileAuthority(
       ? [
         "permissionMode",
         "dangerouslySkipPermissions",
-        ...(nextPermissionProfileId === "read_only" || previousClaudeProfileWasReadOnly
+        ...(nextPermissionProfileId === "read_only" || nextPermissionProfileId === "ask_before_write" || previousClaudeProfileWasReadOnly || previousClaudeProfileAsked
           ? ["tools", "allowedTools", "settingSources"]
           : []),
+        ...(nextPermissionProfileId === "ask_before_write" || previousClaudeProfileAsked
+          ? ["settings", "allowDangerouslySkipPermissions"] : []),
       ]
       : provider === "cursor"
         ? ["mode", "force", "sandbox"]

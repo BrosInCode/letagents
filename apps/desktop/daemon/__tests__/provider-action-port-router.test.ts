@@ -849,7 +849,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       await cursorDaemon.stop();
     }
 
-    // Case 2: a stale generic Claude profile must be rejected before native dispatch.
+    // Case 2: a stale generic Claude policy is narrowed to the selected supervised approval profile.
     capturedSpawns.length = 0;
     const paths2 = {
       lockPath: join(root, "d2.lock"), socketPath: join(root, "d2.sock"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl"),
@@ -863,8 +863,10 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     try {
       await daemon2.start();
       assert.equal((await daemonRequest(paths2.socketPath, "manifest.put", { entry: claudeEntry })).ok, true);
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      assert.equal(capturedSpawns.length, 0, "a gated supervised profile must fail before provider launch");
+      await eventually(async () => capturedSpawns.length === 1, "Claude approval-profile spawn");
+      assert.equal(capturedSpawns.length, 1);
+      assert.equal((capturedSpawns[0]!.launchPolicy as Record<string, unknown>).permissionMode, "default");
+      assert.equal((capturedSpawns[0]!.launchPolicy as Record<string, unknown>).settingSources, "");
     } finally {
       await daemon2.stop();
     }
@@ -1545,4 +1547,33 @@ test("operator resolution remains available after the controlled runtime is deta
     await store.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Claude permissions route exact native turn evidence and one-shot dispatch", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("claude-code", calls);
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const handle = await router.spawn({ provider: "claude-code", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const native = { id: "request", request: { subtype: "can_use_tool" as const, tool_name: "Write", tool_use_id: "tool", input: { file_path: "/repo/a", content: "text" } } };
+  const request = { provider: "claude-code" as const, native };
+  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", requests: [native] }); };
+  await router.observePermissions(handle, event => {
+    assert.equal(event.type, "snapshot");
+    if (event.type === "snapshot") { assert.deepEqual(event.requests, [request]); assert.notEqual(event.requests[0]!.native, native); assert.ok(event.connectionId); }
+  }, new AbortController().signal);
+  adapter.correlatePermissionTurn = async (_handle, expected) => {
+    assert.deepEqual(expected, native);
+    return { outcome: "correlated", providerContinuationId: handle.providerContinuationId!, providerTurnId: "turn" };
+  };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "command" });
+  adapter.replyPermission = async (_handle, expected, reply, options) => {
+    assert.deepEqual(expected, native); assert.equal(reply, "reject");
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); calls.push("send");
+    return { outcome: "sent", scope: "request" };
+  };
+  assert.deepEqual(await router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "sent_unacknowledged", nativeScope: "request" });
+  await assert.rejects(router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {
+    await router.spawn({ provider: "claude-code", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  } }), /binding changed/);
+  assert.equal(calls.filter(value => value === "send").length, 1);
 });

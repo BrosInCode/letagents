@@ -22,7 +22,7 @@ import type {
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
-import type { CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
+import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
 type NativeHandle = {
   custodyLaunchAgentSessionId?: string;
@@ -35,9 +35,9 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
-  observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest)[] } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
-  replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
-  correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
+  observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
+  replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
+  correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
   inspectPermissionFileChanges?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
   inspectPermissionProfile?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
   activateCustodialPolling?(handle: NativeHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
@@ -233,14 +233,16 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const notify = (event: ProviderPermissionObservation) => { try { listener(event); } catch { /* Observer cannot control providers. */ } };
     const adapter = await this.adapter(remembered.provider);
     if (signal.aborted) return;
-    if (!current() || !["codex", "open-model"].includes(remembered.provider) || !adapter.observePermissions) { notify({ type: "unavailable" }); return; }
+    if (!current() || !["codex", "open-model", "claude-code"].includes(remembered.provider) || !adapter.observePermissions) { notify({ type: "unavailable" }); return; }
     await adapter.observePermissions(remembered.handle, event => {
       if (signal.aborted) return;
       if (!current()) { notify({ type: "unavailable" }); return; }
       if (event.type !== "snapshot") { notify(event); return; }
       const requests: ProviderPermissionRequest[] = event.requests.map(native => remembered.provider === "codex"
         ? { provider: "codex", native: native as CodexNativePermissionRequest }
-        : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
+        : remembered.provider === "claude-code"
+          ? { provider: "claude-code", native: structuredClone(native as ClaudeNativePermissionRequest) }
+          : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
       notify({ type: "snapshot", requests, connectionId: remembered.provider === "codex"
         ? (requests[0]?.native as CodexNativePermissionRequest | undefined)?.connectionId ?? null
         : createHash("sha256").update(JSON.stringify(binding.connection)).digest("hex") });
@@ -276,7 +278,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         return { outcome: "correlated", providerContinuationId: continuation!, providerTurnId: params.turnId, kind };
       }
       const expected = structuredClone(request.native);
-      const kind = expected.permission === "bash" ? "command" : expected.permission === "edit" ? "file_change" : null;
+      const kind = request.provider === "claude-code" ? "command"
+        : (expected as OpenCodeNativePermissionRequest).permission === "bash" ? "command"
+          : (expected as OpenCodeNativePermissionRequest).permission === "edit" ? "file_change" : null;
       if (!kind) return { outcome: "correlation_unproven" };
       const adapter = await this.adapter(remembered.provider);
       if (!current() || !adapter.correlatePermissionTurn) return { outcome: "correlation_unproven" };
@@ -306,7 +310,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       throw error;
     });
     if (!admitted || !current()) throw Object.assign(new Error("Permission dispatch cannot be confirmed."), { outcome: "uncertain" });
-    if (request.provider === "codex" && result.outcome === "sent") return { outcome: "sent_unacknowledged", nativeScope: "request" };
+    if ((request.provider === "codex" || request.provider === "claude-code") && result.outcome === "sent") return { outcome: "sent_unacknowledged", nativeScope: "request" };
     if (request.provider === "open-model" && result.outcome === "processed") return { outcome: "native_processed", nativeScope: result.nativeScope };
     throw Object.assign(new Error("Permission dispatch returned unexpected evidence."), { outcome: "uncertain" });
   }

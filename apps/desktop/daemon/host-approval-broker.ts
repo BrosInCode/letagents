@@ -162,7 +162,7 @@ export class HostApprovalBroker {
     if (previous) previous.requests = [];
     const provider = this.options.provider;
     if (!provider?.observePermissions || !handle.providerConnection
-      || !["codex_app_server", "opencode_server"].includes(handle.providerConnection.kind)) return () => {};
+      || !["codex_app_server", "opencode_server", "claude_cli"].includes(handle.providerConnection.kind)) return () => {};
     const lane: Lane = { agentId, generation, handle, connection: { ...handle.providerConnection },
       controller: new AbortController(), revision: 0, state: "degraded", connectionId: null, requests: [],
       approvalExecutions: null };
@@ -335,7 +335,7 @@ export class HostApprovalBroker {
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
     const prepared = await this.prepareCore(lane, native);
     const presentation = this.presentation(prepared.entry, native,
-      prepared.kind === "command" ? "Run a command"
+      native.provider === "claude-code" ? "Run a tool" : prepared.kind === "command" ? "Run a command"
         : prepared.kind === "file_change" ? "Change files" : "Grant for this turn", prepared.fileChanges);
     const { entry: _entry, now, kind: _kind, ...result } = prepared;
     const candidate: HostApprovalCandidate = { reference: reference(result.approval), presentation,

@@ -209,6 +209,11 @@ export function assertManagedAgentPermissionProfileAvailable(
     throw new Error(`Unknown permission profile '${requested}' for ${providerId}.`);
   }
   const profile = managedAgentPermissionProfileForProvider(providerId, requestedProfileId);
+  if (launchMode === "supervised" && providerId === "claude-code" && profile.id === "ask_before_write") {
+    return { ...profile, status: "available",
+      description: "Requires approval before Claude can change files or run write-capable commands.",
+      detail: "Uses native one-time tool approvals with ambient settings disabled; daemon-mediated room tools remain available." };
+  }
   if (
     launchMode === "supervised"
     && (providerId === "codex" || providerId === "open-model")

@@ -27,7 +27,7 @@ const secret = "PRIVATE-APPROVAL-CONTENT";
 const now = Date.parse("2026-08-31T00:00:00.000Z");
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-async function fixture(providerId: "codex" | "open-model" = "codex") {
+async function fixture(providerId: "codex" | "open-model" | "claude-code" = "codex") {
   const root = await mkdtemp(join(tmpdir(), "letagents-approval-broker-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -36,6 +36,7 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
   const inbox = new SupervisedAgentInboxStore(path, () => new Date(now).toISOString());
   const connection = providerId === "codex"
     ? { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "native-birth" }
+    : providerId === "claude-code" ? { kind: "claude_cli" as const, pid: 4311, processIdentity: "native-birth" }
     : { kind: "opencode_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "native-birth", serverAuthPath: "/private/native-auth" };
   const entry: DaemonManifestEntry = { id: "agent", room_id: "room", display_name: "GardenPoint", provider: providerId,
     model: null, charter: "Help", desired_state: "running", observed_state: "working", condition: "none",
@@ -58,6 +59,8 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
   const native: ProviderPermissionRequest = providerId === "codex"
     ? { provider: "codex", native: { id: 1, connectionId: "connection", method: "item/commandExecution/requestApproval",
       params: { threadId: "continuation", turnId: "native-turn", command: `printf '${secret}'`, reason: "\u001b[31m\u202eFake trusted label" } } }
+    : providerId === "claude-code"
+      ? { provider: "claude-code", native: { id: "permission", request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: "tool", input: { content: secret } } } }
     : { provider: "open-model", native: { id: "permission", sessionID: "continuation", permission: "bash", patterns: [secret],
       metadata: { command: secret }, always: [], tool: { messageID: "assistant-message", callID: "call" } } };
   const state = { current: true, owned: true, correlation: true, turnId: "native-turn", live: handle as ProviderActionHandle | undefined,
@@ -92,7 +95,7 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
       options.assertNativeDispatch!();
       sends.push(reply); order.push("native_write");
       if (state.failAfter) throw new Error("native response lost");
-      return providerId === "codex" ? { outcome: "sent_unacknowledged" as const, nativeScope: "request" as const }
+      return providerId !== "open-model" ? { outcome: "sent_unacknowledged" as const, nativeScope: "request" as const }
         : { outcome: "native_processed" as const, nativeScope: reply === "reject" ? "session_pending" as const : "request" as const };
     },
   } as unknown as ProviderActionPort;
@@ -136,24 +139,24 @@ function fileChangeRequest(native: ProviderPermissionRequest, workspace: string)
 }
 
 test("host approvals use exact operational turns without capture and commit selection and intent before native response", async () => {
-  for (const provider of ["codex", "open-model"] as const) {
+  for (const provider of ["codex", "open-model", "claude-code"] as const) {
     const f = await fixture(provider);
     try {
       assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_turns").get()!.n, 0);
       const [candidate] = await f.broker.list("room"); assert.ok(candidate?.reference, "operational turn must admit an approval without capture");
-      assert.equal(candidate.status, "pending"); assert.equal(candidate.presentation.title, "Run a command");
+      assert.equal(candidate.status, "pending"); assert.equal(candidate.presentation.title, provider === "claude-code" ? "Run a tool" : "Run a command");
       assert.match(candidate.presentation.details, /PRIVATE-APPROVAL-CONTENT/);
-      assert.equal(candidate.presentation.denyScope, provider === "codex" ? "request" : "session_pending");
+      assert.equal(candidate.presentation.denyScope, provider !== "open-model" ? "request" : "session_pending");
       if (provider === "codex") {
         assert.match(candidate.presentation.details, /\\u001b/); assert.match(candidate.presentation.details, /\\u202e/);
         assert.doesNotMatch(candidate.presentation.details, /[\u001b\u202e]/);
       }
       assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "none");
-      assert.equal(await f.broker.decide(decision(candidate, { decision: provider === "codex" ? "allow_once" : "deny" })), provider === "codex" ? "decision_sent" : "resolved");
+      assert.equal(await f.broker.decide(decision(candidate, { decision: provider === "codex" ? "allow_once" : "deny" })), provider !== "open-model" ? "decision_sent" : "resolved");
       assert.deepEqual(f.order, ["decision_committed", "dispatch_committed", "native_write"]);
       assert.deepEqual(f.sends, [provider === "codex" ? "once" : "reject"]);
       const row = await f.store.getExecutionApproval(candidate.reference);
-      assert.equal(row!.decision!.dispatchState, provider === "codex" ? "uncertain" : "acknowledged");
+      assert.equal(row!.decision!.dispatchState, provider !== "open-model" ? "uncertain" : "acknowledged");
       for (const table of f.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'execution_%'").all()) {
         assert.doesNotMatch(JSON.stringify(f.db.prepare(`SELECT * FROM ${table.name}`).all()), /PRIVATE-APPROVAL-CONTENT|Fake trusted label|native-auth/);
       }
