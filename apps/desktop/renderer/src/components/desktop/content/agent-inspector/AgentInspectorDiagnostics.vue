@@ -8,26 +8,24 @@
       </button>
     </header>
 
+    <section class="diagnostics-path" aria-label="Agent health checks">
+      <div class="diagnostics-path-caption"><span>Connection checks</span><span>{{ assessment.passedCount }} / {{ assessment.checks.length }} clear</span></div>
+      <div class="diagnostics-path-nodes">
+        <button v-for="check in assessment.checks" :key="check.id" type="button" class="diagnostics-check" :data-state="check.state" :data-check="check.id" :aria-pressed="selectedId === check.id" :title="check.summary" :disabled="busy || checking" @click="openCheck(check.id)">
+          <span class="diagnostics-check-icon"><component :is="checkIcons[check.id]" :size="19" aria-hidden="true" /></span>
+          <strong>{{ check.label }}</strong>
+          <span class="diagnostics-state" :data-state="check.state"><component :is="stateIcons[check.state]" :size="11" aria-hidden="true" />{{ stateLabels[check.state] }}</span>
+        </button>
+      </div>
+    </section>
+
     <div v-if="!selectedCheck" class="diagnostics-overview diagnostics-view">
-      <section class="diagnostics-intro" aria-labelledby="diagnostics-headline">
+      <section class="diagnostics-intro" :data-state="assessment.state" aria-labelledby="diagnostics-headline">
+        <span class="diagnostics-status-label"><component :is="stateIcons[assessment.state]" :size="15" aria-hidden="true" />{{ assessment.state === 'passed' ? 'Checks clear' : assessment.state === 'attention' ? 'Needs attention' : assessment.state === 'paused' ? 'On hold' : 'Current observation' }}</span>
         <h3 id="diagnostics-headline">{{ assessment.headline }}</h3>
         <p>{{ assessment.detail }}</p>
-        <div class="diagnostics-coverage" aria-label="Check results">
-          <span v-for="check in assessment.checks" :key="check.id" :data-state="check.state" aria-hidden="true"></span>
-        </div>
-        <div class="diagnostics-coverage-caption"><span>{{ assessment.passedCount }} of {{ assessment.checks.length }} checks clear</span><span>Based on available observations</span></div>
-      </section>
-
-      <button v-if="assessment.state !== 'passed'" type="button" class="diagnostics-primary diagnostics-start" @click="openCheck(assessment.primaryCheckId)">
-        {{ assessment.state === 'attention' ? 'Troubleshoot this issue' : 'Explore the next step' }}<ArrowRight :size="15" aria-hidden="true" />
-      </button>
-
-      <section class="diagnostics-checks" aria-label="Agent health checks">
-        <button v-for="check in assessment.checks" :key="check.id" type="button" class="diagnostics-check" :data-state="check.state" :data-check="check.id" @click="openCheck(check.id)">
-          <span class="diagnostics-check-icon"><component :is="checkIcons[check.id]" :size="17" aria-hidden="true" /></span>
-          <span class="diagnostics-check-copy"><strong>{{ check.label }}</strong><span>{{ check.summary }}</span></span>
-          <span class="diagnostics-state" :data-state="check.state"><component :is="stateIcons[check.state]" :size="13" aria-hidden="true" /><span>{{ stateLabels[check.state] }}</span></span>
-          <ChevronRight :size="14" class="diagnostics-chevron" aria-hidden="true" />
+        <button v-if="assessment.state !== 'passed'" type="button" class="diagnostics-primary diagnostics-start" @click="openCheck(assessment.primaryCheckId)">
+          {{ assessment.state === 'attention' ? 'Troubleshoot this issue' : 'Explore the next step' }}<ArrowRight :size="15" aria-hidden="true" />
         </button>
       </section>
 
@@ -96,7 +94,7 @@
         <p v-else class="diagnostics-footnote">No runtime events are retained. This alone does not mean the agent is inactive.</p>
       </div>
     </details>
-    <p class="diagnostics-footer"><ShieldCheck :size="13" aria-hidden="true" />Checks observe your agent. Recovery runs only when you choose it.</p>
+    <p class="diagnostics-footer"><ShieldCheck :size="13" aria-hidden="true" />Based on available observations. Recovery runs only when you choose it.</p>
   </div>
 </template>
 

@@ -2,6 +2,7 @@
 .agent-inspector-surface[data-tab="diagnostics"] > .agent-inspector-scroll-region { flex: 1 1 0; }
 .agent-inspector-diagnostics {
   display: grid;
+  align-content: start;
   gap: 16px;
   color: var(--text);
   font-size: .78rem;
@@ -19,33 +20,36 @@
 .diagnostics-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .diagnostics-eyebrow { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--text-secondary); font-size: .66rem; font-weight: 620; letter-spacing: .045em; text-transform: uppercase; }
 .diagnostics-refresh { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; margin-right: -7px; padding: 0 7px; border: 0; border-radius: 8px; color: var(--text-secondary); background: transparent; font-size: .7rem !important; transition: color 140ms ease, background-color 140ms ease; }
-.diagnostics-intro h3 { max-width: 28ch; margin: -4px 0 9px; color: var(--text); font-size: 1.35rem; font-weight: 640; line-height: 1.23; letter-spacing: -.035em; text-wrap: balance; }
-.diagnostics-intro p { max-width: 45ch; margin: 0; color: var(--text-secondary); line-height: 1.6; }
-.diagnostics-coverage { display: flex; gap: 5px; margin: 20px 0 7px; }
-.diagnostics-coverage > span { flex: 1; height: 3px; border-radius: 2px; background: var(--border-strong); }
-.diagnostics-coverage > [data-state="passed"] { background: var(--green-text); }
-.diagnostics-coverage > [data-state="attention"], .diagnostics-coverage > [data-state="pending"] { background: var(--amber-text); }
-.diagnostics-coverage-caption { display: flex; justify-content: space-between; gap: 12px; color: var(--text-tertiary); font-size: .61rem; font-variant-numeric: tabular-nums; }
-.diagnostics-checks { overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--diagnostic-soft); }
-.diagnostics-check { display: flex; align-items: center; gap: 11px; width: 100%; min-height: 70px !important; padding: 12px; border: 0; background: transparent; color: var(--text); text-align: left; transition: background-color 140ms ease; }
-.diagnostics-check + .diagnostics-check { border-top: 1px solid var(--border); }
-.diagnostics-check-icon { display: grid; place-items: center; width: 32px; height: 34px; flex: 0 0 auto; color: var(--text-secondary); }
-.diagnostics-check-copy { display: grid; flex: 1; gap: 3px; min-width: 0; }
-.diagnostics-check-copy strong { font-size: .78rem; font-weight: 590; }
-.diagnostics-check-copy > span { color: var(--text-secondary); font-size: .68rem; line-height: 1.4; overflow-wrap: anywhere; }
+.diagnostics-path { padding: 16px 0 8px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.diagnostics-path-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: var(--text-tertiary); font-size: 11px; }
+.diagnostics-path-caption > span:last-child { font: 10px/1.5 var(--font-mono); }
+.diagnostics-path-nodes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.diagnostics-check { position: relative; display: flex; align-items: center; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 3px 12px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--text); text-align: center; transition: background-color 130ms ease, border-color 130ms ease; }
+.diagnostics-check:not(:last-child)::after { content: ''; position: absolute; top: 29px; left: calc(50% + 23px); width: calc(100% - 42px); height: 1px; background: var(--border-strong); pointer-events: none; }
+.diagnostics-check[aria-pressed=true] { background: var(--accent-dim); border-color: var(--border-strong); }
+.diagnostics-check-icon { display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 auto; border: 1px solid var(--border-strong); border-radius: 12px; color: var(--text-secondary); background: var(--bg-subtle); }
+.diagnostics-check[data-state=attention] .diagnostics-check-icon { color: var(--amber-text); border-color: color-mix(in srgb, var(--amber-text) 35%, var(--border)); }
+.diagnostics-check[data-state=passed] .diagnostics-check-icon { color: var(--text); }
+.diagnostics-check > strong { display: flex; align-items: center; min-height: 30px; font-size: 11px; line-height: 1.35; font-weight: 550; }
+.diagnostics-intro { padding: 20px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-subtle); }
+.diagnostics-status-label { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 12px; color: var(--text-secondary); font-size: 11px; font-weight: 550; }
+.diagnostics-intro[data-state=attention] .diagnostics-status-label { color: var(--amber-text); }
+.diagnostics-intro[data-state=passed] .diagnostics-status-label { color: var(--green-text); }
+.diagnostics-intro h3 { margin: 0 0 10px; color: var(--text); font-size: 20px; font-weight: 610; line-height: 1.3; letter-spacing: -.03em; text-wrap: balance; }
+.diagnostics-intro > p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
 .diagnostics-state { display: inline-flex; align-items: center; gap: 4px; color: var(--text-tertiary); font-size: .61rem; white-space: nowrap; }
 .diagnostics-state[data-state="passed"] { color: var(--green-text); }
 .diagnostics-state[data-state="attention"], .diagnostics-state[data-state="pending"] { color: var(--amber-text); }
 .diagnostics-chevron { color: var(--text-tertiary); }
 .diagnostics-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 44px; padding: 10px 14px; border: 1px solid transparent; border-radius: 9px; color: var(--bg); background: var(--text); font-weight: 620 !important; transition: opacity 140ms ease; }
-.diagnostics-start { margin-top: -6px; }
+.diagnostics-start { margin-top: 20px; }
 .diagnostics-trace { display: flex; align-items: center; gap: 12px; padding: 4px 0 0; border: 0; background: transparent; color: var(--text-secondary); text-align: left; }
 .diagnostics-trace-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: var(--diagnostic-soft); }
 .diagnostics-trace > span:nth-child(2) { display: grid; flex: 1; gap: 2px; }
 .diagnostics-trace strong { color: var(--text); font-size: .75rem; font-weight: 580; }
 .diagnostics-trace span span { font-size: .68rem; }
 .diagnostics-overview { display: grid; gap: 16px; }
-.diagnostics-guide, .diagnostics-step-content { display: grid; gap: 18px; }
+.diagnostics-guide, .diagnostics-step-content { display: grid; gap: 16px; }
 .diagnostics-confirmation { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--green-text) 12%, transparent); color: var(--green-text); }
 .diagnostics-back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; min-height: 44px; margin: 0 0 0 -6px; padding: 0 6px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: .7rem !important; }
 .diagnostics-steps { display: flex; align-items: center; gap: 14px; margin: 0; padding: 0 0 18px; border-bottom: 1px solid var(--border); list-style: none; }
@@ -136,7 +140,7 @@
     transition: transform 180ms var(--diagnostic-ease), color 140ms ease, background-color 140ms ease, border-color 140ms ease;
   }
   .agent-inspector-diagnostics[data-motion="true"] .diagnostics-steps [aria-current="step"] > span { transform: scale(1.06); }
-  .diagnostics-coverage > span { transition: background-color 180ms ease; }
+
   .diagnostics-technical > summary > .diagnostics-chevron, .diagnostics-events summary > .diagnostics-chevron { transition: transform 160ms var(--diagnostic-ease); }
   .agent-inspector-diagnostics[data-motion="false"] summary > .diagnostics-chevron { transition: none; }
 
@@ -144,10 +148,10 @@
   @keyframes diagnostics-spin { to { transform: rotate(360deg); } }
 }
 @media (max-width: 380px) {
-  .diagnostics-check { gap: 7px; padding: 13px 9px; }
-  .diagnostics-check-icon { width: 24px; }
+  .diagnostics-check { gap: 7px; }
+  .diagnostics-check > strong { font-size: 10px; }
   .diagnostics-state { font-size: .58rem; }
   .diagnostics-steps { gap: 9px; }
   .diagnostics-steps li + li::before { width: 10px; margin-right: 3px; }
-  .diagnostics-coverage-caption { font-size: .58rem; }
+
 }

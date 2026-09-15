@@ -22,7 +22,7 @@ test('Needs you presents a human decision with context and escapes agent content
     const eventHtml = await renderToString(createSSRApp(eventsView, { roomIdentifier: 'room', repository: 'a/b', currentBranch: 'main', githubConnected: true, githubLoading: false, githubBusy: false, githubError: null, loading: false, loadingOlder: false, error: null, linkedTaskId: null, selectedEventId: event.id, eventsPage: { roomIdentifier: 'room', githubRoomIdentifier: null, events: [event], hasMore: false } }));
     assert.match(eventHtml, /GitHub event details for Build/, 'cross-view navigation opens the selected check on the first mount');
     const unavailable = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }] }, loading: false, error: '' }));
-    assert.match(unavailable, /Some sources still need checking/); assert.doesNotMatch(unavailable, /You’re clear for now/);
+    assert.match(unavailable, /Some sources still need checking/); assert.match(unavailable, /<details class="inbox-source-notice"/); assert.match(unavailable, /Couldn’t fully check Product launch/); assert.doesNotMatch(unavailable, /You’re clear for now/);
   } finally { await vite.close(); }
 });
 test('account reset rejects old in-flight inbox reads and clears private cached content', async () => {
