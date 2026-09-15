@@ -261,7 +261,7 @@ async function refresh(verifyResult = false): Promise<void> {
     refreshFailed.value = !fresh;
     refreshMessage.value = fresh ? "Checks refreshed from the latest available observations." : "Couldn’t confirm fresh checks. The available evidence is shown above.";
     if (verifyResult) {
-      verification.value = fresh && recoveryChecksPassed.value && !recoveryError.value ? "passed" : "unresolved";
+      verification.value = fresh && recoveryChecksPassed.value && (!runtimeRecoveryRequested.value || !recoveryError.value) ? "passed" : "unresolved";
       if (verification.value === "passed") recoveryRequested.value = false;
     }
   } catch {
