@@ -136,11 +136,12 @@
 .inbox-room-options > button { margin: 0 8px 4px; }
 .inbox-room-options label { display: flex; align-items: center; gap: 10px; padding: 10px 8px; font-size: 12px; overflow-wrap: anywhere; cursor: pointer; }
 .inbox-room-options input { accent-color: var(--text); flex-shrink: 0; }
-.inbox-source-notice-container { position: relative; flex-shrink: 0; }
-.inbox-notice-dismiss { position: absolute; top: 10px; right: 8px; }
+.inbox-source-notice-container { position: relative; flex-shrink: 0; anchor-scope: --inbox-notice-summary; }
+/* Follow the summary's center even when its text wraps or the details expand. */
+.inbox-notice-dismiss { position: absolute; top: anchor(--inbox-notice-summary center); right: 8px; translate: 0 -50%; }
 .inbox-notice-indicator { color: var(--amber-text); }
 .inbox-source-notice { flex-shrink: 0; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-subtle); color: var(--text-secondary); font-size: 12px; }
-.inbox-source-notice summary { display: flex; align-items: center; gap: 10px; padding: 12px 52px 12px 14px; list-style: none; cursor: pointer; }
+.inbox-source-notice summary { display: flex; align-items: center; gap: 10px; padding: 12px 52px 12px 14px; list-style: none; cursor: pointer; anchor-name: --inbox-notice-summary; }
 .inbox-source-notice summary::-webkit-details-marker { display: none; }
 .inbox-source-notice summary > svg:first-child { color: var(--amber-text); }
 .inbox-source-notice summary > span { flex: 1; }
@@ -179,7 +180,7 @@
   .knowledge-header { gap: 10px; }
   .needs-you-page .knowledge-header { flex-wrap: wrap; }
   .inbox-header-actions { flex-wrap: wrap; justify-content: flex-start; }
-  .inbox-notice-dismiss { top: 6px; right: 6px; }
+  .inbox-notice-dismiss { right: 6px; }
   .knowledge-header h1, .knowledge-header h2 { font-size: 22px; }
   .knowledge-header p { max-width: 30ch; font-size: 12px; }
   .knowledge-title { gap: 8px; }
