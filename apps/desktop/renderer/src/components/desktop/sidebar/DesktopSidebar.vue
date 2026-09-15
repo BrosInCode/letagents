@@ -830,8 +830,31 @@ function handleRoomSwitcherShortcut(event: KeyboardEvent): void {
   event.preventDefault();
   openRoomSwitcher();
 }
-onMounted(() => window.addEventListener("keydown", handleRoomSwitcherShortcut));
-onBeforeUnmount(() => window.removeEventListener("keydown", handleRoomSwitcherShortcut));
+let navigationHeightQuery: MediaQueryList | null = null;
+let navigationFocusFrame = 0;
+function revealFocusedNavigationItem(): void {
+  cancelAnimationFrame(navigationFocusFrame);
+  navigationFocusFrame = requestAnimationFrame(() => {
+    navigationFocusFrame = 0;
+    const sidebar = sidebarElement.value;
+    const focused = document.activeElement;
+    if (!sidebar || sidebar.closest("[inert]") || !(focused instanceof HTMLElement)
+      || !sidebar.contains(focused) || !focused.closest(".sidebar-navigation")
+      || !focused.getClientRects().length) return;
+    // Switching scrolling ancestors must not leave keyboard focus offscreen.
+    focused.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+  });
+}
+onMounted(() => {
+  window.addEventListener("keydown", handleRoomSwitcherShortcut);
+  navigationHeightQuery = window.matchMedia("(max-height: 640px)");
+  navigationHeightQuery.addEventListener("change", revealFocusedNavigationItem);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleRoomSwitcherShortcut);
+  navigationHeightQuery?.removeEventListener("change", revealFocusedNavigationItem);
+  cancelAnimationFrame(navigationFocusFrame);
+});
 
 const searchButton = ref<HTMLButtonElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
