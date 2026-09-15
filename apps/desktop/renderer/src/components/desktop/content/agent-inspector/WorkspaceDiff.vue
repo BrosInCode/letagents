@@ -22,9 +22,12 @@
               <p v-if="selectedFile.previous_path" class="workspace-rename-note">Renamed from {{ selectedFile.previous_path }}</p>
               <div v-if="pageLoading || pageError" class="workspace-page-status" role="status"><span>{{ pageError ? 'Couldn’t load these lines.' : 'Loading lines…' }}</span><button v-if="pageError" type="button" @click="retryPage++">Try again</button></div>
               <div v-if="longLine !== null" class="workspace-long-line-heading"><button type="button" ref="backToDiff" @click="leaveLongLine">← Back to diff</button><span v-if="page">Long line · characters {{ (page?.lines[0]?.textOffset ?? 0) + 1 }}–{{ (page?.lines[0]?.textOffset ?? 0) + (page?.lines[0]?.text.length ?? 0) }}</span></div>
-              <div v-if="diffLines.length" :key="`${selectedPath}:${lineOffset}:${longLine}:${textOffset}`" ref="codeScroll" class="workspace-code-scroll" tabindex="0" aria-label="Code diff">
-                <pre class="workspace-patch"><code><span v-for="(line, index) in visibleLines" :key="index" class="workspace-diff-line" :data-kind="line.kind"><span class="workspace-line-number" aria-hidden="true">{{ line.before }}</span><span class="workspace-line-number" aria-hidden="true">{{ line.after }}</span><span class="workspace-line-sign">{{ line.kind === 'added' ? '+' : line.kind === 'deleted' ? '−' : ' ' }}</span><span class="workspace-line-content">{{ line.text || ' ' }}<button v-if="longLine === null && line.nextTextOffset !== null" type="button" class="workspace-long-line" :data-line-offset="lineOffset + index" @click="openLongLine(lineOffset + index)">Read full line ({{ line.textLength.toLocaleString() }} characters)</button></span></span></code></pre>
-
+              <div v-if="diffLines.length" :key="reader ? 'reader' : `${selectedPath}:${lineOffset}:${longLine}:${textOffset}`" ref="codeScroll" class="workspace-code-scroll" :data-reader="reader" :tabindex="reader ? undefined : 0" aria-label="Code diff">
+                <WorkspaceCode v-if="reader" :path="selectedPath" :lines="diffLines" @escape="emit('escape')" />
+                <pre v-else class="workspace-patch"><code><span v-for="(line, index) in diffLines" :key="index" class="workspace-diff-line" :data-kind="line.kind"><span class="workspace-line-number" aria-hidden="true">{{ line.before }}</span><span class="workspace-line-number" aria-hidden="true">{{ line.after }}</span><span class="workspace-line-sign">{{ line.kind === 'added' ? '+' : line.kind === 'deleted' ? '−' : ' ' }}</span><span class="workspace-line-content">{{ line.text || ' ' }}<button v-if="longLine === null && line.nextTextOffset !== null" type="button" class="workspace-long-line" :data-line-offset="lineOffset + index" @click="openLongLine(lineOffset + index)">Read full line ({{ line.textLength.toLocaleString() }} characters)</button></span></span></code></pre>
+                <nav v-if="reader && longLine === null && longLines.length" class="workspace-long-lines" aria-label="Truncated lines">
+                  <button v-for="{ line, offset } in longLines" :key="offset" type="button" class="workspace-long-line" :data-line-offset="offset" @click="openLongLine(offset)">Read full {{ line.kind === 'deleted' ? 'removed ' : '' }}line {{ line.after ?? line.before }} · {{ line.textLength.toLocaleString() }} characters</button>
+                </nav>
               </div>
               <div v-else-if="!pageLoading && !pageError" class="workspace-empty workspace-file-empty"><FileCode :size="26" aria-hidden="true" /><h3>{{ selectedFile.binary ? 'Binary file changed' : page?.included ? 'No text changes' : 'Diff not included' }}</h3><p>{{ selectedFile.binary ? 'A text preview is not available for this file.' : page?.included ? 'Only the file name, permissions, or other file metadata changed.' : 'This file is listed in the snapshot, but its code diff was not captured.' }}</p></div>
               <nav v-if="longLine !== null" class="workspace-line-pages" aria-label="Long line parts">
@@ -45,9 +48,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import { Check, FileCode, FileDiff, Info } from '@lucide/vue';
+import WorkspaceCode from './WorkspaceCode.vue';
 import type { WorkspaceChangeSummary } from '../../../../../../../../shared/workspace-change-summary.mjs';
 import { createWorkspaceDiffIndex, readWorkspaceDiffPage, type WorkspaceDiffPage, type WorkspaceDiffPageOptions } from '../../../../domain/workspace-diff';
-const props = defineProps<{ snapshot: WorkspaceChangeSummary; viewKey?: string; loadPage?: (path: string, options: WorkspaceDiffPageOptions) => Promise<WorkspaceDiffPage> }>();
+const props = defineProps<{ snapshot: WorkspaceChangeSummary; reader?: boolean; viewKey?: string; loadPage?: (path: string, options: WorkspaceDiffPageOptions) => Promise<WorkspaceDiffPage> }>();
+const emit = defineEmits<{ escape: [] }>();
 const selectedPath = ref('');
 const fileOffset = ref(0);
 const fileNav = ref<HTMLElement | null>(null);
@@ -100,7 +105,7 @@ watch([selectedPath, lineOffset, longLine, textOffset, retryPage, () => props.vi
   finally { if (!cancelled) pageLoading.value = false; }
 }, { immediate: true });
 const diffLines = computed(() => page.value?.lines ?? []);
-const visibleLines = diffLines;
+const longLines = computed(() => diffLines.value.flatMap((line, index) => line.nextTextOffset === null ? [] : [{ line, offset: lineOffset.value + index }]));
 const basename = (path: string) => path.split('/').at(-1);
 const dirname = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
 const fileStatus = (status: string) => ({ untracked: 'New file', added: 'Added', modified: 'Modified', deleted: 'Deleted', renamed: 'Renamed', copied: 'Copied', typechange: 'Type changed', unknown: 'Changed' }[status] ?? 'Changed');
@@ -141,6 +146,8 @@ const statusLetter = (status: string) => status === 'untracked' ? 'A' : status =
 .workspace-diff-line[data-kind='hunk'] { color: var(--text-secondary); background: var(--bg-card); margin-bottom: 4px; font-size: 10px; }
 .workspace-diff-line[data-kind='hunk']:not(:first-child) { margin-top: 12px; }
 .workspace-diff-line[data-kind='metadata'] { color: var(--text-secondary); font-style: italic; }
+.workspace-code-scroll[data-reader="true"] { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.workspace-long-lines { max-height: 84px; overflow: auto; padding: 0 12px; border-top: 1px solid var(--border); }
 .workspace-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; color: var(--text-secondary); text-align: center; }
 .workspace-empty h3 { margin: 16px 0 7px; color: var(--text); font-size: 14px; font-weight: 550; }
 .workspace-empty p { margin: 0; max-width: 330px; font-size: 12px; line-height: 1.7; text-wrap: pretty; }
