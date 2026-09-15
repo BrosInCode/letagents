@@ -1,7 +1,7 @@
 <template>
-  <section class="knowledge-page needs-you-page" aria-labelledby="inbox-title" data-testid="inbox-view">
+  <section class="knowledge-page needs-you-page" aria-labelledby="inbox-title" data-testid="inbox-view" :data-motion="motionEnabled" @pointerdown.capture="motionEnabled = true" @keydown.capture="motionEnabled = false">
     <header class="knowledge-header">
-      <div><span class="knowledge-eyebrow">Across your rooms</span><h1 id="inbox-title">Inbox</h1><p>Make the decisions. Catch up on the work.</p></div>
+      <div><h1 id="inbox-title" ref="pageHeading" tabindex="-1">{{ sectionTitle }}<span class="knowledge-total">{{ items.length }}</span></h1><p>{{ sectionDescription }}</p></div>
       <button class="knowledge-button" :disabled="loading" @click="emit('refresh')"><RefreshCw :size="14" :class="{ 'knowledge-spin': loading }" />Refresh</button>
     </header>
     <div class="knowledge-filters">
@@ -16,37 +16,35 @@
         </div>
       </details>
     </div>
-    <p class="inbox-section-hint">{{ section === 'needs-you' ? 'Explicit requests for your input. Room issues stay in Updates until someone asks for your help.' : section === 'updates' ? 'Unread replies, completed work, reviews and room issues. Dismissing an update does not resolve the underlying work.' : 'Your answers stay attached to the original requests and in their rooms.' }}</p>
+
     <p v-if="sendError" class="knowledge-notice" role="alert">{{ sendError }}</p>
     <p v-if="error" class="knowledge-notice" role="alert">{{ error }} <button @click="emit('refresh')">Try again</button></p>
-    <p v-if="data?.failures.length" class="knowledge-notice" role="status">Couldn’t fully check {{ data.failures.map(room => room.displayName).join(', ') }}. <button @click="emit('refresh')">Retry</button></p>
-    <p v-if="unavailable.length" class="knowledge-notice" role="status">Some updates are unavailable: {{ unavailable.join('; ') }}. <button @click="emit('refresh')">Retry</button></p>
-    <p v-if="data?.managedSessionsUnavailable" class="knowledge-notice" role="status">Local agent status could not be checked. <button @click="emit('refresh')">Retry</button></p>
-    <p v-if="rentalError" class="knowledge-notice" role="status">{{ rentalError }} <button @click="emit('refresh')">Retry</button></p>
-    <p v-if="data?.cloudUnavailable" class="knowledge-notice">Shared rooms are unavailable. <button @click="emit('refresh')">Retry</button></p>
-    <p v-if="data?.signedOut" class="knowledge-notice">Showing local rooms. Sign in to include your shared rooms.</p>
-    <p v-if="data?.limited || data?.rooms.some(room => room.truncated)" class="knowledge-notice">Showing up to 100 recent rooms and 200 requests per room, with unanswered requests first.</p>
-    <p v-if="section === 'updates' && data?.rooms.some(room => room.updates?.limited)" class="knowledge-notice">Some rooms have more activity. Open the room to see its full history.</p>
+    <details v-if="sourceNotices.length" class="inbox-source-notice">
+      <summary><TriangleAlert :size="15" aria-hidden="true" /><span>{{ hasSourceFailure ? 'Some sources need checking' : 'About this view' }}<span>{{ hasSourceFailure ? 'Your available requests and updates are shown below.' : 'Room access and history limits.' }}</span></span><ChevronDown :size="14" aria-hidden="true" /></summary>
+      <ul><li v-for="message in sourceNotices" :key="message">{{ message }}</li></ul><button class="knowledge-button" :disabled="loading" @click="emit('refresh')"><RefreshCw :size="14" aria-hidden="true" />{{ hasSourceFailure ? 'Retry sources' : 'Refresh' }}</button>
+    </details>
     <div v-if="lastDismissed" class="inbox-undo" role="status"><span>Dismissed “{{ lastDismissed.title }}”</span><button class="knowledge-text-button" @click="undoDismiss">Undo</button></div>
     <div v-if="loading && !data" class="knowledge-empty" role="status"><LoaderCircle class="knowledge-spin" :size="24" /><h2>Checking your rooms</h2><p>Gathering requests and updates.</p></div>
-    <div v-else-if="!items.length" class="knowledge-empty"><CircleCheck :size="30" /><h2>{{ emptyTitle }}</h2><p>{{ section === 'answered' ? 'Answered requests will appear here.' : section === 'updates' ? 'Room updates will appear here as work progresses.' : 'Questions, decisions and approvals will appear when someone asks for your input.' }}</p><button v-if="rooms.length" class="knowledge-button inbox-empty-action" @click="emit('update:rooms', [])">Show all rooms</button></div>
+    <div v-else-if="!items.length" class="knowledge-empty"><span class="knowledge-empty-mark"><CircleCheck :size="26" aria-hidden="true" /></span><h2>{{ emptyTitle }}</h2><p>{{ section === 'answered' ? 'Answered requests will appear here.' : section === 'updates' ? 'Room updates will appear here as work progresses.' : 'Questions, decisions and approvals will appear when someone asks for your input.' }}</p><button v-if="rooms.length" class="knowledge-button inbox-empty-action" @click="emit('update:rooms', [])">Show all rooms</button></div>
     <div v-else class="knowledge-workspace">
       <nav class="knowledge-queue" aria-label="Inbox items">
         <TransitionGroup name="knowledge-list">
-          <button v-for="item in items" :key="item.key" class="knowledge-queue-item" :data-selected="selected?.key === item.key" :aria-current="selected?.key === item.key ? 'true' : undefined" @click="selectedKey = item.key">
+          <button v-for="item in items" :key="item.key" class="knowledge-queue-item" :data-selected="selected?.key === item.key" :aria-current="selected?.key === item.key ? 'true' : undefined" @click="selectItem(item)">
             <span class="knowledge-queue-top"><span class="knowledge-category" :data-kind="item.category">{{ inboxCategoryLabel(item.category) }}</span><time :datetime="item.timestamp" :title="date(item.timestamp)">{{ relative(item.timestamp) }}</time></span>
             <strong>{{ item.title }}</strong><span class="knowledge-queue-preview">{{ item.body }}</span><span class="knowledge-room-name"><span class="knowledge-room-dot"></span>{{ item.roomName }}<ChevronRight :size="13" /></span>
           </button>
         </TransitionGroup>
       </nav>
       <article v-if="selected" :key="selected.key" class="knowledge-detail knowledge-enter" aria-labelledby="request-title">
+        <div class="knowledge-detail-context">
         <div class="knowledge-detail-top"><span class="knowledge-category" :data-kind="selected.category">{{ inboxCategoryLabel(selected.category) }}</span><button v-if="selected.roomIdentifier" class="knowledge-text-button" @click="openRoom(selected, 'room')">Open room <ArrowUpRight :size="14" /></button></div>
-        <h2 id="request-title">{{ selected.title }}</h2>
-        <p class="knowledge-byline">{{ selected.actor }} · {{ selected.roomName }}</p>
+        <h2 id="request-title" ref="requestHeading" tabindex="-1">{{ selected.title }}</h2>
+        <p class="knowledge-byline"><span>{{ selected.actor }}</span><span>{{ selected.roomName }}</span><time :datetime="selected.timestamp" :title="date(selected.timestamp)">{{ relative(selected.timestamp) === 'Just now' ? 'Just now' : `${relative(selected.timestamp)} ago` }}</time></p>
         <div class="knowledge-prose">{{ selected.body || 'Open the original work for more context.' }}</div>
-        <div v-if="selected.record?.recommendation" class="knowledge-recommendation"><span><Sparkles :size="14" />Recommendation</span><p>{{ selected.record.recommendation }}</p></div>
+        <div v-if="selected.record?.recommendation" class="knowledge-recommendation"><span><Lightbulb :size="15" aria-hidden="true" />Suggested approach</span><p>{{ selected.record.recommendation }}</p></div>
         <div v-if="selected.record?.unblocks" class="knowledge-unblocks"><ArrowRight :size="15" /><p><strong>Your answer unblocks</strong>{{ selected.record.unblocks }}</p></div>
         <div v-if="selected.record?.source_url || selected.record?.source_message_id" class="knowledge-source-row"><button v-if="selected.record.source_url" class="knowledge-button" @click="openSource(selected.record.source_url)"><Link2 :size="14" />View source</button><button v-if="selected.record.source_message_id" class="knowledge-button" @click="openRoom(selected, 'source')"><MessageSquare :size="14" />Original message</button></div>
+        </div>
         <div v-if="selected.record?.response" class="knowledge-answer" role="status"><span><CircleCheck :size="16" /> Answer recorded</span><p>{{ selected.record.response.body }}</p><small>{{ selected.record.response.actor.label }} · {{ date(selected.record.response.at) }}</small></div>
         <form v-else-if="selected.record" class="knowledge-response" @submit.prevent="respond">
           <label :for="`response-${selected.record.id}`">Your response</label><textarea :id="`response-${selected.record.id}`" v-model="drafts[selected.key]" rows="4" maxlength="8000" placeholder="Give the agent a clear decision or next step…" :disabled="sending" required></textarea>
@@ -63,8 +61,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { ArrowRight, ArrowUpRight, Check, ChevronDown, ChevronRight, CircleCheck, Link2, LoaderCircle, MessageSquare, RefreshCw, Send, SlidersHorizontal, Sparkles } from '@lucide/vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { ArrowRight, ArrowUpRight, Check, ChevronDown, ChevronRight, CircleCheck, Link2, LoaderCircle, MessageSquare, RefreshCw, Send, SlidersHorizontal, Lightbulb, TriangleAlert } from '@lucide/vue';
 import type { DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../../../electron/ipc-types.js';
 import type { DesktopNeedsYou } from '../../../../../electron/ipc-types/knowledge.js';
 import type { AttentionNavigationIntent } from './room-shell/types';
@@ -74,6 +72,26 @@ import './room-knowledge.css';
 
 const props = withDefaults(defineProps<{ data: DesktopNeedsYou | null; loading: boolean; error: string; rentals?: DesktopRentalRequest[]; rentalError?: string; rooms?: string[]; section?: InboxSection; storageKey?: string }>(), { rentals: () => [], rentalError: '', rooms: () => [], section: 'needs-you', storageKey: 'local' });
 const emit = defineEmits<{ refresh: []; openRoom: [intent: AttentionNavigationIntent]; openRental: []; 'update:section': [section: InboxSection]; 'update:rooms': [rooms: string[]]; 'threads-loaded': [room: string, page: DesktopRoomThreadInboxPage] }>();
+const motionEnabled = ref(false);
+const requestHeading = ref<HTMLElement | null>(null);
+const pageHeading = ref<HTMLElement | null>(null);
+const sectionTitle = computed(() => props.section === 'needs-you' ? 'Needs you' : props.section === 'updates' ? 'Updates' : 'Answered');
+const sectionDescription = computed(() => props.section === 'needs-you' ? 'Questions and decisions waiting on your input.' : props.section === 'updates' ? 'Replies, progress, and issues across your rooms.' : 'Your decisions, saved with the original requests.');
+const hasSourceFailure = computed(() => Boolean(props.data?.failures.length || unavailable.value.length || props.data?.managedSessionsUnavailable || props.rentalError || props.data?.cloudUnavailable));
+const sourceNotices = computed(() => [
+  ...(props.data?.failures.length ? [`Couldn’t fully check ${props.data.failures.map(room => room.displayName).join(', ')}.`] : []),
+  ...(unavailable.value.length ? [`Some updates are unavailable: ${unavailable.value.join('; ')}.`] : []),
+  ...(props.data?.managedSessionsUnavailable ? ['Local agent status could not be checked.'] : []),
+  ...(props.rentalError ? [props.rentalError] : []),
+  ...(props.data?.cloudUnavailable ? ['Shared rooms are unavailable.'] : []),
+  ...(props.data?.signedOut ? ['Showing local rooms. Sign in to include your shared rooms.'] : []),
+  ...(props.data?.limited || props.data?.rooms.some(room => room.truncated) ? ['Showing up to 100 recent rooms and 200 requests per room, with unanswered requests first.'] : []),
+  ...(props.section === 'updates' && props.data?.rooms.some(room => room.updates?.limited) ? ['Some rooms have more activity. Open the room to see its full history.'] : []),
+]);
+function selectItem(item: UniversalInboxItem) {
+  selectedKey.value = item.key;
+  if (window.matchMedia('(max-width: 700px)').matches) void nextTick(() => { requestHeading.value?.focus({ preventScroll: true }); requestHeading.value?.scrollIntoView({ block: 'start' }); });
+}
 const sections: { id: InboxSection; label: string }[] = [{ id: 'needs-you', label: 'Needs you' }, { id: 'updates', label: 'Updates' }, { id: 'answered', label: 'Answered' }];
 const selectedKey = ref(''); const drafts = reactive<Record<string, string>>({}); const sending = ref(false); const sendError = ref('');
 const roomMenu = ref<HTMLDetailsElement | null>(null); const dismissals = ref<Record<string, string>>({}); const lastDismissed = ref<UniversalInboxItem | null>(null); const loadingOlder = ref(false);
@@ -133,7 +151,7 @@ async function respond() {
     if (!desktopIpc.room.reviseKnowledge) throw new Error(desktopBridgeUpgradeMessage());
     await desktopIpc.room.reviseKnowledge(item.roomIdentifier, 'attention', item.record.id, { expected_version: item.record.version, response: drafts[item.key] });
     if (!alive) return;
-    delete drafts[item.key]; selectedKey.value = item.key; emit('update:section', 'answered'); emit('refresh');
+    delete drafts[item.key]; selectedKey.value = item.key; emit('update:section', 'answered'); emit('refresh'); void nextTick(() => pageHeading.value?.focus({ preventScroll: true }));
   } catch (error) { if (alive) sendError.value = error instanceof Error ? error.message : 'Unable to send your response.'; }
   finally { if (alive) sending.value = false; }
 }
