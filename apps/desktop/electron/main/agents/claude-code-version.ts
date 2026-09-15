@@ -1,4 +1,5 @@
 export const MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION = "2.1.70";
+export const MINIMUM_CLAUDE_TOOL_APPROVAL_VERSION = "2.1.272";
 
 /** One executable authority shared by desktop setup checks and daemon launch. */
 export function resolveClaudeCodeExecutable(
@@ -37,9 +38,10 @@ function compareVersions(left: ParsedVersion, right: ParsedVersion): number {
   return left.major - right.major || left.minor - right.minor || left.patch - right.patch;
 }
 
-export function inspectClaudeCodeVersion(output: string): ClaudeCodeVersionReadiness {
+export function inspectClaudeCodeVersion(output: string, toolApprovals = false): ClaudeCodeVersionReadiness {
   const parsed = parseVersion(output.trim());
-  const minimum = parseVersion(MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION)!;
+  const requiredVersion = toolApprovals ? MINIMUM_CLAUDE_TOOL_APPROVAL_VERSION : MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION;
+  const minimum = parseVersion(requiredVersion)!;
   if (!parsed) {
     return {
       version: null,
@@ -51,14 +53,14 @@ export function inspectClaudeCodeVersion(output: string): ClaudeCodeVersionReadi
     return {
       version: parsed.version,
       supported: false,
-      error: `Claude Code ${parsed.version} is too old for supervised room agents. Update to ${MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION} or newer with 'claude update', then try again.`,
+      error: `Claude Code ${parsed.version} is too old for ${toolApprovals ? "Ask before writes" : "supervised room agents"}. Update to ${requiredVersion} or newer with 'claude update', then try again.`,
     };
   }
   return { version: parsed.version, supported: true, error: null };
 }
 
-export function requireSupportedClaudeCodeVersion(output: string): string {
-  const readiness = inspectClaudeCodeVersion(output);
+export function requireSupportedClaudeCodeVersion(output: string, toolApprovals = false): string {
+  const readiness = inspectClaudeCodeVersion(output, toolApprovals);
   if (!readiness.supported || !readiness.version) {
     throw new Error(readiness.error ?? "Claude Code is not supported.");
   }

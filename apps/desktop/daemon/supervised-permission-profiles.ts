@@ -53,9 +53,9 @@ const claudeProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "ask_before_write", label: "Ask before writes",
-    description: "Would require a live approval conversation between Claude and the desktop.",
-    status: "gated", risk: "medium",
-    detail: "Claude supervised prompt bridging is not available yet.", isDefault: false,
+    description: "Requires approval before Claude can change files or run write-capable commands.",
+    status: "available", risk: "medium",
+    detail: "Uses native one-time tool approvals with ambient settings disabled; daemon-mediated room tools remain available.", isDefault: false,
   },
   {
     id: "full_access", label: "Full access",

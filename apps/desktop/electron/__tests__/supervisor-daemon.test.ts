@@ -2503,7 +2503,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.141");
+    assert.equal(status.implementationVersion, "2.0.142");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -2879,4 +2879,34 @@ test("closing and immediately reopening Live for the same agent discards the sta
     client.connectIfRunning = originalConnect;
     client.watchAgentStream = originalWatch;
   }
+});
+
+test("host approval client displays and signs one-time Claude tool decisions over the daemon socket", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const candidate = hostApprovalCandidate();
+  candidate.reference!.nativeRequestId = "claude-native-request";
+  candidate.presentation = { ...candidate.presentation, provider: "claude-code", title: "Run a tool",
+    details: '{"tool_name":"Write","input":{"file_path":"/tmp/qa","content":"proposed edit"}}' };
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  const decisions: HostApprovalDecision[] = [];
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "list") return [candidate];
+    decisions.push(request.input as HostApprovalDecision); return "decision_sent";
+  };
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+    const snapshot = await client.listHostApprovals("room_1");
+    assert.equal(snapshot.available, true); assert.equal(snapshot.approvals.length, 1);
+    const view = snapshot.approvals[0]!;
+    assert.equal(view.presentation.provider, "claude-code"); assert.equal(view.presentation.title, "Run a tool");
+    assert.equal(view.presentation.denyScope, "request"); assert.equal(view.status, "pending");
+    assert.equal(await client.decideHostApproval({ id: view.id, decision: "allow_once" }), "decision_sent");
+    assert.equal(decisions.length, 1); assert.equal(decisions[0]!.expected.nativeRequestId, "claude-native-request");
+    assert.equal(decisions[0]!.decision, "allow_once");
+    assert.equal(decisions[0]!.projectionSha256, createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"));
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
