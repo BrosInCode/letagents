@@ -74,7 +74,7 @@ import type { DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../
 import type { DesktopNeedsYou } from '../../../../../electron/ipc-types/knowledge.js';
 import type { AttentionNavigationIntent } from './room-shell/types';
 import { desktopBridgeUpgradeMessage, desktopIpc } from '../../../ipc/index.js';
-import { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel, markInboxUpdatesRead, undoInboxRead, type InboxReadChange, type InboxSection, type UniversalInboxItem } from './room-inbox/universal';
+import { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel, inboxSourceFailureKey, markInboxUpdatesRead, undoInboxRead, type InboxReadChange, type InboxSection, type UniversalInboxItem } from './room-inbox/universal';
 import './room-knowledge.css';
 
 const props = withDefaults(defineProps<{ data: DesktopNeedsYou | null; loading: boolean; error: string; rentals?: DesktopRentalRequest[]; rentalError?: string; rooms?: string[]; section?: InboxSection; storageKey?: string }>(), { rentals: () => [], rentalError: '', rooms: () => [], section: 'needs-you', storageKey: 'local' });
@@ -101,7 +101,7 @@ const sourceNotices = computed(() => [
   ...(props.data?.limited || props.data?.rooms.some(room => room.truncated) ? ['Showing up to 100 recent rooms and 200 requests per room, with unanswered requests first.'] : []),
   ...(props.section === 'updates' && props.data?.rooms.some(room => room.updates?.limited) ? ['Some rooms have more activity. Open the room to see its full history.'] : []),
 ]);
-const sourceNoticeKey = computed(() => sourceNotices.value.length ? JSON.stringify([...(hasSourceFailure.value ? sourceFailures.value : sourceNotices.value)].sort()) : '');
+const sourceNoticeKey = computed(() => !sourceNotices.value.length ? '' : hasSourceFailure.value ? inboxSourceFailureKey(props.data, props.rooms, props.rentalError) : JSON.stringify([...sourceNotices.value].sort()));
 const sourceNoticeHidden = computed(() => Boolean(sourceNoticeKey.value && sourceNoticeKey.value === dismissedSourceNotice.value));
 function persistSourceNotice() { try { const key = `letagents-desktop:inbox-hidden-notice:${props.storageKey}`; if (dismissedSourceNotice.value) window.localStorage.setItem(key, dismissedSourceNotice.value); else window.localStorage.removeItem(key); } catch { /* Keep dismissal usable for this session. */ } }
 function dismissSourceNotice() { dismissedSourceNotice.value = sourceNoticeKey.value; persistSourceNotice(); void nextTick(() => showNoticeButton.value?.focus({ preventScroll: true })); }

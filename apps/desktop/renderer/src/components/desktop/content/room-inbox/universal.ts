@@ -65,6 +65,17 @@ export function filterUniversalInbox(items: UniversalInboxItem[], section: Inbox
     && (item.section !== 'updates' || dismissals[item.key] !== item.fingerprint));
 }
 
+/** Room names are not unique; acknowledge failures by source identity. */
+export function inboxSourceFailureKey(data: DesktopNeedsYou | null, rooms: string[], rentalError: string): string {
+  return JSON.stringify([
+    (data?.failures ?? []).map(room => room.roomIdentifier).sort(),
+    (data?.rooms ?? []).filter(room => (!rooms.length || rooms.includes(room.roomIdentifier)) && room.updates?.unavailable.length)
+      .map(room => [room.roomIdentifier, [...room.updates!.unavailable].sort()] as const)
+      .sort((a, b) => a[0].localeCompare(b[0])),
+    Boolean(data?.managedSessionsUnavailable), Boolean(data?.cloudUnavailable), rentalError,
+  ]);
+}
+
 export interface InboxReadChange { key: string; fingerprint: string; previous: string | undefined }
 
 /** Read the exact update versions shown to the user; requests need an explicit answer. */

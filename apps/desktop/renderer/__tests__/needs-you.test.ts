@@ -84,6 +84,21 @@ test('bulk read clears a large backlog, preserves requests, and allows new activ
   assert.equal(filterUniversalInbox(items, 'updates', [], undoInboxRead(read.changes, persisted)).length, 1400);
 });
 
+test('loading notices distinguish same-name rooms and stay dismissed when source order changes', async () => {
+  const { inboxSourceFailureKey } = await import('../src/components/desktop/content/room-inbox/universal');
+  const first = { ...data, failures: [{ roomIdentifier: 'first', displayName: 'Same name' }] };
+  const second = { ...data, failures: [{ roomIdentifier: 'second', displayName: 'Same name' }] };
+  assert.notEqual(inboxSourceFailureKey(first, [], ''), inboxSourceFailureKey(second, [], ''));
+  const failed = { ...data, failures: [...first.failures, ...second.failures] };
+  assert.equal(inboxSourceFailureKey(failed, [], ''), inboxSourceFailureKey({ ...failed, failures: [...failed.failures].reverse() }, [], ''));
+  const updates = { tasks: [], threads: { roomIdentifier: 'first', threads: [], hasMore: false, unreadThreadCount: 0 }, githubEvents: null, presence: [], reasoningSessions: [], unavailable: ['threads', 'tasks'], limited: false };
+  const partial = { ...data, rooms: [{ ...data.rooms[0], roomIdentifier: 'first', updates }, { ...data.rooms[0], roomIdentifier: 'second', updates }] } as DesktopNeedsYou;
+  assert.notEqual(inboxSourceFailureKey(partial, ['first'], ''), inboxSourceFailureKey(partial, ['second'], ''));
+  const reversed = { ...partial, rooms: [...partial.rooms].reverse().map(room => ({ ...room, updates: { ...room.updates!, unavailable: [...room.updates!.unavailable].reverse() } })) };
+  assert.equal(inboxSourceFailureKey(partial, [], ''), inboxSourceFailureKey(reversed, [], ''));
+  assert.notEqual(inboxSourceFailureKey(partial, [], ''), inboxSourceFailureKey({ ...partial, managedSessionsUnavailable: true }, [], ''));
+});
+
 test('bulk read follows the room filter and undo preserves earlier and later read versions', async () => {
   const { buildUniversalInbox, filterUniversalInbox, markInboxUpdatesRead, undoInboxRead } = await import('../src/components/desktop/content/room-inbox/universal');
   const task = { id: 'same_id', title: 'Work ready', status: 'in_review', description: null, updated_at: '2026-09-14T12:00:00Z' };
