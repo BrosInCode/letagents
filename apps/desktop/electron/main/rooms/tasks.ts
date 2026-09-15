@@ -22,6 +22,8 @@ import {
   releaseLocalTaskReviewLease,
   resolveLocalAwareRoomStorageMode,
   updateLocalTask,
+  changeLocalTaskWorkLease,
+  getLocalTask,
 } from "./local-store.js";
 import {
   mapDesktopTaskSummaryPayload,
@@ -175,9 +177,16 @@ export async function updateDesktopRoomTaskLease(
       input.action === "release"
         ? "accepted"
         : undefined;
+    const current = await getLocalTask(localRoomIdentifier, taskId.trim());
+    if (current?.activeLeases.some(lease => lease.kind === "work")) {
+      return changeLocalTaskWorkLease(localRoomIdentifier, taskId.trim(), input);
+    }
+    if (input.lease_id) throw new Error("The task lease changed. Refresh the task before trying again.");
     return {
       task: await updateLocalTask(localRoomIdentifier, taskId.trim(), {
         status: nextStatus,
+        expectedNoWorkLease: true,
+        ...(input.action === "release" ? { assignee: null, assigneeAgentKey: null } : {}),
         validateStatus: nextStatus ? false : undefined,
       }),
     };
@@ -290,7 +299,8 @@ export async function runDesktopRoomTaskWorkerAction(
         status: nextStatus,
         assignee: input.action === "claim" ? actor : undefined,
         assigneeAgentKey: input.action === "claim" ? session?.agent_key || null : undefined,
-      }),
+      }, session?.agent_key && session.session_id ? { agent_key: session.agent_key, session_id: session.session_id,
+        actor_label: actor, agent_instance_id: session.agent_instance_id } : undefined),
     };
   }
 

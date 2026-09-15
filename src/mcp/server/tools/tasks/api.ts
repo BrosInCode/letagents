@@ -12,6 +12,7 @@ import {
   updateLocalTask,
 } from "../../runtime.js";
 import type { TaskToolTarget } from "./context.js";
+import { changeLocalTaskWorkLease } from "../../../local-state/local-chat.js";
 
 export function taskCollectionRoomPath(roomId: string): string {
   return `/rooms/${encodeRoomIdPath(roomId)}/tasks`;
@@ -177,6 +178,17 @@ export async function postCanonicalTaskAction<T>(
       } as T;
     }
 
+    if ((action === "handoff" || action === "release") && existingTask.active_leases?.some(lease => lease.kind === "work")) {
+      return await changeLocalTaskWorkLease(sqliteRoomId, taskId, {
+        action, lease_id: typeof body.lease_id === "string" ? body.lease_id : null,
+        target_actor_key: typeof body.target_actor_key === "string" ? body.target_actor_key : null,
+        target_actor_instance_id: typeof body.target_actor_instance_id === "string" ? body.target_actor_instance_id : null,
+        target_agent_session_id: typeof body.target_agent_session_id === "string" ? body.target_agent_session_id : null,
+      }) as T;
+    }
+    if ((action === "handoff" || action === "release") && body.lease_id) {
+      throw new Error("The task lease changed. Refresh the task before trying again.");
+    }
     if (action === "handoff") {
       const targetActorKey =
         typeof body.target_actor_key === "string" && body.target_actor_key.trim()
@@ -192,6 +204,7 @@ export async function postCanonicalTaskAction<T>(
           : null;
       const task = targetActorKey
         ? await updateLocalTask(sqliteRoomId, taskId, {
+            expected_no_work_lease: true,
             ...(existingTask.status === "accepted" ? { status: "assigned" } : {}),
             assignee: targetActorKey,
             assignee_agent_key: targetActorKey,
@@ -210,6 +223,7 @@ export async function postCanonicalTaskAction<T>(
     if (action === "release") {
       const releasableStatuses = new Set(["assigned", "in_progress", "blocked", "in_review"]);
       const patch: Record<string, unknown> = {
+        expected_no_work_lease: true,
         assignee: null,
         assignee_agent_key: null,
       };
