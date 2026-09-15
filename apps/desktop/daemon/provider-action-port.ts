@@ -14,6 +14,8 @@ export type ProviderActionCapabilities = {
   transcriptAccess: boolean;
   permissionPromptBridging: boolean;
   survivesRestart: boolean;
+  /** The selected adapter can stop an exact OS process birth without attachment. */
+  exactProcessStop?: boolean;
   turnControl?: "native_interrupt" | "restart_resume" | "unsupported";
   /** Native interrupt+resume of the current turn (Codex). Absent/false ⇒ the daemon uses stop-then-resend. */
   midTurnCorrection?: boolean;

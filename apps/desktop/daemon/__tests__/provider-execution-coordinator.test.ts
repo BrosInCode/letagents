@@ -136,6 +136,7 @@ function harness(input: {
     provider: port,
     store: {
       unresolvedDeliveryDrain: async () => null,
+      pendingRuntimeRecovery: async () => null,
       unresolvedPollingActivation: async () => null,
       load: async () => ({ generation: manifestGeneration, entries: [manifestEntry] }),
       getEntry: async (entryId) => entryId === manifestEntry.id ? manifestEntry : undefined,

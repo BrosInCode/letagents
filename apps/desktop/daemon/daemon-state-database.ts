@@ -14,8 +14,9 @@ import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLed
   validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
 import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
+import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 40;
+export const DAEMON_STATE_SCHEMA_VERSION = 41;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -306,7 +307,7 @@ createSchema(database: DatabaseSync): void {
     this.migrateExecutionApprovalProjectionStorage(database);
     return;
   }
-  if (existingVersion === 35 || existingVersion === 36 || existingVersion === 37 || existingVersion === 38 || existingVersion === 39) {
+  if (existingVersion >= 35 && existingVersion <= 40) {
     this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
@@ -1498,6 +1499,7 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
 
 /** Existing memberships stay cloud-backed. Never reconstruct a missing current authority column. */
 private applyLocalRoomMembershipShape(database: DatabaseSync): void {
+  applyRuntimeRecoverySchema(database);
   if (!this.tableColumns(database, "agent_room_memberships").has("local_room_id")) {
     database.exec("ALTER TABLE agent_room_memberships ADD COLUMN local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id))");
   }
@@ -3054,6 +3056,7 @@ repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 
     if (version < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
     else validateLifecycleProjectionLedgerSchema(database);
   }
+  if (version >= 41) validateRuntimeRecoverySchema(database);
   if (version >= 39) validateRoomWorkspaceReviewSchema(database);
   if (version >= 38) validateRoomWorkspaceSchema(database);
   if (version >= 27) validateRoomWorkPublicationSchema(database, version < 37);

@@ -150,6 +150,7 @@ export function onSupervisorDaemonGeneration(
 
 type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
 type WireEntry = {
+  runtime_recovery?: DesktopSupervisorManifestEntry["runtimeRecovery"];
   local_room_id?: string;
   runtime_generation_id?: string | null;
   id: string;
@@ -906,17 +907,22 @@ export class SupervisorDaemonClient {
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
   }
 
-  async recoverAgentRuntime(id: string): Promise<DesktopSupervisorManifestEntry> {
+  async recoverAgentRuntime(id: string, recovery?: import("../ipc-types.js").DesktopSupervisorRuntimeRecoveryInput["recovery"]): Promise<DesktopSupervisorManifestEntry> {
     if (!nonEmptyString(id) || id !== id.trim()) {
       throw new Error("Agent runtime recovery requires an exact identity.");
     }
     const status = await this.ensureRunning();
+    if (recovery && !status.capabilities.agentRuntimeRecoveryV2) {
+      throw new Error("Update the background service to use reconnect and runtime restart controls.");
+    }
     if (!status.capabilities.agentRuntimeRecovery) {
       throw new Error("This supervisor is too old for safe provider runtime recovery; rebuild the desktop daemon.");
     }
     const result = await this.request<{ outcome: "recovering"; entry: WireEntry }>(
       "supervisor.recover_agent_runtime",
-      { entry_id: id, daemon_generation: status.generation },
+      { entry_id: id, daemon_generation: status.generation, ...(recovery ? { mode: recovery.mode,
+        operation_id: recovery.operationId, room_id: recovery.roomId,
+        execution_generation_id: recovery.executionGenerationId, runtime_generation_id: recovery.runtimeGenerationId } : {}) },
       SUPERVISOR_DAEMON_PROTOCOL_VERSION,
       RECOVERY_REQUEST_TIMEOUT_MS,
     );
@@ -1846,6 +1852,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
       agentRoomMove: booleanField(value.capabilities, "agent_room_move_v1"),
       agentLifecycle: booleanField(value.capabilities, "agent_lifecycle_v1"),
       agentRuntimeRecovery: booleanField(value.capabilities, "agent_runtime_recovery_v1"),
+      agentRuntimeRecoveryV2: booleanField(value.capabilities, "agent_runtime_recovery_v2"),
       agentStateSubscription: booleanField(value.capabilities, "agent_state_subscription_v1"),
       agentActivityStream: booleanField(value.capabilities, "agent_activity_stream_v1"),
     },
@@ -2118,6 +2125,7 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
     providerPid: entry.provider_ref?.provider_connection?.pid ?? null,
     runtimeGenerationId: nonEmptyString(entry.runtime_generation_id) ?? null,
+    runtimeRecovery: entry.runtime_recovery ?? null,
     workplaceLiveness: {
       state: entry.workplace_liveness?.state ?? "unknown",
       observedAt: entry.workplace_liveness?.observed_at ?? null,

@@ -1068,6 +1068,34 @@ function troubleshootingProps() {
   } as any;
 }
 
+test("runtime restart confirmation survives unchanged observations and cancels when the runtime changes", async () => {
+  const state = Vue.ref(troubleshootingProps());
+  state.value.daemonStatus.capabilities.agentRuntimeRecoveryV2 = true;
+  state.value.projection.entry.runtimeGenerationId = "runtime_a";
+  state.value.projection.actions = [{ kind: "restart_runtime", label: "Restart and resume", available: true }];
+  const actions: unknown[] = [];
+  const mounted = mount({ setup: () => () => Vue.h(AgentInspectorDiagnostics, {
+    ...state.value, onAction: (intent: unknown) => actions.push(intent), refreshDiagnostics: async () => true,
+  }) }, {});
+  (buttonByText(mounted.root, "Agent runtime").props.onClick as () => void)();
+  await nextTick();
+  await (buttonByText(mounted.root, "Review restart").props.onClick as () => Promise<void>)();
+  await nextTick();
+  const title = descendants(mounted.root).find(node => node.type === "h4" && textContent(node) === "Restart and resume?");
+  assert.ok(title);
+  assert.equal(testDocument.activeElement, title);
+  state.value = { ...state.value, projection: { ...state.value.projection, entry: { ...state.value.projection.entry } } };
+  await nextTick();
+  assert.match(textContent(mounted.root), /Restart and resume\?/);
+  assert.equal(testDocument.activeElement, title, "a status refresh must preserve confirmation focus");
+  state.value.projection.entry.runtimeGenerationId = "runtime_b";
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Restart and resume\?/);
+  assert.ok(buttonByText(mounted.root, "Review restart"));
+  assert.deepEqual(actions, [], "neither a refresh nor a runtime change authorizes a restart");
+  mounted.app.unmount();
+});
+
 test("diagnostic verification survives live projection updates and waits for a fresh read", async () => {
   const state = Vue.ref(troubleshootingProps());
   const actions: unknown[] = [];

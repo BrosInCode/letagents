@@ -341,6 +341,10 @@ export type DaemonManifestEntry = {
 };
 
 export type DaemonManifestEntryView = DaemonManifestEntry & {
+  runtime_recovery?: {
+    operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
+    mode: "resume" | "fresh"; phase: "prepared" | "stopped";
+  } | null;
   /** Opaque exact native process birth; absent on older supervisors. */
   runtime_generation_id?: string | null;
   /** Read-only credential contract from configuration, never caller-owned manifest input. */
