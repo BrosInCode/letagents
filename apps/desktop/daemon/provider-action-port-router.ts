@@ -40,6 +40,7 @@ export type NativeProviderAdapter = {
   correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
   inspectPermissionFileChanges?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
   inspectPermissionProfile?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
+  inspectPermissionMcpToolCall?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
   activateCustodialPolling?(handle: NativeHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
   inspectCustodialPollingActivation?(handle: NativeHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
@@ -255,6 +256,18 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       if (!current() || request.provider !== remembered.provider) return { outcome: "correlation_unproven" };
       if (request.provider === "codex") {
         const params = request.native.params as Record<string, unknown> | null;
+        if (request.native.method === "mcpServer/elicitation/request") {
+          const adapter = await this.adapter(remembered.provider);
+          if (!current() || !adapter.inspectPermissionMcpToolCall) return { outcome: "correlation_unproven" };
+          const proposal = await adapter.inspectPermissionMcpToolCall(remembered.handle, request.native);
+          if (!current() || !proposal || proposal.threadId !== continuation
+            || typeof proposal.turnId !== "string" || !proposal.turnId.trim() || proposal.turnId.length > 512) {
+            return { outcome: "correlation_unproven" };
+          }
+          // Arbitrary MCP tool execution uses the existing host-only command
+          // authority. It is never eligible for delegated file-change approval.
+          return { outcome: "correlated", providerContinuationId: continuation!, providerTurnId: proposal.turnId, kind: "command" };
+        }
         const kind = request.native.method === "item/commandExecution/requestApproval" ? "command"
           : request.native.method === "item/fileChange/requestApproval" ? "file_change"
             : request.native.method === "item/permissions/requestApproval" ? "network" : null;

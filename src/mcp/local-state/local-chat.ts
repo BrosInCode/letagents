@@ -3,7 +3,9 @@ import { createRequire } from "node:module";
 import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { withWorkerStateFence } from "../worker-call-context.js";
+import { withWorkerStateFence, currentWorkerCall } from "../worker-call-context.js";
+import { ensureLocalWorkLeaseSchema, readLocalWorkLeases, assertLocalTaskLeaseMutation, assertLocalWorkLeaseWorker,
+  claimLocalWorkLease, changeLocalWorkLease, type LocalWorkLeaseAction } from "../../../shared/local-work-leases.mjs";
 
 import {
   type ActivationIdentity,
@@ -473,6 +475,7 @@ async function initializeDb(): Promise<SqliteDatabase> {
       addColumnIfMissing(database, "local_tasks", "review_agent_key", "TEXT");
       addColumnIfMissing(database, "local_tasks", "review_agent_session_id", "TEXT");
       addColumnIfMissing(database, "local_tasks", "review_updated_at", "TEXT");
+      ensureLocalWorkLeaseSchema(database);
       database.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_sync_key_idx
       ON local_chat_messages (room_id, sync_key)
@@ -936,7 +939,7 @@ function allocateLocalTaskId(database: SqliteDatabase, roomId: string): string {
   return `task_${number}`;
 }
 
-function mapTaskRow(row: Record<string, unknown>): LocalTask {
+function mapTaskRow(row: Record<string, unknown>, database: SqliteDatabase): LocalTask {
   const reviewLeaseId =
     typeof row.review_lease_id === "string" && row.review_lease_id.trim()
       ? row.review_lease_id
@@ -957,7 +960,8 @@ function mapTaskRow(row: Record<string, unknown>): LocalTask {
     pr_url: typeof row.pr_url === "string" ? row.pr_url : null,
     workflow_artifacts: parseJsonArray(row.workflow_artifacts_json, []),
     workflow_refs: parseJsonArray(row.workflow_refs_json, []),
-    active_leases: reviewLeaseId
+    active_leases: [...readLocalWorkLeases(database, String(row.room_id), String(row.task_id))
+      .map(lease => ({ ...lease, holder_label: lease.actor_label })), ...(reviewLeaseId
       ? [
           {
             id: reviewLeaseId,
@@ -981,7 +985,7 @@ function mapTaskRow(row: Record<string, unknown>): LocalTask {
                 : null,
           },
         ]
-      : [],
+      : [])],
     created_at: String(row.created_at || ""),
     updated_at: String(row.updated_at || ""),
   };
@@ -1062,7 +1066,7 @@ export async function listLocalTasks(
       ORDER BY created_at ASC
     `)
     .all(...params)
-    .map(mapTaskRow);
+    .map(row => mapTaskRow(row, database));
   return { tasks, has_more: false };
 }
 
@@ -1122,7 +1126,7 @@ export async function getLocalTask(
   const row = database
     .prepare("SELECT * FROM local_tasks WHERE room_id = ? AND task_id = ?")
     .get(roomId, taskId);
-  return row ? mapTaskRow(row) : null;
+  return row ? mapTaskRow(row, database) : null;
 }
 
 export async function updateLocalTask(
@@ -1130,71 +1134,122 @@ export async function updateLocalTask(
   taskId: string,
   patch: Record<string, unknown>,
 ): Promise<LocalTask> {
-  const current = await getLocalTask(roomId, taskId);
-  if (!current) throw new Error("Task not found.");
-  const nextStatus =
-    patch.skip_transition_validation === true
-      ? typeof patch.status === "string" && patch.status.trim()
-        ? patch.status.trim()
-        : current.status
-      : resolveLocalTaskStatus(current.status, patch.status);
-  const assigneeAgentKey =
-    patch.assignee_agent_key === undefined
-      ? current.assignee_agent_key
-      : typeof patch.assignee_agent_key === "string"
-        ? patch.assignee_agent_key
-        : null;
-  const assigneeAgentInstanceId =
-    patch.assignee_agent_key === undefined
-      ? current.assignee_agent_instance_id
-      : assigneeAgentKey && typeof patch.assignee_agent_instance_id === "string"
-        ? patch.assignee_agent_instance_id
-        : assigneeAgentKey && typeof patch.actor_instance_id === "string"
-          ? patch.actor_instance_id
-          : null;
-  const assigneeAgentSessionId =
-    patch.assignee_agent_key === undefined
-      ? current.assignee_agent_session_id
-      : assigneeAgentKey && typeof patch.assignee_agent_session_id === "string"
-        ? patch.assignee_agent_session_id
-        : assigneeAgentKey && typeof patch.agent_session_id === "string"
-          ? patch.agent_session_id
-          : null;
-  const workflowArtifacts =
-    patch.workflow_artifacts === undefined
-      ? JSON.stringify(current.workflow_artifacts)
-      : JSON.stringify(Array.isArray(patch.workflow_artifacts) ? patch.workflow_artifacts : []);
-  const now = new Date().toISOString();
   const database = await getDb();
-  await runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => database
-    .prepare(`
-      UPDATE local_tasks
-      SET status = ?,
-          assignee = ?,
-          assignee_agent_key = ?,
-          assignee_agent_instance_id = ?,
-          assignee_agent_session_id = ?,
-          pr_url = ?,
-          workflow_artifacts_json = ?,
-          sync_dirty = 1,
-          updated_at = ?
-      WHERE room_id = ? AND task_id = ?
-    `)
-    .run(
-      nextStatus,
-      patch.assignee === undefined ? current.assignee : patch.assignee || null,
-      assigneeAgentKey,
-      assigneeAgentInstanceId,
-      assigneeAgentSessionId,
-      patch.pr_url === undefined ? current.pr_url : patch.pr_url || null,
-      workflowArtifacts,
-      now,
-      roomId,
-      taskId,
-    )));
-  const updated = await getLocalTask(roomId, taskId);
-  if (!updated) throw new Error("Task not found.");
-  return updated;
+  let observed = readLocalWorkLeases(database, roomId, taskId)[0] ?? null;
+  return runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => {
+    let row = database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId);
+    if (!row) throw new Error("Task not found.");
+    if (patch.expected_no_work_lease === true && readLocalWorkLeases(database, roomId, taskId).length) {
+      throw new Error("The task lease changed. Refresh the task before trying again.");
+    }
+    const caller = currentWorkerCall();
+    const worker = caller?.agent_key ? {
+      agent_key: caller.agent_key, session_id: caller.session_id, actor_label: caller.actor_label || caller.agent_key,
+      agent_instance_id: caller.agent_instance_id,
+    } : null;
+    const supervised = worker ? assertLocalWorkLeaseWorker(database, roomId, worker) : false;
+    if (supervised && worker && patch.status === "assigned") {
+      if ((patch.assignee_agent_key != null && patch.assignee_agent_key !== worker.agent_key)
+        || (patch.assignee != null && patch.assignee !== worker.actor_label)) {
+        throw new Error("Use handoff_task_lease to assign work to another worker.");
+      }
+      observed = claimLocalWorkLease(database, roomId, taskId, worker);
+      row = database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId)!;
+    }
+    if (worker) {
+      assertLocalTaskLeaseMutation(database, row, worker, observed);
+      if ((supervised || observed) && (
+        (patch.assignee !== undefined && patch.assignee !== row.assignee)
+        || (patch.assignee_agent_key !== undefined && patch.assignee_agent_key !== row.assignee_agent_key)
+        || (patch.assignee_agent_session_id !== undefined && patch.assignee_agent_session_id !== row.assignee_agent_session_id)
+        || (patch.assignee_agent_key !== undefined && patch.agent_session_id !== undefined && patch.agent_session_id !== row.assignee_agent_session_id)
+        || (patch.assignee_agent_instance_id !== undefined && patch.assignee_agent_instance_id !== row.assignee_agent_instance_id)
+        || (patch.assignee_agent_key !== undefined && patch.actor_instance_id !== undefined && patch.actor_instance_id !== row.assignee_agent_instance_id))) {
+        throw new Error("Use claim_task or handoff_task_lease to change task ownership.");
+      }
+    } else if (observed || readLocalWorkLeases(database, roomId, taskId).length) {
+      throw new Error("A registered owning worker is required to update this leased task.");
+    }
+    const current = mapTaskRow(row, database);
+    const nextStatus =
+      supervised && patch.status === "assigned" ? current.status
+      : patch.skip_transition_validation === true
+        ? typeof patch.status === "string" && patch.status.trim()
+          ? patch.status.trim()
+          : current.status
+        : resolveLocalTaskStatus(current.status, patch.status);
+    const assigneeAgentKey =
+      patch.assignee_agent_key === undefined
+        ? current.assignee_agent_key
+        : typeof patch.assignee_agent_key === "string"
+          ? patch.assignee_agent_key
+          : null;
+    const assigneeAgentInstanceId =
+      patch.assignee_agent_key === undefined || (worker && patch.assignee_agent_key === current.assignee_agent_key)
+        ? current.assignee_agent_instance_id
+        : assigneeAgentKey && typeof patch.assignee_agent_instance_id === "string"
+          ? patch.assignee_agent_instance_id
+          : assigneeAgentKey && typeof patch.actor_instance_id === "string"
+            ? patch.actor_instance_id
+            : null;
+    const assigneeAgentSessionId =
+      patch.assignee_agent_key === undefined || (worker && patch.assignee_agent_key === current.assignee_agent_key)
+        ? current.assignee_agent_session_id
+        : assigneeAgentKey && typeof patch.assignee_agent_session_id === "string"
+          ? patch.assignee_agent_session_id
+          : assigneeAgentKey && typeof patch.agent_session_id === "string"
+            ? patch.agent_session_id
+            : null;
+    const workflowArtifacts =
+      patch.workflow_artifacts === undefined
+        ? JSON.stringify(current.workflow_artifacts)
+        : JSON.stringify(Array.isArray(patch.workflow_artifacts) ? patch.workflow_artifacts : []);
+    const now = new Date().toISOString();
+    database
+      .prepare(`
+        UPDATE local_tasks
+        SET status = ?,
+            assignee = ?,
+            assignee_agent_key = ?,
+            assignee_agent_instance_id = ?,
+            assignee_agent_session_id = ?,
+            pr_url = ?,
+            workflow_artifacts_json = ?,
+            sync_dirty = 1,
+            updated_at = ?
+        WHERE room_id = ? AND task_id = ?
+      `)
+      .run(
+        nextStatus,
+        patch.assignee === undefined ? current.assignee : patch.assignee || null,
+        assigneeAgentKey,
+        assigneeAgentInstanceId,
+        assigneeAgentSessionId,
+        patch.pr_url === undefined ? current.pr_url : patch.pr_url || null,
+        workflowArtifacts,
+        now,
+        roomId,
+        taskId,
+      );
+    return mapTaskRow(database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId)!, database);
+  }));
+}
+
+export async function changeLocalTaskWorkLease(roomId: string, taskId: string, input: LocalWorkLeaseAction) {
+  const database = await getDb();
+  const observed = readLocalWorkLeases(database, roomId, taskId)[0];
+  if (!observed) throw new Error("This task has no active work lease.");
+  return runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => {
+    const worker = currentWorkerCall();
+    if (!worker?.agent_key) throw new Error("A registered owning worker is required to change this work lease.");
+    const result = changeLocalWorkLease(database, roomId, taskId, {
+      ...input, lease_id: input.lease_id ?? observed.id, epoch: input.epoch ?? observed.epoch,
+    }, {
+      agent_key: worker.agent_key, session_id: worker.session_id, actor_label: worker.actor_label || worker.agent_key,
+    });
+    const task = mapTaskRow(database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId)!, database);
+    return { action: input.action, task, ...result };
+  }));
 }
 
 export async function claimLocalTaskReviewLease(

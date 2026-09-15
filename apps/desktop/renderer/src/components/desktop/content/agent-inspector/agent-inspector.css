@@ -21,6 +21,7 @@
 
 .agent-inspector-surface {
   --inspector-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --inspector-surface-bg: var(--bg-elevated);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -29,7 +30,7 @@
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 18px;
-  background: var(--bg-elevated);
+  background: var(--inspector-surface-bg);
   color: var(--text, #fafafa);
   box-shadow:
     -20px 0 56px light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.32)),
@@ -472,12 +473,12 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .agent-inspector-surface { background: var(--bg-subtle); }
+  .agent-inspector-surface { --inspector-surface-bg: var(--bg-subtle); }
   .agent-inspector-scrim { }
 }
 
 @media (prefers-contrast: more) {
-  .agent-inspector-surface { border-color: var(--text-secondary); background: var(--bg); }
+  .agent-inspector-surface { --inspector-surface-bg: var(--bg); border-color: var(--text-secondary); }
   .agent-inspector-now,
   .agent-inspector-delivery-progress,
   .agent-inspector-continuation-recovery,

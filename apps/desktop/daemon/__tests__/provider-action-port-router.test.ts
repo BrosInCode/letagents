@@ -119,6 +119,24 @@ test("Codex generic permission routing requires an exact bounded current-turn pr
     { outcome: "correlation_unproven" });
 });
 
+test("Codex MCP tool routing requires exact live adapter inspection without itemId or startedAtMs", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const spawn = { provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  const native = Object.freeze({ id: 1, method: "mcpServer/elicitation/request", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn" }) });
+  const request = { provider: "codex" as const, native };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+  adapter.inspectPermissionMcpToolCall = async (_handle, expected) => expected === native ? native.params : null;
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), {
+    outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "command",
+  });
+  assert.deepEqual(await router.correlatePermissionTurn(handle, { ...request, native: { ...native } }), { outcome: "correlation_unproven" });
+  adapter.inspectPermissionMcpToolCall = async () => { await router.spawn(spawn); return native.params; };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+});
+
 test("permission routing snapshots OpenCode payloads and refuses replacement during broker checkpoint", async () => {
   const adapter = fakeAdapter("open-model", []);
   const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
