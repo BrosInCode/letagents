@@ -375,6 +375,69 @@ const genericPermissionParams = (overrides: Record<string, unknown> = {}) => ({
   reason: "Run the local development server", ...overrides,
 });
 
+const mcpToolPermissionParams = (overrides: Record<string, unknown> = {}) => ({
+  threadId: "thread-1", turnId: "turn-thread-1", serverName: "letagents", mode: "form",
+  _meta: { codex_approval_kind: "mcp_tool_call", persist: ["session", "always"],
+    tool_description: "Read the task board", tool_params: { room_id: "room", open_only: false } },
+  message: 'Allow the letagents MCP server to run tool "get_board"?',
+  requestedSchema: { type: "object", properties: {} }, ...overrides,
+});
+
+test("Codex observes native MCP tool approvals without invented item coordinates and replies only once", async () => {
+  for (const reply of ["once", "reject"] as const) {
+    const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!; client.turnStatus = "inProgress";
+    const request = client.askPermission(mcpToolPermissionParams(), 41, "mcpServer/elicitation/request");
+    const controller = new AbortController();
+    let observed = false;
+    const watching = adapter.observePermissions(handle, event => {
+      if (event.type === "snapshot") observed ||= event.requests.includes(request);
+    }, controller.signal);
+    await flush(); assert.equal(observed, true);
+    assert.deepEqual(await adapter.inspectPermissionMcpToolCall(handle, request), request.params);
+    assert.deepEqual(await adapter.replyPermission(handle, request, reply, {
+      beforeNativeDispatch: async () => {}, assertNativeDispatch: () => {},
+    }), { outcome: "sent", scope: "request" });
+    assert.deepEqual(client.permissionResponses, [{ request, result: {
+      action: reply === "once" ? "accept" : "decline", content: reply === "once" ? {} : null, _meta: null,
+    } }]);
+    assert.equal(await adapter.inspectPermissionMcpToolCall(handle, request), null);
+    await assert.rejects(adapter.replyPermission(handle, request, reply), { outcome: "not_dispatched" });
+    controller.abort(); await watching;
+  }
+});
+
+test("Codex MCP approvals refuse uncorrelated, unsupported, cancelled, replaced, or changed requests", async (t) => {
+  const cases = [
+    { name: "foreign thread", params: { threadId: "foreign" } },
+    { name: "foreign turn", params: { turnId: "foreign" } },
+    { name: "uncorrelated elicitation", params: { turnId: null } },
+    { name: "URL interaction", params: { mode: "url" } },
+    { name: "generic form", params: { _meta: {} } },
+    { name: "data-entry form", params: { requestedSchema: { type: "object", properties: { password: { type: "string" } } } } },
+    { name: "oversized proposal", params: { message: "x".repeat(25 * 1024) } },
+    ...["cancelled", "replacement", "disconnect", "turn completed", "arguments changed"].map(name => ({ name, params: {} })),
+  ];
+  for (const entry of cases) await t.test(entry.name, async () => {
+    const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!; client.turnStatus = "inProgress";
+    const request = client.askPermission(mcpToolPermissionParams(entry.params), 41, "mcpServer/elicitation/request");
+    await assert.rejects(adapter.replyPermission(handle, request, "once", {
+      beforeNativeDispatch: async () => {
+        if (entry.name === "cancelled") client.emit({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 41 } });
+        if (entry.name === "replacement") client.askPermission(mcpToolPermissionParams(), 41, request.method);
+        if (entry.name === "disconnect") client.disconnect();
+        if (entry.name === "turn completed") client.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-thread-1", status: "completed" } } });
+        if (entry.name === "arguments changed") ((request.params as ReturnType<typeof mcpToolPermissionParams>)._meta.tool_params).room_id = "other-room";
+      },
+      assertNativeDispatch: () => assert.fail("invalid request must not pass the dispatch fence"),
+    }), { outcome: "not_dispatched" });
+    assert.deepEqual(client.permissionResponses, []);
+  });
+});
+
 test("Codex file approval inspection requires exact full pending native edits", async () => {
   const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));

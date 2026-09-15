@@ -335,7 +335,9 @@ export class HostApprovalBroker {
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
     const prepared = await this.prepareCore(lane, native);
     const presentation = this.presentation(prepared.entry, native,
-      native.provider === "claude-code" ? "Run a tool" : prepared.kind === "command" ? "Run a command"
+      native.provider === "claude-code"
+        || (native.provider === "codex" && native.native.method === "mcpServer/elicitation/request") ? "Run a tool"
+        : prepared.kind === "command" ? "Run a command"
         : prepared.kind === "file_change" ? "Change files" : "Grant for this turn", prepared.fileChanges);
     const { entry: _entry, now, kind: _kind, ...result } = prepared;
     const candidate: HostApprovalCandidate = { reference: reference(result.approval), presentation,
