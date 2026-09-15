@@ -52,7 +52,7 @@
 .knowledge-room-name svg { margin-left: auto; }
 .knowledge-room-dot { width: 5px; height: 5px; flex: 0 0 auto; background: var(--text-muted); border-radius: 50%; }
 .knowledge-detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
-.knowledge-detail-context { flex: 1; min-height: 160px; padding: 24px 28px; overflow-y: auto; overscroll-behavior: contain; }
+.knowledge-detail-context { flex: 1; min-height: 0; padding: 24px 28px; overflow-y: auto; overscroll-behavior: contain; }
 .knowledge-detail-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .knowledge-detail h2 { margin: 20px 0 12px; font-size: 22px; font-weight: 600; line-height: 1.35; letter-spacing: -.03em; overflow-wrap: anywhere; }
 .knowledge-header h1:focus, .knowledge-detail h2:focus, .memory-editor-heading h3:focus { outline: none; }
@@ -66,7 +66,8 @@
 .knowledge-unblocks p { margin: 0; font-size: 12px; line-height: 1.6; }
 .knowledge-unblocks strong { display: block; margin-bottom: 3px; color: var(--text-tertiary); font-size: 10px; font-weight: 500; }
 .knowledge-source-row { justify-content: flex-start; flex-wrap: wrap; margin: 20px 0; }
-.knowledge-response { display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; margin: 0; padding: 16px 28px 20px; border-top: 1px solid var(--border); background: var(--bg-subtle); }
+.knowledge-response { display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; max-height: 65%; overflow-y: auto; margin: 0; padding: 16px 28px 20px; border-top: 1px solid var(--border); background: var(--bg-subtle); }
+.knowledge-response > * { flex-shrink: 0; }
 .knowledge-response label { font-size: 12px; font-weight: 580; }
 .knowledge-response-footer small { max-width: 28ch; color: var(--text-tertiary); font-size: 10px; line-height: 1.5; }
 .knowledge-answer { flex-shrink: 0; max-height: 250px; overflow-y: auto; margin: 0 28px 20px; padding: 18px; border: 1px solid color-mix(in srgb, var(--green-text) 25%, var(--border)); border-radius: var(--radius-md); background: var(--green-dim); }
@@ -186,7 +187,7 @@
   .knowledge-queue { max-height: 240px; border-right: 0; border-bottom: 1px solid var(--border); }
   .knowledge-detail { overflow: visible; }
   .knowledge-detail-context { overflow: visible; padding: 20px; }
-  .knowledge-response { padding: 16px 20px 20px; }
+  .knowledge-response { max-height: none; overflow: visible; padding: 16px 20px 20px; }
   .knowledge-task-action { padding: 0 20px; max-height: none; overflow: visible; }
   .knowledge-answer { margin: 0 20px 20px; max-height: none; overflow: visible; }
   .knowledge-detail h2 { font-size: 20px; scroll-margin-top: 12px; }

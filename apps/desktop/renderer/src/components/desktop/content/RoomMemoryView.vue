@@ -19,7 +19,7 @@
       </nav>
       <div class="memory-content">
         <div class="memory-toolbar">
-          <label class="knowledge-search"><Search :size="15" aria-hidden="true" /><input v-model="search" aria-label="Search room memory" placeholder="Search memories…" /><button v-if="search" class="knowledge-icon-button" aria-label="Clear search" @click="search = ''"><X :size="13" aria-hidden="true" /></button></label>
+          <label class="knowledge-search"><Search :size="15" aria-hidden="true" /><input ref="searchInput" v-model="search" aria-label="Search room memory" placeholder="Search memories…" /><button v-if="search" class="knowledge-icon-button" aria-label="Clear search" @click="clearSearch"><X :size="13" aria-hidden="true" /></button></label>
           <button class="knowledge-button" :aria-pressed="showArchived" @click="showArchived = !showArchived"><Archive :size="14" aria-hidden="true" />{{ showArchived ? 'Archived' : 'Archive' }}</button>
         </div>
         <div class="memory-workspace" :data-editing="Boolean(editor)">
@@ -80,6 +80,7 @@ const labels: Record<MemoryCategory, string> = { goal: 'Goals', decision: 'Decis
 const motionEnabled = ref(false);
 const editorHeading = ref<HTMLElement | null>(null);
 const addMemoryButton = ref<HTMLButtonElement | null>(null);
+const searchInput = ref<HTMLInputElement | null>(null);
 let editorTrigger: HTMLElement | null = null;
 const categoryIcons = { goal: Flag, decision: CircleCheck, constraint: Shield, term: Type, reference: Link2 };
 const starters: { kind: MemoryCategory; title: string; description: string }[] = [
@@ -89,8 +90,9 @@ const starters: { kind: MemoryCategory; title: string; description: string }[] =
 ];
 const visibleCount = computed(() => page.value.records.filter(record => record.archived === showArchived.value).length);
 function categoryCount(kind: MemoryCategory) { return page.value.records.filter(record => record.archived === showArchived.value && record.category === kind).length; }
-function clearFilters() { search.value = ''; category.value = ''; showArchived.value = false; }
-function restoreEditorFocus() { void nextTick(() => (editorTrigger?.isConnected ? editorTrigger : addMemoryButton.value)?.focus({ preventScroll: true })); }
+function clearSearch() { search.value = ''; void nextTick(() => searchInput.value?.focus()); }
+function clearFilters() { category.value = ''; showArchived.value = false; clearSearch(); }
+function restoreEditorFocus(onlyIfUnfocused = false) { const trigger = editorTrigger; void nextTick(() => { if (onlyIfUnfocused && document.activeElement !== document.body) return; (trigger?.isConnected ? trigger : addMemoryButton.value)?.focus({ preventScroll: true }); }); }
 function closeEditor() { if (saving.value) return; historyEpoch++; editor.value = null; restoreEditorFocus(); }
 
 const filtered = computed(() => page.value.records.filter(record => record.archived === showArchived.value && (!category.value || record.category === category.value) && (!search.value.trim() || `${record.title} ${record.body}`.toLowerCase().includes(search.value.trim().toLowerCase()))));
@@ -121,7 +123,7 @@ async function save(archived?: boolean) {
     else { if (!desktopIpc.room.createKnowledge) throw new Error(desktopBridgeUpgradeMessage()); await desktopIpc.room.createKnowledge(roomId, 'memory', { ...draft.input, client_id: draft.clientId }); }
     if (roomId === props.roomIdentifier) { editor.value = null; notice.value = archived === true ? 'Memory archived. Its history is preserved.' : 'Memory saved for the room.'; await refresh(); completed = true; }
   } catch (cause) { if (roomId === props.roomIdentifier) editError.value = cause instanceof Error ? cause.message : 'Unable to save memory.'; }
-  finally { saving.value = false; if (completed && roomId === props.roomIdentifier) restoreEditorFocus(); }
+  finally { saving.value = false; if (completed && roomId === props.roomIdentifier) restoreEditorFocus(true); }
 }
 function archive() { if (editor.value?.record) void save(!editor.value.record.archived); }
 async function openSource(url: string) { try { await desktopIpc.app.openExternalUrl(url); } catch (cause) { error.value = String(cause); } }
