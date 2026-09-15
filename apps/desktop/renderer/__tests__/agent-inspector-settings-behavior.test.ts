@@ -77,6 +77,7 @@ function matches(node: HostNode, selector: string): boolean {
   if (selector === "button:not([disabled])") return node.type === "button" && !node.props.disabled;
   if (selector === "button") return node.type === "button";
   if (selector === '[role="menu"]') return node.props.role === "menu";
+  if (selector === '.workspace-reader-backdrop') return String(node.props.class ?? '').split(' ').includes('workspace-reader-backdrop');
   return false;
 }
 
@@ -817,6 +818,15 @@ test("wide Host closes on a primary pointer press outside and stays open for ins
   }
   assert.equal(closeCount, 0, "interacting inside the Inspector must not dismiss it");
 
+  const readerBackdrop = hostNode('div');
+  readerBackdrop.props.class = 'workspace-reader-backdrop';
+  const readerButton = hostNode('button');
+  readerButton.parent = readerBackdrop;
+  for (const target of [readerButton, readerBackdrop]) {
+    for (const listener of documentListeners.get('pointerdown') ?? []) listener({ button: 0, target } as unknown as Event);
+  }
+  assert.equal(closeCount, 0, 'the teleported workspace reader owns its controls and backdrop');
+
   const outside = hostNode("button");
   for (const listener of documentListeners.get("pointerdown") ?? []) {
     listener({
@@ -1009,6 +1019,17 @@ test("compact Host gives the overflow menu first Escape ownership before closing
   assert.ok(nodeByProp(testBody, "role", "dialog"), "Inspector remains open after menu dismissal");
   assert.equal(currentModel, unsavedModel, "menu dismissal must preserve the Settings draft");
   assert.equal(descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Provider default")?.props.value, unsavedModel);
+
+  const readerBackdrop = hostNode('div');
+  readerBackdrop.props.class = 'workspace-reader-backdrop';
+  const readerInput = hostNode('textarea');
+  readerInput.parent = readerBackdrop;
+  for (const listener of documentListeners.get('keydown') ?? []) listener({
+    key: 'Escape', target: readerInput,
+    preventDefault: () => assert.fail('the reader must receive Escape before the compact inspector'),
+    stopPropagation: () => assert.fail('the reader must receive Escape before the compact inspector'),
+  } as unknown as Event);
+  assert.equal(closeCount, 0, 'Escape inside the workspace reader must preserve the inspector');
 
   let secondPrevented = false;
   const secondEscape = {
