@@ -368,6 +368,21 @@ function permissionProfile(value: unknown): Record<string, unknown> | null {
 }
 
 function permissionParams(request: RpcServerRequest): Record<string, unknown> | null {
+  if (request.method === "mcpServer/elicitation/request") {
+    const params = recordValue(request.params);
+    const metadata = recordValue(params?._meta);
+    // Codex uses an empty form for a single MCP tool approval. Data-entry and
+    // URL elicitations require a different interaction and cannot be accepted here.
+    const schema = z.strictObject({ type: z.literal("object"), properties: z.record(z.string(), z.never()),
+      required: z.array(z.never()).optional() });
+    if (!params || !nativeExecutionId(params.threadId) || !nativeExecutionId(params.turnId)
+      || params.mode !== "form" || !nativeExecutionId(params.serverName)
+      || typeof params.message !== "string" || !params.message.trim() || params.message.length > 8192
+      || metadata?.codex_approval_kind !== "mcp_tool_call" || !recordValue(metadata.tool_params)
+      || !schema.safeParse(params.requestedSchema).success) return null;
+    try { return Buffer.byteLength(JSON.stringify(params)) <= 24 * 1024 ? params : null; }
+    catch { return null; }
+  }
   if (!["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"]
     .includes(request.method)) return null;
   const params = recordValue(request.params);
@@ -851,6 +866,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return structuredClone(profile);
   }
 
+  async inspectPermissionMcpToolCall(rawHandle: ProviderHandle, request: RpcServerRequest): Promise<Record<string, unknown> | null> {
+    const handle = this.handles.get(rawHandle.workAttemptId);
+    const params = request.method === "mcpServer/elicitation/request" ? permissionParams(request) : null;
+    if (!handle || handle !== rawHandle || !params || params.threadId !== handle.providerContinuationId
+      || request.connectionId !== handle.client.currentConnectionId() || !handle.client.listPendingRequests().includes(request)
+      || handle.terminalTurns.has(exactTurnKey(handle.providerContinuationId, params.turnId as string))
+      || this.permissionAuthority(handle, handle.providerContinuationId, { ...handle.providerConnection },
+        handle.client.currentConnectionId()) !== "current") return null;
+    return structuredClone(params);
+  }
+
   /** Host-only dispatch. A successful WebSocket send is NOT evidence that Codex applied the decision. */
   async replyPermission(rawHandle: ProviderHandle, expectedRequest: RpcServerRequest, reply: "once" | "reject",
     options?: ProviderPermissionDispatchOptions):
@@ -863,6 +889,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const params = expectedRequest && permissionParams(expectedRequest);
     const fileChange = expectedRequest?.method === "item/fileChange/requestApproval";
     const genericPermission = expectedRequest?.method === "item/permissions/requestApproval";
+    const mcpToolCall = expectedRequest?.method === "mcpServer/elicitation/request";
+    const expectedMcpParams = mcpToolCall && params ? structuredClone(params) : null;
     const expectedChanges = fileChange ? permissionFileChanges(options?.expectedFileChanges) : null;
     const requestedPermissions = genericPermission ? structuredClone(permissionProfile(params?.permissions)) : null;
     const decision = reply === "once" ? "accept" : reply === "reject" ? "decline" : null;
@@ -897,10 +925,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (genericPermission && !isDeepStrictEqual(permissionProfile(params.permissions), requestedPermissions)) {
       throw new CodexPermissionReplyError("not_dispatched");
     }
+    if (mcpToolCall && !isDeepStrictEqual(permissionParams(expectedRequest), expectedMcpParams)) {
+      throw new CodexPermissionReplyError("not_dispatched");
+    }
     // No await or observer callback between the final fence and native response.
     assertCurrent();
     options?.assertNativeDispatch?.();
-    const result = genericPermission
+    const result = mcpToolCall
+      ? { action: decision, content: reply === "once" ? {} : null, _meta: null }
+      : genericPermission
       ? reply === "once"
         ? { permissions: requestedPermissions, scope: "turn", strictAutoReview: true }
         : { permissions: {}, scope: "turn" }

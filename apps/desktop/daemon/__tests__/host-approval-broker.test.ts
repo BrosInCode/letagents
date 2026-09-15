@@ -162,6 +162,30 @@ test("host approvals use exact operational turns without capture and commit sele
   }
 });
 
+test("Codex MCP approvals show the tool proposal and remain host-only with arguments out of durable storage", async () => {
+  const f = await fixture();
+  try {
+    assert.equal(f.native.provider, "codex");
+    const request: ProviderPermissionRequest = { provider: "codex", native: { ...f.native.native,
+      method: "mcpServer/elicitation/request", params: { threadId: "continuation", turnId: "native-turn",
+        serverName: "letagents", mode: "form", message: 'Allow tool "get_board"?',
+        _meta: { codex_approval_kind: "mcp_tool_call", tool_params: { room_id: secret } },
+        requestedSchema: { type: "object", properties: {} } } } };
+    f.emit([request]);
+    const [candidate] = await f.broker.list("room"); assert.ok(candidate?.reference);
+    assert.equal(candidate.presentation.title, "Run a tool");
+    assert.equal(candidate.presentation.denyScope, "request");
+    assert.match(candidate.presentation.details, /get_board/); assert.match(candidate.presentation.details, /PRIVATE-APPROVAL-CONTENT/);
+    const row = await f.store.getExecutionApproval(candidate.reference);
+    assert.equal(row!.request.delegatable, false); assert.equal(row!.request.kind, "command");
+    assert.equal(await f.broker.decide(decision(candidate)), "decision_sent");
+    assert.deepEqual(f.sends, ["once"]);
+    for (const table of f.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'execution_%'").all()) {
+      assert.doesNotMatch(JSON.stringify(f.db.prepare(`SELECT * FROM ${table.name}`).all()), /PRIVATE-APPROVAL-CONTENT/);
+    }
+  } finally { await f.close(); }
+});
+
 test("Codex file-change approvals stay unavailable without exact native edit inspection", async () => {
   const f = await fixture();
   try {
@@ -418,15 +442,16 @@ test("host approval retains an unsent chosen decision for exact recovery without
 });
 
 for (const scenario of ["command", "command_applied", "command_denied", "generic_permission", "generic_permission_denied",
-  "file_change", "file_change_applied", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
+  "mcp_tool", "mcp_tool_denied", "file_change", "file_change_applied", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
   test(`host approval reaches the real Codex adapter through an offline native server: ${scenario}`, { timeout: 10_000 }, () => verifyNativeApproval(scenario));
 }
 
 async function verifyNativeApproval(scenario: "command" | "command_applied" | "command_denied" | "generic_permission" | "generic_permission_denied"
-  | "file_change" | "file_change_applied" | "changed_file" | "changed_presentation" | "oversized_presentation") {
+  | "mcp_tool" | "mcp_tool_denied" | "file_change" | "file_change_applied" | "changed_file" | "changed_presentation" | "oversized_presentation") {
   const f = await fixture(); f.broker.close();
   const isGeneric = scenario === "generic_permission" || scenario === "generic_permission_denied";
-  const isFileChange = !["command", "command_applied", "command_denied", "generic_permission", "generic_permission_denied"].includes(scenario);
+  const isMcp = scenario === "mcp_tool" || scenario === "mcp_tool_denied";
+  const isFileChange = !isMcp && !["command", "command_applied", "command_denied", "generic_permission", "generic_permission_denied"].includes(scenario);
   const changes = [{ path: join(f.workspace, "old.txt"), kind: { type: "update", move_path: join(f.workspace, "new.txt") }, diff: `@@ -1 +1 @@\n-old\n+${secret}` }];
   if (scenario === "oversized_presentation") {
     // The edits alone fit the adapter's bound; the complete host presentation,
@@ -507,9 +532,12 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
       const unsubscribe = rpc.onPendingRequestsChanged(() => { if (rpc.listPendingRequests().length) { unsubscribe(); resolve(); } });
     });
     server.clients.values().next().value!.send(JSON.stringify({ id: 71,
-      method: isFileChange ? "item/fileChange/requestApproval"
+      method: isMcp ? "mcpServer/elicitation/request" : isFileChange ? "item/fileChange/requestApproval"
         : isGeneric ? "item/permissions/requestApproval" : "item/commandExecution/requestApproval",
-      params: { threadId: "continuation", turnId: "native-turn", itemId: "item-1", startedAtMs: now,
+      params: isMcp ? { threadId: "continuation", turnId: "native-turn", serverName: "letagents", mode: "form",
+        message: 'Allow tool "get_board"?', requestedSchema: { type: "object", properties: {} },
+        _meta: { codex_approval_kind: "mcp_tool_call", persist: ["session", "always"], tool_params: { room_id: secret } } }
+        : { threadId: "continuation", turnId: "native-turn", itemId: "item-1", startedAtMs: now,
         ...(isFileChange ? {} : isGeneric
           ? { cwd: f.workspace, permissions: { network: { enabled: true }, fileSystem: { read: [f.workspace] } } }
           : { command: `printf '${secret}'` }), reason: "failed systemError \u001b[31m\u202e is untrusted permission text" } }));
@@ -530,6 +558,10 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
     assert.ok(candidate?.reference, "native approval must match the operational checkpoint");
     assert.equal(candidate.reference.nativeRequestId, 71); assert.equal(candidate.reference.providerTurnId, "native-turn");
     assert.equal(candidate.reference.connectionId, rpc.currentConnectionId()); assert.equal(candidate.status, "pending");
+    if (isMcp) {
+      assert.equal(candidate.presentation.title, "Run a tool");
+      assert.equal((await f.store.getExecutionApproval(candidate.reference))!.request.delegatable, false);
+    }
     if (isGeneric) {
       assert.equal(candidate.presentation.title, "Grant for this turn");
       assert.match(candidate.presentation.details, /\\u001b/); assert.match(candidate.presentation.details, /\\u202e/);
@@ -544,7 +576,7 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
       assert.deepEqual(JSON.parse(candidate.presentation.details).changes, changes);
       assert.equal(candidate.reference.requestSha256, hash({ request: rpc.listPendingRequests()[0], changes }));
     }
-    selected = decision(candidate, scenario === "command_denied" || scenario === "generic_permission_denied" ? { decision: "deny" } : {});
+    selected = decision(candidate, scenario.endsWith("denied") ? { decision: "deny" } : {});
     if (scenario === "changed_presentation") {
       changes[0]!.diff += "\n+different before the host chooses";
       await assert.rejects(broker.decide(selected), /displayed approval request has changed/);
@@ -557,8 +589,10 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
       assert.deepEqual(order, ["decision_committed", "post_intent_inspection"]);
     } else {
       assert.equal(await broker.decide(selected), "decision_sent");
-      const nativeDecision = scenario === "command_denied" || scenario === "generic_permission_denied";
-      assert.deepEqual(await responseFrame, { id: 71, result: isGeneric
+      const nativeDecision = scenario.endsWith("denied");
+      assert.deepEqual(await responseFrame, { id: 71, result: isMcp
+        ? { action: nativeDecision ? "decline" : "accept", content: nativeDecision ? null : {}, _meta: null }
+        : isGeneric
         ? nativeDecision
           ? { permissions: {}, scope: "turn" }
           : { permissions: { network: { enabled: true }, fileSystem: { read: [f.workspace] } }, scope: "turn", strictAutoReview: true }
