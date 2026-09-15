@@ -3,8 +3,9 @@ import { chmod, readFile, writeFile } from "node:fs/promises";
 import { LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
 import { localChatDatabasePath, readLocalProfileId } from "../chat-storage/settings.js";
 import { getOrCreateDesktopHostId, saveAgentSession, markAgentSessionEnded, type StoredAgentSessionState } from "../agents/state.js";
-import { getLocalChatDatabase } from "./local-db.js";
-import { getLocalRoom } from "./local-store.js";
+import { beginImmediate, rollback } from "./local-db.js";
+import { getLocalRoom, getLocalTaskDatabase } from "./local-store.js";
+import { endLocalWorkerLeases } from "../../../../../shared/local-work-leases.mjs";
 
 // Local authority belongs to this user's local database, never a cloud account.
 // Only public identity and revocation state live in SQLite; bearers are derived
@@ -12,7 +13,7 @@ import { getLocalRoom } from "./local-store.js";
 let schema: Promise<void> | undefined;
 let signingKey: Promise<Buffer> | undefined;
 export async function localSupervisionDatabase() {
-  const db = await getLocalChatDatabase();
+  const db = await getLocalTaskDatabase();
   schema ??= Promise.resolve().then(() => db.exec(`
     CREATE TABLE IF NOT EXISTS local_supervisor_grants (
       entry_id TEXT NOT NULL, room_id TEXT NOT NULL, agent_key TEXT NOT NULL,
@@ -118,11 +119,19 @@ export async function createLocalSupervisorSession(grant: Record<string, unknown
     host_id: String(grant.host_id), host_kind: "desktop", host_label: "This Mac",
     liveness_capability: "native", created_at: now, updated_at: now, last_seen_at: now, ended_at: null,
   };
-  db.prepare(`INSERT INTO local_supervisor_sessions(session_id,grant_id,instance_id,public_json)
-    VALUES(?,?,?,?) ON CONFLICT DO NOTHING`).run(identity.session_id, grant.grant_id, input.agent_instance_id, JSON.stringify(identity));
-  const row = db.prepare("SELECT * FROM local_supervisor_sessions WHERE grant_id=? AND instance_id=? AND ended_at IS NULL").get(grant.grant_id, input.agent_instance_id)!;
-  if (row.ended_at) throw new Error("This exact local worker instance has ended.");
-  const session = JSON.parse(String(row.public_json)) as typeof identity;
+  beginImmediate(db);
+  let session: typeof identity;
+  try {
+    if (!db.prepare("SELECT 1 FROM local_supervisor_grants WHERE grant_id=? AND revoked_at IS NULL").get(grant.grant_id)) {
+      throw new Error("Local supervisor grant ended before worker registration.");
+    }
+    db.prepare(`INSERT INTO local_supervisor_sessions(session_id,grant_id,instance_id,public_json)
+      VALUES(?,?,?,?) ON CONFLICT DO NOTHING`).run(identity.session_id, grant.grant_id, input.agent_instance_id, JSON.stringify(identity));
+    const row = db.prepare("SELECT * FROM local_supervisor_sessions WHERE grant_id=? AND instance_id=? AND ended_at IS NULL").get(grant.grant_id, input.agent_instance_id)!;
+    if (row.ended_at) throw new Error("This exact local worker instance has ended.");
+    session = JSON.parse(String(row.public_json)) as typeof identity;
+    db.exec("COMMIT");
+  } catch (error) { rollback(db); throw error; }
   saveAgentSession(session); // public attribution remains available to the desktop and history publishing
   return { ...session, worker_bearer: await token("worker", session.session_id),
     worker_bearer_id: `local_bearer_${session.session_id}`, worker_bearer_expires_at: null };
@@ -146,22 +155,36 @@ export async function authorizeLocalWorker(roomId: string, bearer: string, sessi
 
 export async function endLocalSupervisorSession(grantId: string, sessionId: string) {
   const db = await localSupervisionDatabase();
-  const row = db.prepare("SELECT session_id FROM local_supervisor_sessions WHERE grant_id=? AND session_id=?").get(grantId, sessionId);
-  if (!row) throw new Error("Local worker session does not belong to this grant.");
   const now = new Date().toISOString();
-  db.prepare("UPDATE local_supervisor_sessions SET ended_at=COALESCE(ended_at,?) WHERE session_id=?").run(now, sessionId);
+  beginImmediate(db);
+  try {
+    const row = db.prepare("SELECT session_id FROM local_supervisor_sessions WHERE grant_id=? AND session_id=?").get(grantId, sessionId);
+    if (!row) throw new Error("Local worker session does not belong to this grant.");
+    db.prepare("UPDATE local_supervisor_sessions SET ended_at=COALESCE(ended_at,?) WHERE session_id=?").run(now, sessionId);
+    endLocalWorkerLeases(db, sessionId, now);
+    db.exec("COMMIT");
+  } catch (error) { rollback(db); throw error; }
   markAgentSessionEnded(sessionId, now);
 }
 
 export async function revokeLocalSupervisorEntry(entryId: string, sessionId?: string | null): Promise<void> {
   const db = await localSupervisionDatabase();
-  const grants = db.prepare("SELECT * FROM local_supervisor_grants WHERE entry_id=?").all(entryId);
-  if (!grants.length) throw new Error("Local supervisor grant was not found.");
-  const sessions = grants.flatMap((grant) => db.prepare("SELECT session_id,grant_id FROM local_supervisor_sessions WHERE grant_id=?").all(grant.grant_id));
-  if (sessionId && !sessions.some((row) => row.session_id === sessionId)) throw new Error("Local revocation does not match this worker session.");
   const now = new Date().toISOString();
-  db.prepare("UPDATE local_supervisor_grants SET revoked_at=COALESCE(revoked_at,?) WHERE entry_id=?").run(now, entryId);
-  for (const session of sessions) await endLocalSupervisorSession(String(session.grant_id), String(session.session_id));
+  let sessions: Record<string, unknown>[];
+  beginImmediate(db);
+  try {
+    const grants = db.prepare("SELECT * FROM local_supervisor_grants WHERE entry_id=?").all(entryId);
+    if (!grants.length) throw new Error("Local supervisor grant was not found.");
+    sessions = grants.flatMap((grant) => db.prepare("SELECT session_id,grant_id FROM local_supervisor_sessions WHERE grant_id=?").all(grant.grant_id));
+    if (sessionId && !sessions.some((row) => row.session_id === sessionId)) throw new Error("Local revocation does not match this worker session.");
+    db.prepare("UPDATE local_supervisor_grants SET revoked_at=COALESCE(revoked_at,?) WHERE entry_id=?").run(now, entryId);
+    for (const session of sessions) {
+      db.prepare("UPDATE local_supervisor_sessions SET ended_at=COALESCE(ended_at,?) WHERE session_id=?").run(now, session.session_id);
+      endLocalWorkerLeases(db, String(session.session_id), now);
+    }
+    db.exec("COMMIT");
+  } catch (error) { rollback(db); throw error; }
+  for (const session of sessions) markAgentSessionEnded(String(session.session_id), now);
 }
 
 

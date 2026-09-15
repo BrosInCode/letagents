@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { createElectronTestEnv } from "./harness.js";
 
 const environment = createElectronTestEnv({ prefix: "local-supervision-",
   paths: ["state", "chatStorage", "localChatDb", "localProfile"],
   extraEnvFiles: { LETAGENTS_LOCAL_FILES_DIR: "files" } });
-const { createLocalRoom } = await import("../main/rooms/local-store.js");
+const { createLocalRoom, addLocalTask, updateLocalTask, getLocalTask, getLocalTaskDatabase } = await import("../main/rooms/local-store.js");
 const { setChatStorageMode } = await import("../main/chat-storage/settings.js");
 const { addLocalChatMessage, getLocalChatMessages } = await import("../main/rooms/messages/local-store.js");
 const { getStoredAgentSession } = await import("../main/agents/state.js");
@@ -25,7 +26,18 @@ async function worker(roomId: string, name: string, suffix: string) {
   const request = (path: string, init: RequestInit = {}) => requestLocalSupervisor(`${origin}/rooms/${roomId}/${path}`, {
     ...init, headers: { authorization: `Bearer ${session.worker_bearer}` },
   }).then(response => response.json()) as Promise<any>;
-  return { grant, session, request, mint };
+  const tool = async (toolName: string, args: object) => {
+    const result = await executeLocalSupervisorTool({ provider: "codex", toolName, input: args,
+      requestId: randomUUID(), roomId, apiUrl: origin, bearer: session.worker_bearer, cwd: environment.tempDir,
+      agentSession: { session_id: session.session_id, agent_key: grant.agentKey, room_id: roomId } });
+    return JSON.parse(result.liveResult.content[0].text);
+  };
+  const owned = async (extra: { heldBefore?: string; taskIds?: string[] } = {}) => {
+    const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
+    return productionSupervisedDeliveryHttp.ownedTasks!({ apiUrl: origin, roomId, bearer: session.worker_bearer,
+      agentSessionId: session.session_id, signal: new AbortController().signal, ...extra });
+  };
+  return { grant, session, request, mint, tool, owned };
 }
 
 // Any accidental cloud request is a test failure, including signed-out setup.
@@ -130,6 +142,351 @@ test("local tools preserve task receipts and produce compatible task ownership r
   assert.deepEqual(await productionSupervisedDeliveryHttp.ownedTasks!({ ...ownership, taskIds: [first.task.id, "task_missing"] }), []);
   await execute("post_reasoning", { summary: "Checking the cloud regression suite" });
   assert.match(JSON.stringify(await oak.request("messages")), /Checking the cloud regression suite/);
+});
+
+test("local work claims have one owner and retries preserve exact lease identity", async () => {
+  const roomId = "local_work_claims";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "work_claim_oak");
+  const elm = await worker(roomId, "Elm", "work_claim_elm");
+  const task = await addLocalTask(roomId, { title: "One owner" });
+  await assert.rejects(oak.tool("claim_task", { task_id: task.id }), /accepted/);
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  const results = await Promise.allSettled([oak, elm].map(actor => actor.tool("claim_task", { task_id: task.id })));
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  const winner = results[0].status === "fulfilled" ? oak : elm;
+  const loser = winner === oak ? elm : oak;
+  const first = (await winner.request(`tasks/${task.id}`)).active_leases[0];
+  assert.equal(first.agent_session_id, winner.session.session_id);
+  assert.equal(first.kind, "work");
+  assert.equal(first.epoch, 0);
+  await winner.tool("update_task", { task_id: task.id, status: "in_progress" });
+  const replay = await winner.tool("claim_task", { task_id: task.id });
+  assert.equal(replay.task.status, "in_progress");
+  assert.deepEqual(replay.lease, first);
+  assert.deepEqual(await winner.owned(), [{ id: task.id, title: task.title, leaseId: first.id, epoch: 0 }]);
+  assert.deepEqual(await loser.owned(), []);
+  assert.deepEqual(await winner.owned({ heldBefore: new Date(Date.parse(first.created_at) - 1).toISOString() }), []);
+  await assert.rejects(loser.tool("update_task", { task_id: task.id, status: "in_review" }), /another worker/);
+  assert.equal((await getLocalTask(roomId, task.id))?.status, "in_progress");
+  await winner.tool("complete_task", { task_id: task.id });
+  assert.deepEqual(await winner.owned(), [], "review work cannot authorize failed-turn continuation");
+});
+
+test("separate local writers racing to claim a task create exactly one work lease", async () => {
+  const roomId = "local_work_process_race";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const actors = await Promise.all([worker(roomId, "Oak", "race_oak"), worker(roomId, "Elm", "race_elm")]);
+  const task = await addLocalTask(roomId, { title: "Claim across processes" });
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  const { spawn } = await import("node:child_process");
+  const moduleUrl = new URL("../main/rooms/local-store.ts", import.meta.url).href;
+  const children = actors.map(actor => {
+    const identity = { agent_key: actor.grant.agentKey, session_id: actor.session.session_id,
+      actor_label: actor.session.actor_label, agent_instance_id: `daemon:${actor.grant.entryId}`, supervised: true };
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      const { claimLocalTaskWorkLease, getLocalTaskDatabase } = await import(${JSON.stringify(moduleUrl)});
+      await getLocalTaskDatabase();
+      process.stdout.write('ready');
+      await new Promise(resolve => process.stdin.once('data', resolve));
+      try { await claimLocalTaskWorkLease(${JSON.stringify(roomId)}, ${JSON.stringify(task.id)}, ${JSON.stringify(identity)}); }
+      catch (error) { process.stderr.write(String(error)); process.exitCode = 2; }
+      process.stdin.destroy();
+    `], { stdio: ["pipe", "pipe", "pipe"] });
+    let errors = "";
+    child.stderr.on("data", chunk => { errors += String(chunk); });
+    return { child, ready: new Promise<void>((resolve, reject) => {
+      child.stdout.once("data", () => resolve()); child.once("error", reject);
+    }), done: new Promise<number | null>((resolve, reject) => {
+      child.once("exit", code => resolve(code)); child.once("error", reject);
+    }), errors: () => errors };
+  });
+  try {
+    await Promise.all(children.map(child => child.ready));
+    for (const { child } of children) child.stdin.end("claim");
+    const codes = await Promise.all(children.map(child => child.done));
+    assert.deepEqual(codes.slice().sort(), [0, 2], children.map(child => child.errors()).join("\n"));
+    assert.equal((await Promise.all(actors.map(actor => actor.owned()))).flat().length, 1);
+    assert.equal((await getLocalTask(roomId, task.id))?.activeLeases.length, 1);
+  } finally { for (const { child } of children) if (child.exitCode === null) child.kill(); }
+});
+
+test("assigning through update_task creates a lease and task artifact mutations commit atomically", async () => {
+  const roomId = "local_work_artifacts";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "work_artifacts_oak");
+  const elm = await worker(roomId, "Elm", "work_artifacts_elm");
+  const task = await addLocalTask(roomId, { title: "Atomic task artifacts" });
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  const assigned = await oak.tool("update_task", { task_id: task.id, status: "assigned" });
+  assert.equal(assigned.task.assigneeAgentKey, oak.grant.agentKey);
+  assert.equal((await oak.owned()).length, 1);
+  await oak.tool("update_task", { task_id: task.id, status: "in_progress" });
+  const artifact = { provider: "git", kind: "branch", ref: "codex/local-work", title: "Original" };
+  await oak.tool("update_task", { task_id: task.id, workflow_artifacts: [artifact] });
+  const db = await getLocalTaskDatabase();
+  db.exec(`CREATE TRIGGER fail_task_artifact_for_test BEFORE INSERT ON local_room_artifacts
+    WHEN NEW.title='Reject this write' BEGIN SELECT RAISE(ABORT,'injected artifact failure'); END`);
+  try {
+    await assert.rejects(oak.tool("update_task", { task_id: task.id, status: "in_review",
+      workflow_artifacts: [{ ...artifact, title: "Reject this write" }] }), /injected artifact failure/);
+    const saved = await getLocalTask(roomId, task.id);
+    assert.equal(saved?.status, "in_progress");
+    assert.deepEqual(saved?.workflowArtifacts, [artifact]);
+  } finally { db.exec("DROP TRIGGER fail_task_artifact_for_test"); }
+  await oak.tool("handoff_task_lease", { task_id: task.id, target_agent_key: elm.grant.agentKey });
+  await assert.rejects(oak.tool("publish_room_artifact", { task_id: task.id, artifact }), /another worker/);
+  await assert.rejects(oak.tool("publish_room_artifact", { artifact }), /another worker/,
+    "omitting task_id must not bypass checks on an already linked artifact");
+  const published = await elm.tool("publish_room_artifact", { task_id: task.id, artifact: { ...artifact, title: "Successor" } });
+  assert.equal(published.artifact.title, "Successor");
+});
+
+test("local lease handoff, release, completion, and stale epochs stop the old owner", async () => {
+  const roomId = "local_work_handoff";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "work_handoff_oak");
+  const elm = await worker(roomId, "Elm", "work_handoff_elm");
+  const task = await addLocalTask(roomId, { title: "Hand off existing work" });
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  const first = await oak.tool("claim_task", { task_id: task.id });
+  await oak.tool("update_task", { task_id: task.id, status: "in_progress" });
+  await assert.rejects(oak.tool("release_task_lease", { task_id: task.id, lease_id: first.lease.id, epoch: 1 }), /changed/);
+  await assert.rejects(elm.tool("release_task_lease", { task_id: task.id, lease_id: first.lease.id }), /current worker/);
+  await assert.rejects(oak.tool("handoff_task_lease", { task_id: task.id, target_agent_key: "missing" }), /active local worker/);
+  assert.equal((await oak.owned()).length, 1);
+  const handoff = await oak.tool("handoff_task_lease", { task_id: task.id, lease_id: first.lease.id,
+    target_agent_key: elm.grant.agentKey, target_agent_session_id: elm.session.session_id });
+  assert.equal(handoff.released_lease.id, first.lease.id);
+  assert.equal(handoff.new_lease.epoch, 1);
+  assert.notEqual(handoff.new_lease.id, first.lease.id);
+  assert.deepEqual(await oak.owned(), []);
+  assert.equal((await elm.owned())[0].leaseId, handoff.new_lease.id);
+  await assert.rejects(oak.tool("update_task", { task_id: task.id, pr_url: "https://example.com/stale" }), /another worker/);
+  await assert.rejects(elm.tool("release_task_lease", { task_id: task.id, lease_id: first.lease.id }), /changed/);
+  const released = await elm.tool("release_task_lease", { task_id: task.id, lease_id: handoff.new_lease.id });
+  assert.equal(released.task.status, "accepted");
+  assert.equal(released.task.assigneeAgentKey, null);
+  assert.deepEqual(await elm.owned(), []);
+  const reclaimed = await elm.tool("claim_task", { task_id: task.id });
+  assert.equal(reclaimed.lease.epoch, 2);
+  const { assertLocalTaskLeaseMutation } = await import("../../../../shared/local-work-leases.mjs");
+  const db = await getLocalTaskDatabase();
+  const row = db.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, task.id)!;
+  assert.throws(() => assertLocalTaskLeaseMutation(db, row, { agent_key: elm.grant.agentKey,
+    session_id: elm.session.session_id, actor_label: "Elm", supervised: true }, handoff.new_lease), /lease changed/);
+  await elm.tool("update_task", { task_id: task.id, status: "in_progress" });
+  await elm.tool("update_task", { task_id: task.id, status: "done" });
+  assert.deepEqual(await elm.owned(), []);
+  assert.equal((await getLocalTask(roomId, task.id))?.activeLeases.length, 0);
+});
+
+test("local assignments do not acquire authority without a claim and native heartbeat cannot revive ended ownership", async () => {
+  const roomId = "local_work_authority";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "work_authority");
+  const task = await addLocalTask(roomId, { title: "Retained task" });
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  await updateLocalTask(roomId, task.id, { status: "assigned", assignee: oak.session.actor_label, assigneeAgentKey: oak.grant.agentKey });
+  assert.deepEqual(await oak.owned(), [], "legacy assignment is not execution authority");
+  await assert.rejects(oak.tool("update_task", { task_id: task.id, status: "in_progress" }), /work lease/);
+  const claim = await oak.tool("claim_task", { task_id: task.id });
+  const heartbeat = await oak.request(`agent-sessions/${oak.session.session_id}/native-activity`, {
+    method: "POST", body: JSON.stringify({ sequence: 1, observed_at: "2099-01-01T00:00:00Z", status: "working" }),
+  });
+  assert.deepEqual(heartbeat.lease_heartbeats, [{ id: claim.lease.id, epoch: 0 }]);
+  const lease = (await oak.request(`tasks/${task.id}`)).active_leases[0];
+  assert.ok(Date.parse(lease.last_heartbeat_at) < Date.parse("2099-01-01"), "lease heartbeat uses local receipt time");
+  const duplicate = await oak.request(`agent-sessions/${oak.session.session_id}/native-activity`, {
+    method: "POST", body: JSON.stringify({ sequence: 1, observed_at: "2099-01-01T00:00:00Z", status: "working" }),
+  });
+  assert.equal(duplicate.accepted, false);
+  assert.deepEqual(duplicate.lease_heartbeats, []);
+  await revokeLocalSupervisorEntry(oak.grant.entryId);
+  const resumed = await worker(roomId, "Oak", "work_authority");
+  assert.deepEqual(await resumed.owned(), []);
+  await assert.rejects(oak.tool("update_task", { task_id: task.id, status: "in_progress" }), /authority/);
+  const newClaim = await resumed.tool("claim_task", { task_id: task.id });
+  assert.equal(newClaim.lease.epoch, 1);
+  assert.notEqual(newClaim.lease.id, claim.lease.id);
+  assert.equal(newClaim.lease.agent_session_id, resumed.session.session_id);
+  await revokeLocalSupervisorEntry(resumed.grant.entryId);
+  const { withWorkerCall } = await import(new URL("../../../../src/mcp/worker-call-context.ts", import.meta.url).href);
+  const mcp = await import(new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href);
+  await assert.rejects(withWorkerCall({ ...getStoredAgentSession(resumed.session.session_id), ended_at: null },
+    () => mcp.updateLocalTask(roomId, task.id, { pr_url: "https://example.com/stale" })), /authority ended/);
+  assert.equal((await getLocalTask(roomId, task.id))?.prUrl, null);
+});
+
+test("MCP supervised claims establish exact ownership and missing leases cannot authorize progress", async () => {
+  const roomId = "local_work_mcp_claim";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "mcp_claim");
+  const task = await addLocalTask(roomId, { title: "MCP ownership" });
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  await updateLocalTask(roomId, task.id, { status: "assigned", assignee: oak.session.actor_label, assigneeAgentKey: oak.grant.agentKey });
+  const { withWorkerCall } = await import(new URL("../../../../src/mcp/worker-call-context.ts", import.meta.url).href);
+  const mcp = await import(new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href);
+  const call = (patch: object) => withWorkerCall(getStoredAgentSession(oak.session.session_id),
+    () => mcp.updateLocalTask(roomId, task.id, patch));
+  await assert.rejects(call({ status: "in_progress" }), /work lease/);
+  const claimed = await call({ status: "assigned", assignee: oak.session.actor_label, assignee_agent_key: oak.grant.agentKey });
+  assert.equal(claimed.active_leases.length, 1);
+  assert.equal(claimed.active_leases[0].agent_session_id, oak.session.session_id);
+  assert.equal(claimed.assignee_agent_session_id, oak.session.session_id);
+  await call({ status: "in_progress" });
+  const retry = await call({ status: "assigned", assignee_agent_key: oak.grant.agentKey });
+  assert.equal(retry.status, "in_progress");
+  assert.equal(retry.active_leases[0].id, claimed.active_leases[0].id);
+  await assert.rejects(call({ assignee_agent_key: oak.grant.agentKey, assignee_agent_session_id: "another-session" }), /ownership/);
+  assert.equal((await oak.owned())[0].leaseId, claimed.active_leases[0].id);
+});
+
+test("legacy desktop and MCP assignments remain lease-free when their sessions end", async () => {
+  const roomId = "local_work_legacy_compatibility";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const { saveAgentSession, markAgentSessionEnded } = await import("../main/agents/state.js");
+  const identity = saveAgentSession({ session_id: "legacy-work-session", session_token: "local-test",
+    room_id: roomId, session_kind: "worker", runtime: "codex:test", actor_label: "Legacy",
+    agent_key: "local/legacy", agent_instance_id: "desktop-codex:legacy", display_name: "Legacy",
+    owner_label: "Local QA", ide_label: "Codex", created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+  const desktop = await addLocalTask(roomId, { title: "Legacy desktop task" });
+  await updateLocalTask(roomId, desktop.id, { status: "accepted" });
+  await updateLocalTask(roomId, desktop.id, { status: "assigned", assignee: identity.actor_label,
+    assigneeAgentKey: identity.agent_key }, { ...identity, agent_key: identity.agent_key!, actor_label: identity.actor_label! });
+  assert.deepEqual((await getLocalTask(roomId, desktop.id))?.activeLeases, []);
+  const artifact = { provider: "git", kind: "branch", ref: "codex/legacy-work", title: "Legacy work",
+    id: null, number: null, url: null, state: null };
+  const published = await updateLocalTask(roomId, desktop.id, { status: "in_progress", workflowArtifacts: [artifact] },
+    { ...identity, agent_key: identity.agent_key!, actor_label: identity.actor_label! });
+  assert.deepEqual(published.workflowArtifacts, [artifact]);
+  assert.deepEqual(published.activeLeases, []);
+  const { withWorkerCall } = await import(new URL("../../../../src/mcp/worker-call-context.ts", import.meta.url).href);
+  const mcp = await import(new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href);
+  const external = await addLocalTask(roomId, { title: "Legacy MCP task" });
+  await updateLocalTask(roomId, external.id, { status: "accepted" });
+  const assigned = await withWorkerCall(identity, () => mcp.updateLocalTask(roomId, external.id,
+    { status: "assigned", assignee: identity.actor_label, assignee_agent_key: identity.agent_key }));
+  assert.deepEqual(assigned.active_leases, []);
+  const progressed = await withWorkerCall(identity, () => mcp.updateLocalTask(roomId, external.id, { status: "in_progress" }));
+  assert.equal(progressed.status, "in_progress");
+  markAgentSessionEnded(identity.session_id);
+  const db = await getLocalTaskDatabase();
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM local_work_leases WHERE agent_session_id=?").get(identity.session_id)?.count, 0);
+});
+
+test("desktop and MCP readers share local leases and legacy writes cannot leave stale ownership", async () => {
+  const roomId = "local_work_shared_store";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "work_shared");
+  const task = await addLocalTask(roomId, { title: "Shared local ownership" });
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  const claim = await oak.tool("claim_task", { task_id: task.id });
+  const mcp = await import(new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href);
+  assert.equal((await mcp.getLocalTask(roomId, task.id)).active_leases[0].id, claim.lease.id);
+  await assert.rejects(mcp.updateLocalTask(roomId, task.id, { status: "in_progress" }), /owning worker/);
+  await updateLocalTask(roomId, task.id, { assignee: "Someone else", assigneeAgentKey: "local/another" });
+  assert.deepEqual(await oak.owned(), []);
+  assert.deepEqual((await mcp.getLocalTask(roomId, task.id)).active_leases, []);
+});
+
+test("a legacy release observed before a new claim cannot revoke its successor", async () => {
+  const roomId = "local_work_legacy_release";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "legacy_release");
+  const task = await addLocalTask(roomId, { title: "Keep the successor lease" });
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  const first = await oak.tool("claim_task", { task_id: task.id });
+  await oak.tool("release_task_lease", { task_id: task.id });
+  assert.deepEqual((await getLocalTask(roomId, task.id))?.activeLeases, []);
+  // The legacy action observed no active lease, then another writer won a claim.
+  const successor = await oak.tool("claim_task", { task_id: task.id });
+  await assert.rejects(updateLocalTask(roomId, task.id, { status: "accepted", assignee: null,
+    assigneeAgentKey: null, validateStatus: false, expectedNoWorkLease: true }), /lease changed/);
+  const mcp = await import(new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href);
+  await assert.rejects(mcp.updateLocalTask(roomId, task.id, { status: "accepted", skip_transition_validation: true,
+    assignee: null, assignee_agent_key: null, expected_no_work_lease: true }), /lease changed/);
+  const { updateDesktopRoomTaskLease } = await import("../main/rooms/tasks.js");
+  await assert.rejects(updateDesktopRoomTaskLease(roomId, task.id, { action: "release", lease_id: first.lease.id }), /lease changed/);
+  assert.equal((await oak.owned())[0].leaseId, successor.lease.id);
+});
+
+test("local leased task recovery survives restart and obeys the existing cloud continuation fences", async () => {
+  const { SupervisedAgentInboxStore } = await import(new URL("../../daemon/supervised-agent-inbox-store.ts", import.meta.url).href);
+  const { SupervisedAgentDelivery } = await import(new URL("../../daemon/supervised-agent-delivery.ts", import.meta.url).href);
+  const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
+  for (const scenario of ["continue", "completed", "handoff", "replacement", "normal_reply"] as const) {
+    const roomId = `local_continuity_${scenario}`;
+    await createLocalRoom({ roomIdentifier: roomId });
+    let owner = await worker(roomId, "Oak", `continuity_${scenario}`);
+    const task = await addLocalTask(roomId, { title: "Finish the existing local task" });
+    await updateLocalTask(roomId, task.id, { status: "accepted" });
+    const claimed = await owner.tool("claim_task", { task_id: task.id });
+    await owner.tool("update_task", { task_id: task.id, status: "in_progress" });
+    const source = await addLocalChatMessage(roomId, { sender: "You", source: "browser", text: "@Oak finish this task" });
+    const path = `${environment.tempDir}/continuity-${scenario}.sqlite`;
+    let store = new SupervisedAgentInboxStore(path);
+    const connection = { kind: "codex_app_server", url: "ws://127.0.0.1:1", pid: 1, processIdentity: "test-birth" };
+    const handle = { workAttemptId: "attempt", providerContinuationId: "thread", pid: 1, providerConnection: connection, observedState: "working" };
+    const agent = () => ({ agentId: owner.grant.entryId, roomId, apiUrl: origin, provider: "codex", deliveryMode: "daemon_inbox",
+      agentSessionId: owner.session.session_id, bearer: owner.session.worker_bearer, handle, providerConnection: connection,
+      executionGenerationId: "generation-1", daemonGeneration: 1, workAttemptId: "attempt", providerContinuationId: "thread" });
+    let nativeStarts = 0;
+    let delivery: InstanceType<typeof SupervisedAgentDelivery>;
+    const port = (run: (handle: any, request: any, options: any) => Promise<any>) => ({
+      capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true,
+        permissionPromptBridging: false, survivesRestart: true, turnControl: "unsupported", continuationRepair: "unsupported" }),
+      spawn: async () => { throw new Error("unexpected spawn"); }, attach: async () => null,
+      attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unexpected resume"); },
+      poke: async () => {}, stop: async () => ({}), onExit: async () => () => {}, runRoomTurn: run,
+      recoverRoomTurn: async () => { throw new Error("A durably failed turn must not replay."); },
+    });
+    delivery = new SupervisedAgentDelivery(store, port(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.(); nativeStarts++;
+      await options?.checkpointTurnStarted?.("failed-turn");
+      const terminal = { turnId: "failed-turn", providerContinuationId: "thread",
+        outcome: scenario === "normal_reply" ? "reply" : "failed", text: scenario === "normal_reply" ? "Done for now" : null,
+        evidence: "stream", error: scenario === "normal_reply" ? undefined : "HTTP 503 Service Unavailable" };
+      await options?.checkpointTerminalResult?.(terminal);
+      delivery.fence();
+      return terminal;
+    }), productionSupervisedDeliveryHttp, async () => true, 0);
+    try {
+      await store.ingestPoll({ agent_id: owner.grant.entryId, room_id: roomId, last_observed_message_id: source.id,
+        messages: [{ source_message_id: source.id, source_message: source, activation: {} }] });
+      await delivery.pump(agent());
+      await delivery.fenceAndDrain(); await store.close();
+      assert.equal((await owner.mint()).session_id, owner.session.session_id);
+      assert.equal((await owner.owned())[0].leaseId, claimed.lease.id);
+      if (scenario === "completed") await owner.tool("update_task", { task_id: task.id, status: "done" });
+      if (scenario === "handoff") {
+        const other = await worker(roomId, "Elm", "continuity_target");
+        await owner.tool("handoff_task_lease", { task_id: task.id, target_agent_key: other.grant.agentKey });
+      }
+      if (scenario === "replacement") {
+        await revokeLocalSupervisorEntry(owner.grant.entryId);
+        owner = await worker(roomId, "Oak", `continuity_${scenario}`);
+        await owner.tool("claim_task", { task_id: task.id });
+      }
+      store = new SupervisedAgentInboxStore(path);
+      delivery = new SupervisedAgentDelivery(store, port(async (_handle, request, options) => {
+        await options?.beforeNativeDispatch?.(); nativeStarts++;
+        assert.equal(scenario, "continue", "only the unchanged owner may continue failed work");
+        assert.match(JSON.stringify(request.sourceMessage), /existing authorized work/);
+        await options?.checkpointTurnStarted?.("continuation-turn");
+        await owner.tool("update_task", { task_id: task.id, status: "done" });
+        return { turnId: "continuation-turn", outcome: "reply", text: "LOCAL_TASK_RECOVERED" };
+      }), productionSupervisedDeliveryHttp, async () => true, 0);
+      await delivery.pump({ ...agent(), executionGenerationId: "generation-2", daemonGeneration: 2 });
+      await delivery.pump({ ...agent(), executionGenerationId: "generation-2", daemonGeneration: 2 });
+      assert.equal(nativeStarts, scenario === "continue" ? 2 : 1, scenario);
+      assert.equal((await store.cursor(owner.grant.entryId)).last_observed_message_id, source.id);
+      if (scenario === "continue") {
+        assert.equal((await getLocalTask(roomId, task.id))?.status, "done");
+        assert.equal((await getLocalChatMessages(roomId)).messages.filter(message => message.text === "LOCAL_TASK_RECOVERED").length, 1);
+      }
+    } finally { await delivery.fenceAndDrain(); await store.close(); }
+  }
 });
 
 test("local saved work is atomic, replayable, and readable while signed out", async () => {
