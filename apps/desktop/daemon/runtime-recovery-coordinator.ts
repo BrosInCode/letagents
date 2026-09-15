@@ -418,6 +418,7 @@ export class RuntimeRecoveryCoordinator {
       if (terminal.providerContinuationId && terminal.providerContinuationId !== savedRef.provider_continuation_id) {
         throw new Error("The stop result belongs to a different conversation. Recovery remains paused.");
       }
+      if (birthState() !== "gone") throw new Error("The old process has not been proven stopped. Recovery remains paused; no replacement was started.");
       if (installation) await this.options.terminals?.handleTerminal(installation, terminal);
       await boundedRecoveryWait(deliveryStopped);
       await this.serializeEntry(entryId, async () => {

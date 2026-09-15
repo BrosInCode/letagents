@@ -102,7 +102,7 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
   });
   try {
     await daemon.start();
-    const internals = daemon as unknown as { requestConvergence: (id: string) => void;
+    const internals = daemon as unknown as { requestConvergence: (id: string) => void; durability: WorkDurabilityStore;
       runtimeRecovery: RuntimeRecoveryCoordinator & { options: { processIdentity: ProcessIdentity } };
       providerExecution: { converge(id: string): Promise<void> } };
     internals.requestConvergence = () => {};
@@ -162,6 +162,9 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
     const paused = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
     assert.equal(paused.desired_state, "paused");
     assert.equal(paused.runtime_recovery?.phase, "prepared");
+    const afterRejectedStop = await internals.durability.getAttempt(attempt.work_attempt_id);
+    assert.equal(afterRejectedStop.execution_generations.find(value => value.execution_generation_id === execution.execution_generation_id)?.terminal, null,
+      "a cached terminal cannot release the old workspace execution fence while its process is alive");
     const resume = await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: "running" });
     assert.equal(resume.ok, false, "ordinary Resume cannot bypass an unfinished recovery");
     const callsBeforeConvergence = stopCalls;
