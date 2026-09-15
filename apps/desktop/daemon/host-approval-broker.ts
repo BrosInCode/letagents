@@ -162,7 +162,7 @@ export class HostApprovalBroker {
     if (previous) previous.requests = [];
     const provider = this.options.provider;
     if (!provider?.observePermissions || !handle.providerConnection
-      || !["codex_app_server", "opencode_server"].includes(handle.providerConnection.kind)) return () => {};
+      || !["codex_app_server", "opencode_server", "claude_cli"].includes(handle.providerConnection.kind)) return () => {};
     const lane: Lane = { agentId, generation, handle, connection: { ...handle.providerConnection },
       controller: new AbortController(), revision: 0, state: "degraded", connectionId: null, requests: [],
       approvalExecutions: null };
@@ -241,9 +241,9 @@ export class HostApprovalBroker {
     for (const record of durable) {
       if (shown.has(record.request.requestId) || !["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state)) continue;
       const entry = await this.options.store.getEntry(record.request.agentId);
-      if (!entry || entry.room_id !== roomId || !["codex", "open-model"].includes(entry.provider)) continue;
+      if (!entry || entry.room_id !== roomId || !["codex", "open-model", "claude-code"].includes(entry.provider)) continue;
       result.push({ reference: reference(record), recordedDecision: recordedDecision(record),
-        presentation: { agentId: entry.id, displayName: entry.display_name, provider: entry.provider as "codex" | "open-model",
+        presentation: { agentId: entry.id, displayName: entry.display_name, provider: entry.provider as "codex" | "open-model" | "claude-code",
           title: "Approval unavailable", details: "The native request is no longer available to inspect on this connection.",
           denyScope: entry.provider === "open-model" ? "session_pending" : "request" },
         status: record.decision?.dispatchId && record.request.applicationCertainty !== "impossible" ? "uncertain" : "unavailable",
@@ -335,7 +335,8 @@ export class HostApprovalBroker {
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
     const prepared = await this.prepareCore(lane, native);
     const presentation = this.presentation(prepared.entry, native,
-      native.provider === "codex" && native.native.method === "mcpServer/elicitation/request" ? "Run a tool"
+      native.provider === "claude-code"
+        || (native.provider === "codex" && native.native.method === "mcpServer/elicitation/request") ? "Run a tool"
         : prepared.kind === "command" ? "Run a command"
         : prepared.kind === "file_change" ? "Change files" : "Grant for this turn", prepared.fileChanges);
     const { entry: _entry, now, kind: _kind, ...result } = prepared;
