@@ -965,6 +965,15 @@ describe("room chat helpers", () => {
     );
   });
 
+  it("preserves complete file paths in ticket Markdown without making them links", () => {
+    const html = renderDesktopMarkdown('`src/api/auth.ts` and src/web/auth.ts. [file](</tmp/test/auth.ts>)', {
+      block: true, mentions: false, preservePaths: true,
+    });
+    assert.equal(html, '<p><code>src/api/auth.ts</code> and src/web/auth.ts. <code>/tmp/test/auth.ts</code></p>');
+    assert.doesNotMatch(html, /href=/);
+    assert.equal(renderDesktopMarkdown('`src/api/auth.ts`'), '<code>auth.ts</code>');
+  });
+
   it("bounds adversarial blockquote nesting in desktop messages", () => {
     const html = renderMessageText(`${">".repeat(5_000)} safe`, "");
     assert.match(html, /safe/);

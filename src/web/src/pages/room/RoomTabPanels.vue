@@ -45,6 +45,7 @@
         :roomIdentifier="room?.identifier || null"
         @addTask="emit('addTask', $event)"
         @updateTask="emit('updateTask', $event)"
+        @closeTask="emit('closeTask')"
         @leaseAction="emit('leaseAction', $event)"
         @reviewLeaseAction="emit('reviewLeaseAction', $event)"
         @focusTask="emit('focusTask', $event)"
@@ -136,7 +137,7 @@ import type {
   RoomTab,
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
-  TaskStatusUpdatePayload,
+  TaskUpdatePayload,
 } from './types'
 
 const props = defineProps<{
@@ -193,7 +194,8 @@ const emit = defineEmits<{
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   addTask: [title: string]
-  updateTask: [payload: TaskStatusUpdatePayload]
+  updateTask: [payload: TaskUpdatePayload]
+  closeTask: []
   leaseAction: [payload: TaskLeaseActionPayload]
   reviewLeaseAction: [payload: TaskReviewLeaseActionPayload]
   focusTask: [taskId: string]

@@ -222,7 +222,7 @@ export interface DesktopApi {
     updateTask: (
       roomIdentifier: string,
       taskId: string,
-      updates: { status?: string; assignee?: string | null; pr_url?: string | null }
+      updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null }
     ) => Promise<DesktopTaskMutationResult>;
     updateTaskLease: (
       roomIdentifier: string,

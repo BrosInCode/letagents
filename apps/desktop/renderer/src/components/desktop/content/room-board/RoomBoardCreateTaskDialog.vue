@@ -11,21 +11,10 @@
     @submit="submit"
   >
     <header class="desktop-task-create-header">
-      <span>New task</span>
-      <h3 id="desktop-create-task-title">Describe the work</h3>
-      <p>Give the next person or agent the outcome, context, and done condition.</p>
+      <h3 id="desktop-create-task-title">New task</h3>
     </header>
 
-    <label class="desktop-task-create-field" for="desktop-create-task-description">
-      <span>Description</span>
-      <textarea
-        id="desktop-create-task-description"
-        v-model="description"
-        rows="7"
-        placeholder="What should happen, and how will we know it is done?"
-        :disabled="busyAction !== null"
-      ></textarea>
-    </label>
+    <TaskMarkdownEditor id="desktop-create-task-description" v-model="description" :disabled="busyAction !== null" />
 
     <label class="desktop-task-create-field" for="desktop-create-task-title-input">
       <span>Short title <small>optional</small></span>
@@ -64,6 +53,7 @@
 import { computed, ref, watch } from "vue";
 import type { DesktopTaskCreateInput } from "../../../../../../electron/ipc-types";
 import DesktopDialogShell from "../DesktopDialogShell.vue";
+import TaskMarkdownEditor from "./TaskMarkdownEditor.vue";
 import { deriveTaskTitle } from "./board-presentation";
 
 const props = defineProps<{

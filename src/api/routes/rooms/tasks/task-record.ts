@@ -4,6 +4,7 @@ import {
   BoardIntentApprovalConsumptionError,
   getActiveTaskLeases,
   LeaseFenceStaleError,
+  TaskContentConflictError,
   type BoardIntentConsumptionInput,
   type TaskStatus,
 } from "../../../db.js";
@@ -78,6 +79,9 @@ export function registerTaskRecordRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const editsContent = Object.prototype.hasOwnProperty.call(requestBody, "title")
+      || Object.prototype.hasOwnProperty.call(requestBody, "description");
+    if (editsContent && !(await deps.requireAdmin(req, res, project))) return;
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
@@ -86,13 +90,20 @@ export function registerTaskRecordRoutes(
     });
     if (workerWriteIdentity.kind === "responded") return;
     const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
-    const workflow_artifacts = validateTaskWorkflowArtifactsInput(
-      requestBody.workflow_artifacts
-    );
-    const patch = buildTaskUpdatePatch({
-      body: requestBody,
-      workflowArtifacts: workflow_artifacts,
-    });
+    if (editsContent && workerIdentity) {
+      res.status(403).json({ error: "Task content edits require a human room admin." });
+      return;
+    }
+    let patch: ReturnType<typeof buildTaskUpdatePatch>;
+    try {
+      patch = buildTaskUpdatePatch({
+        body: requestBody,
+        workflowArtifacts: validateTaskWorkflowArtifactsInput(requestBody.workflow_artifacts),
+      });
+    } catch (error) {
+      respondWithBadRequest(res, "PATCH /rooms/:room_id/tasks/:task_id", error, "Invalid task update.");
+      return;
+    }
     const { updates } = patch;
     const actorLabel = workerIdentity?.actor_label ?? patch.actorLabel;
     const actorKey = workerIdentity?.agent_key ?? patch.actorKey;
@@ -121,6 +132,8 @@ export function registerTaskRecordRoutes(
       const isReviewChangeRequest = updates.status === "blocked" && task.status === "in_review";
       const reviewDecisionOnly =
         isReviewChangeRequest &&
+        updates.title === undefined &&
+        updates.description === undefined &&
         updates.assignee === undefined &&
         updates.assignee_agent_key === undefined &&
         updates.pr_url === undefined &&
@@ -272,7 +285,7 @@ export function registerTaskRecordRoutes(
         res.status(404).json({ error: "Task not found" });
       }
     } catch (error) {
-      if (error instanceof LeaseFenceStaleError) {
+      if (error instanceof LeaseFenceStaleError || error instanceof TaskContentConflictError) {
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }

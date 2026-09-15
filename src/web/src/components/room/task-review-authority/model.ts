@@ -16,7 +16,7 @@ export type ReviewLeaseActionPayload = {
   target_actor_instance_id?: string | null
   target_agent_session_id?: string | null
   reason?: string | null
-  onSettled?: () => void
+  onSettled?: (updated?: boolean) => void
 }
 
 export type ReviewAuthoritySummary = {
