@@ -22,20 +22,20 @@
       </div>
       <div class="board-refine">
         <input v-model="searchQuery" type="search" aria-label="Search tasks" placeholder="Search tasks..." class="board-search" />
-        <select v-model="ownerFilter" aria-label="Filter by owner">
+        <AppSelect v-model="ownerFilter" aria-label="Filter by owner">
           <option value="">All owners</option>
           <option value="unassigned">Unassigned</option>
           <option v-for="owner in owners" :key="owner.key" :value="owner.key">{{ owner.label }}</option>
-        </select>
-        <select v-model="statusFilter" aria-label="Filter by status" @change="activeFilter = 'all'">
+        </AppSelect>
+        <AppSelect v-model="statusFilter" aria-label="Filter by status" @update:model-value="activeFilter = 'all'">
           <option value="">All statuses</option>
           <option v-for="status in statuses" :key="status" :value="status">{{ taskStatusLabel(status) }}</option>
-        </select>
-        <select v-model="sortOrder" aria-label="Sort tasks">
+        </AppSelect>
+        <AppSelect :model-value="sortOrder" aria-label="Sort tasks" @update:model-value="sortOrder = $event as typeof sortOrder">
           <option value="recent">Recently updated</option>
           <option value="oldest">Oldest first</option>
           <option value="title">Title A-Z</option>
-        </select>
+        </AppSelect>
         <button v-if="searchQuery || ownerFilter || statusFilter" type="button" class="board-clear" @click="clearFilters">Clear filters</button>
       </div>
     </div>
@@ -87,6 +87,7 @@ import type { TaskContentPatch } from '../../../../../shared/task-markdown-editi
 
 import { type RoomAgentPresence, type RoomTask, type TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import { TASK_STATUS_ORDER, taskStatusLabel } from '@/domain/taskStatus'
+import AppSelect from '@/components/ui/AppSelect.vue'
 import TaskBoardAddForm from './task-board/TaskBoardAddForm.vue'
 import TaskBoardEmptyState from './task-board/TaskBoardEmptyState.vue'
 import TaskBoardGroup from './task-board/TaskBoardGroup.vue'
@@ -428,7 +429,19 @@ function handleReviewLeaseAction(payload: TaskReviewLeaseActionPayload) {
 }
 .board-refine { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .board-refine .board-search { width: 220px; }
-.board-refine select, .board-clear {
+.board-refine :deep(.app-select) {
+  --app-select-height: 36px;
+  --app-select-radius: 6px;
+  --app-select-bg: var(--bg-subtle);
+  --app-select-border: var(--border);
+  --app-select-text: var(--text-secondary);
+  --app-select-focus: var(--blue);
+  flex: 0 1 170px;
+  width: 170px;
+  min-width: 0;
+  max-width: 100%;
+}
+.board-clear {
   min-width: 0; max-width: 200px; min-height: 36px; padding: 0 10px;
   border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg-subtle); color: var(--text-secondary);
@@ -500,7 +513,7 @@ function handleReviewLeaseAction(payload: TaskReviewLeaseActionPayload) {
   font-size: 0.8125rem;
   cursor: pointer;
 }
-.board-controls :is(button, input, select):focus-visible,
+.board-controls :is(button, input):focus-visible,
 .board-filter-empty button:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
@@ -514,7 +527,7 @@ function handleReviewLeaseAction(payload: TaskReviewLeaseActionPayload) {
 @media (max-width: 768px) {
   .board-search, .board-filters button { min-height: 44px; }
   .board-refine .board-search { width: 100%; }
-  .board-refine select { flex: 1 1 120px; max-width: 100%; min-height: 44px; }
+  .board-refine :deep(.app-select) { flex: 1 1 160px; --app-select-height: 44px; }
   .board-kanban { grid-auto-columns: minmax(260px, calc(100vw - 52px)); }
   .board-panel {
     padding: 16px 12px 14px;

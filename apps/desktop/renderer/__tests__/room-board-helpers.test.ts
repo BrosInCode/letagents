@@ -69,9 +69,11 @@ describe("board card hierarchy", () => {
     for (const label of ["Filter by owner", "Filter by status", "Sort tasks"]) {
       assert.match(html, new RegExp(`<select[^>]*aria-label="${label}"`));
     }
+    assert.equal((html.match(/class="[^"]*\bdesktop-select-caret\b[^"]*"/g) || []).length, 3);
+    assert.equal((html.match(/class="[^"]*\bsr-only\b[^"]*"[^>]*>(?:Filter by owner|Filter by status|Sort tasks)</g) || []).length, 3);
     assert.match(html, /value="label:Alex"/);
     assert.match(html, /value="unassigned"/);
-    assert.match(html, /value="oldest">Oldest first/);
+    assert.match(html, /value="oldest"[^>]*>Oldest first/);
     assert.match(html, /value="done"/);
     assert.doesNotMatch(html, /Clear filters/);
     assert.doesNotMatch(await render({ sort: "oldest", searchQuery: "   " }), /Clear filters/);

@@ -63,17 +63,18 @@
         />
       </label>
       <div class="desktop-board-refinements" role="group" aria-label="Task filters and sorting">
-        <select :value="ownerFilter" aria-label="Filter by owner" @change="emit('update:owner-filter', selectValue($event))">
-          <option v-for="option in ownerOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
-        </select>
-        <select :value="statusFilter" aria-label="Filter by status" @change="emit('update:status-filter', selectValue($event))">
-          <option v-for="option in statusOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
-        </select>
-        <select :value="sort" aria-label="Sort tasks" @change="emit('update:sort', selectValue($event))">
-          <option value="recent">Recently updated</option>
-          <option value="oldest">Oldest first</option>
-          <option value="title">Title A-Z</option>
-        </select>
+        <DesktopSelectField
+          :model-value="ownerFilter" :options="ownerSelectOptions" label="Filter by owner" label-hidden
+          @update:model-value="emit('update:owner-filter', $event)"
+        />
+        <DesktopSelectField
+          :model-value="statusFilter" :options="statusSelectOptions" label="Filter by status" label-hidden
+          @update:model-value="emit('update:status-filter', $event)"
+        />
+        <DesktopSelectField
+          :model-value="sort" :options="sortOptions" label="Sort tasks" label-hidden
+          @update:model-value="emit('update:sort', $event)"
+        />
         <button
           v-if="hasFilters"
           class="desktop-board-clear-filter"
@@ -92,6 +93,7 @@
 import { computed, ref } from "vue";
 import { Plus, Search, X } from "@lucide/vue";
 import DesktopSegmentedControl from "../../controls/DesktopSegmentedControl.vue";
+import DesktopSelectField from "../../controls/DesktopSelectField.vue";
 
 const props = defineProps<{
   searchQuery: string;
@@ -113,6 +115,13 @@ const countFor = (id: string): number => Number(
   props.filterOptions.find((option) => option.id === id)?.count || 0
 );
 const searchInput = ref<HTMLInputElement | null>(null);
+const ownerSelectOptions = computed(() => props.ownerOptions.map(option => ({ value: option.id, label: option.label })));
+const statusSelectOptions = computed(() => props.statusOptions.map(option => ({ value: option.id, label: option.label })));
+const sortOptions = [
+  { value: "recent", label: "Recently updated" },
+  { value: "oldest", label: "Oldest first" },
+  { value: "title", label: "Title A-Z" },
+];
 const hasFilters = computed(() => Boolean(props.searchQuery.trim())
   || props.ownerFilter !== "all" || props.statusFilter !== "all");
 const summaryText = computed(() => {
@@ -146,7 +155,4 @@ function onSearchInput(event: Event): void {
   emit("update:search-query", (event.target as HTMLInputElement).value);
 }
 
-function selectValue(event: Event): string {
-  return (event.target as HTMLSelectElement).value;
-}
 </script>

@@ -181,17 +181,17 @@
   min-width: 0;
 }
 
-.desktop-board-refinements select {
+.desktop-board-toolbar .desktop-board-refinements .desktop-select-field {
+  --desktop-select-height: 36px;
+  --desktop-select-radius: 6px;
+  --desktop-select-background: var(--bg-subtle);
+  --desktop-select-focus-border: var(--blue);
+  --desktop-select-focus-ring: var(--blue-dim);
+  --desktop-select-caret-inset: 12px;
+  --desktop-select-caret-gap: 8px;
   width: 180px;
   max-width: 100%;
   min-width: 0;
-  min-height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-subtle);
-  color: var(--text-secondary);
-  font: inherit;
   font-size: 0.8125rem;
 }
 
@@ -399,9 +399,9 @@
     min-height: 44px;
   }
 
-  .desktop-board-refinements select {
-    flex: 1 1 140px;
-    min-height: 44px;
+  .desktop-board-toolbar .desktop-board-refinements .desktop-select-field {
+    flex: 1 1 160px;
+    --desktop-select-height: 44px;
   }
 
   .desktop-board-add-button,

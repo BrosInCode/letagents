@@ -163,6 +163,7 @@ test('ticket editing forwards content without changing task status or clearing f
 let vite: ViteDevServer
 let TaskBoardCard: object
 let TaskBoardTaskDialog: object
+let TaskBoard: object
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
@@ -170,8 +171,24 @@ before(async () => {
   })
   TaskBoardCard = (await vite.ssrLoadModule('/src/components/room/task-board/TaskBoardCard.vue')).default
   TaskBoardTaskDialog = (await vite.ssrLoadModule('/src/components/room/task-board/TaskBoardTaskDialog.vue')).default
+  TaskBoard = (await vite.ssrLoadModule('/src/components/room/TaskBoard.vue')).default
 })
 after(async () => { await vite?.close() })
+
+test('board filters reuse the shared select with labelled native controls', async () => {
+  const html = await renderToString(createSSRApp({
+    render: () => h(TaskBoard, {
+      tasks: [], presence: [], canManageLeases: false,
+      roomIdentifier: 'test-room', taskGithubStatus: {}, selectedTaskId: null,
+    }),
+  }))
+  assert.equal((html.match(/class="app-select"/g) || []).length, 3)
+  for (const label of ['Filter by owner', 'Filter by status', 'Sort tasks']) {
+    assert.match(html, new RegExp(`<select[^>]*aria-label="${label}"[^>]*class="app-select__control"`))
+  }
+  assert.match(html, /value="oldest"[^>]*>Oldest first/)
+  assert.match(html, /value="done"[^>]*>Done/)
+})
 
 function detailTask(): RoomTask {
   return {
