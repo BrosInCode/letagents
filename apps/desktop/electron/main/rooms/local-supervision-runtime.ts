@@ -7,7 +7,10 @@ import { parseRoomAgentWorkSummary } from "../../../../../shared/room-agent-work
 import { addLocalChatMessage, getLocalChatMessages, getLatestLocalChatMessages,
   getLocalChatMessagesBefore, getLocalMessageThread } from "./messages/local-store.js";
 import type { RoomMessagePayload } from "./messages/mappers.js";
-import { getLocalRoom, listLocalTasks, addLocalTask, updateLocalTask, claimLocalTaskReviewLease } from "./local-store.js";
+import { getLocalRoom, listLocalTasks, addLocalTask, updateLocalTask, claimLocalTaskReviewLease,
+  claimLocalTaskWorkLease, changeLocalTaskWorkLease } from "./local-store.js";
+import { readLocalWorkLeases, heartbeatLocalWorkLeases, assertLocalWorkLeaseWorker } from "../../../../../shared/local-work-leases.mjs";
+import { beginImmediate, rollback } from "./local-db.js";
 import { getLocalRoomArtifacts, publishLocalRoomArtifact } from "./artifacts/local-store.js";
 import { localSupervisionDatabase, authorizeLocalHost, authorizeLocalWorker,
   createLocalSupervisorSession, endLocalSupervisorSession } from "./local-supervision-authority.js";
@@ -140,18 +143,27 @@ export async function requestLocalSupervisor(rawUrl: string, init: RequestInit =
   if (operation[0] === "agent-sessions" && operation[2] === "native-activity" && init.method === "POST") {
     if (operation[1] !== session.session_id) throw new Error("Local native activity belongs to another worker.");
     const db = await localSupervisionDatabase();
-    const row = db.prepare("SELECT native_sequence,native_observed_at FROM local_supervisor_sessions WHERE session_id=?").get(session.session_id)!;
-    const observed = Date.parse(String(body.observed_at));
-    if (!Number.isSafeInteger(body.sequence) || !Number.isFinite(observed) || !["working", "idle"].includes(String(body.status))) throw new Error("Invalid local native activity.");
-    if (Number(body.sequence) < Number(row.native_sequence) || (row.native_observed_at && observed < Date.parse(String(row.native_observed_at)))) return json({ accepted: false });
-    db.prepare("UPDATE local_supervisor_sessions SET native_sequence=?,native_observed_at=?,native_status=? WHERE session_id=?")
-      .run(body.sequence, body.observed_at, body.status, session.session_id);
-    return json({ accepted: true });
+    beginImmediate(db);
+    try {
+      assertLocalWorkLeaseWorker(db, roomId, { ...session, supervised: true });
+      const row = db.prepare("SELECT native_sequence,native_observed_at FROM local_supervisor_sessions WHERE session_id=?").get(session.session_id)!;
+      const observed = Date.parse(String(body.observed_at));
+      if (!Number.isSafeInteger(body.sequence) || !Number.isFinite(observed) || !["working", "idle"].includes(String(body.status))) throw new Error("Invalid local native activity.");
+      if (Number(body.sequence) <= Number(row.native_sequence) || (row.native_observed_at && observed < Date.parse(String(row.native_observed_at)))) {
+        db.exec("COMMIT");
+        return json({ accepted: false, lease_heartbeats: [] });
+      }
+      db.prepare("UPDATE local_supervisor_sessions SET native_sequence=?,native_observed_at=?,native_status=? WHERE session_id=?")
+        .run(body.sequence, body.observed_at, body.status, session.session_id);
+      const lease_heartbeats = heartbeatLocalWorkLeases(db, session.session_id, new Date().toISOString());
+      db.exec("COMMIT");
+      return json({ accepted: true, lease_heartbeats });
+    } catch (error) { rollback(db); throw error; }
   }
   if (operation[0] === "tasks") {
-    // Lease-backed automatic continuation is enabled only for actual work leases.
-    // Existing local board assignments carry no such execution authority.
-    const tasks = (await listLocalTasks(roomId)).map(task => ({ ...task, active_leases: [] }));
+    const db = await localSupervisionDatabase();
+    const tasks = (await listLocalTasks(roomId)).map(task => ({ ...task,
+      active_leases: readLocalWorkLeases(db, roomId, task.id) }));
     if (operation[1]) {
       const task = tasks.find(task => task.id === operation[1]);
       return task ? json({ ...task, room_id: roomId }) : json({ error: "Task not found." }, 404);
@@ -183,6 +195,7 @@ export async function executeLocalSupervisorTool(input: LocalToolInput) {
   if (worker.agent_key !== input.agentSession.agent_key || worker.runtime !== input.provider
     || input.agentSession.room_id !== input.roomId) throw new Error("Local tool worker identity changed.");
   const args = object(input.input);
+  const leaseWorker = { ...worker, supervised: true };
   if (args.room_id && args.room_id !== input.roomId) throw new Error("This tool is scoped to the agent's local room.");
   let value: unknown;
   switch (input.toolName) {
@@ -213,21 +226,28 @@ export async function executeLocalSupervisorTool(input: LocalToolInput) {
     case "add_task": value = { task: await addLocalTask(input.roomId, { title: required(args.title, "title"),
       description: optional(args.description), createdBy: worker.actor_label,
       clientTaskId: `${worker.agent_key}:${required(args.client_task_id, "client task id")}` }) }; break;
-    case "claim_task": value = { task: await updateLocalTask(input.roomId, required(args.task_id, "task id"), {
-      status: "assigned", assignee: worker.actor_label, assigneeAgentKey: worker.agent_key,
-    }) }; break;
+    case "claim_task": value = await claimLocalTaskWorkLease(input.roomId, required(args.task_id, "task id"), leaseWorker); break;
+    case "complete_task":
     case "update_task": value = { task: await updateLocalTask(input.roomId, required(args.task_id, "task id"), {
-      status: optional(args.status), ...(Object.hasOwn(args, "pr_url") ? { prUrl: optional(args.pr_url) } : {}),
+      status: input.toolName === "complete_task" ? "in_review" : optional(args.status),
+      ...(Object.hasOwn(args, "pr_url") ? { prUrl: optional(args.pr_url) } : {}),
       ...(Object.hasOwn(args, "assignee") ? { assignee: optional(args.assignee) } : {}),
       ...(Object.hasOwn(args, "assignee_agent_key") ? { assigneeAgentKey: optional(args.assignee_agent_key) } : {}),
       ...(Array.isArray(args.workflow_artifacts) ? { workflowArtifacts: args.workflow_artifacts as never } : {}),
-    }) }; break;
+    }, leaseWorker) }; break;
+    case "release_task_lease":
+    case "handoff_task_lease": value = await changeLocalTaskWorkLease(input.roomId, required(args.task_id, "task id"), {
+      action: input.toolName === "release_task_lease" ? "release" : "handoff", lease_id: optional(args.lease_id),
+      ...(args.epoch !== undefined ? { epoch: Number(args.epoch) } : {}),
+      target_actor_key: optional(args.target_agent_key), target_actor_instance_id: optional(args.target_actor_instance_id),
+      target_agent_session_id: optional(args.target_agent_session_id),
+    }, leaseWorker); break;
     case "claim_task_review": value = await claimLocalTaskReviewLease(input.roomId, required(args.task_id, "task id"), {
       holderLabel: worker.actor_label, agentKey: worker.agent_key, agentSessionId: worker.session_id,
     }); break;
     case "get_room_artifacts": value = await getLocalRoomArtifacts(input.roomId, { taskId: optional(args.task_id), limit: Math.min(100, Number(args.limit) || 100) }); break;
     case "publish_room_artifact": value = await publishLocalRoomArtifact({ roomId: input.roomId, artifact: object(args.artifact),
-      taskId: optional(args.task_id), linkedTaskIds: Array.isArray(args.linked_task_ids) ? args.linked_task_ids : [] }); break;
+      taskId: optional(args.task_id), linkedTaskIds: Array.isArray(args.linked_task_ids) ? args.linked_task_ids : [], worker: leaseWorker }); break;
     case "get_message_thread": value = await getLocalMessageThread(input.roomId, required(args.root_message_id ?? args.message_id, "message id")); break;
     default: {
       const result = { isError: true, content: [{ type: "text", text: JSON.stringify({ code: "local_room_tool_unavailable",

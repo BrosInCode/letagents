@@ -376,7 +376,8 @@ async function executeLocalRoomTool(
           status: "assigned",
           assignee: workerSession.actor_label || workerSender(workerSession),
           assigneeAgentKey: workerSession.agent_key || null,
-        }),
+        }, workerSession.agent_key ? { agent_key: workerSession.agent_key, session_id: workerSession.session_id,
+          actor_label: workerSession.actor_label || workerSender(workerSession), agent_instance_id: workerSession.agent_instance_id } : undefined),
       };
     }
     case "update_task": {
@@ -388,7 +389,8 @@ async function executeLocalRoomTool(
           assigneeAgentKey: optionalStringOrNull(request.arguments.assignee_agent_key),
           prUrl: optionalStringOrNull(request.arguments.pr_url),
           workflowArtifacts: arrayArg(request.arguments.workflow_artifacts) as never,
-        }),
+        }, workerSession.agent_key ? { agent_key: workerSession.agent_key, session_id: workerSession.session_id,
+          actor_label: workerSession.actor_label || workerSender(workerSession), agent_instance_id: workerSession.agent_instance_id } : undefined),
       };
     }
     case "claim_task_review": {
