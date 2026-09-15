@@ -6,9 +6,14 @@ export type OpenCodeNativePermissionRequest = {
   id: string; sessionID: string; permission: string; patterns: string[];
   metadata: Record<string, unknown>; always: string[]; tool?: { messageID: string; callID: string };
 };
+export type ClaudeNativePermissionRequest = {
+  id: string;
+  request: { subtype: "can_use_tool"; tool_name: string; input: Record<string, unknown>; tool_use_id: string; [key: string]: unknown };
+};
 export type ProviderPermissionRequest =
   | { provider: "codex"; native: CodexNativePermissionRequest }
-  | { provider: "open-model"; native: OpenCodeNativePermissionRequest };
+  | { provider: "open-model"; native: OpenCodeNativePermissionRequest }
+  | { provider: "claude-code"; native: ClaudeNativePermissionRequest };
 export type ProviderPermissionObservation =
   | { type: "snapshot"; connectionId: string | null; requests: readonly ProviderPermissionRequest[] }
   | { type: "degraded" | "unavailable" };
