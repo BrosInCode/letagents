@@ -104,8 +104,8 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
     status: "available", risk: "low", detail: "Maps to Cursor mode=ask without --force.", isDefault: false,
   },
   {
-    id: "ask_before_write", label: "Ask before writes", description: "Requires prompt bridging and a supervised Cursor runtime.",
-    status: "gated", risk: "medium", detail: "Cursor supervised prompt bridging is not available yet.", isDefault: false,
+    id: "ask_before_write", label: "Ask before writes", description: "Unavailable because Cursor can edit ordinary workspace files without asking.",
+    status: "gated", risk: "medium", detail: "Cursor does not request approval for every workspace edit. Use Read-only to prevent edits, or Workspace writes to allow them.", isDefault: false,
   },
   {
     id: "sandboxed_write", label: "Workspace writes", description: "Lets Cursor inspect, edit source files, and run repository tools in a private turn workspace.",

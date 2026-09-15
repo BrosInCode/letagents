@@ -295,6 +295,11 @@ test("supervised profile contract gates Claude prompt approval without changing 
   const cursor = supervisedPermissionProfilesForProvider("cursor");
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.status, "available");
   assert.equal(cursor.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.match(cursor.find((profile) => profile.id === "ask_before_write")?.detail ?? "", /does not request approval for every workspace edit/);
+  assert.throws(() => deriveProviderConfigurationSnapshot({
+    provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "ask_before_write", configurationRevision: 1,
+    launchPolicy: { force: false, sandbox: "enabled" },
+  }, {}), /does not request approval for every workspace edit/);
   assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.status, "available");
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.isDefault, false);
   assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.isDefault, true);
