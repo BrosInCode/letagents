@@ -217,8 +217,8 @@ test("composer presents literal host-only native requests and sends only the sel
     await nextTick();
     assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
     assert.equal(buttons(root).some(node => descendants(node).some(child => child.text === "Allow once")), false);
-    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false,
-      "a sent decision leaves the composer instead of becoming permanent status chrome");
+    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), true,
+      "an uncertain decision remains visible without offering another approval");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
@@ -261,14 +261,14 @@ test("composer retries only the recorded choice and disables stale cards during 
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
-test("composer remains unchanged when no approval bridge is enrolled and discards late results after unmount", async () => {
+test("composer shows unavailable approval authority and discards late results after unmount", async () => {
   let resolve!: (snapshot: DesktopHostApprovalSnapshot) => void;
   Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: () => new Promise(done => { resolve = done; }) } } });
   const { root, app } = mount(RoomComposer, composerProps());
   await flushHostApprovals();
   resolve({ available: false, approvals: [], error: "Host approval key is unavailable." });
   await flushHostApprovals();
-  assert.equal(descendants(root).some(node => node.text.includes("Host approval key")), false);
+  assert.equal(descendants(root).some(node => node.text.includes("Host approval key")), true);
   assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
   app.unmount();
   const late = mount(RoomComposer, composerProps());
@@ -300,28 +300,45 @@ test("composer rejects stale refreshes and removes retry controls after an uncer
     resolveRefresh({ available: true, approvals: [hostApproval()], error: null });
     await flushHostApprovals();
     assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Retry recorded approval)$/.test(child.text))), false);
-    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), true);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
-test("composer hides non-actionable approval history and lets the user dismiss actionable cards locally", async () => {
+test("composer keeps unresolved approval failures visible and dismisses cards locally", async () => {
   const pending = hostApproval();
-  const unavailable = { ...hostApproval(), id: "presentation-2", status: "unavailable" as const };
+  const unavailable = { ...hostApproval(), id: "presentation-2", status: "unavailable" as const,
+    presentation: { ...hostApproval().presentation, displayName: "UnavailableAgent" } };
+  const uncertain = { ...hostApproval(), id: "presentation-3", status: "uncertain" as const };
+  const resolved = { ...hostApproval(), id: "presentation-4", status: "resolved" as const };
   const decisions: unknown[] = [];
   Object.assign(window, { letagentsDesktop: { supervisor: {
-    listHostApprovals: async () => ({ available: true, approvals: [pending, unavailable], error: null }),
+    listHostApprovals: async () => ({ available: true, approvals: [pending, unavailable, uncertain, resolved], error: null }),
     decideHostApproval: async (input: unknown) => { decisions.push(input); return "decision_sent"; },
   } } });
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 1);
+    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 3);
+    assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 1);
     const dismiss = descendants(root).find(node => node.props["aria-label"] === "Dismiss approval from GardenPoint");
     assert.ok(dismiss?.props.onClick);
     (dismiss.props.onClick as () => void)();
     await nextTick();
-    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 2);
     assert.deepEqual(decisions, [], "dismissal is local presentation state and never changes the recorded approval");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer shows approval-service failure when no request cards have arrived", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: false, approvals: [], error: "Approval connection unavailable" }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.ok(descendants(root).some(node => node.text.includes("Approval connection unavailable")));
+    assert.ok(buttonByText(root, "Refresh approvals"));
+    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 

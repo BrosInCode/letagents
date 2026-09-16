@@ -113,6 +113,7 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
   };
   broker.install("agent", handle, "generation"); emit();
   return { store, inbox, db, item, state, native, handle, workspace, sends, order, emit,
+    observationFailure(type: "degraded" | "unavailable") { receive!({ type }); },
     get permissionChanges() { return permissionChanges; },
     get broker() { return broker; },
     reinstall() { broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation"); emit(); },
@@ -123,6 +124,25 @@ test("native permission observations wake delegated decision reconciliation", as
   const f = await fixture();
   try { assert.equal(f.permissionChanges, 1); }
   finally { await f.close(); }
+});
+
+test("an unavailable approval observer is visible even before it discovers a request", async () => {
+  const f = await fixture();
+  try {
+    f.emit([]);
+    assert.deepEqual(await f.broker.list("room"), [], "an observed empty snapshot is healthy");
+    for (const state of ["degraded", "unavailable"] as const) {
+      f.observationFailure(state);
+      const [unavailable] = await f.broker.list("room");
+      assert.equal(unavailable?.status, "unavailable");
+      assert.equal(unavailable.reference, null, "observation failure never grants decision authority");
+      assert.equal(unavailable.presentation.agentId, "agent");
+      assert.match(unavailable.detail!, /observe.*approval/i);
+      assert.deepEqual(await f.broker.list("another-room"), []);
+      f.emit([]);
+      assert.deepEqual(await f.broker.list("room"), [], "a verified empty snapshot clears the observation failure");
+    }
+  } finally { await f.close(); }
 });
 
 function decision(candidate: HostApprovalCandidate, changes: Partial<HostApprovalDecision> = {}): HostApprovalDecision {
@@ -444,17 +464,17 @@ test("host approval retains an unsent chosen decision for exact recovery without
   }
 });
 
-for (const scenario of ["command", "command_applied", "command_denied", "generic_permission", "generic_permission_denied",
+for (const scenario of ["command", "command_restored_before", "command_restored_pending", "command_applied", "command_denied", "generic_permission", "generic_permission_denied",
   "mcp_tool", "mcp_tool_denied", "file_change", "file_change_applied", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
   test(`host approval reaches the real Codex adapter through an offline native server: ${scenario}`, { timeout: 10_000 }, () => verifyNativeApproval(scenario));
 }
 
-async function verifyNativeApproval(scenario: "command" | "command_applied" | "command_denied" | "generic_permission" | "generic_permission_denied"
+async function verifyNativeApproval(scenario: "command" | "command_restored_before" | "command_restored_pending" | "command_applied" | "command_denied" | "generic_permission" | "generic_permission_denied"
   | "mcp_tool" | "mcp_tool_denied" | "file_change" | "file_change_applied" | "changed_file" | "changed_presentation" | "oversized_presentation") {
   const f = await fixture(); f.broker.close();
   const isGeneric = scenario === "generic_permission" || scenario === "generic_permission_denied";
   const isMcp = scenario === "mcp_tool" || scenario === "mcp_tool_denied";
-  const isFileChange = !isMcp && !["command", "command_applied", "command_denied", "generic_permission", "generic_permission_denied"].includes(scenario);
+  const isFileChange = !isMcp && !scenario.startsWith("command") && !isGeneric;
   const changes = [{ path: join(f.workspace, "old.txt"), kind: { type: "update", move_path: join(f.workspace, "new.txt") }, diff: `@@ -1 +1 @@\n-old\n+${secret}` }];
   if (scenario === "oversized_presentation") {
     // The edits alone fit the adapter's bound; the complete host presentation,
@@ -475,7 +495,8 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
     if (!Object.hasOwn(frame, "id")) return;
     if (frame.method === "thread/turns/list") assert.deepEqual(frame.params,
       { threadId: "continuation", limit: 1, sortDirection: "desc", itemsView: "full" });
-    if (frame.method === "thread/resume") assert.deepEqual(frame.params, { threadId: "continuation" });
+    if (frame.method === "thread/resume") assert.deepEqual(frame.params,
+      { threadId: "continuation", ...((frame.params as Record<string, unknown>).cwd ? { cwd: f.workspace } : {}) });
     const result = frame.method === "mcpServerStatus/list" ? { data: [{ name: "letagents" }] }
       : frame.method === "thread/resume" ? { thread: { id: "continuation" } }
       : frame.method === "thread/read" ? { thread: { id: "continuation", status: { type: "active" },
@@ -531,6 +552,15 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
     broker = new HostApprovalBroker({ store: f.store, inbox: f.inbox, provider, currentHandle: () => handle,
       isCurrent: () => true, exactAuthority: async () => true, fenceCommit: commit => commit(), nowMs: () => now + 10 });
     broker.install("agent", handle, "generation");
+    const restore = async () => {
+      const repaired = await provider.repairContinuation(handle, { workAttemptId: "workspace",
+        expectedProviderContinuationId: "continuation", cwd: f.workspace, launchPolicy: {} }, {
+        checkpointReplacement: async () => assert.fail("restoring a conversation must not create a replacement"),
+      });
+      assert.equal(repaired.outcome, "rematerialized");
+      assert.equal(repaired.handle, handle, "same-connection restoration preserves the installed handle and observers");
+    };
+    if (scenario === "command_restored_before") await restore();
     const pending = new Promise<void>(resolve => {
       const unsubscribe = rpc.onPendingRequestsChanged(() => { if (rpc.listPendingRequests().length) { unsubscribe(); resolve(); } });
     });
@@ -545,6 +575,11 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
           ? { cwd: f.workspace, permissions: { network: { enabled: true }, fileSystem: { read: [f.workspace] } } }
           : { command: `printf '${secret}'` }), reason: "failed systemError \u001b[31m\u202e is untrusted permission text" } }));
     await pending;
+    if (scenario === "command_restored_pending") {
+      const [before] = await broker.list("room");
+      assert.equal(before?.status, "pending");
+      await restore();
+    }
     if (scenario === "command_applied") {
       server.clients.values().next().value!.send(JSON.stringify({ method: "item/started",
         params: { threadId: "continuation", turnId: "native-turn",

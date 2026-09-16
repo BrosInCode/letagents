@@ -219,6 +219,17 @@ export class HostApprovalBroker {
     for (const lane of this.lanes.values()) {
       const entry = await this.options.store.getEntry(lane.agentId);
       if (!entry || entry.room_id !== roomId || entry.delivery_mode !== "daemon_inbox") continue;
+      // A missing observation is not a verified empty pending-request list.
+      // Keep failure visible even when no native request reached this lane.
+      if (!lane.requests.length && (lane.state !== "pending" || !this.current(lane))
+        && ["codex", "open-model", "claude-code"].includes(entry.provider) && result.length < 64) {
+        result.push({ reference: null, recordedDecision: null, status: "unavailable",
+          presentation: { agentId: entry.id, displayName: entry.display_name,
+            provider: entry.provider as HostApprovalPresentation["provider"], title: "Approval unavailable",
+            details: "Pending approval requests cannot currently be checked for this agent.",
+            denyScope: entry.provider === "open-model" ? "session_pending" : "request" },
+          detail: "Unable to observe this agent's approvals. Decisions are disabled until its connection is restored." });
+      }
       for (const native of lane.requests) {
         if (result.length >= 64) break;
         try { result.push((await this.prepare(lane, native)).candidate); }
