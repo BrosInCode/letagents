@@ -223,8 +223,6 @@
         key="rooms"
         :room="room"
         :focus-rooms="focusRooms"
-        :repo-status="repoStatus"
-        :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
         :tasks="tasks"
         :on-focus-room-concluded="onFocusRoomConcluded"
         @open-focus-room="emit('open-focus-room', $event)"
