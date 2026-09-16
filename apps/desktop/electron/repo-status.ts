@@ -15,6 +15,8 @@ import { runGitStdout } from "./main/git-exec.js";
 
 export type RepoStatusBuildOptions = {
   signal?: AbortSignal;
+  /** Room opening needs repository identity before the watcher loads branch statistics. */
+  includeBranchDeltas?: boolean;
   /** Project ownership checks must derive identity from Git, never repository config. */
   ignoreConfiguredRoom?: boolean;
 };
@@ -480,12 +482,14 @@ export async function buildRepoStatus(
   const defaultBranch = resolvedRoom.routingDefaultBranch || fallbackDefaultBranch(localBranches);
   throwIfAborted(options);
 
-  const branchDeltas = await getKnownBranchDeltas(
-    repoRoot,
-    [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
-    defaultBranch,
-    options,
-  );
+  const branchDeltas = options.includeBranchDeltas === false
+    ? []
+    : await getKnownBranchDeltas(
+      repoRoot,
+      [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
+      defaultBranch,
+      options,
+    );
   const branchDelta = branchDeltas.find((delta) => delta.branch === gitStatus.branch) ?? null;
   throwIfAborted(options);
 
