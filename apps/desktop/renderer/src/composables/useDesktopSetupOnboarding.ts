@@ -12,6 +12,7 @@ import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { setupEntry } from "../domain/desktop-navigation";
 import { defaultMcpTargetSelection, fallbackMcpInstallState } from "../domain/mcp-install";
 import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
+import { preserveRoomRepoStatistics } from "../domain/repo-status";
 import { desktopIpc } from "../ipc/index.js";
 
 const defaultMcpInstallRevealDelayMs = 160;
@@ -186,7 +187,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         options.authFeedback.value = roomAccessFeedback(result.snapshot);
         return false;
       }
-      options.repoStatus.value = result.repoStatus;
+      options.repoStatus.value = preserveRoomRepoStatistics(options.repoStatus.value, result.repoStatus);
       options.openRoomSnapshot(result.snapshot, {
         displayName: folderLabel,
         kind: "project",

@@ -79,18 +79,25 @@ test("repo status watch does not build refreshes while the window is hidden", as
 });
 
 test("repo status watch closes the initial snapshot/listener race authoritatively", async () => {
-  const initial = repoStatus();
+  const initial = repoStatus({ branchDelta: null, branchDeltas: [] });
+  const branchDelta = { branch: "main", baseBranch: "main", filesChanged: 0, additions: 0, deletions: 0 };
   const reconciled = repoStatus({
     ahead: 1,
     changes: { staged: 0, unstaged: 1, untracked: 0, conflicted: 0 },
     dirty: true,
+    branchDelta,
+    branchDeltas: [branchDelta],
   });
   const emitted: RepoStatus[] = [];
   const restore = configureRepoStatusWatchForTest({
-    buildRepoStatus: async () => initial,
-    refreshRepoStatus: async (_rootPath, previous, invalidation) => {
+    buildRepoStatus: async (_rootPath, options) => {
+      assert.equal(options?.includeBranchDeltas, false);
+      return initial;
+    },
+    refreshRepoStatus: async (_rootPath, previous, invalidation, options) => {
       assert.strictEqual(previous, initial);
       assert.deepEqual(invalidation, { full: true });
+      assert.notEqual(options?.includeBranchDeltas, false);
       return reconciled;
     },
     emitToMainWindow: (_channel, payload) => emitted.push(payload as RepoStatus),

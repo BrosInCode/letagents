@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -313,8 +313,33 @@ test("buildRepoStatus uses local default branches for no-remote branch deltas", 
       stdio: "ignore",
     });
 
-    const status = await buildRepoStatus(tempDir);
+    const tracePath = join(tempDir, ".git", "startup-trace.jsonl");
+    const previousTrace = process.env.GIT_TRACE2_EVENT;
+    let initial;
+    try {
+      process.env.GIT_TRACE2_EVENT = tracePath;
+      initial = await buildRepoStatus(tempDir, { includeBranchDeltas: false });
+    } finally {
+      if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT;
+      else process.env.GIT_TRACE2_EVENT = previousTrace;
+    }
+    const commands = readFileSync(tracePath, "utf8").trim().split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.event === "start")
+      .map((event) => event.argv as string[]);
+    assert.equal(commands.some((argv) => argv.includes("diff")), false,
+      "the room-opening status must not wait for any branch comparison");
+    assert.equal(initial.defaultBranch, "main");
+    assert.equal(initial.branch, "feature/delta");
+    assert.equal(initial.mainRootPath, realpathSync(tempDir));
+    assert.equal(initial.branchDelta, null);
+    assert.deepEqual(initial.branchDeltas, []);
 
+    // The existing background watch performs a full refresh after startup.
+    const status = await refreshRepoStatus(tempDir, initial, { full: true });
+
+    assert.equal(status.roomIdentifier, initial.roomIdentifier);
+    assert.deepEqual(status.worktrees, initial.worktrees);
     assert.equal(status.defaultBranch, "main");
     assert.equal(status.branchDelta?.branch, "feature/delta");
     assert.equal(status.branchDelta?.baseBranch, "main");

@@ -31,6 +31,7 @@ import {
   upsertSnapshotTask,
 } from "../domain/desktop-room-snapshots";
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
+import { preserveRoomRepoStatistics } from "../domain/repo-status";
 import { desktopIpc } from "../ipc/index.js";
 import {
   normalizeRoomIdentifier,
@@ -330,7 +331,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (!sessionIsCurrent(sessionGeneration)) return;
       const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
       options.appInfo.value = nextAppInfo;
-      options.repoStatus.value = loadedRootRoomContext.repoStatus;
+      options.repoStatus.value = loadedRootRoomContext.openedRoom?.repoStatus
+        ? preserveRoomRepoStatistics(options.repoStatus.value, loadedRootRoomContext.repoStatus)
+        : loadedRootRoomContext.repoStatus;
       options.workers.value = nextWorkers;
       options.rootRoomSnapshot.value = nextRootRoomSnapshot;
       options.selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
@@ -484,7 +487,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         const nextRootSnapshot = openedContext.snapshot;
         const nextRepoStatus = openedContext.repoStatus;
         if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-        options.repoStatus.value = nextRepoStatus;
+        options.repoStatus.value = openedContext.openedRoom?.repoStatus
+          ? preserveRoomRepoStatistics(options.repoStatus.value, nextRepoStatus)
+          : nextRepoStatus;
         options.rootRoomSnapshot.value = nextRootSnapshot;
         setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot), { cache: false });
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;

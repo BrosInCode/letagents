@@ -75,6 +75,8 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
   try {
     const status = await repoStatusWatchHooks.buildRepoStatus(rootPath, {
       signal: abortController.signal,
+      // The full reconciliation below supplies statistics after listeners exist.
+      includeBranchDeltas: false,
     });
     abortController.signal.throwIfAborted();
     if (requestId !== watchRequestId) return status;

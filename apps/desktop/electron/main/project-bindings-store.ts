@@ -457,7 +457,7 @@ export async function migrateLegacyProjectBindings(
       if (findProjectBinding(await listProjectBindings(options), candidate.context)) continue;
       const rootPath = await canonicalDirectory(candidate.rootPath);
       const resolved = await resolveRoomIdentifierFromPath(rootPath, { ignoreConfiguredRoom: true });
-      const status = await buildRepoStatus(resolved.repoRoot || rootPath);
+      const status = await buildRepoStatus(resolved.repoRoot || rootPath, { includeBranchDeltas: false });
       const resolvedContext: DesktopProjectBindingContext = {
         roomIdentifier: resolved.roomIdentifier,
         gitRoom: resolved.gitRoom,

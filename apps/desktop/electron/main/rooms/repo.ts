@@ -103,7 +103,9 @@ export async function openRepoRoomFromPath(
   }
 
   const snapshot = await fetchRoomSnapshot(resolved.roomIdentifier);
-  const selectedRepoStatus = await buildRepoStatus(repoPath);
+  // The existing repository watcher fills in branch statistics independently
+  // of opening the room. Only identity and folder selection are needed here.
+  const selectedRepoStatus = await buildRepoStatus(repoPath, { includeBranchDeltas: false });
   const projectBinding = await bindProjectRoot({
     context: {
       roomIdentifier: snapshot.roomIdentifier || resolved.roomIdentifier,
