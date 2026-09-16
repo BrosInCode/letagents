@@ -20,6 +20,7 @@ import type {
   RepoStatus,
 } from "../../electron/ipc-types";
 import { useDesktopSetupOnboarding } from "../src/composables/useDesktopSetupOnboarding";
+import { isAuthSnapshotPending, resolveAuthCardState } from "../src/components/desktop/content/auth-onboarding";
 import { setupEntry } from "../src/domain/desktop-navigation";
 import type { RoomEntry, SidebarEntry } from "../src/components/desktop/types";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "../src/components/desktop/setup/types";
@@ -40,7 +41,6 @@ interface SetupStateInput {
   selectedMcpTargetIds?: DesktopMcpInstallTargetId[];
   firstRunStage?: FirstRunWizardStage;
   mcpWizardStep?: DesktopMcpWizardStep;
-  initialBootstrapTimeoutMs?: number;
   mcpInstallRevealDelayMs?: number;
   roomBridge?: {
     createInviteRoom?: () => Promise<DesktopInviteRoomCreation>;
@@ -267,10 +267,64 @@ test("signing out while project preparation is pending cancels the startup room 
   assert.equal(state.authStatus.value.authenticated, false);
 });
 
-test("initial splash yields when the first room refresh stalls", async () => {
+for (const slowPhase of ["project preparation", "room refresh"] as const) {
+  test(`startup keeps the room loading while ${slowPhase} takes more than ten seconds`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let finishPending!: () => void;
+    const pending = new Promise<void>((resolve) => { finishPending = resolve; });
+    let snapshot: DesktopRoomSnapshot | null = null;
+    let refreshCount = 0;
+    const state = makeSetupState({
+      refresh: async () => {
+        refreshCount += 1;
+        if (slowPhase === "room refresh") await pending;
+        snapshot = snapshotFixture("sky-lake", "sky-lake");
+      },
+      setupBridge: {
+        getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }),
+      },
+      authBridge: {
+        getStatus: async () => authStatusFixture(),
+      },
+    });
+
+    await withDesktopBridge(state.windowBridge, async () => {
+      const loadPromise = state.onboarding.loadFirstRunSetup(
+        slowPhase === "project preparation" ? pending : Promise.resolve(),
+      );
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        t.mock.timers.tick(10_001);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        assert.equal(state.onboarding.showFirstRunSplash.value, false);
+        assert.equal(state.loading.value, true);
+        assert.equal(resolveAuthCardState({
+          snapshotPending: isAuthSnapshotPending({
+            rootLoading: state.loading.value,
+            selectedLoading: false,
+            hasSnapshot: Boolean(snapshot),
+          }),
+          status: "unavailable",
+          hasPendingAuth: false,
+          authenticated: true,
+        }), "loading", "a pending first fetch must not show the error/retry card");
+      } finally {
+        finishPending();
+        await loadPromise;
+      }
+    });
+
+    assert.equal(state.loading.value, false);
+    assert.ok(snapshot);
+    assert.equal(refreshCount, 1, "the first fetch should finish without a retry");
+    assert.equal(state.setupLoadError.value, null);
+  });
+}
+
+test("an initial room refresh failure releases loading without resetting completed setup", async () => {
   const state = makeSetupState({
-    initialBootstrapTimeoutMs: 5,
-    refresh: () => new Promise<void>(() => undefined),
+    refresh: async () => { throw new Error("root room refresh snapshot timed out"); },
     setupBridge: {
       getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }),
     },
@@ -281,9 +335,21 @@ test("initial splash yields when the first room refresh stalls", async () => {
 
   await withDesktopBridge(state.windowBridge, () => state.onboarding.loadFirstRunSetup());
 
-  assert.equal(state.onboarding.showFirstRunSplash.value, false);
   assert.equal(state.loading.value, false);
+  assert.equal(state.onboarding.showFirstRunSplash.value, false);
+  assert.equal(state.onboarding.showFirstRunGate.value, false);
+  assert.equal(state.mcpInstallState.value?.completed, true);
   assert.equal(state.setupLoadError.value, null);
+  assert.equal(resolveAuthCardState({
+    snapshotPending: isAuthSnapshotPending({
+      rootLoading: state.loading.value,
+      selectedLoading: false,
+      hasSnapshot: false,
+    }),
+    status: "unavailable",
+    hasPendingAuth: false,
+    authenticated: true,
+  }), "unavailable");
 });
 
 test("startFirstRunSetup advances welcome to MCP choose step", () => {
@@ -915,7 +981,6 @@ function makeSetupState(input: SetupStateInput = {}) {
     repoStatus,
     selectedMcpTargetIds,
     setupLoadError,
-    initialBootstrapTimeoutMs: input.initialBootstrapTimeoutMs,
     mcpInstallRevealDelayMs: input.mcpInstallRevealDelayMs ?? 0,
   });
 
