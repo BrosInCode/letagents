@@ -339,3 +339,78 @@ for (const operation of ['create', 'task', 'settings', 'close'] as const) {
     globalThis.fetch = originalFetch
   })
 }
+
+test('a concluded room replaces unsaved drafts with its authoritative outcome, including empty closeouts', async () => {
+  const scope = effectScope()
+  const props = modelProps()
+  Object.assign(props, {
+    isFocusRoom: true,
+    focusKey: 'topic_a',
+    sourceTaskId: 'task_a',
+    focusStatus: 'active',
+  })
+  const vm = scope.run(() => useModel(props, () => undefined))
+  vm.resultSummary.value = 'My unsaved draft'
+  vm.closeoutDetails.value.artifact = 'My unsaved artifact'
+  props.conclusionSummary = 'Outcome recorded by another agent'
+  props.conclusionDetails = {
+    artifact: 'PR #900',
+    review_state: 'reviewed',
+    blocker_state: 'none',
+    parent_task_next: 'move_to_review',
+    next_owner: 'Reviewer',
+  }
+  props.focusStatus = 'concluded'
+  await nextTick()
+  assert.equal(vm.resultSummary.value, 'Outcome recorded by another agent')
+  assert.equal(vm.closeoutDetails.value.artifact, 'PR #900')
+  assert.equal(vm.showCloseoutDetails.value, true)
+  assert.equal(vm.canShareResults.value, false)
+  props.conclusionSummary = null
+  props.conclusionDetails = null
+  await nextTick()
+  assert.equal(vm.resultSummary.value, '')
+  assert.equal(vm.closeoutDetails.value.artifact, '')
+  assert.equal(vm.showCloseoutDetails.value, false)
+  scope.stop()
+})
+
+test('an idempotent conclusion does not fill a saved empty closeout with the losing request draft', async () => {
+  const { applyFocusRoomConclusion } = await vite.ssrLoadModule(
+    '/src/composables/room/focusRooms.ts',
+  )
+  const persisted = {
+    ...focus(),
+    focus_status: 'concluded',
+    conclusion_summary: null,
+    conclusion_details: null,
+  }
+  const result = applyFocusRoomConclusion(
+    { identifier: 'focus_1' },
+    persisted,
+    'Unsaved outcome',
+    { artifact: 'Unsaved artifact' },
+  )
+  assert.equal(result.conclusionSummary, null)
+  assert.equal(result.conclusionDetails, null)
+})
+
+test('leaving the Rooms page invalidates a pending creation even when the singleton room stays unchanged', async () => {
+  const result = deferred<any>()
+  const paths: string[] = []
+  const { vm, scope, notices } = navigation({
+    createAdHocFocusRoom: () => result.promise,
+    router: {
+      push: async (path: string) => {
+        paths.push(path)
+      },
+    },
+  })
+  const pending = vm.handleCreateAdHocFocusRoom('Release planning')
+  scope.stop()
+  result.resolve(focus())
+  await pending
+  assert.deepEqual(paths, [])
+  assert.deepEqual(notices, [])
+  assert.equal(vm.createdRoom.value, null)
+})

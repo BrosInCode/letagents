@@ -238,3 +238,44 @@ test("shared directory keeps empty Open selected and opens an existing task room
   );
   mounted.stop();
 });
+
+test("task search cannot create or open a selected task hidden by the query", () => {
+  const props = reactive({
+    rooms: [],
+    tasks: [
+      { id: "a", title: "Agent recovery", description: "", status: "open" },
+      {
+        id: "b",
+        title: "Release planning",
+        description: "",
+        status: "open",
+        roomId: "focus_b",
+      },
+    ],
+    parentLabel: "Main",
+    busy: false,
+  } as any);
+  const mounted = mountSetup(Directory, props);
+  mounted.vm.selectedTaskId.value = "a";
+  mounted.vm.taskQuery.value = "Release";
+  assert.equal(mounted.vm.selectedTaskId.value, null);
+  assert.equal(mounted.vm.selectedTask.value, undefined);
+  mounted.vm.createTask();
+  assert.deepEqual(mounted.events, []);
+  mounted.vm.selectedTaskId.value = "b";
+  mounted.vm.taskQuery.value = "No matching tasks";
+  mounted.vm.createTask();
+  assert.deepEqual(mounted.events, []);
+  mounted.stop();
+});
+
+test("unmounting the desktop Rooms view prevents a late creation from navigating", async () => {
+  const result = deferred<any>();
+  bridge({ createAdHocFocusRoom: () => result.promise });
+  const mounted = mountSetup(RoomDetails, desktopProps());
+  const pending = mounted.vm.createAdHocFocusRoom("Release planning");
+  mounted.stop();
+  result.resolve({ focusRoom: room("focus_new") });
+  await pending;
+  assert.deepEqual(mounted.events, []);
+});

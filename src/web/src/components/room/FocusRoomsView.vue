@@ -89,7 +89,7 @@
               type="button"
               @click="openDirectoryRoom(selectedFocusRoom.room_id)"
             >
-              Open conversation <span aria-hidden="true">↗</span></button
+              Open room <span aria-hidden="true">↗</span></button
             ><span
               v-if="selectedFocusRoom.focus_status !== 'concluded'"
               class="rooms-hint"

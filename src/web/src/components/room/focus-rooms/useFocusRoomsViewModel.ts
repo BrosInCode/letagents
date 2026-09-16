@@ -98,8 +98,10 @@ export function useFocusRoomsViewModel(
   const requiresCloseoutDetails = computed(
     () => props.isFocusRoom && Boolean(props.sourceTaskId),
   )
-  const showCloseoutDetails = computed(
-    () => requiresCloseoutDetails.value || Boolean(props.conclusionDetails),
+  const showCloseoutDetails = computed(() =>
+    isConcluded.value
+      ? Boolean(props.conclusionDetails)
+      : requiresCloseoutDetails.value || Boolean(props.conclusionDetails),
   )
   const closeoutDetailsComplete = computed(() =>
     Boolean(
@@ -223,9 +225,15 @@ export function useFocusRoomsViewModel(
       `${props.roomAddress}:${props.isFocusRoom ? props.focusKey || props.sourceTaskId || props.roomLabel : ''}`,
   )
   watch(
-    () => [roomIdentity.value, props.conclusionSummary || ''] as const,
-    ([id, summary], previous) => {
+    () =>
+      [
+        roomIdentity.value,
+        props.conclusionSummary || '',
+        props.focusStatus,
+      ] as const,
+    ([id, summary, status], previous) => {
       if (
+        status === 'concluded' ||
         !previous ||
         id !== previous[0] ||
         resultSummary.value === previous[1]
@@ -240,9 +248,11 @@ export function useFocusRoomsViewModel(
       [
         roomIdentity.value,
         JSON.stringify(props.conclusionDetails || createEmptyCloseoutDetails()),
+        props.focusStatus,
       ] as const,
-    ([id, details], previous) => {
+    ([id, details, status], previous) => {
       if (
+        status === 'concluded' ||
         !previous ||
         id !== previous[0] ||
         JSON.stringify(closeoutDetails.value) === previous[1]

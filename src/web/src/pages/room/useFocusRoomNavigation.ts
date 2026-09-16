@@ -1,4 +1,4 @@
-import { ref, watch, type ComputedRef, type Ref } from 'vue'
+import { onScopeDispose, ref, watch, type ComputedRef, type Ref } from 'vue'
 import type { Router } from 'vue-router'
 import type {
   FocusRoomConclusionDetails,
@@ -44,6 +44,9 @@ export function useFocusRoomNavigation(input: {
   const createdRoom = ref<{ id: string; title: string } | null>(null)
   let pendingCreation: { key: string; path: string } | null = null
   let generation = 0
+  onScopeDispose(() => {
+    generation++
+  })
   watch(
     () => input.room.value?.identifier,
     () => {

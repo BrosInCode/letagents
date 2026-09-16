@@ -444,13 +444,14 @@ const visibleTasks = computed(() =>
   ),
 )
 const selectedTask = computed(() =>
-  props.tasks.find((task) => task.id === selectedTaskId.value),
+  visibleTasks.value.find((task) => task.id === selectedTaskId.value),
 )
 
 watch(
   () => props.initialTaskId,
   (id) => {
     if (!id) return
+    taskQuery.value = ''
     selectedTaskId.value = id
     creationMode.value = 'task'
     composing.value = true
@@ -463,6 +464,17 @@ watch(visibleRooms, (rooms) => {
     emit('select', null)
   }
 })
+watch(
+  visibleTasks,
+  (tasks) => {
+    if (
+      selectedTaskId.value &&
+      !tasks.some((task) => task.id === selectedTaskId.value)
+    )
+      selectedTaskId.value = null
+  },
+  { flush: 'sync' },
+)
 async function openComposer() {
   composing.value = true
   await focusComposer()

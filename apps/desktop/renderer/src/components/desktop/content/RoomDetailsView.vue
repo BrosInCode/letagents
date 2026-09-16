@@ -275,7 +275,7 @@
               type="button"
               @click="openFocusRoom(selectedFocusRoom.identifier)"
             >
-              Open conversation <ArrowRight :size="15" aria-hidden="true" />
+              Open room <ArrowRight :size="15" aria-hidden="true" />
             </button>
             <button
               class="rooms-button"
@@ -993,6 +993,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 onBeforeUnmount(() => {
+  roomGeneration++;
   if (feedbackTimer !== null) {
     window.clearTimeout(feedbackTimer);
     feedbackTimer = null;
