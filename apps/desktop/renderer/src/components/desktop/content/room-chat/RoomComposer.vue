@@ -34,7 +34,7 @@
           @click="decideHostApproval(approval.id, approval.retryDecision)">Retry recorded {{ approval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button>
       </div>
     </section>
-    <p v-if="hostApprovalError && visibleHostApprovals.length" class="desktop-composer-permission-error" role="status">
+    <p v-if="hostApprovalError" class="desktop-composer-permission-error" role="status">
       {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshHostApprovals">Refresh approvals</button>
     </p>
     <div
@@ -275,7 +275,8 @@ function hostApprovalStatus(status: HostApprovalStatus): string {
 }
 
 const visibleHostApprovals = computed(() => hostApprovals.value.filter(approval =>
-  (approval.status === "pending" || approval.status === "decision_recorded")
+  (approval.status === "pending" || approval.status === "decision_recorded"
+    || approval.status === "unavailable" || approval.status === "uncertain")
   && !dismissedHostApprovalIds.value.has(approval.id)));
 
 function dismissHostApproval(id: string): void {
