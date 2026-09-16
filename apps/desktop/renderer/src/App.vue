@@ -402,6 +402,7 @@ import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/Sideb
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "./domain/desktop-message-drafts";
+import { preserveRoomRepoStatistics } from "./domain/repo-status";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
@@ -1014,7 +1015,7 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
       return false;
     }
     if (selection.repoStatus) {
-      repoStatus.value = selection.repoStatus;
+      repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, selection.repoStatus);
     }
     openRoomSnapshot(selection.snapshot, {
       aliasIdentifiers: [selection.roomIdentifier],
@@ -1473,7 +1474,7 @@ const {
 } = useDesktopNewRoomModal({
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
   setRepoStatus: (status) => {
-    if (status) repoStatus.value = status;
+    if (status) repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, status);
   },
   getDefaultStorageMode: () =>
     chatStorageSettings.value?.defaultMode === "local" || chatStorageSettings.value?.mode === "local"

@@ -1106,6 +1106,7 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
 function createHarness(options: {
   deliveryRepairRetryMs?: number;
   snapshotTimeoutMs?: number;
+  openedRoom?: DesktopRepoRoomSelection;
 } = {}): {
   accountRooms: Ref<DesktopAccountRoomEntry[]>;
   activeEntry: Ref<SidebarEntry>;
@@ -1121,6 +1122,7 @@ function createHarness(options: {
   nextSelectedSnapshot: Promise<DesktopRoomSnapshot>;
   nextStreamReady: Promise<void>;
   repairStreamDeliveryAvailable: boolean;
+  repoStatus: Ref<RepoStatus | null>;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
   sessionGeneration: Ref<number>;
@@ -1135,6 +1137,7 @@ function createHarness(options: {
     ],
   }));
   const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
+  const repoStatus = ref<RepoStatus | null>(null);
   const activeEntry = ref<SidebarEntry>(focusEntry("focus_a", "Focus A"));
   const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
@@ -1168,8 +1171,11 @@ function createHarness(options: {
     mcpInstallState: ref<DesktopMcpInstallState | null>(null),
     reconcileActiveEntry: () => undefined,
     rememberRootRoomSnapshot: () => undefined,
-    recentRootRooms: ref<RecentRootRoom[]>([]),
-    repoStatus: ref<RepoStatus | null>(null),
+    recentRootRooms: ref<RecentRootRoom[]>(options.openedRoom ? [{
+      identifier: "room_parent", kind: "project", rootPath: options.openedRoom.repoPath,
+      displayName: "Project", meta: "Room", updatedAt: "2026-09-16T00:00:00.000Z",
+    }] : []),
+    repoStatus,
     resolveSelectedRoomIdentifier: () => activeEntry.value.type === "room" ? activeEntry.value.roomIdentifier : null,
     rootRoomSnapshot,
     scheduleLiveMetadataRefresh: (delayMs?: number) => {
@@ -1236,6 +1242,7 @@ function createHarness(options: {
     set repairStreamDeliveryAvailable(value: boolean) {
       harness.repairStreamDeliveryAvailable = value;
     },
+    repoStatus,
     rootRoomSnapshot,
     selectedSnapshot,
     sessionGeneration,
@@ -1284,7 +1291,7 @@ function createHarness(options: {
         },
         repos: {
           getStatus: async (): Promise<RepoStatus> => repoStatusFixture(),
-          openRoom: async (): Promise<DesktopRepoRoomSelection> => canceledOpenRoom(),
+          openRoom: async (): Promise<DesktopRepoRoomSelection> => options.openedRoom || canceledOpenRoom(),
         },
         setup: {
           getMcpInstallState: async (): Promise<DesktopMcpInstallState> => ({
@@ -1321,6 +1328,34 @@ async function withDesktopBridge<T>(
     }
   }
 }
+
+it("keeps watcher statistics when room refresh finishes later and when reopening the same room", async () => {
+  const openingStatus = {
+    ...repoStatusFixture(), isGitRepo: true, defaultBranch: "master", branchDelta: null, branchDeltas: [],
+  };
+  const harness = createHarness({ openedRoom: {
+    ...canceledOpenRoom(), canceled: false, repoPath: openingStatus.rootPath,
+    repoStatus: openingStatus, roomIdentifier: "room_parent", snapshot: roomSnapshot("room_parent"),
+  } });
+  harness.activeEntry.value = parentEntry();
+  const appInfo = deferred<DesktopAppInfo>();
+  harness.nextAppInfo = appInfo.promise;
+  const delta = { branch: "staging", baseBranch: "master", filesChanged: 2, additions: 8, deletions: 3 };
+  const watchedStatus = { ...openingStatus, branchDelta: delta, branchDeltas: [delta] };
+
+  await withDesktopBridge(harness.windowBridge, async () => {
+    const refresh = harness.state.refresh();
+    await flushAsync();
+    // The watcher can deliver full statistics while other refresh requests wait.
+    harness.repoStatus.value = watchedStatus;
+    appInfo.resolve({} as DesktopAppInfo);
+    await refresh;
+    assert.deepEqual(harness.repoStatus.value, watchedStatus);
+    await harness.state.refresh();
+    assert.deepEqual(harness.repoStatus.value, watchedStatus);
+    assert.equal(harness.rootRoomSnapshot.value?.roomIdentifier, "room_parent");
+  });
+});
 
 describe("useDesktopAppData session invalidation", () => {
   it("drops a pre-sign-out root and account refresh that resolves after the session is cleared", async () => {
