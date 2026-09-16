@@ -31,6 +31,7 @@ import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
+import type { ProviderPermissionObservation } from "../../shared/provider-permissions.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,6 +61,71 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
 }
 
 type FakeProvider = "codex" | "claude-code" | "open-model";
+
+test("restoration preserves permission ownership while replacement retires it", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "repair", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const request = { workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd: "/repo", launchPolicy: {} };
+  const native = { id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1",
+    params: { threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 } };
+  const listeners: Parameters<NonNullable<NativeProviderAdapter["observePermissions"]>>[1][] = [];
+  adapter.observePermissions = async (_handle, listener) => { listeners.push(listener); };
+  const events: ProviderPermissionObservation[] = [];
+  await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
+  const snapshot = { type: "snapshot" as const, requests: [native] };
+  listeners[0]!(snapshot);
+  adapter.repairContinuation = async nativeHandle => {
+    listeners[0]!(snapshot); // Pending requests can arrive while restoration awaits the provider.
+    return { handle: nativeHandle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
+      replacementProviderContinuationId: request.expectedProviderContinuationId };
+  };
+  const restored = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
+  listeners[0]!(snapshot);
+  assert.equal(restored.handle, handle);
+  assert.deepEqual(events.map(event => event.type), ["snapshot", "snapshot", "snapshot"]);
+  adapter.repairContinuation = async nativeHandle => {
+    nativeHandle.providerContinuationId = "replacement";
+    return { handle: nativeHandle, outcome: "replaced", previousProviderContinuationId: request.expectedProviderContinuationId,
+      replacementProviderContinuationId: "replacement" };
+  };
+  const replaced = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
+  listeners[0]!(snapshot);
+  assert.equal(events.at(-1)!.type, "unavailable");
+  assert.deepEqual(await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native }), { outcome: "correlation_unproven" });
+  await router.observePermissions(replaced.handle, event => events.push(event), new AbortController().signal);
+  const current = { ...native, params: { ...native.params, threadId: "replacement" } };
+  listeners[1]!({ type: "snapshot", requests: [current] });
+  assert.equal(events.at(-1)!.type, "snapshot");
+  assert.equal((await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native: current })).outcome, "correlated");
+});
+
+for (const mutation of ["handle", "continuation", "pid", "connection", "owner", "detach"] as const) {
+  test(`restoration rejects changed ${mutation} authority`, async () => {
+    const adapter = fakeAdapter("codex", []);
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    const spawn = { provider: "codex", workAttemptId: "repair", roomId: "room", cwd: "/repo", launchPolicy: {} };
+    const handle = await router.spawn(spawn);
+    const continuation = handle.providerContinuationId!;
+    const controller = new AbortController();
+    let successor = handle;
+    adapter.repairContinuation = async nativeHandle => {
+      if (mutation === "handle") nativeHandle = { ...nativeHandle };
+      if (mutation === "continuation") nativeHandle.providerContinuationId = "different";
+      if (mutation === "pid") nativeHandle.pid! += 1;
+      if (mutation === "connection") nativeHandle.providerConnection!.processIdentity = "different-birth";
+      if (mutation === "owner") successor = await router.spawn(spawn);
+      if (mutation === "detach") controller.abort();
+      return { handle: nativeHandle, outcome: "rematerialized", previousProviderContinuationId: continuation,
+        replacementProviderContinuationId: nativeHandle.providerContinuationId! };
+    };
+    await assert.rejects(router.repairContinuation(handle, { workAttemptId: "repair",
+      expectedProviderContinuationId: continuation, cwd: "/repo", launchPolicy: {} }, {
+      checkpointReplacement: async () => {}, detachSignal: controller.signal,
+    }), /ownership changed|process identity|must preserve/);
+    if (mutation === "owner") await router.poke(successor, "still owned");
+  });
+}
 
 test("permission routing preserves frozen Codex request identity and fences native dispatch", async () => {
   const calls: string[] = [];

@@ -381,14 +381,42 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   async repairContinuation(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderContinuationRepairResult> {
     const remembered = this.required(handle);
+    // Public handles expose live getters. Freeze the authority being repaired
+    // before an adapter can mutate its native handle or yield to a replacement.
+    const workAttemptId = handle.workAttemptId;
+    const pid = handle.pid;
+    const connection = structuredClone(handle.providerConnection);
+    const continuation = handle.providerContinuationId;
+    const assertOwned = () => {
+      if (options.detachSignal?.aborted || this.handles.get(workAttemptId) !== remembered) {
+        throw new Error("Provider ownership changed during continuation repair.");
+      }
+    };
     const adapter = await this.adapter(remembered.provider);
+    assertOwned();
     if (!adapter.repairContinuation) throw new Error(`Provider '${remembered.provider}' does not support continuation repair.`);
     const repaired = await adapter.repairContinuation(remembered.handle, request, options);
-    if (repaired.handle.workAttemptId !== handle.workAttemptId || repaired.handle.pid !== handle.pid
-      || !sameProviderActionConnectionIdentity(repaired.handle.providerConnection, handle.providerConnection)) {
+    assertOwned();
+    if (repaired.handle.workAttemptId !== workAttemptId || repaired.handle.pid !== pid
+      || !sameProviderActionConnectionIdentity(repaired.handle.providerConnection, connection)) {
       throw new Error("Provider continuation repair changed the verified provider process identity.");
     }
-    this.handles.set(handle.workAttemptId, { provider: remembered.provider, handle: repaired.handle });
+    if (repaired.previousProviderContinuationId !== continuation
+      || repaired.replacementProviderContinuationId !== repaired.handle.providerContinuationId) {
+      throw new Error("Provider continuation repair returned inconsistent conversation identity.");
+    }
+    if (repaired.outcome === "rematerialized") {
+      if (repaired.handle !== remembered.handle || repaired.replacementProviderContinuationId !== continuation) {
+        throw new Error("Provider restoration must preserve the installed native handle and conversation.");
+      }
+      // The registry record owns existing observations. A restoration changes
+      // neither that ownership nor the coordinator's installed public handle.
+      return { ...repaired, handle };
+    }
+    if (repaired.replacementProviderContinuationId === continuation) {
+      throw new Error("Provider replacement must establish a different conversation.");
+    }
+    this.handles.set(workAttemptId, { provider: remembered.provider, handle: repaired.handle });
     return {
       ...repaired,
       handle: publicHandle(repaired.handle, handle.appliedConfigurationRevision),
