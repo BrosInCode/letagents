@@ -14,7 +14,6 @@ import { defaultMcpTargetSelection, fallbackMcpInstallState } from "../domain/mc
 import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 import { desktopIpc } from "../ipc/index.js";
 
-const defaultInitialBootstrapTimeoutMs = 10_000;
 const defaultMcpInstallRevealDelayMs = 160;
 
 interface OpenRoomOptions {
@@ -40,7 +39,6 @@ interface DesktopSetupOnboardingOptions {
   repoStatus: Ref<RepoStatus | null>;
   selectedMcpTargetIds: Ref<DesktopMcpInstallTargetId[]>;
   setupLoadError: Ref<string | null>;
-  initialBootstrapTimeoutMs?: number;
   mcpInstallRevealDelayMs?: number;
 }
 
@@ -101,16 +99,19 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       // Do not load any room/account payload until GitHub authorization has
       // completed; useDesktopAuthFlow performs the first refresh after that.
       if (nextMcpInstallState.completed && nextAuthStatus.authenticated) {
-        await waitForInitialRefresh(
-          async () => {
-            await preparation;
-            // The visible shell may have signed out or switched accounts while
-            // project identity checks were pending. Do not resume that startup.
-            if (options.authStatus.value !== initialAuthStatus) return;
-            await options.refresh();
-          },
-          options.initialBootstrapTimeoutMs ?? defaultInitialBootstrapTimeoutMs,
-        );
+        await preparation;
+        // The visible shell may have signed out or switched accounts while
+        // project identity checks were pending. Do not resume that startup.
+        if (options.authStatus.value !== initialAuthStatus) return;
+        // The splash has already yielded. Keep room loading pending until its
+        // own timeout or result settles; a separate startup timer would expose
+        // the unavailable placeholder while the first fetch is still running.
+        try {
+          await options.refresh();
+        } catch {
+          // A room failure belongs to the room's error/retry surface and must
+          // not send an already-configured desktop back through setup.
+        }
       }
     } catch (error) {
       options.setupLoadError.value = error instanceof Error
@@ -490,23 +491,6 @@ function mcpInstallRevealDelay(overrideMs?: number): number {
 async function waitForMcpInstallReveal(delayMs: number): Promise<void> {
   if (delayMs <= 0) return;
   await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-}
-
-async function waitForInitialRefresh(
-  refresh: () => Promise<void>,
-  timeoutMs: number,
-): Promise<void> {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  try {
-    await Promise.race([
-      refresh(),
-      new Promise<void>((resolve) => {
-        timeoutId = setTimeout(resolve, Math.max(0, timeoutMs));
-      }),
-    ]);
-  } finally {
-    if (timeoutId !== null) clearTimeout(timeoutId);
-  }
 }
 
 function canSelectFirstRunRoom(status: DesktopRoomAccess["status"]): boolean {
