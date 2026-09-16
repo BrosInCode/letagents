@@ -5,20 +5,15 @@
   >
     <div :class="compact ? 'focus-settings-heading' : 'focus-panel-header'">
       <div>
-        <p class="focus-eyebrow">Sharing</p>
         <h4>{{ title }}</h4>
       </div>
-      <button
-        class="focus-secondary"
-        type="submit"
-        :disabled="!canSubmit"
-      >
+      <button class="focus-secondary" type="submit" :disabled="!canSubmit">
         {{ submitLabel }}
       </button>
     </div>
     <div :class="['focus-settings-grid', { compact }]">
       <label>
-        <span>Parent room</span>
+        <span>Share with main room</span>
         <AppSelect v-model="settings.parent_visibility" :disabled="disabled">
           <option
             v-for="option in parentVisibilityOptions"
@@ -31,7 +26,7 @@
         <small>{{ parentVisibilityDescription }}</small>
       </label>
       <label>
-        <span>What counts</span>
+        <span>Related work</span>
         <AppSelect v-model="settings.activity_scope" :disabled="disabled">
           <option
             v-for="option in activityScopeOptions"
@@ -44,7 +39,7 @@
         <small>{{ activityScopeDescription }}</small>
       </label>
       <label>
-        <span>Code updates</span>
+        <span>GitHub updates</span>
         <AppSelect v-model="settings.github_event_routing" :disabled="disabled">
           <option
             v-for="option in githubEventRoutingOptions"

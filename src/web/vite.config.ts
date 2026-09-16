@@ -11,6 +11,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   resolve: {
+    dedupe: ["vue"],
     alias: {
       '@': resolve(__dirname, 'src'),
     },

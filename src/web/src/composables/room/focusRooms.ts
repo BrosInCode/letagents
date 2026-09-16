@@ -89,16 +89,24 @@ export function applyFocusRoomConclusion(
   return {
     ...room,
     displayName: focusRoom.display_name || room.displayName,
-    attachmentsEnabled: focusRoom.attachments_enabled ?? room.attachmentsEnabled,
+    attachmentsEnabled:
+      focusRoom.attachments_enabled ?? room.attachmentsEnabled,
     focusStatus: focusRoom.focus_status || room.focusStatus,
     focusParentVisibility:
       focusRoom.focus_parent_visibility || room.focusParentVisibility,
-    focusActivityScope: focusRoom.focus_activity_scope || room.focusActivityScope,
+    focusActivityScope:
+      focusRoom.focus_activity_scope || room.focusActivityScope,
     focusGitHubEventRouting:
       focusRoom.focus_github_event_routing || room.focusGitHubEventRouting,
     concludedAt: focusRoom.concluded_at || room.concludedAt,
-    conclusionSummary: focusRoom.conclusion_summary || summary,
-    conclusionDetails: focusRoom.conclusion_details || conclusionDetails,
+    conclusionSummary:
+      focusRoom.conclusion_summary !== undefined
+        ? focusRoom.conclusion_summary
+        : summary,
+    conclusionDetails:
+      focusRoom.conclusion_details !== undefined
+        ? focusRoom.conclusion_details
+        : conclusionDetails,
   }
 }
 
@@ -108,7 +116,8 @@ export function applyFocusRoomSettings(
 ): RoomInfo {
   return {
     ...room,
-    attachmentsEnabled: focusRoom.attachments_enabled ?? room.attachmentsEnabled,
+    attachmentsEnabled:
+      focusRoom.attachments_enabled ?? room.attachmentsEnabled,
     focusParentVisibility: focusRoom.focus_parent_visibility,
     focusActivityScope: focusRoom.focus_activity_scope,
     focusGitHubEventRouting: focusRoom.focus_github_event_routing,

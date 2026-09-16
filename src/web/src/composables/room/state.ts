@@ -125,6 +125,8 @@ export function isCurrentActivityHistoryRequest(requestId: number): boolean {
   return requestId === activityHistoryRequestSequence
 }
 
+export let roomSessionVersion = 0
+
 export function resetRoomState(options: {
   activityHistoryLoading: boolean
   githubEventsLoading: boolean
@@ -132,6 +134,7 @@ export function resetRoomState(options: {
   activityHistoryRequest?: ActivityHistoryRequest
 }) {
   nextActivityHistoryRequestSequence()
+  roomSessionVersion++
   room.value = null
   replaceRoomMessages([])
   messagesHasOlder.value = false

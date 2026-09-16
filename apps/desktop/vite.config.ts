@@ -20,6 +20,7 @@ export default defineConfig({
     strictPort: true,
   },
   resolve: {
+    dedupe: ["vue"],
     alias: {
       "@": fileURLToPath(new URL("./renderer/src", import.meta.url)),
     },
