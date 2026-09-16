@@ -20,6 +20,8 @@ export interface FocusRoomsViewProps {
   focusSettings: FocusRoomSettings
   conclusionSummary: string | null
   conclusionDetails: FocusRoomConclusionDetails | null
+  creationError?: string | null
+  createdRoom?: { id: string; title: string } | null
   isCreatingFocusRoom: boolean
   isCreatingAdHocFocusRoom: boolean
   isSharingFocusResult: boolean
@@ -32,6 +34,7 @@ export type FocusRoomsViewEmit = {
   (event: 'createAdHocFocusRoom', title: string): void
   (event: 'openFocusRoom', focusKey: string): void
   (event: 'openParentRoom'): void
+  (event: 'retryCreatedRoom'): void
   (event: 'shareResults', summary: string, details: FocusRoomConclusionDetails | null): void
   (event: 'updateFocusSettings', focusKey: string, settings: FocusRoomSettings): void
 }

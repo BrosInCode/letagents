@@ -86,6 +86,8 @@
       :roomTitle="roomTitle"
       :focusParentAddress="focusParentAddress"
       :focusSettings="focusSettings"
+      :creation-error="creationError"
+      :created-room="createdRoom"
       :creatingFocusRoomTaskId="creatingFocusRoomTaskId"
       :creatingAdHocFocusRoom="creatingAdHocFocusRoom"
       :sharingFocusResult="sharingFocusResult"
@@ -108,6 +110,7 @@
       @createAdHocFocusRoom="handleCreateAdHocFocusRoom"
       @openFocusRoom="handleOpenFocusRoom"
       @openParentRoom="handleOpenParentRoom"
+      @retryCreatedRoom="retryCreatedRoom"
       @shareResults="handleShareFocusResults"
       @updateFocusSettings="handleUpdateFocusSettings"
     />
@@ -312,6 +315,9 @@ const {
 const {
   focusDraftTaskId,
   creatingFocusRoomTaskId,
+  creationError,
+  createdRoom,
+  retryCreatedRoom,
   creatingAdHocFocusRoom,
   sharingFocusResult,
   updatingFocusSettings,

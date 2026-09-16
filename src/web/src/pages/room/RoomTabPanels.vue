@@ -92,6 +92,8 @@
         :focusSettings="focusSettings"
         :conclusionSummary="room?.conclusionSummary || null"
         :conclusionDetails="room?.conclusionDetails || null"
+        :creation-error="creationError"
+        :created-room="createdRoom"
         :isCreatingFocusRoom="creatingFocusRoomTaskId !== null"
         :isCreatingAdHocFocusRoom="creatingAdHocFocusRoom"
         :isSharingFocusResult="sharingFocusResult"
@@ -101,6 +103,7 @@
         @createAdHocFocusRoom="emit('createAdHocFocusRoom', $event)"
         @openFocusRoom="emit('openFocusRoom', $event)"
         @openParentRoom="emit('openParentRoom')"
+        @retryCreatedRoom="emit('retryCreatedRoom')"
         @shareResults="emitShareResults"
         @updateFocusSettings="emitUpdateFocusSettings"
       />
@@ -173,6 +176,8 @@ const props = defineProps<{
   roomTitle: string
   focusParentAddress: string
   focusSettings: FocusRoomSettings
+  creationError: string | null
+  createdRoom: { id: string; title: string } | null
   creatingFocusRoomTaskId: string | null
   creatingAdHocFocusRoom: boolean
   sharingFocusResult: boolean
@@ -203,6 +208,7 @@ const emit = defineEmits<{
   createAdHocFocusRoom: [title: string]
   openFocusRoom: [focusKey: string]
   openParentRoom: []
+  retryCreatedRoom: []
   shareResults: [summary: string, details: FocusRoomConclusionDetails | null]
   updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
   openTask: [taskId: string]
