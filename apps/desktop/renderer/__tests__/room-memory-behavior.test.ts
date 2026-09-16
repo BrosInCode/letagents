@@ -104,3 +104,18 @@ test('saving after a filtered search reveals the saved memory and preserves vers
   assert.ok(vm.filtered.value.some((r: any) => r.id === goal.id));
   stop();
 });
+
+
+test('failed source links report errors inside history while its background is inert', async () => {
+  const { vm, stop } = mount();
+  Object.assign(window.letagentsDesktop!, { app: { openExternalUrl: async () => { throw new Error('Unable to open this source.'); } } });
+  await vm.refresh();
+  vm.edit(goal); vm.historyMode.value = true;
+  await vm.openSource('https://letagents.chat');
+  assert.equal(vm.editError.value, 'Unable to open this source.');
+  assert.equal(vm.error.value, '');
+  vm.closeEditor(); await nextTick();
+  await vm.openSource('https://letagents.chat');
+  assert.equal(vm.error.value, 'Unable to open this source.');
+  stop();
+});

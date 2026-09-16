@@ -70,7 +70,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
-import { Archive, ArrowUpRight, BookOpen, ChevronDown, CircleCheck, Flag, History, Link2, LoaderCircle, MessageSquare, Pencil, Plus, RefreshCw, Search, Shield, Type, Users, X } from '@lucide/vue';
+import { Archive, ArrowUpRight, ChevronDown, CircleCheck, Flag, History, Link2, LoaderCircle, MessageSquare, Pencil, Plus, RefreshCw, Search, Shield, Type, Users, X } from '@lucide/vue';
 import { MEMORY_CATEGORIES, type KnowledgeInput, type KnowledgePage, type KnowledgeRecord, type MemoryCategory } from '../../../../../../../shared/room-knowledge.mjs';
 import { desktopBridgeUpgradeMessage, desktopIpc } from '../../../ipc/index.js';
 import DesktopDialogShell from './DesktopDialogShell.vue';
@@ -131,5 +131,12 @@ async function save(archived?: boolean) {
   finally { saving.value = false; if (completed && roomId === props.roomIdentifier) restoreEditorFocus(true); }
 }
 function archive() { if (editor.value?.record) void save(!editor.value.record.archived); }
-async function openSource(url: string) { try { await desktopIpc.app.openExternalUrl(url); } catch (cause) { error.value = String(cause); } }
+async function openSource(url: string) {
+  try { await desktopIpc.app.openExternalUrl(url); }
+  catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    if (editor.value) editError.value = message;
+    else error.value = message;
+  }
+}
 </script>
