@@ -15,9 +15,12 @@ mobile push, or cross-instance delivery when there is only one API instance.
 
 - `/usr/local/bin/letagents-probe.py`: executable probe, root-owned.
 - `/etc/letagents-monitor.json`: root-only configuration with `base_url`,
-  `room_id`, and `timeout_seconds` (5 in production). The invite ID is a secret.
+  `room_id`, `timeout_seconds` (5 in production), and a dedicated `ntfy_url`.
+  The invite ID and notification topic URL are secrets.
 - `/usr/local/lib/letagents-monitor/watchdog-check.sh`: sourced by the existing
-  `/usr/local/bin/uptime-watchdog.sh`; uses its `NTFY_URL` and `STATE_DIR`.
+  `/usr/local/bin/uptime-watchdog.sh`; uses its `STATE_DIR`, but reads the
+  LetAgents notification destination from its own configuration. It never
+  falls back to the RevApp `NTFY_URL`. Subscribe to this separate topic in ntfy.
 - Replace only the existing LetAgents homepage check with the source command
   and `check_letagents`. RevApp checks remain unchanged.
 

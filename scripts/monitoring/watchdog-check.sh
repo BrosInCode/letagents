@@ -1,9 +1,15 @@
-# Sourced by the existing watchdog after NTFY_URL and STATE_DIR are defined.
+# Sourced by the existing watchdog after STATE_DIR is defined.
+# LetAgents uses its own ntfy_url in the root-only monitor configuration.
 # Keep the room identifier and alert destination out of logs.
 check_letagents() {
     local state_file="$STATE_DIR/letagents" prev state result attempt temp
     local probe="${LETAGENTS_PROBE:-/usr/local/bin/letagents-probe.py}"
     local config="${LETAGENTS_MONITOR_CONFIG:-/etc/letagents-monitor.json}"
+    local ntfy_url
+    if ! ntfy_url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ntfy_url"])' "$config" 2>/dev/null) || [ -z "$ntfy_url" ]; then
+        printf 'LetAgents ntfy destination is missing or unreadable; no alert sent.\n' >&2
+        return 1
+    fi
     prev=$(cat "$state_file" 2>/dev/null || echo up)
     state=down
     for attempt in 1 2; do
@@ -28,7 +34,7 @@ check_letagents() {
             priority=urgent
         fi
         if ! curl --fail --silent --show-error --max-time 10 -o /dev/null \
-            -H "Title: $title" -H "Priority: $priority" -d "$message" "$NTFY_URL"; then
+            -H "Title: $title" -H "Priority: $priority" -d "$message" "$ntfy_url"; then
             # Retry notification on the next scheduled run, instead of silently
             # acknowledging a transition whose notification was never accepted.
             printf 'LetAgents alert delivery failed; transition remains pending.\n' >&2

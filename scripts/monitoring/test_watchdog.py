@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,8 +13,11 @@ class WatchdogTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name)
         self.env = dict(os.environ, STATE_DIR=str(self.path), LETAGENTS_PROBE=str(self.path/'probe'), NTFY_URL='http://unused.invalid', PATH=str(self.path)+':'+os.environ['PATH'])
+        self.config = self.path/'config.json'
+        self.config.write_text(json.dumps({'ntfy_url': 'https://ntfy.sh/letagents-test'}))
+        self.env['LETAGENTS_MONITOR_CONFIG'] = str(self.config)
         self.tool('probe', 'echo "probe" >> "$STATE_DIR/calls"; echo \'{"status":"ok"}\'; exit "${PROBE_EXIT:-0}"')
-        self.tool('curl', 'echo "notification" >> "$STATE_DIR/notifications"; exit "${NOTIFY_EXIT:-0}"')
+        self.tool('curl', '''printf '%s\\n' "$@" >> "$STATE_DIR/notification-arguments"; echo "notification" >> "$STATE_DIR/notifications"; exit "${NOTIFY_EXIT:-0}"''')
         self.tool('sleep', 'exit 0')
         self.tool('timeout', 'test "$1" = "--kill-after=2s" && test "$2" = "30s" || exit 99; shift 2; exec "$@"')
 
@@ -43,6 +47,23 @@ class WatchdogTest(unittest.TestCase):
         self.env['PROBE_EXIT']='0'
         self.assertEqual(self.run_check().returncode, 0)
         self.assertEqual(len((self.path/'notifications').read_text().splitlines()),2)
+
+    def test_letagents_alerts_use_dedicated_topic(self):
+        self.env['PROBE_EXIT']='1'
+        self.run_check()
+        arguments=(self.path/'notification-arguments').read_text()
+        self.assertIn('https://ntfy.sh/letagents-test',arguments)
+        self.assertNotIn(self.env['NTFY_URL'],arguments)
+        self.env['PROBE_EXIT']='0'
+        self.run_check()
+        self.assertEqual((self.path/'notification-arguments').read_text().count('https://ntfy.sh/letagents-test'),2)
+
+    def test_missing_topic_does_not_fall_back_to_revapp(self):
+        self.config.write_text('{}')
+        self.env['PROBE_EXIT']='1'
+        self.assertNotEqual(self.run_check().returncode,0)
+        self.assertFalse((self.path/'notifications').exists())
+        self.assertFalse((self.path/'letagents').exists())
 
     def test_failed_alert_is_retried_next_run(self):
         (self.path/'letagents').write_text('up\n')
