@@ -4075,6 +4075,61 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
   }
 });
 
+test("missing Codex room tools retain the exact inbox item without spending a model attempt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-room-tools-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  try {
+    await ingest(store);
+    let ready = false;
+    let invocations = 0;
+    const published: string[] = [];
+    const detail = "LetAgents room tools could not be verified. No model turn was started. Restart and resume, then retry the message.";
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      invocations += 1;
+      if (!ready) throw Object.assign(new Error(detail), { providerFailureCode: "provider_room_tools_unavailable" });
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.("turn-tools-restored");
+      return { turnId: "turn-tools-restored", outcome: "reply", text: "Board checked." };
+    }), { poll: async () => ({}), publish: async input => {
+      published.push(input.clientMessageId);
+      return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId };
+    } }, currentAuthority);
+    await delivery.pump(agent);
+    const blocked = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(blocked.state, "blocked");
+    assert.equal(blocked.last_error, detail);
+    assert.equal(blocked.attempt_count, 0);
+    assert.equal(blocked.provider_turn_id, null);
+    assert.equal(blocked.outcome, null);
+    assert.equal(invocations, 1, "no automatic retry loop while tools are unavailable");
+    assert.deepEqual(published, []);
+    ready = true;
+    await store.retryBlocked(blocked.inbox_item_id);
+    await delivery.pump(agent);
+    const finished = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(finished.inbox_item_id, blocked.inbox_item_id);
+    assert.equal(finished.state, "acknowledged");
+    assert.equal(finished.attempt_count, 1);
+    assert.deepEqual(published, [blocked.reply_client_message_id]);
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("room-tool failure after dispatch intent cannot claim that no model turn started", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-room-tools-late-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  try {
+    await ingest(store);
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.();
+      throw Object.assign(new Error("late tool failure"), { providerFailureCode: "provider_room_tools_unavailable" });
+    }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+    await delivery.pump(agent);
+    const blocked = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(blocked.state, "blocked");
+    assert.match(blocked.last_error!, /provider may have started this work/);
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("a typed pre-turn missing conversation restores the same inbox item before one real turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-restore-"));
   try {
