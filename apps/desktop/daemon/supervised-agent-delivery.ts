@@ -1146,6 +1146,7 @@ export class SupervisedAgentDelivery {
       try { await this.observeSettledWorkspace?.(agent, item.source_message_id, item.inbox_item_id, summary, workspaceBaseline); } catch { /* optional review */ }
     };
     let providerCallEntered = false;
+    let nativeDispatchEntered = false;
     const recovering = Boolean(item.provider_turn_id);
     let providerTurnOriginExecutionGenerationId = agent.executionGenerationId;
     const hasProviderAuthority = () => recovering && agent.provider === "cursor"
@@ -1460,6 +1461,7 @@ export class SupervisedAgentDelivery {
       };
       let baselineObserved = false;
       const beforeDispatch = async () => {
+        nativeDispatchEntered = true;
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         const continuation = await this.inbox.taskContinuation(item.inbox_item_id);
         if (continuation) {
@@ -1681,6 +1683,15 @@ export class SupervisedAgentDelivery {
         return;
       }
       const failure = error as { providerFailureCode?: unknown; providerContinuationId?: unknown };
+      if (failure.providerFailureCode === "provider_room_tools_unavailable"
+        && agent.provider === "codex" && !recovering && !nativeDispatchEntered
+        && !current.provider_turn_id && !current.outcome) {
+        // This failure is emitted before dispatch intent or turn/start. Keep
+        // the exact inbox item for Retry after tool/runtime recovery; do not
+        // imply an uncertain model turn or spend the model-attempt budget.
+        await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
+        return;
+      }
       if (failure.providerFailureCode === "provider_continuation_missing"
         && current.attempt_count === 0
         && !current.provider_turn_id

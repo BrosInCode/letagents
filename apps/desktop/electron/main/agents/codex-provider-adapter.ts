@@ -265,11 +265,13 @@ function custodialPollingTools(value: unknown): string[] {
   return tools;
 }
 
+const REQUIRED_ROOM_TOOLS = ["claim_task", "get_board", "read_messages", "send_message"] as const;
+
 function boundedCodexTools(value: unknown): string[] {
   const report = recordValue(value);
   const tools = recordValue(recordValue(report?.profiles)?.cursor_supervised_room_turn)?.tools;
   if (report?.format !== 1 || !Array.isArray(tools) || !tools.every((name) => typeof name === "string")
-    || !["claim_task", "get_board", "read_messages", "send_message"].every((name) => tools.includes(name))
+    || !REQUIRED_ROOM_TOOLS.every((name) => tools.includes(name))
     || tools.some((name) => /^(?:wait_for_messages|register_agent_session|disconnect_agent_session|start_device_auth|poll_device_auth|clear_saved_auth|resume_room_session)$/.test(name))) {
     throw new Error("The verified LetAgents MCP runtime does not support Codex supervised room tools.");
   }
@@ -544,6 +546,49 @@ async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void>
       "LetAgents MCP server is not configured in Codex; refusing to launch without the room workplace.",
     );
   }
+}
+
+class CodexRoomToolsUnavailableError extends Error {
+  readonly providerFailureCode = "provider_room_tools_unavailable";
+
+  constructor() {
+    super("LetAgents room tools could not be verified for this conversation. No model turn was started. Retry the message; if this persists, use Restart and resume in agent Diagnostics, then retry the message.");
+    this.name = "CodexRoomToolsUnavailableError";
+  }
+}
+
+/** Configuration presence is enough for observation, never for dispatching new work. */
+async function requireLetAgentsRoomTools(client: CodexAdapterRpc, threadId: string): Promise<void> {
+  let cursor: string | undefined;
+  const cursors = new Set<string>();
+  try {
+    for (let page = 0; page < 10; page += 1) {
+      const response = recordValue(await client.request("mcpServerStatus/list", {
+        threadId, detail: "toolsAndAuthOnly", limit: 100, ...(cursor ? { cursor } : {}),
+      }, { timeoutMs: 5_000 }));
+      if (!Array.isArray(response?.data)) break;
+      const servers = response.data.map(recordValue).filter(row => row?.name === "letagents");
+      if (servers.length) {
+        const server = servers[0]!;
+        const tools = recordValue(server.tools);
+        const names = tools && Object.values(tools).map(tool => recordValue(tool)?.name);
+        if (servers.length === 1 && tools
+          && (server.runtimeStatus === undefined || server.runtimeStatus === "connected")
+          && names?.every(name => typeof name === "string")
+          && REQUIRED_ROOM_TOOLS.every(name => names.includes(name))) return;
+        break;
+      }
+      const next = response.nextCursor;
+      if (typeof next !== "string" || !next || cursors.has(next)) break;
+      cursors.add(next);
+      cursor = next;
+    }
+  } catch (error) {
+    // Keep the existing exact-conversation restoration path when the probe
+    // discovers absence before turn/start gets a chance to report it.
+    if (isMissingContinuation(error, threadId)) throw new ProviderContinuationMissingError(threadId);
+  }
+  throw new CodexRoomToolsUnavailableError();
 }
 
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
@@ -1276,11 +1321,19 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const handle = this.requireHandle(providerHandle);
     if (!request.inboxItemId.trim() || !request.actionId.trim()) throw new Error("Bounded Codex room turn requires durable inbox and action ids.");
     const turnPolicy = handle.requireTurnPolicy();
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const rpcConnection = handle.client.currentConnectionId();
     const assertRuntimeAvailable = () => {
-      if (handle.terminal || isCodexRuntimeUnavailable(handle.state)) {
+      if (options.detachSignal?.aborted || handle.terminal || isCodexRuntimeUnavailable(handle.state)
+        || this.handles.get(handle.workAttemptId) !== handle || handle.providerContinuationId !== continuation
+        || !sameProviderConnectionIdentity(handle.providerConnection, connection)
+        || handle.client.currentConnectionId() !== rpcConnection) {
         throw new Error("Codex runtime is unavailable; no bounded room turn can start.");
       }
     };
+    assertRuntimeAvailable();
+    await requireLetAgentsRoomTools(handle.client, continuation);
     assertRuntimeAvailable();
     await options.beforeNativeDispatch?.();
     assertRuntimeAvailable();
