@@ -44,6 +44,8 @@ export function formatActivationReason(reason: string): string {
       return "Included in this small room";
     case "recent_conversation":
       return "Continuing your conversation";
+    case "jev_routed":
+      return "Chosen by conversation routing";
     case "self_message":
       return "Published by this agent";
     case "system_event":

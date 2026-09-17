@@ -1,5 +1,5 @@
 export type AgentMessageActivationDecision = "activate" | "silent" | "unclear";
-export type AgentMessageActivationReason = "self_message" | "explicit_mention" | "explicit_other_mention" | "broadcast" | "reply_target" | "other_reply_target" | "thread_participant" | "task_owner" | "small_room" | "recent_conversation" | "system_event" | "unaddressed";
+export type AgentMessageActivationReason = "self_message" | "explicit_mention" | "explicit_other_mention" | "broadcast" | "reply_target" | "other_reply_target" | "thread_participant" | "task_owner" | "small_room" | "recent_conversation" | "jev_routed" | "system_event" | "unaddressed";
 /** Send-time human fallback only; never use this to re-route historical reads. */
 export declare function humanConversationFallback(input: {
     source: string | null;

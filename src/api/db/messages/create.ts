@@ -53,6 +53,10 @@ import {
 } from "./account-agent-routing.js";
 import { getMessageThreadReadOverlays } from "./thread-read-overlays.js";
 import {
+  logJevConversationRouting,
+  resolveJevConversationRoutingHint,
+} from "./jev-routing-hint.js";
+import {
   getMessageThreadRoutingProjection,
   resolveMessageThreadRoutingProjection,
   type ThreadRoutingProjection,
@@ -198,6 +202,11 @@ export async function addMessageWithCreateStatus(
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
+  // Conversation-routing inference runs before the transaction opens: a
+  // network call must never hold the message-insert connection. The hint is
+  // advisory; the routing loop re-validates every elected key against the
+  // owned session population inside the transaction.
+  const jevHint = await resolveJevConversationRoutingHint({ roomId, sender, text, options });
   const result = await db.transaction(async (tx): Promise<AddMessageResult> => {
     // Transitional projection repair can inspect a legacy thread on the first
     // post-watermark reply. Bound that work—and every other statement in this
@@ -678,7 +687,7 @@ export async function addMessageWithCreateStatus(
             number: createdMessage.number, timestamp: createdMessage.timestamp,
             publisher_account_id: createdMessage.publisher_account_id!,
           }) : null;
-      const humanFallback = humanConversationFallback({
+      const heuristicFallback = humanConversationFallback({
         source: createdMessage.source, publisherAccountId: createdMessage.publisher_account_id,
         publisherAgentKey: createdMessage.publisher_agent_key,
         explicitlyAddressed: !humanConversationEligible,
@@ -688,6 +697,16 @@ export async function addMessageWithCreateStatus(
         recentAgentKey: recentRecipient && ownerScopeByAgentKey.get(recentRecipient.agentKey) === recentRecipient.ownerAccountId
           ? recentRecipient.agentKey : null,
       });
+      // Jev only ever replaces the untagged fallback, and only in rooms of
+      // three or more agents; mentions, replies, threads, and task ownership
+      // stay deterministic. Elected keys must be single-owner durable keys in
+      // this room right now, or they route nothing.
+      const jevRouting = jevHint && sessionsByAgentKey.size > 2 ? jevHint : null;
+      const jevElectedKeys = new Set(
+        (jevRouting?.elected ?? []).filter((agentKey) => ownerScopeByAgentKey.has(agentKey)),
+      );
+      const jevDecides = jevRouting?.mode === "active";
+      const humanFallback = jevDecides ? null : heuristicFallback;
 
       // Receipts are keyed by durable agent identity: several live sessions
       // (duplicates, mid-rotation overlap) may share one agent_key, but the
@@ -742,6 +761,11 @@ export async function addMessageWithCreateStatus(
             session: representative,
             activation: { decision: "activate", reason: "thread_participant", addressed: true },
           };
+        } else if (jevDecides && jevElectedKeys.has(agentKey)) {
+          selectedActivation = {
+            session: representative,
+            activation: { decision: "activate", reason: "jev_routed", addressed: true },
+          };
         } else if (humanFallback?.agentKeys.includes(agentKey)) {
           selectedActivation = {
             session: representative,
@@ -781,6 +805,16 @@ export async function addMessageWithCreateStatus(
             updated_at: createdMessage.timestamp,
           });
         }
+      }
+
+      if (jevRouting) {
+        logJevConversationRouting(jevRouting, {
+          roomId,
+          messageNumber: createdMessage.number,
+          heuristicReason: heuristicFallback?.reason ?? null,
+          heuristicAgentKeys: heuristicFallback?.agentKeys ?? [],
+          appliedAgentKeys: jevDecides ? [...jevElectedKeys] : [],
+        });
       }
 
       const receiptRowsToInsert = [...receiptsByAgentKey.values()];
