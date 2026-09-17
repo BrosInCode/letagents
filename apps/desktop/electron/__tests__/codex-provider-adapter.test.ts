@@ -92,7 +92,8 @@ class FakeRpc implements CodexAdapterRpc {
         throw new Error("Codex app-server request timed out: mcpServerStatus/list");
       }
       return {
-        data: this.options.workplacePresent ? [{ name: "letagents", status: "ready" }] : [],
+        data: this.options.workplacePresent ? [{ name: "letagents", runtimeStatus: "connected",
+          tools: Object.fromEntries(["claim_task", "get_board", "read_messages", "send_message"].map(name => [name, { name }])) }] : [],
       } as T;
     }
     if (method === "thread/start") {
@@ -1345,6 +1346,130 @@ test("Codex bounded room turn verifies its exact terminal state when thread idle
     text: "Verified after idle.",
     evidence: "transcript",
   });
+});
+
+test("Codex blocks a restored conversation with missing room tools before any dispatch", async (t) => {
+  const validTools = Object.fromEntries(["claim_task", "get_board", "read_messages", "send_message"].map(name => [name, { name }]));
+  for (const [name, inventory] of Object.entries({
+    "missing server": { data: [] },
+    "configured but failed": { data: [{ name: "letagents", runtimeStatus: "failed", tools: {} }] },
+    "stale tools on failed server": { data: [{ name: "letagents", runtimeStatus: "failed", tools: validTools }] },
+    "unknown connection with cached tools": { data: [{ name: "letagents", runtimeStatus: null, tools: validTools }] },
+    "missing board tool": { data: [{ name: "letagents", tools: { send_message: { name: "send_message" } } }] },
+    "name only": { data: [{ name: "letagents" }] },
+    "malformed tools": { data: [{ name: "letagents", tools: ["get_board"] }] },
+    "malformed page": {},
+    "repeated cursor": { data: [], nextCursor: "loop" },
+    "probe timeout": null,
+  })) await t.test(name, async () => {
+    const harness = createHarness();
+    const spawn = spawnRequest({ deliveryMode: "daemon_inbox" });
+    const original = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawn);
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.attach({ workAttemptId: spawn.workAttemptId,
+      providerContinuationId: original.providerContinuationId!, providerConnection: original.providerConnection,
+      launchPolicy: spawn.launchPolicy });
+    assertProviderHandle(handle);
+    const client = harness.clients.at(-1)!;
+    const originalRequest = client.request.bind(client);
+    let probes = 0;
+    client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+      if (method === "mcpServerStatus/list") {
+        probes += 1;
+        assert.equal((params as { threadId?: string }).threadId, original.providerContinuationId);
+        if (!inventory) throw new Error("request timed out");
+        return inventory as T;
+      }
+      return originalRequest<T>(method, params);
+    };
+    let dispatches = 0;
+    await assert.rejects(adapter.runRoomTurn!(handle, {
+      inboxItemId: "inbox-tools", actionId: "action-tools", sourceMessage: {}, activation: {},
+    }, { beforeNativeDispatch: async () => { dispatches += 1; } }), {
+      providerFailureCode: "provider_room_tools_unavailable",
+    });
+    assert.equal(dispatches, 0);
+    assert.equal(client.requests.some(request => request.method === "turn/start"), false);
+    assert.ok(probes <= 2, "a repeated pagination cursor terminates");
+    assert.equal(client.closed, false, "observation remains attached");
+    assert.deepEqual(harness.signals, [], "a missing tool never kills the provider");
+    assert.equal(harness.launches.length, 1);
+  });
+});
+
+test("Codex follows thread-scoped tool pages and rechecks inventory on every new room turn", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  let healthy = true;
+  const probes: unknown[] = [];
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "mcpServerStatus/list") {
+      probes.push(params);
+      if (!healthy) return { data: [{ name: "letagents", tools: {} }] } as T;
+      if (!(params as { cursor?: string }).cursor) return { data: [{ name: "other" }], nextCursor: "page-two" } as T;
+      return { data: [{ name: "letagents", runtimeStatus: "connected", tools: Object.fromEntries(
+        ["claim_task", "get_board", "read_messages", "send_message"].map(name => [`mcp__letagents__${name}`, { name }]),
+      ) }], nextCursor: null } as T;
+    }
+    return originalRequest<T>(method, params);
+  };
+  const request = { inboxItemId: "inbox-ready", actionId: "action-ready", sourceMessage: {}, activation: {} };
+  const running = adapter.runRoomTurn!(handle, request);
+  await flush();
+  client.emit({ method: "turn/completed", params: {
+    threadId: handle.providerContinuationId, turnId: `turn-${handle.providerContinuationId}`,
+  } });
+  await running;
+  assert.deepEqual(probes, [
+    { threadId: handle.providerContinuationId, detail: "toolsAndAuthOnly", limit: 100 },
+    { threadId: handle.providerContinuationId, detail: "toolsAndAuthOnly", limit: 100, cursor: "page-two" },
+  ]);
+  healthy = false;
+  await assert.rejects(adapter.runRoomTurn!(handle, { ...request, inboxItemId: "inbox-next", actionId: "action-next" }), {
+    providerFailureCode: "provider_room_tools_unavailable",
+  });
+  assert.equal(client.requests.filter(request => request.method === "turn/start").length, 1);
+  assert.equal((await adapter.recoverRoomTurn!(handle, { inboxItemId: request.inboxItemId,
+    providerTurnId: `turn-${handle.providerContinuationId}` })).turnId, `turn-${handle.providerContinuationId}`);
+  assert.equal(probes.length, 3, "exact prior-turn recovery does not depend on current tool availability");
+});
+
+test("Codex refuses readiness evidence from a replaced RPC connection", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    const response = await originalRequest<T>(method, params);
+    if (method === "mcpServerStatus/list") client.connectionEpoch = "replacement";
+    return response;
+  };
+  let dispatched = false;
+  await assert.rejects(adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-stale-tools", actionId: "action-stale-tools", sourceMessage: {}, activation: {},
+  }, { beforeNativeDispatch: async () => { dispatched = true; } }), /runtime is unavailable/);
+  assert.equal(dispatched, false);
+  assert.equal(client.requests.some(request => request.method === "turn/start"), false);
+});
+
+test("an exact missing conversation during tool discovery retains automatic continuation repair", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "mcpServerStatus/list") throw new Error(`thread not found: ${handle.providerContinuationId}`);
+    return originalRequest<T>(method, params);
+  };
+  await assert.rejects(adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-missing", actionId: "action-missing", sourceMessage: {}, activation: {},
+  }), { providerFailureCode: "provider_continuation_missing", providerContinuationId: handle.providerContinuationId });
+  assert.equal(client.requests.some(request => request.method === "turn/start"), false);
 });
 
 test("a failed Codex room turn leaves the same runtime available for its successor", async () => {
