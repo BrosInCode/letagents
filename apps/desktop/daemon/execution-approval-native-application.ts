@@ -49,6 +49,7 @@ type Options = {
 
 function status(record: ExecutionApprovalRecord): HostApprovalStatus {
   if (record.request.state === "resolved") return "resolved";
+  if (record.request.closedAtMs != null) return "request_closed";
   if (record.request.state === "requested") return "pending";
   if (record.request.state === "decision_recorded") return "decision_recorded";
   if (record.request.state === "dispatching") return "uncertain";

@@ -15,8 +15,9 @@ import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLed
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
 import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
+import { applyApprovalRequestClosureSchema, validateApprovalRequestClosureSchema } from "./execution-approval-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 41;
+export const DAEMON_STATE_SCHEMA_VERSION = 42;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -131,6 +132,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
   if (existingVersion >= 39) validateRoomWorkspaceReviewSchema(database);
+  if (existingVersion >= 42) validateApprovalRequestClosureSchema(database);
   if (existingVersion >= 38) validateRoomWorkspaceSchema(database);
   if (existingVersion >= 36) validateExecutionApprovalPublicationSchema(database);
   if (existingVersion >= 27) validateRoomWorkPublicationSchema(database, existingVersion < 37);
@@ -307,7 +309,7 @@ createSchema(database: DatabaseSync): void {
     this.migrateExecutionApprovalProjectionStorage(database);
     return;
   }
-  if (existingVersion >= 35 && existingVersion <= 40) {
+  if (existingVersion >= 35 && existingVersion <= 41) {
     this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
@@ -1500,6 +1502,7 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
 /** Existing memberships stay cloud-backed. Never reconstruct a missing current authority column. */
 private applyLocalRoomMembershipShape(database: DatabaseSync): void {
   applyRuntimeRecoverySchema(database);
+  applyApprovalRequestClosureSchema(database);
   if (!this.tableColumns(database, "agent_room_memberships").has("local_room_id")) {
     database.exec("ALTER TABLE agent_room_memberships ADD COLUMN local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id))");
   }

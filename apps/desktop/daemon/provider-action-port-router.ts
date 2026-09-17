@@ -35,7 +35,7 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
-  observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
+  observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
   replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
   correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
   inspectPermissionFileChanges?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
@@ -238,6 +238,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     await adapter.observePermissions(remembered.handle, event => {
       if (signal.aborted) return;
       if (!current()) { notify({ type: "unavailable" }); return; }
+      if (event.type === "request_closed") {
+        if (remembered.provider === "codex") notify({ type: "request_closed", request: { provider: "codex", native: event.request } });
+        return;
+      }
       if (event.type !== "snapshot") { notify(event); return; }
       const requests: ProviderPermissionRequest[] = event.requests.map(native => remembered.provider === "codex"
         ? { provider: "codex", native: native as CodexNativePermissionRequest }

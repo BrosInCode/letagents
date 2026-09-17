@@ -50,6 +50,7 @@ function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync):
 }
 
 function restoreEmptyExecutionDelegationV23Fixture(database: DatabaseSync): void {
+  database.exec("DROP TABLE IF EXISTS execution_approval_request_closures");
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
   database.exec("DROP TRIGGER execution_approval_projection_immutable; DROP TABLE execution_approval_projections");
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 0);
@@ -1373,6 +1374,7 @@ test("approval journal snapshots caller inputs before awaiting the ownership fen
       delegatable: false,
       state: "requested",
       applicationCertainty: null,
+      closedAtMs: null,
     });
     const selection = { authority, expected: { ...expected }, decisionId: "decision", actorId: "owner", decision: "allow_once" as const, projectionSha256: "b".repeat(64), atMs: 110 };
     const selected = await store.selectHostApproval(selection, async commit => {

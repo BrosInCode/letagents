@@ -114,6 +114,7 @@ function reference(record: ExecutionApprovalRecord): HostApprovalReference {
 }
 function status(record: ExecutionApprovalRecord): HostApprovalStatus {
   if (record.request.state === "resolved") return "resolved";
+  if (record.request.closedAtMs != null) return "request_closed";
   if (record.request.state === "requested") return "pending";
   if (record.request.state === "decision_recorded") return "decision_recorded";
   if (record.request.state === "dispatching") return "uncertain";
@@ -175,6 +176,10 @@ export class HostApprovalBroker {
     }
     const receive = (event: ProviderPermissionObservation) => {
       if (!this.current(lane)) return;
+      if (event.type === "request_closed") {
+        lane.approvalExecutions?.observeRequestClosed(event.request);
+        return;
+      }
       if (event.type === "snapshot" && event.requests.length <= MAX_REQUESTS) {
         if (lane.state !== "pending" || lane.connectionId !== event.connectionId) lane.revision += 1;
         lane.state = "pending";
@@ -250,7 +255,8 @@ export class HostApprovalBroker {
     // an absent pending request never proves that our decision was applied.
     const shown = new Set(result.flatMap(item => item.reference ? [item.reference.requestId] : []));
     for (const record of durable) {
-      if (shown.has(record.request.requestId) || !["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state)) continue;
+      if (shown.has(record.request.requestId) || record.request.closedAtMs != null
+        || !["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state)) continue;
       const entry = await this.options.store.getEntry(record.request.agentId);
       if (!entry || entry.room_id !== roomId || !["codex", "open-model", "claude-code"].includes(entry.provider)) continue;
       result.push({ reference: reference(record), recordedDecision: recordedDecision(record),
@@ -335,9 +341,13 @@ export class HostApprovalBroker {
       ? { classification: "delegatable_file_change" as const, request: { ...baseRequest, kind: "file_change" as const, risk: "low" as const },
           authority: { ...owned, provider: "codex" as const }, projection: projection! }
       : { classification: "host_only" as const, request: { ...baseRequest, risk: "high" as const }, authority: owned };
+    // Worker credential reads serialize with writes that acquire the daemon
+    // commit fence. Finish them before taking that fence to preserve lock order.
+    await assertAuthority();
     assertCurrent();
     const { approval, projection: admittedProjection } = await this.options.store.admitExecutionApprovalPlan(admission, this.now, commit =>
-      this.options.fenceCommit(async () => { await assertAuthority(); await commit(); }));
+      this.options.fenceCommit(async () => { assertCurrent(); await commit(); }));
+    await assertAuthority();
     assertCurrent();
     return { owned, approval, projection: admittedProjection, sourceMessageId: head.source_message_id,
       assertCurrent, fileChanges, entry, now, kind: correlated.kind };
