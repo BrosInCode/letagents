@@ -9,6 +9,8 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import { HostApprovalBroker } from "../host-approval-broker.js";
+import { DaemonAuthority } from "../daemon-authority.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
 import type { RecordedApprovalDecision } from "../execution-approval-native-application.js";
 import { ManifestStore } from "../manifest-store.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
@@ -27,7 +29,8 @@ const secret = "PRIVATE-APPROVAL-CONTENT";
 const now = Date.parse("2026-08-31T00:00:00.000Z");
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-async function fixture(providerId: "codex" | "open-model" | "claude-code" = "codex") {
+async function fixture(providerId: "codex" | "open-model" | "claude-code" = "codex",
+  overrides: Partial<Pick<ConstructorParameters<typeof HostApprovalBroker>[0], "exactAuthority" | "fenceCommit">> = {}) {
   const root = await mkdtemp(join(tmpdir(), "letagents-approval-broker-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -105,14 +108,18 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
       return state.owned && state.authorityChecks !== state.authorityFailAt;
     },
     fenceCommit: async commit => { if (!state.current) throw new Error("daemon generation changed"); await commit(); },
-    onPermissionChanged: () => { permissionChanges += 1; }, nowMs: () => now + 10 });
+    onPermissionChanged: () => { permissionChanges += 1; }, nowMs: () => now + 10, ...overrides });
   let broker = makeBroker();
   const emit = (requests: ProviderPermissionRequest[] = [native]) => {
     assert.ok(receive, "broker must subscribe before the fixture emits"); assert.equal(signal?.aborted, false);
     receive!({ type: "snapshot", connectionId: "connection", requests });
   };
   broker.install("agent", handle, "generation"); emit();
-  return { store, inbox, db, item, state, native, handle, workspace, sends, order, emit,
+  return { store, inbox, db, item, state, native, handle, workspace, root, path, sends, order, emit,
+    closed(request: ProviderPermissionRequest = native) {
+      assert.equal(request.provider, "codex");
+      receive!({ type: "request_closed", request: request as Extract<ProviderPermissionRequest, { provider: "codex" }> });
+    },
     observationFailure(type: "degraded" | "unavailable") { receive!({ type }); },
     get permissionChanges() { return permissionChanges; },
     get broker() { return broker; },
@@ -124,6 +131,107 @@ test("native permission observations wake delegated decision reconciliation", as
   const f = await fixture();
   try { assert.equal(f.permissionChanges, 1); }
   finally { await f.close(); }
+});
+
+test("approval admission and worker credential writes preserve lock order", { timeout: 5_000 }, async () => {
+  const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => false,
+    notifyStateChanged: () => {} });
+  let bindings!: WorkerBindingStore;
+  let interleave = true;
+  let bindingWrite: Promise<unknown> | undefined;
+  let requestedFence!: () => void;
+  const needsFence = new Promise<void>(resolve => { requestedFence = resolve; });
+  const f = await fixture("codex", {
+    exactAuthority: async () => { await bindings.get("agent"); return true; },
+    fenceCommit: commit => authority.fenceDaemonCommit(async () => {
+      if (interleave) {
+        interleave = false;
+        bindingWrite = bindings.beginSupervisedWorkerSessionMint({ agent_id: "agent", room_id: "room", agent_instance_id: "instance" });
+        await needsFence;
+      }
+      await commit();
+    }),
+  });
+  bindings = new WorkerBindingStore(join(f.root, "workers.json"), commit => {
+    requestedFence(); return authority.fenceDaemonCommit(commit);
+  }, f.path);
+  try {
+    await bindings.list();
+    const [candidate] = await f.broker.list("room");
+    await bindingWrite;
+    await bindings.list();
+    assert.equal(candidate?.status, "pending");
+    assert.deepEqual(f.sends, []);
+  } finally { await bindings.close(); await f.close(); }
+});
+
+test("approval admission suppresses an actionable card if credentials change before commit", async () => {
+  let owned = true;
+  const f = await fixture("codex", {
+    exactAuthority: async () => owned,
+    fenceCommit: async commit => { owned = false; await commit(); },
+  });
+  try {
+    const [candidate] = await f.broker.list("room");
+    assert.equal(candidate?.status, "unavailable");
+    assert.equal(candidate?.reference, null);
+    assert.deepEqual(f.sends, []);
+  } finally { await f.close(); }
+});
+
+test("request closure needs the dispatched native object and never acknowledges a decision", async () => {
+  const f = await fixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    f.closed();
+    const selected = decision(candidate!);
+    assert.equal(await f.broker.decide(selected), "decision_sent");
+    f.closed({ ...f.native, native: { ...f.native.native } } as ProviderPermissionRequest);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.closedAtMs, null);
+    f.emit([]);
+    f.closed();
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if ((await f.store.getExecutionApproval(selected.expected))!.request.closedAtMs != null) break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    const stored = (await f.store.getExecutionApproval(selected.expected))!;
+    assert.equal(stored.request.closedAtMs, now + 10);
+    assert.equal(stored.request.state, "dispatching");
+    assert.equal(stored.decision!.dispatchState, "uncertain");
+    assert.equal(stored.decision!.resolvedAtMs, null);
+    assert.deepEqual(await f.broker.list("room"), []);
+    assert.equal(await f.broker.decide(selected), "request_closed");
+    assert.deepEqual(f.sends, ["once"]);
+    const reopened = new ManifestStore(f.path);
+    try { assert.equal((await reopened.getExecutionApproval(selected.expected))!.request.closedAtMs, now + 10); }
+    finally { await reopened.close(); }
+    f.db.exec("DELETE FROM execution_approval_decisions");
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM execution_approval_request_closures").get()!.n, 0,
+      "approval retention also retires its structural closure");
+  } finally { await f.close(); }
+});
+
+test("v41 approval history upgrades without inventing a closure or changing a decision", async () => {
+  const f = await fixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    const selected = decision(candidate!);
+    await f.broker.decide(selected);
+    const before = f.db.prepare("SELECT * FROM execution_approval_decisions").all();
+    await f.store.close();
+    f.db.exec("DROP TABLE execution_approval_request_closures; PRAGMA user_version=41; UPDATE manifest_metadata SET schema_version=41");
+    const upgraded = new ManifestStore(f.path);
+    try {
+      assert.equal((await upgraded.getExecutionApproval(selected.expected))!.request.closedAtMs, null);
+      assert.deepEqual(f.db.prepare("SELECT * FROM execution_approval_decisions").all(), before);
+      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, 42);
+    } finally { await upgraded.close(); }
+    f.db.exec("DROP TABLE execution_approval_request_closures");
+    const damaged = new ManifestStore(f.path);
+    try { await assert.rejects(damaged.load(), /closure storage is missing or invalid/); }
+    finally { await damaged.close(); }
+  } finally { await f.close(); }
 });
 
 test("an unavailable approval observer is visible even before it discovers a request", async () => {
@@ -638,6 +746,25 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
       assert.deepEqual(order, ["decision_committed", ...(isFileChange ? ["post_intent_inspection"] : []), "intent_committed", "native_write"]);
     }
     assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "uncertain");
+    if (isMcp || isGeneric || scenario === "command_applied") {
+      const socket = server.clients.values().next().value!;
+      for (const params of [{ requestId: "71", threadId: "continuation" }, { requestId: 71, threadId: "other" }]) {
+        socket.send(JSON.stringify({ method: "serverRequest/resolved", params }));
+      }
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.closedAtMs, null);
+      socket.send(JSON.stringify({ method: "serverRequest/resolved", params: { requestId: 71, threadId: "continuation" } }));
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if ((await f.store.getExecutionApproval(selected.expected))!.request.closedAtMs != null) break;
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const closed = (await f.store.getExecutionApproval(selected.expected))!;
+      assert.equal(closed.request.closedAtMs, now + 10);
+      assert.equal(closed.decision!.dispatchState, "uncertain", "native closure does not identify the applied response");
+      assert.equal(closed.decision!.resolvedAtMs, null);
+      assert.deepEqual(await broker.list("room"), [], "a closed prompt is no longer actionable");
+      assert.equal(await broker.decide(selected), "request_closed", "retry does not repeat the native response");
+    }
     if (scenario === "command_applied") {
       await new Promise(resolve => setImmediate(resolve));
       assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "uncertain",
@@ -686,7 +813,7 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
       assert.equal(resolved.request.state, "resolved");
       assert.equal(resolved.decision!.dispatchState, "acknowledged");
     }
-    if (!scenario.endsWith("applied") && scenario !== "command_denied") assert.equal(await broker.decide(selected), "uncertain");
+    if (!scenario.endsWith("applied") && scenario !== "command_denied" && !isMcp && !isGeneric) assert.equal(await broker.decide(selected), "uncertain");
     assert.equal(frames.filter(frame => frame.id === 71 && !frame.method).length, scenario === "changed_file" ? 0 : 1);
     assert.equal(frames.some(frame => ["thread/start", "turn/start", "turn/interrupt"].includes(String(frame.method))), false);
     assert.equal(handle.observedState, "working");

@@ -174,6 +174,7 @@ class FakeRpc implements CodexAdapterRpc {
 
   currentConnectionId(): string | null { return this.connected && !this.closed ? `${this.threadId}-${this.connectionEpoch}` : null; }
   listPendingRequests(): readonly RpcServerRequest[] { return [...this.pendingPermissions.values()]; }
+  onRequestResolved(_listener: (request: RpcServerRequest) => void): () => void { return () => {}; }
   onPendingRequestsChanged(listener: () => void): () => void {
     this.permissionListeners.add(listener);
     return () => { this.permissionListeners.delete(listener); };

@@ -13,7 +13,7 @@ export type HostApprovalPresentation = {
   details: string;
   denyScope: "request" | "session_pending";
 };
-export type HostApprovalStatus = "pending" | "decision_recorded" | "decision_sent" | "uncertain" | "resolved" | "unavailable";
+export type HostApprovalStatus = "pending" | "decision_recorded" | "decision_sent" | "uncertain" | "request_closed" | "resolved" | "unavailable";
 export type HostApprovalCandidate = {
   reference: HostApprovalReference | null;
   presentation: HostApprovalPresentation;

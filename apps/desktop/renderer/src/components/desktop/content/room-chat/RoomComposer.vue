@@ -271,7 +271,7 @@ let approvalTimer: ReturnType<typeof setInterval> | null = null;
 
 function hostApprovalStatus(status: HostApprovalStatus): string {
   return { pending: "Needs your approval", decision_recorded: "Decision recorded", decision_sent: "Decision sent",
-    uncertain: "Decision could not be confirmed", resolved: "Decision applied", unavailable: "Approval unavailable" }[status];
+    uncertain: "Decision could not be confirmed", request_closed: "Approval request closed", resolved: "Decision applied", unavailable: "Approval unavailable" }[status];
 }
 
 const visibleHostApprovals = computed(() => hostApprovals.value.filter(approval =>

@@ -82,6 +82,11 @@ export class CodexRpcClient {
   private ws: WebSocket | null = null;
   private connectionId = "";
   private readonly inbound = new Map<RpcRequestId, RpcServerRequest>();
+  private readonly sentRequests = new Map<RpcRequestId, RpcServerRequest>();
+  private highestNumericRequestId: number | null = null;
+  private readonly seenStringRequestIds = new Set<string>();
+  private readonly ambiguousClosures = new WeakSet<RpcServerRequest>();
+  private readonly resolvedRequestListeners = new Set<(request: RpcServerRequest) => void>();
   private readonly requestListeners = new Set<(request: RpcServerRequest) => void>();
   private readonly pendingRequestListeners = new Set<() => void>();
   private pendingRequestsNotificationQueued = false;
@@ -224,6 +229,11 @@ export class CodexRpcClient {
 
   listPendingRequests(): readonly RpcServerRequest[] { return [...this.inbound.values()]; }
 
+  onRequestResolved(listener: (request: RpcServerRequest) => void): () => void {
+    this.resolvedRequestListeners.add(listener);
+    return () => this.resolvedRequestListeners.delete(listener);
+  }
+
   currentConnectionId(): string | null {
     const ws = this.ws;
     return ws && ws.readyState === getWebSocketCtor().OPEN ? this.connectionId : null;
@@ -241,12 +251,17 @@ export class CodexRpcClient {
     // Retire before send: a transport exception can leave delivery uncertain,
     // never permission to repeat an approval response.
     this.inbound.delete(request.id);
+    this.sentRequests.set(request.id, request);
+    while (this.sentRequests.size > 64) this.sentRequests.delete(this.sentRequests.keys().next().value!);
     this.notifyPendingRequestsChanged();
     this.send({ id: request.id, result });
   }
 
   private invalidateRequests(): void {
     this.inbound.clear();
+    this.sentRequests.clear();
+    this.highestNumericRequestId = null;
+    this.seenStringRequestIds.clear();
     this.notifyPendingRequestsChanged();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
@@ -293,9 +308,21 @@ export class CodexRpcClient {
     if (Object.hasOwn(message, "method")) {
       if (typeof message.method !== "string" || !message.method || hasResult || hasError) return;
       if (hasId) {
-        if (!validId(message.id) || this.inbound.has(message.id)) return;
+        if (!validId(message.id)) return;
+        const existing = this.inbound.get(message.id);
+        if (existing) { this.ambiguousClosures.add(existing); return; }
+        // A bounded identity history must outlive payload retention. Numeric
+        // IDs at/below the high-water mark and repeated/overflow string IDs
+        // remain unprovable, even after eviction or a previous closure.
+        const fresh = typeof message.id === "number"
+          ? this.highestNumericRequestId === null || message.id > this.highestNumericRequestId
+          : !this.seenStringRequestIds.has(message.id) && this.seenStringRequestIds.size < 64;
+        if (typeof message.id === "number") this.highestNumericRequestId = Math.max(this.highestNumericRequestId ?? message.id, message.id);
+        else if (this.seenStringRequestIds.size < 64) this.seenStringRequestIds.add(message.id);
+        this.sentRequests.delete(message.id);
         freezeJson(message.params);
         const request = Object.freeze({ id: message.id, method: message.method, params: message.params, connectionId: this.connectionId });
+        if (!fresh) this.ambiguousClosures.add(request);
         this.inbound.set(request.id, request);
         this.notifyPendingRequestsChanged();
         for (const listener of this.requestListeners) {
@@ -304,14 +331,18 @@ export class CodexRpcClient {
         return;
       }
       if (message.method === "serverRequest/resolved" && record(message.params) && validId(message.params.requestId)) {
-        const request = this.inbound.get(message.params.requestId);
+        const request = this.inbound.get(message.params.requestId) ?? this.sentRequests.get(message.params.requestId);
         // Thread-bearing native requests can only be retired by that exact
         // thread. Generic requests without a thread retain ID-only resolution.
         const threadMatches = !record(request?.params) || !Object.hasOwn(request.params, "threadId")
           || (typeof request.params.threadId === "string" && request.params.threadId.length > 0
             && request.params.threadId === message.params.threadId);
-        if (request && threadMatches) {
+        if (request && threadMatches && !this.ambiguousClosures.has(request)) {
           this.inbound.delete(request.id);
+          this.sentRequests.delete(request.id);
+          for (const listener of this.resolvedRequestListeners) {
+            try { listener(request); } catch { /* Closure observation never controls native work. */ }
+          }
           this.notifyPendingRequestsChanged();
         }
       }

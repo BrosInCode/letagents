@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import type { ExecutionDelegationDecisionIntent } from "../../../../shared/execution-delegation-decision.mjs";
-import type { ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
+import { applyApprovalRequestClosureSchema, type ApprovalAuthority, type ApprovalReference } from "../execution-approval-journal.js";
 import { selectDelegatedApproval } from "../execution-delegated-approval.js";
 import type { ExecutionDelegationHostAuthority } from "../execution-delegation-journal.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeExecutionIdentity } from "../execution-shadow-store.js";
@@ -51,6 +51,7 @@ function intent(decisionId: string, revision: number, scopeSha256: string,
 function fixture(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
   applyExecutionStorageSchema(db);
+  applyApprovalRequestClosureSchema(db);
   db.exec(`
     CREATE TABLE agent_configurations(agent_id TEXT PRIMARY KEY,config_revision INTEGER,runtime_configuration_revision INTEGER);
     CREATE TABLE work_attempt_executions(execution_generation_id TEXT,work_attempt_id TEXT,terminal_json TEXT);

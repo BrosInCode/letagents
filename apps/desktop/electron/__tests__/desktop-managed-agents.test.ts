@@ -4431,6 +4431,8 @@ test("CodexRpcClient fences server requests, malformed replies and reconnects in
     const id = socket.sent.at(-1)!.id;
     socket.emit({ id, method: "item/commandExecution/requestApproval", params: { command: "echo hi" } });
     const request = client.listPendingRequests()[0]!;
+    const closures: typeof request[] = [];
+    client.onRequestResolved(closed => closures.push(closed));
     assert.equal(request.id, id);
     assert.equal(received, 1);
     assert.equal(Object.isFrozen(request), true);
@@ -4459,6 +4461,8 @@ test("CodexRpcClient fences server requests, malformed replies and reconnects in
     assert.notEqual(reused, request);
     assert.throws(() => client.respond(request, {}), /no longer pending/);
     client.respond(reused, { decision: "decline" });
+    socket.emit({ method: "serverRequest/resolved", params: { requestId: id } });
+    assert.deepEqual(closures, [], "a reused unresolved ID cannot close either approval by inference");
     unsubscribe();
     unsubscribeThrower();
     await Promise.resolve();
@@ -4494,6 +4498,36 @@ test("CodexRpcClient fences server requests, malformed replies and reconnects in
     assert.equal(snapshots.length, beforeWrongThread + 1);
     assert.equal(client.listPendingRequests().length, 0);
     assert.throws(() => client.respond(threaded, {}), /no longer pending/);
+    assert.equal(closures.at(-1), threaded);
+    socket.emit({ id: "sent-threaded", method: "approval", params: { threadId: "thread-current" } });
+    const sentThreaded = client.listPendingRequests()[0]!;
+    client.respond(sentThreaded, {});
+    const beforeClosure = closures.length;
+    for (const params of [{ requestId: "sent-threaded" }, { requestId: "sent-threaded", threadId: "other" }]) {
+      socket.emit({ method: "serverRequest/resolved", params });
+    }
+    assert.equal(closures.length, beforeClosure);
+    socket.emit({ method: "serverRequest/resolved", params: { requestId: "sent-threaded", threadId: "thread-current" } });
+    assert.equal(closures.at(-1), sentThreaded, "sent requests retain exact identity until native closure");
+    socket.emit({ method: "serverRequest/resolved", params: { requestId: "sent-threaded", threadId: "thread-current" } });
+    assert.equal(closures.length, beforeClosure + 1, "closure notifications are idempotent");
+    for (const scenario of ["evicted", "already_closed"]) {
+      const reusedId = scenario === "evicted" ? 100 : "sent-threaded";
+      if (scenario === "evicted") {
+        for (let id = 100; id < 165; id++) {
+          socket.emit({ id, method: "approval", params: { threadId: "thread-current" } });
+          client.respond(client.listPendingRequests()[0]!, {});
+        }
+      }
+      socket.emit({ id: reusedId, method: "approval", params: { threadId: "thread-current" } });
+      const successor = client.listPendingRequests()[0]!;
+      const closureCount: number = closures.length;
+      socket.emit({ method: "serverRequest/resolved", params: { requestId: reusedId, threadId: "thread-current" } });
+      assert.equal(client.listPendingRequests()[0], successor, `${scenario}: ambiguous closure must not erase the successor`);
+      client.respond(successor, {});
+      socket.emit({ method: "serverRequest/resolved", params: { requestId: reusedId, threadId: "thread-current" } });
+      assert.equal(closures.length, closureCount, `${scenario}: old closure must not transfer to the reused ID`);
+    }
     for (const threadId of [null, "", 4]) {
       socket.emit({ id: "malformed-thread", method: "approval", params: { threadId } });
       const malformedThread = client.listPendingRequests()[0]!;

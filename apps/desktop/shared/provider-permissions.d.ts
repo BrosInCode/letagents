@@ -16,6 +16,7 @@ export type ProviderPermissionRequest =
   | { provider: "claude-code"; native: ClaudeNativePermissionRequest };
 export type ProviderPermissionObservation =
   | { type: "snapshot"; connectionId: string | null; requests: readonly ProviderPermissionRequest[] }
+  | { type: "request_closed"; request: { provider: "codex"; native: CodexNativePermissionRequest } }
   | { type: "degraded" | "unavailable" };
 /** Exact native proposed edits, host-ephemeral like the permission request. */
 export type CodexPermissionFileChange = {
