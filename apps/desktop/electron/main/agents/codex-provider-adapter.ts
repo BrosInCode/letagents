@@ -114,12 +114,14 @@ export interface CodexAdapterRpc {
   currentConnectionId(): string | null;
   listPendingRequests(): readonly RpcServerRequest[];
   onPendingRequestsChanged(listener: () => void): () => void;
+  onRequestResolved(listener: (request: RpcServerRequest) => void): () => void;
   respond(request: RpcServerRequest, result: unknown): void;
 }
 
 /** Native approval payloads stay host-ephemeral, outside execution facts and room projections. */
 export type CodexPermissionObservation =
   | { type: "snapshot"; requests: readonly RpcServerRequest[] }
+  | { type: "request_closed"; request: RpcServerRequest }
   | { type: "degraded" }
   | { type: "unavailable" };
 
@@ -841,6 +843,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         if (disposed) return;
         disposed = true;
         unsubscribe();
+        unsubscribeResolved();
         handle.permissionInvalidationListeners.delete(refresh);
         signal.removeEventListener("abort", finish);
         resolve();
@@ -856,6 +859,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
         if (authority === "unavailable") finish();
       };
       const unsubscribe = handle.client.onPendingRequestsChanged(refresh);
+      const unsubscribeResolved = handle.client.onRequestResolved(request => {
+        if (disposed || signal.aborted || request.connectionId !== rpcConnection
+          || permissionParams(request)?.threadId !== continuation
+          || this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current") return;
+        try { listener({ type: "request_closed", request }); } catch { /* Observation only. */ }
+      });
       handle.permissionInvalidationListeners.add(refresh);
       signal.addEventListener("abort", finish, { once: true });
       refresh();

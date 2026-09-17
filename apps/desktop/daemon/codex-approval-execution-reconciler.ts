@@ -10,18 +10,22 @@ type Store = {
     expected: HostApprovalReference;
     decisionId: string;
     dispatchId: string;
-    evidence: "exact_native_execution";
+    evidence: "exact_native_execution" | "native_request_closed";
     atMs: number;
   }, fence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord>;
 };
 
 type PendingReconciliation = {
   key: string;
+  native: ProviderPermissionRequest;
+  executionKey: string | null;
   expected: HostApprovalReference;
   decisionId: string;
   decision: "allow_once" | "deny";
-  operation: "command" | "file_change";
+  operation: "command" | "file_change" | null;
   armed: boolean;
+  dispatched: boolean;
+  closedAtMs: number | null;
   lowerBound: { sourceId: string; sequence: number } | null;
 };
 
@@ -76,10 +80,12 @@ export class CodexApprovalExecutionReconciler {
 
   prepare(native: ProviderPermissionRequest, expected: HostApprovalReference, decisionId: string,
     decision: "allow_once" | "deny"): PendingReconciliation | null {
+    if (native.provider !== "codex") return null;
     const identity = requestIdentity(native);
-    if (!identity) return null;
-    const value = { ...identity, expected, decisionId, decision, armed: false, lowerBound: null };
-    this.pending.set(identity.key, value);
+    const value: PendingReconciliation = { key: expected.requestId, native,
+      executionKey: identity?.key ?? null, operation: identity?.operation ?? null,
+      expected, decisionId, decision, armed: false, dispatched: false, closedAtMs: null, lowerBound: null };
+    this.pending.set(value.key, value);
     while (this.pending.size > 64) this.pending.delete(this.pending.keys().next().value!);
     return value;
   }
@@ -90,9 +96,20 @@ export class CodexApprovalExecutionReconciler {
   }
 
   markNativeDispatch(value: PendingReconciliation): void {
+    value.dispatched = true;
     const subscription = this.subscription;
     if (!subscription) return;
     value.lowerBound = { sourceId: subscription.sourceId, sequence: subscription.position().latestSequence };
+  }
+
+  observeRequestClosed(native: ProviderPermissionRequest): void {
+    if (this.closed || !this.options.isCurrent()) return;
+    for (const value of this.pending.values()) {
+      if (!value.dispatched || native.provider !== "codex" || value.native.provider !== "codex"
+        || value.native.native !== native.native) continue;
+      value.closedAtMs ??= this.options.nowMs();
+      void this.reconcile(value.key);
+    }
   }
 
   discard(value: PendingReconciliation): void {
@@ -114,17 +131,19 @@ export class CodexApprovalExecutionReconciler {
     this.evidence.delete(key);
     this.evidence.set(key, observation);
     while (this.evidence.size > 64) this.evidence.delete(this.evidence.keys().next().value!);
-    void this.reconcile(key);
+    for (const pending of this.pending.values()) {
+      if (pending.executionKey === key) void this.reconcile(pending.key);
+    }
   }
 
   private async reconcile(key: string): Promise<void> {
     const pending = this.pending.get(key);
-    const observation = this.evidence.get(key);
+    const observation = pending?.executionKey ? this.evidence.get(pending.executionKey) : undefined;
     const lowerBound = pending?.lowerBound;
-    if (!pending?.armed || !lowerBound || !observation
-      || observation.sourceId !== lowerBound.sourceId || observation.sequence <= lowerBound.sequence
-      || !confirmsDecision(observation.fact, pending)
-      || this.closed || !this.options.isCurrent()) return;
+    if (!pending?.armed || this.closed || !this.options.isCurrent()) return;
+    const applied = lowerBound && observation && observation.sourceId === lowerBound.sourceId
+      && observation.sequence > lowerBound.sequence && confirmsDecision(observation.fact, pending);
+    if (!applied && pending.closedAtMs === null) return;
     try {
       const record = await this.options.store.readLatestExecutionApproval(pending.expected.requestId);
       const decision = record?.decision;
@@ -132,13 +151,15 @@ export class CodexApprovalExecutionReconciler {
         || decision?.decisionId !== pending.decisionId || decision.decision !== pending.decision || !decision.dispatchId) return;
       await this.options.store.recordExecutionApprovalOutcome({ expected: pending.expected,
         decisionId: pending.decisionId, dispatchId: decision.dispatchId,
-        evidence: "exact_native_execution", atMs: this.options.nowMs() }, commit =>
+        evidence: applied ? "exact_native_execution" : "native_request_closed", atMs: this.options.nowMs() }, commit =>
         this.options.fenceCommit(async () => {
           if (this.closed || !this.options.isCurrent()) throw new Error("Approval execution authority changed.");
           await commit();
         }));
-      this.pending.delete(key);
-      this.evidence.delete(key);
+      // Item-backed approvals can still gain stronger application evidence
+      // after their prompt closes. MCP closures never invent item identity.
+      if (applied || !pending.executionKey) this.pending.delete(key);
+      if (applied && pending.executionKey) this.evidence.delete(pending.executionKey);
       this.options.onChanged?.();
     } catch { /* An exact replay can retry reconciliation without redispatching. */ }
   }

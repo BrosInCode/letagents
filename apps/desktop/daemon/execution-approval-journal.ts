@@ -49,7 +49,7 @@ const dispatch = z.strictObject({
 });
 const outcome = z.strictObject({
   expected: reference, decisionId: executionIdentity, dispatchId: executionIdentity,
-  evidence: z.enum(["sent_unacknowledged", "dispatch_uncertain", "native_processed", "exact_native_execution"]), atMs: time,
+  evidence: z.enum(["sent_unacknowledged", "dispatch_uncertain", "native_processed", "exact_native_execution", "native_request_closed"]), atMs: time,
 });
 const loss = z.strictObject({ expected: reference, atMs: time });
 export type ApprovalReference = z.infer<typeof reference>;
@@ -62,7 +62,7 @@ export type RecordExecutionApprovalOutcome = z.infer<typeof outcome>;
 export type LoseExecutionApproval = z.infer<typeof loss>;
 type Certainty = "impossible" | "unknown" | null;
 export type ExecutionApprovalRecord = {
-  request: AdmitExecutionApproval & { delegatable: boolean; state: ApprovalState; applicationCertainty: Certainty };
+  request: AdmitExecutionApproval & { delegatable: boolean; state: ApprovalState; applicationCertainty: Certainty; closedAtMs?: number | null };
   decision: null | {
     decisionId: string; actorId: string; decision: "allow_once" | "deny"; projectionSha256: string | null;
     source: "host" | "delegate"; delegationInstanceId: string | null; delegationRevision: number | null;
@@ -73,6 +73,28 @@ export type ExecutionApprovalRecord = {
   };
 };
 type Row = Record<string, unknown>;
+// Closing a provider prompt is independent of acknowledging the chosen decision.
+// Retain only exact structural identity; never retain the request payload.
+const closureSchema = `CREATE TABLE execution_approval_request_closures (
+  request_id TEXT NOT NULL,
+  request_version INTEGER NOT NULL,
+  decision_id TEXT NOT NULL REFERENCES execution_approval_decisions(decision_id) ON DELETE CASCADE,
+  dispatch_id TEXT NOT NULL,
+  observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+  PRIMARY KEY(request_id,request_version),
+  FOREIGN KEY(request_id,request_version) REFERENCES execution_approval_requests(request_id,request_version) ON DELETE CASCADE
+) STRICT`;
+const normalizeClosureSql = (sql: string) => sql.replace(/IF NOT EXISTS /gi, "").replace(/\s+/g, " ").trim();
+export function applyApprovalRequestClosureSchema(db: DatabaseSync): void {
+  db.exec(closureSchema.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+  validateApprovalRequestClosureSchema(db);
+}
+export function validateApprovalRequestClosureSchema(db: DatabaseSync): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get();
+  if (!row || normalizeClosureSql(String(row.sql)) !== normalizeClosureSql(closureSchema)) {
+    throw new Error("Approval request closure storage is missing or invalid.");
+  }
+}
 export class ApprovalJournalError extends Error {
   constructor(readonly code: "invalid_input" | "identity_mismatch" | "missing_turn" | "invalid_transition" | "decision_conflict" | "expired") {
     super(`Approval journal rejected: ${code}.`); this.name = "ApprovalJournalError";
@@ -115,7 +137,10 @@ function read(db: DatabaseSync, id: string, version: number): ExecutionApprovalR
       && typeof decision.delegation_instance_id === "string" && Number.isSafeInteger(decision.delegation_revision)
       && typeof decision.delegation_scope_sha256 === "string")
   )) reject("identity_mismatch");
-  return { request: requestFromRow(row), decision: decision ? {
+  const closure = db.prepare("SELECT * FROM execution_approval_request_closures WHERE request_id=? AND request_version=?").get(id, version);
+  if (closure && (!decision || closure.decision_id !== decision.decision_id || closure.dispatch_id !== decision.dispatch_id
+    || decision.dispatch_started_at_ms === null || Number(closure.observed_at_ms) < Number(decision.dispatch_started_at_ms))) reject("identity_mismatch");
+  return { request: { ...requestFromRow(row), closedAtMs: closure ? Number(closure.observed_at_ms) : null }, decision: decision ? {
     decisionId: String(decision.decision_id), actorId: String(decision.actor_id), decision: decision.decision as "allow_once" | "deny",
     source: decision.source as "host" | "delegate", delegationInstanceId: decision.delegation_instance_id as string | null,
     delegationRevision: decision.delegation_revision as number | null,
@@ -309,6 +334,15 @@ export function recordExecutionApprovalOutcome(db: DatabaseSync, input: RecordEx
   const value = parse(outcome, input); const current = exact(db, value.expected); const d = current.decision;
   if (!d || d.decisionId !== value.decisionId || d.dispatchId !== value.dispatchId || d.dispatchStartedAtMs === null) reject("identity_mismatch");
   if (value.atMs < d.dispatchStartedAtMs) reject("invalid_input");
+  if (value.evidence === "native_request_closed") {
+    const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
+      .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
+    if (provider !== "codex" || !["dispatching", "resolved"].includes(current.request.state)) reject("invalid_transition");
+    db.prepare(`INSERT OR IGNORE INTO execution_approval_request_closures
+      (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`)
+      .run(value.expected.requestId, value.expected.requestVersion, d.decisionId, d.dispatchId, value.atMs);
+    return exact(db, value.expected);
+  }
   if (value.evidence === "native_processed" || value.evidence === "exact_native_execution") {
     // OpenCode confirms processing in its reply endpoint. Codex requires a
     // later exact item execution fact; a socket send or serverRequest/resolved

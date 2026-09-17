@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.144";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.145";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -321,7 +321,7 @@ export class SupervisorDaemonProtocolMismatchError extends Error {
 
 const approvalId = z.string().min(1).max(256);
 const approvalSha = z.string().regex(/^[a-f0-9]{64}$/);
-const approvalStatus = z.enum(["pending", "decision_recorded", "decision_sent", "uncertain", "resolved", "unavailable"]);
+const approvalStatus = z.enum(["pending", "decision_recorded", "decision_sent", "uncertain", "request_closed", "resolved", "unavailable"]);
 const approvalChallenge = z.strictObject({ daemonGeneration: z.number().int().positive().safe(),
   bootNonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/), keyFingerprint: approvalSha });
 const approvalCandidate = z.strictObject({

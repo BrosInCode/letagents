@@ -310,9 +310,10 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
     presentation: { ...hostApproval().presentation, displayName: "UnavailableAgent" } };
   const uncertain = { ...hostApproval(), id: "presentation-3", status: "uncertain" as const };
   const resolved = { ...hostApproval(), id: "presentation-4", status: "resolved" as const };
+  const closed = { ...hostApproval(), id: "presentation-5", status: "request_closed" as const };
   const decisions: unknown[] = [];
   Object.assign(window, { letagentsDesktop: { supervisor: {
-    listHostApprovals: async () => ({ available: true, approvals: [pending, unavailable, uncertain, resolved], error: null }),
+    listHostApprovals: async () => ({ available: true, approvals: [pending, unavailable, uncertain, resolved, closed], error: null }),
     decideHostApproval: async (input: unknown) => { decisions.push(input); return "decision_sent"; },
   } } });
   const { root, app } = mount(RoomComposer, composerProps());
