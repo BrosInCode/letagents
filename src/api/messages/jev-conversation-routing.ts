@@ -38,6 +38,8 @@ export const JEV_ROUTING_DEFAULT_TIMEOUT_MS = 4_000;
 export const JEV_NEEDS_RESPONSE_MIN_PROBABILITY = 0.6;
 /** The chosen agent must carry at least this much of the choice mass. */
 export const JEV_RESPONDER_MIN_PROBABILITY = 0.5;
+/** Per-agent yes/no floor: every agent at or above it is woken. */
+export const JEV_RESPOND_MIN_PROBABILITY = 0.5;
 /** Choice criteria allow 255 options; keep the state small and the call fast. */
 export const JEV_MAX_CANDIDATE_AGENTS = 40;
 
@@ -128,6 +130,23 @@ export function buildJevEvaluationRequest(input: JevRoutingInput): JevEvaluation
     };
   });
   criteria[JEV_NONE_OPTION] = "No listed agent should respond.";
+  // One independent yes/no per agent is the natural multi-select: "the cursor
+  // agents" or "everyone except X" needs several agents woken, and a single
+  // Choice distribution can only ever name one winner.
+  const perAgentQuestions: Record<string, unknown> = Object.fromEntries(agentState.map((agent) => [
+    `respond_${agent.option}`,
+    {
+      type: "boolean",
+      instructions: `Should ${agent.name} (${agent.option}) respond to the latest message?`,
+      criteria: {
+        true: `The latest message is addressed to ${agent.name} — by name, by role, by runtime or`
+          + ` model, or as a member of a group it belongs to (for example "the cursor agents" or`
+          + ` "everyone except …") — or it concerns work that ${agent.name} is doing.`,
+        false: `The latest message is meant for a different agent, for nobody in particular, or`
+          + ` explicitly excludes ${agent.name}.`,
+      },
+    },
+  ]));
 
   return {
     state: {
@@ -166,6 +185,7 @@ export function buildJevEvaluationRequest(input: JevRoutingInput): JevEvaluation
           + " continuing a conversation with. Choose none when no listed agent should respond.",
         criteria,
       },
+      ...perAgentQuestions,
     },
     agentKeyByOption,
   };
@@ -178,6 +198,8 @@ export interface JevEvaluationAnswers {
   probabilities: Record<string, number>;
   /** Native per-question confidence for the choice, when the provider reports one. */
   confidence: number | null;
+  /** Choice option → P(this agent should respond), from the per-agent questions. */
+  respondByOption: Record<string, number>;
 }
 
 function finiteNumber(value: unknown): number | null {
@@ -199,6 +221,13 @@ export function parseJevEvaluationResponse(body: unknown): JevEvaluationAnswers 
     const probability = finiteNumber(value);
     if (probability !== null) probabilities[option] = probability;
   }
+  const respondByOption: Record<string, number> = {};
+  for (const [name, value] of Object.entries(answers ?? {})) {
+    if (!name.startsWith("respond_")) continue;
+    const answer = record(value);
+    const probability = finiteNumber(answer?.probability) ?? finiteNumber(answer?.noul);
+    if (probability !== null) respondByOption[name.slice("respond_".length)] = probability;
+  }
   // TypeSafe's native API puts confidence on the answer; the gateway moves it
   // into provider metadata (either a number or a per-question record).
   const providerConfidence = record(record(record(body)?.providerMetadata)?.typesafe)?.confidence;
@@ -211,11 +240,13 @@ export function parseJevEvaluationResponse(body: unknown): JevEvaluationAnswers 
     choice: typeof responder?.choice === "string" ? responder.choice : null,
     probabilities,
     confidence,
+    respondByOption,
   };
 }
 
 export type JevElectionReason =
   | "elected"
+  | "elected_multi"
   | "no_response_needed"
   | "none_chosen"
   | "low_probability"
@@ -229,14 +260,16 @@ export interface JevResponderElection {
   choice: string | null;
   probabilitiesByAgentKey: Record<string, number>;
   confidence: number | null;
+  respondByAgentKey: Record<string, number>;
 }
 
 /**
- * Turns Jev's answers into at most one advisory responder. Two independent
- * gates must both pass: the room-level "does anyone need to respond" boolean,
- * then the per-agent choice mass. Either failing means nobody is woken —
- * interrupting a human conversation is the costlier error, so both thresholds
- * lean toward silence.
+ * Turns Jev's answers into advisory responders. The room-level "does anyone
+ * need to respond" gate comes first. Then every agent whose own yes/no clears
+ * the floor is woken — that is how "the cursor agents" wakes three. Only when
+ * no agent clears it does the single-winner Choice decide, with its own floor.
+ * Every failure means nobody is woken — interrupting a human conversation is
+ * the costlier error, so the thresholds lean toward silence.
  */
 export function electJevResponders(
   answers: JevEvaluationAnswers,
@@ -247,15 +280,25 @@ export function electJevResponders(
     const agentKey = agentKeyByOption.get(option);
     if (agentKey) probabilitiesByAgentKey[agentKey] = probability;
   }
+  const respondByAgentKey: Record<string, number> = {};
+  for (const [option, probability] of Object.entries(answers.respondByOption)) {
+    const agentKey = agentKeyByOption.get(option);
+    if (agentKey) respondByAgentKey[agentKey] = probability;
+  }
   const base = {
     elected: [] as readonly string[],
     needsResponse: answers.needsResponse,
     choice: answers.choice,
     probabilitiesByAgentKey,
     confidence: answers.confidence,
+    respondByAgentKey,
   };
   if (answers.needsResponse === null || answers.choice === null) return { ...base, reason: "unparseable" };
   if (answers.needsResponse < JEV_NEEDS_RESPONSE_MIN_PROBABILITY) return { ...base, reason: "no_response_needed" };
+  // Preserve candidate order so receipts are deterministic for equal answers.
+  const multi = [...agentKeyByOption.values()]
+    .filter((agentKey) => (respondByAgentKey[agentKey] ?? 0) >= JEV_RESPOND_MIN_PROBABILITY);
+  if (multi.length > 0) return { ...base, elected: multi, reason: multi.length > 1 ? "elected_multi" : "elected" };
   if (answers.choice === JEV_NONE_OPTION) return { ...base, reason: "none_chosen" };
   const agentKey = agentKeyByOption.get(answers.choice);
   if (!agentKey) return { ...base, reason: "unknown_option" };

@@ -43,6 +43,8 @@ export interface JevConversationRoutingHint {
   choice: string | null;
   probabilitiesByAgentKey: Record<string, number>;
   confidence: number | null;
+  /** Per-agent P(should respond); the multi-responder signal. */
+  respondByAgentKey: Record<string, number>;
   candidateAgentKeys: readonly string[];
   latencyMs: number;
 }
@@ -168,6 +170,7 @@ export async function resolveJevConversationRoutingHint(input: {
       choice: election.choice,
       probabilitiesByAgentKey: election.probabilitiesByAgentKey,
       confidence: election.confidence,
+      respondByAgentKey: election.respondByAgentKey,
       candidateAgentKeys: candidates.map(([agentKey]) => agentKey),
       latencyMs,
     };
@@ -206,6 +209,7 @@ export function logJevConversationRouting(
     + ` jev=[${jev.join(",")}] heuristic=${context.heuristicReason ?? "none"}[${heuristic.join(",")}]`
     + ` applied=[${[...context.appliedAgentKeys].join(",")}] agree=${agree}`
     + ` candidates=${hint.candidateAgentKeys.length} latency=${hint.latencyMs}ms`
+    + ` respond=${JSON.stringify(hint.respondByAgentKey)}`
     + ` probabilities=${JSON.stringify(hint.probabilitiesByAgentKey)}`,
   );
 }
