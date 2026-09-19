@@ -331,6 +331,7 @@ export async function runDeferredJevRouting(plan: DeferredJevRoutingPlan, canoni
     message: canonicalMessage,
     recipientAgentTargets: targets,
   });
+  console.info(`[jev routing] re-published msg_${plan.message.number} in ${plan.roomId} to ${targets.length} agent(s): ${targets.map((target) => `${target.agent_key}@${target.agent_session_id}`).join(", ")}`);
   queueMessageInfoInvalidation(plan.roomId, null);
 }
 

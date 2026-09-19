@@ -218,11 +218,12 @@ export class RoomEventBroker {
         message: Message;
         recipientAgentTargets?: readonly MessageRecipientAgentTarget[];
       };
+      const recipientAgentTargetSet = createRecipientAgentTargetSet(event.recipientAgentTargets ?? []);
       return {
         kind: "message_routed",
         roomId: event.projectId,
         message: event.message,
-        recipientAgentTargetSet: createRecipientAgentTargetSet(event.recipientAgentTargets ?? []),
+        recipientAgentTargetSet,
       };
     });
     this.addSource(deps.taskEvents, "task:updated", (payload) => {

@@ -1,4 +1,5 @@
 import { parseScopedId } from "../../../db/utils.js";
+import { claimDeferredRoutingCatchUp } from "../../../db/messages/deferred-routing-catch-up.js";
 import type { Express } from "express";
 
 import {
@@ -230,6 +231,15 @@ export function registerMessageHistoryRoutes(
       });
     }
 
+    // A page may carry catch-up rows older than the poller's cursor; report
+    // the cursor itself so durable progress never regresses.
+    function cursorFloor(page: readonly Message[]): { last_observed_message_id?: string } {
+      const cursorNumber = after ? parseScopedId(after, "msg") : null;
+      if (!cursorNumber) return {};
+      const highest = Math.max(0, ...page.map((message) => parseScopedId(message.id, "msg") ?? 0));
+      return cursorNumber > highest ? { last_observed_message_id: after } : {};
+    }
+
     async function resolveRequestAsync(
       msgs: Message[],
       hasMore = false,
@@ -255,6 +265,7 @@ export function registerMessageHistoryRoutes(
           room_id: projectId,
           messages: attached,
           has_more: hasMore,
+          ...cursorFloor(attached),
         });
       } catch (error) {
         console.error(`[room messages poll] failed to resolve poll for ${projectId}`, error);
@@ -304,15 +315,11 @@ export function registerMessageHistoryRoutes(
         await cleanup();
         // A re-published (routed) message can be older than the poller's
         // cursor; never let it regress durable progress.
-        const cursorNumber = after ? parseScopedId(after, "msg") : null;
-        const messageNumber = parseScopedId(attached.id, "msg");
         res.json({
           room_id: projectId,
           messages: [attached],
           has_more: false,
-          ...(cursorNumber && messageNumber && cursorNumber > messageNumber
-            ? { last_observed_message_id: after }
-            : {}),
+          ...cursorFloor([attached]),
         });
       } catch (error) {
         console.error(`[room messages poll] failed to hydrate broker message for ${projectId}`, error);
@@ -439,11 +446,19 @@ export function registerMessageHistoryRoutes(
         account_id: accountId,
         account_agent_routing: accountAgentRouting,
       });
-      if (!settled && existing.messages.length > 0) {
+      // Deferred routing may have appended a receipt for this worker on a
+      // message it already scrolled past; hand those over with this page.
+      const workerIdentity = liveController.activationIdentity;
+      const cursorNumber = after ? parseScopedId(after, "msg") : null;
+      const catchUp = workerIdentity?.session_kind === "worker" && workerIdentity.agent_key && cursorNumber
+        ? await claimDeferredRoutingCatchUp(projectId, workerIdentity.agent_key, cursorNumber)
+        : [];
+      const page = catchUp.length > 0 ? [...catchUp, ...existing.messages] : existing.messages;
+      if (!settled && page.length > 0) {
         // The initial/backlog response is awaited so the route handler does
         // not return before the response body is written; only the timeout
         // and message-created event callbacks stay fire-and-forget.
-        await resolveRequestAsync(existing.messages, existing.has_more, { includeTaskOwnerLeases: false });
+        await resolveRequestAsync(page, existing.has_more, { includeTaskOwnerLeases: false });
       }
     } catch (error) {
       if (!settled) {
