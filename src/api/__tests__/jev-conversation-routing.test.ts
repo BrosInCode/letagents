@@ -21,9 +21,9 @@ import {
 
 const input: JevRoutingInput = {
   agents: [
-    { agent_key: "EmmyMay/cometlively", display_name: "CometLively", runtime: "claude", recent_messages: ["Reviewing PR #12 now.", "older"] },
-    { agent_key: "EmmyMay/dawnridge", display_name: "DawnRidge", runtime: null, recent_messages: [] },
-    { agent_key: "EmmyMay/peakcloud", display_name: "PeakCloud", runtime: "codex", recent_messages: ["Implementing the migration."] },
+    { agent_key: "EmmyMay/cometlively", display_name: "CometLively", runtime: "claude", model: "opus", charter: "You are the code reviewer for this repo.", recent_messages: ["Reviewing PR #12 now.", "older"] },
+    { agent_key: "EmmyMay/dawnridge", display_name: "DawnRidge", runtime: null, model: null, charter: null, recent_messages: [] },
+    { agent_key: "EmmyMay/peakcloud", display_name: "PeakCloud", runtime: "codex", model: "sonnet", charter: null, recent_messages: ["Implementing the migration."] },
   ],
   recent_conversation: [
     { from: "EmmyMay", kind: "human", text: "Morning all" },
@@ -78,8 +78,9 @@ test("buildJevEvaluationRequest maps agents to stable options plus none and keep
   const responder = request.questions.responder as { type: string; criteria: Record<string, string> };
   assert.equal(responder.type, "choice");
   assert.deepEqual(Object.keys(responder.criteria), ["agent_1", "agent_2", "agent_3", JEV_NONE_OPTION]);
-  assert.match(responder.criteria.agent_1!, /^CometLively \(claude agent\); recently said: "Reviewing PR #12 now\." \| "older"$/);
+  assert.match(responder.criteria.agent_1!, /^CometLively \(claude agent, model opus\); charter: "You are the code reviewer for this repo\."; recently said: "Reviewing PR #12 now\." \| "older"$/);
   assert.equal(responder.criteria.agent_2, "DawnRidge; has not spoken recently");
+  assert.match(responder.criteria.agent_3!, /^PeakCloud \(codex agent, model sonnet\); recently said:/);
   const needs = request.questions.needs_agent_response as { type: string; criteria: { true: string; false: string } };
   assert.equal(needs.type, "boolean");
   assert.ok(needs.criteria.true && needs.criteria.false);
@@ -92,17 +93,28 @@ test("buildJevEvaluationRequest maps agents to stable options plus none and keep
   assert.match(perAgent.criteria.true, /the cursor agents/);
   // Durable agent keys are identifiers for our routing, not model input.
   assert.doesNotMatch(JSON.stringify(request.state), /EmmyMay\/(cometlively|dawnridge|peakcloud)/);
-  const state = request.state as { room: { agent_count: number }; recent_conversation: unknown[]; latest_message: { text: string } };
+  const state = request.state as { room: { agent_count: number }; agents: { model: string | null; charter: string | null }[]; recent_conversation: unknown[]; latest_message: { text: string; replying_to?: unknown } };
   assert.equal(state.room.agent_count, 3);
   assert.equal(state.recent_conversation.length, 2);
   assert.equal(state.latest_message.text, input.latest_message.text);
+  assert.equal(state.latest_message.replying_to, undefined);
+  assert.deepEqual(state.agents.map((agent) => [agent.model, agent.charter]), [
+    ["opus", "You are the code reviewer for this repo."], [null, null], ["sonnet", null],
+  ]);
+
+  // A reply to a human message travels with the latest message as context.
+  const replyState = buildJevEvaluationRequest({
+    ...input,
+    latest_message: { ...input.latest_message, text: "did you not get this message?", replying_to: { from: "EmmyMay", kind: "human", text: "can any other agent answer as well" } },
+  }).state as { latest_message: { replying_to?: { from: string; kind: string; text: string } } };
+  assert.deepEqual(replyState.latest_message.replying_to, { from: "EmmyMay", kind: "human", text: "can any other agent answer as well" });
 });
 
 test("buildJevEvaluationRequest truncates long text and caps the candidate list", () => {
   const long = "x".repeat(5_000);
   const request = buildJevEvaluationRequest({
     agents: Array.from({ length: JEV_MAX_CANDIDATE_AGENTS + 5 }, (_, index) => ({
-      agent_key: `k${index}`, display_name: `A${index}`, runtime: null, recent_messages: [long],
+      agent_key: `k${index}`, display_name: `A${index}`, runtime: null, model: null, charter: long, recent_messages: [long],
     })),
     recent_conversation: [{ from: "h", kind: "human", text: long }],
     latest_message: { from: "h", kind: "human", text: long },
@@ -110,6 +122,7 @@ test("buildJevEvaluationRequest truncates long text and caps the candidate list"
   assert.equal(request.agentKeyByOption.size, JEV_MAX_CANDIDATE_AGENTS);
   const state = request.state as { agents: { recently_said: string[] }[]; recent_conversation: { text: string }[]; latest_message: { text: string } };
   assert.equal(state.agents[0]!.recently_said[0]!.length, 240);
+  assert.equal((state.agents[0] as unknown as { charter: string }).charter.length, 300);
   assert.equal(state.recent_conversation[0]!.text.length, 400);
   assert.equal(state.latest_message.text.length, 1_200);
 });

@@ -53,8 +53,9 @@ import {
 } from "./account-agent-routing.js";
 import { getMessageThreadReadOverlays } from "./thread-read-overlays.js";
 import {
-  logJevConversationRouting,
-  resolveJevConversationRoutingHint,
+  planJevRoutingMode,
+  runDeferredJevRouting,
+  type DeferredJevRoutingPlan,
 } from "./jev-routing-hint.js";
 import {
   getMessageThreadRoutingProjection,
@@ -202,11 +203,10 @@ export async function addMessageWithCreateStatus(
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
-  // Conversation-routing inference runs before the transaction opens: a
-  // network call must never hold the message-insert connection. The hint is
-  // advisory; the routing loop re-validates every elected key against the
-  // owned session population inside the transaction.
-  const jevHint = await resolveJevConversationRoutingHint({ roomId, sender, text, options });
+  // Conversation routing (Jev) never runs inside the send: the plan is
+  // captured in the transaction and executed after commit, so the human's
+  // send returns as fast as the deterministic ladder alone.
+  let deferredJevRouting: DeferredJevRoutingPlan | null = null;
   const result = await db.transaction(async (tx): Promise<AddMessageResult> => {
     // Transitional projection repair can inspect a legacy thread on the first
     // post-watermark reply. Bound that work—and every other statement in this
@@ -415,6 +415,7 @@ export async function addMessageWithCreateStatus(
 
     let replyToMessage: {
       sender: string;
+      text: string;
       source?: string;
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
@@ -424,6 +425,7 @@ export async function addMessageWithCreateStatus(
       const [foundReply] = await tx
         .select({
           sender: messages.sender,
+          text: messages.text,
           source: messages.source,
           publisher_agent_key: messages.publisher_agent_key,
           publisher_agent_session_id: messages.publisher_agent_session_id,
@@ -434,6 +436,7 @@ export async function addMessageWithCreateStatus(
         .limit(1);
       if (foundReply) replyToMessage = {
         sender: foundReply.sender,
+        text: foundReply.text,
         source: foundReply.source ?? undefined,
         publisher_agent_key: foundReply.publisher_agent_key,
         publisher_agent_session_id: foundReply.publisher_agent_session_id,
@@ -467,10 +470,17 @@ export async function addMessageWithCreateStatus(
     // querying just those keys/sessions avoids enumerating a large room twice
     // for an ordinary one-recipient continuation.
     const routingShape = createGlobalAgentAddressResolver([])(messageForRouting);
+    // Replying to a human's message (often your own, to nudge the room) does
+    // not address any agent: it stays in the untagged fallback lane instead
+    // of the reply-target lane, which has no agent to wake.
+    const replyToIsHuman = replyToMessage !== null
+      && !replyToMessage.publisher_agent_key
+      && replyToMessage.source !== "agent";
     const humanConversationEligible = createdMessage.source === "browser"
       && Boolean(createdMessage.publisher_account_id) && !createdMessage.publisher_agent_key
       && !routingShape.broadcast && !routingShape.hasMention
-      && createdMessage.reply_to_number === null && createdMessage.thread_root_number === null;
+      && (createdMessage.reply_to_number === null || replyToIsHuman)
+      && createdMessage.thread_root_number === null;
     const candidateAgentKeys = new Set<string>();
     const candidateSessionIds = new Set<string>();
     if (replyToMessage?.publisher_agent_key && replyToMessage.publisher_account_id) {
@@ -698,15 +708,41 @@ export async function addMessageWithCreateStatus(
           ? recentRecipient.agentKey : null,
       });
       // Jev only ever replaces the untagged fallback, and only in rooms of
-      // three or more agents; mentions, replies, threads, and task ownership
-      // stay deterministic. Elected keys must be single-owner durable keys in
-      // this room right now, or they route nothing.
-      const jevRouting = jevHint && sessionsByAgentKey.size > 2 ? jevHint : null;
-      const jevElectedKeys = new Set(
-        (jevRouting?.elected ?? []).filter((agentKey) => ownerScopeByAgentKey.has(agentKey)),
-      );
-      const jevDecides = jevRouting?.mode === "active";
+      // three or more agents; mentions, replies to agents, threads, and task
+      // ownership stay deterministic. Inference runs after commit: in active
+      // mode the fallback is withheld here and the deferred pass applies
+      // Jev's election (or this heuristic when Jev is unavailable); shadow
+      // mode applies the heuristic now and only compares afterwards.
+      const jevMode = planJevRoutingMode();
+      const jevEligible = jevMode !== null
+        && sessionsByAgentKey.size > 2
+        && !createdMessageIsPromptOnly
+        && !routingShape.broadcast && !routingShape.hasMention
+        && createdMessage.thread_root_number === null
+        && (createdMessage.reply_to_number === null || replyToIsHuman)
+        && (humanConversationEligible
+          || (createdMessage.source === "agent" && Boolean(createdMessage.publisher_agent_key)));
+      const jevDecides = jevMode === "active" && jevEligible;
       const humanFallback = jevDecides ? null : heuristicFallback;
+      if (jevMode && jevEligible) {
+        deferredJevRouting = {
+          mode: jevMode,
+          roomId,
+          message: {
+            number: createdMessage.number,
+            sender: createdMessage.sender,
+            text: createdMessage.text,
+            source: createdMessage.source ?? null,
+            publisher_agent_key: createdMessage.publisher_agent_key ?? null,
+            publisher_account_id: createdMessage.publisher_account_id ?? null,
+            timestamp: createdMessage.timestamp,
+          },
+          replyTo: replyToMessage && replyToIsHuman
+            ? { sender: replyToMessage.sender, text: replyToMessage.text }
+            : null,
+          heuristic: heuristicFallback,
+        };
+      }
 
       // Receipts are keyed by durable agent identity: several live sessions
       // (duplicates, mid-rotation overlap) may share one agent_key, but the
@@ -761,11 +797,6 @@ export async function addMessageWithCreateStatus(
             session: representative,
             activation: { decision: "activate", reason: "thread_participant", addressed: true },
           };
-        } else if (jevDecides && jevElectedKeys.has(agentKey)) {
-          selectedActivation = {
-            session: representative,
-            activation: { decision: "activate", reason: "jev_routed", addressed: true },
-          };
         } else if (humanFallback?.agentKeys.includes(agentKey)) {
           selectedActivation = {
             session: representative,
@@ -805,16 +836,6 @@ export async function addMessageWithCreateStatus(
             updated_at: createdMessage.timestamp,
           });
         }
-      }
-
-      if (jevRouting) {
-        logJevConversationRouting(jevRouting, {
-          roomId,
-          messageNumber: createdMessage.number,
-          heuristicReason: heuristicFallback?.reason ?? null,
-          heuristicAgentKeys: heuristicFallback?.agentKeys ?? [],
-          appliedAgentKeys: jevDecides ? [...jevElectedKeys] : [],
-        });
       }
 
       const receiptRowsToInsert = [...receiptsByAgentKey.values()];
@@ -929,6 +950,16 @@ export async function addMessageWithCreateStatus(
       recipientAgentTargets,
     }, options, tx);
   });
+  // Assigned inside the transaction callback, which control-flow narrowing
+  // cannot see; the assertion restores the declared type.
+  const plan = deferredJevRouting as DeferredJevRoutingPlan | null;
+  if (plan && result.created) {
+    // The message and its deterministic receipts are committed and announced;
+    // this only appends routing authority and re-publishes to its audience.
+    void runDeferredJevRouting(plan, result.canonical_message).catch((error) => {
+      console.error(`[jev routing] deferred pass failed for ${roomId} msg_${plan.message.number}`, error);
+    });
+  }
   if (repliedReceiptTargets.size > 0) {
     // Dynamic import avoids a module cycle; room-level so the shared stream
     // never enumerates ids that may be concealed from some participants.

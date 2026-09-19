@@ -23,7 +23,7 @@ const EXECUTION_DELEGATION_INVENTORY_PAGE_SIZE = 100;
 export interface SupervisorGrantHttp {
   createWorkerSession(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string;
-    provider: string; displayName: string; signal?: AbortSignal;
+    provider: string; displayName: string; model?: string | null; charter?: string | null; signal?: AbortSignal;
   }): Promise<{
     sessionId: string; bearer: string; bearerId: string; expiresAt: string | null;
     /** Exact public identity paired with the worker bearer by the server. */
@@ -332,6 +332,10 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
         display_name: input.displayName,
         runtime: input.provider,
         ide_label: ideLabel,
+        // Routing needs more than the runtime: humans address agents by model
+        // and by the role their charter gave them.
+        model: input.model ?? null,
+        charter: input.charter ?? null,
       }),
       signal: boundedCloudSignal(input.signal),
     });

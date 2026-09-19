@@ -21,7 +21,15 @@ export function isRoomEventVisibleToSubscriber(input: {
   messageOnly?: boolean;
 }): boolean {
   const { event } = input;
-  if (input.messageOnly && event.kind !== "message_created") return false;
+  if (input.messageOnly && event.kind !== "message_created" && event.kind !== "message_routed") return false;
+  if (event.kind === "message_routed") {
+    // Deferred routing re-publishes a message everyone already has. Only the
+    // exact durable audience that just gained authority needs to hear it.
+    const durableTarget = input.recipientAgentIdentity
+      ? recipientAgentDurableTargetKey(input.recipientAgentIdentity)
+      : null;
+    return Boolean(durableTarget && event.recipientAgentTargetSet.has(durableTarget));
+  }
   if (event.kind === "message_created") {
     if (!isPromptOnlyAgentMessage(event.message.text, event.message.agent_prompt_kind)) return true;
     const durableTarget = input.recipientAgentIdentity

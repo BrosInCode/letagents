@@ -413,7 +413,7 @@ export function registerLegacyProjectMessageRoutes(
           continue;
         }
         const event = delivery.envelope.event;
-        if (event.kind !== "message_created") continue;
+        if (event.kind !== "message_created" && event.kind !== "message_routed") continue;
         try {
           const attached = await hydrateLiveMessageForSubscriber({
             roomId: projectId,
@@ -667,7 +667,7 @@ export function registerLegacyProjectMessageRoutes(
           await refreshAfterCursor();
           continue;
         }
-        if (delivery.envelope.event.kind === "message_created") {
+        if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
           await resolveCanonicalEventAsync(delivery.envelope.event.message);
         }
       }

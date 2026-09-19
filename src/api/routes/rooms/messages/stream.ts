@@ -208,7 +208,8 @@ export function registerMessageStreamRoute(
       const eventId = `id: ${envelope.cursor}\n`;
       const event = envelope.event;
       switch (event.kind) {
-        case "message_created": {
+        case "message_created":
+        case "message_routed": {
           try {
             // Let every listener enter the shared per-event overlay batch.
             // A per-connection executor here would reject listeners before
@@ -229,6 +230,9 @@ export function registerMessageStreamRoute(
             await writeEvent(`${eventId}data: ${JSON.stringify({
               ...deliveryMessage,
               room_id: projectId,
+              // Marks a re-published message whose routing changed after commit
+              // so clients can pass their by-id replay dedupe for it.
+              ...(event.kind === "message_routed" ? { routing_pass: 2 } : {}),
             })}\n\n`);
           } catch (error) {
             console.error(`[room messages stream] failed to hydrate message for ${projectId}`, error);

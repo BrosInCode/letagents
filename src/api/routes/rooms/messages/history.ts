@@ -1,3 +1,4 @@
+import { parseScopedId } from "../../../db/utils.js";
 import type { Express } from "express";
 
 import {
@@ -301,7 +302,18 @@ export function registerMessageHistoryRoutes(
         }
         settled = true;
         await cleanup();
-        res.json({ room_id: projectId, messages: [attached], has_more: false });
+        // A re-published (routed) message can be older than the poller's
+        // cursor; never let it regress durable progress.
+        const cursorNumber = after ? parseScopedId(after, "msg") : null;
+        const messageNumber = parseScopedId(attached.id, "msg");
+        res.json({
+          room_id: projectId,
+          messages: [attached],
+          has_more: false,
+          ...(cursorNumber && messageNumber && cursorNumber > messageNumber
+            ? { last_observed_message_id: after }
+            : {}),
+        });
       } catch (error) {
         console.error(`[room messages poll] failed to hydrate broker message for ${projectId}`, error);
         if (!settled) {
@@ -382,7 +394,7 @@ export function registerMessageHistoryRoutes(
           await refreshAfterCursor();
           continue;
         }
-        if (delivery.envelope.event.kind === "message_created") {
+        if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
           await resolveCanonicalEventAsync(delivery.envelope.event.message);
         }
       }

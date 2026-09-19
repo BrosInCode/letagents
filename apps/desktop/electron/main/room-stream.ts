@@ -975,7 +975,16 @@ function handleRoomStreamFrame(
     ) {
       activeRoomStream.lastMessageId = messageId;
     }
-    const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(eventRoomIdentifier, messageId);
+    // A routed frame re-publishes an already-seen message once the server has
+    // appended routing receipts after commit. It carries new managed-agent
+    // authority, so it must pass the by-id dedupe that drops ordinary replays.
+    const routingPass = typeof payload.routing_pass === "number" && payload.routing_pass > 1
+      ? payload.routing_pass
+      : null;
+    const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(
+      eventRoomIdentifier,
+      routingPass ? `${messageId}#routing-pass-${routingPass}` : messageId,
+    );
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier: eventRoomIdentifier,

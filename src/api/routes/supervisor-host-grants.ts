@@ -443,6 +443,8 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
         room_id: roomId, session_kind: "worker", runtime: typeof body.runtime === "string" ? body.runtime.slice(0, 64) : "supervisor",
         registration_liveness: { host_id: grant.host_id, host_kind: "supervisor", host_label: grant.installation_id },
         repo_branch: typeof body.repo_branch === "string" ? body.repo_branch.slice(0, 255) : null,
+        model: typeof body.model === "string" && body.model.trim() ? body.model.trim().slice(0, 64) : null,
+        charter: typeof body.charter === "string" && body.charter.trim() ? body.charter.trim().slice(0, 2_000) : null,
         actor_label: buildAgentActorLabel({ display_name: displayName, owner_label: agent.owner_label, ide_label: ideLabel }),
         agent_key: agent.canonical_key, agent_instance_id: agentInstanceId,
         display_name: displayName, owner_account_id: grant.owner_account_id, owner_label: agent.owner_label, ide_label: ideLabel,

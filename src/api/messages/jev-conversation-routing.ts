@@ -47,6 +47,7 @@ export const JEV_NONE_OPTION = "none";
 const LATEST_TEXT_MAX_CHARS = 1_200;
 const CONVERSATION_TEXT_MAX_CHARS = 400;
 const AGENT_SNIPPET_MAX_CHARS = 240;
+const AGENT_CHARTER_MAX_CHARS = 300;
 
 export function readJevRoutingConfig(env: NodeJS.ProcessEnv = process.env): JevRoutingConfigResolution {
   const mode = (env.LETAGENTS_JEV_ROUTING ?? "off").trim().toLowerCase();
@@ -78,7 +79,11 @@ export interface JevRoutingAgentCandidate {
   agent_key: string;
   display_name: string;
   runtime: string | null;
-  /** Newest first. Role is inferred from what the agent has said, not its name. */
+  /** Provider model when the launcher recorded one (e.g. "sonnet"); humans refer to agents by it. */
+  model: string | null;
+  /** The launch charter: the only durable statement of the agent's role. */
+  charter: string | null;
+  /** Newest first. Role is inferred from the charter and what the agent has said, not its name. */
   recent_messages: readonly string[];
 }
 
@@ -92,7 +97,10 @@ export interface JevRoutingInput {
   agents: readonly JevRoutingAgentCandidate[];
   /** Oldest first, excluding the latest message. */
   recent_conversation: readonly JevRoutingConversationEntry[];
-  latest_message: JevRoutingConversationEntry;
+  latest_message: JevRoutingConversationEntry & {
+    /** Set when the human replied to a message; a reply to a human is still unaddressed to agents. */
+    replying_to?: JevRoutingConversationEntry | null;
+  };
 }
 
 export interface JevEvaluationRequest {
@@ -118,7 +126,11 @@ export function buildJevEvaluationRequest(input: JevRoutingInput): JevEvaluation
       .slice(0, 2)
       .map((text) => truncate(text, AGENT_SNIPPET_MAX_CHARS));
     const runtime = agent.runtime?.trim();
-    criteria[option] = `${agent.display_name}${runtime ? ` (${runtime} agent)` : ""}`
+    const model = agent.model?.trim();
+    const charter = agent.charter?.trim() ? truncate(agent.charter, AGENT_CHARTER_MAX_CHARS) : null;
+    const identity = [runtime ? `${runtime} agent` : null, model ? `model ${model}` : null].filter(Boolean).join(", ");
+    criteria[option] = `${agent.display_name}${identity ? ` (${identity})` : ""}`
+      + (charter ? `; charter: ${JSON.stringify(charter)}` : "")
       + (recentlySaid.length > 0
         ? `; recently said: ${recentlySaid.map((text) => JSON.stringify(text)).join(" | ")}`
         : "; has not spoken recently");
@@ -126,6 +138,8 @@ export function buildJevEvaluationRequest(input: JevRoutingInput): JevEvaluation
       option,
       name: agent.display_name,
       runtime: runtime || null,
+      model: model || null,
+      charter,
       recently_said: recentlySaid,
     };
   });
@@ -141,7 +155,8 @@ export function buildJevEvaluationRequest(input: JevRoutingInput): JevEvaluation
       criteria: {
         true: `The latest message is addressed to ${agent.name} — by name, by role, by runtime or`
           + ` model, or as a member of a group it belongs to (for example "the cursor agents" or`
-          + ` "everyone except …") — or it concerns work that ${agent.name} is doing.`,
+          + ` "everyone except …") — or it concerns work that ${agent.name} is doing, or it thanks or`
+          + ` acknowledges ${agent.name}'s most recent reply.`,
         false: `The latest message is meant for a different agent, for nobody in particular, or`
           + ` explicitly excludes ${agent.name}.`,
       },
@@ -153,7 +168,9 @@ export function buildJevEvaluationRequest(input: JevRoutingInput): JevEvaluation
       room: {
         agent_count: agents.length,
         note: "Agents are software workers sharing a chat room with humans. Agent names are"
-          + " arbitrary identifiers, not roles; infer each agent's role from what it has said.",
+          + " arbitrary identifiers, not roles; infer each agent's role from its charter and what it"
+          + " has said. Humans may also refer to agents by runtime (\"the cursor agents\") or by"
+          + " model (\"the Sonnet model\").",
       },
       agents: agentState,
       recent_conversation: input.recent_conversation.map((entry) => ({
@@ -165,6 +182,15 @@ export function buildJevEvaluationRequest(input: JevRoutingInput): JevEvaluation
         from: input.latest_message.from,
         kind: input.latest_message.kind,
         text: truncate(input.latest_message.text, LATEST_TEXT_MAX_CHARS),
+        ...(input.latest_message.replying_to
+          ? {
+              replying_to: {
+                from: input.latest_message.replying_to.from,
+                kind: input.latest_message.replying_to.kind,
+                text: truncate(input.latest_message.replying_to.text, CONVERSATION_TEXT_MAX_CHARS),
+              },
+            }
+          : {}),
       },
     },
     questions: {
@@ -173,9 +199,10 @@ export function buildJevEvaluationRequest(input: JevRoutingInput): JevEvaluation
         instructions: "Does the latest message call for a reply or action from one of the listed agents?",
         criteria: {
           true: "It asks a question, makes a request, gives an instruction, or hands off work"
-            + " that one of the listed agents should answer or act on.",
-          false: "It is conversation between humans, a status update, an acknowledgement, a"
-            + " reaction, or otherwise not something any listed agent should respond to.",
+            + " that one of the listed agents should answer or act on; or it thanks, acknowledges,"
+            + " greets, or otherwise speaks directly to an agent — a brief reply is expected then too.",
+          false: "It is conversation between humans, a note about the human's own plans or"
+            + " availability, a reaction, or otherwise not something any listed agent should respond to.",
         },
       },
       responder: {
