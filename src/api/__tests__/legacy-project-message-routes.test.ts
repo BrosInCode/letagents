@@ -54,6 +54,7 @@ function createDeps() {
       },
       close() {},
     },
+    getMessageStreamCheckpoint: async () => ({ checkpoint: "msg_100", cursorExists: true }),
     resolveRequestProjectRepoAccessRoomName: async (_req: unknown, project: { id: string }) => project.id,
     reauthorizeGitRoomParticipant: async () => true,
     beginRoomAgentDelivery: async () => ({
@@ -439,6 +440,7 @@ test("legacy poll timeout cannot overtake an in-flight canonical hydration", asy
   let responseBody: { messages?: Array<{ id?: string }> } | null = null;
   const deps = {
     ...createDeps(),
+    beginRoomAgentDelivery: async () => null,
     getProjectById: async () => ({ id: "room_1", display_name: "Room" }),
     resolveCanonicalRoomRequestId: async () => "room_1",
     requireParticipant: async () => true,

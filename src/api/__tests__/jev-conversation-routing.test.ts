@@ -311,7 +311,7 @@ test("evaluateWithJev surfaces HTTP failures without leaking the credential", as
   await assert.rejects(
     evaluateWithJev(config, buildJevEvaluationRequest(input), { fetchImpl }),
     (error: Error) => {
-      assert.match(error.message, /HTTP 503 model unavailable/);
+      assert.match(error.message, /HTTP 503/);
       assert.doesNotMatch(error.message, /test-key/);
       return true;
     },

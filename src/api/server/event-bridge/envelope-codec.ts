@@ -94,6 +94,7 @@ const REF_BUILDERS: Record<string, RefBuilder> = {
     const number = parseScopedId(stringField(message, "id") ?? "", "msg");
     return roomId && number ? { room_id: roomId, number } : null;
   },
+  "messages:message:routed": (data) => REF_BUILDERS["messages:message:created"]!(data),
   "tasks:task:updated": (data) => {
     const event = asRecord(data);
     const roomId = roomIdField(event, "projectId");
@@ -130,6 +131,13 @@ export const REF_HYDRATORS: Record<string, RefHydrator> = {
         ? await getMessageRecipientAgentTargets(roomId, number)
         : [],
     };
+  },
+  "messages:message:routed": async (ref) => {
+    const roomId = stringField(ref, "room_id");
+    const number = typeof ref.number === "number" ? ref.number : null;
+    if (!roomId || !number) return null;
+    const message = await getMessageById(roomId, formatMessageId(number));
+    return message ? { projectId: roomId, message, recipientAgentTargets: await getMessageRecipientAgentTargets(roomId, number) } : null;
   },
   "tasks:task:updated": async (ref) => {
     const roomId = stringField(ref, "room_id");

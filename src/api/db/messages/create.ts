@@ -1,3 +1,4 @@
+import { JEV_MAX_CANDIDATE_AGENTS } from "../../messages/jev-conversation-routing.js";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 
@@ -29,7 +30,7 @@ import {
 } from "../../../shared/activation-routing.js";
 import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
-import { message_attachment_uploads, message_attachments, messages, room_agent_delivery_sessions, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
+import { rooms, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_delivery_sessions, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
@@ -54,7 +55,6 @@ import {
 import { getMessageThreadReadOverlays } from "./thread-read-overlays.js";
 import {
   planJevRoutingMode,
-  runDeferredJevRouting,
   type DeferredJevRoutingPlan,
 } from "./jev-routing-hint.js";
 import {
@@ -206,7 +206,6 @@ export async function addMessageWithCreateStatus(
   // Conversation routing (Jev) never runs inside the send: the plan is
   // captured in the transaction and executed after commit, so the human's
   // send returns as fast as the deterministic ladder alone.
-  let deferredJevRouting: DeferredJevRoutingPlan | null = null;
   const result = await db.transaction(async (tx): Promise<AddMessageResult> => {
     // Transitional projection repair can inspect a legacy thread on the first
     // post-watermark reply. Bound that work—and every other statement in this
@@ -713,35 +712,30 @@ export async function addMessageWithCreateStatus(
       // mode the fallback is withheld here and the deferred pass applies
       // Jev's election (or this heuristic when Jev is unavailable); shadow
       // mode applies the heuristic now and only compares afterwards.
-      const jevMode = planJevRoutingMode();
+      const [routingRoom] = await tx.select({ enabled: rooms.jev_routing_enabled }).from(rooms).where(eq(rooms.id, roomId));
+      const jevMode = routingRoom?.enabled ? planJevRoutingMode() : null;
       const jevEligible = jevMode !== null
         && sessionsByAgentKey.size > 2
+        && sessionsByAgentKey.size <= JEV_MAX_CANDIDATE_AGENTS
+        && !taskOwnerFollowUp
         && !createdMessageIsPromptOnly
         && !routingShape.broadcast && !routingShape.hasMention
         && createdMessage.thread_root_number === null
         && (createdMessage.reply_to_number === null || replyToIsHuman)
-        && (humanConversationEligible
-          || (createdMessage.source === "agent" && Boolean(createdMessage.publisher_agent_key)));
+        && humanConversationEligible;
       const jevDecides = jevMode === "active" && jevEligible;
       const humanFallback = jevDecides ? null : heuristicFallback;
       if (jevMode && jevEligible) {
-        deferredJevRouting = {
+        const plan: DeferredJevRoutingPlan = {
           mode: jevMode,
           roomId,
           message: {
             number: createdMessage.number,
-            sender: createdMessage.sender,
-            text: createdMessage.text,
-            source: createdMessage.source ?? null,
             publisher_agent_key: createdMessage.publisher_agent_key ?? null,
-            publisher_account_id: createdMessage.publisher_account_id ?? null,
-            timestamp: createdMessage.timestamp,
           },
-          replyTo: replyToMessage && replyToIsHuman
-            ? { sender: replyToMessage.sender, text: replyToMessage.text }
-            : null,
           heuristic: heuristicFallback,
         };
+        await tx.insert(jev_routing_jobs).values({ room_id: roomId, message_number: createdMessage.number, plan });
       }
 
       // Receipts are keyed by durable agent identity: several live sessions
@@ -950,16 +944,6 @@ export async function addMessageWithCreateStatus(
       recipientAgentTargets,
     }, options, tx);
   });
-  // Assigned inside the transaction callback, which control-flow narrowing
-  // cannot see; the assertion restores the declared type.
-  const plan = deferredJevRouting as DeferredJevRoutingPlan | null;
-  if (plan && result.created) {
-    // The message and its deterministic receipts are committed and announced;
-    // this only appends routing authority and re-publishes to its audience.
-    void runDeferredJevRouting(plan, result.canonical_message).catch((error) => {
-      console.error(`[jev routing] deferred pass failed for ${roomId} msg_${plan.message.number}`, error);
-    });
-  }
   if (repliedReceiptTargets.size > 0) {
     // Dynamic import avoids a module cycle; room-level so the shared stream
     // never enumerates ids that may be concealed from some participants.

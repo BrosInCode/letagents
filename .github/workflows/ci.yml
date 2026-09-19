@@ -178,6 +178,9 @@ jobs:
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
 
+      - name: Test opt-in conversation routing and recovery
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/jev-room-routing-db.test.ts
+
       - name: Test room memory and human request persistence
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-knowledge-routes.test.ts src/api/__tests__/room-knowledge-db.test.ts
 

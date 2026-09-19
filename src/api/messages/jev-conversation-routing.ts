@@ -70,7 +70,7 @@ export function readJevRoutingConfig(env: NodeJS.ProcessEnv = process.env): JevR
         : env.AI_GATEWAY_EVALUATE_BASE_URL?.trim() || JEV_ROUTING_DEFAULT_BASE_URL).replace(/\/+$/, ""),
       model: env.LETAGENTS_JEV_ROUTING_MODEL?.trim()
         || (provider === "typesafe" ? JEV_TYPESAFE_DEFAULT_MODEL : JEV_ROUTING_DEFAULT_MODEL),
-      timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : JEV_ROUTING_DEFAULT_TIMEOUT_MS,
+      timeoutMs: Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 4_000) : JEV_ROUTING_DEFAULT_TIMEOUT_MS,
     },
   };
 }
@@ -230,7 +230,7 @@ export interface JevEvaluationAnswers {
 }
 
 function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -398,8 +398,8 @@ export async function evaluateWithJev(
     signal: AbortSignal.timeout(config.timeoutMs),
   });
   if (!response.ok) {
-    const detail = (await response.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 300);
-    throw new Error(`Jev evaluation failed: HTTP ${response.status}${detail ? ` ${detail}` : ""}`);
+    // Provider bodies may echo room context or credentials. Keep them out of logs.
+    throw new Error(`Jev evaluation failed: HTTP ${response.status}`);
   }
   return {
     answers: parseJevEvaluationResponse(await response.json()),

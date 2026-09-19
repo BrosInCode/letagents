@@ -1,3 +1,4 @@
+import { waitForMessageRouting } from "./wait-for-routing.js";
 import type { Express } from "express";
 import {
   ROOM_RESOURCE_AGENT_APPROVAL,
@@ -153,6 +154,7 @@ export function registerMessageStreamRoute(
         () => (deps.getMessageStreamCheckpoint ?? getMessageStreamCheckpoint)(projectId, {
           requestedCursor,
           includePromptOnly,
+          waitForRouting: liveController.activationIdentity?.session_kind === "worker",
         }),
       );
       await writeEvent(roomSyncSseFrame({
@@ -211,6 +213,13 @@ export function registerMessageStreamRoute(
         case "message_created":
         case "message_routed": {
           try {
+            // Hold the frame (and its event cursor) until all preceding routing
+            // decisions commit. This also preserves later queued frames and
+            // reconnect replay without a second delivery acknowledgment.
+            if (liveController.activationIdentity?.session_kind === "worker" && !await waitForMessageRouting({
+              roomId: projectId, messageId: event.message.id, includePromptOnly,
+              closed: () => streamClosed, load: deps.getMessageStreamCheckpoint,
+            })) return;
             // Let every listener enter the shared per-event overlay batch.
             // A per-connection executor here would reject listeners before
             // their work can coalesce into the one bounded database plan.

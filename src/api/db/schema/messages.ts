@@ -480,11 +480,6 @@ export const message_agent_receipts = pgTable(
     // transition. Supervised publications carry no reply_to, so this is the
     // only durable link from a replied receipt to its answer.
     reply_message_number: integer("reply_message_number"),
-    // Set when a receipt appended after the message committed (deferred
-    // routing) has been handed to its worker through a poll page. A long-poll
-    // that was between requests when the routing event fired can only learn
-    // of the receipt this way, and must learn of it exactly once.
-    deferred_delivered_at: timestamp("deferred_delivered_at", { mode: "string", withTimezone: true }),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },

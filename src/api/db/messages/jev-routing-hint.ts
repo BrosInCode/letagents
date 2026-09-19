@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { isPromptOnlyAgentMessage } from "../../../shared/room-agent-prompts.js";
 import { createBoundedExecutor } from "../../bounded-async.js";
 import {
+  JEV_MAX_CANDIDATE_AGENTS,
   buildJevEvaluationRequest,
   electJevResponders,
   evaluateWithJev,
@@ -13,8 +14,8 @@ import {
   type JevRoutingMode,
 } from "../../messages/jev-conversation-routing.js";
 import { db } from "../client.js";
-import { message_agent_receipts, messages, room_agent_sessions } from "../schema.js";
-import type { Message, MessageRecipientAgentTarget } from "../types.js";
+import { message_agent_receipts, messages, room_agent_sessions, rooms } from "../schema.js";
+import type { MessageRecipientAgentTarget } from "../types.js";
 import { MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 
 /** Rooms above this size fall back to deterministic routing rather than ship a huge state. */
@@ -59,15 +60,8 @@ export interface DeferredJevRoutingPlan {
   roomId: string;
   message: {
     number: number;
-    sender: string;
-    text: string;
-    source: string | null;
     publisher_agent_key: string | null;
-    publisher_account_id: string | null;
-    timestamp: string;
   };
-  /** The human message this one replied to, if any. A reply to a human is still unaddressed to agents. */
-  replyTo: { sender: string; text: string } | null;
   /** What the deterministic ladder did (shadow) or would have done (active). */
   heuristic: { reason: string; agentKeys: readonly string[] } | null;
 }
@@ -98,8 +92,21 @@ export async function resolveJevConversationRoutingHint(
 ): Promise<JevConversationRoutingHint | null> {
   const resolution = readJevRoutingConfig();
   if (resolution.status !== "enabled") return null;
+  const [room] = await db.select({ enabled: rooms.jev_routing_enabled }).from(rooms).where(eq(rooms.id, plan.roomId));
+  if (!room?.enabled) return null;
   const { config } = resolution;
-  const { roomId, message } = plan;
+  const { roomId } = plan;
+  // Re-read visibility and text at dispatch, rather than exporting a stale
+  // copy captured before a rental projection or redaction changed it.
+  const [message] = await db.select().from(messages).where(and(
+    eq(messages.room_id, roomId), eq(messages.number, plan.message.number),
+    sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
+  ));
+  if (!message) return null;
+  const [replyTo] = message.reply_to_number === null ? [] : await db.select().from(messages).where(and(
+    eq(messages.room_id, roomId), eq(messages.number, message.reply_to_number),
+    sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
+  ));
   const publisherAgentKey = message.publisher_agent_key?.trim() || null;
   const humanSender = message.source === "browser" && !publisherAgentKey;
 
@@ -143,7 +150,7 @@ export async function resolveJevConversationRoutingHint(
     // Rooms of one or two agents keep the deterministic small-room rule.
     if (agentsByKey.size <= 2) return null;
     const candidates = [...agentsByKey].filter(([agentKey]) => agentKey !== publisherAgentKey);
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0 || candidates.length > JEV_MAX_CANDIDATE_AGENTS) return null;
 
     const rows = await db
       .select({
@@ -155,7 +162,7 @@ export async function resolveJevConversationRoutingHint(
         publisher_agent_key: messages.publisher_agent_key,
       })
       .from(messages)
-      .where(and(eq(messages.room_id, roomId), sql`${messages.number} < ${message.number}`))
+      .where(and(eq(messages.room_id, roomId), sql`${messages.number} < ${message.number}`, sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`))
       .orderBy(desc(messages.number))
       .limit(RECENT_MESSAGE_WINDOW);
     const context = rows
@@ -193,11 +200,12 @@ export async function resolveJevConversationRoutingHint(
         from: message.sender,
         kind: humanSender ? "human" : "agent",
         text: message.text,
-        replying_to: plan.replyTo ? { from: plan.replyTo.sender, kind: "human", text: plan.replyTo.text } : null,
+        replying_to: replyTo ? { from: replyTo.sender, kind: "human", text: replyTo.text } : null,
       },
     });
     const { answers, latencyMs } = await runBoundedJevEvaluation(() => evaluateWithJev(config, request));
     const election = electJevResponders(answers, request.agentKeyByOption);
+    if (election.reason === "unparseable" || election.reason === "unknown_option") return null;
     return {
       mode: config.mode,
       elected: election.elected,
@@ -211,7 +219,7 @@ export async function resolveJevConversationRoutingHint(
       latencyMs,
     };
   } catch (error) {
-    const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const detail = error instanceof Error ? error.name : "Error";
     console.warn(`[jev routing] inference unavailable for ${roomId}; routing stays deterministic (${detail})`);
     return null;
   }
@@ -223,116 +231,70 @@ export async function resolveJevConversationRoutingHint(
  * changed since the send — and never duplicates a receipt (unique
  * (message, agent_key) index).
  */
-async function applyDeferredJevReceipts(
+export async function applyDeferredJevReceipts(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
   plan: DeferredJevRoutingPlan,
   decision: { reason: string; agentKeys: readonly string[] },
 ): Promise<MessageRecipientAgentTarget[]> {
   const wanted = new Set(decision.agentKeys.slice(0, MAX_ACCOUNT_ROUTING_TARGETS));
   const publisherAgentKey = plan.message.publisher_agent_key?.trim() || null;
-  return db.transaction(async (tx) => {
-    const sessions = await tx
-      .select({
-        session_id: room_agent_sessions.session_id,
-        agent_key: room_agent_sessions.agent_key,
-        actor_label: room_agent_sessions.actor_label,
-        owner_account_id: room_agent_sessions.owner_account_id,
-      })
-      .from(room_agent_sessions)
-      .where(and(
-        eq(room_agent_sessions.room_id, plan.roomId),
-        eq(room_agent_sessions.session_kind, "worker"),
-        sql`${room_agent_sessions.ended_at} IS NULL`,
-      ))
-      .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id))
-      .limit(MAX_JEV_ROUTING_SESSIONS + 1);
-    const groups = new Map<string, { representative: (typeof sessions)[number]; owners: Set<string> }>();
-    for (const session of sessions) {
-      const group = groups.get(session.agent_key) ?? { representative: session, owners: new Set<string>() };
-      group.owners.add(session.owner_account_id);
-      groups.set(session.agent_key, group);
-    }
-    const now = new Date().toISOString();
-    const rows = [...wanted].flatMap((agentKey) => {
-      const group = groups.get(agentKey);
-      // Only a single-owner durable key may receive authority; self never does.
-      if (!group || group.owners.size !== 1 || agentKey === publisherAgentKey) return [];
-      return [{
-        id: `rcpt_${randomUUID().replace(/-/g, "")}`,
-        message_room_id: plan.roomId,
-        message_number: plan.message.number,
-        room_id: plan.roomId,
-        agent_session_id: group.representative.session_id,
-        agent_key: agentKey,
-        actor_label: group.representative.actor_label,
-        activation_reason: decision.reason,
-        receipt_state: "queued",
-        created_at: now,
-        updated_at: now,
-      }];
-    });
-    if (rows.length === 0) return [];
-    const inserted = await tx
-      .insert(message_agent_receipts)
-      .values(rows)
-      .onConflictDoNothing()
-      .returning({ agent_key: message_agent_receipts.agent_key, agent_session_id: message_agent_receipts.agent_session_id });
-    return inserted.map((receipt) => ({
-      agent_key: receipt.agent_key,
-      agent_session_id: receipt.agent_session_id,
-      owner_account_id: groups.get(receipt.agent_key)!.representative.owner_account_id,
-    }));
-  });
-}
-
-/**
- * The deferred routing pass. Runs after the send transaction committed and
- * the ordinary `message:created` event went out, so the human's send never
- * waits on inference. Active mode applies Jev's election (or the withheld
- * heuristic fallback when Jev is unavailable) and re-publishes the message to
- * exactly the agents that gained authority. Shadow mode only compares.
- */
-export async function runDeferredJevRouting(plan: DeferredJevRoutingPlan, canonicalMessage: Message): Promise<void> {
-  const hint = await resolveJevConversationRoutingHint(plan);
-  const decision = plan.mode !== "active"
-    ? null
-    : hint
-      ? { reason: "jev_routed", agentKeys: hint.elected }
-      : plan.heuristic
-        ? { reason: plan.heuristic.reason, agentKeys: plan.heuristic.agentKeys }
-        : null;
-  const targets = decision && decision.agentKeys.length > 0
-    ? await applyDeferredJevReceipts(plan, decision)
-    : [];
-  const applied = targets.map((target) => target.agent_key);
-  if (hint) {
-    logJevConversationRouting(hint, {
-      roomId: plan.roomId,
-      messageNumber: plan.message.number,
-      heuristicReason: plan.heuristic?.reason ?? null,
-      heuristicAgentKeys: plan.heuristic?.agentKeys ?? [],
-      appliedAgentKeys: applied,
-    });
-  } else {
-    console.info(
-      `[jev routing] ${plan.mode} room=${plan.roomId} msg=msg_${plan.message.number} jev=unavailable`
-      + ` heuristic=${plan.heuristic?.reason ?? "none"}[${[...(plan.heuristic?.agentKeys ?? [])].join(",")}]`
-      + ` applied=[${applied.join(",")}]`,
-    );
+  const [visible] = await tx.select({ number: messages.number }).from(messages).where(and(
+    eq(messages.room_id, plan.roomId), eq(messages.number, plan.message.number),
+    sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
+  ));
+  if (!visible) return [];
+  const sessions = await tx
+    .select({
+      session_id: room_agent_sessions.session_id,
+      agent_key: room_agent_sessions.agent_key,
+      actor_label: room_agent_sessions.actor_label,
+      owner_account_id: room_agent_sessions.owner_account_id,
+    })
+    .from(room_agent_sessions)
+    .where(and(
+      eq(room_agent_sessions.room_id, plan.roomId),
+      eq(room_agent_sessions.session_kind, "worker"),
+      sql`${room_agent_sessions.ended_at} IS NULL`,
+    ))
+    .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id))
+    .limit(MAX_JEV_ROUTING_SESSIONS + 1);
+  if (sessions.length > MAX_JEV_ROUTING_SESSIONS) return [];
+  const groups = new Map<string, { representative: (typeof sessions)[number]; owners: Set<string> }>();
+  for (const session of sessions) {
+    const group = groups.get(session.agent_key) ?? { representative: session, owners: new Set<string>() };
+    group.owners.add(session.owner_account_id);
+    groups.set(session.agent_key, group);
   }
-  if (targets.length === 0) return;
-  // Dynamic imports avoid a db → server module cycle (same pattern as the
-  // message-info invalidation in create.ts).
-  const [{ messageEvents }, { queueMessageInfoInvalidation }] = await Promise.all([
-    import("../../server/events.js"),
-    import("../../server/message-info-events.js"),
-  ]);
-  messageEvents.emit("message:routed", {
-    projectId: plan.roomId,
-    message: canonicalMessage,
-    recipientAgentTargets: targets,
+  const now = new Date().toISOString();
+  const rows = [...wanted].flatMap((agentKey) => {
+    const group = groups.get(agentKey);
+    // Only a single-owner durable key may receive authority; self never does.
+    if (!group || group.owners.size !== 1 || agentKey === publisherAgentKey) return [];
+    return [{
+      id: `rcpt_${randomUUID().replace(/-/g, "")}`,
+      message_room_id: plan.roomId,
+      message_number: plan.message.number,
+      room_id: plan.roomId,
+      agent_session_id: group.representative.session_id,
+      agent_key: agentKey,
+      actor_label: group.representative.actor_label,
+      activation_reason: decision.reason,
+      receipt_state: "queued",
+      created_at: now,
+      updated_at: now,
+    }];
   });
-  console.info(`[jev routing] re-published msg_${plan.message.number} in ${plan.roomId} to ${targets.length} agent(s): ${targets.map((target) => `${target.agent_key}@${target.agent_session_id}`).join(", ")}`);
-  queueMessageInfoInvalidation(plan.roomId, null);
+  if (rows.length === 0) return [];
+  const inserted = await tx
+    .insert(message_agent_receipts)
+    .values(rows)
+    .onConflictDoNothing()
+    .returning({ agent_key: message_agent_receipts.agent_key, agent_session_id: message_agent_receipts.agent_session_id });
+  return inserted.map((receipt) => ({
+    agent_key: receipt.agent_key,
+    agent_session_id: receipt.agent_session_id,
+    owner_account_id: groups.get(receipt.agent_key)!.representative.owner_account_id,
+  }));
 }
 
 function formatProbability(value: number | null): string {

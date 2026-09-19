@@ -1,5 +1,4 @@
 import { parseScopedId } from "../../../db/utils.js";
-import { claimDeferredRoutingCatchUp } from "../../../db/messages/deferred-routing-catch-up.js";
 import type { Express } from "express";
 
 import {
@@ -79,15 +78,16 @@ export function registerMessageHistoryRoutes(
       const accountAgentRouting = isDesktopHumanClient(req);
       const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
       const result = before === "latest"
-        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting })
+        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, wait_for_routing: activationIdentity?.session_kind === "worker" })
         : before
-          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting })
+          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, wait_for_routing: activationIdentity?.session_kind === "worker" })
           : await getMessages(project.id, {
             limit,
             after,
             include_prompt_only: includePromptOnly,
             account_id: accountId,
             account_agent_routing: accountAgentRouting,
+            wait_for_routing: activationIdentity?.session_kind === "worker",
           });
 
       res.json({
@@ -382,6 +382,7 @@ export function registerMessageHistoryRoutes(
         limit,
         includePromptOnly,
         load: deps.getMessagesAfter ?? getMessagesAfter,
+        waitForRouting: liveController.activationIdentity?.session_kind === "worker",
       });
       if (next.messages.length > 0) {
         await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
@@ -402,7 +403,8 @@ export function registerMessageHistoryRoutes(
           continue;
         }
         if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
-          await resolveCanonicalEventAsync(delivery.envelope.event.message);
+          if (liveController.activationIdentity?.session_kind === "worker") await refreshAfterCursor();
+          else await resolveCanonicalEventAsync(delivery.envelope.event.message);
         }
       }
     }
@@ -445,15 +447,9 @@ export function registerMessageHistoryRoutes(
         include_prompt_only: includePromptOnly,
         account_id: accountId,
         account_agent_routing: accountAgentRouting,
+        wait_for_routing: liveController.activationIdentity?.session_kind === "worker",
       });
-      // Deferred routing may have appended a receipt for this worker on a
-      // message it already scrolled past; hand those over with this page.
-      const workerIdentity = liveController.activationIdentity;
-      const cursorNumber = after ? parseScopedId(after, "msg") : null;
-      const catchUp = workerIdentity?.session_kind === "worker" && workerIdentity.agent_key && cursorNumber
-        ? await claimDeferredRoutingCatchUp(projectId, workerIdentity.agent_key, cursorNumber)
-        : [];
-      const page = catchUp.length > 0 ? [...catchUp, ...existing.messages] : existing.messages;
+      const page = existing.messages;
       if (!settled && page.length > 0) {
         // The initial/backlog response is awaited so the route handler does
         // not return before the response body is written; only the timeout
