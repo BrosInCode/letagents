@@ -173,6 +173,30 @@ test("routing setting is admin-only, canonical and disabled by default", skip, a
   assert.equal((await request("patch", a.ownerId, { enabled: false })).body.enabled, false);
 });
 
+test("an expired never-claimed job restores ordered delivery without calling Jev", skip, async () => {
+  const a = await seed();
+  const before = await a.send("@Agent0 hello");
+  await a.enable(true);
+  const pending = await a.send("Which agent is best for design?");
+  const direct = await a.send("@Agent1 please check the board");
+  const read = () => api!.getMessagesAfter(a.room.id, before.message.id, { wait_for_routing: true });
+  assert.equal((await read()).messages.length, 0);
+  await client!.pool.query("UPDATE jev_routing_jobs SET expires_at = now() - interval '1 second'");
+  const [job] = await worker!.claimJevRoutingJobs();
+  assert.ok(job);
+  assert.equal(job.attempts, 1, "the deadline applies before any previous claim or failure");
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; throw new Error("expired jobs must not call Jev"); };
+  try {
+    await worker!.processJevRoutingJob(job);
+    assert.equal(calls, 0);
+    assert.deepEqual((await read()).messages.map((m) => m.id), [pending.message.id, direct.message.id]);
+    const receipts = await client!.pool.query("SELECT agent_key, activation_reason FROM message_agent_receipts WHERE message_room_id=$1 AND message_number=$2", [a.room.id, job.message_number]);
+    assert.deepEqual(receipts.rows, [{ agent_key: a.sessions[0]!.agent_key, activation_reason: "recent_conversation" }]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 
 test("shadow evaluations never hold the worker frontier", skip, async () => {
   const a = await seed();

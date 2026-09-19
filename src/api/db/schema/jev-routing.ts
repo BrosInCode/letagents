@@ -10,6 +10,7 @@ export const jev_routing_jobs = pgTable("jev_routing_jobs", {
   state: text("state").notNull().default("pending"),
   claim_token: text("claim_token"),
   available_at: timestamp("available_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }).notNull().default(sql`now() + interval '8 seconds'`),
   attempts: integer("attempts").notNull().default(0),
 }, (table) => ({
   pk: primaryKey({ columns: [table.room_id, table.message_number] }),

@@ -7,6 +7,7 @@ CREATE TABLE jev_routing_jobs (
   state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'processing', 'completed')),
   claim_token text,
   available_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL DEFAULT (now() + interval '8 seconds'),
   attempts integer NOT NULL DEFAULT 0,
   PRIMARY KEY (room_id, message_number),
   FOREIGN KEY (room_id, message_number) REFERENCES messages(room_id, number) ON DELETE CASCADE ON UPDATE CASCADE

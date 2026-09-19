@@ -19,6 +19,7 @@ export interface ClaimedJevRoutingJob {
   plan: DeferredJevRoutingPlan;
   claim_token: string;
   attempts: number;
+  expires_at: string | Date;
 }
 
 /** A bounded lease lets another API process recover abandoned work. */
@@ -77,18 +78,26 @@ export async function completeJevRoutingJob(
   queueMessageInfoInvalidation(plan.roomId, null);
 }
 
+export async function processJevRoutingJob(job: ClaimedJevRoutingJob): Promise<void> {
+  // The deadline starts at enqueue, not claim: a slow provider must not turn
+  // queued messages into an ever-growing series of inference timeouts.
+  const expired = new Date(job.expires_at).getTime() <= Date.now();
+  const hint = expired || job.attempts > 3 ? null : await resolveJevConversationRoutingHint(job.plan);
+  await completeJevRoutingJob(job, hint);
+}
+
 export function startJevRoutingWorker(): () => Promise<void> {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void>;
   async function tick(): Promise<void> {
+    let batchFull = false;
     try {
       const jobs = await claimJevRoutingJobs();
+      batchFull = jobs.length === 8;
       await Promise.all(jobs.map(async (job) => {
         try {
-          // Repeated process crashes must not indefinitely defer delivery.
-          const hint = job.attempts > 3 ? null : await resolveJevConversationRoutingHint(job.plan);
-          await completeJevRoutingJob(job, hint);
+          await processJevRoutingJob(job);
         } catch (error) {
           console.error(`[jev routing] job failed ${job.room_id}/msg_${job.message_number}`, error);
         }
@@ -96,7 +105,7 @@ export function startJevRoutingWorker(): () => Promise<void> {
     } catch (error) {
       console.error("[jev routing] queue unavailable", error);
     } finally {
-      if (!stopped) timer = setTimeout(() => { running = tick(); }, 250);
+      if (!stopped) timer = setTimeout(() => { running = tick(); }, batchFull ? 0 : 250);
     }
   }
   running = tick();

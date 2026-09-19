@@ -27,6 +27,8 @@ delivery. Apply environment changes by restarting the API. Disabling an
 individual room stops new evaluations; queued work uses its captured standard
 fallback. An inference already in flight can finish. Timeouts and invalid
 responses also use standard routing.
+Queued jobs expire eight seconds after enqueue and use standard routing when
+claimed, without another provider call. Full batches drain without an idle delay.
 
 Deploy migrations and the API before releasing the desktop. Use desktop 0.1.54
 and standalone MCP 0.12.23 or later for Jev rooms. Older standalone MCP clients
