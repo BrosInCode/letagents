@@ -734,7 +734,7 @@ export class SupervisorDaemon {
       requestConvergence: (entryId) => this.requestConvergence(entryId),
     });
     this.runtimeRecovery = new RuntimeRecoveryCoordinator({
-      releaseRecoveredObservation: (entryId, runtimeId) => this.executionCapture?.releaseRecoveredRuntime(entryId, runtimeId),
+      releaseRecoveredObservation: (entryId, runtimeId, stoppedCursorGeneration) => this.executionCapture?.releaseRecoveredRuntime(entryId, runtimeId, stoppedCursorGeneration),
       streams: this.providerStreams,
       terminals: this.providerTerminals,
       restartDelivery: (entryId) => this.restartSupervisedDeliveryOrConverge(entryId),

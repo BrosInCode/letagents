@@ -6103,6 +6103,8 @@ for (const cachedLane of [false, true]) {
     };
     const calls = { stop: 0, converge: 0 };
     let onExit: ((terminal: Awaited<ReturnType<ProviderActionPort["stop"]>>) => void) | undefined;
+    let observe!: (event: NativeExecutionObservation) => void;
+    let sourceSequence = 0;
     const port: ProviderActionPort = {
       capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: false,
         permissionPromptBridging: false, survivesRestart: false }),
@@ -6121,6 +6123,10 @@ for (const cachedLane of [false, true]) {
       },
       onExit: async (_handle, listener) => { onExit = listener; return () => { onExit = undefined; }; },
       onStream: async () => () => {},
+      onExecution: async (_current, listener) => {
+        observe = listener;
+        return { sourceId: "recovery-successor-source", position: () => ({ firstRetainedSequence: 1, latestSequence: sourceSequence }), dispose() {} };
+      },
     };
     const daemon = new SupervisorDaemon(paths, "darwin", port, false);
     try {
@@ -6130,6 +6136,9 @@ for (const cachedLane of [false, true]) {
         providerStreams: ProviderStreamCoordinator;
         supervisedInbox: SupervisedAgentInboxStore;
         liveHandles: Map<string, ProviderActionHandle>;
+        store: ManifestStore;
+        durability: WorkDurabilityStore;
+        manifestGeneration: number;
       };
       internals.requestConvergence = () => { calls.converge++; };
       const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
@@ -6162,6 +6171,21 @@ for (const cachedLane of [false, true]) {
         source_message_id: "later-message", source_message: { text: "later turn" }, activation: {} });
       const before = await internals.supervisedInbox.get(head.inbox_item_id);
       const bindingBefore = await internals.supervisedInbox.providerTurnBinding(head.inbox_item_id);
+      const capture = new DatabaseSync(paths.manifestPath);
+      const shadow = new ExecutionShadowStore(capture);
+      const oldRuntime = executionRuntimeStorageIdentity(id, failedExecution.execution_generation_id, "cursor_cli", 7124, "crashed-child");
+      const oldIdentity = { agentId: id, executionGenerationId: failedExecution.execution_generation_id, runtimeGenerationId: oldRuntime };
+      shadow.registerRuntime({ ...oldIdentity, provider: "cursor", authorityMode: "typed", configRevision: 1, createdAtMs: 1 });
+      const oldAttempt = shadow.trackMessage({ agentId: id, roomId: entry.room_id, sourceMessageId: "failed-message",
+        executionGenerationId: failedExecution.execution_generation_id, workspaceId: attempt.work_attempt_id, createdAtMs: 1 });
+      const oldTurn = { turnId: "captured-crashed-turn", providerContinuationId: handle.providerContinuationId!, providerTurnId: "cursor-crashed-turn" };
+      shadow.trackNativeTurn({ ...oldIdentity, ...oldTurn, attemptId: oldAttempt, roomId: entry.room_id, createdAtMs: 1 });
+      const oldObserver = shadow.bindObserver({ agentId: id, subjectRuntimeGenerationId: oldRuntime, observerRuntimeGenerationId: oldRuntime,
+        daemonGenerationId: String(generation), sourceId: "crashed-source", expectedEpoch: 0, boundAtMs: 1 });
+      shadow.ingest(oldObserver.sourceId, oldObserver, { ...oldIdentity, ...oldTurn, factId: "crashed-lost", observerEpoch: oldObserver.epoch,
+        sourceSequence: 1, observedAtMs: 2, domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none" });
+      shadow.observeSourcePosition(oldObserver.sourceId, oldObserver, 9);
+      const oldFacts = capture.prepare("SELECT * FROM execution_facts WHERE runtime_generation_id=?").all(oldRuntime);
       if (cachedLane) {
         handle.pid = 42;
         handle.providerConnection = { kind: "cursor_cli", pid: 42, processIdentity: "live-wrapper" };
@@ -6197,6 +6221,8 @@ for (const cachedLane of [false, true]) {
             .find((candidate) => candidate.id === id)!;
           assert.equal(saved.provider_ref?.provider_continuation_id, "cursor_crashed_continuation");
           assert.equal(calls.converge, 0);
+          assert.equal(capture.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=?").get(id)!.n, 0);
+          assert.equal(capture.prepare("SELECT observer_epoch FROM execution_observers WHERE agent_id=?").get(id)!.observer_epoch, oldObserver.epoch);
           database.exec("DROP TRIGGER reject_cursor_runtime_reset");
         } finally {
           database.close();
@@ -6226,6 +6252,42 @@ for (const cachedLane of [false, true]) {
       assert.equal(durable.execution_generations.length, cachedLane ? 2 : 1);
       assert.equal(durable.execution_generations[0]?.terminal?.terminal_cause, "crashed");
       assert.equal(durable.execution_generations.at(-1)?.terminal?.terminal_cause, cachedLane ? "stopped" : "crashed");
+      const boundary = capture.prepare("SELECT phase,observer_json FROM agent_runtime_recoveries WHERE agent_id=? AND runtime_generation_id=?").get(id, oldRuntime)!;
+      assert.equal(boundary.phase, "complete");
+      assert.equal(JSON.parse(String(boundary.observer_json)).max_observed_sequence, 9);
+      assert.deepEqual(capture.prepare("SELECT * FROM execution_facts WHERE runtime_generation_id=?").all(oldRuntime), oldFacts);
+      assert.equal(capture.prepare("SELECT state FROM execution_turns WHERE turn_id=?").get(oldTurn.turnId)!.state, "lost");
+      assert.throws(() => shadow.observeSourcePosition(oldObserver.sourceId, oldObserver, 10), /stale_observer/);
+
+      // Drive the next FIFO message through the real native observation path.
+      const nextExecution = await internals.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 3);
+      const nextConnection = { kind: "cursor_cli" as const, pid: 7125, processIdentity: "replacement-child" };
+      const nextHandle: ProviderActionHandle = { ...handle, observedState: "working", pid: nextConnection.pid,
+        providerContinuationId: "fresh-continuation", providerConnection: nextConnection };
+      const birth = await internals.store.checkpointProviderBirth(internals.manifestGeneration, {
+        entry: { ...recovered, provider_ref: { work_attempt_id: attempt.work_attempt_id,
+          execution_generation_id: nextExecution.execution_generation_id, provider_continuation_id: nextHandle.providerContinuationId!,
+          provider_connection: nextConnection } }, executionGenerationId: nextExecution.execution_generation_id,
+        providerConnection: nextConnection, appliedRevision: 1, requestedAuthorityMode: "typed", observedAtMs: Date.now(),
+      });
+      internals.manifestGeneration = birth.generation;
+      await internals.supervisedInbox.transition(later.inbox_item_id, "dispatching");
+      await internals.supervisedInbox.checkpointTurnStarted(later.inbox_item_id, "next-turn", {
+        work_attempt_id: attempt.work_attempt_id, origin_execution_generation_id: nextExecution.execution_generation_id,
+        provider_continuation_id: nextHandle.providerContinuationId!,
+      });
+      await internals.providerStreams.install(id, nextHandle, nextExecution.execution_generation_id);
+      await eventually(async () => Boolean(observe), "replacement capture subscribes");
+      for (const state of ["active", "terminal"] as const) {
+        observe({ sourceId: "recovery-successor-source", sequence: ++sourceSequence, observedAtMs: Date.now(),
+          nativeProcessPid: nextConnection.pid, nativeProcessIdentity: nextConnection.processIdentity,
+          fact: { domain: "turn", kind: "state_changed", state, providerContinuationId: nextHandle.providerContinuationId!,
+            providerTurnId: "next-turn", sideEffects: "none", ...(state === "terminal" ? { turnOutcome: "completed" as const } : {}) } });
+      }
+      await eventually(async () => capture.prepare("SELECT state FROM execution_turns WHERE provider_turn_id='next-turn'").get()?.state === "terminal",
+        "the next captured turn completes beyond the retained lost turn");
+      assert.equal(shadow.retainedMessageExecution(id, entry.room_id, "failed-message").availability, "available");
+      capture.close();
     } finally {
       await daemon.stop().catch(() => undefined);
       await env.cleanup();

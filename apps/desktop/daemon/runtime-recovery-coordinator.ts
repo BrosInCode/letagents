@@ -52,7 +52,7 @@ export type RuntimeRecoveryCoordinatorOptions = {
   streams: Pick<ProviderStreamCoordinator, "currentInstallation" | "install" | "remove">;
   terminals?: Pick<ProviderTerminalCoordinator, "handleTerminal">;
   restartDelivery?: (entryId: string) => Promise<void>;
-  releaseRecoveredObservation?: (entryId: string, runtimeId: string) => void;
+  releaseRecoveredObservation?: (entryId: string, runtimeId: string, stoppedCursorGeneration?: string) => void;
   processIdentity?: ProcessIdentity;
   liveHandles: Map<string, ProviderActionHandle>;
   authority: RuntimeRecoveryAuthority;
@@ -648,6 +648,9 @@ export class RuntimeRecoveryCoordinator {
           detail: "Room move cancelled because its activating provider runtime ended before destination membership was joined.",
         }, interruptedDelivery);
         this.authority.acceptManifestGeneration(committed.generation);
+        if (committed.recoveredRuntimeId) {
+          this.options.releaseRecoveredObservation?.(entryId, committed.recoveredRuntimeId, ref?.execution_generation_id);
+        }
         return committed.entry;
       });
       return entry;

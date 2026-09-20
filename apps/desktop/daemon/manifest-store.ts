@@ -40,7 +40,7 @@ import {
   type SelectDelegatedApproval,
 } from "./execution-delegated-approval.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
-import { prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery,
+import { prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
   type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "./runtime-recovery-journal.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
@@ -1294,8 +1294,9 @@ export class ManifestStore {
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
     roomMoveCancellation?: PreMembershipRoomMoveCancellation,
     interruptedDelivery?: { turn: SupervisedProviderTurnBinding; detail: string; observedAt: string },
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; recoveredRuntimeId?: string }> {
     const normalized = canonicalManifestEntry(entry);
+    let recoveredRuntimeId: string | undefined;
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?").get(normalized.id) as Row | undefined;
       if (!row) throw new Error(`Unknown daemon manifest entry: ${normalized.id}`);
@@ -1309,6 +1310,7 @@ export class ManifestStore {
           || !binding || Object.entries(turn).some(([key, value]) => binding[key] !== value)) {
           throw new ManifestConflictError("Runtime recovery lost the exact blocked provider turn before settlement.");
         }
+        recoveredRuntimeId = recordInterruptedCursorRecovery(database, turn, observedAt) ?? undefined;
         cancelInterruptedSupervisedTurn(database, turn.inbox_item_id, detail, observedAt,
           { agent_id: normalized.id, room_id: normalized.room_id });
       }
@@ -1325,7 +1327,7 @@ export class ManifestStore {
       if (!persisted) throw new Error(`Daemon manifest entry disappeared during replacement: ${normalized.id}`);
       return persisted;
     }, commitFence);
-    return { generation: result.generation, entry: result.value };
+    return { generation: result.generation, entry: result.value, recoveredRuntimeId };
   }
 
   /**
