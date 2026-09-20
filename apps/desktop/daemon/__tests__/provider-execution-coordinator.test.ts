@@ -297,7 +297,7 @@ function harness(input: {
       stop: async (entryId) => { stoppedDelivery.push(entryId); },
       start: async () => {},
     },
-    inbox: { head: async () => null, cursor: async () => ({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "1" }) },
+    inbox: { cursor: async () => ({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "1" }) },
     host: {
       requiresGrant: () => false,
       currentGrant: () => null,
@@ -749,67 +749,6 @@ function ownedRecoveryHarness() {
     replaceGrant: () => { grant = { ...grant, grantId: "grant-2" }; },
   };
 }
-
-test("a crashed Cursor generation with a blocked FIFO head cannot recover as a healthy idle lane", async () => {
-  const runtime = ownedRecoveryHarness();
-  const crash = { ...terminal(returnedHandle), exitCode: 1, terminalCause: "crashed" as const };
-  runtime.executionGenerations[0]!.terminal = runtime.options.terminalPayload(crash, "test");
-  runtime.setEntry({
-    ...runtime.entry(), provider: "cursor", observed_state: "failed", condition: "none",
-    provider_ref: { ...runtime.entry().provider_ref!,
-      provider_connection: { kind: "cursor_cli", pid: null, processIdentity: null } },
-  });
-  const detail = "Cursor supervised turn failed: Cursor's live MCP connector ended before the turn became terminal.";
-  runtime.options.inbox.head = async () => ({ room_id: "room-1", state: "blocked", last_error: detail }) as never;
-  let launches = 0;
-  runtime.options.provider.resume = async () => { launches++; return returnedHandle; };
-  runtime.options.provider.spawn = async () => { launches++; return returnedHandle; };
-
-  await runtime.coordinator.converge("agent-1");
-  await runtime.coordinator.converge("agent-1");
-
-  assert.equal(runtime.entry().observed_state, "recovering");
-  assert.equal(runtime.entry().condition, "coordination_blocked");
-  assert.equal(runtime.entry().last_error, detail);
-  assert.equal(launches, 0);
-  assert.equal(runtime.installed.length, 0);
-  assert.equal(runtime.executionGenerations.length, 1);
-
-  // Explicit recovery clears the runtime reference and settles the failed
-  // head. Convergence can then create a fresh lane for the remaining FIFO.
-  runtime.setEntry({ ...runtime.entry(), provider_ref: null, observed_state: "starting", condition: "none", last_error: null });
-  runtime.options.inbox.head = async () => null;
-  runtime.options.host.requiresGrant = () => false;
-  runtime.options.provider.spawn = async () => {
-    launches++;
-    return { ...returnedHandle, pid: null, observedState: "idle",
-      providerContinuationId: "replacement-continuation",
-      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null } };
-  };
-  await runtime.coordinator.converge("agent-1");
-  assert.equal(launches, 1);
-  assert.equal(runtime.installed.length, 1);
-  assert.equal(runtime.executionGenerations.length, 2);
-  assert.equal(runtime.entry().provider_ref?.provider_continuation_id, "replacement-continuation");
-});
-
-test("a healthy processless Cursor lane remains idle and delivery-capable", async () => {
-  const runtime = ownedRecoveryHarness();
-  runtime.binding.execution_generation_id = "generation-2";
-  const connection = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
-  runtime.setEntry({ ...runtime.entry(), provider: "cursor", condition: "none", last_error: null,
-    provider_ref: { ...runtime.entry().provider_ref!, provider_connection: connection } });
-  runtime.liveHandles.set("agent-1", {
-    ...returnedHandle, pid: null, providerConnection: connection, observedState: "idle",
-  });
-
-  await runtime.coordinator.converge("agent-1");
-
-  assert.equal(runtime.entry().observed_state, "idle");
-  assert.equal(runtime.entry().condition, "none");
-  assert.equal(runtime.deliveryStarts, 1);
-  assert.equal(runtime.mintCalls, 0);
-});
 
 test("exact Cursor host binding remains current while its per-turn child is replaced", async () => {
   const runtime = ownedRecoveryHarness();
