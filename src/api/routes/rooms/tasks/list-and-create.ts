@@ -1,3 +1,4 @@
+import { isHumanAppWrite } from "../../../request/app-session.js";
 import { createHash } from "node:crypto";
 import type { Express } from "express";
 
@@ -16,7 +17,6 @@ import { normalizeRoomId } from "../../../rooms/routing.js";
 import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import { normalizeTaskActorKey } from "../../../tasks/ownership.js";
 import {
-  isDesktopHumanWrite,
   resolveOwnerTokenWorkerWriteIdentity,
 } from "./request-identity.js";
 import { attachTaskDetails, attachTaskListDetails } from "./task-details.js";
@@ -181,7 +181,7 @@ export function registerTaskListAndCreateRoutes(
       throw error;
     }
 
-    if ((req.authKind === "owner_token" || req.authKind === "agent_session") && !isDesktopHumanWrite(req, requestBody)) {
+    if ((req.authKind === "owner_token" || req.authKind === "agent_session") && !isHumanAppWrite(req, requestBody)) {
       await createCoordinationEvent({
         room_id: project.id,
         task_id: task.id,

@@ -5,7 +5,7 @@ import {
   describeAgentMessageAttachments,
   type AgentMessageAttachmentDescriptor,
 } from "./managed-agent-attachments.js";
-import { apiFetch } from "../auth.js";
+import { agentApiFetch as apiFetch } from "../auth.js";
 import {
   cloudRoomIdentifierForStorage,
   localRoomIdentifierForStorage,

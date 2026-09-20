@@ -35,7 +35,8 @@ export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): 
     async getAuthToken() {
       try {
         const stored = await readStoredAuth();
-        return stored.token ?? null;
+        // Rental host polling and launches run as delegated agent activity.
+        return stored.agentToken ?? null;
       } catch {
         return null;
       }

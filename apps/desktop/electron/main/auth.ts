@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -115,6 +116,8 @@ type ApiErrorPayload = {
 
 type StoredDesktopAuth = {
   token: string | null;
+  agentToken: string | null;
+  appLoginVerifier: string | null;
   ownerTokenId: string | null;
   oauthTokenExpiresAt: string | null;
   account: DesktopAuthAccount | null;
@@ -122,9 +125,11 @@ type StoredDesktopAuth = {
   savedAt: string;
 };
 
-type PersistedDesktopAuth = Omit<StoredDesktopAuth, "token"> & {
+type PersistedDesktopAuth = Omit<StoredDesktopAuth, "token" | "agentToken" | "appLoginVerifier"> & {
+  version: 2;
+  encryptedAgentToken?: string | null;
+  encryptedAppLoginVerifier?: string | null;
   encryptedToken?: string | null;
-  token?: string | null;
 };
 
 type DeviceAuthStartResponse = {
@@ -139,7 +144,8 @@ type DeviceAuthPollResponse = {
   status: "pending" | "slow_down" | "authorized" | "denied" | "expired";
   interval?: number;
   expires_in?: number;
-  letagents_token?: string;
+  app_session?: string;
+  agent_token?: string;
   owner_token_id?: string;
   oauth_token_expires_at?: string | null;
   account?: {
@@ -200,7 +206,7 @@ function encryptTokenForStorage(token: string | null): string | null {
   if (!token) return null;
   const safeStorage = desktopSecretStorage();
   if (!safeStorage.isEncryptionAvailable()) {
-    return `plain:${token}`;
+    throw new Error("Unlock your system credential storage before signing in to LetAgents.");
   }
   return `safe:${safeStorage.encryptString(token).toString("base64")}`;
 }
@@ -209,11 +215,7 @@ function decryptTokenFromStorage(
   parsed: Partial<PersistedDesktopAuth>,
 ): string | null {
   const encryptedToken = parsed.encryptedToken || null;
-  if (!encryptedToken) return parsed.token || null;
-
-  if (encryptedToken.startsWith("plain:")) {
-    return encryptedToken.slice("plain:".length) || null;
-  }
+  if (!encryptedToken) return null;
 
   if (
     !encryptedToken.startsWith("safe:") ||
@@ -234,6 +236,8 @@ function decryptTokenFromStorage(
 function emptyStoredAuth(): StoredDesktopAuth {
   return {
     token: null,
+    agentToken: null,
+    appLoginVerifier: null,
     ownerTokenId: null,
     oauthTokenExpiresAt: null,
     account: null,
@@ -279,7 +283,10 @@ export async function readStoredAuth(): Promise<StoredDesktopAuth> {
   try {
     const raw = await readFile(getAuthStorePath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<PersistedDesktopAuth>;
+    if (parsed.version !== 2) return emptyStoredAuth();
     const storedAuth: StoredDesktopAuth = {
+      agentToken: decryptTokenFromStorage({ encryptedToken: parsed.encryptedAgentToken }),
+      appLoginVerifier: decryptTokenFromStorage({ encryptedToken: parsed.encryptedAppLoginVerifier }),
       token: decryptTokenFromStorage(parsed),
       ownerTokenId: parsed.ownerTokenId || null,
       oauthTokenExpiresAt: parsed.oauthTokenExpiresAt || null,
@@ -305,6 +312,9 @@ export async function readStoredAuth(): Promise<StoredDesktopAuth> {
 
 async function writeStoredAuth(nextAuth: StoredDesktopAuth): Promise<void> {
   const persistedAuth: PersistedDesktopAuth = {
+    version: 2,
+    encryptedAgentToken: encryptTokenForStorage(nextAuth.agentToken),
+    encryptedAppLoginVerifier: encryptTokenForStorage(nextAuth.appLoginVerifier),
     ownerTokenId: nextAuth.ownerTokenId,
     oauthTokenExpiresAt: nextAuth.oauthTokenExpiresAt,
     account: nextAuth.account,
@@ -316,7 +326,7 @@ async function writeStoredAuth(nextAuth: StoredDesktopAuth): Promise<void> {
   await writeFile(
     getAuthStorePath(),
     `${JSON.stringify(persistedAuth, null, 2)}\n`,
-    "utf8",
+    { encoding: "utf8", mode: 0o600 },
   );
   // Refresh the cache from the value we just persisted so the next
   // readStoredAuth (e.g. the Authorization header on the next apiFetch) reflects
@@ -364,13 +374,15 @@ export async function clearStoredAuth(): Promise<void> {
 export async function signOutDesktopAuth(): Promise<void> {
   // Capture the outgoing session before clearing local state. Do not let a
   // slow logout response clear a replacement sign-in started in the meantime.
-  const revocation = apiFetch<{ success: boolean }>(
-    "/auth/logout",
-    { method: "POST" },
-    { timeoutMs: 3_000 },
-  ).catch(() => undefined);
+  const stored = await readStoredAuth();
+  const revocation = revokeAuthTokens([stored.token, stored.agentToken]);
   await clearStoredAuth();
   await revocation;
+}
+
+async function revokeAuthTokens(tokens: Array<string | null | undefined>): Promise<void> {
+  await Promise.all(tokens.filter(Boolean).map(token =>
+    apiFetch("/auth/logout", { method: "POST", headers: { Authorization: `Bearer ${token}` } }, { timeoutMs: 3_000 }).catch(() => undefined)));
 }
 
 function buildAuthStatus(input: {
@@ -402,6 +414,7 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
   try {
     const session = await apiFetch<{
       authenticated: boolean;
+      credential_type?: string;
       account?: {
         id: string;
         provider: string;
@@ -412,13 +425,15 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
       };
     }>("/auth/session");
     const account = normalizeAuthAccount(session.account);
-    if (session.authenticated && account) {
+    if (session.authenticated && session.credential_type === "session" && account) {
       const nextAuth = await updateStoredAuth({ account }, generation);
       return buildAuthStatus({ storedAuth: nextAuth });
     }
 
     const nextAuth = await updateStoredAuth({
       token: null,
+      agentToken: null,
+      appLoginVerifier: null,
       ownerTokenId: null,
       oauthTokenExpiresAt: null,
       account: null,
@@ -465,6 +480,7 @@ async function parseApiErrorPayload(
  *   - `{ timeoutMs: null }` disables the default timeout with no replacement.
  */
 export type ApiFetchOptions = {
+  credential?: "app" | "agent" | "none";
   timeoutMs?: number | null;
 };
 
@@ -483,8 +499,10 @@ export async function apiFetch<T>(
   ) {
     requestHeaders.set("Content-Type", "application/json");
   }
-  if (storedAuth.token && !requestHeaders.has("Authorization")) {
-    requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
+  const credential = options?.credential === "none" ? null
+    : options?.credential === "agent" ? storedAuth.agentToken : storedAuth.token;
+  if (credential && !requestHeaders.has("Authorization")) {
+    requestHeaders.set("Authorization", `Bearer ${credential}`);
   }
 
   // A caller-provided signal always wins: we never override it with a default
@@ -536,12 +554,12 @@ export async function startDeviceAuthFlow(
 ): Promise<DesktopAuthStartResult> {
   const generation = ++authGeneration;
   const trimmedRoomIdentifier = roomIdentifier?.trim() || null;
-  const path = trimmedRoomIdentifier
-    ? `/auth/device/start?room_id=${encodeURIComponent(trimmedRoomIdentifier)}`
-    : "/auth/device/start";
+  const verifier = randomBytes(32).toString("hex");
+  const path = "/auth/app/start";
   const response = await apiFetch<DeviceAuthStartResponse>(path, {
     method: "POST",
-  });
+    body: JSON.stringify({ code_challenge: createHash("sha256").update(verifier).digest("hex") }),
+  }, { credential: "none" });
   const now = Date.now();
   const pendingDeviceAuth: DesktopPendingDeviceAuth = {
     requestId: response.request_id,
@@ -552,7 +570,7 @@ export async function startDeviceAuthFlow(
     roomIdentifier: trimmedRoomIdentifier || null,
     startedAt: new Date(now).toISOString(),
   };
-  const storedAuth = await updateStoredAuth({ pendingDeviceAuth }, generation);
+  const storedAuth = await updateStoredAuth({ pendingDeviceAuth, appLoginVerifier: verifier }, generation);
   return {
     pendingDeviceAuth,
     authStatus: buildAuthStatus({ storedAuth }),
@@ -561,7 +579,7 @@ export async function startDeviceAuthFlow(
 
 export async function cancelDeviceAuthFlow(): Promise<DesktopAuthStatus> {
   const generation = ++authGeneration;
-  const storedAuth = await updateStoredAuth({ pendingDeviceAuth: null }, generation);
+  const storedAuth = await updateStoredAuth({ pendingDeviceAuth: null, appLoginVerifier: null }, generation);
   return buildAuthStatus({ storedAuth });
 }
 
@@ -587,14 +605,19 @@ export async function pollDeviceAuthFlow(
 
   try {
     const response = await apiFetch<DeviceAuthPollResponse>(
-      `/auth/device/poll/${encodeURIComponent(pending.requestId)}`,
+      "/auth/app/exchange",
+      { method: "POST", body: JSON.stringify({ request_id: pending.requestId, code_verifier: storedAuth.appLoginVerifier }) },
+      { credential: "none" },
     );
 
-    if (generation !== authGeneration) return stalePollResult();
+    if (generation !== authGeneration) {
+      await revokeAuthTokens([response.app_session, response.agent_token]);
+      return stalePollResult();
+    }
 
     if (response.status === "authorized") {
       const account = normalizeAuthAccount(response.account);
-      if (!response.letagents_token || !account) {
+      if (!response.app_session || !response.agent_token || !account) {
         return {
           status: "unknown",
           intervalSeconds: null,
@@ -606,13 +629,18 @@ export async function pollDeviceAuthFlow(
       }
 
       const nextAuth = await updateStoredAuth({
-        token: response.letagents_token,
+        token: response.app_session,
+        agentToken: response.agent_token,
+        appLoginVerifier: null,
         ownerTokenId: response.owner_token_id || null,
         oauthTokenExpiresAt: response.oauth_token_expires_at || null,
         account,
         pendingDeviceAuth: null,
       }, generation);
-      if (generation !== authGeneration) return stalePollResult();
+      if (generation !== authGeneration) {
+        await revokeAuthTokens([response.app_session, response.agent_token]);
+        return stalePollResult();
+      }
       ++authGeneration;
       authAuthorizedHandler?.();
       return {
@@ -689,4 +717,9 @@ async function stalePollResult(): Promise<DesktopAuthPollResult> {
     authStatus: buildAuthStatus({ storedAuth: await readStoredAuth() }),
     error: "This GitHub approval is no longer active.",
   };
+}
+
+/** Agent work always uses the separately issued, non-app credential. */
+export function agentApiFetch<T>(path: string, init?: RequestInit, options?: ApiFetchOptions): Promise<T> {
+  return apiFetch<T>(path, init, { ...options, credential: "agent" });
 }

@@ -15,16 +15,16 @@
       </div>
 
       <header>
-        <p>GitHub device sign-in</p>
+        <p>Sign in to LetAgents</p>
         <h2 id="desktop-device-auth-title">Connect GitHub</h2>
-        <span v-if="pendingAuth">Copy this one-time code, then enter it on GitHub.</span>
-        <span v-else-if="busy">Requesting a one-time code from GitHub…</span>
-        <span v-else>Request a one-time code to connect your account.</span>
+        <span v-if="pendingAuth">Open your browser and confirm that the code matches.</span>
+        <span v-else-if="busy">Preparing secure sign-in…</span>
+        <span v-else>Continue in your browser to connect your account.</span>
       </header>
 
       <template v-if="pendingAuth">
         <div class="desktop-device-auth-code-card" data-testid="desktop-auth-pending-device-flow">
-          <span>One-time code</span>
+          <span>Approval code</span>
           <code data-testid="desktop-auth-device-code">{{ pendingAuth.userCode }}</code>
           <small>Expires {{ expiryLabel }}</small>
         </div>
@@ -48,7 +48,7 @@
             @click="$emit('open-verification', pendingAuth.verificationUri)"
           >
             <ExternalLink aria-hidden="true" />
-            Open GitHub
+            Open browser
           </button>
         </div>
 
@@ -56,7 +56,7 @@
           <span><i></i><i></i><i></i></span>
           <p>
             <strong>Waiting for approval</strong>
-            <small>LetAgents checks automatically after you enter the code.</small>
+            <small>This updates automatically after you approve.</small>
           </p>
           <button type="button" :disabled="busy" data-testid="desktop-auth-check-now" @click="$emit('poll-auth')">
             <LoaderCircle v-if="busy" class="desktop-device-auth-spinner" aria-hidden="true" />
@@ -91,7 +91,7 @@
       </p>
 
       <p class="desktop-device-auth-footnote">
-        The code only connects LetAgents. Never enter a password or personal access token here.
+        Approve only if the browser shows this code. Your private messages stay in LetAgents.
       </p>
     </div>
   </DesktopDialogShell>

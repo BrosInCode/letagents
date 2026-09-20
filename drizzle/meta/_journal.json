@@ -694,6 +694,13 @@
       "when": 1789850000000,
       "tag": "0098_jev_room_routing",
       "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1789944000000,
+      "tag": "0099_private_conversations",
+      "breakpoints": true
     }
   ]
 }

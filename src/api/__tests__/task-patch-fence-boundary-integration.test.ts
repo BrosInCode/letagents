@@ -405,8 +405,8 @@ test("HTTP admin edits persist Markdown and clearing through PATCH and GET witho
   assert.equal(accepted.body.description, "");
   const ownerToken = randomUUID();
   await db!.createOwnerToken({ accountId: f.ownerId, githubUserId: f.ownerId, token: ownerToken });
-  const desktopEdit = await f.request(ownerToken, `tasks/${f.task.id}`, {
-    title: "Desktop edit", desktop_human_client: true,
+  const desktopEdit = await f.request(sessionToken, `tasks/${f.task.id}`, {
+    title: "Desktop edit",
   }, "PATCH");
   assert.equal(desktopEdit.status, 200, JSON.stringify(desktopEdit.body));
   assert.equal((await getTaskById(f.room.id, f.task.id))!.title, "Desktop edit");

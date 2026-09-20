@@ -47,7 +47,8 @@ mock.module("../main/room-stream.js", {
 
 mock.module("../main/auth.js", {
   namedExports: {
-    apiFetch: async () => {
+    apiFetch: async () => { throw new Error("Agent delivery must not use an app session"); },
+    agentApiFetch: async () => {
       apiPosts += 1;
       return {};
     },

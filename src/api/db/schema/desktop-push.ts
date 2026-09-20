@@ -13,6 +13,8 @@ import {
 
 import { accounts, rooms } from "./core.js";
 import { messages } from "./messages.js";
+import { conversations, conversation_messages } from "./conversations.js";
+import { auth_sessions } from "./auth.js";
 
 export const desktop_push_devices = pgTable(
   "desktop_push_devices",
@@ -22,6 +24,7 @@ export const desktop_push_devices = pgTable(
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade", onUpdate: "cascade" }),
     installation_id: text("installation_id").notNull(),
+    app_session_id: text("app_session_id").references(() => auth_sessions.id, { onDelete: "set null" }),
     device_token: text("device_token").notNull(),
     token_hash: text("token_hash").notNull(),
     bundle_id: text("bundle_id").notNull(),
@@ -56,8 +59,8 @@ export const desktop_push_notifications = pgTable(
       .notNull()
       .references(() => desktop_push_devices.id, { onDelete: "cascade", onUpdate: "cascade" }),
     room_id: text("room_id")
-      .notNull()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    conversation_id: text("conversation_id").references(() => conversations.id, { onDelete: "cascade" }),
     message_number: integer("message_number").notNull(),
     thread_root_number: integer("thread_root_number"),
     room_display_name: text("room_display_name").notNull(),
@@ -81,6 +84,9 @@ export const desktop_push_notifications = pgTable(
       columns: [table.room_id, table.message_number],
       foreignColumns: [messages.room_id, messages.number],
     }).onDelete("cascade").onUpdate("cascade"),
+    conversation_message_fk: foreignKey({ name: "desktop_push_notifications_conversation_message_fk", columns: [table.conversation_id, table.message_number], foreignColumns: [conversation_messages.conversation_id, conversation_messages.number] }).onDelete("cascade"),
+    target_check: check("desktop_push_notifications_target_check", sql`(${table.room_id} IS NULL) <> (${table.conversation_id} IS NULL)`),
+    conversation_uq: uniqueIndex("desktop_push_notifications_conversation_uq").on(table.device_id, table.conversation_id, table.message_number).where(sql`${table.conversation_id} IS NOT NULL`),
     device_message_uq: uniqueIndex("desktop_push_notifications_device_message_uq")
       .on(table.device_id, table.room_id, table.message_number),
     ready_idx: index("desktop_push_notifications_ready_idx")

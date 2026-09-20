@@ -19,8 +19,8 @@ import ToastContainer from '@/components/ui/ToastContainer.vue'
 const route = useRoute()
 
 // Show navbar/footer on landing and docs, hide in room view
-const showNavbar = computed(() => route.name !== 'room')
-const showFooter = computed(() => route.name !== 'room')
+const showNavbar = computed(() => route.name !== 'room' && route.name !== 'messages')
+const showFooter = computed(() => route.name !== 'room' && route.name !== 'messages')
 </script>
 
 <style>

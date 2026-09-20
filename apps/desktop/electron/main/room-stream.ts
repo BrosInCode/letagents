@@ -1092,7 +1092,7 @@ async function fetchRoomMessagePollPage(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "application/json",
-    "X-LetAgents-Desktop-Client": "1",
+
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
@@ -1227,7 +1227,7 @@ async function fetchLatestRoomMessagePage(
   signal: AbortSignal,
 ): Promise<void> {
   const storedAuth = await readStoredAuth();
-  const headers = new Headers({ Accept: "application/json", "X-LetAgents-Desktop-Client": "1" });
+  const headers = new Headers({ Accept: "application/json" });
   if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
   const response = await fetch(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
@@ -1323,7 +1323,7 @@ async function emitLatestRoomMessageWindow(
   stream: NonNullable<typeof activeRoomStream>,
 ): Promise<void> {
   const storedAuth = await readStoredAuth();
-  const headers = new Headers({ Accept: "application/json", "X-LetAgents-Desktop-Client": "1" });
+  const headers = new Headers({ Accept: "application/json" });
   if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
   const response = await fetch(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
@@ -1568,7 +1568,7 @@ async function openDesktopRoomStream(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "text/event-stream",
-    "X-LetAgents-Desktop-Client": "1",
+
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);

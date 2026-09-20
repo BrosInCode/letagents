@@ -1,9 +1,9 @@
+import { isHumanAppWrite } from "../../request/app-session.js";
 import type { Express, Response } from 'express';
 import type { AuthenticatedRequest } from '../../http/helpers.js';
 import type { RoomMessageRouteDeps } from './messages/types.js';
 import { resolveParticipantRoom, routeParam } from './messages/helpers.js';
 import { requireWorkerRequestAgentIdentity } from '../../request/agent-identity.js';
-import { isDesktopHumanWrite } from './messages/request-identity.js';
 import { formatAttentionResponse, createKnowledgeRecord, knowledgeId, reviseKnowledgeRecord, RoomKnowledgeError, type KnowledgeActor, type KnowledgeInput, type KnowledgeType } from '../../../../shared/room-knowledge.mjs';
 import * as store from '../../db/room-knowledge.js';
 import { emitProjectMessage } from '../../server/events.js';
@@ -19,7 +19,7 @@ function fail(res: Response, error: unknown) {
   else { console.error('[room knowledge]', error); res.status(500).json({ error: 'Unable to save or load room knowledge. Please retry.' }); }
 }
 function human(req: AuthenticatedRequest): KnowledgeActor | null {
-  return req.sessionAccount && (req.authKind === 'session' || isDesktopHumanWrite(req, req.body ?? {}))
+  return req.sessionAccount && (req.authKind === 'session' || isHumanAppWrite(req, req.body ?? {}))
     ? { id: req.sessionAccount.account_id, label: req.sessionAccount.login, kind: 'human' } : null;
 }
 async function actor(req: AuthenticatedRequest, roomId: string): Promise<KnowledgeActor> {

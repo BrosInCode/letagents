@@ -54,7 +54,7 @@
           >
             <LoaderCircle v-if="busy" class="sidebar-account-spinner" aria-hidden="true" />
             <LogIn v-else aria-hidden="true" />
-            <span>{{ busy ? "Connecting..." : pendingAuth ? "Show device code" : "Connect GitHub" }}</span>
+            <span>{{ busy ? "Connecting..." : pendingAuth ? "Continue sign-in" : "Connect GitHub" }}</span>
           </button>
         </div>
       </div>

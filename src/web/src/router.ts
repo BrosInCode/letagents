@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
+  { path: "/messages", name: "messages", component: () => import("./pages/Messages.vue") },
   {
     path: '/',
     name: 'landing',

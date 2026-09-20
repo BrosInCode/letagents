@@ -1,3 +1,4 @@
+import { isHumanAppWrite } from "../../../request/app-session.js";
 import type { Express } from "express";
 
 import {
@@ -10,7 +11,6 @@ import { parseCreateMessageBody } from "../../../messages/inputs.js";
 import {
   hasAgentSessionCredentials,
   isAgentLikeSender,
-  isDesktopHumanWrite,
 } from "./request-identity.js";
 import { resolveParticipantRoom } from "./helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
@@ -33,7 +33,7 @@ export function registerCreateMessageRoute(
       const replyToMessageId = deps.parseOptionalReplyToMessageId(body.reply_to);
       const threadRootMessageId = deps.parseOptionalThreadRootMessageId(body.thread_root_id);
       const attachments = normalizeMessageAttachmentReferences(body.attachments);
-      const desktopHumanWrite = isDesktopHumanWrite(req, sessionCredentials);
+      const desktopHumanWrite = isHumanAppWrite(req, sessionCredentials);
       const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
         || req.authKind === "agent_session"
         || hasAgentSessionCredentials(sessionCredentials)

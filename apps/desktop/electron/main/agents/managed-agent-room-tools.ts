@@ -4,7 +4,7 @@ import type {
   DesktopRoomMessage,
   DesktopRoomStorageState,
 } from "../../ipc-types.js";
-import { apiFetch, DesktopApiError } from "../auth.js";
+import { agentApiFetch as apiFetch, DesktopApiError } from "../auth.js";
 import {
   cloudRoomIdentifierForStorage,
   localRoomIdentifierForStorage,

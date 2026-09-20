@@ -211,6 +211,9 @@
             {{ rentalRequestCount > 99 ? '99+' : rentalRequestCount }}
           </span>
         </button>
+        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'messages'" data-testid="sidebar-messages" @click="$emit('open-messages')">
+          <span class="cta-plus" aria-hidden="true"><MessageSquare /></span><span>Messages</span><span v-if="messagesUnread" class="sidebar-rent-count" :aria-label="`${messagesUnread} unread messages`">{{ messagesUnread > 99 ? '99+' : messagesUnread }}</span>
+        </button>
         <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'inbox'" data-testid="sidebar-inbox" @click="$emit('open-needs-you')">
           <span class="cta-plus" aria-hidden="true"><Inbox /></span><span>Inbox</span><span v-if="needsYouCount" class="sidebar-rent-count" :aria-label="`${needsYouCount} items need your attention`">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
         </button>
@@ -709,6 +712,7 @@ const props = defineProps<{
   batchActionBusy: SidebarRoomBatchActionId | null;
   rentalRequestCount?: number;
   needsYouCount?: number;
+  messagesUnread?: number;
   updateStatus: DesktopUpdateStatus | null;
   authStatus: DesktopAuthStatus | null;
   authBusy: boolean;
@@ -719,6 +723,7 @@ const emit = defineEmits<{
   "new-room": [];
   "open-rent": [];
   "open-needs-you": [];
+  "open-messages": [];
   "open-updates": [];
   "open-settings": [];
   "connect-account": [];

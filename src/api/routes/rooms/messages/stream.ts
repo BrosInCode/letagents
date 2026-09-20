@@ -12,7 +12,7 @@ import {
 } from "../../../http/sse.js";
 import { getMessageStreamCheckpoint } from "../../../db.js";
 import { InvalidRoomAgentDeliverySessionError } from "../../../rooms/agent-delivery.js";
-import { isDesktopHumanClient } from "./request-identity.js";
+import { isAppSession } from "../../../request/app-session.js";
 import { toPublicGitHubRoomEvent } from "../events.js";
 import {
   rentalActivityPayload,
@@ -88,7 +88,7 @@ export function registerMessageStreamRoute(
         project,
         accessRoomName,
         transport: "sse",
-        trackDelivery: !isDesktopHumanClient(req),
+        trackDelivery: !isAppSession(req),
         onSessionDisconnected: () => {
           streamClosed = true;
           void connection?.write(`event: session_disconnect\ndata: ${JSON.stringify({ room_id: projectId })}\n\n`)

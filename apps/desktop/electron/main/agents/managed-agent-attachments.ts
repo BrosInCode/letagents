@@ -295,7 +295,7 @@ async function fetchCloudMessageAttachmentPayloads(
   if (messageNumber !== null && messageNumber > 1) {
     params.set("after", `msg_${messageNumber - 1}`);
   }
-  const { apiFetch } = await import("../auth.js");
+  const { agentApiFetch: apiFetch } = await import("../auth.js");
   const page = await apiFetch<{
     messages?: Array<{ id?: string; attachments?: RoomMessageAttachmentPayload[] | null }>;
   }>(`/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages?${params.toString()}`);
@@ -321,8 +321,8 @@ export async function downloadApiAttachment(
   }
   const storedAuth = await readStoredAuth();
   const headers = new Headers();
-  if (storedAuth.token) {
-    headers.set("Authorization", `Bearer ${storedAuth.token}`);
+  if (storedAuth.agentToken) {
+    headers.set("Authorization", `Bearer ${storedAuth.agentToken}`);
   }
   const response = await fetch(target, { headers });
   if (!response.ok) {

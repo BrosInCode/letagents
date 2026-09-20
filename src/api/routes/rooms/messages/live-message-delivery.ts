@@ -8,7 +8,7 @@ import type {
   RoomMessageOverlayTarget,
 } from "../../../server/room-message-overlays.js";
 import { attachAccountRoutingAuthorityActivation } from "./receipt-activation.js";
-import { isDesktopHumanClient } from "./request-identity.js";
+import { isAppSession } from "../../../request/app-session.js";
 import { isPromptOnlyAgentMessage } from "../../../../shared/room-agent-prompts.js";
 import { parseScopedId } from "../../../db/utils.js";
 
@@ -23,7 +23,7 @@ export function resolveLiveMessageOverlayTarget(
   }
   const accountId = req.sessionAccount?.account_id?.trim();
   return accountId
-    ? { accountId, accountAgentRouting: isDesktopHumanClient(req) }
+    ? { accountId, accountAgentRouting: isAppSession(req) }
     : undefined;
 }
 

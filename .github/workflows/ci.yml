@@ -178,6 +178,9 @@ jobs:
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
 
+      - name: Test private conversations and app credentials
+        run: node --import tsx --test src/api/__tests__/private-conversations-db.test.ts
+
       - name: Test opt-in conversation routing and recovery
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/jev-room-routing-db.test.ts
 

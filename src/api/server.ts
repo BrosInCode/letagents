@@ -1,3 +1,4 @@
+import { closeConversationChanges } from "./conversations/changes.js";
 import { createApiApp } from "./server/app.js";
 import { startRoomEventBridge, stopRoomEventBridge } from "./server/event-bridge.js";
 import { startLivenessSweep, stopLivenessSweep } from "./server/liveness.js";
@@ -49,7 +50,7 @@ const shutdown = createGracefulShutdownController({
     await Promise.all([stopLivenessSweep(), stopDesktopPushWorker(), stopJevRoutingWorker()]);
   },
   stopBridge: stopRoomEventBridge,
-  closeBroker: closeApiRouteEventBroker,
+  closeBroker: async () => { closeApiRouteEventBroker(); await closeConversationChanges(); },
   drainConnections: async () => {
     await waitForSseCleanupDrain();
     await drainRoomAgentDeliveryLeases();
