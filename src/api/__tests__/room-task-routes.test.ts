@@ -1,3 +1,4 @@
+import { isHumanAppWrite } from "../request/app-session.js";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
@@ -5,7 +6,6 @@ import test from "node:test";
 process.env.DB_URL ??= process.env.TEST_DB_URL || "postgresql://test:test@127.0.0.1:1/test";
 const {
   getTaskBoardStalePromptState,
-  isDesktopHumanTaskWriteForTest,
   isCurrentStalePromptAction,
   registerRoomTaskRoutes,
 } = await import("../routes/rooms/tasks/index.js");
@@ -227,43 +227,12 @@ test("owner-token task creation requires a registered worker session", async () 
   assert.equal(admissionCalled, false);
 });
 
-test("desktop human task writes are identified by header or body marker without worker credentials", () => {
-  assert.equal(
-    isDesktopHumanTaskWriteForTest(
-      {
-        authKind: "owner_token",
-        headers: { "x-letagents-desktop-client": "1" },
-      } as never,
-      { status: "accepted" }
-    ),
-    true
-  );
-
-  assert.equal(
-    isDesktopHumanTaskWriteForTest(
-      {
-        authKind: "owner_token",
-        headers: {},
-      } as never,
-      { status: "accepted", desktop_human_client: true }
-    ),
-    true
-  );
-
-  assert.equal(
-    isDesktopHumanTaskWriteForTest(
-      {
-        authKind: "owner_token",
-        headers: { "x-letagents-desktop-client": "1" },
-      } as never,
-      {
-        status: "accepted",
-        desktop_human_client: true,
-        agent_session_id: "agent_session_1",
-      }
-    ),
-    false
-  );
+test("human task authority requires an app session, never a client marker", () => {
+  assert.equal(isHumanAppWrite({ authKind: "session", sessionAccount: { account_id: "acct_1" } } as never, {}), true);
+  for (const authKind of ["owner_token", "agent_session", null]) {
+    assert.equal(isHumanAppWrite({ authKind, sessionAccount: { account_id: "acct_1" }, headers: { "x-letagents-desktop-client": "1" } } as never, { desktop_human_client: true }), false);
+  }
+  assert.equal(isHumanAppWrite({ authKind: "session", sessionAccount: { account_id: "acct_1" } } as never, { agent_session_id: "worker" }), false);
 });
 
 test("room task updates deny parent board writes from hard-isolated Focus Rooms before task lookup", async () => {

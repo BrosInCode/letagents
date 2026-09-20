@@ -81,7 +81,6 @@ const {
   executeManagedAgentContextRequest,
 } = await import("../main/agents/managed-agent-context.js");
 const {
-  desktopMessageAccountRoutingRequest,
   resolveLocalCloudPublishAuthority,
 } = await import("../main/rooms/messages.js");
 const {
@@ -141,20 +140,6 @@ function localRoutingWorker(input: {
   };
 }
 
-test("desktop message payload requests always opt into account routing authority", () => {
-  assert.deepEqual(desktopMessageAccountRoutingRequest(), {
-    headers: { "X-LetAgents-Desktop-Client": "1" },
-  });
-  assert.deepEqual(desktopMessageAccountRoutingRequest({
-    "Content-Type": "application/json",
-    "X-LetAgents-Desktop-Client": "0",
-  }), {
-    headers: {
-      "Content-Type": "application/json",
-      "X-LetAgents-Desktop-Client": "1",
-    },
-  });
-});
 
 test("local cloud sync preserves exact worker provenance and never promotes it to human control", () => {
   const worker = {

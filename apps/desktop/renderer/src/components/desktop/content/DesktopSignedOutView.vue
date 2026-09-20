@@ -50,8 +50,8 @@
 
         <template v-if="pendingAuth">
           <div class="signed-out-card-heading">
-            <p>GitHub device sign-in</p>
-            <h2>Enter this code on GitHub</h2>
+            <p>Sign in to LetAgents</p>
+            <h2>Check this code in your browser</h2>
             <span>It is one-time and expires {{ expiryLabel }}.</span>
           </div>
 
@@ -60,10 +60,10 @@
             :class="{ 'is-copied': copied }"
             type="button"
             data-testid="signed-out-device-code"
-            :aria-label="copied ? 'GitHub device code copied' : 'Copy GitHub device code'"
+            :aria-label="copied ? 'Approval code copied' : 'Copy approval code'"
             @click="copyCode"
           >
-            <small>One-time code</small>
+            <small>Approval code</small>
             <code>{{ pendingAuth.userCode }}</code>
             <span aria-live="polite"><Check v-if="copied" aria-hidden="true" /><Copy v-else aria-hidden="true" />{{ copied ? "Copied" : "Copy code" }}</span>
           </button>
@@ -76,7 +76,7 @@
               data-testid="signed-out-open-github"
               @click="$emit('open-verification', pendingAuth.verificationUri)"
             >
-              Open GitHub <ArrowUpRight aria-hidden="true" />
+              Open browser <ArrowUpRight aria-hidden="true" />
             </button>
             <button
               class="signed-out-secondary"
@@ -99,7 +99,7 @@
 
         <template v-else>
           <div class="signed-out-card-heading">
-            <p>GitHub device sign-in</p>
+            <p>Sign in to LetAgents</p>
             <h2>Continue with GitHub</h2>
             <span>LetAgents will show a one-time code here before opening your browser.</span>
           </div>

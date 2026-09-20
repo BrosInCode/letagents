@@ -49,14 +49,14 @@
           </div>
 
           <div v-else-if="pendingAuth" key="pending" class="github-auth-state">
-            <strong>Finish on GitHub.</strong>
-            <p>Enter this code in the browser.</p>
+            <strong>Finish in your browser.</strong>
+            <p>Confirm that this code matches in your browser.</p>
             <div class="auth-code-block" data-testid="first-run-device-code">
               <strong>{{ pendingAuth.userCode }}</strong>
               <button
                 class="auth-code-copy"
                 type="button"
-                :aria-label="copied ? 'Code copied' : 'Copy GitHub code'"
+                :aria-label="copied ? 'Code copied' : 'Copy approval code'"
                 data-testid="first-run-auth-copy-code"
                 @click="copyCode"
               >
@@ -80,7 +80,7 @@
               data-testid="first-run-auth-open"
               @click="$emit('open-verification', pendingAuth.verificationUri)"
             >
-              Open GitHub
+              Open browser
             </button>
 
             <button

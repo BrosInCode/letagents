@@ -416,6 +416,7 @@ export function registerAuthRoutes(app: Express): void {
 
     res.json({
       authenticated: true,
+      credential_type: req.authKind,
       account: {
         id: req.sessionAccount.account_id,
         provider: req.sessionAccount.provider,
@@ -438,6 +439,9 @@ export function registerAuthLogoutRoute(
     const cookies = parseCookies(req.headers.cookie);
     if (cookies.letagents_session) {
       await deps.deleteSessionByToken(cookies.letagents_session);
+    }
+    if (req.authKind === "session" && req.headers.authorization?.startsWith("Bearer ")) {
+      await deps.deleteSessionByToken(req.headers.authorization.slice(7).trim());
     }
     if (req.authKind === "owner_token" && req.sessionAccount && "token_id" in req.sessionAccount) {
       await deps.deleteOwnerTokenById(req.sessionAccount.token_id);

@@ -15,7 +15,7 @@ import type {
   DesktopRoomStorageState,
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
-import { apiFetch } from "../auth.js";
+import { agentApiFetch as apiFetch } from "../auth.js";
 import { buildRepoStatus } from "../../repo-status.js";
 import { emitPersistedLocalRoomMessage } from "../room-stream.js";
 import { isDesktopSmokeCheck } from "../smoke.js";

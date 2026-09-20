@@ -3,8 +3,9 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createElectronTestEnv } from "./harness.js";
+import { createElectronTestEnv, installTestSecretStorage, testEncryptedToken } from "./harness.js";
 
+installTestSecretStorage();
 const env = createElectronTestEnv({
   prefix: "letagents-auth-device-cancel-",
   paths: [],
@@ -14,13 +15,14 @@ process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = env.tempDir;
 
 const authStorePath = join(env.tempDir, "letagents-desktop-auth.json");
 writeFileSync(authStorePath, `${JSON.stringify({
+  version: 2,
   ownerTokenId: null,
   oauthTokenExpiresAt: null,
   account: null,
   pendingDeviceAuth: {
     requestId: "request-1",
     userCode: "ABCD-1234",
-    verificationUri: "https://github.com/login/device",
+    verificationUri: "https://letagents.chat/auth/app/authorize/test",
     expiresAt: "2026-08-16T12:00:00.000Z",
     intervalSeconds: 5,
     roomIdentifier: null,
@@ -54,11 +56,11 @@ for (const action of ["cancel", "signOut", "restart"] as const) {
     setAuthAuthorizedHandler(() => { authorizedCount += 1; });
     globalThis.fetch = async (input) => {
       const url = String(input);
-      if (url.includes("/auth/device/start")) return Response.json({
+      if (url.includes("/auth/app/start")) return Response.json({
         request_id: `request-${++request}`, user_code: "ABCD-1234",
-        verification_uri: "https://github.com/login/device", expires_in: 600, interval: 5,
+        verification_uri: "https://letagents.chat/auth/app/authorize/test", expires_in: 600, interval: 5,
       });
-      if (url.includes("/auth/device/poll/")) {
+      if (url.includes("/auth/app/exchange")) {
         pollStarted();
         return new Promise(resolve => { finishPoll = resolve; });
       }
@@ -72,7 +74,7 @@ for (const action of ["cancel", "signOut", "restart"] as const) {
       if (action === "signOut") await signOutDesktopAuth();
       if (action === "restart") await startDeviceAuthFlow();
       finishPoll(Response.json({
-        status: "authorized", letagents_token: "late-test-token",
+        status: "authorized", app_session: "late-test-token", agent_token: "late-agent-token",
         account: { id: "test", provider: "github", provider_user_id: "test", login: "test" },
       }));
       assert.notEqual((await poll).status, "authorized");
@@ -100,7 +102,7 @@ test("cancel during device-code startup does not persist the late code", async (
     const start = startDeviceAuthFlow();
     await started;
     await cancelDeviceAuthFlow();
-    finishStart(Response.json({ request_id: "late", user_code: "LATE", verification_uri: "https://github.com/login/device", expires_in: 600, interval: 5 }));
+    finishStart(Response.json({ request_id: "late", user_code: "LATE", verification_uri: "https://letagents.chat/auth/app/authorize/test", expires_in: 600, interval: 5 }));
     await start;
     assert.equal((await readStoredAuth()).pendingDeviceAuth, null);
   } finally { globalThis.fetch = originalFetch; }

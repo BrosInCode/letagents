@@ -44,6 +44,14 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
     };
   }
 
+  const appSession = await getSessionAccountByToken(providerToken);
+  if (appSession) {
+    if (cookieSessionAccount && cookieSessionAccount.id !== appSession.id) {
+      return { account: null, authKind: null };
+    }
+    return { account: appSession, authKind: "session" };
+  }
+
   const supervisorGrant = await getSupervisorHostGrantByToken(providerToken);
   if (supervisorGrant) {
     // A browser/session credential and a host credential in one request is a

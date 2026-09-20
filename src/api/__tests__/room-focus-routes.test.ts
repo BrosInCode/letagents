@@ -312,7 +312,7 @@ test("focus room archive route requires an admin guard", async () => {
   assert.equal(requireParticipantCalled, false);
 });
 
-test("marked desktop-human focus room conclusions skip agent coordination", async () => {
+test("app-session human focus room conclusions skip agent coordination", async () => {
   let coordinationCalled = false;
   let concludeCalled = false;
   const concludeHandler = registerConclusionHandler({
@@ -342,8 +342,9 @@ test("marked desktop-human focus room conclusions skip agent coordination", asyn
 
   await concludeHandler(
     {
-      authKind: "owner_token",
-      headers: { "x-letagents-desktop-client": "1" },
+      authKind: "session",
+      sessionAccount: { account_id: "acct_1" },
+      headers: {},
       params: { 0: "room_1", 1: "focus_1" },
       body: { summary: "Done", conclusion_details: conclusionDetails },
     },
@@ -355,7 +356,7 @@ test("marked desktop-human focus room conclusions skip agent coordination", asyn
   assert.equal(concludeCalled, true);
 });
 
-test("marked desktop humans can quick-close without a summary or structured details", async () => {
+test("app-session humans can quick-close without a summary or structured details", async () => {
   let conclusionInput: unknown[] | null = null;
   const concludeHandler = registerConclusionHandler({
     concludeFocusRoom: async (...input: unknown[]) => {
@@ -380,8 +381,9 @@ test("marked desktop humans can quick-close without a summary or structured deta
 
   await concludeHandler(
     {
-      authKind: "owner_token",
-      headers: { "x-letagents-desktop-client": "1" },
+      authKind: "session",
+      sessionAccount: { account_id: "acct_1" },
+      headers: {},
       params: { 0: "room_1", 1: "focus_1" },
       body: { quick_close: true },
     },

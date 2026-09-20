@@ -23,7 +23,7 @@ import {
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
 import { resolveMessageActivationIdentity } from "./activation-identity.js";
-import { isDesktopHumanClient } from "./request-identity.js";
+import { isAppSession } from "../../../request/app-session.js";
 import { attachReceiptAuthorityActivations } from "./receipt-activation.js";
 import { resolveParticipantRoom } from "./helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
@@ -75,7 +75,7 @@ export function registerMessageHistoryRoutes(
       }
       const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
       const accountId = req.sessionAccount?.account_id ?? null;
-      const accountAgentRouting = isDesktopHumanClient(req);
+      const accountAgentRouting = isAppSession(req);
       const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
       const result = before === "latest"
         ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, wait_for_routing: activationIdentity?.session_kind === "worker" })
@@ -114,7 +114,7 @@ export function registerMessageHistoryRoutes(
       const message = await getMessageById(project.id, messageId, {
         include_prompt_only: includePromptOnly,
         account_id: req.sessionAccount?.account_id ?? null,
-        account_agent_routing: isDesktopHumanClient(req),
+        account_agent_routing: isAppSession(req),
       });
       if (!message) {
         // Body deliberately avoids the phrase "not found" so MCP clients can
@@ -152,7 +152,7 @@ export function registerMessageHistoryRoutes(
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const accountId = req.sessionAccount?.account_id ?? null;
-    const accountAgentRouting = isDesktopHumanClient(req);
+    const accountAgentRouting = isAppSession(req);
     let settled = false;
     let resolving = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -164,7 +164,7 @@ export function registerMessageHistoryRoutes(
         project,
         accessRoomName,
         transport: "long_poll",
-        trackDelivery: !isDesktopHumanClient(req),
+        trackDelivery: !isAppSession(req),
         onSessionDisconnected: resolveDisconnectedRequest,
         onAuthorizationDenied: denyRequest,
         reauthorize: deps.reauthorizeGitRoomParticipant,
@@ -497,7 +497,7 @@ export function registerMessageHistoryRoutes(
         limit,
         before,
         account_id: req.sessionAccount?.account_id ?? null,
-        account_agent_routing: isDesktopHumanClient(req),
+        account_agent_routing: isAppSession(req),
       });
       const attachedRoots = await (
         deps.attachReceiptAuthorityActivations ?? attachReceiptAuthorityActivations
@@ -548,7 +548,7 @@ export function registerMessageHistoryRoutes(
         before,
         include_prompt_only: includePromptOnly,
         account_id: req.sessionAccount?.account_id ?? null,
-        account_agent_routing: isDesktopHumanClient(req),
+        account_agent_routing: isAppSession(req),
       });
       if (!page) {
         res.status(404).json({ error: "thread not found" });

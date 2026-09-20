@@ -1,3 +1,4 @@
+import { isHumanAppWrite } from "../../request/app-session.js";
 import type { Express, Response } from "express";
 
 import {
@@ -36,7 +37,6 @@ import {
   normalizeTaskActorLabel,
 } from "../../tasks/ownership.js";
 import {
-  isDesktopHumanWrite,
   resolveOwnerTokenWorkerWriteIdentity,
 } from "./tasks/request-identity.js";
 
@@ -337,11 +337,11 @@ export function registerRoomFocusRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
-    const desktopHumanWrite = isDesktopHumanWrite(req, requestBody);
+    const desktopHumanWrite = isHumanAppWrite(req, requestBody);
     if (
       requestBody.quick_close === true
-      && requestBody.desktop_human_client === true
       && !desktopHumanWrite
+      && !req.authKind
     ) {
       res.status(401).json({
         error: "Connect GitHub to close this Focus Room.",

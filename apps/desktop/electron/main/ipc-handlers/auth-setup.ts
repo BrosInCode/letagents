@@ -21,6 +21,7 @@ import {
   signOutDesktopAuth,
   startDeviceAuthFlow,
 } from "../auth.js";
+import { apiUrl } from "../paths.js";
 import { openAllowedExternalUrl } from "../external-url.js";
 import {
   buildMcpInstallState,
@@ -77,7 +78,7 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   targetIpcMain.handle(
     "desktop:auth:open-verification",
     async (_event, url: string): Promise<void> => {
-      await openAllowedExternalUrl(url, ["github.com"]);
+      await openAllowedExternalUrl(url, [new URL(apiUrl).hostname]);
     },
   );
   targetIpcMain.handle(
