@@ -46,7 +46,7 @@ setExecutionDelegationInvalidationHandler(async (roomId) => { await supervisorDa
 
 app.once("ready", async (_event, launchInfo) => {
   prepareDesktopNotificationLaunch(launchInfo);
-  const backgroundStartup = (async () => {
+  const startupPreparation = (async () => {
     await startDesktopShellEnvironmentHydration().catch((error) => {
       console.warn(`Desktop shell environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -55,8 +55,12 @@ app.once("ready", async (_event, launchInfo) => {
         `Legacy Open Model retirement failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
+  })();
+  const backgroundStartup = (async () => {
     if (process.platform === "darwin") {
-      await supervisorDaemonClient.ensureRunning().catch((error) => {
+      // Register startup before opening the window, including its prerequisites,
+      // so passive readers can wait for the same readiness operation.
+      await supervisorDaemonClient.ensureRunning(startupPreparation).catch((error) => {
         console.warn(`Supervisor daemon unavailable: ${error instanceof Error ? error.message : String(error)}`);
       });
       // Rehydrate only desired-running daemon-inbox Codex entries. A failure is
@@ -65,6 +69,8 @@ app.once("ready", async (_event, launchInfo) => {
       await supervisorGrantCoordinator.reconcileDesiredRunning().catch((error) => {
         console.warn(`Supervisor grant reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`);
       });
+    } else {
+      await startupPreparation;
     }
   })();
   if (process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE === "1") {
