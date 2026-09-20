@@ -20,6 +20,7 @@ import type { SelectDelegatedApproval } from "./execution-delegated-approval.js"
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import type { ManifestStore } from "./manifest-store.js";
 import {
+  exhaustedTransientWorkerMint,
   retryableWorkerMintFailure,
   schedulerErrorDetail,
   WorkerCredentialMintError,
@@ -46,7 +47,7 @@ const WORKER_MINT_TIMEOUT_MS = 10_000;
 const WORKER_MINT_MAX_ATTEMPTS = 3;
 const WORKER_MINT_RETRY_DELAY_MS = 100;
 const WORKER_BIND_MAX_ATTEMPTS = 3;
-const WORKER_BIND_RETRY_DELAYS_MS = [1_000, 3_000] as const;
+const WORKER_BIND_RETRY_DELAYS_MS = [1_000, 3_000, 10_000, 30_000, 60_000] as const;
 
 class InvalidSupervisorGrantRenewalError extends Error {}
 
@@ -630,7 +631,8 @@ export class WorkerAuthorityCoordinator {
             : "supervised worker session bound",
         },
         ...(clearsCoordinationLatch
-          ? { observed_state: "working" as const, condition: "none" as const, last_error: null }
+          ? { observed_state: handle?.observedState === "idle" ? "idle" as const : "working" as const,
+            condition: "none" as const, last_error: null }
           : {}),
         ready_reached_at: resolveReadyReachedAt(current, clearsCoordinationLatch, new Date().toISOString()),
         last_worker_binding: {
@@ -996,17 +998,34 @@ export class WorkerAuthorityCoordinator {
     const attempts = previous?.executionGenerationId === executionGenerationId ? previous.attempts + 1 : 1;
     this.bindingRecoveryAttempts.set(entryId, { executionGenerationId, attempts });
     const safeError = schedulerErrorDetail(error);
-    const retrying = attempts < WORKER_BIND_MAX_ATTEMPTS;
-    const detail = retrying
+    const transient = exhaustedTransientWorkerMint(error)
+      || (error instanceof SupervisorGrantRequestError && retryableWorkerMintFailure(error));
+    const retrying = transient || attempts < WORKER_BIND_MAX_ATTEMPTS;
+    let retryDelay: number = WORKER_BIND_RETRY_DELAYS_MS[Math.min(attempts - 1, WORKER_BIND_RETRY_DELAYS_MS.length - 1)]!;
+    // Do not let the capped backoff carry a retained credential past expiry
+    // without another convergence pass to pause delivery and remove it.
+    const session = await this.options.bindings.supervisedWorkerSession(entryId);
+    const expiresAt = session?.expires_at ? Date.parse(session.expires_at) : Number.NaN;
+    if (Number.isFinite(expiresAt) && expiresAt > this.options.nowMs()) {
+      retryDelay = Math.min(retryDelay, expiresAt - this.options.nowMs());
+    }
+    const detail = transient && attempts >= WORKER_BIND_MAX_ATTEMPTS
+      ? `Restoring room access (attempt ${attempts}) failed: ${safeError}. Retrying automatically in ${Math.ceil(retryDelay / 1_000)} seconds. Use Reconnect to retry now.`
+      : retrying
       ? `Restoring room access (attempt ${attempts} of ${WORKER_BIND_MAX_ATTEMPTS}) failed: ${safeError}. Retrying automatically.`
       : `The provider is running, but room access could not be restored after ${WORKER_BIND_MAX_ATTEMPTS} attempts: ${safeError}. Use Reconnect to try the room handoff again.`;
+    if (!retrying) {
+      // No further convergence owns expiry cleanup. Pause room authority now
+      // so a retained bearer cannot outlive the retry budget or hide Reconnect.
+      this.options.custody.deleteWorkerAuthorization(entryId);
+      await this.options.delivery.stop(entryId).catch(() => undefined);
+      const binding = await this.options.bindings.get(entryId);
+      if (binding) await this.options.bindings.unbind(entryId, binding.agent_session_id, binding.execution_generation_id);
+    }
     await this.options.activity.transition(entryId, "recovering", "coordination_blocked", detail, "daemon-convergence");
+    this.options.convergence.clear(entryId);
     if (retrying) {
-      this.options.convergence.clear(entryId);
-      this.options.convergence.schedule(
-        entryId,
-        WORKER_BIND_RETRY_DELAYS_MS[Math.min(attempts - 1, WORKER_BIND_RETRY_DELAYS_MS.length - 1)]!,
-      );
+      this.options.convergence.schedule(entryId, retryDelay);
     }
   }
 
