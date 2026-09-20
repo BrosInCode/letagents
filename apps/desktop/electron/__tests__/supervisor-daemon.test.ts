@@ -235,6 +235,118 @@ test("host approval client fences changed daemon challenges and sender revocatio
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
+test("host approval reads wait for scheduled startup preparation and daemon readiness without starting extra work", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(42, signer.publicKey);
+  let releasePreparation!: () => void;
+  const preparation = new Promise<void>(resolve => { releasePreparation = resolve; });
+  let didSpawn!: () => void;
+  const spawned = new Promise<void>(resolve => { didSpawn = resolve; });
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  let spawns = 0;
+  let signerLoads = 0;
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { spawns += 1; didSpawn(); return child; },
+    loadApprovalSigner: async () => { signerLoads += 1; return signer; },
+    signalDaemon: () => { assert.fail("approval reads must not retire a provider"); },
+  });
+  let wire: Awaited<ReturnType<typeof startWireDaemon>> | null = null;
+  const startup = client.ensureRunning(preparation);
+  let earlyReadSettled = false;
+  const earlyRead = client.listHostApprovals("room_1").then(result => { earlyReadSettled = true; return result; });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const beforePreparation = { settled: earlyReadSettled, spawns, signerLoads };
+    releasePreparation();
+    await spawned;
+    let bootstrapReadSettled = false;
+    const bootstrapRead = client.listHostApprovals("room_1").then(result => { bootstrapReadSettled = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const beforeReady = { settled: bootstrapReadSettled, spawns, signerLoads };
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
+    wire.hostApprovals.challenge = () => verifier.challenge();
+    wire.hostApprovals.request = envelope => {
+      const verified = verifier.verify(envelope);
+      assert.equal(verified?.operation, "list");
+      assert.deepEqual(verified?.input, { roomId: "room_1" });
+      return [hostApprovalCandidate()];
+    };
+    child.emit("message", { type: "state_recovery_ready" });
+    const [status, earlySnapshot, bootstrapSnapshot] = await Promise.all([startup, earlyRead, bootstrapRead]);
+    assert.deepEqual(beforePreparation, { settled: false, spawns: 0, signerLoads: 0 });
+    assert.deepEqual(beforeReady, { settled: false, spawns: 1, signerLoads: 0 });
+    assert.equal(status.generation, 42);
+    for (const snapshot of [earlySnapshot, bootstrapSnapshot]) {
+      assert.equal(snapshot.available, true);
+      assert.equal(snapshot.error, null);
+      assert.equal(snapshot.approvals[0]?.status, "pending");
+    }
+    assert.equal(spawns, 1);
+    assert.equal(signerLoads, 1);
+    assert.ok(wire.requests.every(request => ["daemon.negotiate", "supervisor.host_approval_challenge", "supervisor.host_approval_request"].includes(request.method)));
+  } finally {
+    releasePreparation();
+    child.emit("message", { type: "state_recovery_ready" });
+    await startup.catch(() => undefined);
+    await closeServer(wire?.server ?? null, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("host approval reads report failed startup and recover through passive polling", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(42, signer.publicKey);
+  let rejectPreparation!: (error: Error) => void;
+  const preparation = new Promise<void>((_resolve, reject) => { rejectPreparation = reject; });
+  let signerLoads = 0;
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { assert.fail("failed preparation and passive polling must not spawn a daemon"); },
+    loadApprovalSigner: async () => { signerLoads += 1; return signer; },
+  });
+  let wire: Awaited<ReturnType<typeof startWireDaemon>> | null = null;
+  try {
+    const startup = client.ensureRunning(preparation);
+    const failedStartup = assert.rejects(startup, /preparation failed/);
+    const pendingRead = client.listHostApprovals("room_1");
+    rejectPreparation(new Error("preparation failed: private diagnostic"));
+    await failedStartup;
+    const failedRead = await pendingRead;
+    assert.equal(failedRead.available, false);
+    assert.deepEqual(failedRead.approvals, []);
+    assert.match(failedRead.error!, /Could not load host approvals/);
+    assert.equal(failedRead.error!.includes("private diagnostic"), false);
+    assert.equal(signerLoads, 0);
+
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
+    wire.hostApprovals.challenge = () => verifier.challenge();
+    wire.hostApprovals.request = envelope => {
+      assert.equal(verifier.verify(envelope)?.operation, "list");
+      return [];
+    };
+    assert.deepEqual(await client.listHostApprovals("room_1"), { available: true, approvals: [], error: null });
+    assert.equal(signerLoads, 1);
+    assert.deepEqual(wire.requests.map(request => request.method), ["supervisor.host_approval_challenge", "supervisor.host_approval_request"]);
+  } finally {
+    await closeServer(wire?.server ?? null, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("host approval client reports unenrolled or absent daemon without startup or secure-storage side effects", async () => {
   const env = await fixture(); let loads = 0;
   const client = new SupervisorDaemonClient({ socketPath: env.socketPath,
