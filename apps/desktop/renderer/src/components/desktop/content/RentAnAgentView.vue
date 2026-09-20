@@ -36,9 +36,9 @@
       data-testid="rent-an-agent-session-created"
     >
       <div>
-        <p class="surface-title">Session started: {{ lastCreatedSession.taskTitle }}</p>
+        <p class="surface-title">Rental created: {{ lastCreatedSession.taskTitle }}</p>
         <p class="surface-subtitle">
-          <code>{{ lastCreatedSession.id }}</code> · {{ rentalModeLabel(lastCreatedSession.mode) }} ·
+          {{ rentalModeLabel(lastCreatedSession.mode) }} ·
           {{ humanizeToken(lastCreatedSession.status) }}
         </p>
       </div>

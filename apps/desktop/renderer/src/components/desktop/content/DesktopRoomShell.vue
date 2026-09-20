@@ -263,6 +263,7 @@
       :settings-conflict="agentInspectorSettingsConflict"
       :live-feed="agentInspectorLiveFeed"
       :room-identifier="room.identifier"
+      :room-display-name="room.displayName || room.name"
       :request-version="selectedAgentDetailRequestVersion"
       :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
       :managed-sessions="roomManagedAgentSessions"
@@ -2234,7 +2235,7 @@ async function saveAgentInspectorSettings(overwrite: boolean): Promise<void> {
     }
     return;
   }
-  const operation = beginAgentInspectorOperation("save_settings", overwrite ? "Overwriting saved configuration…" : "Saving configuration…", status.generation);
+  const operation = beginAgentInspectorOperation("save_settings", overwrite ? "Overwriting saved configuration…" : "Saving settings…", status.generation);
   if (!operation) return;
   agentInspectorSettingsRequestToken += 1;
   try {
@@ -2269,7 +2270,7 @@ async function saveAgentInspectorSettings(overwrite: boolean): Promise<void> {
     agentInspectorConfigurationResource.value = settled.resource;
     agentInspectorSettingsDraftVersion = settled.draftVersion;
     agentInspectorSettingsConflict.value = false;
-    agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "save_settings", status: "success", message: "Configuration saved." };
+    agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "save_settings", status: "success", message: "Settings saved." };
   } catch (error) {
     if (!agentInspectorOperationIdentityCurrent(operation)) return;
     const refreshed = await refreshSupervisorStatus();
@@ -2387,7 +2388,7 @@ async function purgeAgentInspectorAgent(): Promise<void> {
   if (!projection) return;
   const status = await refreshSupervisorStatus();
   if (!status || !agentInspectorSettingsSelectionCurrent(projection.entryId, projection.roomId)) return;
-  const operation = beginAgentInspectorOperation("purge_agent", "Revoking credentials and purging durable records…", status.generation);
+  const operation = beginAgentInspectorOperation("purge_agent", "Removing access, history, and settings…", status.generation);
   if (!operation) return;
   try {
     const result = await desktopIpc.supervisor.purgeAgent({ entryId: operation.entryId, daemonGeneration: operation.daemonGeneration });
@@ -2869,22 +2870,22 @@ function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string
     pause: "Pausing this agent…",
     resume: "Resuming this agent…",
     reconnect: "Restoring the existing agent connection…",
-    recover: "Starting a replacement provider for this agent…",
-    reconnect_runtime: "Reconnecting observation and room delivery…",
-    restart_runtime: "Stopping the old runtime and resuming its conversation…",
-    fresh_runtime: "Stopping the old runtime and opening a fresh conversation…",
+    recover: "Restarting the agent app…",
+    reconnect_runtime: "Reconnecting the agent and its room messages…",
+    restart_runtime: "Restarting the agent app with its saved conversation…",
+    fresh_runtime: "Restarting the agent app with a new conversation…",
     stop_turn: "Stopping the current turn…",
     steer_turn: "Applying correction to this session…",
-    retry_turn_control: "Retrying the exact previous turn control…",
-    resolve_turn_control: "Recording the verified turn outcome…",
+    retry_turn_control: "Retrying the previous stop or correction…",
+    resolve_turn_control: "Saving the confirmed result…",
     retry_delivery: "Retrying this delivery…",
     restore_conversation: "Restoring this agent’s conversation…",
     skip_message: "Skipping this blocked message…",
     retire_agent: "Retiring this saved agent…",
-    save_settings: "Saving configuration…",
-    apply_settings: "Restarting with saved configuration…",
+    save_settings: "Saving settings…",
+    apply_settings: "Restarting with saved settings…",
     move_room: "Moving room…",
-    purge_agent: "Purging durable records…",
+    purge_agent: "Deleting history and settings…",
   } as const)[kind];
 }
 
@@ -2893,23 +2894,23 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
     mention: "Composer ready.",
     pause: "Agent paused.",
     resume: "Agent resumed.",
-    reconnect: "Connection handoff requested.",
-    recover: "Provider recovery started. The agent identity and workspace were preserved.",
-    reconnect_runtime: "Reconnection requested. Verify the latest runtime and room checks.",
-    restart_runtime: "Restart requested with the saved conversation. Verify the new runtime before continuing work.",
-    fresh_runtime: "Fresh start requested. Your workspace and saved history are preserved. Verify the new runtime before continuing work.",
+    reconnect: "Reconnection requested.",
+    recover: "The agent app is restarting. Its name and project files are kept.",
+    reconnect_runtime: "Reconnection requested. Check the agent and room connection status.",
+    restart_runtime: "Restart requested with the saved conversation. Wait for the agent to be ready before continuing.",
+    fresh_runtime: "A new conversation was requested. Your project files and history are kept. Wait for the agent to be ready before continuing.",
     stop_turn: "Current turn stopped.",
     steer_turn: "Correction applied to the same agent session.",
-    retry_turn_control: "Previous turn control completed.",
-    resolve_turn_control: "Turn-control outcome recorded.",
+    retry_turn_control: "Previous stop or correction completed.",
+    resolve_turn_control: "Confirmed result saved.",
     retry_delivery: "Delivery retry started.",
     restore_conversation: "Conversation restoration started.",
     skip_message: "Message skipped. Later room work can continue.",
-    retire_agent: "Agent retired. Its worktree is retained.",
-    save_settings: "Configuration saved.",
-    apply_settings: "Saved configuration restart requested.",
+    retire_agent: "Agent retired. Its project files and history are kept.",
+    save_settings: "Settings saved.",
+    apply_settings: "Restart requested to apply your settings.",
     move_room: "Room move started.",
-    purge_agent: "Durable records purged.",
+    purge_agent: "History and settings deleted. Project files are kept.",
   } as const)[kind];
 }
 

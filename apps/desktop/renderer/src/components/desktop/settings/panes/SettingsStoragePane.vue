@@ -95,7 +95,7 @@
         <SettingsRow
           v-if="activePane !== 'storage:database' && selectedRoomIsLocalGitRoom"
           title="Local Git Room"
-          description="This room stays local until you attach a provider-backed repository."
+          description="This room stays on your Mac until you connect a repository hosted online."
           badge="local"
           badge-state="away"
         />

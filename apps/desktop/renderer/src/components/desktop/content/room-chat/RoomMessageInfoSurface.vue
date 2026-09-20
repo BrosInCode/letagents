@@ -38,8 +38,7 @@
         </div>
 
         <p v-else-if="localOnly" class="room-message-info-state">
-          Message info is available in shared rooms. Local-only rooms keep no
-          read or receipt evidence.
+          Read and delivery status are available only in shared rooms.
         </p>
 
         <div v-else-if="info" class="room-message-info-body">
@@ -49,7 +48,7 @@
             </span>
             <div>
               <strong>No activity yet</strong>
-              <p>Nobody else has read this, and no agent was asked to respond. Evidence appears here as it happens.</p>
+              <p>Nobody else has read this, and no agent was asked to respond. Updates will appear here.</p>
             </div>
           </div>
 

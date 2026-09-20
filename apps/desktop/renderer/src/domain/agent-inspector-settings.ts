@@ -53,10 +53,10 @@ export interface AgentInspectorSettingsCoordinates {
 }
 
 export const AGENT_INSPECTOR_RETIRE_CONFIRMATION =
-  "This retires the saved agent. Its history and worktree stay available.";
+  "This stops the agent. Its history and project files stay available.";
 
 export const AGENT_INSPECTOR_ROOM_MOVE_UNAVAILABLE =
-  "Room moves are unavailable in this build. The supervisor can read a move only by operation ID, but does not expose the active operation ID needed to recover after this inspector or app reopens.";
+  "Moving agents between rooms is unavailable in this version. Update LetAgents and try again.";
 
 export function snapshotConfigurationSave(
   resource: AgentInspectorConfigurationResource,
@@ -182,15 +182,15 @@ export function agentInspectorProviderSupportsEffort(providerId: string | null |
 
 export function roomMovePresentation(move: DesktopSupervisorRoomMove): { label: string; detail: string; terminal: boolean } {
   switch (move.phase) {
-    case "prepared": return { label: "Move saved", detail: "The move is prepared and has not changed room membership.", terminal: false };
-    case "waiting_for_current_turn": return { label: "Waiting for current turn", detail: "The move will continue after active room work reaches a safe boundary.", terminal: false };
-    case "joining_destination": return { label: "Joining destination", detail: "Destination membership is being joined; the source remains authoritative until commit.", terminal: false };
-    case "membership_committed": return { label: "Membership moved", detail: "Destination membership is committed; destination ingress is not active yet.", terminal: false };
-    case "rotating_credentials": return { label: "Rotating credentials", detail: "The previous room credential is being retired before destination authority starts.", terminal: false };
-    case "bootstrapping_destination_tail": return { label: "Starting destination observation", detail: "The destination tail is being observed before ingress becomes active.", terminal: false };
-    case "active": return { label: "Moved", detail: "Destination observation is active.", terminal: true };
-    case "failed": return { label: "Move failed", detail: move.error || "The move did not complete. The durable journal has released this move.", terminal: true };
-    case "rollback_required": return { label: "Recovery required", detail: move.error || "The daemon is reconciling source and destination membership.", terminal: false };
+    case "prepared": return { label: "Move saved", detail: "Ready to move. The agent is still in its current room.", terminal: false };
+    case "waiting_for_current_turn": return { label: "Waiting for current work", detail: "The move will continue when the agent can safely pause its current work.", terminal: false };
+    case "joining_destination": return { label: "Joining destination", detail: "Connecting to the new room. The agent still belongs to its current room.", terminal: false };
+    case "membership_committed": return { label: "Finishing move", detail: "The agent has joined the new room and is getting ready to receive messages.", terminal: false };
+    case "rotating_credentials": return { label: "Updating room access", detail: "Removing access to the previous room before starting work in the new one.", terminal: false };
+    case "bootstrapping_destination_tail": return { label: "Loading the new room", detail: "Loading recent messages before the agent starts receiving new ones.", terminal: false };
+    case "active": return { label: "Moved", detail: "The agent is connected to the new room.", terminal: true };
+    case "failed": return { label: "Move failed", detail: move.error || "The move did not complete. Try moving the agent again.", terminal: true };
+    case "rollback_required": return { label: "Recovery required", detail: move.error || "LetAgents is checking which room the agent belongs to before continuing.", terminal: false };
   }
 }
 
