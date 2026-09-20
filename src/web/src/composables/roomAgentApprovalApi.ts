@@ -88,7 +88,7 @@ export async function fetchRoomAgentApprovals(
   })
   if (!response.ok) throw await responseError(response)
   const parsed = parsePage(await response.json(), parseServerNow(response.headers.get('Date')))
-  if (!parsed) throw new Error('The approval inventory response was not valid.')
+  if (!parsed) throw new Error('Could not load approval requests. Try again.')
   return parsed
 }
 
@@ -115,27 +115,27 @@ export async function fetchRoomAgentApprovalEvidence(
   if (!response.ok) throw await responseError(response)
   const projectionBytes = await response.arrayBuffer()
   if (projectionBytes.byteLength > EXECUTION_APPROVAL_PROJECTION_MAX_BYTES) {
-    return { status: 'invalid', message: 'Approval reference exceeds the public size limit.' }
+    return { status: 'invalid', message: 'This request is too large to review safely. Ask the agent to split the changes into smaller requests.' }
   }
   const digest = await sha256(projectionBytes)
   if (digest === null || digest !== publication.projection_sha256) {
-    return { status: 'invalid', message: 'Approval reference could not be verified.' }
+    return { status: 'invalid', message: 'The request could not be verified. Ask the agent to send a new approval request.' }
   }
   const bytes = new Uint8Array(projectionBytes)
   if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    return { status: 'invalid', message: 'Approval reference must not contain a byte-order mark.' }
+    return { status: 'invalid', message: 'The request could not be read safely. Ask the agent to send a new approval request.' }
   }
   let projectionJson: string
   try {
     projectionJson = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
   } catch {
-    return { status: 'invalid', message: 'Approval reference is not valid UTF-8.' }
+    return { status: 'invalid', message: 'The request could not be read safely. Ask the agent to send a new approval request.' }
   }
   let raw: unknown
   try {
     raw = JSON.parse(projectionJson)
   } catch {
-    return { status: 'invalid', message: 'Approval reference is not valid JSON.' }
+    return { status: 'invalid', message: 'The request could not be read safely. Ask the agent to send a new approval request.' }
   }
   const version = raw && typeof raw === 'object' && !Array.isArray(raw)
     ? (raw as { version?: unknown }).version
@@ -145,7 +145,7 @@ export async function fetchRoomAgentApprovalEvidence(
   }
   const projection = parseExecutionApprovalProjectionV1(raw)
   if (!projection || serializeExecutionApprovalProjectionV1(projection) !== projectionJson) {
-    return { status: 'invalid', message: 'Approval reference is not canonical.' }
+    return { status: 'invalid', message: 'The request is incomplete or has an unexpected format. Ask the agent to send a new approval request.' }
   }
   return { status: 'ready', projectionJson, projection }
 }

@@ -56,27 +56,27 @@ export function getReviewState(task: RoomTask): ReviewAuthoritySummary {
     return {
       state: 'idle',
       label: 'Review not active',
-      detail: 'Move the task to review before assigning board review authority.',
+      detail: 'Move the task to review before assigning a reviewer.',
     }
   }
   if (hasInvalidReviewLease) {
     return {
       state: 'invalid',
-      label: 'Reviewer conflicts with work holder',
-      detail: 'At least one reviewer also matches the active work lease. Assign a different worker before treating the board review as valid.',
+      label: 'Reviewer is also doing the work',
+      detail: 'The agent doing the work cannot review it. Assign a different agent.',
     }
   }
   if (validReviewLeaseCount > 0) {
     return {
       state: 'assigned',
       label: 'Reviewer assigned',
-      detail: 'A separate worker has board review authority for this task. Review decisions should come from that lane.',
+      detail: 'A different agent is assigned to review this work.',
     }
   }
   return {
     state: 'missing',
     label: 'Review unassigned',
-    detail: 'This task is waiting for an explicit LetAgents reviewer. Assign a reachable worker before merge handoff.',
+    detail: 'Assign an available agent to review this task before merging.',
   }
 }
 

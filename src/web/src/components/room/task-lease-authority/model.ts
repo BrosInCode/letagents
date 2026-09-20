@@ -41,29 +41,29 @@ export function getAuthorityState(task: RoomTask): {
     if (owner && !taskOwnerMatchesLease(task, lease)) {
       return {
         state: 'mismatch',
-        label: 'Lease overrides owner',
-        detail: `Assigned to ${owner}, but execution authority is held by ${holder}. Handoff or release the lease to make the lane explicit.`,
+        label: 'Different agent is working',
+        detail: `Assigned to ${owner}, but ${holder} currently has permission to work on it. Transfer or remove that permission to change who can work.`,
       }
     }
     return {
       state: 'held',
-      label: 'Lane held',
-      detail: `${holder} has the active work lease. This is the actor/session authorized to mutate the work lane.`,
+      label: 'Agent assigned',
+      detail: `${holder} can update this task and its linked work.`,
     }
   }
 
   if (task.assignee && ['assigned', 'in_progress', 'blocked', 'in_review'].includes(task.status)) {
     return {
       state: 'missing',
-      label: 'No active lease',
-      detail: 'This task has an owner/status but no work lease, so execution authority is not explicit yet.',
+      label: 'No working agent',
+      detail: 'The task has an owner, but no agent currently has permission to work on it.',
     }
   }
 
   return {
     state: 'missing',
-    label: 'No active lease',
-    detail: 'No worker currently holds execution authority for this task.',
+    label: 'No working agent',
+    detail: 'No agent currently has permission to work on this task.',
   }
 }
 
@@ -81,7 +81,7 @@ export function getAuthorityBadgeVariant(state: AuthorityState): 'success' | 'wa
 export function getAuthorityBadgeLabel(state: AuthorityState): string {
   switch (state) {
     case 'held':
-      return 'Lane held'
+      return 'Agent assigned'
     case 'mismatch':
       return 'Mismatch'
     default:

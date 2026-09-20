@@ -257,9 +257,9 @@ test("supervised providers expose their supervised permission presentation inste
   assert.match(configurationSource, /const permissionProfiles = bindings\.selectedPermissionProfiles\.value/);
   assert.match(controllerSource, /selectedPermissionProfiles,[\s\S]*?selectedPermissionProfile,/);
   assert.doesNotMatch(presentationSource, /profiles\.filter\(\(profile\) => profile\.id === "read_only"\)/);
-  assert.match(presentationSource, /private turn workspace/);
-  assert.match(presentationSource, /Git history and ignored output are not persisted/);
-  assert.match(presentationSource, /Daemon-mediated LetAgents room tools remain available/);
+  assert.match(presentationSource, /separate copy of your project/);
+  assert.match(presentationSource, /files ignored by Git and changes to Git history are not copied back/);
+  assert.match(presentationSource, /LetAgents room tools remain available/);
 });
 
 test("the supervised action island owns complete responsive interaction styles", () => {

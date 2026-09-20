@@ -1547,7 +1547,7 @@ test("managed permission profile helpers present available and gated modes", () 
   const running = session();
   assert.equal(managedAgentPermissionProfileLabel(running), "Full access");
   assert.equal(managedAgentPermissionProfileStatusLabel("available"), "Available");
-  assert.equal(managedAgentPermissionProfileStatusLabel("gated"), "Gated");
+  assert.equal(managedAgentPermissionProfileStatusLabel("gated"), "Not available yet");
   assert.equal(managedAgentPermissionProfileSummary({
     id: "sandboxed_write",
     label: "Sandboxed writes",
@@ -1556,7 +1556,7 @@ test("managed permission profile helpers present available and gated modes", () 
     risk: "medium",
     detail: "Needs config isolation.",
     isDefault: false,
-  }), "Gated: Needs config isolation.");
+  }), "Not available yet: Needs config isolation.");
 });
 
 test("supervised Cursor permission copy describes workspace scope instead of machine-wide access", () => {
@@ -1571,8 +1571,8 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
   };
   const compatibility = supervisedCursorPermissionProfilePresentation(base);
   assert.equal(compatibility.label, "Workspace writes (compatibility)");
-  assert.match(compatibility.detail ?? "", /private turn workspace/i);
-  assert.match(compatibility.detail ?? "", /does not change Git history/i);
+  assert.match(compatibility.detail ?? "", /separate copy of your project/i);
+  assert.match(compatibility.detail ?? "", /Git history is kept/i);
 
   const writable = supervisedCursorPermissionProfilePresentation({
     ...base,
@@ -1581,7 +1581,7 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
     risk: "medium",
   });
   assert.equal(writable.label, "Workspace writes");
-  assert.match(writable.description, /private turn workspace/i);
+  assert.match(writable.description, /separate copy of your project/i);
 });
 
 test("supervised Codex presents ask-before-write without changing the legacy catalog", () => {
@@ -1597,7 +1597,7 @@ test("supervised Codex presents ask-before-write without changing the legacy cat
   const supervised = supervisedPermissionProfilePresentation("codex", legacy);
   assert.equal(legacy.status, "gated");
   assert.equal(supervised.status, "available");
-  assert.match(supervised.detail ?? "", /read-only, network-disabled sandbox/);
+  assert.match(supervised.detail ?? "", /read-only file access and no network access/);
 });
 
 test("supervised Open Model presents its native approval bridge without changing the legacy catalog", () => {
@@ -1613,7 +1613,7 @@ test("supervised Open Model presents its native approval bridge without changing
   const supervised = supervisedPermissionProfilePresentation("open-model", legacy);
   assert.equal(legacy.status, "gated");
   assert.equal(supervised.status, "available");
-  assert.match(supervised.detail ?? "", /each shell command and file edit/);
+  assert.match(supervised.detail ?? "", /Commands and file changes need approval/);
 });
 
 test("managed permission profile selection is scoped by provider", () => {
@@ -2159,6 +2159,6 @@ test("supervised Claude exposes one-time native approval without enabling its le
   const supervised = supervisedPermissionProfilePresentation("claude-code", legacy);
   assert.equal(supervised.status, "available");
   assert.match(supervised.description, /Claude.*change files/);
-  assert.match(supervised.detail!, /one-time.*ambient settings disabled/);
+  assert.match(supervised.detail!, /Each approval allows one action.*Other Claude settings do not apply/);
   assert.equal(legacy.status, "gated");
 });

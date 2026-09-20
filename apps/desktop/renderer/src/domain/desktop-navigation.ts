@@ -20,7 +20,7 @@ export const appAgentEntry: SystemEntry = {
   id: "system:app-agent",
   type: "system",
   title: "App Agent",
-  description: "Typed app control",
+  description: "Help using LetAgents",
   sectionLabel: "System",
 };
 

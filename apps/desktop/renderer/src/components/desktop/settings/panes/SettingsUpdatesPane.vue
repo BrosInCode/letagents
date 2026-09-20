@@ -73,8 +73,8 @@
         description="Checks at startup and every six hours. Updates download without interrupting your work."
       />
       <SettingsRow
-        title="Agent-safe restart"
-        description="Before installation, LetAgents stops new agent mutations and retires only the supervisor daemon. Provider processes stay alive so the new app can reconnect to their exact sessions."
+        title="Keep agents running"
+        description="Running agents stay open while LetAgents restarts. Agent controls pause briefly during the update."
       />
     </div>
 

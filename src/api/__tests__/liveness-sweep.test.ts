@@ -274,10 +274,10 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
     runtime_evidence: "none",
     runtime_inactive_for_ms: null,
   });
-  assert.ok(unknown.includes("workplace-reachability axis has been stale for 6m"));
-  assert.ok(unknown.includes("may still be working outside the room"));
-  assert.ok(unknown.includes("does not authorize taking over"));
-  assert.ok(unknown.includes("terminal payload or fenced supervisor verdict"));
+  assert.ok(unknown.includes("has not connected to the room for 6m"));
+  assert.ok(unknown.includes("may still be working"));
+  assert.ok(unknown.includes("Do not take over its work based on this notice"));
+  assert.ok(unknown.includes("agent or its current supervisor confirms it has stopped"));
   assert.ok(!unknown.includes("appears to be offline"));
   assert.ok(!unknown.includes("Board Manager"));
 
@@ -291,9 +291,9 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
     runtime_inactive_for_ms: 7 * 60_000,
   });
   assert.ok(!stale.includes("appears to be offline"));
-  assert.ok(stale.includes("native execution-activity axis has also been quiet for 7m"));
-  assert.ok(stale.includes("suspect while the reconnect/probe grace runs"));
-  assert.ok(stale.includes("lease handoff"));
+  assert.ok(stale.includes("No activity has been reported by its agent app for 7m"));
+  assert.ok(stale.includes("does not confirm that it has stopped"));
+  assert.ok(stale.includes("task assignment has been transferred"));
 
   const manager = buildOfflineAnnouncementText({
     session,
@@ -306,7 +306,7 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
 
   assert.equal(
     buildRecoveryAnnouncementText({ session }),
-    "[status] FieldSignal's workplace-reachability axis is fresh again."
+    "[status] FieldSignal is connected to the room again."
   );
 });
 
@@ -436,7 +436,7 @@ test("sweepOnce announces offline workers with an epoch-stable client message id
   assert.equal(summary.announced_recovered, 0);
   assert.equal(announcedOffline.length, 1);
   assert.equal(announcedOffline[0]?.roomId, "focus_34");
-  assert.ok(announcedOffline[0]!.text.includes("FieldSignal's workplace-reachability axis has been stale"));
+  assert.ok(announcedOffline[0]!.text.includes("FieldSignal has not connected to the room"));
   assert.equal(
     announcedOffline[0]?.clientMessageId,
     `agent_liveness:offline:${session.delivery_key}:${session.last_disconnected_at}`
@@ -527,7 +527,7 @@ test("sweepOnce announces recoveries with a marker-stable client message id", as
   const summary = await createLivenessSweeper(deps).sweepOnce();
 
   assert.equal(summary.announced_recovered, 1);
-  assert.ok(announcedRecovered[0]!.text.includes("workplace-reachability axis is fresh again"));
+  assert.ok(announcedRecovered[0]!.text.includes("is connected to the room again"));
   assert.equal(
     announcedRecovered[0]?.clientMessageId,
     `agent_liveness:recovered:${recovered.delivery_key}:${recovered.offline_announced_at}`

@@ -529,9 +529,9 @@ test("managed agent permission profiles map provider-specific available and gate
   const claudeProfiles = listManagedAgentPermissionProfiles("claude-code");
   assert.equal(claudeProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
   assert.equal(claudeProfiles.find((profile) => profile.id === "read_only")?.status, "available");
-  assert.match(claudeProfiles.find((profile) => profile.id === "read_only")?.detail ?? "", /shell tools are unavailable/);
+  assert.match(claudeProfiles.find((profile) => profile.id === "read_only")?.detail ?? "", /Cannot change files or run commands/);
   assert.equal(claudeProfiles.find((profile) => profile.id === "full_access")?.status, "available");
-  assert.match(claudeProfiles.find((profile) => profile.id === "full_access")?.description ?? "", /on this host/);
+  assert.match(claudeProfiles.find((profile) => profile.id === "full_access")?.description ?? "", /on this Mac/);
   assert.doesNotMatch(claudeProfiles.find((profile) => profile.id === "full_access")?.description ?? "", /repo|workspace/i);
 
   const cursorProfiles = listManagedAgentPermissionProfiles("cursor");

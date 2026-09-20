@@ -107,7 +107,7 @@ test('approval reads distinguish unsupported, tampered, and unavailable referenc
   )
   assert.deepEqual(
     await fetchRoomAgentApprovalEvidence('room_1', publication({ projection_sha256: '0'.repeat(64) })),
-    { status: 'invalid', message: 'Approval reference could not be verified.' },
+    { status: 'invalid', message: 'The request could not be verified. Ask the agent to send a new approval request.' },
   )
   assert.deepEqual(
     await fetchRoomAgentApprovalEvidence('room_1', publication()),
@@ -132,14 +132,14 @@ test('approval reads reject a byte-order mark and malformed UTF-8 after hashing 
       'room_1',
       publication({ projection_sha256: digest(bomBytes) }),
     ),
-    { status: 'invalid', message: 'Approval reference must not contain a byte-order mark.' },
+    { status: 'invalid', message: 'The request could not be read safely. Ask the agent to send a new approval request.' },
   )
   assert.deepEqual(
     await fetchRoomAgentApprovalEvidence(
       'room_1',
       publication({ projection_sha256: digest(malformedBytes) }),
     ),
-    { status: 'invalid', message: 'Approval reference is not valid UTF-8.' },
+    { status: 'invalid', message: 'The request could not be read safely. Ask the agent to send a new approval request.' },
   )
 })
 

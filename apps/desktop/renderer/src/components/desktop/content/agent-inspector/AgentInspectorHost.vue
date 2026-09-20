@@ -104,6 +104,7 @@ const props = defineProps<{
   settingsConflict: boolean;
   liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
   roomIdentifier: string;
+  roomDisplayName?: string;
   requestVersion: number;
   initialTab?: "overview" | "work" | "workspace";
   roomAgentWork?: DesktopRoomAgentWork[];
@@ -206,6 +207,7 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
       roomMoveAvailable: props.roomMoveAvailable,
       providers: props.providers,
       destinations: props.destinations,
+      roomDisplayName: props.roomDisplayName,
       settingsConflict: props.settingsConflict,
       liveFeed: props.liveFeed,
     };

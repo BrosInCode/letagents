@@ -33,7 +33,7 @@
     <p v-if="projection.overallDetail && selectedTab !== 'diagnostics'" class="agent-inspector-status-copy">{{ projection.overallDetail }}</p>
 
     <p v-if="projection.resourceFreshness === 'stale'" class="agent-inspector-stale-banner" role="status">
-      Showing the last known agent state. Controls that depend on live state are unavailable until the supervisor reconnects.
+      Showing the last known status. Agent controls will be available when LetAgents reconnects.
     </p>
 
     <AgentInspectorLifecycleActions
@@ -67,6 +67,7 @@
     <div class="agent-inspector-scroll-region">
       <div v-if="selectedTab === 'overview'" id="agent-inspector-overview-panel" role="tabpanel" aria-labelledby="agent-inspector-overview-tab">
         <AgentInspectorOverview
+          :room-name="roomDisplayName"
           :projection="projection"
           :busy="actionState?.status === 'running'"
           :runtime-control="workResource.detail?.runtime_control ?? null"
@@ -122,7 +123,7 @@
         :work="roomAgentWork ?? []" :agent-key="projection.entry.agentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :request-version="requestVersion" />
       <AgentInspectorSettings
         v-else-if="selectedTab === 'settings'" id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
-        :entry-id="projection.entryId" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
+        :entry-id="projection.entryId" :display-name="projection.displayName" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
         :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
         :busy="actionState?.status === 'running'" :apply-pending="actionState?.kind === 'apply_settings' && actionState.status === 'success' && configurationHasRuntimeLag(settingsResource.configuration)" :conflict="settingsConflict"
         @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @apply="emit('settings-apply')" @reload="emit('settings-reload')"
@@ -167,6 +168,7 @@ const AgentInspectorLive = defineAsyncComponent(() => import("./AgentInspectorLi
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
+  roomDisplayName?: string;
   daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
   refreshDiagnostics?: () => Promise<boolean>;
   initialTab?: "overview" | "work" | "workspace";

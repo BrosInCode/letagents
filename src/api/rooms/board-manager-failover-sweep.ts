@@ -86,14 +86,14 @@ export function buildManagerOfflineAnnouncementText(input: {
   suggested_candidate: Pick<BoardManagerCandidate, "actor_label"> | null;
 }): string {
   const label = getAgentPrimaryLabel(input.assignment.actor_label) || input.assignment.actor_label;
-  const base = `[status] Board Manager ${label} appears to be offline — intent approvals and agent task creation are stalled. A room admin can approve pending intents or reassign the role.`;
+  const base = `[status] Board Manager ${label} appears to be offline — approval requests and new agent tasks are waiting. A room admin can review the requests or choose another Board Manager.`;
   if (!input.suggested_candidate) {
     return base;
   }
 
   const candidateLabel =
     getAgentPrimaryLabel(input.suggested_candidate.actor_label) || input.suggested_candidate.actor_label;
-  return `${base} ${candidateLabel} is the most recently active worker if a replacement is needed.`;
+  return `${base} ${candidateLabel} is the most recently active agent if a replacement is needed.`;
 }
 
 export function buildManagerFailoverAnnouncementText(input: {
@@ -102,7 +102,7 @@ export function buildManagerFailoverAnnouncementText(input: {
 }): string {
   const deadLabel = getAgentPrimaryLabel(input.assignment.actor_label) || input.assignment.actor_label;
   const successorLabel = getAgentPrimaryLabel(input.successor.actor_label) || input.successor.actor_label;
-  return `[status] Board Manager ${deadLabel} appears to be offline. ${successorLabel} has been promoted to Board Manager automatically so intent approvals and task creation keep moving (room setting manager_failover=auto).`;
+  return `[status] Board Manager ${deadLabel} appears to be offline. ${successorLabel} has been promoted to Board Manager automatically under this room’s automatic replacement setting, so approval requests and new tasks can continue.`;
 }
 
 export function buildPendingIntentsHandoffText(input: {
@@ -110,8 +110,8 @@ export function buildPendingIntentsHandoffText(input: {
   pending_count: number;
 }): string {
   const successorLabel = getAgentPrimaryLabel(input.successor.actor_label) || input.successor.actor_label;
-  const plural = input.pending_count === 1 ? "board intent awaits" : "board intents await";
-  return `[status] ${input.pending_count} pending ${plural} review by the new Board Manager ${successorLabel}. ${successorLabel}, please run list_board_intents and decide them.`;
+  const plural = input.pending_count === 1 ? "request awaits" : "requests await";
+  return `[status] ${input.pending_count} pending ${plural} review by the new Board Manager ${successorLabel}. ${successorLabel}, review the pending requests and approve or deny each one.`;
 }
 
 export interface BoardManagerFailoverResult {

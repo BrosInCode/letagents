@@ -307,7 +307,7 @@ const cloudStorageUnavailableReason = computed(() =>
 const storageDescription = computed(() => {
   if (props.storage.effectiveMode === "local") {
     if (localGitRoom.value) {
-      return "This local Git Room needs a provider-backed remote before it can use cloud storage.";
+      return "Connect this project to a repository hosted online before sharing its room.";
     }
     const target = props.storage.localRoom?.cloudRoomIdentifier;
     return target

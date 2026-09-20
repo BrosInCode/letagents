@@ -192,7 +192,7 @@ const desktopManagedAgentRuntimes = new DesktopManagedAgentRuntimeRegistry();
 const CODEX_EXTERNAL_WAIT_ITEM_PATTERN = /(command|exec|tool|mcp|collab|web.?search)/i;
 let cleanupRegistered = false;
 const CODEX_WORKER_REGISTRATION_ERROR =
-  "Codex did not get a LetAgents room worker identity. Sign into LetAgents Desktop, then try starting the agent again.";
+  "Codex could not connect to the room. Sign in to LetAgents Desktop, then try starting the agent again.";
 
 desktopManagedAgentRuntimes.register({
   providerId: "codex",

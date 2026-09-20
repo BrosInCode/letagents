@@ -5,5 +5,5 @@ export const rentSessionDetailTabs: Array<{ id: RentSessionDetailTab; label: str
   { id: "activity", label: "Activity" },
   { id: "patches", label: "Patches" },
   { id: "access", label: "Access requests" },
-  { id: "exposures", label: "Exposures" },
+  { id: "exposures", label: "What the agent accessed" },
 ];

@@ -145,7 +145,7 @@ export async function runDesktopCursorProviderPreflight(
         canStart: false,
         message: "Cursor Agent does not support the selected permission profile.",
         detail: supervised
-          ? "Update Cursor Agent so supervised Cursor can use --trust and the selected permission flags."
+          ? "Update Cursor Agent to use this access level."
           : "Update Cursor Agent so managed Cursor can use the required --force and --sandbox flags.",
         nextAction: null,
         version,
@@ -202,7 +202,7 @@ export async function runDesktopCursorProviderPreflight(
         providerId: provider.id,
         status: "error",
         canStart: false,
-        message: "Cursor managed profile could not be prepared.",
+        message: "Could not set up Cursor for this agent.",
         detail: error instanceof Error ? error.message : String(error),
         nextAction: null,
         version,
@@ -242,7 +242,7 @@ export async function runDesktopCursorProviderPreflight(
           providerId: provider.id,
           status: "error",
           canStart: false,
-          message: "Cursor live account identity could not be supervised.",
+          message: "Could not verify the Cursor account in use.",
           detail: error instanceof Error ? error.message : String(error),
           nextAction: null,
           version,
@@ -290,7 +290,7 @@ export async function runDesktopCursorProviderPreflight(
           providerId: provider.id,
           status: "error",
           canStart: false,
-          message: "Cursor writable workspace cannot be supervised exactly.",
+          message: "LetAgents cannot safely track Cursor’s changes in this folder.",
           detail: error instanceof Error ? error.message : String(error),
           nextAction: null,
           version,
@@ -321,7 +321,7 @@ export async function runDesktopCursorProviderPreflight(
           providerId: provider.id,
           status: "error",
           canStart: false,
-          message: "Cursor authenticated profile cannot be supervised exactly.",
+          message: "LetAgents could not verify this Cursor sign-in.",
           detail: error instanceof Error ? error.message : String(error),
           nextAction: null,
           version,
@@ -367,7 +367,7 @@ export async function runDesktopCursorProviderPreflight(
           providerId: provider.id,
           status: "error",
           canStart: false,
-          message: "Cursor supervised MCP authority is not exact.",
+          message: "LetAgents could not verify Cursor’s connected tools.",
           detail,
           nextAction: null,
           version,
@@ -525,15 +525,15 @@ function cursorPreflightReadyDetail(
 ): string {
   const permissionDetail = cursorPermissionProfileReadyDetail(permissionProfileId, supervised);
   if (supervised) {
-    return `${permissionDetail} A per-agent Cursor profile exposes only the daemon-mediated LetAgents bridge and survives desktop restarts.`;
+    return `${permissionDetail} This agent connects only to LetAgents room tools and keeps running when the desktop app restarts.`;
   }
   if (policy === "normal") {
-    return `${permissionDetail} The normal Cursor MCP settings are enabled; Cursor may directly use any MCP tools configured in Cursor, including LetAgents if present.`;
+    return `${permissionDetail} Cursor can use your configured tools, including LetAgents if connected.`;
   }
   if (policy === "none") {
-    return `${permissionDetail} MCP tools are disabled in the managed profile.`;
+    return `${permissionDetail} Connected tools are disabled for this agent.`;
   }
   return mcpStatus === "installed"
-    ? `${permissionDetail} Managed MCP settings keep user MCPs except LetAgents.`
-    : `${permissionDetail} Managed MCP settings filter LetAgents; install the LetAgents connection only for manual Cursor joins.`;
+    ? `${permissionDetail} Your connected tools remain available, except LetAgents.`
+    : `${permissionDetail} LetAgents room tools are disabled for this agent.`;
 }

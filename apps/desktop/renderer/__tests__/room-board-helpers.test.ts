@@ -292,7 +292,7 @@ describe("room board helpers", () => {
     }));
 
     assert.equal(state.state, "mismatch");
-    assert.equal(state.label, "Different worker is active");
+    assert.equal(state.label, "Different agent is working");
   });
 
   it("marks review authority as conflicted when the reviewer also holds the work lease", () => {

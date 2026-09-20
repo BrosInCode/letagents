@@ -152,7 +152,7 @@ test("ready update names the version and a failed safe restart remains retryable
 test("installing presentation describes the supervisor handoff", () => {
   const presentation = desktopUpdatePresentation(status({ phase: "installing", canCheck: false }));
   assert.match(presentation.title, /safe restart/i);
-  assert.match(presentation.detail, /supervisor dispatch/i);
+  assert.match(presentation.detail, /keeping your agents running/i);
 });
 
 test("update progress does not churn an atomic live region or claim account navigation state", async () => {

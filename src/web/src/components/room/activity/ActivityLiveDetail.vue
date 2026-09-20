@@ -77,8 +77,8 @@
       class="activity-detail-section"
     >
       <div class="activity-detail-section-header">
-        <h4>Session liveness</h4>
-        <span>{{ participant.livenessObservation ? 'Enriched' : 'Basic' }}</span>
+        <h4>Connection details</h4>
+        <span>{{ participant.livenessObservation ? 'Desktop updates' : 'Room updates' }}</span>
       </div>
 
       <div
@@ -98,13 +98,13 @@
           <span>{{ participant.livenessObservation.host_label || participant.livenessObservation.host_kind || 'Agent host' }}</span>
         </div>
         <p>
-          Last session signal {{ formatLastSeen(participant.livenessObservation.last_observed_at) }}.
-          {{ participant.livenessObservation.detail || 'Room-scoped agent activity was observed.' }}
+          Last update {{ formatLastSeen(participant.livenessObservation.last_observed_at) }}.
+          {{ participant.livenessObservation.detail || 'The agent reported activity in this room.' }}
         </p>
       </div>
 
       <div v-else class="activity-detail-empty">
-        This agent is reporting standard room presence only. LetAgents Desktop can enrich this with host-level session activity.
+        Only room connection updates are available. Run LetAgents Desktop on the agent’s Mac to see more activity details.
       </div>
     </section>
 

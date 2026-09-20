@@ -97,7 +97,7 @@ export function useRoomBoardController(
     if (work) {
       actions.push({
         id: "release-work",
-        label: "Release worker",
+        label: "Remove assignment",
         busyLabel: "Releasing...",
         tone: "neutral",
         run: async (nextTask) => (await desktopIpc.room.updateTaskLease(props.roomIdentifier, nextTask.id, {

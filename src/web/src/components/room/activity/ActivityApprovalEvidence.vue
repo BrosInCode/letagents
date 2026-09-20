@@ -7,7 +7,7 @@
     <header class="activity-approvals-header">
       <div>
         <h3>Agent approvals</h3>
-        <p>Review the exact public reference before deciding.</p>
+        <p>Review the requested file changes before allowing them.</p>
       </div>
       <span v-if="entries.length" class="activity-group-count">{{ entries.length }}</span>
     </header>
@@ -30,10 +30,10 @@
         <header class="activity-approval-card-header">
           <div>
             <span class="activity-approval-kind">File changes</span>
-            <h4>{{ entry.publication.agent_key }} needs approval</h4>
+            <h4>{{ agentName(entry.publication.agent_key) }} needs approval</h4>
           </div>
           <time :datetime="entry.publication.expires_at">
-            Expires {{ entry.publication.expires_at }}
+            Expires {{ expiryLabel(entry.publication.expires_at) }}
           </time>
         </header>
 
@@ -47,12 +47,12 @@
         </button>
 
         <p v-else-if="entry.evidenceStatus === 'loading'" class="activity-approval-loading" role="status">
-          Verifying the exact approval reference…
+          Checking that the request is complete and unchanged…
         </p>
 
         <div v-else-if="entry.evidenceStatus === 'unsupported'" class="activity-approval-alert">
-          <strong>Unsupported reference</strong>
-          <span>This app cannot safely display or decide this approval format.</span>
+          <strong>Update needed</strong>
+          <span>This app cannot display this request. Update LetAgents before reviewing it.</span>
         </div>
 
         <div v-else-if="entry.evidenceStatus === 'unavailable'" class="activity-approval-alert">
@@ -61,7 +61,7 @@
         </div>
 
         <div v-else-if="entry.evidenceStatus === 'invalid'" class="activity-approval-alert" role="alert">
-          <strong>Reference could not be verified</strong>
+          <strong>Request could not be verified</strong>
           <span>{{ entry.evidenceError }}</span>
         </div>
 
@@ -94,7 +94,8 @@
           </ul>
 
           <details class="activity-approval-exact">
-            <summary>Exact approval reference</summary>
+            <summary>Technical details</summary>
+            <p>Agent reference: {{ entry.publication.agent_key }}</p>
             <pre>{{ entry.projectionJson }}</pre>
           </details>
 
@@ -138,13 +139,23 @@
 import type { ExecutionDelegationDecisionChoice } from '../../../../../../shared/execution-delegation-decision.mjs'
 import type { RoomAgentApprovalEntry } from '@/composables/roomAgentApprovalTypes'
 
-defineProps<{
+const props = defineProps<{
+  agents?: readonly { agent_key?: string | null; display_name?: string | null }[]
   entries: readonly RoomAgentApprovalEntry[]
   loading: boolean
   loadingMore: boolean
   error: string
   hasMore: boolean
 }>()
+
+function agentName(agentKey: string): string {
+  return props.agents?.find(agent => agent.agent_key === agentKey && agent.display_name)?.display_name || 'An agent'
+}
+
+function expiryLabel(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'at an unknown time' : date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
 
 const emit = defineEmits<{
   refresh: []

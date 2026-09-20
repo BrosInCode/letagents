@@ -60,14 +60,17 @@ function entry(overrides: Record<string, unknown> = {}) {
 async function render(entries: unknown[]): Promise<string> {
   return renderToString(createSSRApp(ActivityApprovalEvidence, {
     entries, loading: false, loadingMore: false, error: '', hasMore: false,
+    agents: [{ agent_key: publication.agent_key, display_name: 'Gardenpoint' }],
   }))
 }
 
 test('approval card renders verified changes, exact bytes, and decision controls', async () => {
   const html = await render([entry()])
-  assert.ok(html.includes('EmmyMay/gardenpoint needs approval'))
+  assert.ok(html.includes('Gardenpoint needs approval'))
+  assert.ok(!html.includes('EmmyMay/gardenpoint needs approval'))
+  assert.ok(!html.includes(`Expires ${publication.expires_at}`))
   assert.ok(html.includes('src/a.ts'))
-  assert.ok(html.includes('Exact approval reference'))
+  assert.ok(html.includes('Technical details'))
   assert.ok(html.includes('&quot;version&quot;:1'), 'the exact JSON is present without client reserialization')
   assert.ok(html.includes('Allow once'))
   assert.ok(html.includes('Deny'))
@@ -75,8 +78,8 @@ test('approval card renders verified changes, exact bytes, and decision controls
 
 test('unsupported and invalid references stay visible and non-actionable', async () => {
   for (const [candidate, label] of [
-    [entry({ evidenceStatus: 'unsupported', projectionJson: null, projection: null }), 'Unsupported reference'],
-    [entry({ evidenceStatus: 'invalid', projectionJson: null, projection: null, evidenceError: 'bad digest' }), 'Reference could not be verified'],
+    [entry({ evidenceStatus: 'unsupported', projectionJson: null, projection: null }), 'Update needed'],
+    [entry({ evidenceStatus: 'invalid', projectionJson: null, projection: null, evidenceError: 'bad digest' }), 'Request could not be verified'],
   ] as const) {
     const html = await render([candidate])
     assert.ok(html.includes(label))

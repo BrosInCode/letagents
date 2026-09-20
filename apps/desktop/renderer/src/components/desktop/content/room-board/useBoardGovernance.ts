@@ -20,7 +20,7 @@ export function useBoardGovernance(roomIdentifier: string) {
     { id: "manager" as const, label: "Manager" },
     {
       id: "pending" as const,
-      label: "Intents",
+      label: "Requests",
       count: governance.value?.pendingIntentCount || undefined,
     },
     { id: "audit" as const, label: "Audit" },

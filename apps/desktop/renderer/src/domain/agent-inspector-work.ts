@@ -89,7 +89,7 @@ export async function readAgentInspectorWorkDetail(input: {
     return current;
   } catch (error) {
     if (input.isCurrent()) input.write({ status: "error", detail: previous ? { ...previous, runtime_control: null } : null,
-      error: error instanceof Error ? error.message : "Could not load retained work.", sourceMessageId: source });
+      error: error instanceof Error ? error.message : "Could not load work history.", sourceMessageId: source });
     return null;
   }
 }
@@ -146,36 +146,36 @@ export function describeAgentInspectorRuntimeControl(
   if (!control) return null;
   if (control.runtime_state === "exited") return {
     state: "exited",
-    label: "Provider stopped",
-    detail: "The provider runtime exited. LetAgents will not infer that unfinished work completed.",
+    label: "Agent app stopped",
+    detail: "The agent app stopped. Unfinished work has not been marked complete.",
     observedAt: control.observed_at,
   };
   if (control.runtime_state === "stopping") return {
     state: "stopping",
-    label: "Provider stopping",
-    detail: "LetAgents is ending this provider runtime.",
+    label: "Agent app stopping",
+    detail: "LetAgents is stopping the agent app.",
     observedAt: control.observed_at,
   };
   const presentation: Record<RuntimeControl["control_state"], Pick<AgentInspectorRuntimeControlPresentation, "label" | "detail">> = {
     connecting: {
-      label: control.runtime_state === "starting" ? "Provider starting" : "Checking provider",
-      detail: "LetAgents is verifying the provider’s control connection.",
+      label: control.runtime_state === "starting" ? "Agent app starting" : "Checking agent app",
+      detail: "Checking whether the agent app is responding.",
     },
     responsive: {
-      label: "Provider reachable at last check",
-      detail: "The latest control check completed.",
+      label: "Responded at last check",
+      detail: "The agent app responded to the latest check.",
     },
     degraded: {
-      label: "Provider check inconclusive",
-      detail: "LetAgents could not confirm the provider’s control connection. The agent may still be working; it has not been failed or restarted.",
+      label: "Status uncertain",
+      detail: "The agent app did not respond to the check. It may still be working and has not been restarted.",
     },
     lost: {
-      label: "Provider connection lost",
-      detail: "Process or transport evidence shows that LetAgents can no longer control this provider runtime.",
+      label: "Agent app connection lost",
+      detail: "LetAgents can no longer send commands to this agent app.",
     },
     unprobeable: {
       label: "Live checks unavailable",
-      detail: "This provider has no safe control probe. Silence is not treated as failure.",
+      detail: "This agent app cannot report its current status. It may still be working.",
     },
   };
   return { state: control.control_state, ...presentation[control.control_state], observedAt: control.observed_at };

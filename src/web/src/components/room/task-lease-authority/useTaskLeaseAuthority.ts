@@ -102,7 +102,7 @@ export function useTaskLeaseAuthority(
     badgeVariant,
     canHandoffLease,
     formatActorName: formatAuthorityActorName,
-    formatHandoffCandidate: formatWorkerCandidate,
+    formatHandoffCandidate: (candidate: RoomAgentPresence) => formatWorkerCandidate(candidate, handoffCandidatesForTask.value),
     getHandoffCandidateKey: getWorkerCandidateKey,
     handoffCandidatesForTask,
     handleHandoffLease,

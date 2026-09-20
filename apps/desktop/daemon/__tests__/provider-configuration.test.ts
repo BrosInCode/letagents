@@ -282,14 +282,14 @@ test("supervised profile contract exposes Claude prompt approval while retaining
   const claude = supervisedPermissionProfilesForProvider("claude-code");
   assert.equal(claude.find((profile) => profile.id === "ask_before_write")?.status, "available");
   assert.equal(claude.find((profile) => profile.id === "read_only")?.status, "available");
-  assert.match(claude.find((profile) => profile.id === "read_only")?.detail ?? "", /shell tools are unavailable/);
+  assert.match(claude.find((profile) => profile.id === "read_only")?.detail ?? "", /Cannot change files or run commands/);
   assert.equal(claude.find((profile) => profile.id === "full_access")?.status, "available");
-  assert.match(claude.find((profile) => profile.id === "full_access")?.description ?? "", /on this host/);
+  assert.match(claude.find((profile) => profile.id === "full_access")?.description ?? "", /on this Mac/);
   assert.doesNotMatch(claude.find((profile) => profile.id === "full_access")?.description ?? "", /repo|workspace/i);
   const codex = supervisedPermissionProfilesForProvider("codex");
   assert.equal(codex.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(codex.find((profile) => profile.id === "ask_before_write")?.status, "available");
-  assert.match(codex.find((profile) => profile.id === "ask_before_write")?.detail ?? "", /network-disabled sandbox/);
+  assert.match(codex.find((profile) => profile.id === "ask_before_write")?.detail ?? "", /read-only file access and no network access/);
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "ask_before_write")?.status, "available");
   const cursor = supervisedPermissionProfilesForProvider("cursor");

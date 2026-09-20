@@ -1135,7 +1135,7 @@ export function managedAgentPermissionProfileStatusLabel(
   status: DesktopManagedAgentPermissionProfile["status"],
 ): string {
   if (status === "available") return "Available";
-  if (status === "gated") return "Gated";
+  if (status === "gated") return "Not available yet";
   return "Unsupported";
 }
 
@@ -1155,16 +1155,16 @@ export function supervisedCursorPermissionProfilePresentation(
     return {
       ...profile,
       label: "Workspace writes",
-      description: "Inspects, edits source files, and runs repository tools in a private turn workspace.",
-      detail: "Cursor's sandbox stays enabled. LetAgents carries conflict-checked, nonignored file edits back after the turn; ignored dependencies remain read-only and Git history is not changed.",
+      description: "Can inspect files, edit code, and run project tools in a separate copy of your project.",
+      detail: "Cursor restricts file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and Git history is kept.",
     };
   }
   if (profile.id === "full_access") {
     return {
       ...profile,
       label: "Workspace writes (compatibility)",
-      description: "Runs repository tools with Cursor's inner sandbox disabled when a project needs broader tool compatibility.",
-      detail: "Cursor's inner sandbox is disabled inside a private turn workspace. Direct host writes remain blocked; LetAgents carries back only conflict-checked, nonignored file edits and does not change Git history.",
+      description: "Turns off Cursor’s own command restrictions so more project tools can run.",
+      detail: "Cursor still works in a separate copy of your project and cannot write directly to files on this Mac. LetAgents checks for conflicts before copying changes back. Files ignored by Git are not copied back, and Git history is kept.",
     };
   }
   if (profile.id === "read_only") {
@@ -1187,21 +1187,21 @@ export function supervisedPermissionProfilePresentation(
   if (providerId === "claude-code") {
     return { ...profile, status: "available",
       description: "Requires approval before Claude can change files or run write-capable commands.",
-      detail: "Claude asks for one-time tool approval with ambient settings disabled; daemon-mediated room tools remain available." };
+      detail: "Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available." };
   }
   if (providerId === "open-model") {
     return {
       ...profile,
       status: "available",
       description: "Requires approval before OpenCode can run shell commands or change files.",
-      detail: "OpenCode asks for each shell command and file edit; read and daemon-mediated room tools remain available.",
+      detail: "Commands and file changes need approval. Reading files and using LetAgents room tools do not.",
     };
   }
   return {
     ...profile,
     status: "available",
     description: "Requires approval before Codex can run write-capable commands or apply file changes.",
-    detail: "Codex runs with native on-request approvals inside a read-only, network-disabled sandbox.",
+    detail: "Starts with read-only file access and no network access. Requests approval when it needs more access.",
   };
 }
 

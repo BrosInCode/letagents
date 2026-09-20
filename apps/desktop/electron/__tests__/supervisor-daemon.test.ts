@@ -1629,7 +1629,7 @@ test("runtime recovery sends exact daemon authority and returns the durable repl
       execution_generation_id: "execution_1",
     },
     workplace_liveness: { state: "unknown", observed_at: null, detail: null },
-    native_liveness: { state: "terminal", observed_at: null, detail: "Provider stopped." },
+    native_liveness: { state: "terminal", observed_at: null, detail: "Agent app stopped." },
     activity: [],
   });
   try {

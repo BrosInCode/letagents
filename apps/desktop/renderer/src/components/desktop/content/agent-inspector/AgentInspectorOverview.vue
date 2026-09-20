@@ -31,14 +31,14 @@
       </div>
       <dl class="agent-inspector-context-list">
         <div>
-          <dt>Provider status</dt>
+          <dt>Agent app status</dt>
           <dd class="agent-inspector-provider-status" :data-state="runtimeControl?.state ?? 'unavailable'" :title="runtimeControl?.observedAt || undefined">
-            <strong>{{ runtimeControl?.label ?? (runtimeControlPending ? "Checking provider" : "Provider status unavailable") }}</strong>
-            <span>{{ runtimeControl?.detail ?? (runtimeControlPending ? "Waiting for a fresh provider check." : "No current provider check is available.") }}</span>
+            <strong>{{ runtimeControl?.label ?? (runtimeControlPending ? "Checking agent app" : "Agent app status unavailable") }}</strong>
+            <span>{{ runtimeControl?.detail ?? (runtimeControlPending ? "Checking whether the agent app is responding." : "The agent app has not been checked yet.") }}</span>
             <small :aria-hidden="!runtimeControl?.observedAt || undefined">{{ runtimeControl?.observedAt ? `Checked ${formatFullTimestamp(runtimeControl.observedAt)}` : "\u00a0" }}</small>
           </dd>
         </div>
-        <div><dt>Current room</dt><dd>{{ projection.roomId }}</dd></div>
+        <div><dt>Current room</dt><dd>{{ roomName || friendlyRoomLabel(projection.roomId) }}</dd></div>
         <div>
           <dt>Assigned work</dt>
           <dd v-if="projection.assignedWork.length">
@@ -57,6 +57,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { friendlyRoomLabel } from "../../../../domain/git-rooms";
 import type { DesktopSupervisorAgentInspectorDetail } from "../../../../../../electron/ipc-types";
 import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
 import { describeAgentInspectorRuntimeControl } from "../../../../domain/agent-inspector-work";
@@ -68,6 +69,7 @@ import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
+  roomName?: string;
   busy: boolean;
   runtimeControl: DesktopSupervisorAgentInspectorDetail["runtime_control"] | null;
   runtimeControlPending: boolean;
