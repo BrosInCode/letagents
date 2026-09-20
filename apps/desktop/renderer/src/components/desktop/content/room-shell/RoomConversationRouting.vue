@@ -3,13 +3,10 @@
     <span class="desktop-room-action-icon is-blue" aria-hidden="true"><Sparkles :size="22" /></span>
     <span class="desktop-room-property-copy">
       <strong>Smart conversation routing · Beta</strong>
-      <small>Powered by Jev. Choose who responds to untagged human messages in rooms with three or more agents.</small>
-      <small>Turning this on shares recent room messages, agent names, models, and role descriptions with Jev to choose responders.</small>
       <small v-if="error" role="alert">{{ error }}</small>
       <small v-else-if="!settings">Loading routing settings…</small>
       <small v-else-if="!settings.available">Jev is currently unavailable. Standard routing is active.</small>
       <small v-else-if="!settings.can_manage">Only room admins can change this setting.</small>
-      <small v-else>Applies to new messages. Explicit mentions keep their usual behavior.</small>
     </span>
     <button
       v-if="settings"
