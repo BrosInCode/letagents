@@ -235,3 +235,45 @@ test("returning after the acknowledged message falls before the latest page stil
     [200],
   );
 });
+
+test("late send responses cannot acknowledge or fail a newer outbox entry", async (t) => {
+  const original = globalThis.document;
+  Object.assign(globalThis, {
+    document: { hasFocus: () => true, visibilityState: "visible" },
+  });
+  t.after(() => Object.assign(globalThis, { document: original }));
+  for (const failed of [false, true]) {
+    let finish!: () => void;
+    const response = new Promise<ReturnType<typeof message>>(
+      (resolve, reject) => {
+        finish = () =>
+          failed
+            ? reject(new Error("Late failure"))
+            : resolve(message(12, "old"));
+      },
+    );
+    const vm = setup({
+      send: async () => response,
+      list: async () => ({ conversations: [chat], version: "2" }),
+      messages: async () => ({
+        messages: [message(11), message(12, "old")],
+        has_more: false,
+      }),
+      update: async () => {},
+    });
+    vm.chats.value = [chat];
+    vm.selectedId.value = "chat";
+    vm.messages.value = [message(10)];
+    vm.draft.value = "Old send";
+    const sending = vm.send();
+    await new Promise((resolve) => setImmediate(resolve));
+    // A concurrent poll observed the first send and the user started a second.
+    vm.outbox.value.chat = { text: "New send", id: "new", failed: false };
+    finish();
+    await sending;
+    assert.deepEqual(
+      { ...vm.outbox.value.chat },
+      { text: "New send", id: "new", failed: false },
+    );
+  }
+});

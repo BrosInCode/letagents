@@ -949,7 +949,7 @@ async function send() {
   await scrollBottom();
   try {
     const acknowledged = await props.api.send(id, pending.text, pending.id);
-    if (outbox.value[id])
+    if (outbox.value[id]?.id === pending.id)
       outbox.value[id].acknowledgedNumber = acknowledged.number;
     // Only fetched history advances the pagination/read cursor. Another person
     // may have sent a message immediately before this acknowledgement.
@@ -961,7 +961,7 @@ async function send() {
       composer.value?.focus();
     }
   } catch (error) {
-    if (outbox.value[id]) outbox.value[id].failed = true;
+    if (outbox.value[id]?.id === pending.id) outbox.value[id].failed = true;
     if (id === selectedId.value) actionError.value = errorText(error);
   }
 }
