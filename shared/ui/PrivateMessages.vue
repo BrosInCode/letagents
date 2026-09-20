@@ -339,7 +339,11 @@
             <div class="conversation-message-meta">
               <strong>You</strong
               ><span role="status">{{
-                outbox[selectedId!].failed ? "Not sent" : "Sending…"
+                outbox[selectedId!].failed
+                  ? "Not sent"
+                  : outbox[selectedId!].acknowledgedNumber !== undefined
+                    ? "Sent"
+                    : "Sending…"
               }}</span>
             </div>
             <p>{{ outbox[selectedId!].text }}</p>
@@ -362,6 +366,13 @@
         <div class="conversation-composer-wrap">
           <p v-if="actionError" class="conversation-error" role="alert">
             {{ actionError }}
+            <button
+              v-if="historyNeedsRetry"
+              class="chat-text-button"
+              @click="refresh"
+            >
+              Retry
+            </button>
           </p>
           <p
             v-if="!selected.can_send && selected.accepted"
@@ -516,6 +527,7 @@ const section = ref("chats"),
   busy = ref(false);
 const connectionError = ref(""),
   actionError = ref(""),
+  historyNeedsRetry = ref(false),
   hasMore = ref(false),
   newMessagesBelow = ref(false);
 const composing = ref(false),
@@ -532,7 +544,10 @@ const messageList = ref<HTMLElement>(),
   menuDetails = ref<HTMLDetailsElement>();
 const drafts = ref<Record<string, string>>({});
 const outbox = ref<
-  Record<string, { text: string; id: string; failed: boolean }>
+  Record<
+    string,
+    { text: string; id: string; failed: boolean; acknowledgedNumber?: number }
+  >
 >({});
 let alive = true,
   version = "0",
@@ -630,7 +645,8 @@ async function watchChanges() {
     try {
       const change = await props.api.changes(version);
       if (!alive) return;
-      if (change.version !== version) await refresh();
+      if (change.version !== version || historyNeedsRetry.value)
+        await refresh();
       failures = 0;
     } catch {
       if (!alive) return;
@@ -698,13 +714,17 @@ async function loadMessages(reset: boolean) {
     const pending = outbox.value[id];
     if (
       pending &&
-      messages.value.some(
-        (message) =>
-          message.sender_account_id === props.accountId &&
-          message.client_message_id === pending.id,
-      )
+      ((pending.acknowledgedNumber !== undefined &&
+        (messages.value.at(-1)?.number ?? 0) >= pending.acknowledgedNumber) ||
+        messages.value.some(
+          (message) =>
+            message.sender_account_id === props.accountId &&
+            message.client_message_id === pending.id,
+        ))
     )
       delete outbox.value[id];
+    if (historyNeedsRetry.value) actionError.value = "";
+    historyNeedsRetry.value = false;
     await nextTick();
     if (reset || atBottom) await scrollBottom();
     else if (
@@ -717,7 +737,10 @@ async function loadMessages(reset: boolean) {
         messages.value[messages.value.length - 1]?.number ?? 0,
       );
   } catch (error) {
-    if (id === selectedId.value) actionError.value = errorText(error);
+    if (id === selectedId.value && generation === messageGeneration) {
+      historyNeedsRetry.value = true;
+      actionError.value = errorText(error);
+    }
   } finally {
     if (generation === messageGeneration) messagesLoading.value = false;
   }
@@ -727,6 +750,7 @@ async function selectChat(id: string) {
   composing.value = false;
   actionError.value = "";
   messages.value = [];
+  historyNeedsRetry.value = false;
   atBottom = true;
   newMessagesBelow.value = false;
   await loadMessages(true);
@@ -924,7 +948,9 @@ async function send() {
   actionError.value = "";
   await scrollBottom();
   try {
-    await props.api.send(id, pending.text, pending.id);
+    const acknowledged = await props.api.send(id, pending.text, pending.id);
+    if (outbox.value[id])
+      outbox.value[id].acknowledgedNumber = acknowledged.number;
     // Only fetched history advances the pagination/read cursor. Another person
     // may have sent a message immediately before this acknowledgement.
     // Keep the optimistic entry until loadMessages observes its client ID.

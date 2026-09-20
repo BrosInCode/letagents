@@ -21,6 +21,7 @@ const code = ts.transpileModule(script.content, {
     target: ts.ScriptTarget.ES2022,
   },
 }).outputText;
+let cleanup: (() => void)[] = [];
 const component = Function(
   "require",
   "exports",
@@ -28,7 +29,13 @@ const component = Function(
 )(
   (id: string) =>
     id === "vue"
-      ? { ...Vue, onMounted() {}, onBeforeUnmount() {} }
+      ? {
+          ...Vue,
+          onMounted() {},
+          onBeforeUnmount(fn: () => void) {
+            cleanup.push(fn);
+          },
+        }
       : id.endsWith(".vue")
         ? {}
         : require(id),
@@ -55,10 +62,14 @@ const chat = {
   updated_at: "2026-09-20T12:00:00Z",
 };
 function setup(api: Record<string, unknown>) {
-  return component.setup(
+  cleanup = [];
+  const vm = component.setup(
     { api, accountId: "me", active: true, openConversationId: null },
     { expose() {}, emit() {} },
   );
+  const callbacks = cleanup;
+  vm.stop = () => callbacks.forEach((fn) => fn());
+  return vm;
 }
 
 test("an own-send acknowledgement cannot skip a concurrently arriving human message", async (t) => {
@@ -146,5 +157,81 @@ test("an acknowledged message remains in the outbox when history refresh fails",
   assert.deepEqual(
     vm.messages.value.map((item: { number: number }) => item.number),
     [10, 11, 12],
+  );
+});
+
+test("an unchanged-version poll retries history after its request fails following a send", async (t) => {
+  const original = { document: globalThis.document, window: globalThis.window };
+  Object.assign(globalThis, {
+    document: {
+      hasFocus: () => true,
+      visibilityState: "visible",
+      removeEventListener() {},
+    },
+    window: { removeEventListener() {} },
+  });
+  let acknowledged = message(12),
+    historyCalls = 0,
+    polls = 0;
+  const vm = setup({
+    send: async (_id: string, _text: string, clientId: string) =>
+      (acknowledged = message(12, clientId)),
+    list: async () => ({ conversations: [chat], version: "2" }),
+    messages: async () => {
+      if (++historyCalls === 1) throw new Error("Temporarily unavailable");
+      return { messages: [message(11), acknowledged], has_more: false };
+    },
+    changes: async (after: string) => {
+      assert.equal(after, "2");
+      if (++polls === 1) return { version: "2" };
+      return new Promise(() => {});
+    },
+    update: async () => {},
+  });
+  t.after(() => {
+    vm.stop();
+    Object.assign(globalThis, original);
+  });
+  vm.chats.value = [chat];
+  vm.selectedId.value = "chat";
+  vm.messages.value = [message(10)];
+  vm.draft.value = "My reply";
+  await vm.send();
+  assert.equal(vm.historyNeedsRetry.value, true);
+  assert.equal(vm.outbox.value.chat.acknowledgedNumber, 12);
+  void vm.watchChanges();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(historyCalls, 2);
+  assert.equal(vm.historyNeedsRetry.value, false);
+  assert.equal(vm.outbox.value.chat, undefined);
+  assert.deepEqual(
+    vm.messages.value.map((item: { number: number }) => item.number),
+    [10, 11, 12],
+  );
+});
+
+test("returning after the acknowledged message falls before the latest page still clears its outbox", async (t) => {
+  const original = globalThis.document;
+  Object.assign(globalThis, {
+    document: { hasFocus: () => true, visibilityState: "visible" },
+  });
+  t.after(() => Object.assign(globalThis, { document: original }));
+  const vm = setup({
+    messages: async () => ({ messages: [message(200)], has_more: true }),
+    update: async () => {},
+  });
+  vm.chats.value = [chat];
+  vm.selectedId.value = "chat";
+  vm.outbox.value.chat = {
+    text: "Already sent",
+    id: "ack",
+    failed: false,
+    acknowledgedNumber: 12,
+  };
+  await vm.loadMessages(true);
+  assert.equal(vm.outbox.value.chat, undefined);
+  assert.deepEqual(
+    vm.messages.value.map((item: { number: number }) => item.number),
+    [200],
   );
 });
