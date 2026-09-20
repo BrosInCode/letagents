@@ -1,7 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
 import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
-import { executionRuntimeStorageIdentity } from "./execution-shadow-store.js";
+import { executionRuntimeStorageIdentity, executionStorageIdentity } from "./execution-shadow-store.js";
 import type { DaemonManifestEntry, DaemonProviderRuntimeReference } from "./types.js";
+import type { SupervisedProviderTurnBinding } from "./supervised-agent-inbox-store.js";
 
 export type RuntimeRestartMode = "resume" | "fresh";
 export type RuntimeRestartRequest = {
@@ -144,6 +145,45 @@ export function recoveredRuntime(database: DatabaseSync, agentId: string, runtim
   // Force-stop proves death, not that every final native event reached SQLite.
   // Preserve that uncertainty even when the durable cursor had no known gap.
   return { incomplete: true };
+}
+
+/** The caller proved the exact Cursor turn's origin execution terminal and owns the reset transaction. */
+export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: SupervisedProviderTurnBinding, at: string): string | null {
+  if (!database.isTransaction) throw new Error("Runtime recovery requires a fenced transaction.");
+  const runtime = database.prepare(`SELECT r.runtime_generation_id FROM execution_turns t
+    JOIN execution_runtime_generations r ON r.agent_id=t.agent_id
+      AND r.execution_generation_id=t.execution_generation_id AND r.runtime_generation_id=t.runtime_generation_id
+    JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
+      AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id
+    WHERE t.agent_id=? AND t.room_id=? AND t.execution_generation_id=?
+      AND t.provider_continuation_id=? AND t.provider_turn_id=? AND g.workspace_id=? AND r.provider='cursor'`)
+    .get(turn.agent_id, turn.room_id, turn.origin_execution_generation_id,
+      turn.provider_continuation_id, turn.provider_turn_id, turn.work_attempt_id) as { runtime_generation_id: string } | undefined;
+  if (!runtime) return null; // Older deliveries may have no captured native runtime.
+  const runtimeId = runtime.runtime_generation_id;
+  if (pendingRuntimeRecovery(database, turn.agent_id)) throw new Error("A different runtime recovery is already recorded.");
+  if (recoveredRuntime(database, turn.agent_id, runtimeId)) return runtimeId;
+  const observer = database.prepare(`SELECT * FROM execution_observers
+    WHERE agent_id=? AND observer_runtime_generation_id=?`).get(turn.agent_id, runtimeId);
+  // Retain the old cursor, including missing events. Recovery permits a new
+  // process to start; it never turns the crashed turn into a native success.
+  const ref: DaemonProviderRuntimeReference = { work_attempt_id: turn.work_attempt_id,
+    execution_generation_id: turn.origin_execution_generation_id,
+    provider_continuation_id: turn.provider_continuation_id, provider_connection: null };
+  database.prepare(`INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,?,'complete',?,?,?,?)`)
+    .run(executionStorageIdentity("cursor-recovery", turn.agent_id, runtimeId), turn.agent_id, turn.room_id,
+      turn.origin_execution_generation_id, runtimeId, "fresh", JSON.stringify(ref), observer ? JSON.stringify(observer) : null, at, at);
+  database.prepare(`UPDATE execution_observers SET observer_epoch=observer_epoch+1
+    WHERE agent_id=? AND observer_runtime_generation_id=?`).run(turn.agent_id, runtimeId);
+  database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
+    ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=?`).run(Date.parse(at), turn.agent_id, runtimeId);
+  database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+    WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`).run(Date.parse(at), turn.agent_id, runtimeId);
+  database.prepare(`UPDATE supervised_agent_effects SET state='uncertain',error=?,updated_at=?
+    WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND mutation=1 AND state='executing'`)
+    .run("The runtime was recovered before this action's result was confirmed. Check its result before repeating it.",
+      at, turn.agent_id, turn.origin_execution_generation_id, turn.provider_turn_id);
+  return runtimeId;
 }
 
 /** Only a new process may cross this boundary. The old missing events stay missing. */

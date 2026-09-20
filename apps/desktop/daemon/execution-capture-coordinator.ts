@@ -4,6 +4,7 @@ import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } fr
 import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { recoveredRuntime } from "./runtime-recovery-journal.js";
+import { isIdleCursorConnection } from "./provider-state-policy.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
 import { unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
@@ -84,17 +85,21 @@ export class ExecutionCaptureCoordinator {
   }
 
   /** Discard queued callbacks only after their exact dead runtime was archived. */
-  releaseRecoveredRuntime(agentId: string, runtimeId: string): void {
+  releaseRecoveredRuntime(agentId: string, runtimeId: string, stoppedCursorGeneration?: string): void {
     if (!recoveredRuntime(this.database, agentId, runtimeId)) throw new Error("The runtime has no verified recovery boundary.");
-    for (const lane of [this.lanes.get(agentId), this.retiring.get(agentId)]) {
-      if (!lane) continue;
+    const lanes = [this.lanes.get(agentId), this.retiring.get(agentId)].filter((lane): lane is Lane => Boolean(lane));
+    for (const lane of lanes) {
       const connection = lane.handle.providerConnection;
-      if (!connection?.pid || !connection.processIdentity || executionRuntimeStorageIdentity(agentId, lane.generation,
-        connection.kind, connection.pid, connection.processIdentity) !== runtimeId) {
+      const exactProcess = connection?.pid && connection.processIdentity && executionRuntimeStorageIdentity(agentId, lane.generation,
+        connection.kind, connection.pid, connection.processIdentity) === runtimeId;
+      const exactCursor = stoppedCursorGeneration && isIdleCursorConnection(connection)
+        && (lane.observer?.observerRuntimeGenerationId === runtimeId || lane.verifiedRuntime?.id === runtimeId
+          || (lane.generation === stoppedCursorGeneration && !lane.observer && !lane.verifiedRuntime && !lane.pending.size));
+      if (!exactProcess && !exactCursor) {
         throw new Error("Runtime recovery cannot discard a different observer.");
       }
-      this.remove(lane);
     }
+    for (const lane of lanes) this.remove(lane);
     this.suspendedAgents.delete(agentId);
   }
 
