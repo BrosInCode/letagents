@@ -1515,6 +1515,7 @@ test("worker streams fail closed when activation authority cannot be attached", 
     resolveCanonicalRoomRequestId: async () => "room_1",
     resolveRoomOrReply: async () => ({ id: "room_1" }),
     requireParticipant: async () => true,
+    getMessageStreamCheckpoint: async () => ({ checkpoint: "msg_9", cursorExists: true }),
     beginRoomAgentDelivery: async () => ({
       identity: {
         actor_label: "Worker | Owner | Codex",
@@ -2226,3 +2227,27 @@ for (const failure of ["participant", "account", "blocked", "persistence"] as co
     } finally { release(); }
   });
 }
+
+
+test("worker stream routing barrier retains frames, coalesces readers and releases without an event", async () => {
+  const { waitForMessageRouting } = await import("../routes/rooms/messages/wait-for-routing.js");
+  let ready = false;
+  let calls = 0;
+  let closed = false;
+  const load = async () => {
+    calls++;
+    await new Promise((resolve) => setImmediate(resolve));
+    return { checkpoint: ready ? "msg_3" : "msg_1", cursorExists: true };
+  };
+  let completed = 0;
+  const frames = ["msg_2", "msg_3"].map((messageId) => waitForMessageRouting({
+    roomId: "routing-stream", messageId, includePromptOnly: false, closed: () => closed, load,
+  }).then((value) => { completed++; return value; }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(completed, 0);
+  assert.equal(calls, 1, "concurrent worker streams share the checkpoint query");
+  ready = true; // Simulate committed completion followed by a lost notification.
+  assert.deepEqual(await Promise.all(frames), [true, true]);
+  closed = true;
+  assert.equal(await waitForMessageRouting({ roomId: "routing-stream", messageId: "msg_4", includePromptOnly: false, closed: () => closed, load }), false);
+});

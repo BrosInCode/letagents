@@ -1,3 +1,4 @@
+import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
 import { getDesktopNeedsYou, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain } from "electron";
 
@@ -427,6 +428,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     ): Promise<DesktopFocusRoomMutationResult> =>
       createDesktopAdHocFocusRoom(roomIdentifier, title),
   );
+  targetIpcMain.handle("desktop:room:get-conversation-routing", (_event, roomIdentifier: string) => getDesktopConversationRouting(roomIdentifier));
+  targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
   targetIpcMain.handle(
     "desktop:room:update-focus-room-settings",
     async (

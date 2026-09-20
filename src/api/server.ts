@@ -1,6 +1,7 @@
 import { createApiApp } from "./server/app.js";
 import { startRoomEventBridge, stopRoomEventBridge } from "./server/event-bridge.js";
 import { startLivenessSweep, stopLivenessSweep } from "./server/liveness.js";
+import { startJevRoutingWorker } from "./messages/jev-routing-worker.js";
 import { startDesktopPushWorker } from "./notifications/worker.js";
 import { assertMessageThreadProjectionReady } from "./db/messages/projection-readiness.js";
 import { closeApiRouteEventBroker } from "./server/routes.js";
@@ -26,6 +27,7 @@ startRoomEventBridge();
 // server entry point only, so tests and embedders opt in explicitly.
 startLivenessSweep();
 const stopDesktopPushWorker = startDesktopPushWorker();
+const stopJevRoutingWorker = startJevRoutingWorker();
 process.once("exit", closeApiRouteEventBroker);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -44,7 +46,7 @@ const stopIntake = () => closeHttpServerIntake(server);
 const shutdown = createGracefulShutdownController({
   stopIntake,
   stopWorkers: async () => {
-    await Promise.all([stopLivenessSweep(), stopDesktopPushWorker()]);
+    await Promise.all([stopLivenessSweep(), stopDesktopPushWorker(), stopJevRoutingWorker()]);
   },
   stopBridge: stopRoomEventBridge,
   closeBroker: closeApiRouteEventBroker,

@@ -821,6 +821,8 @@ export class WorkerAuthorityCoordinator {
             agentInstanceId,
             provider: entry.provider,
             displayName: entry.display_name,
+            model: entry.model ?? null,
+            charter: entry.charter ?? null,
             signal: controller.signal,
           });
           await this.options.bindings.recordExactSupervisedWorkerSessionMint({

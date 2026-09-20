@@ -24,6 +24,8 @@ export async function roomScopedApiCall<T>(input: {
   // last_message_id alone so the cursor never moves backwards.
   preserve_session_cursor?: boolean;
 }): Promise<T> {
+  // A successful send does not prove that preceding messages were read.
+  const preserveCursor = input.preserve_session_cursor || (input.options?.method ?? "GET").toUpperCase() !== "GET";
   const supervised = hasSupervisedWorkerAuthority();
   const exactRoomAuthority = supervised ? getCurrentSupervisedRoomAuthority() : null;
   if (supervised && (!exactRoomAuthority || input.room_id !== exactRoomAuthority)) {
@@ -54,7 +56,7 @@ export async function roomScopedApiCall<T>(input: {
     try {
       const result = await apiCall<T>(input.room_path(apiRoomId), options);
       if (!supervised) {
-        touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
+        touchRoomSession(input.room_id, preserveCursor ? undefined : getLastMessageId(result));
       }
       return result;
     } catch (error) {
@@ -72,7 +74,7 @@ export async function roomScopedApiCall<T>(input: {
   const result = await apiCall<T>(input.project_path(input.project_id), options);
   if (input.room_id) {
     if (!supervised) {
-      touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
+      touchRoomSession(input.room_id, preserveCursor ? undefined : getLastMessageId(result));
     }
   }
   return result;

@@ -165,6 +165,9 @@ export interface CreateRoomAgentSessionInput {
   runtime: string;
   registration_liveness?: RoomAgentRegistrationLiveness | null;
   repo_branch?: string | null;
+  /** Launcher-declared provider model and charter; optional, routing context only. */
+  model?: string | null;
+  charter?: string | null;
   actor_label: string;
   agent_key: string;
   agent_instance_id?: string | null;
@@ -245,6 +248,8 @@ async function insertRoomAgentSessionTx(
     liveness_capability: input.registration_liveness?.liveness_capability ?? null,
     tool_bridge_id: input.registration_liveness?.tool_bridge_id ?? null,
     repo_branch: input.repo_branch ?? null,
+    model: input.model ?? null,
+    charter: input.charter ?? null,
     actor_label: input.actor_label,
     agent_key: input.agent_key,
     agent_instance_id: input.agent_instance_id ?? null,
@@ -305,6 +310,8 @@ async function rotateRoomAgentSessionTx(
     liveness_capability: input.registration_liveness?.liveness_capability ?? null,
     tool_bridge_id: input.registration_liveness?.tool_bridge_id ?? null,
     repo_branch: input.repo_branch ?? null,
+    model: input.model ?? null,
+    charter: input.charter ?? null,
     actor_label: input.actor_label,
     agent_key: input.agent_key,
     agent_instance_id: input.agent_instance_id ?? null,

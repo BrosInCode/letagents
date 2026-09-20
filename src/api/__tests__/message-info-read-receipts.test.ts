@@ -17,6 +17,7 @@ function routeSource(relative: string): string {
 test("formatActivationReason maps all AgentMessageActivationReason values to human-friendly labels", () => {
   assert.equal(formatActivationReason("small_room"), "Included in this small room");
   assert.equal(formatActivationReason("recent_conversation"), "Continuing your conversation");
+  assert.equal(formatActivationReason("jev_routed"), "Chosen by conversation routing");
   assert.equal(formatActivationReason("explicit_mention"), "Mentioned directly");
   assert.equal(formatActivationReason("direct_mention"), "Mentioned directly");
   assert.equal(formatActivationReason("explicit_other_mention"), "Mentioned another agent");
