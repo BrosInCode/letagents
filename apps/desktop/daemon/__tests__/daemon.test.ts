@@ -11,6 +11,8 @@ import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 
 import { AuditLog } from "../audit-log.js";
+import { mapEntry } from "../../electron/main/supervisor-daemon.js";
+import { canReconnectRoomAgent, canRecoverSavedRoomAgent } from "../../renderer/src/domain/room-agent-delivery.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
@@ -3617,7 +3619,7 @@ test("pause during post-install worker bind fences the exact provider before del
   }
 });
 
-test("a live daemon rotates an expiring host worker bearer without reinstalling the grant or restarting the provider", async () => {
+for (const [rotationFailures, rotationStatus, providerName] of [[0, 500, "codex"], [1, 500, "codex"], [18, 500, "codex"], [3, 403, "codex"], [3, 403, "cursor"]] as const) test(`a live daemon rotates its bearer after ${rotationFailures} HTTP ${rotationStatus} responses without replacing ${providerName}`, async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -3631,20 +3633,43 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
   let clock = Date.parse("2026-07-21T12:00:00.000Z");
   let spawns = 0;
   let mintCalls = 0;
-  const handle = { workAttemptId: attempt.work_attempt_id, pid: 9914, providerContinuationId: "rotating-host-grant-continuation", observedState: "working" as const };
+  let stops = 0;
+  const pendingTimers = new Map<ReturnType<typeof setTimeout>, { callback: () => void; delay: number }>();
+  const handle: ProviderActionHandle = {
+    workAttemptId: attempt.work_attempt_id, providerContinuationId: "rotating-host-grant-continuation",
+    ...(providerName === "cursor"
+      ? { pid: null, providerConnection: { kind: "cursor_cli" as const, pid: null, processIdentity: null }, observedState: "idle" as const }
+      : { pid: 9914, observedState: "working" as const }),
+  };
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
     resume: async () => { throw new Error("bearer rotation must retain the live provider"); }, poke: async () => {},
-    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
+    stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
     onExit: async () => () => {}, onStream: async () => () => {},
-    onExecution: async (runtime, listener) => runtimeReadySubscription(runtime, listener),
+    ...(providerName === "codex" ? { onExecution: async (runtime: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void) => runtimeReadySubscription(runtime, listener) } : {}),
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, { nowMs: () => clock }, {
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, rotationFailures ? 60_000 : 10, undefined, {
+    nowMs: () => clock,
+    setTimeout: ((callback: () => void, delay: number) => {
+      if (delay < 1_000) return setTimeout(callback, delay);
+      const timer = setTimeout(() => undefined, 3_600_000);
+      timer.unref();
+      pendingTimers.set(timer, { callback, delay });
+      return timer;
+    }) as typeof setTimeout,
+    clearTimeout: ((timer: ReturnType<typeof setTimeout>) => {
+      pendingTimers.delete(timer);
+      clearTimeout(timer);
+    }) as typeof clearTimeout,
+  }, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
     createWorkerSession: async () => {
       mintCalls += 1;
+      if (mintCalls > 1 && mintCalls <= rotationFailures + 1) {
+        throw new SupervisorGrantRequestError(rotationStatus, "worker rotation");
+      }
       return mintCalls === 1
         ? { sessionId: "rotating-session", bearer: "first-rotating-bearer", bearerId: "first-rotating-bearer-id", expiresAt: new Date(clock + 120_000).toISOString() }
         : { sessionId: "rotating-session", bearer: "second-rotating-bearer", bearerId: "second-rotating-bearer-id", expiresAt: new Date(clock + 3_600_000).toISOString() };
@@ -3652,19 +3677,31 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
   });
   try {
     await daemon.start();
-    const internals = daemon as unknown as { workerBindings: WorkerBindingStore; publishNativeActivity: () => Promise<boolean> };
+    const internals = daemon as unknown as {
+      workerBindings: WorkerBindingStore;
+      supervisedInbox: SupervisedAgentInboxStore;
+      store: ManifestStore;
+      providerExecution: {
+        request(entryId: string): void;
+        drainConvergence(): Promise<void>;
+        recoveryTimers: Map<string, ReturnType<typeof setTimeout>>;
+      };
+      publishNativeActivity: () => Promise<boolean>;
+    };
     internals.publishNativeActivity = async () => true;
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
-      ...entry, id: "host_grant_expiry_rotation", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      ...entry, id: "host_grant_expiry_rotation", provider: providerName, delivery_mode: "daemon_inbox", observed_state: "absent",
+      ...(providerName === "cursor" ? { permission_profile_id: "read_only" } : {}),
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
     await admitDaemonInboxForProviderTest(daemon, "host_grant_expiry_rotation", entry.room_id);
     const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
-    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+    const installedGrant = {
       entry_id: "host_grant_expiry_rotation", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-rotation",
       supervisor_grant: "rotation-grant", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
       host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
-    })).ok, true);
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", installedGrant)).ok, true);
     let firstBinding: Awaited<ReturnType<WorkerBindingStore["get"]>> = null;
     await eventually(async () => {
       firstBinding = await internals.workerBindings.get("host_grant_expiry_rotation");
@@ -3673,19 +3710,100 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
     assert(firstBinding);
     assert.equal(await internals.workerBindings.credentialFor(firstBinding), "first-rotating-bearer");
 
+    await internals.providerExecution.drainConvergence();
+    const initial = await internals.store.getEntry("host_grant_expiry_rotation");
+    if (providerName === "cursor") {
+      const head = await internals.supervisedInbox.enqueueInitialMessage({
+        agent_id: "host_grant_expiry_rotation", room_id: entry.room_id,
+        source_message_id: "blocked-cursor-turn", source_message: { text: "failed turn" }, activation: {},
+      });
+      await internals.supervisedInbox.transition(head.inbox_item_id, "dispatching");
+      await internals.supervisedInbox.transition(head.inbox_item_id, "blocked", { last_error: "Provider turn failed." });
+    }
     clock += 61_000;
+    if (rotationFailures) {
+      internals.providerExecution.request("host_grant_expiry_rotation");
+      await internals.providerExecution.drainConvergence();
+      let recoveryPasses = 0;
+      while (mintCalls <= rotationFailures + 1) {
+        const blocked = await internals.store.getEntry("host_grant_expiry_rotation");
+        assert.equal(blocked?.desired_state, "running");
+        assert.equal(blocked?.observed_state, "recovering");
+        assert.equal(blocked?.condition, "coordination_blocked");
+        assert.match(blocked?.last_error ?? "", new RegExp(`HTTP ${rotationStatus}`));
+        if (rotationStatus === 403 && mintCalls === 4) {
+          assert.equal(await internals.workerBindings.get("host_grant_expiry_rotation"), null);
+          assert.equal(await internals.workerBindings.credentialFor(firstBinding), null);
+          assert.equal(internals.providerExecution.recoveryTimers.has("host_grant_expiry_rotation"), false);
+          clock += 120_000;
+          const views = (await daemonRequest(paths.socketPath, "manifest.list")).result as Parameters<typeof mapEntry>[0][];
+          const desktopEntry = mapEntry(views.find(view => view.id === "host_grant_expiry_rotation")!);
+          assert.equal(desktopEntry.desiredState, "running");
+          assert.equal(desktopEntry.roomAgentState?.inbox.state, "waiting_for_desktop_credentials");
+          assert.equal(desktopEntry.roomAgentState?.ingress.state, "stopped");
+          assert.equal(canReconnectRoomAgent(desktopEntry), true, "actual desktop projection offers credential-only recovery");
+          assert.equal(mintCalls, 4, "definitive rejection does not retry indefinitely");
+          assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+            ...installedGrant, credential_only: true,
+          })).ok, true);
+          await internals.providerExecution.drainConvergence();
+          break;
+        }
+        assert.match(blocked?.last_error ?? "", /Retrying automatically/);
+        assert.equal(blocked?.reconciliation_notices?.at(-1)?.kind, "coordination_escalation");
+        if (clock >= Date.parse("2026-07-21T12:02:00.000Z")) {
+          assert.equal(await internals.workerBindings.get("host_grant_expiry_rotation"), null,
+            "expired authority cannot keep delivering room work");
+          assert.equal(await internals.workerBindings.credentialFor(firstBinding), null);
+        }
+        const timer = internals.providerExecution.recoveryTimers.get("host_grant_expiry_rotation");
+        assert.ok(timer, "a transient outage must not exhaust automatic recovery");
+        const pending = pendingTimers.get(timer);
+        assert.ok(pending);
+        assert.ok(pending.delay <= 60_000);
+        clock += pending.delay;
+        pendingTimers.delete(timer);
+        clearTimeout(timer);
+        pending.callback();
+        await internals.providerExecution.drainConvergence();
+        assert.ok(++recoveryPasses <= 7, "rotation must eventually recover");
+      }
+      if (rotationFailures > 3) {
+        assert.ok(recoveryPasses > 3, "the outage survives the former three-attempt budget");
+        const audit = await readFile(paths.auditPath, "utf8");
+        assert.match(audit, /HTTP 500/);
+        assert.doesNotMatch(audit, /first-rotating-bearer|rotation-grant/);
+      }
+    }
     await eventually(async () => {
       const current = await internals.workerBindings.get("host_grant_expiry_rotation");
-      return mintCalls === 2 && current?.credential_ref === "second-rotating-bearer-id";
+      return mintCalls === rotationFailures + 2 && current?.credential_ref === "second-rotating-bearer-id";
     }, "automatic host worker bearer rotation");
     const rotated = await internals.workerBindings.get("host_grant_expiry_rotation");
     assert(rotated);
     assert.equal(await internals.workerBindings.credentialFor(rotated), "second-rotating-bearer");
     const credentialVault = (internals.workerBindings as unknown as { credentials: Map<string, unknown> }).credentials;
     assert.equal(credentialVault.has("first-rotating-bearer-id"), false, "the replaced bearer is revoked from the in-memory vault");
+    await internals.providerExecution.drainConvergence();
+    const recovered = await internals.store.getEntry("host_grant_expiry_rotation");
+    assert.equal(recovered?.desired_state, "running");
+    assert.equal(recovered?.condition, "none");
+    assert.equal(recovered?.last_error, null);
+    assert.deepEqual(recovered?.provider_ref, initial?.provider_ref);
+    assert.equal(recovered?.work_attempt_id, initial?.work_attempt_id);
+    assert.equal(rotated.agent_session_id, firstBinding.agent_session_id);
+    if (providerName === "cursor") {
+      const views = (await daemonRequest(paths.socketPath, "manifest.list")).result as Parameters<typeof mapEntry>[0][];
+      const desktopEntry = mapEntry(views.find(view => view.id === "host_grant_expiry_rotation")!);
+      assert.equal(desktopEntry.observedState, "idle", "credential-only recovery preserves the idle wrapper");
+      assert.equal(desktopEntry.roomAgentState?.inbox.state, "blocked", "credential recovery retains the blocked work");
+      assert.equal(canRecoverSavedRoomAgent(desktopEntry), true, "blocked idle Cursor still offers runtime recovery");
+    }
+    assert.equal(stops, 0);
     assert.equal(spawns, 1, "bearer rotation must not restart the provider");
   } finally {
     await daemon.stop().catch(() => undefined);
+    for (const timer of pendingTimers.keys()) clearTimeout(timer);
     await env.cleanup();
   }
 });

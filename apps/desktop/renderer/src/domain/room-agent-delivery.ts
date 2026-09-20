@@ -150,7 +150,8 @@ export function canReconnectRoomAgent(
     | "agentSessionId" | "agentSessionBindingState" | "executionGenerationId"
     | "providerContinuationId" | "providerPid" | "lastError">,
 ): boolean {
-  const automaticRecoveryIsActive = /retrying automatically/i.test(agent.lastError ?? "");
+  const automaticRecoveryIsActive = /retrying automatically/i.test(agent.lastError ?? "")
+    && !/use reconnect to retry now/i.test(agent.lastError ?? "");
   const providerIsKnownStopped = /saved OpenCode process is no longer running|previous provider runtime is unavailable/i
     .test(agent.lastError ?? "");
   return agent.deliveryMode === "daemon_inbox"

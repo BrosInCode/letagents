@@ -1092,24 +1092,27 @@ export class ProviderExecutionCoordinator {
             entry = await this.options.store.getEntry(entry.id) ?? entry;
           }
         } catch (error) {
+          if (this.options.authority.isHandoffScheduled()
+            || this.options.authority.currentDaemonGeneration() !== daemonGeneration
+            || this.options.concurrency.currentControlEpoch(entry.id) !== controlEpoch
+            || this.options.host.currentGrant(entry) !== grant) return;
           const bearerExpiry = supervisedSession?.expires_at
             ? Date.parse(supervisedSession.expires_at)
             : Number.NaN;
-          if (!exactBinding) {
-            await this.options.host.recordBindingRecoveryFailure(
-              entry.id,
-              executionGenerationId,
-              error,
-            );
-            return;
-          }
-          if (Number.isFinite(bearerExpiry) && bearerExpiry <= this.options.nowMs()) {
+          if (binding && Number.isFinite(bearerExpiry) && bearerExpiry <= this.options.nowMs()) {
             await this.options.host.blockExpiredAuthority(
               entry,
               `Worker bearer rotation failed after expiry: ${error instanceof Error ? error.message : "unknown error"}`,
             );
-            return;
           }
+          // Rotation failures need the same durable, visible recovery path as
+          // a missing binding, even while the previous bearer is still valid.
+          await this.options.host.recordBindingRecoveryFailure(
+            entry.id,
+            executionGenerationId,
+            error,
+          );
+          return;
         }
       }
       if (this.options.authority.isHandoffScheduled()

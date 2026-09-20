@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { SupervisorGrantRequestError } from "../cloud-http.js";
+import { WorkerCredentialMintError } from "../daemon-error-policy.js";
 import {
   WorkerAuthorityCoordinator,
   type BindWorkerSessionInput,
@@ -1725,4 +1726,45 @@ test("binding recovery ignores stopped or mismatched providers and a successful 
   assert.deepEqual(reset.scheduled, [1_000, 3_000, 1_000]);
   const lastTransition = reset.events.filter((event) => event.startsWith("transition:")).at(-1) ?? "";
   assert.match(lastTransition, /attempt 1 of 3/);
+});
+
+test("transient worker mint recovery survives the fast retry budget with capped backoff", async () => {
+  for (const cause of [new SupervisorGrantRequestError(500, "mint"), new Error("request timed out")]) {
+    const harness = fixture();
+    const error = new WorkerCredentialMintError(3, true, cause);
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      await harness.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1", error);
+    }
+    assert.deepEqual(harness.scheduled, [1_000, 3_000, 10_000, 30_000, 60_000, 60_000, 60_000]);
+    const detail = harness.events.filter((event) => event.startsWith("transition:")).at(-1)!;
+    assert.match(detail, /Retrying automatically in 60 seconds/);
+    assert.match(detail, /Use Reconnect to retry now/);
+    assert.equal(harness.entry.desired_state, "running");
+    assert.equal(harness.handle?.providerContinuationId, "continuation-1");
+    assert.equal(harness.credential, "worker-secret");
+  }
+});
+
+test("rotation recovery wakes at bearer expiry and does not retry authorization rejection indefinitely", async () => {
+  const harness = fixture();
+  await harness.bindings.recordSupervisedWorkerSession({
+    agent_id: "agent-1", room_id: "room-1", agent_session_id: "session-1",
+    execution_generation_id: "execution-1", credential_ref: "bearer-id-1",
+    expires_at: new Date(now + 500).toISOString(),
+  });
+  await harness.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1",
+    new WorkerCredentialMintError(3, true, new SupervisorGrantRequestError(500, "mint")));
+  assert.deepEqual(harness.scheduled, [500]);
+
+  const rejected = fixture();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await rejected.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1",
+      new WorkerCredentialMintError(1, false, new SupervisorGrantRequestError(403, "mint")));
+  }
+  assert.deepEqual(rejected.scheduled, [1_000, 3_000]);
+  assert.equal(rejected.binding, null, "retry exhaustion removes authority even before bearer expiry");
+  assert.equal(rejected.credential, null);
+  assert.ok(rejected.deliveryStops > 0);
+  assert.equal(rejected.entry.desired_state, "running");
+  assert.match(rejected.events.filter((event) => event.startsWith("transition:")).at(-1)!, /Use Reconnect to try/);
 });
