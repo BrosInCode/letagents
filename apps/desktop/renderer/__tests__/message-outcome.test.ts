@@ -39,6 +39,8 @@ test("interventions distinguish provider delivery, uncertainty and explicit oper
     correctionText: "Keep the API unchanged", strategy: "native" as const, operatorResolution: null,
     status: "completed" as const, interrupted: false, resumed: false };
   assert.equal(messageInterventionLabel(intervention), "Correction delivered");
+  assert.equal(messageInterventionLabel({ ...intervention, strategy: "stop_then_resend", resumed: true }), "Correction queued");
+  assert.equal(messageInterventionLabel({ ...intervention, resumed: true }), "Correction delivered · Session resumed");
   assert.equal(messageInterventionLabel({ ...intervention, status: "uncertain" }), "Delivery is uncertain");
   assert.equal(messageInterventionLabel({ ...intervention, operatorResolution: "not_applied" }), "Marked as not applied");
   assert.equal(messageInterventionLabel({ ...intervention, hasCorrection: false, interrupted: true }), "Turn stopped");
@@ -57,6 +59,10 @@ test("trajectory renders captured text safely and distinguishes missing, queued 
       selectedSourceMessageId: "msg-1", tasks: [{ id: "unrelated", title: "Other work", status: "in_progress" }], artifacts: [],
     }));
     const old = await render();
+    assert.match(old, /View original message/);
+    for (const id of ["correction:action-1", "task-continuation:inbox-1", "desktop-initial-message:agent-1"]) {
+      assert.doesNotMatch(await render({ source_message: { ...detail.source_message, id } }), /View original message/, id);
+    }
     assert.match(old, /Context wasn’t captured/);
     assert.match(old, /This message is queued/);
     assert.match(old, /not verified outcomes of the selected message/);

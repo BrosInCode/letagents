@@ -31,6 +31,7 @@ export function messageInterventionLabel(control: MessageIntervention): string {
   if (control.status === "retryable") return "Delivery needs retry";
   if (control.status === "prepared") return "Requested";
   if (control.status === "dispatching") return "Being delivered";
+  if (control.hasCorrection && control.strategy === "stop_then_resend") return "Correction queued";
   if (control.hasCorrection) return control.resumed ? "Correction delivered · Session resumed" : "Correction delivered";
   return control.interrupted ? "Turn stopped" : "Stop request completed";
 }

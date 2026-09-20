@@ -37,7 +37,7 @@
               <div class="outcome-stage-heading"><h4>Trigger</h4><time v-if="detail.source_message?.created_at" :datetime="detail.source_message.created_at" :title="formatFullTimestamp(detail.source_message.created_at)">{{ timeLabel(detail.source_message.created_at) }}</time></div>
               <p class="outcome-stage-description">{{ messageTriggerLabel(detail.source_message?.activation) }}</p>
               <blockquote class="outcome-message"><strong>{{ detail.source_message?.sender || 'Room message' }}</strong><p>{{ detail.source_message?.text || 'The recorded message text is unavailable.' }}</p></blockquote>
-              <button v-if="detail.source_message?.id" type="button" class="outcome-text-button" @click="emit('reveal', detail.source_message.id)">View original message <ArrowUpRight :size="13" aria-hidden="true" /></button>
+              <button v-if="originalMessageId" type="button" class="outcome-text-button" @click="emit('reveal', originalMessageId)">View original message <ArrowUpRight :size="13" aria-hidden="true" /></button>
             </div>
           </li>
           <li class="outcome-stage" :data-tone="detail.prepared_context ? 'active' : 'neutral'">
@@ -150,6 +150,11 @@ watch(() => [props.resource.status, props.resource.sourceMessageId], async () =>
   if (!focused.isConnected && document.activeElement === document.body) workElement.value?.focus({ preventScroll: true });
 });
 const detail = computed(() => props.resource.detail);
+const originalMessageId = computed(() => {
+  const id = detail.value?.source_message?.id;
+  // These retained inputs originate locally and have no message to reveal in Chat.
+  return id && !/^(correction:|task-continuation:|desktop-initial-message:)/.test(id) ? id : null;
+});
 const execution = computed(() => detail.value?.recorded_execution);
 const duration = computed(() => detail.value ? messageOutcomeDuration(detail.value) : null);
 const recordedTurns = computed(() => execution.value?.availability === "available"
