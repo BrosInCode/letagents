@@ -51,7 +51,6 @@ import type {
   MintedWorkerAuthorization,
 } from "./worker-runtime-custody.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
-import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
@@ -186,7 +185,6 @@ export type ProviderExecutionCoordinatorOptions = {
     start(entryId: string, mode?: "ensure" | "wake"): Promise<unknown>;
   };
   inbox: {
-    head: SupervisedAgentInboxStore["head"];
     cursor(entryId: string): Promise<{
       agent_id: string;
       room_id: string;
@@ -1223,19 +1221,6 @@ export class ProviderExecutionCoordinator {
     const resumableCursorLane = entry.provider === "cursor"
       && entry.delivery_mode === "daemon_inbox"
       && entry.provider_ref?.provider_connection?.kind === "cursor_cli";
-    if (resumableCursorLane && !activeExecution) {
-      const head = await this.options.inbox.head(entry.id);
-      if (head?.room_id === entry.room_id && head.state === "blocked") {
-        await this.options.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          head.last_error ?? "The failed Cursor delivery needs attention before its runtime can recover.",
-          "daemon-convergence",
-        );
-        return;
-      }
-    }
     if (activeExecution && !resumableCursorLane) {
       await this.options.transition(
         entry.id,

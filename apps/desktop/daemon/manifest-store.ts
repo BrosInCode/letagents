@@ -54,12 +54,10 @@ import {
 } from "./delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
 import {
-  cancelInterruptedSupervisedTurn,
   pruneSupervisedAgentHistory,
   readDurableNativeFailure,
   settleSupervisedTerminalItem,
 } from "./supervised-agent-history-retention.js";
-import type { SupervisedProviderTurnBinding } from "./supervised-agent-inbox-store.js";
 
 import {
   composeDaemonManifestEntry,
@@ -1291,25 +1289,11 @@ export class ManifestStore {
     entry: DaemonManifestEntry,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
     roomMoveCancellation?: PreMembershipRoomMoveCancellation,
-    interruptedDelivery?: { turn: SupervisedProviderTurnBinding; detail: string; observedAt: string },
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
     const normalized = canonicalManifestEntry(entry);
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?").get(normalized.id) as Row | undefined;
       if (!row) throw new Error(`Unknown daemon manifest entry: ${normalized.id}`);
-      if (interruptedDelivery) {
-        const { turn, detail, observedAt } = interruptedDelivery;
-        const receipt = database.prepare("SELECT state,outcome,provider_turn_id FROM supervised_agent_inbox WHERE inbox_item_id=?").get(turn.inbox_item_id) as Row | undefined;
-        const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(turn.inbox_item_id) as Row | undefined;
-        if (turn.agent_id !== normalized.id || turn.room_id !== normalized.room_id
-          || !receipt || receipt.state !== "blocked" || receipt.outcome !== null
-          || receipt.provider_turn_id !== turn.provider_turn_id
-          || !binding || Object.entries(turn).some(([key, value]) => binding[key] !== value)) {
-          throw new ManifestConflictError("Runtime recovery lost the exact blocked provider turn before settlement.");
-        }
-        cancelInterruptedSupervisedTurn(database, turn.inbox_item_id, detail, observedAt,
-          { agent_id: normalized.id, room_id: normalized.room_id });
-      }
       if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
       // Configuration revisions are Inspector-owned state, intentionally not
       // part of the legacy flat manifest projection. Preserve them through
