@@ -136,6 +136,17 @@ describe("durable room delivery UI contracts", () => {
     };
     assert.equal(canReconnectRoomAgent(exact as never), true);
     assert.equal(canRecoverSavedRoomAgent(exact as never), false);
+    const blockedCursor = {
+      ...exact, provider: "cursor", providerPid: null, observedState: "idle",
+      roomAgentState: { connection: { state: "connected" }, inbox: { state: "blocked" } },
+    };
+    assert.equal(canRecoverSavedRoomAgent(blockedCursor as never), true,
+      "a blocked idle Cursor lane remains recoverable despite a connected handle projection");
+    assert.equal(canRecoverSavedRoomAgent({ ...blockedCursor, providerPid: 123 } as never), false,
+      "a live Cursor wrapper cannot be replaced by this recovery action");
+    assert.equal(canRecoverSavedRoomAgent({ ...blockedCursor,
+      roomAgentState: { connection: { state: "connected" }, inbox: { state: "empty" } },
+    } as never), false, "normal processless Cursor idle periods are healthy");
     assert.equal(canReconnectRoomAgent(gone as never), false);
     assert.equal(canRecoverSavedRoomAgent(gone as never), true);
     assert.equal(canRecoverSavedRoomAgent(starting as never), false,
