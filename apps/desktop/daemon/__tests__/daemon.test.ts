@@ -3617,7 +3617,7 @@ test("pause during post-install worker bind fences the exact provider before del
   }
 });
 
-test("a live daemon rotates an expiring host worker bearer without reinstalling the grant or restarting the provider", async () => {
+for (const rotationFailures of [0, 1, 18]) test(`a live daemon rotates its bearer after ${rotationFailures} HTTP 500 responses without replacing the provider`, async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -3631,20 +3631,38 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
   let clock = Date.parse("2026-07-21T12:00:00.000Z");
   let spawns = 0;
   let mintCalls = 0;
+  let stops = 0;
+  const pendingTimers = new Map<ReturnType<typeof setTimeout>, { callback: () => void; delay: number }>();
   const handle = { workAttemptId: attempt.work_attempt_id, pid: 9914, providerContinuationId: "rotating-host-grant-continuation", observedState: "working" as const };
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
     resume: async () => { throw new Error("bearer rotation must retain the live provider"); }, poke: async () => {},
-    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
+    stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
     onExit: async () => () => {}, onStream: async () => () => {},
     onExecution: async (runtime, listener) => runtimeReadySubscription(runtime, listener),
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, { nowMs: () => clock }, {
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, rotationFailures ? 60_000 : 10, undefined, {
+    nowMs: () => clock,
+    setTimeout: ((callback: () => void, delay: number) => {
+      if (delay < 1_000) return setTimeout(callback, delay);
+      const timer = setTimeout(() => undefined, 3_600_000);
+      timer.unref();
+      pendingTimers.set(timer, { callback, delay });
+      return timer;
+    }) as typeof setTimeout,
+    clearTimeout: ((timer: ReturnType<typeof setTimeout>) => {
+      pendingTimers.delete(timer);
+      clearTimeout(timer);
+    }) as typeof clearTimeout,
+  }, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
     createWorkerSession: async () => {
       mintCalls += 1;
+      if (mintCalls > 1 && mintCalls <= rotationFailures + 1) {
+        throw new SupervisorGrantRequestError(500, "worker rotation");
+      }
       return mintCalls === 1
         ? { sessionId: "rotating-session", bearer: "first-rotating-bearer", bearerId: "first-rotating-bearer-id", expiresAt: new Date(clock + 120_000).toISOString() }
         : { sessionId: "rotating-session", bearer: "second-rotating-bearer", bearerId: "second-rotating-bearer-id", expiresAt: new Date(clock + 3_600_000).toISOString() };
@@ -3652,7 +3670,16 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
   });
   try {
     await daemon.start();
-    const internals = daemon as unknown as { workerBindings: WorkerBindingStore; publishNativeActivity: () => Promise<boolean> };
+    const internals = daemon as unknown as {
+      workerBindings: WorkerBindingStore;
+      store: ManifestStore;
+      providerExecution: {
+        request(entryId: string): void;
+        drainConvergence(): Promise<void>;
+        recoveryTimers: Map<string, ReturnType<typeof setTimeout>>;
+      };
+      publishNativeActivity: () => Promise<boolean>;
+    };
     internals.publishNativeActivity = async () => true;
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "host_grant_expiry_rotation", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
@@ -3673,19 +3700,66 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
     assert(firstBinding);
     assert.equal(await internals.workerBindings.credentialFor(firstBinding), "first-rotating-bearer");
 
+    await internals.providerExecution.drainConvergence();
+    const initial = await internals.store.getEntry("host_grant_expiry_rotation");
     clock += 61_000;
+    if (rotationFailures) {
+      internals.providerExecution.request("host_grant_expiry_rotation");
+      await internals.providerExecution.drainConvergence();
+      let recoveryPasses = 0;
+      while (mintCalls <= rotationFailures + 1) {
+        const blocked = await internals.store.getEntry("host_grant_expiry_rotation");
+        assert.equal(blocked?.desired_state, "running");
+        assert.equal(blocked?.observed_state, "recovering");
+        assert.equal(blocked?.condition, "coordination_blocked");
+        assert.match(blocked?.last_error ?? "", /HTTP 500.*Retrying automatically/);
+        assert.equal(blocked?.reconciliation_notices?.at(-1)?.kind, "coordination_escalation");
+        if (clock >= Date.parse("2026-07-21T12:02:00.000Z")) {
+          assert.equal(await internals.workerBindings.get("host_grant_expiry_rotation"), null,
+            "expired authority cannot keep delivering room work");
+          assert.equal(await internals.workerBindings.credentialFor(firstBinding), null);
+        }
+        const timer = internals.providerExecution.recoveryTimers.get("host_grant_expiry_rotation");
+        assert.ok(timer, "a transient outage must not exhaust automatic recovery");
+        const pending = pendingTimers.get(timer);
+        assert.ok(pending);
+        assert.ok(pending.delay <= 60_000);
+        clock += pending.delay;
+        pendingTimers.delete(timer);
+        clearTimeout(timer);
+        pending.callback();
+        await internals.providerExecution.drainConvergence();
+        assert.ok(++recoveryPasses <= 7, "rotation must eventually recover");
+      }
+      if (rotationFailures > 3) {
+        assert.ok(recoveryPasses > 3, "the outage survives the former three-attempt budget");
+        const audit = await readFile(paths.auditPath, "utf8");
+        assert.match(audit, /HTTP 500/);
+        assert.doesNotMatch(audit, /first-rotating-bearer|rotation-grant/);
+      }
+    }
     await eventually(async () => {
       const current = await internals.workerBindings.get("host_grant_expiry_rotation");
-      return mintCalls === 2 && current?.credential_ref === "second-rotating-bearer-id";
+      return mintCalls === rotationFailures + 2 && current?.credential_ref === "second-rotating-bearer-id";
     }, "automatic host worker bearer rotation");
     const rotated = await internals.workerBindings.get("host_grant_expiry_rotation");
     assert(rotated);
     assert.equal(await internals.workerBindings.credentialFor(rotated), "second-rotating-bearer");
     const credentialVault = (internals.workerBindings as unknown as { credentials: Map<string, unknown> }).credentials;
     assert.equal(credentialVault.has("first-rotating-bearer-id"), false, "the replaced bearer is revoked from the in-memory vault");
+    await internals.providerExecution.drainConvergence();
+    const recovered = await internals.store.getEntry("host_grant_expiry_rotation");
+    assert.equal(recovered?.desired_state, "running");
+    assert.equal(recovered?.condition, "none");
+    assert.equal(recovered?.last_error, null);
+    assert.deepEqual(recovered?.provider_ref, initial?.provider_ref);
+    assert.equal(recovered?.work_attempt_id, initial?.work_attempt_id);
+    assert.equal(rotated.agent_session_id, firstBinding.agent_session_id);
+    assert.equal(stops, 0);
     assert.equal(spawns, 1, "bearer rotation must not restart the provider");
   } finally {
     await daemon.stop().catch(() => undefined);
+    for (const timer of pendingTimers.keys()) clearTimeout(timer);
     await env.cleanup();
   }
 });

@@ -537,6 +537,24 @@ test("runtime recovery shows the live replacement and durable room-access phase"
     "automatic recovery owns the binding while its bounded retries remain active");
 });
 
+test("transient bearer recovery stays visible and offers reconnect during slow retries", () => {
+  const recovering = entry({
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "Restoring room access (attempt 5) failed: HTTP 500. Retrying automatically in 60 seconds. Use Reconnect to retry now.",
+    agentSessionId: null,
+    agentSessionBindingState: "none",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "waiting_for_desktop_credentials", pendingCount: 3, blockedByMessageId: null, detail: "Room delivery is paused." },
+    },
+  });
+  const projection = projectAgentInspector(recovering, { roomId: "focus_1" });
+  assert.equal(projection?.overallState, "recovering");
+  assert.equal(projection?.deliveryProgress?.label, "Restoring room access");
+  assert.equal(projection?.actions.find((action) => action.kind === "reconnect")?.available, true);
+});
+
 test("turn control is available only for the exact responding provider turn", () => {
   const responding = entry({
     roomAgentState: {
