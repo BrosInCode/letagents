@@ -8,6 +8,7 @@ import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrain
 import { assertNoPollingActivation } from "./custodial-polling-activation.js";
 import { parseTaskContinuation, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
 import {
+  cancelInterruptedSupervisedTurn,
   pruneSupervisedAgentHistory,
   readDurableNativeFailure,
   RETAINED_UNCERTAIN_EFFECTS_PER_AGENT,
@@ -1806,33 +1807,9 @@ export class SupervisedAgentInboxStore {
     detail = "Stopped by the user.",
     expected?: { agent_id: string; room_id: string },
   ): Promise<SupervisedInboxItem | null> {
-    // Every pre-publish state is safe to settle on a user Stop. `publishing`
-    // and the terminal states are not: their outcome is already committed.
-    const cancellable = new Set<SupervisedInboxState>(["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"]);
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
-      if (!row) return null;
-      const item = rowToItem(row);
-      if (expected && (item.agent_id !== expected.agent_id || item.room_id !== expected.room_id)) {
-        throw new Error("Interrupted-turn settlement does not match the exact active delivery identity.");
-      }
-      if (!cancellable.has(item.state)) return item;
-      this.assertCurrentHead(database, item);
-      const timestamp = this.now();
-      if (readDurableNativeFailure(database, inboxItemId)) {
-        run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',
-          failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
-        this.settleTerminalItem(database, item, timestamp);
-        this.pruneAgentHistory(database, item.agent_id);
-        return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
-      }
-      run(database.prepare(`UPDATE supervised_agent_inbox
-        SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
-        WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
-      this.settleTerminalItem(database, item, timestamp);
-      this.recordEvent(database, inboxItemId, `user_cancelled:${item.fifo_sequence}`, "user_cancelled", timestamp, detail);
-      this.pruneAgentHistory(database, item.agent_id);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const row = cancelInterruptedSupervisedTurn(database, inboxItemId, detail, this.now(), expected);
+      return row ? rowToItem(row) : null;
     }));
   }
 
