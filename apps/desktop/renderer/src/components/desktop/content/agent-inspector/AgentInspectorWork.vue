@@ -1,5 +1,5 @@
 <template>
-  <div class="agent-inspector-work message-outcome" data-testid="message-outcome-inspector">
+  <div ref="workElement" tabindex="-1" class="agent-inspector-work message-outcome" data-testid="message-outcome-inspector">
     <div v-if="resource.status === 'loading' && !resource.detail" class="outcome-loading" aria-busy="true" role="status">
       <span>Loading message activity…</span>
       <div v-for="row in 4" :key="row" class="outcome-skeleton" aria-hidden="true"><i /><div><b /><b /></div></div>
@@ -129,7 +129,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { Activity, ArrowUpRight, Check, ChevronDown, CircleDashed, Clock3, CornerDownRight, Layers, MessageSquare } from "@lucide/vue";
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
@@ -140,6 +140,15 @@ import "./message-outcome.css";
 
 const props = defineProps<{ resource: AgentInspectorWorkResource; selectedSourceMessageId: string | null; tasks: readonly Pick<DesktopTaskSummary, 'id' | 'title' | 'status'>[]; artifacts: readonly RoomArtifactTimelineItem[] }>();
 const emit = defineEmits<{ retry: []; 'select-source': [sourceMessageId: string]; reveal: [canonicalMessageId: string] }>();
+const workElement = ref<HTMLElement | null>(null);
+watch(() => [props.resource.status, props.resource.sourceMessageId], async () => {
+  const focused = document.activeElement;
+  if (!(focused instanceof HTMLElement) || !workElement.value?.contains(focused)) return;
+  await nextTick();
+  // Retry and source changes may remove the focused control. Keep keyboard
+  // users in this panel without stealing focus from another control.
+  if (!focused.isConnected && document.activeElement === document.body) workElement.value?.focus({ preventScroll: true });
+});
 const detail = computed(() => props.resource.detail);
 const execution = computed(() => detail.value?.recorded_execution);
 const duration = computed(() => detail.value ? messageOutcomeDuration(detail.value) : null);

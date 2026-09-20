@@ -67,21 +67,21 @@
                   </span>
                 </div>
                 <div v-if="activityTarget(agent) || agent.replyMessageId" class="room-message-info-agent-actions">
-                <button
-                  v-if="activityTarget(agent)"
-                  type="button"
-                  class="room-message-info-view-reply"
-                  :aria-label="`View ${agent.actorLabel}’s activity for this message`"
-                  @click="inspectAgent(agent)"
-                >View activity</button>
-                <button
-                  v-if="agent.replyMessageId"
-                  type="button"
-                  class="room-message-info-view-reply"
-                  @click="emit('scroll-to-message', agent.replyMessageId)"
-                >
-                  View reply
-                </button>
+                  <button
+                    v-if="activityTarget(agent)"
+                    type="button"
+                    class="room-message-info-view-reply"
+                    :aria-label="`View ${agent.actorLabel}’s activity for this message`"
+                    @click="inspectAgent(agent)"
+                  >View activity</button>
+                  <button
+                    v-if="agent.replyMessageId"
+                    type="button"
+                    class="room-message-info-view-reply"
+                    @click="emit('scroll-to-message', agent.replyMessageId)"
+                  >
+                    View reply
+                  </button>
                 </div>
               </li>
             </ul>

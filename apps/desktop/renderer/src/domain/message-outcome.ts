@@ -5,7 +5,7 @@ import type { MessageIntervention } from "../../../shared/message-outcome";
 /** A receipt's durable key can select only one agent in this room, never a matching display name. */
 export function messageOutcomeTarget(agent: DesktopMessageInfo["agentsAsked"][number], messageId: string,
   roomId: string, entries: readonly DesktopSupervisorManifestEntry[]): AgentModalTarget | null {
-  if (!messageId.trim() || !agent.agentKey.trim()) return null;
+  if (!messageId.trim() || !/[/:]/.test(agent.agentKey)) return null;
   const matches = entries.filter(entry => entry.roomId === roomId && entry.agentKey === agent.agentKey);
   if (matches.length !== 1) return null;
   const entry = matches[0]!;

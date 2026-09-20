@@ -32,6 +32,13 @@ test("dispatch context survives restart, remains exact to its message, and is pr
   try {
     const [item] = await store.ingestPoll({ agent_id: "stone", room_id: "room", last_observed_message_id: "1",
       messages: [{ source_message_id: "1", source_message: { id: "1", text: "Fix auth" }, activation: { reason: "mention" } }] });
+    // An actual v42 receipt survives upgrade, without invented past context.
+    await store.close();
+    const predecessor = new DatabaseSync(path);
+    predecessor.exec("DROP TABLE supervised_agent_prepared_context; PRAGMA user_version=42; UPDATE manifest_metadata SET schema_version=42");
+    predecessor.close();
+    store = new SupervisedAgentInboxStore(path, () => "2026-09-20T09:00:00.000Z");
+    assert.equal((await store.detail("stone", "room", "1")).source_message?.text, "Fix auth");
     assert.equal((await store.detail("stone", "room", "1")).prepared_context, null);
     await assert.rejects(store.checkpointDispatchIntent(item!.inbox_item_id, undefined, []), /unstarted dispatching/);
     await store.transition(item!.inbox_item_id, "dispatching");

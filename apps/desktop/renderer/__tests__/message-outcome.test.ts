@@ -17,6 +17,7 @@ test("message activity targets exact local agent identity and preserves the trig
   assert.equal(messageOutcomeTarget(receipt, "human-message", "different-room", [entry]), null);
   assert.equal(messageOutcomeTarget(receipt, "human-message", "room", [entry, { ...entry, id: "ambiguous" }]), null);
   assert.equal(messageOutcomeTarget({ ...receipt, agentKey: "Stone" }, "human-message", "room", [entry]), null);
+  assert.equal(messageOutcomeTarget({ ...receipt, agentKey: "Stone" }, "human-message", "room", [{ ...entry, agentKey: "Stone" }]), null);
   assert.equal(messageOutcomeTarget(receipt, "", "room", [entry]), null);
 });
 
