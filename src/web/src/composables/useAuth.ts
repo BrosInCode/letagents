@@ -1,6 +1,7 @@
 import { ref, readonly } from 'vue'
 
 interface AuthUser {
+  id: string
   login: string
   display_name: string | null
   avatar_url: string | null

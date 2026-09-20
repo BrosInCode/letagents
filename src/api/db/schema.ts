@@ -20,3 +20,4 @@ export * from "./schema/execution-approval-publications.js";
 
 export * from "./schema/room-knowledge.js";
 export * from "./schema/jev-routing.js";
+export * from "./schema/conversations.js";

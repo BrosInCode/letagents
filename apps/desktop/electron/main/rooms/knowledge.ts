@@ -18,7 +18,6 @@ const path = (id: string, type: KnowledgeType) => {
   if (type !== 'memory' && type !== 'attention') throw new Error('Invalid room knowledge type.');
   return `/rooms/${encodeURIComponent(id)}/${type}`;
 };
-const humanHeaders = { 'X-LetAgents-Desktop-Client': '1' };
 async function localActor(): Promise<KnowledgeActor> {
   const auth = await readStoredAuth();
   return { id: auth.account?.login ?? 'local-human', label: auth.account?.displayName || auth.account?.login || 'You', kind: 'human' };
@@ -43,12 +42,12 @@ export async function getDesktopKnowledge(roomIdentifier: string, type: Knowledg
 }
 export async function createDesktopKnowledge(roomIdentifier: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }): Promise<KnowledgeRecord> {
   const room = await target(roomIdentifier);
-  if (!room.local) return (await apiFetch<{ record: KnowledgeRecord }>(path(room.id, type), { method: 'POST', headers: humanHeaders, body: JSON.stringify(input) })).record;
+  if (!room.local) return (await apiFetch<{ record: KnowledgeRecord }>(path(room.id, type), { method: 'POST', body: JSON.stringify(input) })).record;
   return saveLocalKnowledge(await getLocalChatDatabase(), createKnowledgeRecord(room.id, type, input, await localActor()));
 }
 export async function reviseDesktopKnowledge(roomIdentifier: string, type: KnowledgeType, id: string, input: KnowledgeRevisionInput): Promise<KnowledgeRecord> {
   const room = await target(roomIdentifier); knowledgeId(id);
-  if (!room.local) return (await apiFetch<{ record: KnowledgeRecord }>(`${path(room.id, type)}/${id}${type === 'attention' ? '/respond' : ''}`, { method: type === 'attention' ? 'POST' : 'PATCH', headers: humanHeaders, body: JSON.stringify(input) })).record;
+  if (!room.local) return (await apiFetch<{ record: KnowledgeRecord }>(`${path(room.id, type)}/${id}${type === 'attention' ? '/respond' : ''}`, { method: type === 'attention' ? 'POST' : 'PATCH', body: JSON.stringify(input) })).record;
   const db = await getLocalChatDatabase();
   const old = getLocalKnowledge(db, room.id, id);
   if (!old || old.type !== type) throw new Error('Record not found.');

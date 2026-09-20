@@ -12,7 +12,7 @@ import type {
   DesktopSendRoomMessageResult,
 } from "../../ipc-types.js";
 import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
-import { apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
+import { agentApiFetch, apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
 import {
   readLocalStagedAttachments,
   releaseLocalStagedAttachments,
@@ -66,16 +66,7 @@ import {
 
 export { mapCloudRoomMessagePayload, mapRoomMessagePayload, type RoomMessagePayload };
 
-export function desktopMessageAccountRoutingRequest(
-  headers: Record<string, string> = {},
-): { headers: Record<string, string> } {
-  return {
-    headers: {
-      ...headers,
-      "X-LetAgents-Desktop-Client": "1",
-    },
-  };
-}
+
 
 type RoomThreadInboxPayload = {
   threads: Array<{
@@ -158,9 +149,7 @@ export async function sendDesktopRoomMessage(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
       method: "POST",
-      ...desktopMessageAccountRoutingRequest({
-        "Content-Type": "application/json",
-      }),
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sender,
         text: trimmedText,
@@ -225,7 +214,6 @@ export async function getDesktopRoomThread(
     has_older?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedThreadRootId)}/thread?${params.toString()}`,
-    desktopMessageAccountRoutingRequest(),
   );
   const summary = mapRoomMessageThreadSummary(
     page.summary ?? page.root.thread ?? null,
@@ -298,8 +286,7 @@ export async function getDesktopRoomThreads(
   try {
     const page = await apiFetch<RoomThreadInboxPayload>(
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/threads?${params.toString()}`,
-      desktopMessageAccountRoutingRequest(),
-    );
+      );
     return mapThreadInboxPayload(page);
   } catch (error) {
     if (isMissingThreadRouteError(error)) {
@@ -402,7 +389,7 @@ export async function markDesktopRoomThreadRead(
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify({ message_id: trimmedMessageId }),
     },
@@ -456,7 +443,6 @@ export async function getDesktopRoomMessagesBefore(
     has_more?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages?limit=${encodeURIComponent(String(limit))}&before=${encodeURIComponent(trimmedBeforeMessageId)}`,
-    desktopMessageAccountRoutingRequest(),
   );
 
   return {
@@ -500,7 +486,6 @@ export async function getDesktopRoomMessage(
   );
   const response = await apiFetch<{ message?: RoomMessagePayload | null }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}`,
-    desktopMessageAccountRoutingRequest(),
   );
   return response.message ? mapRoomMessagePayload(response.message) : null;
 }
@@ -618,7 +603,7 @@ async function registerLocalPublisherForCloudSync(
   ) {
     throw new Error("Local publisher session is no longer authoritative.");
   }
-  const created = await apiFetch<{
+  const created = await agentApiFetch<{
     session_id?: string;
     session_token?: string;
     agent_key?: string | null;
@@ -658,7 +643,7 @@ async function disconnectCloudSyncWorkerSession(
   cloudRoomIdentifier: string,
   session: CloudSyncWorkerSession,
 ): Promise<void> {
-  await apiFetch(
+  await agentApiFetch(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions/${encodeURIComponent(session.session_id)}/disconnect`,
     {
       method: "POST",
@@ -783,13 +768,12 @@ export async function syncDesktopLocalChatRoom(
       continue;
     }
 
-    const cloudMessage = await apiFetch<RoomMessagePayload>(
+    const cloudMessage = await (publishAsWorker ? agentApiFetch : apiFetch)<RoomMessagePayload>(
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(publishAsHuman ? { "X-LetAgents-Desktop-Client": "1" } : {}),
         },
         body: JSON.stringify({
           sender: localMessage.sender,
@@ -968,11 +952,11 @@ async function patchCloudTask(
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify({
         ...patch,
-        desktop_human_client: true,
+
       }),
     },
   );
@@ -999,7 +983,7 @@ async function syncLocalRoomTasks(input: {
         description: task.description,
         created_by: task.createdBy || "human",
         source_message_id: clientTaskId,
-        desktop_human_client: true,
+
         client_task_id: clientTaskId,
       };
       let syncedCloudTaskId = cloudTaskId;
@@ -1015,7 +999,7 @@ async function syncLocalRoomTasks(input: {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "X-LetAgents-Desktop-Client": "1",
+
             },
             body: JSON.stringify(createBody),
           },

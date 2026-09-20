@@ -492,8 +492,8 @@ test("thread inbox attaches receipt authority and Desktop routing to every root"
   await handler({
     params: { 0: "room_1" },
     query: {},
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
     sessionAccount: { account_id: "acct_1" },
   }, res);
 
@@ -570,8 +570,8 @@ test("thread detail attaches the same receipt authority to its root and replies"
   await handler({
     params: { 0: "room_1", 1: "msg_1" },
     query: {},
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
     sessionAccount: { account_id: "acct_1" },
   }, res);
 
@@ -777,7 +777,7 @@ test("worker message writes persist server-authenticated publisher identity", as
   );
 });
 
-test("desktop owner-token human messages can post as browser activity", async () => {
+test("desktop app-session human messages can post as browser activity", async () => {
   let createdMessage: { sender: string; text: string; options?: { source?: string; account_id?: string | null } } | null = null;
   let rememberedSource: string | null | undefined;
   let rememberedAccountRoom:
@@ -847,8 +847,8 @@ test("desktop owner-token human messages can post as browser activity", async ()
     {
       params: { 0: "room_1" },
       body: { sender: "EmmyMay", text: "hello from desktop" },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
     },
     res
@@ -883,7 +883,7 @@ test("desktop owner-token human messages can post as browser activity", async ()
   });
 });
 
-test("desktop owner-token messages ignore agent-shaped display labels", async () => {
+test("desktop app-session messages ignore agent-shaped display labels", async () => {
   let createdMessage: { sender: string; text: string; options?: { source?: string; account_id?: string | null } } | null = null;
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
@@ -927,8 +927,8 @@ test("desktop owner-token messages ignore agent-shaped display labels", async ()
     {
       params: { 0: "room_1" },
       body: { sender: "BadgerMoon | EmmyMay's agent | Agent", text: "hello from desktop" },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
     },
     res
@@ -1007,8 +1007,8 @@ test("desktop local sync forwards client message idempotency key", async () => {
         text: "synced local message",
         client_message_id: "local-chat:room_1:1",
       },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
     },
     res
@@ -1087,8 +1087,8 @@ test("desktop thread replies forward root and quoted reply targets separately", 
         reply_to: "msg_7",
         thread_root_id: "msg_1",
       },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
     },
     res,
@@ -1099,7 +1099,7 @@ test("desktop thread replies forward root and quoted reply targets separately", 
   assert.equal(createdOptions?.thread_root_id, "msg_1");
 });
 
-test("desktop owner-token streams do not require worker delivery credentials", async () => {
+test("desktop app-session streams do not require worker delivery credentials", async () => {
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
     get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
@@ -1121,8 +1121,9 @@ test("desktop owner-token streams do not require worker delivery credentials", a
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -1276,8 +1277,8 @@ test("one canonical broker event resolves a thousand long polls without repeat h
     const req = {
       params: { 0: "room_1" },
       query: { after: "msg_6", timeout: "60000" },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
       get() { return undefined; },
       on: requestEvents.on.bind(requestEvents),
@@ -1419,7 +1420,7 @@ test("one broker gap coalesces a thousand poll catch-ups without executor overfl
   batcher.close();
 });
 
-test("browser streams hydrate account thread reads without requesting desktop routing", async () => {
+test("browser app sessions hydrate account thread reads and human routing", async () => {
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
     get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
@@ -1434,10 +1435,12 @@ test("browser streams hydrate account thread reads without requesting desktop ro
     resolveRoomOrReply: async () => ({ id: "room_1" }),
     requireParticipant: async () => true,
     beginRoomAgentDelivery: async () => null,
+    getMessage: async () => ({ id: "msg_8", sender: "Human", text: "thread update", source: "browser", timestamp: new Date().toISOString(), routing_snapshot_version: 1, thread: { root_message_id: "msg_1", reply_count: 4 } }),
     roomMessageOverlayBatcher: {
       async prepare(input: { targets: Array<{ accountId: string; accountAgentRouting: boolean }> }) {
         overlayTargets = input.targets;
         return new Map([["acct_1", {
+          account_agent_routing: { targets: [], unresolved_mentions: [] },
           thread_read: {
             last_read_message_id: "msg_6",
             unread_count: 2,
@@ -1495,7 +1498,7 @@ test("browser streams hydrate account thread reads without requesting desktop ro
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(overlayTargets, [{ accountId: "acct_1", accountAgentRouting: false }]);
+  assert.deepEqual(overlayTargets, [{ accountId: "acct_1", accountAgentRouting: true }]);
   assert.match(res.writes.join(""), /"last_read_message_id":"msg_6"/);
   closeHandler?.();
 });
@@ -1614,8 +1617,8 @@ test("desktop streams close without advancing when account routing hydration ret
   const req = {
     params: { 0: "room_1" },
     query: {},
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
     sessionAccount: { account_id: "acct_1" },
     get() { return undefined; },
     on(event: string, handler: () => void) {
@@ -1684,8 +1687,9 @@ test("room streams forward rental activity and patch frames", async () => {
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -1769,8 +1773,9 @@ test("room streams forward artifact update invalidations", async () => {
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -1842,8 +1847,9 @@ test("room streams forward redacted GitHub event updates", async () => {
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -1940,8 +1946,9 @@ test("room stream does NOT forward internal/provider_only/renter_only rental act
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;

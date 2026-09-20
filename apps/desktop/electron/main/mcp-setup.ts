@@ -219,7 +219,7 @@ async function buildExpectedLetAgentsMcpServerConfig(): Promise<LetAgentsMcpServ
   const storedAuth = await readStoredAuth();
   return createLetAgentsMcpServerConfig({
     apiUrl,
-    authToken: storedAuth.token,
+    authToken: storedAuth.agentToken,
   });
 }
 

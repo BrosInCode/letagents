@@ -2,6 +2,16 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopApi } from "./ipc-types.js";
 
 const api: DesktopApi = {
+  conversations: {
+    list: () => ipcRenderer.invoke("desktop:conversations:list"),
+    people: query => ipcRenderer.invoke("desktop:conversations:people", query),
+    create: (ids, from) => ipcRenderer.invoke("desktop:conversations:create", ids, from),
+    messages: (id, cursor) => ipcRenderer.invoke("desktop:conversations:messages", id, cursor),
+    send: (id, text, clientId) => ipcRenderer.invoke("desktop:conversations:send", id, text, clientId),
+    update: (id, changes) => ipcRenderer.invoke("desktop:conversations:update", id, changes),
+    block: (id, blocked) => ipcRenderer.invoke("desktop:conversations:block", id, blocked),
+    changes: after => ipcRenderer.invoke("desktop:conversations:changes", after),
+  },
   ui: {
     onOpenSettings: (callback) => {
       const listener = () => callback();

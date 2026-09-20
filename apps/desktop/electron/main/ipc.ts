@@ -2,6 +2,7 @@ import electron from "electron";
 import type { IpcMain } from "electron";
 
 import { registerDesktopAppIpcHandlers } from "./ipc-handlers/app.js";
+import { registerConversationIpcHandlers } from "./ipc-handlers/conversations.js";
 import { registerDesktopAuthAndSetupIpcHandlers } from "./ipc-handlers/auth-setup.js";
 import { registerDesktopRentalDomainIpcHandlers } from "./ipc-handlers/rental.js";
 import { registerDesktopRepoIpcHandlers } from "./ipc-handlers/repos.js";
@@ -22,6 +23,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
 ): void {
   registerDesktopAuthAndSetupIpcHandlers(targetIpcMain);
+  registerConversationIpcHandlers(targetIpcMain);
   registerDesktopAppIpcHandlers(targetIpcMain);
   registerDesktopRoomIpcHandlers(targetIpcMain);
   registerDesktopRentalDomainIpcHandlers(targetIpcMain);

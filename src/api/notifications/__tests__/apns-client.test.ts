@@ -70,3 +70,13 @@ test("classifies APNs responses for idempotent retry and token retirement", () =
   assert.equal(classifyApnsResult({ status: 410, reason: "Unregistered", apnsId: null }), "disable-device");
   assert.equal(classifyApnsResult({ status: 400, reason: "PayloadEmpty", apnsId: null }), "dead");
 });
+
+test("private message alerts identify only the conversation, with a generic preview", () => {
+  const payload = buildApnsPayload({
+    notificationId: "dm-1", deviceToken: "a".repeat(64), environment: "production",
+    roomId: null, conversationId: "chat_123", roomDisplayName: "Messages",
+    messageId: "msg_9", threadRootId: null, sender: "Alice", body: "Sent you a private message",
+  });
+  assert.deepEqual(payload.letagents, { notification_id: "dm-1", conversation_id: "chat_123", message_id: "msg_9", thread_root_id: null });
+  assert.equal((payload.aps as Record<string,unknown>)["thread-id"], "chat_123");
+});

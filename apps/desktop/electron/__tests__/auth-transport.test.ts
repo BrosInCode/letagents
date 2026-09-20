@@ -3,11 +3,12 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createElectronTestEnv } from "./harness.js";
+import { createElectronTestEnv, installTestSecretStorage, testEncryptedToken } from "./harness.js";
 
 // Point the auth store at the harness temp dir BEFORE importing auth.js so the
 // module-level cache starts cold against a hermetic file (never the real
 // per-user auth store).
+installTestSecretStorage();
 const env = createElectronTestEnv({
   prefix: "letagents-auth-transport-",
   paths: [],
@@ -17,7 +18,7 @@ process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = env.tempDir;
 
 const authStorePath = join(env.tempDir, "letagents-desktop-auth.json");
 
-const { apiFetch, clearStoredAuth, pollDeviceAuthFlow } = await import(
+const { apiFetch, agentApiFetch, clearStoredAuth, pollDeviceAuthFlow } = await import(
   "../main/auth.js"
 );
 
@@ -56,12 +57,13 @@ function authHeaderOf(request: CapturedRequest): string | null {
 
 function seedAuthFile(plainToken: string | null): void {
   const persisted: Record<string, unknown> = {
+    version: 2,
     ownerTokenId: null,
     oauthTokenExpiresAt: null,
     account: null,
     pendingDeviceAuth: null,
     savedAt: new Date().toISOString(),
-    encryptedToken: plainToken === null ? null : `plain:${plainToken}`,
+    encryptedToken: plainToken === null ? null : testEncryptedToken(plainToken),
   };
   writeFileSync(authStorePath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 }
@@ -93,7 +95,7 @@ test("auth cache: warm read is reused, mutations invalidate/refresh it", async (
   recorder.restore();
   const authorizedRecorder = installFetchRecorder(() => ({
     status: "authorized",
-    letagents_token: "token-C",
+    app_session: "token-C", agent_token: "agent-C",
     owner_token_id: "owner-C",
     account: {
       id: "1",
@@ -106,19 +108,24 @@ test("auth cache: warm read is reused, mutations invalidate/refresh it", async (
   // Poll only the active request, just like the desktop device-flow entrypoint.
   const authorizedFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({
-    request_id: "req-1", user_code: "CODE", verification_uri: "https://github.com/login/device",
+    request_id: "req-1", user_code: "CODE", verification_uri: "https://letagents.chat/auth/app/authorize/test",
     expires_in: 600, interval: 5,
   });
   await startDeviceAuthFlow();
   globalThis.fetch = authorizedFetch;
   await pollDeviceAuthFlow("req-1");
   await apiFetch("/after-write");
+  const exchange = authorizedRecorder.calls.find(call => call.url.endsWith("/auth/app/exchange"))!;
+  assert.equal(authHeaderOf(exchange), null, "sign-in must work independently of an expired saved session");
   const afterWrite = authorizedRecorder.calls.at(-1)!;
   assert.equal(
     authHeaderOf(afterWrite),
     "Bearer token-C",
     "writeStoredAuth must refresh the cache with the new token",
   );
+
+  await agentApiFetch("/agent-request");
+  assert.equal(authHeaderOf(authorizedRecorder.calls.at(-1)!), "Bearer agent-C");
 
   // 4. Sign-out (clearStoredAuth) must invalidate the cache so no stale token
   //    rides along on subsequent requests.

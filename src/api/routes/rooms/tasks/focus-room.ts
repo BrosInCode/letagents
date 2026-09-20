@@ -1,3 +1,4 @@
+import { isHumanAppWrite } from "../../../request/app-session.js";
 import type { Express } from "express";
 
 import {
@@ -17,7 +18,6 @@ import {
   normalizeTaskActorLabel,
 } from "../../../tasks/ownership.js";
 import {
-  isDesktopHumanWrite,
   resolveOwnerTokenWorkerWriteIdentity,
 } from "./request-identity.js";
 import type { RoomTaskRouteDeps } from "./types.js";
@@ -46,7 +46,7 @@ export function registerTaskFocusRoomRoute(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
-    const desktopHumanWrite = isDesktopHumanWrite(req, requestBody);
+    const desktopHumanWrite = isHumanAppWrite(req, requestBody);
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,

@@ -1,3 +1,4 @@
+import { isHumanAppWrite } from "../../../request/app-session.js";
 import type { Express } from "express";
 
 import {
@@ -31,7 +32,7 @@ import {
   leaseMatchesActor,
 } from "../../../coordination-policy.js";
 import { buildAgentActorLabel } from "../../../../shared/agent-identity.js";
-import { isDesktopHumanWrite, resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
+import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import { attachTaskDetails } from "./task-details.js";
 import { getActiveWorkLease, LEASE_RECOVERY_ACTIVE_STATUSES } from "./lease-helpers.js";
 import type { RoomTaskRouteDeps } from "./types.js";
@@ -80,7 +81,7 @@ export function registerTaskLeaseActionRoute(
     }
 
     const requestBody = (req.body ?? {}) as LeaseActionRequestBody;
-    const desktopHumanWrite = isDesktopHumanWrite(req, requestBody as Record<string, unknown>);
+    const desktopHumanWrite = isHumanAppWrite(req, requestBody as Record<string, unknown>);
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,

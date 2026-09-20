@@ -253,9 +253,9 @@ export async function ensureDesktopManagedWorkerIdentity(
     }
   }
 
-  const { apiFetch, readStoredAuth } = await import("../auth.js");
+  const { agentApiFetch: apiFetch, readStoredAuth } = await import("../auth.js");
   const storedAuth = await readStoredAuth();
-  if (!storedAuth.token) {
+  if (!storedAuth.agentToken) {
     throw new Error(provider.signInErrorMessage);
   }
 
@@ -387,7 +387,7 @@ export async function registerDesktopManagedWorker(
     throw new Error(provider.missingActorKeyErrorMessage);
   }
 
-  const { apiFetch } = await import("../auth.js");
+  const { agentApiFetch: apiFetch } = await import("../auth.js");
   const cloudRoomIdentifier = registration.cloudRoomIdentifier;
   const created = await apiFetch<AgentSessionCreateResponse>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions`,
@@ -464,7 +464,7 @@ async function postDesktopManagedWorkerDeliveryHeartbeat(
       return;
     }
 
-    const { apiFetch, DesktopApiError } = await import("../auth.js");
+    const { agentApiFetch: apiFetch, DesktopApiError } = await import("../auth.js");
     if (!isCurrent()) return;
     const deliverySignalSequence = nextDesktopDeliverySignalSequence(runtime);
     const path = roomClosed
@@ -486,7 +486,7 @@ async function postDesktopManagedWorkerDeliveryHeartbeat(
     try {
       await apiFetch<Record<string, unknown>>(path, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (!isCurrent()) return;
@@ -565,7 +565,7 @@ export async function pauseDesktopManagedWorkerDelivery(
       return;
     }
 
-    const { apiFetch, DesktopApiError } = await import("../auth.js");
+    const { agentApiFetch: apiFetch, DesktopApiError } = await import("../auth.js");
     if (!isCurrent()) return;
     const deliverySignalSequence = nextDesktopDeliverySignalSequence(runtime);
     try {
@@ -573,7 +573,7 @@ export async function pauseDesktopManagedWorkerDelivery(
         `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-pause`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             agent_session_id: session.session_id,
             agent_session_token: session.session_token,
@@ -620,7 +620,7 @@ export async function disconnectDesktopManagedWorker(
     if (!isCurrent()) return;
 
     try {
-      const { apiFetch } = await import("../auth.js");
+      const { agentApiFetch: apiFetch } = await import("../auth.js");
       if (!isCurrent()) return;
       await apiFetch<Record<string, unknown>>(
         `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/disconnect`,
@@ -704,7 +704,7 @@ export async function publishDesktopManagedWorkerReply(input: {
     return;
   }
 
-  const { apiFetch } = await import("../auth.js");
+  const { agentApiFetch: apiFetch } = await import("../auth.js");
   const { cloudRoomIdentifierForStorage } = await import("../rooms/local-store.js");
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, input.roomIdentifier);
   const attachments = await stageDesktopManagedAgentReplyChangeAttachment(
@@ -720,7 +720,7 @@ export async function publishDesktopManagedWorkerReply(input: {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify({
         text,
@@ -772,7 +772,7 @@ export async function publishDesktopManagedWorkerFailure(input: {
     return;
   }
 
-  const { apiFetch } = await import("../auth.js");
+  const { agentApiFetch: apiFetch } = await import("../auth.js");
   const { cloudRoomIdentifierForStorage } = await import("../rooms/local-store.js");
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, input.session.room_identifier);
   try {
@@ -780,7 +780,7 @@ export async function publishDesktopManagedWorkerFailure(input: {
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions/${encodeURIComponent(workerSession.session_id)}/failures`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           agent_session_id: workerSession.session_id,
           agent_session_token: workerSession.session_token,

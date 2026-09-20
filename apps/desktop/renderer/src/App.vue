@@ -77,6 +77,7 @@
           :settings-entry="settingsEntry"
           :rental-request-count="rentalRequestCount"
           :needs-you-count="needsYouCount"
+          :messages-unread="messagesUnread"
           :pinned-collapsed="pinnedCollapsed"
           :rooms-collapsed="roomsCollapsed"
           :collapsed-projects="collapsedProjects"
@@ -90,6 +91,7 @@
           @new-room="selectNewRoomEntry"
           @open-rent="openRentMarketplace"
           @open-needs-you="openNeedsYou"
+          @open-messages="openMessages"
           @open-updates="openUpdatesSurface"
           @open-settings="openSettingsSurface"
           @connect-account="openAccountAuthFlow"
@@ -131,7 +133,7 @@
     ></div>
     <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
       <DesktopTopbar
-        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && !isSettingsSurface"
+        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && activeEntry.type !== 'messages' && !isSettingsSurface"
         :active-entry="activeEntry"
         :sidebar-mode="sidebarMode"
         :loading="loading"
@@ -140,6 +142,7 @@
         @refresh="refresh"
       />
 
+      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event" />
       <AuthOnboardingView
         v-if="activeEntry.type === 'room' && selectedNeedsAccess"
         :sidebar-mode="sidebarMode"
@@ -272,7 +275,7 @@
     </section>
 
     <DesktopAppAgent
-      v-if="appAgentSettingsStatus?.enabled === true"
+      v-if="appAgentSettingsStatus?.enabled === true && activeEntry.type !== 'messages'"
       :active-room-display-name="selectedRoomInfo.displayName || activeEntry.title"
       :active-room-identifier="selectedRoomIdentifier || selectedRootRoomIdentifier"
       :active-room-pinned="activeEntry.type === 'room' && activeEntry.pinned"
@@ -372,6 +375,7 @@
 </template>
 
 <script setup lang="ts">
+import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -537,6 +541,10 @@ const rentalRequestCount = ref(0);
 const inboxRentals = ref<DesktopRentalRequest[]>([]);
 const inboxRentalError = ref('');
 const inboxRooms = ref<string[]>([]);
+const messagesUnread = ref(0);
+const openConversationId = ref<string | null>(null);
+const openConversationNonce = ref(0);
+function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; openConversationNonce.value += 1; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
 const inboxSection = ref<InboxSection>('needs-you');
 const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
 const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value);
@@ -2195,6 +2203,8 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
 
 async function handleNotificationActivation(target: DesktopNotificationTarget): Promise<void> {
   try {
+    if (target.conversationId) { openMessages(target.conversationId); return; }
+    if (!target.roomIdentifier) return;
     await openRoomFromAppAgent(target.roomIdentifier);
     notificationRevealMessageId.value = target.messageId;
     notificationRevealNonce.value += 1;
