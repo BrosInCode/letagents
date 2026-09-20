@@ -460,6 +460,7 @@ export class SupervisorDaemon {
           start: (entryId, mode) => this.startSupervisedDelivery(entryId, mode ?? "refresh"),
         },
         inbox: {
+          head: (entryId) => this.supervisedInbox.head(entryId),
           cursor: (entryId) => this.supervisedInbox.cursor(entryId),
         },
         host: {
@@ -747,6 +748,7 @@ export class SupervisorDaemon {
       supervisorGrantHttp: this.supervisorGrantHttp,
       ...(providerPort ? { provider: providerPort } : {}),
       liveHandles: this.liveHandles,
+      streams: this.providerStreams,
       authority: {
         currentDaemonGeneration: () => this.singleton.currentGeneration,
         currentManifestGeneration: () => this.manifestGeneration,

@@ -2,12 +2,15 @@ import type { SupervisorGrantHttp } from "./cloud-http.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import type { ManifestStore } from "./manifest-store.js";
 import {
+  sameProviderActionConnectionSnapshot,
   type ProviderActionAttachTerminal,
   type ProviderActionHandle,
   type ProviderActionPort,
   type ProviderActionRef,
   type ProviderActionTerminal,
 } from "./provider-action-port.js";
+import { isIdleCursorConnection } from "./provider-state-policy.js";
+import type { ProviderStreamCoordinator } from "./provider-stream-coordinator.js";
 import { advanceReconciliationState, rememberCompletedControlAction } from "./reconciler-state.js";
 import type { SupervisedAgentDelivery } from "./supervised-agent-delivery.js";
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
@@ -53,6 +56,7 @@ export type RuntimeRecoveryCoordinatorOptions = {
   releaseRecoveredObservation?: (entryId: string, runtimeId: string) => void;
   processIdentity?: ProcessIdentity;
   liveHandles: Map<string, ProviderActionHandle>;
+  streams: Pick<ProviderStreamCoordinator, "currentInstallation" | "remove">;
   authority: RuntimeRecoveryAuthority;
   beginLifecycle: (entryId: string) => () => void;
   bumpControlEpoch: (entryId: string) => number;
@@ -83,6 +87,7 @@ export class RuntimeRecoveryCoordinator {
   private readonly supervisorGrantHttp: SupervisorGrantHttp;
   private readonly provider?: ProviderActionPort;
   private readonly liveHandles: Map<string, ProviderActionHandle>;
+  private readonly streams: RuntimeRecoveryCoordinatorOptions["streams"];
   private readonly authority: RuntimeRecoveryAuthority;
   private readonly beginLifecycle: RuntimeRecoveryCoordinatorOptions["beginLifecycle"];
   private readonly bumpControlEpoch: RuntimeRecoveryCoordinatorOptions["bumpControlEpoch"];
@@ -104,6 +109,7 @@ export class RuntimeRecoveryCoordinator {
     this.supervisorGrantHttp = options.supervisorGrantHttp;
     this.provider = options.provider;
     this.liveHandles = options.liveHandles;
+    this.streams = options.streams;
     this.authority = options.authority;
     this.beginLifecycle = options.beginLifecycle;
     this.bumpControlEpoch = options.bumpControlEpoch;
@@ -490,7 +496,22 @@ export class RuntimeRecoveryCoordinator {
       if (entry.desired_state === "stopped") {
         throw new Error("A stopped agent must be resumed before its runtime can be recovered.");
       }
-      if (this.liveHandles.has(entryId)) {
+      const handle = this.liveHandles.get(entryId);
+      const installation = this.streams.currentInstallation(entryId);
+      const head = entry.provider === "cursor" && entry.delivery_mode === "daemon_inbox"
+        ? await this.inbox.head(entryId)
+        : null;
+      const recoverIdleCursor = Boolean(handle
+        && installation?.handle === handle
+        && installation.executionGenerationId === entry.provider_ref?.execution_generation_id
+        && head?.room_id === entry.room_id && head.state === "blocked"
+        && handle.observedState === "idle" && handle.pid === null
+        && handle.workAttemptId === entry.work_attempt_id
+        && handle.providerContinuationId === entry.provider_ref?.provider_continuation_id
+        && isIdleCursorConnection(entry.provider_ref?.provider_connection)
+        && isIdleCursorConnection(handle.providerConnection)
+        && sameProviderActionConnectionSnapshot(entry.provider_ref?.provider_connection, handle.providerConnection));
+      if (handle && !recoverIdleCursor) {
         throw new Error("The provider runtime is still connected. Reconnect its credentials instead.");
       }
       const pendingRoomMoves = await this.store.pendingRoomMoves(entryId);
@@ -502,6 +523,7 @@ export class RuntimeRecoveryCoordinator {
       }
 
       const ref = entry.provider_ref ?? null;
+      let interruptedDelivery: Parameters<ManifestStore["replaceEntry"]>[4];
       if (ref) {
         if (!entry.work_attempt_id || ref.work_attempt_id !== entry.work_attempt_id) {
           throw new Error("The saved provider runtime no longer matches this agent’s durable work attempt.");
@@ -512,7 +534,40 @@ export class RuntimeRecoveryCoordinator {
         if (!execution) {
           throw new Error("The saved provider runtime has no matching durable execution generation.");
         }
-        if (!execution.terminal) {
+        if (head?.room_id === entry.room_id && head.state === "blocked"
+          && head.provider_turn_id && !head.outcome) {
+          const turn = await this.inbox.providerTurnBinding(head.inbox_item_id);
+          const origin = turn && attempt.execution_generations.find((candidate) =>
+            candidate.execution_generation_id === turn.origin_execution_generation_id);
+          if (!turn || turn.agent_id !== entryId || turn.room_id !== entry.room_id
+            || turn.work_attempt_id !== ref.work_attempt_id
+            || turn.provider_continuation_id !== ref.provider_continuation_id
+            || turn.provider_turn_id !== head.provider_turn_id
+            || !origin || (!origin.terminal && origin.execution_generation_id !== execution.execution_generation_id)) {
+            throw new Error("Runtime recovery cannot settle a blocked turn without its exact provider authority.");
+          }
+          interruptedDelivery = { turn,
+            detail: `Stopped the failed turn during runtime recovery. ${head.last_error ?? ""}`.trim(),
+            observedAt: new Date(this.nowMs()).toISOString() };
+        }
+        // Cursor's between-turn handle is a lane, not a connected process.
+        // A blocked FIFO proves no new turn may dispatch. Stop that exact
+        // lane before retiring its worker; never infer death from PID absence.
+        if (recoverIdleCursor) {
+          if (!this.provider) throw new Error("Provider recovery is unavailable.");
+          await this.delivery?.stop(entryId);
+          const terminal = await this.provider.stop(handle!);
+          if (terminal.providerContinuationId !== ref.provider_continuation_id) {
+            throw new Error("Provider recovery returned terminal evidence for a different continuation.");
+          }
+          if (!execution.terminal) {
+            await this.durability.recordTerminal(ref.work_attempt_id, ref.execution_generation_id,
+              terminalPayload(terminal, execution.actor, execution.generation));
+          }
+          await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
+          if (installation) this.streams.remove(installation);
+        }
+        if (!execution.terminal && !recoverIdleCursor) {
           if (!this.provider) throw new Error("Provider recovery is unavailable.");
           const attachment = await this.provider.attach(providerRef(entry));
           if (!attachment) {
@@ -560,29 +615,42 @@ export class RuntimeRecoveryCoordinator {
       this.runtimeCustody.deletePendingResumeBinding(entryId);
       this.runtimeCustody.deleteWorkerAuthorization(entryId);
 
-      entry = await this.updateEntry(entryId, (current) => ({
-        ...current,
-        desired_state: "running",
-        observed_state: "starting",
-        condition: "none",
-        last_error: null,
-        run_id: null,
-        deployment_id: null,
-        provider_ref: null,
-        last_worker_binding: null,
-        workplace_liveness: {
-          state: "unknown",
-          observed_at: new Date(this.nowMs()).toISOString(),
-          detail: "Preparing a replacement provider and exact worker binding.",
-        },
-        native_liveness: {
-          state: "unknown",
-          observed_at: new Date(this.nowMs()).toISOString(),
-          detail: "The previous provider process stopped; a replacement is starting.",
-        },
-      }), {
-        agentId: entryId,
-        detail: "Room move cancelled because its activating provider runtime ended before destination membership was joined.",
+      // Clear the runtime and settle its exact failed turn in one transaction.
+      // A crash must leave either the old continuation AND its blocked FIFO,
+      // or fresh-runtime intent AND a released FIFO, never a mix of the two.
+      entry = await this.authority.serializeManifest(async () => {
+        await this.authority.assertCurrent();
+        const current = await this.store.getEntry(entryId);
+        if (!current || current.provider_ref?.execution_generation_id !== ref?.execution_generation_id
+          || current.provider_ref?.provider_continuation_id !== ref?.provider_continuation_id) {
+          throw new Error("Runtime recovery lost the exact provider reference before replacement.");
+        }
+        const committed = await this.store.replaceEntry(this.authority.currentManifestGeneration(), {
+          ...current,
+          desired_state: "running",
+          observed_state: "starting",
+          condition: "none",
+          last_error: null,
+          run_id: null,
+          deployment_id: null,
+          provider_ref: null,
+          last_worker_binding: null,
+          workplace_liveness: {
+            state: "unknown",
+            observed_at: new Date(this.nowMs()).toISOString(),
+            detail: "Preparing a replacement provider and exact worker binding.",
+          },
+          native_liveness: {
+            state: "unknown",
+            observed_at: new Date(this.nowMs()).toISOString(),
+            detail: "The previous provider process stopped; a replacement is starting.",
+          },
+        }, this.authority.fenceCommit, {
+          agentId: entryId,
+          detail: "Room move cancelled because its activating provider runtime ended before destination membership was joined.",
+        }, interruptedDelivery);
+        this.authority.acceptManifestGeneration(committed.generation);
+        return committed.entry;
       });
       return entry;
     });
