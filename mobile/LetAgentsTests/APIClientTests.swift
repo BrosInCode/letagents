@@ -34,6 +34,27 @@ final class MockURLProtocol: URLProtocol, @unchecked Sendable {
 }
 
 final class APIClientTests: XCTestCase {
+    func testMissingResourcesExplainWhichItemIsUnavailable() async throws {
+        MockURLProtocol.handler = { _ in (404, #"{"error":"internal reference missing"}"#) }
+        let cases: [([String], String)] = [
+            (["auth", "device", "poll", "request"], "This sign-in request is no longer available. Start again for a new code."),
+            (["rooms", "room_1", "messages"], "This room is no longer available. Return to your projects and refresh the list."),
+            (["rooms", "room_1", "messages", "msg_1"], "This message is no longer available."),
+            (["rooms", "room_1", "messages", "msg_1", "thread"], "This conversation is no longer available."),
+            (["rooms", "room_1", "attachments", "uploads", "upload_1"], "This attachment is no longer available."),
+            (["account", "rooms"], "This item is no longer available. Refresh and try again.")
+        ]
+        for (path, expected) in cases {
+            do {
+                let _: [String: String] = try await MockURLProtocol.client().request(path: path)
+                XCTFail("Expected missing resource")
+            } catch let error as APIError {
+                XCTAssertEqual(error.status, 404)
+                XCTAssertEqual(error.message, expected)
+                XCTAssertEqual(error.serverMessage, "internal reference missing")
+            }
+        }
+    }
     func testRoomPathAndHumanAuthenticationContract() async throws {
         MockURLProtocol.handler = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer owner-token")

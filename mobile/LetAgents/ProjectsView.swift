@@ -198,7 +198,7 @@ struct RoomRow: View {
                 .font(.system(size: 19, weight: .medium)).foregroundStyle(Theme.accent).frame(width: 32, height: 36)
             VStack(alignment: .leading, spacing: 5) {
                 Text(title ?? room.displayName).font(.body.weight(.medium)).foregroundStyle(Theme.ink).lineLimit(2)
-                Text(subtitle ?? [room.focusStatus == "concluded" ? "Concluded" : "Active", room.sourceTaskId, room.role == "admin" ? "Admin" : nil].compactMap { $0 }.joined(separator: " · "))
+                Text(subtitle ?? [room.focusStatus == "concluded" ? "Concluded" : "Active", room.role == "admin" ? "Admin" : nil].compactMap { $0 }.joined(separator: " · "))
                     .font(.caption).foregroundStyle(Theme.muted)
             }.padding(.vertical, 7)
         }.accessibilityElement(children: .combine)

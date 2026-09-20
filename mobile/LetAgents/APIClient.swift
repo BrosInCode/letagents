@@ -53,7 +53,7 @@ struct APIClient: Sendable {
             switch response.statusCode {
             case 401: message = "Your session has expired. Sign in again to continue."
             case 403: message = detail?.status == "denied" ? "GitHub sign-in was declined. You can try again." : "You no longer have access to this room."
-            case 404: message = "This room or sign-in request is no longer available."
+            case 404: message = Self.notFoundMessage(for: path)
             case 410: message = "This sign-in code has expired. Start again for a new code."
             case 429: message = "Too many requests. Please try again in a moment."
             default: message = "LetAgents couldn’t complete the request. Please try again."
@@ -61,6 +61,23 @@ struct APIClient: Sendable {
             throw APIError(status: response.statusCode, message: message, interval: detail?.interval, serverMessage: detail?.error)
         }
         return try decoder.decode(T.self, from: data)
+    }
+
+    private static func notFoundMessage(for path: [String]) -> String {
+        if path.starts(with: ["auth", "device"]) {
+            return "This sign-in request is no longer available. Start again for a new code."
+        }
+        if path.first == "rooms" {
+            let resource = path.dropFirst(2)
+            if resource.contains("attachments") { return "This attachment is no longer available." }
+            if resource.contains("thread") { return "This conversation is no longer available." }
+            if resource.first == "messages", resource.count == 2,
+               !["poll", "threads"].contains(resource.last!) {
+                return "This message is no longer available."
+            }
+            return "This room is no longer available. Return to your projects and refresh the list."
+        }
+        return "This item is no longer available. Refresh and try again."
     }
 
     func startAuthorization() async throws -> DeviceAuthorization {
