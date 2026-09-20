@@ -1013,6 +1013,14 @@ export class WorkerAuthorityCoordinator {
       : retrying
       ? `Restoring room access (attempt ${attempts} of ${WORKER_BIND_MAX_ATTEMPTS}) failed: ${safeError}. Retrying automatically.`
       : `The provider is running, but room access could not be restored after ${WORKER_BIND_MAX_ATTEMPTS} attempts: ${safeError}. Use Reconnect to try the room handoff again.`;
+    if (!retrying) {
+      // No further convergence owns expiry cleanup. Pause room authority now
+      // so a retained bearer cannot outlive the retry budget or hide Reconnect.
+      this.options.custody.deleteWorkerAuthorization(entryId);
+      await this.options.delivery.stop(entryId).catch(() => undefined);
+      const binding = await this.options.bindings.get(entryId);
+      if (binding) await this.options.bindings.unbind(entryId, binding.agent_session_id, binding.execution_generation_id);
+    }
     await this.options.activity.transition(entryId, "recovering", "coordination_blocked", detail, "daemon-convergence");
     this.options.convergence.clear(entryId);
     if (retrying) {

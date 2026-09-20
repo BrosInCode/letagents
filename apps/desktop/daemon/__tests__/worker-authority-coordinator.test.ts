@@ -1762,5 +1762,9 @@ test("rotation recovery wakes at bearer expiry and does not retry authorization 
       new WorkerCredentialMintError(1, false, new SupervisorGrantRequestError(403, "mint")));
   }
   assert.deepEqual(rejected.scheduled, [1_000, 3_000]);
+  assert.equal(rejected.binding, null, "retry exhaustion removes authority even before bearer expiry");
+  assert.equal(rejected.credential, null);
+  assert.ok(rejected.deliveryStops > 0);
+  assert.equal(rejected.entry.desired_state, "running");
   assert.match(rejected.events.filter((event) => event.startsWith("transition:")).at(-1)!, /Use Reconnect to try/);
 });

@@ -11,6 +11,8 @@ import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 
 import { AuditLog } from "../audit-log.js";
+import { mapEntry } from "../../electron/main/supervisor-daemon.js";
+import { canReconnectRoomAgent } from "../../renderer/src/domain/room-agent-delivery.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
@@ -3617,7 +3619,7 @@ test("pause during post-install worker bind fences the exact provider before del
   }
 });
 
-for (const rotationFailures of [0, 1, 18]) test(`a live daemon rotates its bearer after ${rotationFailures} HTTP 500 responses without replacing the provider`, async () => {
+for (const [rotationFailures, rotationStatus] of [[0, 500], [1, 500], [18, 500], [3, 403]] as const) test(`a live daemon rotates its bearer after ${rotationFailures} HTTP ${rotationStatus} responses without replacing the provider`, async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -3661,7 +3663,7 @@ for (const rotationFailures of [0, 1, 18]) test(`a live daemon rotates its beare
     createWorkerSession: async () => {
       mintCalls += 1;
       if (mintCalls > 1 && mintCalls <= rotationFailures + 1) {
-        throw new SupervisorGrantRequestError(500, "worker rotation");
+        throw new SupervisorGrantRequestError(rotationStatus, "worker rotation");
       }
       return mintCalls === 1
         ? { sessionId: "rotating-session", bearer: "first-rotating-bearer", bearerId: "first-rotating-bearer-id", expiresAt: new Date(clock + 120_000).toISOString() }
@@ -3687,11 +3689,12 @@ for (const rotationFailures of [0, 1, 18]) test(`a live daemon rotates its beare
     } });
     await admitDaemonInboxForProviderTest(daemon, "host_grant_expiry_rotation", entry.room_id);
     const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
-    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+    const installedGrant = {
       entry_id: "host_grant_expiry_rotation", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-rotation",
       supervisor_grant: "rotation-grant", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
       host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
-    })).ok, true);
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", installedGrant)).ok, true);
     let firstBinding: Awaited<ReturnType<WorkerBindingStore["get"]>> = null;
     await eventually(async () => {
       firstBinding = await internals.workerBindings.get("host_grant_expiry_rotation");
@@ -3712,7 +3715,26 @@ for (const rotationFailures of [0, 1, 18]) test(`a live daemon rotates its beare
         assert.equal(blocked?.desired_state, "running");
         assert.equal(blocked?.observed_state, "recovering");
         assert.equal(blocked?.condition, "coordination_blocked");
-        assert.match(blocked?.last_error ?? "", /HTTP 500.*Retrying automatically/);
+        assert.match(blocked?.last_error ?? "", new RegExp(`HTTP ${rotationStatus}`));
+        if (rotationStatus === 403 && mintCalls === 4) {
+          assert.equal(await internals.workerBindings.get("host_grant_expiry_rotation"), null);
+          assert.equal(await internals.workerBindings.credentialFor(firstBinding), null);
+          assert.equal(internals.providerExecution.recoveryTimers.has("host_grant_expiry_rotation"), false);
+          clock += 120_000;
+          const views = (await daemonRequest(paths.socketPath, "manifest.list")).result as Parameters<typeof mapEntry>[0][];
+          const desktopEntry = mapEntry(views.find(view => view.id === "host_grant_expiry_rotation")!);
+          assert.equal(desktopEntry.desiredState, "running");
+          assert.equal(desktopEntry.roomAgentState?.inbox.state, "waiting_for_desktop_credentials");
+          assert.equal(desktopEntry.roomAgentState?.ingress.state, "stopped");
+          assert.equal(canReconnectRoomAgent(desktopEntry), true, "actual desktop projection offers credential-only recovery");
+          assert.equal(mintCalls, 4, "definitive rejection does not retry indefinitely");
+          assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+            ...installedGrant, credential_only: true,
+          })).ok, true);
+          await internals.providerExecution.drainConvergence();
+          break;
+        }
+        assert.match(blocked?.last_error ?? "", /Retrying automatically/);
         assert.equal(blocked?.reconciliation_notices?.at(-1)?.kind, "coordination_escalation");
         if (clock >= Date.parse("2026-07-21T12:02:00.000Z")) {
           assert.equal(await internals.workerBindings.get("host_grant_expiry_rotation"), null,
