@@ -1896,7 +1896,7 @@ async function openAgentDetailFromParticipant(target: AgentModalTarget): Promise
 }
 
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
-  agentInspectorInitialTab.value = request.target.workspaceSourceMessageId ? "workspace" : "overview";
+  agentInspectorInitialTab.value = request.target.workSourceMessageId ? "work" : request.target.workspaceSourceMessageId ? "workspace" : "overview";
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
   agentInspectorActionState.value = null;
@@ -1904,9 +1904,9 @@ function openAgentDetailRequest(request: AgentInspectorRequest): void {
   agentInspectorBackgroundRefresh.reset();
   agentInspectorDetailRequest.reset();
   agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
-  agentInspectorWorkSourceMessageId.value = null;
-  // A fresh agent opens on the Overview tab; drop any prior live subscription
-  // so a stale agent's feed never leaks into the new inspector.
+  agentInspectorWorkSourceMessageId.value = request.target.workSourceMessageId ?? null;
+  // Drop any prior live subscription so another agent's feed cannot leak
+  // into the requested message's inspector.
   stopAgentInspectorLive();
   resetAgentInspectorSettings();
   // Live capability copy is provider-driven and must be ready independently
@@ -1914,7 +1914,8 @@ function openAgentDetailRequest(request: AgentInspectorRequest): void {
   void loadAgentInspectorProviders();
   // Overview reads the exact current control-health projection without
   // selecting or loading a retained message from the Work tab.
-  void loadAgentInspectorWorkDetail(null, false, false);
+  if (request.target.workSourceMessageId) void loadAgentInspectorWorkDetail(request.target.workSourceMessageId, false, false);
+  else void loadAgentInspectorWorkDetail(null, false, false);
 }
 
 async function loadAgentInspectorProviders(): Promise<void> {

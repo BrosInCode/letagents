@@ -2071,6 +2071,22 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
   if (requestedSourceId === null && availability !== "not_loaded") fail();
   const recorded = availability === "available" && value.recorded_execution !== undefined
     ? recordedExecutionSchema.safeParse(value.recorded_execution) : null;
+  const preparedContext = availability === "available" && value.prepared_context != null
+    ? z.object({
+      preparedAt: z.string().datetime(), totalMessages: z.number().int().nonnegative(),
+      omittedMessages: z.number().int().nonnegative(),
+      messages: z.array(z.object({ id: z.string().max(256).nullable(), sender: z.string().max(256).nullable(),
+        text: z.string().max(2_000).nullable(), truncated: z.boolean() })).max(30),
+    }).refine(row => row.totalMessages === row.messages.length + row.omittedMessages).safeParse(value.prepared_context)
+    : null;
+  const intervention = availability === "available" && value.latest_intervention != null
+    ? z.object({
+      actionId: z.string().min(1), recordedAt: z.string().datetime(), hasCorrection: z.boolean(),
+      correctionText: z.string().max(32_768).nullable(), strategy: z.enum(["native", "stop_then_resend"]).nullable(),
+      operatorResolution: z.enum(["applied", "not_applied"]).nullable(),
+      status: z.enum(["prepared", "dispatching", "completed", "retryable", "uncertain"]),
+      interrupted: z.boolean().nullable(), resumed: z.boolean().nullable(),
+    }).safeParse(value.latest_intervention) : null;
   let runtimeControl: Detail["runtime_control"] = undefined;
   if (value.runtime_control !== undefined) {
     runtimeControl = null;
@@ -2090,6 +2106,8 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
   }
   return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary,
     ...(recorded ? { recorded_execution: recorded.success ? recorded.data : { availability: "unavailable" } } : {}),
+    prepared_context: preparedContext?.success ? preparedContext.data : null,
+    latest_intervention: intervention?.success ? intervention.data : null,
     ...(runtimeControl === undefined ? {} : { runtime_control: runtimeControl }) } as Detail;
 }
 

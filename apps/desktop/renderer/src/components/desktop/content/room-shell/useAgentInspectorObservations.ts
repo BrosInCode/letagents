@@ -60,10 +60,11 @@ export function useAgentInspectorObservations(options: {
 
   function openWork(): void {
     const projection = options.selectedProjection.value;
-    const source = projection ? defaultAgentInspectorWorkSource(projection.entry, options.workResource.value.detail) : null;
+    const selectedSource = options.workSource.value;
+    const source = selectedSource ?? (projection ? defaultAgentInspectorWorkSource(projection.entry, options.workResource.value.detail) : null);
     options.workSource.value = source;
-    // Reconcile the active source and receipt when Work or Diagnostics opens.
-    void options.loadDetail(source, true);
+    // Tab navigation refreshes the selected message without replacing its causal record.
+    void options.loadDetail(source, selectedSource === null);
   }
 
   return { refreshDiagnostics, openWork };

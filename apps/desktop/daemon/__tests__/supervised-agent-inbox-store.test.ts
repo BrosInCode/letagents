@@ -170,6 +170,40 @@ test("poll ingestion advances its cursor atomically, deduplicates replay, and re
   } finally { await env.cleanup(); }
 });
 
+test("message interventions require exact native-turn, message, room and execution authority", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database);
+  try {
+    await seedActiveAgent(env, { agentId: "stone", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation" });
+    const [item] = await store.ingestPoll({ agent_id: "stone", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "Fix auth" }, activation: {} }] });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "native-1", TEST_PROVIDER_TURN_AUTHORITY);
+    const database = new DatabaseSync(env.database);
+    try {
+      database.prepare(`UPDATE turn_control_journals SET turn_control_present=1, action_id='control-1',
+        action_sequence=1, turn_work_attempt_id='attempt', turn_execution_generation_id='generation',
+        target_room_id='room', target_source_message_id='1', target_provider_continuation_id='continuation',
+        inbox_item_id=?, provider_turn_id='native-1', has_correction=1, correction_text='Keep the API unchanged',
+        correction_strategy='native', status='uncertain', capability='native_interrupt',
+        recorded_at='2026-09-20T09:00:00.000Z', updated_at='2026-09-20T09:00:00.000Z'
+        WHERE agent_id='stone'`).run(item!.inbox_item_id);
+      assert.equal((await store.detail("stone", "room", "1")).latest_intervention?.status, "uncertain");
+      assert.equal((await store.detail("stone", "room", "1")).latest_intervention?.correctionText, "Keep the API unchanged");
+      for (const [column, original] of [
+        ["provider_turn_id", "native-1"], ["target_source_message_id", "1"], ["target_room_id", "room"],
+        ["turn_work_attempt_id", "attempt"], ["turn_execution_generation_id", "generation"],
+        ["target_provider_continuation_id", "continuation"],
+      ]) {
+        database.prepare(`UPDATE turn_control_journals SET ${column}=? WHERE agent_id='stone'`).run("different");
+        assert.equal((await store.detail("stone", "room", "1")).latest_intervention, null, column);
+        database.prepare(`UPDATE turn_control_journals SET ${column}=? WHERE agent_id='stone'`).run(original!);
+      }
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("a successful poll exposes received work and observing health in one notification", async () => {
   const env = await fixture();
   let observer: DatabaseSync | null = null;
@@ -1091,6 +1125,7 @@ test("v12 migration types only exact pre-turn historical missing-thread failures
       PRAGMA foreign_keys=OFF;
       BEGIN IMMEDIATE;
       DROP TABLE supervised_agent_provider_turn_bindings;
+      DROP TABLE supervised_agent_prepared_context;
       DROP TABLE provider_continuation_repairs;
       DROP TABLE supervised_agent_inbox_events;
       DROP TABLE supervised_agent_terminal_results;

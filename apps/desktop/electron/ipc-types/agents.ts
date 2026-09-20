@@ -828,6 +828,9 @@ export interface DesktopSupervisorContinuationRepair {
   attempt_count: number; last_error: string | null; created_at: string; updated_at: string;
 }
 export interface DesktopSupervisorAgentInspectorDetail {
+  /** Optional on older supervisors; bounded room text captured before native dispatch. */
+  prepared_context?: import("../../shared/message-outcome.js").PreparedRoomContext | null;
+  latest_intervention?: import("../../shared/message-outcome.js").MessageIntervention | null;
   availability: "available" | "pruned" | "not_loaded";
   /** Optional for older supervisors; recorded evidence, never live authority. */
   recorded_execution?: RetainedExecutionDetail;

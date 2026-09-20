@@ -71,7 +71,7 @@ test("recorded execution renders partial evidence without changing the work rece
     assert.match(html, /Start was not recorded/);
     assert.doesNotMatch(html, /spinner|Running a command/);
     assert.match(await render({ availability: "not_captured" }), /agent may still have worked on it/);
-    assert.match(await render({ availability: "unavailable" }), /result is still available above/);
+    assert.match(await render({ availability: "unavailable" }), /result is still available below/);
     assert.match(await render(), /Work details are unavailable in this version/);
     assert.match(await render({ ...execution, turns: [] }), /Detailed activity could not be confirmed/);
     const bounded = await render({ ...execution, truncated: true, turns: [execution.turns[0]!, { ...execution.turns[0]!, turnId: "omitted-operations", operations: [] }] });
@@ -158,7 +158,7 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(surface, /ArrowLeft.*ArrowRight.*Home.*End/);
   assert.match(work, /Older history has been removed/);
   assert.match(work, /work history may be unavailable/);
-  assert.match(work, /Some changes could not be confirmed/i);
+  assert.match(work, /Some other changes by this agent could not be confirmed/i);
   assert.match(work, /An update ended this work/);
   assert.match(work, /Open reply in Chat/);
 });
