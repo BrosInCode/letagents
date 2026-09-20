@@ -3,6 +3,8 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
 import { pendingRuntimeRecovery } from "./runtime-recovery-journal.js";
 import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
+import type { PreparedRoomContext, MessageIntervention } from "../shared/message-outcome.js";
+import { prepareRoomContext } from "./prepared-room-context.js";
 
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
@@ -109,6 +111,8 @@ function structuredRoomTurnCompletionResult(completion: StructuredRoomTurnComple
   };
 }
 export type AgentInspectorDetail = {
+  prepared_context?: PreparedRoomContext | null;
+  latest_intervention?: MessageIntervention | null;
   recorded_execution?: RetainedExecutionDetail;
   runtime_control: {
     runtime_generation_id?: string;
@@ -631,10 +635,34 @@ export class SupervisedAgentInboxStore {
       }
       const item = rowToItem(row);
       const events = (database.prepare("SELECT event_sequence,phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
+      const contextEvent = database.prepare("SELECT snapshot_json FROM supervised_agent_prepared_context WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
+      let preparedContext: PreparedRoomContext | null = null;
+      try { if (contextEvent) preparedContext = JSON.parse(String(contextEvent.snapshot_json)); } catch { /* Optional evidence must not hide delivery receipts. */ }
+      const control = database.prepare(`SELECT j.* FROM turn_control_journals j
+        JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=j.inbox_item_id
+        WHERE j.turn_control_present=1 AND j.agent_id=? AND j.target_room_id=?
+          AND j.target_source_message_id=? AND j.inbox_item_id=?
+          AND b.agent_id=j.agent_id AND b.room_id=j.target_room_id
+          AND b.provider_turn_id=j.provider_turn_id AND b.work_attempt_id=j.turn_work_attempt_id
+          AND b.origin_execution_generation_id=j.turn_execution_generation_id
+          AND b.provider_continuation_id=j.target_provider_continuation_id`)
+        .get(agentId, roomId, item.source_message_id, item.inbox_item_id) as Row | undefined;
+      const intervention: MessageIntervention | null = control ? {
+        actionId: String(control.action_id), recordedAt: String(control.recorded_at),
+        hasCorrection: control.has_correction === 1,
+        correctionText: typeof control.correction_text === "string" ? control.correction_text : null,
+        strategy: control.correction_strategy as MessageIntervention["strategy"],
+        operatorResolution: control.operator_resolution as MessageIntervention["operatorResolution"],
+        status: control.status as MessageIntervention["status"],
+        interrupted: control.interrupted === null ? null : control.interrupted === 1,
+        resumed: control.resumed === null ? null : control.resumed === 1,
+      } : null;
       const terminal = database.prepare("SELECT outcome,normalized_text,evidence_source,observed_at FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const publication = database.prepare("SELECT room_id,client_message_id,canonical_message_id FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const repair = database.prepare("SELECT * FROM provider_continuation_repairs WHERE inbox_item_id=? ORDER BY created_at DESC LIMIT 1").get(item.inbox_item_id) as Row | undefined;
       return { availability: "available", runtime_control: runtimeControl, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: item.inbox_item_id,
+        prepared_context: preparedContext,
+        latest_intervention: intervention,
         recorded_execution: new ExecutionShadowStore(database).retainedMessageExecution(agentId, roomId, item.source_message_id),
         source_message: safeSource(item.source_message, item.source_message_id, roomId, item.activation),
         receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, failure_code: item.failure_code, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms, terminal_reason: item.terminal_reason },
@@ -741,7 +769,7 @@ export class SupervisedAgentInboxStore {
    * fact itself is the FIFO claim's committed `dispatching` state; this is
    * intentionally not a second synthetic transition.
    */
-  async checkpointDispatchIntent(inboxItemId: string, taskOwnerSessionId?: string): Promise<SupervisedInboxItem> {
+  async checkpointDispatchIntent(inboxItemId: string, taskOwnerSessionId?: string, context?: readonly unknown[]): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
@@ -749,6 +777,11 @@ export class SupervisedAgentInboxStore {
       if (item.state !== "dispatching" || item.provider_turn_id) throw new Error("Provider dispatch intent requires an unstarted dispatching inbox item.");
       this.assertCurrentHead(database, item);
       if (!deliveryDrainAllowsAdmission(database, item)) throw new Error("Delivery drain blocks new turn dispatch.");
+      if (context) {
+        const snapshot = prepareRoomContext(context, this.now());
+        run(database.prepare(`INSERT INTO supervised_agent_prepared_context(inbox_item_id,snapshot_json) VALUES (?,?)
+          ON CONFLICT(inbox_item_id) DO UPDATE SET snapshot_json=excluded.snapshot_json`), inboxItemId, JSON.stringify(snapshot));
+      }
       run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
         JSON.stringify({ ...item.activation, task_continuity_dispatch_session_id: taskOwnerSessionId ?? null }), inboxItemId);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);

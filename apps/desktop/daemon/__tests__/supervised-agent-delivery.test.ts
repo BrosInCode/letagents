@@ -1549,7 +1549,8 @@ test("a fresh agent observes history at the tail, advances across silent message
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const dispatched: string[] = [];
     const cursors: Array<string | null> = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.();
       dispatched.push(request.sourceMessage.id as string);
       return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
     }), {
@@ -1572,6 +1573,9 @@ test("a fresh agent observes history at the tail, advances across silent message
     await delivery.poll(agent);
     assert.deepEqual(cursors, ["99"]);
     assert.deepEqual(dispatched, ["101"]);
+    const detail = await store.detail(agent.agentId, agent.roomId, "101");
+    assert.deepEqual(detail.prepared_context?.messages.map(message => message.id), ["100", "101"]);
+    assert.equal(detail.prepared_context?.messages[0]?.text, "ordinary room context");
     assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "101");
     assert.deepEqual((await store.receipts(agent.agentId)).map((item) => item.source_message_id), ["101"]);
     await delivery.fenceAndDrain();

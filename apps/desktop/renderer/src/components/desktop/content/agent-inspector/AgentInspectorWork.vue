@@ -1,120 +1,164 @@
 <template>
-  <div class="agent-inspector-work">
-    <p v-if="resource.status === 'loading' && !resource.detail" class="agent-inspector-work-note" role="status">Loading retained work…</p>
+  <div class="agent-inspector-work message-outcome" data-testid="message-outcome-inspector">
+    <div v-if="resource.status === 'loading' && !resource.detail" class="outcome-loading" aria-busy="true" role="status">
+      <span>Loading message activity…</span>
+      <div v-for="row in 4" :key="row" class="outcome-skeleton" aria-hidden="true"><i /><div><b /><b /></div></div>
+    </div>
     <section v-else-if="resource.status === 'unavailable'" class="agent-inspector-work-note">
       <strong>Work history is unavailable in this desktop session.</strong>
       <p>This supervisor does not support retained agent work detail yet. Update the desktop supervisor and try again.</p>
     </section>
     <section v-else-if="resource.status === 'error' && !resource.detail" class="agent-inspector-work-note" role="alert">
-      <strong>Couldn’t load retained work.</strong><p>{{ resource.error || 'Try again when the supervisor is reachable.' }}</p>
+      <strong>Couldn’t load message activity.</strong><p>{{ resource.error || 'Try again when the supervisor is reachable.' }}</p>
       <button type="button" @click="emit('retry')">Retry</button>
     </section>
-
     <template v-else>
-      <div v-if="resource.status === 'refreshing'" class="agent-inspector-work-refresh" role="status">Refreshing retained work…</div>
-      <section v-if="resource.status === 'error'" class="agent-inspector-work-note" role="status"><strong>Couldn’t refresh retained work.</strong><p>{{ resource.error || 'Showing the last retained work detail.' }}</p><button type="button" @click="emit('retry')">Retry</button></section>
-      <div class="agent-inspector-work-layout">
-        <nav class="agent-inspector-work-list" aria-label="Recent agent work">
-          <p class="agent-inspector-work-list-label">Recent work</p>
-          <button
-            v-for="item in detail?.items || []" :key="item.source_message_id" type="button"
-            :class="{ selected: selectedSourceMessageId === item.source_message_id }"
+      <div class="outcome-heading"><div><p class="outcome-eyebrow">Message activity</p><h3>From message to outcome</h3></div><span v-if="duration" class="outcome-duration" title="Recorded work duration"><Clock3 :size="13" aria-hidden="true" />{{ duration }}</span></div>
+      <details v-if="detail?.items.length" class="outcome-history">
+        <summary>Recent messages <span>{{ detail.items.length }}</span><ChevronDown :size="14" aria-hidden="true" /></summary>
+        <nav class="outcome-history-list" aria-label="Recent agent work">
+          <button v-for="item in detail.items" :key="item.source_message_id" type="button"
             :aria-current="selectedSourceMessageId === item.source_message_id ? 'true' : undefined"
-            @click="emit('select-source', item.source_message_id)"
-          >
-            <span class="agent-inspector-work-item-state" :data-state="item.state" aria-hidden="true"></span>
-            <span><strong>{{ humanizeAgentInspectorReceiptState(item.state, item.terminal_reason) }}</strong><small>{{ item.text_preview || 'Message content is unavailable.' }} · {{ formatRelativeTime(item.updated_at) }}</small></span>
+            @click="emit('select-source', item.source_message_id)">
+            <span class="outcome-dot" :data-tone="messageOutcomeTone(item.state)" aria-hidden="true" />
+            <span><strong>{{ item.text_preview || 'Message content is unavailable.' }}</strong><small>{{ humanizeAgentInspectorReceiptState(item.state, item.terminal_reason) }} · {{ formatRelativeTime(item.updated_at) }}</small></span>
           </button>
-          <p v-if="!detail?.items.length" class="agent-inspector-work-empty">No retained activated work is available for this agent in this room.</p>
         </nav>
-
-        <div class="agent-inspector-work-detail">
-          <section v-if="detail?.uncertain_effects.length" class="agent-inspector-work-note" role="status">
-            <strong>Some mutating tool outcomes need verification.</strong>
-            <p v-for="effect in detail.uncertain_effects" :key="effect.effect_id">{{ describeAgentInspectorUncertainEffect(effect.tool_name) }}</p>
-          </section>
-          <section v-if="detail?.availability === 'pruned'" class="agent-inspector-work-note"><strong>Older detail was removed by local retention.</strong><p>This item is outside the retained local work history.</p></section>
-          <section v-else-if="detail?.availability === 'not_loaded'" class="agent-inspector-work-note"><strong>No retained activated work for this message.</strong><p>This message was observed but did not create retained activated work, or no exact evidence is loaded.</p></section>
-          <template v-else-if="detail?.availability === 'available'">
-            <section class="agent-inspector-work-section">
-              <p class="agent-inspector-work-eyebrow">Activated by</p>
-              <strong>{{ detail.source_message?.sender || 'Room message' }}</strong>
-              <p>{{ detail.source_message?.text || 'The retained message text is unavailable.' }}</p>
-              <small>{{ formatFullTimestamp(detail.source_message?.created_at) }}<template v-if="detail.source_message?.thread_root_id"> · In a message thread</template></small>
-            </section>
-            <section class="agent-inspector-work-section">
-              <p class="agent-inspector-work-eyebrow">Receipt and outcome</p>
-              <strong>{{ detail.receipt ? humanizeAgentInspectorReceiptState(detail.receipt.state, detail.receipt.terminal_reason) : 'No receipt retained' }}</strong>
-              <p v-if="detail.terminal?.normalized_text">{{ detail.terminal.normalized_text }}</p>
-              <p v-else-if="detail.receipt?.outcome?.text">{{ detail.receipt.outcome.text }}</p>
-              <p v-else>{{ detail.receipt?.terminal_reason === 'upgrade_authority_unavailable'
-                ? 'A safety upgrade retired this legacy turn because its exact authority could not be reconstructed. The outcome is unknown, and LetAgents did not replay provider work.'
-                : detail.receipt?.failure_code === 'provider_continuation_missing'
-                ? 'The saved Codex conversation is unavailable. No model turn was started.'
-                : detail.receipt?.last_error || 'No terminal outcome is retained.' }}</p>
-            </section>
-            <section class="agent-inspector-work-section">
-              <p class="agent-inspector-work-eyebrow">Recorded execution</p>
-              <template v-if="execution?.availability === 'available'">
-                <p>Saved observations, not live status. The receipt above describes the overall work outcome.</p>
-                <p v-if="execution.evidenceIncomplete" role="status">Some execution evidence is missing or could not be verified. This is not a complete account of the work.</p>
-                <p v-if="execution.truncated" role="status">Showing a bounded selection of recorded turns and operations.</p>
-                <p v-if="!recordedTurns.length">No individual turns could be verified from the retained evidence.</p>
-                <details v-for="(turn, index) in recordedTurns" :key="turn.turnId" :open="index === 0" class="agent-inspector-work-execution">
-                  <summary>{{ humanizeRecordedTurn(turn) }} · {{ turn.operations.length }} {{ turn.operations.length === 1 ? 'operation' : 'operations' }} shown</summary>
-                  <ol v-if="turn.operations.length" class="agent-inspector-work-timeline">
-                    <li v-for="operation in turn.operations" :key="operation.executionId">
-                      <strong>{{ operation.presentation.title }}</strong>
-                      <span v-if="operation.presentation.detail">{{ operation.presentation.detail }}</span>
+      </details>
+      <p v-if="resource.status === 'refreshing'" class="outcome-refresh" role="status">Updating activity…</p>
+      <section v-if="resource.status === 'error'" class="agent-inspector-work-note" role="status"><strong>Couldn’t refresh activity.</strong><p>{{ resource.error || 'Showing the last recorded activity.' }}</p><button type="button" @click="emit('retry')">Retry</button></section>
+      <section v-if="detail?.availability === 'pruned'" class="agent-inspector-work-note"><strong>Older detail was removed by local retention.</strong><p>This message is outside the retained work history.</p></section>
+      <section v-else-if="detail?.availability === 'not_loaded'" class="agent-inspector-work-note"><strong>No recorded work for this message.</strong><p>It may have been observed without requesting a response, or its execution evidence isn’t available on this desktop.</p></section>
+      <template v-else-if="detail?.availability === 'available'">
+        <ol :key="detail.inbox_item_id ?? selectedSourceMessageId ?? 'work'" class="outcome-trajectory" aria-label="Message to outcome">
+          <li class="outcome-stage" data-tone="active">
+            <span class="outcome-marker" aria-hidden="true"><MessageSquare :size="15" /></span>
+            <div class="outcome-stage-body">
+              <div class="outcome-stage-heading"><h4>Trigger</h4><time v-if="detail.source_message?.created_at" :datetime="detail.source_message.created_at" :title="formatFullTimestamp(detail.source_message.created_at)">{{ timeLabel(detail.source_message.created_at) }}</time></div>
+              <p class="outcome-stage-description">{{ messageTriggerLabel(detail.source_message?.activation) }}</p>
+              <blockquote class="outcome-message"><strong>{{ detail.source_message?.sender || 'Room message' }}</strong><p>{{ detail.source_message?.text || 'The recorded message text is unavailable.' }}</p></blockquote>
+              <button v-if="detail.source_message?.id" type="button" class="outcome-text-button" @click="emit('reveal', detail.source_message.id)">View original message <ArrowUpRight :size="13" aria-hidden="true" /></button>
+            </div>
+          </li>
+          <li class="outcome-stage" :data-tone="detail.prepared_context ? 'active' : 'neutral'">
+            <span class="outcome-marker" aria-hidden="true"><Layers :size="15" /></span>
+            <div class="outcome-stage-body">
+              <div class="outcome-stage-heading"><h4>Room context</h4><time v-if="detail.prepared_context" :datetime="detail.prepared_context.preparedAt" :title="formatFullTimestamp(detail.prepared_context.preparedAt)">{{ timeLabel(detail.prepared_context.preparedAt) }}</time></div>
+              <template v-if="detail.prepared_context">
+                <p class="outcome-stage-description">{{ detail.prepared_context.totalMessages }} {{ detail.prepared_context.totalMessages === 1 ? 'message' : 'messages' }} selected when preparing this turn.</p>
+                <details v-if="detail.prepared_context.messages.length" class="outcome-evidence">
+                  <summary>View captured context <ChevronDown :size="14" aria-hidden="true" /></summary>
+                  <ol class="outcome-context-list">
+                    <li v-for="(message, index) in detail.prepared_context.messages" :key="index">
+                      <div><strong>{{ message.sender || 'Sender unavailable' }}</strong><code v-if="message.id">{{ message.id }}</code></div>
+                      <p>{{ message.text ?? 'Message text was not available.' }}</p><small v-if="message.truncated">Text shortened in this snapshot.</small>
                     </li>
                   </ol>
-                  <p v-else class="agent-inspector-work-empty">No individual operations are included for this turn.</p>
+                </details>
+                <p v-if="detail.prepared_context.omittedMessages" class="outcome-footnote">{{ detail.prepared_context.omittedMessages }} messages exceed the snapshot limit.</p>
+                <p class="outcome-footnote">Text captured before dispatch. Provider prompts, attachment contents, and additional provider context are not included.</p>
+              </template>
+              <p v-else class="outcome-missing">Context wasn’t captured for this work. Today’s room history cannot establish what the agent received then.</p>
+            </div>
+          </li>
+          <li class="outcome-stage" :data-tone="recordedTurns.length ? 'active' : 'neutral'">
+            <span class="outcome-marker" aria-hidden="true"><Activity :size="15" /></span>
+            <div class="outcome-stage-body">
+              <div class="outcome-stage-heading"><h4>Activity</h4><span v-if="recordedTurns.length" class="outcome-count">{{ operationCount }} operations shown</span></div>
+              <template v-if="execution?.availability === 'available'">
+                <p class="outcome-footnote">Saved observations, not live status. The delivery receipt describes the overall work outcome.</p>
+                <p v-if="execution.evidenceIncomplete" class="outcome-missing" role="status">Some execution evidence is missing or could not be verified. This is not a complete account of the work.</p>
+                <p v-if="execution.truncated" class="outcome-footnote">Showing a bounded selection of recorded turns and operations.</p>
+                <p v-if="!recordedTurns.length" class="outcome-missing">No individual turns could be verified from the retained evidence.</p>
+                <details v-for="(turn, index) in recordedTurns" :key="turn.turnId" :open="index === 0" class="outcome-evidence outcome-turn">
+                  <summary><span>{{ humanizeRecordedTurn(turn) }}<small>{{ turn.operations.length }} {{ turn.operations.length === 1 ? 'operation' : 'operations' }} shown</small></span><ChevronDown :size="14" aria-hidden="true" /></summary>
+                  <ol v-if="turn.operations.length" class="outcome-operations">
+                    <li v-for="operation in turn.operations" :key="operation.executionId" :data-failed="operation.outcome === 'failed'">
+                      <span class="outcome-dot" aria-hidden="true" /><div><strong>{{ operation.presentation.title }}</strong><p v-if="operation.presentation.detail">{{ operation.presentation.detail }}</p></div>
+                    </li>
+                  </ol>
+                  <p v-else class="outcome-missing">No individual operations are included for this turn.</p>
                 </details>
               </template>
-              <template v-else-if="execution?.availability === 'unavailable'">
-                <p>Recorded execution could not be loaded. Delivery receipts are still available above.</p>
-                <button type="button" @click="emit('retry')">Retry</button>
-              </template>
-              <p v-else-if="execution?.availability === 'not_captured'">No execution evidence was captured for this message. This does not mean the agent did no work.</p>
-              <p v-else>This supervisor does not provide recorded execution detail.</p>
-            </section>
-            <section v-if="detail.publication" class="agent-inspector-work-section">
-              <p class="agent-inspector-work-eyebrow">Published reply</p>
-              <p>{{ detail.publication.canonical_message_id ? 'A room reply was published.' : 'Publication was recorded, but no canonical room message is available.' }}</p>
-              <button v-if="detail.publication.canonical_message_id" type="button" @click="emit('reveal', detail.publication.canonical_message_id)">Open reply in Chat</button>
-            </section>
-            <section class="agent-inspector-work-section">
-              <p class="agent-inspector-work-eyebrow">Current task{{ tasks.length === 1 ? '' : 's' }}</p>
-              <p v-if="tasks.length" v-for="task in tasks" :key="task.id"><strong>{{ task.title }}</strong> · {{ task.status }}</p>
-              <p v-else>No task is currently linked to this agent.</p>
-            </section>
-            <section v-if="artifacts.length" class="agent-inspector-work-section">
-              <p class="agent-inspector-work-eyebrow">Task-linked artifacts</p>
-              <p v-for="item in artifacts" :key="item.artifact.identityKey"><strong>{{ item.title }}</strong><span v-if="item.metaLabel"> · {{ item.metaLabel }}</span></p>
-            </section>
-            <section class="agent-inspector-work-section">
-              <p class="agent-inspector-work-eyebrow">Causal timeline</p>
-              <ol class="agent-inspector-work-timeline"><li v-for="event in detail.timeline" :key="`${event.observedAt}-${event.phase}`"><strong>{{ humanizeAgentInspectorTimeline(event) }}</strong><span>{{ event.detail || formatFullTimestamp(event.observedAt) }}</span></li></ol>
-            </section>
-          </template>
-        </div>
-      </div>
+              <template v-else-if="execution?.availability === 'unavailable'"><p class="outcome-missing">Recorded execution could not be loaded. Delivery receipts are still available.</p><button type="button" class="outcome-text-button" @click="emit('retry')">Retry</button></template>
+              <p v-else-if="execution?.availability === 'not_captured'" class="outcome-missing">No execution evidence was captured for this message. This does not mean the agent did no work.</p>
+              <p v-else class="outcome-missing">This supervisor does not provide recorded execution detail.</p>
+              <details v-if="detail.timeline.length" class="outcome-evidence">
+                <summary>Delivery timeline <ChevronDown :size="14" aria-hidden="true" /></summary>
+                <ol class="outcome-delivery-events"><li v-for="event in detail.timeline" :key="event.sequence"><time :datetime="event.observedAt" :title="formatFullTimestamp(event.observedAt)">{{ timeLabel(event.observedAt) }}</time><div><strong>{{ humanizeAgentInspectorTimeline(event) }}</strong><p v-if="event.detail">{{ event.detail }}</p></div></li></ol>
+              </details>
+            </div>
+          </li>
+          <li v-if="detail.latest_intervention" class="outcome-stage" data-tone="active">
+            <span class="outcome-marker" aria-hidden="true"><CornerDownRight :size="15" /></span>
+            <div class="outcome-stage-body">
+              <div class="outcome-stage-heading"><h4>{{ detail.latest_intervention.hasCorrection ? 'Correction' : 'Stop request' }}</h4><time :datetime="detail.latest_intervention.recordedAt" :title="formatFullTimestamp(detail.latest_intervention.recordedAt)">{{ timeLabel(detail.latest_intervention.recordedAt) }}</time></div>
+              <p class="outcome-stage-description">{{ messageInterventionLabel(detail.latest_intervention) }}</p>
+              <blockquote v-if="detail.latest_intervention.correctionText" class="outcome-message"><p>{{ detail.latest_intervention.correctionText }}</p></blockquote>
+              <p v-if="detail.latest_intervention.strategy" class="outcome-footnote">{{ detail.latest_intervention.strategy === 'native' ? 'Native steering' : 'Stop and resend' }}</p>
+              <p class="outcome-footnote">Latest retained intervention for this message. Earlier interventions may no longer be available.</p>
+            </div>
+          </li>
+          <li class="outcome-stage" :data-tone="messageOutcomeTone(detail.receipt?.state)">
+            <span class="outcome-marker" aria-hidden="true"><Check v-if="messageOutcomeTone(detail.receipt?.state) === 'positive'" :size="15" /><CircleDashed v-else :size="15" /></span>
+            <div class="outcome-stage-body">
+              <div class="outcome-stage-heading"><h4>Outcome</h4></div>
+              <div class="outcome-result" :data-tone="messageOutcomeTone(detail.receipt?.state)">
+                <strong>{{ detail.receipt ? humanizeAgentInspectorReceiptState(detail.receipt.state, detail.receipt.terminal_reason) : 'No receipt retained' }}</strong>
+                <p v-if="detail.terminal?.normalized_text">{{ detail.terminal.normalized_text }}</p>
+                <p v-else-if="detail.receipt?.outcome?.text">{{ detail.receipt.outcome.text }}</p>
+                <p v-else>{{ outcomeDescription }}</p>
+                <button v-if="detail.publication?.canonical_message_id" type="button" class="outcome-text-button" @click="emit('reveal', detail.publication.canonical_message_id)">Open reply in Chat <ArrowUpRight :size="13" aria-hidden="true" /></button>
+              </div>
+              <p v-if="detail.publication && !detail.publication.canonical_message_id" class="outcome-footnote">Publication was recorded, but no canonical room message is available.</p>
+            </div>
+          </li>
+        </ol>
+        <details class="outcome-evidence outcome-identifiers"><summary>Record details <ChevronDown :size="14" aria-hidden="true" /></summary><dl><dt>Message</dt><dd>{{ detail.source_message?.id || 'Unavailable' }}</dd><dt>Provider turn</dt><dd>{{ detail.receipt?.provider_turn_id || 'No turn recorded' }}</dd><dt>Dispatch attempts</dt><dd>{{ detail.receipt?.attempt_count ?? 'Unavailable' }}</dd></dl><p v-if="!detail.latest_intervention" class="outcome-footnote">No correction or stop record is retained for this message. This is not a complete intervention history.</p></details>
+      </template>
+      <p v-else class="outcome-missing">An agent’s recorded work appears here after a message asks it to respond.</p>
+      <section v-if="detail?.uncertain_effects.length" class="agent-inspector-work-note" role="status"><strong>Other actions by this agent need verification.</strong><p v-for="effect in detail.uncertain_effects" :key="effect.effect_id">{{ describeAgentInspectorUncertainEffect(effect.tool_name) }}</p></section>
+      <details v-if="tasks.length || artifacts.length" class="outcome-evidence outcome-related">
+        <summary>Related tasks and artifacts <ChevronDown :size="14" aria-hidden="true" /></summary>
+        <p class="outcome-footnote">Linked to this agent’s current tasks. These are not verified outcomes of the selected message.</p>
+        <p v-for="task in tasks" :key="task.id"><strong>{{ task.title }}</strong> · {{ task.status }}</p>
+        <p v-for="item in artifacts" :key="item.artifact.identityKey"><strong>{{ item.title }}</strong><span v-if="item.metaLabel"> · {{ item.metaLabel }}</span></p>
+      </details>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { Activity, ArrowUpRight, Check, ChevronDown, CircleDashed, Clock3, CornerDownRight, Layers, MessageSquare } from "@lucide/vue";
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import { formatFullTimestamp, formatRelativeTime } from "../../../../domain/time";
+import { messageInterventionLabel, messageOutcomeDuration, messageOutcomeTone, messageTriggerLabel } from "../../../../domain/message-outcome";
 import { describeAgentInspectorUncertainEffect, describeRecordedOperation, humanizeRecordedTurn, humanizeAgentInspectorReceiptState, humanizeAgentInspectorTimeline, type AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
+import "./message-outcome.css";
 
 const props = defineProps<{ resource: AgentInspectorWorkResource; selectedSourceMessageId: string | null; tasks: readonly Pick<DesktopTaskSummary, 'id' | 'title' | 'status'>[]; artifacts: readonly RoomArtifactTimelineItem[] }>();
 const emit = defineEmits<{ retry: []; 'select-source': [sourceMessageId: string]; reveal: [canonicalMessageId: string] }>();
 const detail = computed(() => props.resource.detail);
 const execution = computed(() => detail.value?.recorded_execution);
+const duration = computed(() => detail.value ? messageOutcomeDuration(detail.value) : null);
 const recordedTurns = computed(() => execution.value?.availability === "available"
-  ? execution.value.turns.map((turn) => ({ ...turn, operations: turn.operations.map((row) => ({ ...row, presentation: describeRecordedOperation(row) })) }))
-  : []);
+  ? execution.value.turns.map((turn) => ({ ...turn, operations: turn.operations.map((row) => ({ ...row, presentation: describeRecordedOperation(row) })) })) : []);
+const operationCount = computed(() => recordedTurns.value.reduce((count, turn) => count + turn.operations.length, 0));
+function timeLabel(value: string): string {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Time unavailable';
+}
+const outcomeDescription = computed(() => {
+  const receipt = detail.value?.receipt;
+  if (receipt?.terminal_reason === 'upgrade_authority_unavailable') return 'A safety upgrade retired this turn because its exact authority could not be reconstructed. Its outcome is unknown; the provider work was not replayed.';
+  if (receipt?.failure_code === 'provider_continuation_missing') return 'The saved provider conversation is unavailable. No model turn was started.';
+  if (receipt?.last_error) return receipt.last_error;
+  if (receipt?.state === 'acknowledged_no_reply') return 'The agent finished without publishing a room reply.';
+  if (receipt?.state === 'pending') return 'This message is queued. No provider turn has started.';
+  if (receipt?.state === 'publishing') return 'The provider finished. Its reply is being published to the room.';
+  if (receipt?.state === 'awaiting_result' || receipt?.state === 'dispatching') return 'Work is in progress. The outcome will appear when it is recorded.';
+  return 'No final response is retained for this message.';
+});
 </script>

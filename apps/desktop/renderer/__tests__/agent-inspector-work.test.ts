@@ -157,9 +157,9 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(surface, /role="tablist"/);
   assert.match(surface, /ArrowLeft.*ArrowRight.*Home.*End/);
   assert.match(work, /Older detail was removed by local retention/);
-  assert.match(work, /did not create retained activated work/);
-  assert.match(work, /mutating tool outcomes need verification/i);
-  assert.match(work, /A safety upgrade retired this legacy turn/);
+  assert.match(work, /No recorded work for this message/);
+  assert.match(work, /Other actions by this agent need verification/i);
+  assert.match(work, /A safety upgrade retired this turn/);
   assert.match(work, /Open reply in Chat/);
 });
 
