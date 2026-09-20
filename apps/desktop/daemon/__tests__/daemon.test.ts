@@ -19,7 +19,7 @@ import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, providerStreamLifecycle, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
-import { DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type TaskWorkAttempt } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import { loadSupervisedToolRuntimeAt, type DaemonToolAgentSession } from "../supervised-tool-runtime.js";
@@ -5904,6 +5904,167 @@ test("explicit runtime recovery retires a proven-dead provider generation withou
     await env.cleanup();
   }
 });
+
+for (const cachedLane of [false, true]) {
+  test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"})`, async () => {
+    const env = await fixture();
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+      attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    };
+    const id = "recover_blocked_cursor";
+    const workspace = await provisionedWorkspace(env.root, id);
+    const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined,
+      join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
+    const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0,
+      workspacePath: workspace.path, workAttemptId: workspace.id });
+    const failedExecution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+    await durability.recordTerminal(attempt.work_attempt_id, failedExecution.execution_generation_id, {
+      ended_at: new Date().toISOString(), exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "",
+      terminal_cause: "crashed", actor: "daemon-provider", generation: 1,
+      provider_continuation_id: "cursor_crashed_continuation",
+    });
+    const execution = cachedLane
+      ? await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 2)
+      : failedExecution;
+    await durability.close();
+    const handle: ProviderActionHandle = {
+      workAttemptId: attempt.work_attempt_id, pid: null, providerContinuationId: "cursor_crashed_continuation",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+      observedState: "idle", appliedConfigurationRevision: 1,
+    };
+    const calls = { stop: 0, converge: 0 };
+    let onExit: ((terminal: Awaited<ReturnType<ProviderActionPort["stop"]>>) => void) | undefined;
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: false,
+        permissionPromptBridging: false, survivesRestart: false }),
+      spawn: async () => { throw new Error("replacement must converge after recovery returns"); },
+      resume: async () => { throw new Error("failed continuation must not be resumed"); },
+      attach: async () => { throw new Error("the exact processless lane is already installed"); },
+      attachAction: async () => ({ state: "absent" }), poke: async () => {},
+      stop: async (current) => {
+        assert.equal(current, handle);
+        calls.stop++;
+        const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+          terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
+        handle.observedState = "stopped";
+        onExit?.(terminal);
+        return terminal;
+      },
+      onExit: async (_handle, listener) => { onExit = listener; return () => { onExit = undefined; }; },
+      onStream: async () => () => {},
+    };
+    const daemon = new SupervisorDaemon(paths, "darwin", port, false);
+    try {
+      await daemon.start();
+      const internals = daemon as unknown as {
+        requestConvergence: (entryId: string) => void;
+        providerStreams: ProviderStreamCoordinator;
+        supervisedInbox: SupervisedAgentInboxStore;
+        liveHandles: Map<string, ProviderActionHandle>;
+      };
+      internals.requestConvergence = () => { calls.converge++; };
+      const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        ...entry, id, provider: "cursor", delivery_mode: "daemon_inbox", observed_state: "idle",
+        desired_state: "running", condition: "none", last_error: null,
+        workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+        provider_ref: { work_attempt_id: attempt.work_attempt_id,
+          execution_generation_id: execution.execution_generation_id,
+          provider_continuation_id: handle.providerContinuationId, provider_connection: handle.providerConnection },
+      } });
+      assert.equal(put.ok, true, put.error);
+      if (cachedLane) await internals.providerStreams.install(id, handle, execution.execution_generation_id);
+      calls.converge = 0;
+      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      const recover = () => daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", {
+        entry_id: id, daemon_generation: generation,
+      });
+      if (cachedLane) assert.match((await recover()).error!, /still connected/, "healthy idle lanes are not failed runtimes");
+      const head = await internals.supervisedInbox.enqueueInitialMessage({ agent_id: id, room_id: entry.room_id,
+        source_message_id: "failed-message", source_message: { text: "failed turn" }, activation: {} });
+      await internals.supervisedInbox.transition(head.inbox_item_id, "dispatching");
+      await internals.supervisedInbox.checkpointTurnStarted(head.inbox_item_id, "cursor-crashed-turn", {
+        work_attempt_id: attempt.work_attempt_id, origin_execution_generation_id: failedExecution.execution_generation_id,
+        provider_continuation_id: handle.providerContinuationId!,
+      });
+      await internals.supervisedInbox.transition(head.inbox_item_id, "blocked", {
+        last_error: "Cursor's live MCP connector ended before the turn became terminal.",
+      });
+      const later = await internals.supervisedInbox.enqueueInitialMessage({ agent_id: id, room_id: entry.room_id,
+        source_message_id: "later-message", source_message: { text: "later turn" }, activation: {} });
+      const before = await internals.supervisedInbox.get(head.inbox_item_id);
+      const bindingBefore = await internals.supervisedInbox.providerTurnBinding(head.inbox_item_id);
+      if (cachedLane) {
+        handle.pid = 42;
+        handle.providerConnection = { kind: "cursor_cli", pid: 42, processIdentity: "live-wrapper" };
+        assert.match((await recover()).error!, /still connected/, "a live wrapper must not be discarded");
+        handle.pid = null;
+        handle.providerConnection = { kind: "cursor_cli", pid: null, processIdentity: null };
+        handle.providerContinuationId = "another-continuation";
+        assert.match((await recover()).error!, /still connected/, "recovery must target the exact continuation");
+        handle.providerContinuationId = "cursor_crashed_continuation";
+      }
+      assert.equal(calls.stop, 0);
+      const readTurnBinding = internals.supervisedInbox.providerTurnBinding.bind(internals.supervisedInbox);
+      internals.supervisedInbox.providerTurnBinding = async () => ({
+        ...bindingBefore!, provider_continuation_id: "unrelated-continuation",
+      });
+      assert.match((await recover()).error!, /exact provider authority/);
+      assert.equal(calls.stop, 0, "unverified turn authority must fail before stopping a lane");
+      assert.deepEqual(await internals.supervisedInbox.get(head.inbox_item_id), before);
+      internals.supervisedInbox.providerTurnBinding = readTurnBinding;
+
+      if (!cachedLane) {
+        const database = new DatabaseSync(paths.manifestPath);
+        try {
+          // replaceEntry settles the inbox before replacing its runtime rows.
+          // Fail at that boundary to prove a crash cannot leave a released FIFO
+          // alongside the old continuation for startup convergence to resume.
+          database.exec(`CREATE TRIGGER reject_cursor_runtime_reset BEFORE DELETE ON agent_identities
+            WHEN OLD.agent_id='recover_blocked_cursor'
+            BEGIN SELECT RAISE(ABORT, 'injected runtime reset failure'); END`);
+          assert.match((await recover()).error!, /injected runtime reset failure/);
+          assert.deepEqual(await internals.supervisedInbox.get(head.inbox_item_id), before);
+          const saved = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])
+            .find((candidate) => candidate.id === id)!;
+          assert.equal(saved.provider_ref?.provider_continuation_id, "cursor_crashed_continuation");
+          assert.equal(calls.converge, 0);
+          database.exec("DROP TRIGGER reject_cursor_runtime_reset");
+        } finally {
+          database.close();
+        }
+      }
+
+      const result = await recover();
+      assert.equal(result.ok, true, result.error);
+      const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
+      assert.equal(recovered.provider_ref, null);
+      assert.equal(recovered.observed_state, "starting");
+      assert.equal(recovered.condition, "none");
+      assert.equal(recovered.work_attempt_id, attempt.work_attempt_id);
+      assert.equal(recovered.workspace_path, attempt.workspace_path);
+      assert.equal(internals.liveHandles.has(id), false);
+      assert.deepEqual(calls, { stop: cachedLane ? 1 : 0, converge: 1 });
+      const settled = await internals.supervisedInbox.get(head.inbox_item_id);
+      assert.equal(settled?.state, "cancelled_by_user");
+      assert.equal(settled?.provider_turn_id, before?.provider_turn_id);
+      assert.equal(settled?.attempt_count, before?.attempt_count);
+      assert.ok(settled?.last_error?.includes(before!.last_error!));
+      assert.deepEqual(await internals.supervisedInbox.providerTurnBinding(head.inbox_item_id), bindingBefore);
+      assert.equal((await internals.supervisedInbox.head(id))?.inbox_item_id, later.inbox_item_id,
+        "explicit recovery releases the FIFO without replaying the failed turn");
+      assert.equal((await internals.supervisedInbox.get(later.inbox_item_id))?.attempt_count, 0);
+      const durable = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as TaskWorkAttempt;
+      assert.equal(durable.execution_generations.length, cachedLane ? 2 : 1);
+      assert.equal(durable.execution_generations[0]?.terminal?.terminal_cause, "crashed");
+      assert.equal(durable.execution_generations.at(-1)?.terminal?.terminal_cause, cachedLane ? "stopped" : "crashed");
+    } finally {
+      await daemon.stop().catch(() => undefined);
+      await env.cleanup();
+    }
+  });
+}
 
 test("runtime recovery atomically fails a pre-join room move without losing its activating authority evidence", async () => {
   const env = await fixture();
