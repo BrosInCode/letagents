@@ -17,6 +17,17 @@ export interface MessageCreatedEvent {
   recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
+/**
+ * Routing authority appended after the message committed (deferred
+ * conversation routing). Same body as the original message; only the exact
+ * new audience is meant to learn of it.
+ */
+export interface MessageRoutedEvent {
+  projectId: string;
+  message: Message;
+  recipientAgentTargets: readonly MessageRecipientAgentTarget[];
+}
+
 export const messageEvents = createBridgedEmitter("messages");
 export const taskEvents = createBridgedEmitter("tasks");
 export const githubRoomEvents = createBridgedEmitter("github");

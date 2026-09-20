@@ -1,3 +1,4 @@
+import { JEV_MAX_CANDIDATE_AGENTS } from "../../messages/jev-conversation-routing.js";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 
@@ -29,7 +30,7 @@ import {
 } from "../../../shared/activation-routing.js";
 import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
-import { message_attachment_uploads, message_attachments, messages, room_agent_delivery_sessions, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
+import { rooms, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_delivery_sessions, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
@@ -52,6 +53,10 @@ import {
   MAX_ACCOUNT_ROUTING_TARGETS,
 } from "./account-agent-routing.js";
 import { getMessageThreadReadOverlays } from "./thread-read-overlays.js";
+import {
+  planJevRoutingMode,
+  type DeferredJevRoutingPlan,
+} from "./jev-routing-hint.js";
 import {
   getMessageThreadRoutingProjection,
   resolveMessageThreadRoutingProjection,
@@ -198,6 +203,9 @@ export async function addMessageWithCreateStatus(
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
+  // Conversation routing (Jev) never runs inside the send: the plan is
+  // captured in the transaction and executed after commit, so the human's
+  // send returns as fast as the deterministic ladder alone.
   const result = await db.transaction(async (tx): Promise<AddMessageResult> => {
     // Transitional projection repair can inspect a legacy thread on the first
     // post-watermark reply. Bound that work—and every other statement in this
@@ -406,6 +414,7 @@ export async function addMessageWithCreateStatus(
 
     let replyToMessage: {
       sender: string;
+      text: string;
       source?: string;
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
@@ -415,6 +424,7 @@ export async function addMessageWithCreateStatus(
       const [foundReply] = await tx
         .select({
           sender: messages.sender,
+          text: messages.text,
           source: messages.source,
           publisher_agent_key: messages.publisher_agent_key,
           publisher_agent_session_id: messages.publisher_agent_session_id,
@@ -425,6 +435,7 @@ export async function addMessageWithCreateStatus(
         .limit(1);
       if (foundReply) replyToMessage = {
         sender: foundReply.sender,
+        text: foundReply.text,
         source: foundReply.source ?? undefined,
         publisher_agent_key: foundReply.publisher_agent_key,
         publisher_agent_session_id: foundReply.publisher_agent_session_id,
@@ -458,10 +469,17 @@ export async function addMessageWithCreateStatus(
     // querying just those keys/sessions avoids enumerating a large room twice
     // for an ordinary one-recipient continuation.
     const routingShape = createGlobalAgentAddressResolver([])(messageForRouting);
+    // Replying to a human's message (often your own, to nudge the room) does
+    // not address any agent: it stays in the untagged fallback lane instead
+    // of the reply-target lane, which has no agent to wake.
+    const replyToIsHuman = replyToMessage !== null
+      && !replyToMessage.publisher_agent_key
+      && replyToMessage.source !== "agent";
     const humanConversationEligible = createdMessage.source === "browser"
       && Boolean(createdMessage.publisher_account_id) && !createdMessage.publisher_agent_key
       && !routingShape.broadcast && !routingShape.hasMention
-      && createdMessage.reply_to_number === null && createdMessage.thread_root_number === null;
+      && (createdMessage.reply_to_number === null || replyToIsHuman)
+      && createdMessage.thread_root_number === null;
     const candidateAgentKeys = new Set<string>();
     const candidateSessionIds = new Set<string>();
     if (replyToMessage?.publisher_agent_key && replyToMessage.publisher_account_id) {
@@ -678,7 +696,7 @@ export async function addMessageWithCreateStatus(
             number: createdMessage.number, timestamp: createdMessage.timestamp,
             publisher_account_id: createdMessage.publisher_account_id!,
           }) : null;
-      const humanFallback = humanConversationFallback({
+      const heuristicFallback = humanConversationFallback({
         source: createdMessage.source, publisherAccountId: createdMessage.publisher_account_id,
         publisherAgentKey: createdMessage.publisher_agent_key,
         explicitlyAddressed: !humanConversationEligible,
@@ -688,6 +706,37 @@ export async function addMessageWithCreateStatus(
         recentAgentKey: recentRecipient && ownerScopeByAgentKey.get(recentRecipient.agentKey) === recentRecipient.ownerAccountId
           ? recentRecipient.agentKey : null,
       });
+      // Jev only ever replaces the untagged fallback, and only in rooms of
+      // three or more agents; mentions, replies to agents, threads, and task
+      // ownership stay deterministic. Inference runs after commit: in active
+      // mode the fallback is withheld here and the deferred pass applies
+      // Jev's election (or this heuristic when Jev is unavailable); shadow
+      // mode applies the heuristic now and only compares afterwards.
+      const [routingRoom] = await tx.select({ enabled: rooms.jev_routing_enabled }).from(rooms).where(eq(rooms.id, roomId));
+      const jevMode = routingRoom?.enabled ? planJevRoutingMode() : null;
+      const jevEligible = jevMode !== null
+        && sessionsByAgentKey.size > 2
+        && sessionsByAgentKey.size <= JEV_MAX_CANDIDATE_AGENTS
+        && !taskOwnerFollowUp
+        && !createdMessageIsPromptOnly
+        && !routingShape.broadcast && !routingShape.hasMention
+        && createdMessage.thread_root_number === null
+        && (createdMessage.reply_to_number === null || replyToIsHuman)
+        && humanConversationEligible;
+      const jevDecides = jevMode === "active" && jevEligible;
+      const humanFallback = jevDecides ? null : heuristicFallback;
+      if (jevMode && jevEligible) {
+        const plan: DeferredJevRoutingPlan = {
+          mode: jevMode,
+          roomId,
+          message: {
+            number: createdMessage.number,
+            publisher_agent_key: createdMessage.publisher_agent_key ?? null,
+          },
+          heuristic: heuristicFallback,
+        };
+        await tx.insert(jev_routing_jobs).values({ room_id: roomId, message_number: createdMessage.number, plan });
+      }
 
       // Receipts are keyed by durable agent identity: several live sessions
       // (duplicates, mid-rotation overlap) may share one agent_key, but the

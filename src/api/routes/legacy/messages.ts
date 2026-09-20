@@ -1,3 +1,4 @@
+import { waitForMessageRouting } from "../rooms/messages/wait-for-routing.js";
 import type { Express, Request, Response } from "express";
 
 import {
@@ -77,6 +78,7 @@ function isAgentLikeSender(sender: unknown): boolean {
 
 export interface LegacyProjectMessageRouteDeps {
   getMessagesAfter?: typeof getMessagesAfter;
+  getMessageStreamCheckpoint?: typeof import("../../db/messages/checkpoint.js").getMessageStreamCheckpoint;
   resolveRequestProjectRepoAccessRoomName?(
     req: AuthenticatedRequest,
     project: Project,
@@ -291,13 +293,14 @@ export function registerLegacyProjectMessageRoutes(
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const activationIdentity = await resolveMessageActivationIdentity(req, projectId);
     const result = before === "latest"
-      ? await getLatestMessages(projectId, { limit, include_prompt_only: includePromptOnly })
+      ? await getLatestMessages(projectId, { limit, include_prompt_only: includePromptOnly, wait_for_routing: activationIdentity?.session_kind === "worker" })
       : before
-        ? await getMessagesBefore(projectId, before, { limit, include_prompt_only: includePromptOnly })
+        ? await getMessagesBefore(projectId, before, { limit, include_prompt_only: includePromptOnly, wait_for_routing: activationIdentity?.session_kind === "worker" })
         : await getMessages(projectId, {
           limit,
           after,
           include_prompt_only: includePromptOnly,
+          wait_for_routing: activationIdentity?.session_kind === "worker",
         });
 
     res.json({
@@ -413,8 +416,13 @@ export function registerLegacyProjectMessageRoutes(
           continue;
         }
         const event = delivery.envelope.event;
-        if (event.kind !== "message_created") continue;
+        if (event.kind !== "message_created" && event.kind !== "message_routed") continue;
         try {
+          if (liveController.activationIdentity?.session_kind === "worker" && !await waitForMessageRouting({
+            roomId: projectId, messageId: event.message.id,
+            includePromptOnly: deps.shouldIncludePromptOnlyMessages(req),
+            closed: () => streamClosed, load: deps.getMessageStreamCheckpoint,
+          })) return;
           const attached = await hydrateLiveMessageForSubscriber({
             roomId: projectId,
             message: event.message,
@@ -647,6 +655,7 @@ export function registerLegacyProjectMessageRoutes(
         limit,
         includePromptOnly,
         load: loadMessagesAfter,
+        waitForRouting: liveController.activationIdentity?.session_kind === "worker",
       });
       if (!(await liveController.check())) {
         await denyRequestAsync();
@@ -667,8 +676,9 @@ export function registerLegacyProjectMessageRoutes(
           await refreshAfterCursor();
           continue;
         }
-        if (delivery.envelope.event.kind === "message_created") {
-          await resolveCanonicalEventAsync(delivery.envelope.event.message);
+        if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
+          if (liveController.activationIdentity?.session_kind === "worker") await refreshAfterCursor();
+          else await resolveCanonicalEventAsync(delivery.envelope.event.message);
         }
       }
     }

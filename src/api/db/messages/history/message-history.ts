@@ -1,3 +1,4 @@
+import { settledRoutingCondition } from "../routing-frontier.js";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../../client.js";
@@ -42,6 +43,7 @@ type MessageHistoryOptions = {
   include_prompt_only?: boolean;
   account_id?: string | null;
   account_agent_routing?: boolean;
+  wait_for_routing?: boolean;
 };
 
 export async function getMessages(
@@ -50,7 +52,7 @@ export async function getMessages(
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
-  const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
+  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
 
   const rows = await db
     .select(messageRowSelection)
@@ -81,7 +83,7 @@ export async function getLatestMessages(
   options?: Omit<MessageHistoryOptions, "after">,
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
-  const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
+  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
 
   const rows = await db
     .select(messageRowSelection)
@@ -114,7 +116,7 @@ export async function getMessagesBefore(
   }
 
   const limit = clampLimit(options?.limit);
-  const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
+  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
 
   const rows = await db
     .select(messageRowSelection)

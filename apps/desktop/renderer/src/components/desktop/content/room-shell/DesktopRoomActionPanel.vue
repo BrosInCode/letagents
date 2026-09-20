@@ -50,6 +50,7 @@
         </form>
 
         <div class="desktop-room-property-list" aria-label="Room settings inspector">
+          <RoomConversationRouting v-if="storage.effectiveMode === 'cloud'" :room-identifier="room.identifier" />
           <div
             class="desktop-room-property-row desktop-room-storage-row"
             :data-busy="storageBusy"
@@ -230,6 +231,7 @@
 </template>
 
 <script setup lang="ts">
+import RoomConversationRouting from "./RoomConversationRouting.vue";
 import { computed, ref, watch } from "vue";
 import type {
   DesktopGitHubIntegrationStatus,

@@ -63,6 +63,11 @@ export const room_agent_sessions = pgTable(
     liveness_capability: text("liveness_capability"),
     tool_bridge_id: text("tool_bridge_id"),
     repo_branch: text("repo_branch"),
+    // Launcher-declared identity beyond the runtime: the provider model and the
+    // charter the worker was started with. Both feed conversation routing so a
+    // human can address "the Sonnet model" or "whoever owns releases".
+    model: text("model"),
+    charter: text("charter"),
     display_name: text("display_name").notNull(),
     // The server-resolved BASE label for this session, before any collision
     // suffix. Provenance for replay normalization: a decorated replay is only

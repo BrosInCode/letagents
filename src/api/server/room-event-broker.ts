@@ -22,6 +22,13 @@ export type RoomEvent =
     /** Compact owner+durable-key audience; exact generation is checked before serialization. */
     recipientAgentTargetSet: ReadonlySet<string>;
   }
+  | {
+    /** Receipts appended after commit; re-publishes the message to its new exact audience only. */
+    kind: "message_routed";
+    roomId: string;
+    message: Message;
+    recipientAgentTargetSet: ReadonlySet<string>;
+  }
   | { kind: "task_updated"; roomId: string; task: Task }
   | { kind: "github_event_updated"; roomId: string; event: GitHubRoomEvent }
   | {
@@ -39,7 +46,7 @@ export type RoomEvent =
   | { kind: "execution_delegation_invalidated"; roomId: string };
 
 export type RoomEventKind = RoomEvent["kind"];
-export const MESSAGE_CREATED_EVENT_KINDS: ReadonlySet<RoomEventKind> = new Set(["message_created"]);
+export const MESSAGE_CREATED_EVENT_KINDS: ReadonlySet<RoomEventKind> = new Set(["message_created", "message_routed"]);
 
 export interface RoomEventEnvelope {
   cursor: string;
@@ -203,6 +210,20 @@ export class RoomEventBroker {
         roomId: event.projectId,
         message: event.message,
         recipientAgentTargetSet: createRecipientAgentTargetSet(event.recipientAgentTargets ?? []),
+      };
+    });
+    this.addSource(deps.messageEvents, "message:routed", (payload) => {
+      const event = payload as {
+        projectId: string;
+        message: Message;
+        recipientAgentTargets?: readonly MessageRecipientAgentTarget[];
+      };
+      const recipientAgentTargetSet = createRecipientAgentTargetSet(event.recipientAgentTargets ?? []);
+      return {
+        kind: "message_routed",
+        roomId: event.projectId,
+        message: event.message,
+        recipientAgentTargetSet,
       };
     });
     this.addSource(deps.taskEvents, "task:updated", (payload) => {
@@ -742,7 +763,7 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 function serializedEventBytes(event: RoomEvent, overflowValue: number): number {
   try {
     let bytes = Buffer.byteLength(JSON.stringify(event));
-    if (event.kind === "message_created" && event.recipientAgentTargetSet.size > 0) {
+    if ((event.kind === "message_created" || event.kind === "message_routed") && event.recipientAgentTargetSet.size > 0) {
       // JSON.stringify(Set) emits `{}` and would make the broker's byte limits
       // blind to the largest retained object in a prompt event. Count the
       // UTF-16 backing store plus a conservative Set-entry allocation for each

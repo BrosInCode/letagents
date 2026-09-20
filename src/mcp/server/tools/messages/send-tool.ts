@@ -147,7 +147,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       publisher_agent_key: agentSession?.agent_key ?? null,
       publisher_agent_session_id: agentSession?.session_id ?? null,
     });
-    touchCurrentRoom(message.id);
+    touchCurrentRoom();
     return jsonToolResponse({
       ...message,
       agent_identity: toPublicAgentIdentity(identity),
@@ -170,7 +170,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       })),
     },
   });
-  touchCurrentRoom(typeof (message as { id?: string }).id === "string" ? (message as { id: string }).id : undefined);
+  touchCurrentRoom();
   await syncRoomPresence(
     targetRoomId ?? currentRoom?.room_id ?? null,
     identity,
