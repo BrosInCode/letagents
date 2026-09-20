@@ -29,11 +29,11 @@
       </SettingsRow>
 
       <SettingsRow
-        title="Planner model"
-        description="The model interprets intent and selects typed App Agent actions. Side effects still run through the app registry."
+        title="Assistant model"
+        description="Choose the model that helps you use LetAgents."
       >
         <label class="settings-field">
-          <span>Model slug</span>
+          <span>Model name</span>
           <input
             v-model="appAgentModelDraft"
             type="text"
@@ -64,7 +64,7 @@
 
       <SettingsRow
         title="Settings file"
-        description="The key is encrypted before it is written when Electron secure storage is available."
+        description="Your API key is encrypted when secure storage is available on this device."
       >
         <code>{{ appAgentSettings?.settingsPath || "Settings path unavailable" }}</code>
         <template #action>
@@ -126,7 +126,7 @@
         </article>
 
         <article v-if="!sortedAppAgentActions.length" class="surface-row single-line">
-          <p class="surface-title">No App Agent actions are registered.</p>
+          <p class="surface-title">No assistant actions are available yet.</p>
         </article>
       </div>
     </div>
@@ -199,7 +199,7 @@ const appAgentStatusDescription = computed(() => {
   if (props.appAgentSettings?.configured) {
     return `Ready to control the app with ${props.appAgentSettings.model}.`;
   }
-  return "Add a tool-capable planner model before running app actions.";
+  return "Add a model that supports tools so the assistant can take actions for you.";
 });
 
 const sortedAppAgentActions = computed(() =>

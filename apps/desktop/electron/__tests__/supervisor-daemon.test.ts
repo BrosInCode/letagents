@@ -1436,6 +1436,29 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
   assert.equal(mapped.recorded_execution, undefined, "older supervisors remain compatible");
   assert.equal(mapped.runtime_control, undefined, "older supervisors may omit control health");
+  assert.equal(mapped.prepared_context, null, "older supervisors have no captured room context");
+  const intervention = { actionId: "control-1", recordedAt: "2026-01-01T00:01:00.000Z",
+    hasCorrection: true, correctionText: "Keep the API unchanged", strategy: "native",
+    operatorResolution: null, status: "uncertain", interrupted: null, resumed: null };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, latest_intervention: intervention }, input).latest_intervention, intervention);
+  assert.equal(mapAgentInspectorDetail({ ...wire, latest_intervention: { ...intervention, status: "applied" } }, input).latest_intervention, null);
+  assert.equal(mapAgentInspectorDetail({ ...wire, availability: "pruned", inbox_item_id: null, source_message: null,
+    receipt: null, terminal: null, publication: null, timeline: [], latest_intervention: intervention }, input).latest_intervention, null);
+  const context = { preparedAt: "2026-01-01T00:00:00.000Z", totalMessages: 1, omittedMessages: 0,
+    messages: [{ id: "msg-0", sender: "Ada", text: "Keep the API unchanged", truncated: false }] };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, prepared_context: context }, input).prepared_context, context);
+  for (const invalid of [
+    { ...context, preparedAt: "invalid" }, { ...context, totalMessages: 2 }, { ...context, omittedMessages: -1 },
+    { ...context, totalMessages: 31, messages: Array(31).fill(context.messages[0]) },
+    { ...context, messages: [{ ...context.messages[0], text: "a".repeat(2_001) }] },
+    { ...context, messages: [{ ...context.messages[0], truncated: "false" }] },
+  ]) {
+    const result = mapAgentInspectorDetail({ ...wire, prepared_context: invalid }, input);
+    assert.equal(result.prepared_context, null);
+    assert.deepEqual(result.receipt, mapped.receipt, "malformed optional context cannot hide receipts");
+  }
+  assert.equal(mapAgentInspectorDetail({ ...wire, availability: "pruned", inbox_item_id: null, source_message: null,
+    receipt: null, terminal: null, publication: null, timeline: [], prepared_context: context }, input).prepared_context, null);
   const runtimeControl = { control_state: "degraded", runtime_state: "ready", observed_at: "2026-01-01T00:00:03.000Z",
     execution_generation_id: "generation-1", daemon_generation_id: "4" };
   assert.deepEqual(mapAgentInspectorDetail({ ...wire, runtime_control: runtimeControl }, input).runtime_control, runtimeControl);
@@ -1629,7 +1652,7 @@ test("runtime recovery sends exact daemon authority and returns the durable repl
       execution_generation_id: "execution_1",
     },
     workplace_liveness: { state: "unknown", observed_at: null, detail: null },
-    native_liveness: { state: "terminal", observed_at: null, detail: "Provider stopped." },
+    native_liveness: { state: "terminal", observed_at: null, detail: "Agent app stopped." },
     activity: [],
   });
   try {

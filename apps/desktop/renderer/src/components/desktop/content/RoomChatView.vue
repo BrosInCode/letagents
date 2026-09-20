@@ -205,8 +205,10 @@
       :room-identifier="roomIdentifier ?? ''"
       :message-id="messageInfoTargetId ?? ''"
       :invoker-context="messageInfoInvokerContext"
+      :supervisor-entries="roomSupervisorEntries"
       @close="messageInfoTargetId = null"
       @scroll-to-message="revealMessageFromInfo"
+      @inspect-agent="emit('open-agent-detail', $event)"
     />
   </section>
 </template>

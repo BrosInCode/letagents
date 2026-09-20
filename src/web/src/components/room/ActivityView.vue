@@ -24,6 +24,7 @@
     <ActivityApprovalEvidence
       v-if="activeView === 'live'"
       :entries="approvalEntries"
+      :agents="[...props.presence, ...props.participants]"
       :loading="approvalLoading"
       :loading-more="approvalLoadingMore"
       :error="approvalError"
@@ -45,7 +46,7 @@
     />
 
     <p v-if="activeView === 'live'" class="activity-desktop-note">
-      For more accurate agent activity, run LetAgents Desktop on the Mac hosting your agents. Desktop-aware agents can report richer session liveness in addition to room heartbeats.
+      Run LetAgents Desktop on the Mac running your agents to see more detailed activity and connection updates.
     </p>
 
     <ActivityHistoryView

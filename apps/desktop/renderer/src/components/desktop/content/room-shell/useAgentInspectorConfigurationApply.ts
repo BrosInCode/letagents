@@ -67,17 +67,17 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
           entryId: operation.entryId,
           kind: "apply_settings",
           status: "success",
-          message: "The saved configuration is already active.",
+          message: "The agent is already using your saved settings.",
         };
         return;
       }
       const message = result.outcome === "restarting"
-        ? "Restart started. Reload after the agent is ready to confirm the saved revision."
+        ? "Restart started. Reload when the agent is ready to check that your settings were applied."
         : result.outcome === "busy_active_turn"
-          ? "This agent is working. Apply the saved revision after its current turn finishes."
+          ? "This agent is working. Wait for it to finish, then restart it to apply your settings."
           : result.outcome === "unsupported"
-            ? "This agent cannot apply saved configuration in place."
-            : "The saved configuration or runtime changed. Reload Settings, then try again.";
+            ? "This agent cannot restart to apply settings from here."
+            : "The agent or its settings changed. Reload Settings, then try again.";
       options.actionState.value = {
         operationId: operation.operationId,
         entryId: operation.entryId,
@@ -97,7 +97,7 @@ export function useAgentInspectorConfigurationApply<Operation extends Configurat
         entryId: operation.entryId,
         kind: "apply_settings",
         status: "error",
-        message: error instanceof Error ? error.message : "The saved configuration could not be applied.",
+        message: error instanceof Error ? error.message : "Could not apply your saved settings.",
       };
     }
   }

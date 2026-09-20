@@ -2,7 +2,7 @@
   <section class="review-authority" :data-state="reviewState.state">
     <div class="review-authority__header">
       <div>
-        <span class="review-authority__kicker">Board review authority</span>
+        <span class="review-authority__kicker">Task review</span>
         <h5>{{ reviewState.label }}</h5>
       </div>
       <AppBadge :variant="badgeVariant" size="sm" dot>
@@ -12,8 +12,8 @@
 
     <div class="review-authority__grid">
       <div class="review-authority__tile">
-        <span>Work holder</span>
-        <strong>{{ workLease ? formatActorName(workLease.actor_label) : 'No active work lease' }}</strong>
+        <span>Working agent</span>
+        <strong>{{ workLease ? formatActorName(workLease.actor_label) : 'None' }}</strong>
       </div>
       <div class="review-authority__tile">
         <span>Reviewer</span>
@@ -31,7 +31,7 @@
         :data-invalid="reviewLeaseMatchesWork(lease)"
       >
         <span>{{ formatActorName(lease.actor_label) }}</span>
-        <small>{{ lease.agent_session_id ? lease.agent_session_id.slice(-6) : lease.id.slice(-6) }}</small>
+
         <button
           v-if="canManageReviewLeases"
           type="button"
@@ -70,7 +70,7 @@
     </div>
 
     <p v-else-if="canManageReviewLeases && shouldShowReviewLane" class="review-authority__note">
-      No reachable worker sessions are available for review assignment.
+      No agents are connected and available to review.
     </p>
   </section>
 </template>

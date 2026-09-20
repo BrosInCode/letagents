@@ -10,6 +10,7 @@ import { WebSocketServer } from "ws";
 
 import { HostApprovalBroker } from "../host-approval-broker.js";
 import { DaemonAuthority } from "../daemon-authority.js";
+import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import type { RecordedApprovalDecision } from "../execution-approval-native-application.js";
 import { ManifestStore } from "../manifest-store.js";
@@ -225,7 +226,7 @@ test("v41 approval history upgrades without inventing a closure or changing a de
     try {
       assert.equal((await upgraded.getExecutionApproval(selected.expected))!.request.closedAtMs, null);
       assert.deepEqual(f.db.prepare("SELECT * FROM execution_approval_decisions").all(), before);
-      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, 42);
+      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     } finally { await upgraded.close(); }
     f.db.exec("DROP TABLE execution_approval_request_closures");
     const damaged = new ManifestStore(f.path);

@@ -229,7 +229,7 @@ export function settleAgentInspectorRetirementEvent(
     ...state,
     status: event.status === "completed" ? "success" : "error",
     message: event.status === "completed"
-      ? "Agent retired. Its worktree is retained."
+      ? "Agent retired. Its project files and history are kept."
       : event.error || "Agent retirement could not be completed.",
   };
 }
@@ -242,7 +242,7 @@ export function settleAgentInspectorRetirementCompletion(
   if (!state || state.kind !== "retire_agent" || state.status !== "running"
     || state.operationId !== input.operationId || state.entryId !== input.entryId
     || state.daemonGeneration !== input.daemonGeneration) return state;
-  return { ...state, status: "success", message: "Agent retired. Its worktree is retained." };
+  return { ...state, status: "success", message: "Agent retired. Its project files and history are kept." };
 }
 
 /** Prevents an in-flight action for one agent from disabling or messaging another inspector. */

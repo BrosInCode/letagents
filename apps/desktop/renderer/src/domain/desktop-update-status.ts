@@ -163,7 +163,7 @@ export function desktopUpdatePresentation(status: DesktopUpdateStatus | null): D
     case "installing":
       return {
         title: "Preparing a safe restart",
-        detail: "Pausing supervisor dispatch and handing off running agent sessions.",
+        detail: "Preparing to restart LetAgents while keeping your agents running.",
         tone: "warning",
       };
     case "error":

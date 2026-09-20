@@ -1,8 +1,9 @@
 <template>
   <div class="rent-detail-summary">
     <div>
-      <p class="rent-detail-label">Session ID</p>
-      <code>{{ session.id }}</code>
+      <p class="rent-detail-label">Task</p>
+      <span>{{ session.taskTitle || "Rented agent" }}</span>
+      <details><summary>Support reference</summary><code>{{ session.id }}</code></details>
     </div>
     <div>
       <p class="rent-detail-label">Status</p>
