@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import type { Express } from "express";
+import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
 
 import {
   consumeAuthState,
@@ -440,8 +441,9 @@ export function registerAuthLogoutRoute(
     if (cookies.letagents_session) {
       await deps.deleteSessionByToken(cookies.letagents_session);
     }
-    if (req.authKind === "session" && req.headers.authorization?.startsWith("Bearer ")) {
-      await deps.deleteSessionByToken(req.headers.authorization.slice(7).trim());
+    const authorization = parseBearerAuthorization(req.headers.authorization);
+    if (req.authKind === "session" && authorization.kind === "token") {
+      await deps.deleteSessionByToken(authorization.token);
     }
     if (req.authKind === "owner_token" && req.sessionAccount && "token_id" in req.sessionAccount) {
       await deps.deleteOwnerTokenById(req.sessionAccount.token_id);

@@ -1,5 +1,6 @@
 import type { Response } from "express";
 import type { AuthenticatedRequest } from "../http/helpers.js";
+import { parseBearerAuthorization } from "./bearer-authorization.js";
 
 /** Human authority comes from a session issued by an interactive sign-in. */
 export function isAppSession(req: AuthenticatedRequest): boolean {
@@ -31,7 +32,7 @@ export function requireAppSession(
   // Cookie-authenticated writes must come from our own UI. Native bearer
   // sessions do not use ambient cookies and are not subject to CSRF.
   if (
-    !/^Bearer\s+\S/.test(req.headers.authorization || "") &&
+    parseBearerAuthorization(req.headers.authorization).kind !== "token" &&
     !["GET", "HEAD"].includes(req.method)
   ) {
     const origin = req.headers.origin;
