@@ -30,11 +30,14 @@ export function getWorkerCandidateKey(candidate: RoomAgentPresence): string {
   ].join(':')
 }
 
-export function formatWorkerCandidate(candidate: RoomAgentPresence): string {
+export function formatWorkerCandidate(candidate: RoomAgentPresence, peers: readonly RoomAgentPresence[] = []): string {
   const owner = candidate.owner_label ? ` · ${candidate.owner_label}` : ''
   const runtime = candidate.runtime && candidate.runtime !== 'unknown' ? ` · ${candidate.runtime}` : ''
-  const session = candidate.agent_session_id ? ` · ${candidate.agent_session_id.slice(-6)}` : ''
-  return `${candidate.display_name}${owner}${runtime}${session}`
+  const label = `${candidate.display_name}${owner}${runtime}`
+  const matches = peers.filter(peer => formatWorkerCandidate(peer) === label)
+    .sort((left, right) => getWorkerCandidateKey(left).localeCompare(getWorkerCandidateKey(right)))
+  const index = matches.findIndex(peer => getWorkerCandidateKey(peer) === getWorkerCandidateKey(candidate))
+  return matches.length > 1 && index >= 0 ? `${label} · Connection ${index + 1}` : label
 }
 
 export function presenceMatchesLeaseSession(

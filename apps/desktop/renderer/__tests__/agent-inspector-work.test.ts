@@ -60,9 +60,9 @@ test("recorded execution renders partial evidence without changing the work rece
     }));
     const html = await render(execution);
     assert.match(html, /Reply published/);
-    assert.match(html, /Saved observations, not live status/);
-    assert.match(html, /not a complete account/);
-    assert.match(html, /bounded selection/);
+    assert.match(html, /Saved activity for this request/);
+    assert.match(html, /history may be incomplete/);
+    assert.match(html, /part of the saved activity/);
     assert.match(html, /<details[^>]*open/);
     assert.match(html, /Provider turn completed/);
     assert.match(html, /Command · Failed/);
@@ -70,10 +70,10 @@ test("recorded execution renders partial evidence without changing the work rece
     assert.match(html, /Command · No finish recorded/);
     assert.match(html, /Start was not recorded/);
     assert.doesNotMatch(html, /spinner|Running a command/);
-    assert.match(await render({ availability: "not_captured" }), /does not mean the agent did no work/);
-    assert.match(await render({ availability: "unavailable" }), /Delivery receipts are still available/);
-    assert.match(await render(), /supervisor does not provide recorded execution/);
-    assert.match(await render({ ...execution, turns: [] }), /No individual turns could be verified/);
+    assert.match(await render({ availability: "not_captured" }), /agent may still have worked on it/);
+    assert.match(await render({ availability: "unavailable" }), /result is still available below/);
+    assert.match(await render(), /Work details are unavailable in this version/);
+    assert.match(await render({ ...execution, turns: [] }), /Detailed activity could not be confirmed/);
     const bounded = await render({ ...execution, truncated: true, turns: [execution.turns[0]!, { ...execution.turns[0]!, turnId: "omitted-operations", operations: [] }] });
     assert.match(bounded, /0 operations shown/);
     assert.match(bounded, /No individual operations are included/);
@@ -115,18 +115,18 @@ test("work labels present human language instead of raw causal enums", () => {
     execution_generation_id: "generation", daemon_generation_id: "4",
   }), {
     state: "degraded",
-    label: "Provider check inconclusive",
-    detail: "LetAgents could not confirm the provider’s control connection. The agent may still be working; it has not been failed or restarted.",
+    label: "Status uncertain",
+    detail: "The agent app did not respond to the check. It may still be working and has not been restarted.",
     observedAt: "now",
   });
   assert.match(describeAgentInspectorRuntimeControl({
     control_state: "unprobeable", runtime_state: "ready", observed_at: null,
     execution_generation_id: "generation", daemon_generation_id: "4",
-  })?.detail ?? "", /Silence is not treated as failure/);
+  })?.detail ?? "", /It may still be working/);
   assert.match(describeAgentInspectorRuntimeControl({
     control_state: "responsive", runtime_state: "exited", observed_at: "now",
     execution_generation_id: "generation", daemon_generation_id: "4",
-  })?.detail ?? "", /will not infer that unfinished work completed/);
+  })?.detail ?? "", /Unfinished work has not been marked complete/);
   const fenced = { control_state: "responsive", runtime_state: "ready", observed_at: "now",
     execution_generation_id: "generation", daemon_generation_id: "4", runtime_generation_id: "birth" } as const;
   assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 4, "birth"), true);
@@ -156,10 +156,10 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(shell, /activeTab\.value = "chat"[\s\S]{0,120}revealRoomMessage\(canonicalMessageId\)/);
   assert.match(surface, /role="tablist"/);
   assert.match(surface, /ArrowLeft.*ArrowRight.*Home.*End/);
-  assert.match(work, /Older detail was removed by local retention/);
-  assert.match(work, /No recorded work for this message/);
-  assert.match(work, /Other actions by this agent need verification/i);
-  assert.match(work, /A safety upgrade retired this turn/);
+  assert.match(work, /Older history has been removed/);
+  assert.match(work, /work history may be unavailable/);
+  assert.match(work, /Some other changes by this agent could not be confirmed/i);
+  assert.match(work, /An update ended this work/);
   assert.match(work, /Open reply in Chat/);
 });
 

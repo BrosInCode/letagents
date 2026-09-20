@@ -45,7 +45,7 @@ export function readableManagerRuntime(
   if (runtimeSource === "desktop_managed") return "Desktop managed";
   if (runtimeSource === "external") return "External";
   if (runtimeSource === "unknown") return "Unknown";
-  return "Worker";
+  return "Agent";
 }
 
 export function readableManagerMode(mode: DesktopBoardManagerMode): string {
@@ -170,7 +170,7 @@ export function readableIntentBody(intent: DesktopBoardIntentSummary): string {
     const target = payloadText(intent, "target_actor_key");
     if (action === "handoff") return target ? `Hand off ${taskId} to ${target}` : `Hand off ${taskId}`;
     if (action === "release") return `Release work on ${taskId}`;
-    return `Change work lease for ${taskId}`;
+    return `Change work assignment for ${taskId}`;
   }
   return "Review the requested board change.";
 }

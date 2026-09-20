@@ -36,16 +36,16 @@ export function executionAuthorityState(task: DesktopTaskSummary): AuthorityPane
     if (owner && task.assigneeAgentKey && lease.agentKey && normalizeActor(task.assigneeAgentKey) !== normalizeActor(lease.agentKey)) {
       return {
         state: "mismatch",
-        label: "Different worker is active",
+        label: "Different agent is working",
         badge: "Check owner",
-        detail: `Assigned to ${owner}, but ${holder || "another worker"} is currently allowed to work on it. Release the worker if this is stale.`,
+        detail: `Assigned to ${owner}, but ${holder || "another agent"} is currently allowed to work on it. Check whether the agent is still working before changing the assignment.`,
       };
     }
     return {
       state: "held",
       label: "Work in progress",
       badge: "Active",
-      detail: `${holder || "A worker"} can update this task right now.`,
+      detail: `${holder || "An agent"} can update this task right now.`,
     };
   }
   return {
@@ -53,8 +53,8 @@ export function executionAuthorityState(task: DesktopTaskSummary): AuthorityPane
     label: "No one is working on this now",
     badge: "Unclaimed",
     detail: task.assignee
-      ? "The task has an owner, but no active worker is attached right now."
-      : "No worker owns this task yet.",
+      ? "The task has an owner, but no agent is currently assigned to do the work."
+      : "No agent is working on this task yet.",
   };
 }
 
@@ -77,9 +77,9 @@ export function reviewPanelState(task: DesktopTaskSummary): ReviewPanelState {
   if (conflicts.length) {
     return {
       state: "conflict",
-      label: "Reviewer is also the worker",
+      label: "Reviewer is also doing the work",
       badge: "Conflict",
-      detail: "The reviewer also appears to be the active worker. Assign someone else before treating this as reviewed.",
+      detail: "The reviewer also appears to be the working agent. Assign someone else before treating this as reviewed.",
     };
   }
   if (reviews.length) {

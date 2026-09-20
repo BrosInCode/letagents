@@ -101,7 +101,7 @@ test("local Git Rooms disable Cloud and explain how to unlock it", async () => {
 
   assert.match(html, /No Git provider is attached to this room/);
   assert.match(html, /Add an origin remote, then reopen the repository to use Cloud/);
-  assert.match(html, /This local Git Room needs a provider-backed remote before it can use cloud storage/);
+  assert.match(html, /Connect this project to a repository hosted online before sharing its room/);
   assert.match(
     html,
     /<button type="button" data-testid="desktop-room-storage-cloud" data-active="false" disabled>/,

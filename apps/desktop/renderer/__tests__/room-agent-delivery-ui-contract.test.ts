@@ -223,10 +223,10 @@ describe("durable room delivery UI contracts", () => {
       source("src/components/desktop/content/RoomActivityTabView.vue"),
       source("src/components/desktop/content/DesktopRoomShell.vue"),
     ]);
-    assert.match(activity, /Retained structural outcomes — not live status\./);
+    assert.match(activity, /Results saved from earlier work\./);
     assert.match(activity, /data-testid="desktop-recorded-room-work"/);
     assert.match(activity, /recordedWorkEvidenceIncomplete\(work\)/);
-    assert.match(activity, /Public structural history was cleared by its owner\./);
+    assert.match(activity, /The owner cleared this shared work history\./);
     assert.match(activity, /emit\('reveal-message', work\.sourceMessageId\)/);
     for (const [field, label] of [
       ["unresolved", "unresolved"],

@@ -15,7 +15,7 @@
 
     <template v-if="control.status === 'uncertain'">
       <p class="agent-inspector-turn-control-guidance">
-        Use the recorded outcome—not a guess. Confirming “not applied” unlocks a new request; it never replays the old one.
+        Check what the agent actually did before choosing. “Not applied” lets you make a new request; it does not repeat the previous one.
       </p>
       <div class="agent-inspector-turn-control-actions">
         <button type="button" :disabled="busy || !control.canResolve" @click="emitResolution('applied')">Mark as applied</button>
@@ -24,12 +24,12 @@
     </template>
 
     <template v-else-if="control.status === 'in_progress'">
-      <p class="agent-inspector-turn-control-guidance">Waiting for the durable control record to settle.</p>
+      <p class="agent-inspector-turn-control-guidance">Waiting for the agent to confirm the change.</p>
     </template>
 
     <template v-else-if="control.status === 'retryable'">
       <p class="agent-inspector-turn-control-guidance">
-        This retries the recorded {{ control.retryHasCorrection ? "correction" : "stop" }} with the same action identity.
+        Retry the previous {{ control.retryHasCorrection ? "correction" : "stop" }} request.
       </p>
       <div class="agent-inspector-turn-control-actions">
         <button type="button" class="primary" :disabled="busy || !control.canRetry" @click="emit('retry')">Retry previous change</button>
@@ -38,14 +38,14 @@
 
     <template v-else>
       <label class="agent-inspector-field" :for="fieldId">
-        Correction for this session
+        What should the agent change?
         <textarea
           :id="fieldId"
           v-model="draft"
           rows="3"
           maxlength="32768"
           :disabled="busy || !control.canCorrect"
-          placeholder="Tell the agent what to change. It will continue on this same session."
+          placeholder="The agent will continue this conversation with your correction."
         />
       </label>
       <div class="agent-inspector-turn-control-actions">

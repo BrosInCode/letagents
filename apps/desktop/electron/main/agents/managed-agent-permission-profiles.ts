@@ -8,10 +8,10 @@ const CLAUDE_CODE_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "read_only",
     label: "Read-only",
-    description: "Allows Read, Glob, and Grep while keeping daemon-mediated LetAgents room tools available.",
+    description: "Can read and search files, and use LetAgents room tools.",
     status: "available",
     risk: "low",
-    detail: "Write, edit, and shell tools are unavailable, and ambient Claude settings are disabled.",
+    detail: "Cannot change files or run commands. Other Claude settings do not apply.",
     isDefault: true,
   },
   {
@@ -20,25 +20,25 @@ const CLAUDE_CODE_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Allows read tools and asks in the room or desktop UI before write, edit, or shell tools.",
     status: "gated",
     risk: "medium",
-    detail: "Claude supervised prompt bridging is not available yet.",
+    detail: "Approval requests are unavailable in this connection mode.",
     isDefault: false,
   },
   {
     id: "full_access",
     label: "Full access",
-    description: "Auto-allows non-blocked Claude Code tools with broad local access on this host.",
+    description: "Can change files and run commands on this Mac without asking.",
     status: "available",
     risk: "high",
-    detail: "LetAgents room, rental, and provisioning tools stay blocked.",
+    detail: "Cannot use LetAgents tools to manage rooms, rentals, or access.",
     isDefault: false,
   },
   {
     id: "sandboxed_write",
     label: "Sandboxed writes",
-    description: "Claude Code does not expose a separate LetAgents-managed sandbox profile here.",
+    description: "Restricted file editing is unavailable for Claude Code here.",
     status: "unsupported",
     risk: "medium",
-    detail: "Use read-only or full access for Claude Code managed sessions.",
+    detail: "Choose Read-only to prevent changes, or Full access to allow them.",
     isDefault: false,
   },
 ];
@@ -47,37 +47,37 @@ const CODEX_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "full_access",
     label: "Full access",
-    description: "Runs Codex with the current app-server launch policy for trusted local work.",
+    description: "Can change files and run commands on this Mac without asking.",
     status: "available",
     risk: "high",
-    detail: "Maps to approvalPolicy=never and sandboxPolicy=dangerFullAccess.",
+    detail: "Commands can access files outside the project. Use only for work you trust.",
     isDefault: true,
   },
   {
     id: "ask_before_write",
     label: "Ask before writes",
-    description: "Desktop-mediated Codex approvals are not wired for managed agents yet.",
+    description: "Approval requests are unavailable for Codex in this connection mode.",
     status: "gated",
     risk: "medium",
-    detail: "Requires Codex app-server approval bridging before it can be enabled.",
+    detail: "Choose another available access level.",
     isDefault: false,
   },
   {
     id: "sandboxed_write",
     label: "Sandboxed writes",
-    description: "Codex managed sandbox presets need app-server contract tests before exposure.",
+    description: "Restricted file editing is unavailable for Codex here.",
     status: "gated",
     risk: "medium",
-    detail: "The current managed Codex launch uses full access.",
+    detail: "Full access allows file changes and commands without asking.",
     isDefault: false,
   },
   {
     id: "read_only",
     label: "Read-only",
-    description: "A read-only Codex managed profile is not currently wired.",
+    description: "Read-only access is unavailable for Codex here.",
     status: "gated",
     risk: "low",
-    detail: "Requires a Codex app-server read-only launch path.",
+    detail: "Choose another available access level.",
     isDefault: false,
   },
 ];
@@ -86,7 +86,7 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "read_only",
     label: "Read-only",
-    description: "Runs Cursor Agent in ask mode for desktop-delivered room events.",
+    description: "Can answer room messages and inspect files without editing them.",
     status: "available",
     risk: "low",
     detail: "Runs Cursor in ask mode without workspace edits.",
@@ -107,7 +107,7 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Runs Cursor with writes enabled inside Cursor's sandbox.",
     status: "available",
     risk: "medium",
-    detail: "Maps to cursor-agent --force --sandbox enabled. Cursor's sandbox applies to Cursor operations; selected MCP tools may have their own side effects.",
+    detail: "Cursor restricts its own file and command access. Connected tools can still make changes outside those restrictions.",
     isDefault: false,
   },
   {
@@ -116,7 +116,7 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Runs Cursor with broad write and shell access for trusted local work.",
     status: "available",
     risk: "high",
-    detail: "Maps to cursor-agent --force --sandbox disabled. Use only for trusted repositories and trusted MCP configurations.",
+    detail: "Can change files and run commands outside the project without asking. Use only with projects and connected tools you trust.",
     isDefault: false,
   },
 ];
@@ -125,37 +125,37 @@ const OPEN_MODEL_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "full_access",
     label: "Full access",
-    description: "Runs OpenCode with broad write and shell access against your configured model endpoint.",
+    description: "Can change files and run commands using your chosen model.",
     status: "available",
     risk: "high",
-    detail: "Maps to OpenCode permission=* allow. Open models vary in tool-call reliability; use only with trusted repos.",
+    detail: "Runs without asking and can access files outside the project. Model reliability varies; use only for work you trust.",
     isDefault: true,
   },
   {
     id: "ask_before_write",
     label: "Ask before writes",
-    description: "Desktop-mediated approvals are not wired for OpenCode agents yet.",
+    description: "Approval requests are unavailable for OpenCode in this connection mode.",
     status: "gated",
     risk: "medium",
-    detail: "Requires an OpenCode permission bridge before it can be enabled.",
+    detail: "Choose another available access level.",
     isDefault: false,
   },
   {
     id: "sandboxed_write",
     label: "Sandboxed writes",
-    description: "OpenCode sandbox presets are not verified for supervised agents yet.",
+    description: "Restricted file editing is unavailable for OpenCode here.",
     status: "gated",
     risk: "medium",
-    detail: "The current managed launch uses full access.",
+    detail: "Full access allows file changes and commands without asking.",
     isDefault: false,
   },
   {
     id: "read_only",
     label: "Read-only",
-    description: "A read-only OpenCode profile is not currently wired.",
+    description: "Read-only access is unavailable for OpenCode here.",
     status: "gated",
     risk: "low",
-    detail: "Requires a verified OpenCode read-only execution boundary.",
+    detail: "Choose another available access level.",
     isDefault: false,
   },
 ];
@@ -212,7 +212,7 @@ export function assertManagedAgentPermissionProfileAvailable(
   if (launchMode === "supervised" && providerId === "claude-code" && profile.id === "ask_before_write") {
     return { ...profile, status: "available",
       description: "Requires approval before Claude can change files or run write-capable commands.",
-      detail: "Uses native one-time tool approvals with ambient settings disabled; daemon-mediated room tools remain available." };
+      detail: "Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available." };
   }
   if (
     launchMode === "supervised"
@@ -227,8 +227,8 @@ export function assertManagedAgentPermissionProfileAvailable(
         ? "Requires approval before OpenCode can run shell commands or change files."
         : "Requires approval before Codex can run write-capable commands or apply file changes.",
       detail: openModel
-        ? "Maps to OpenCode bash=ask and edit=ask; read and daemon-mediated room tools remain available."
-        : "Maps to approvalPolicy=on-request and a read-only, network-disabled sandbox.",
+        ? "Can read files and use LetAgents room tools without asking. Commands and file changes need approval."
+        : "Starts with read-only file access and no network access. Requests approval when it needs more access.",
     };
   }
   if (profile.status !== "available") {

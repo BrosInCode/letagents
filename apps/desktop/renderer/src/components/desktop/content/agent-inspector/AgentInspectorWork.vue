@@ -6,10 +6,10 @@
     </div>
     <section v-else-if="resource.status === 'unavailable'" class="agent-inspector-work-note">
       <strong>Work history is unavailable in this desktop session.</strong>
-      <p>This supervisor does not support retained agent work detail yet. Update the desktop supervisor and try again.</p>
+      <p>Update LetAgents to view this agent’s work history.</p>
     </section>
     <section v-else-if="resource.status === 'error' && !resource.detail" class="agent-inspector-work-note" role="alert">
-      <strong>Couldn’t load message activity.</strong><p>{{ resource.error || 'Try again when the supervisor is reachable.' }}</p>
+      <strong>Couldn’t load message activity.</strong><p>{{ resource.error || 'Check the connection and try again.' }}</p>
       <button type="button" @click="emit('retry')">Retry</button>
     </section>
     <template v-else>
@@ -27,8 +27,8 @@
       </details>
       <p v-if="resource.status === 'refreshing'" class="outcome-refresh" role="status">Updating activity…</p>
       <section v-if="resource.status === 'error'" class="agent-inspector-work-note" role="status"><strong>Couldn’t refresh activity.</strong><p>{{ resource.error || 'Showing the last recorded activity.' }}</p><button type="button" @click="emit('retry')">Retry</button></section>
-      <section v-if="detail?.availability === 'pruned'" class="agent-inspector-work-note"><strong>Older detail was removed by local retention.</strong><p>This message is outside the retained work history.</p></section>
-      <section v-else-if="detail?.availability === 'not_loaded'" class="agent-inspector-work-note"><strong>No recorded work for this message.</strong><p>It may have been observed without requesting a response, or its execution evidence isn’t available on this desktop.</p></section>
+      <section v-if="detail?.availability === 'pruned'" class="agent-inspector-work-note"><strong>Older history has been removed.</strong><p>This message is no longer in the saved work history.</p></section>
+      <section v-else-if="detail?.availability === 'not_loaded'" class="agent-inspector-work-note"><strong>No work history is available for this message.</strong><p>The agent may not have acted on this message, or its work history may be unavailable.</p></section>
       <template v-else-if="detail?.availability === 'available'">
         <ol :key="detail.inbox_item_id ?? selectedSourceMessageId ?? 'work'" class="outcome-trajectory" aria-label="Message to outcome">
           <li class="outcome-stage" data-tone="active">
@@ -36,7 +36,7 @@
             <div class="outcome-stage-body">
               <div class="outcome-stage-heading"><h4>Trigger</h4><time v-if="detail.source_message?.created_at" :datetime="detail.source_message.created_at" :title="formatFullTimestamp(detail.source_message.created_at)">{{ timeLabel(detail.source_message.created_at) }}</time></div>
               <p class="outcome-stage-description">{{ messageTriggerLabel(detail.source_message?.activation) }}</p>
-              <blockquote class="outcome-message"><strong>{{ detail.source_message?.sender || 'Room message' }}</strong><p>{{ detail.source_message?.text || 'The recorded message text is unavailable.' }}</p></blockquote>
+              <blockquote class="outcome-message"><strong>{{ detail.source_message?.sender || 'Room message' }}</strong><p>{{ detail.source_message?.text || 'The original message is unavailable.' }}</p></blockquote>
               <button v-if="originalMessageId" type="button" class="outcome-text-button" @click="emit('reveal', originalMessageId)">View original message <ArrowUpRight :size="13" aria-hidden="true" /></button>
             </div>
           </li>
@@ -66,10 +66,10 @@
             <div class="outcome-stage-body">
               <div class="outcome-stage-heading"><h4>Activity</h4><span v-if="recordedTurns.length" class="outcome-count">{{ operationCount }} operations shown</span></div>
               <template v-if="execution?.availability === 'available'">
-                <p class="outcome-footnote">Saved observations, not live status. The delivery receipt describes the overall work outcome.</p>
-                <p v-if="execution.evidenceIncomplete" class="outcome-missing" role="status">Some execution evidence is missing or could not be verified. This is not a complete account of the work.</p>
-                <p v-if="execution.truncated" class="outcome-footnote">Showing a bounded selection of recorded turns and operations.</p>
-                <p v-if="!recordedTurns.length" class="outcome-missing">No individual turns could be verified from the retained evidence.</p>
+                <p class="outcome-footnote">Saved activity for this request. See the result below for its outcome.</p>
+                <p v-if="execution.evidenceIncomplete" class="outcome-missing" role="status">Some activity is missing or could not be confirmed. This history may be incomplete.</p>
+                <p v-if="execution.truncated" class="outcome-footnote">Showing part of the saved activity.</p>
+                <p v-if="!recordedTurns.length" class="outcome-missing">Detailed activity could not be confirmed.</p>
                 <details v-for="(turn, index) in recordedTurns" :key="turn.turnId" :open="index === 0" class="outcome-evidence outcome-turn">
                   <summary><span>{{ humanizeRecordedTurn(turn) }}<small>{{ turn.operations.length }} {{ turn.operations.length === 1 ? 'operation' : 'operations' }} shown</small></span><ChevronDown :size="14" aria-hidden="true" /></summary>
                   <ol v-if="turn.operations.length" class="outcome-operations">
@@ -80,9 +80,9 @@
                   <p v-else class="outcome-missing">No individual operations are included for this turn.</p>
                 </details>
               </template>
-              <template v-else-if="execution?.availability === 'unavailable'"><p class="outcome-missing">Recorded execution could not be loaded. Delivery receipts are still available.</p><button type="button" class="outcome-text-button" @click="emit('retry')">Retry</button></template>
-              <p v-else-if="execution?.availability === 'not_captured'" class="outcome-missing">No execution evidence was captured for this message. This does not mean the agent did no work.</p>
-              <p v-else class="outcome-missing">This supervisor does not provide recorded execution detail.</p>
+              <template v-else-if="execution?.availability === 'unavailable'"><p class="outcome-missing">Work details could not be loaded. The result is still available below.</p><button type="button" class="outcome-text-button" @click="emit('retry')">Retry</button></template>
+              <p v-else-if="execution?.availability === 'not_captured'" class="outcome-missing">No activity was saved for this message. The agent may still have worked on it.</p>
+              <p v-else class="outcome-missing">Work details are unavailable in this version of LetAgents.</p>
               <details v-if="detail.timeline.length" class="outcome-evidence">
                 <summary>Delivery timeline <ChevronDown :size="14" aria-hidden="true" /></summary>
                 <ol class="outcome-delivery-events"><li v-for="event in detail.timeline" :key="event.sequence"><time :datetime="event.observedAt" :title="formatFullTimestamp(event.observedAt)">{{ timeLabel(event.observedAt) }}</time><div><strong>{{ humanizeAgentInspectorTimeline(event) }}</strong><p v-if="event.detail">{{ event.detail }}</p></div></li></ol>
@@ -104,20 +104,20 @@
             <div class="outcome-stage-body">
               <div class="outcome-stage-heading"><h4>Outcome</h4></div>
               <div class="outcome-result" :data-tone="messageOutcomeTone(detail.receipt?.state)">
-                <strong>{{ detail.receipt ? humanizeAgentInspectorReceiptState(detail.receipt.state, detail.receipt.terminal_reason) : 'No receipt retained' }}</strong>
+                <strong>{{ detail.receipt ? humanizeAgentInspectorReceiptState(detail.receipt.state, detail.receipt.terminal_reason) : 'No result saved' }}</strong>
                 <p v-if="detail.terminal?.normalized_text">{{ detail.terminal.normalized_text }}</p>
                 <p v-else-if="detail.receipt?.outcome?.text">{{ detail.receipt.outcome.text }}</p>
                 <p v-else>{{ outcomeDescription }}</p>
                 <button v-if="detail.publication?.canonical_message_id" type="button" class="outcome-text-button" @click="emit('reveal', detail.publication.canonical_message_id)">Open reply in Chat <ArrowUpRight :size="13" aria-hidden="true" /></button>
               </div>
-              <p v-if="detail.publication && !detail.publication.canonical_message_id" class="outcome-footnote">Publication was recorded, but no canonical room message is available.</p>
+              <p v-if="detail.publication && !detail.publication.canonical_message_id" class="outcome-footnote">The reply was recorded, but its room message is unavailable.</p>
             </div>
           </li>
         </ol>
         <details class="outcome-evidence outcome-identifiers"><summary>Record details <ChevronDown :size="14" aria-hidden="true" /></summary><dl><dt>Message</dt><dd>{{ detail.source_message?.id || 'Unavailable' }}</dd><dt>Provider turn</dt><dd>{{ detail.receipt?.provider_turn_id || 'No turn recorded' }}</dd><dt>Dispatch attempts</dt><dd>{{ detail.receipt?.attempt_count ?? 'Unavailable' }}</dd></dl><p v-if="!detail.latest_intervention" class="outcome-footnote">No correction or stop record is retained for this message. This is not a complete intervention history.</p></details>
       </template>
       <p v-else class="outcome-missing">An agent’s recorded work appears here after a message asks it to respond.</p>
-      <section v-if="detail?.uncertain_effects.length" class="agent-inspector-work-note" role="status"><strong>Other actions by this agent need verification.</strong><p v-for="effect in detail.uncertain_effects" :key="effect.effect_id">{{ describeAgentInspectorUncertainEffect(effect.tool_name) }}</p></section>
+      <section v-if="detail?.uncertain_effects.length" class="agent-inspector-work-note" role="status"><strong>Some other changes by this agent could not be confirmed. Review them before trying again.</strong><p v-for="effect in detail.uncertain_effects" :key="effect.effect_id">{{ describeAgentInspectorUncertainEffect(effect.tool_name) }}</p></section>
       <details v-if="tasks.length || artifacts.length" class="outcome-evidence outcome-related">
         <summary>Related tasks and artifacts <ChevronDown :size="14" aria-hidden="true" /></summary>
         <p class="outcome-footnote">Linked to this agent’s current tasks. These are not verified outcomes of the selected message.</p>
@@ -166,13 +166,13 @@ function timeLabel(value: string): string {
 }
 const outcomeDescription = computed(() => {
   const receipt = detail.value?.receipt;
-  if (receipt?.terminal_reason === 'upgrade_authority_unavailable') return 'A safety upgrade retired this turn because its exact authority could not be reconstructed. Its outcome is unknown; the provider work was not replayed.';
-  if (receipt?.failure_code === 'provider_continuation_missing') return 'The saved provider conversation is unavailable. No model turn was started.';
+  if (receipt?.terminal_reason === 'upgrade_authority_unavailable') return 'An update ended this work because LetAgents could not safely reconnect to it. The result is unknown. The work was not repeated.';
+  if (receipt?.failure_code === 'provider_continuation_missing') return 'The saved agent conversation is unavailable. The agent did not start this request.';
   if (receipt?.last_error) return receipt.last_error;
   if (receipt?.state === 'acknowledged_no_reply') return 'The agent finished without publishing a room reply.';
   if (receipt?.state === 'pending') return 'This message is queued. No provider turn has started.';
   if (receipt?.state === 'publishing') return 'The provider finished. Its reply is being published to the room.';
   if (receipt?.state === 'awaiting_result' || receipt?.state === 'dispatching') return 'Work is in progress. The outcome will appear when it is recorded.';
-  return 'No final response is retained for this message.';
+  return 'No final result is available for this message.';
 });
 </script>

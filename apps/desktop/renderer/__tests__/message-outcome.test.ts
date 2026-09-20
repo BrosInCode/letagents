@@ -79,6 +79,6 @@ test("trajectory renders captured text safely and distinguishes missing, queued 
     assert.match(captured, /Reply published/);
     assert.match(await render({}, { status: "loading", detail: null }), /aria-busy="true"/);
     assert.match(await render({}, { status: "error", detail: null, error: "Service unavailable" }), /Service unavailable/);
-    assert.match(await render({ availability: "pruned" }), /Older detail was removed/);
+    assert.match(await render({ availability: "pruned" }), /Older history has been removed/);
   } finally { await vite.close(); }
 });

@@ -48,7 +48,7 @@
               <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(agent.displayName) }}</span>
               <span>
                 <strong>{{ agent.displayName }}</strong>
-                <small v-if="agent.resourceFreshness === 'stale'">Waiting for fresh supervisor state.</small>
+                <small v-if="agent.resourceFreshness === 'stale'">Reconnecting to this agent…</small>
                 <small v-else-if="agent.overallDetail">{{ agent.overallDetail }}</small>
               </span>
               <span class="desktop-activity-row-meta">
@@ -138,7 +138,7 @@
             <div>
               <h3>Recorded work</h3>
               <p>
-                Retained structural outcomes — not live status.
+                Results saved from earlier work.
                 <template v-if="roomAgentWorkTruncated"> Showing the latest 50 records.</template>
               </p>
             </div>
@@ -156,9 +156,9 @@
             type="button"
             @click="emit('reveal-message', work.sourceMessageId)"
           >
-            <span class="desktop-activity-avatar" data-state="recorded">{{ initials(work.agentKey) }}</span>
+            <span class="desktop-activity-avatar" data-state="recorded">{{ initials(recordedAgentName(work.agentKey)) }}</span>
             <span>
-              <strong>{{ work.agentKey }}</strong>
+              <strong>{{ recordedAgentName(work.agentKey) }}</strong>
               <small>{{ recordedWorkDetail(work) }}</small>
             </span>
             <span class="desktop-activity-row-meta">
@@ -167,16 +167,16 @@
                 v-if="recordedWorkEvidenceIncomplete(work)"
                 class="desktop-activity-mini-pill"
               >
-                Incomplete evidence
+                Some details missing
               </span>
               <small>{{ formatRelativeTime(work.updatedAt) }}</small>
             </span>
           </button>
 
           <article v-if="!roomAgentWork.length" class="desktop-activity-empty">
-            <template v-if="roomAgentWorkStatus === 'loading'">Loading retained room work…</template>
-            <template v-else-if="roomAgentWorkStatus === 'error'">Retained room work is temporarily unavailable.</template>
-            <template v-else>No retained agent work has been published to this room yet.</template>
+            <template v-if="roomAgentWorkStatus === 'loading'">Loading work history…</template>
+            <template v-else-if="roomAgentWorkStatus === 'error'">Work history is temporarily unavailable.</template>
+            <template v-else>No work results have been shared in this room yet.</template>
           </article>
         </section>
 
@@ -241,7 +241,7 @@
             </li>
           </ol>
           <article v-else class="desktop-activity-empty">
-            No artifacts are linked to this task yet.
+            No changes or pull requests are linked to this task yet.
           </article>
         </section>
 
@@ -332,7 +332,7 @@
             </a>
             <span v-else>{{ taskStatusLabel(task.status) }}</span>
           </article>
-          <p v-if="!selectedHistoryEntry.currentTasks.length" class="desktop-activity-muted">No open tasks linked in this room history scope.</p>
+          <p v-if="!selectedHistoryEntry.currentTasks.length" class="desktop-activity-muted">No open tasks found in this room or its related rooms.</p>
         </section>
 
         <section class="desktop-activity-detail-section">
@@ -416,6 +416,13 @@ const emit = defineEmits<{
   "reveal-message": [messageId: string];
   "clear-artifact-task-filter": [];
 }>();
+
+function recordedAgentName(agentKey: string): string {
+  return props.supervisorEntries.find(entry => entry.agentKey === agentKey)?.displayName
+    || props.presence.find(entry => entry.agentKey === agentKey)?.displayName
+    || props.participants.find(entry => entry.agentKey === agentKey)?.displayName
+    || "Agent";
+}
 
 const expandedChangeArtifacts = ref<Set<string>>(new Set());
 // Globally-unique, collision-safe DOM ids: an SSR-stable per-instance base
@@ -516,7 +523,7 @@ const inspectorTruthfulGroups = computed(() => {
     { key: "starting", label: "Starting", description: "Preparing the provider and room observation path.", agents: [] as AgentInspectorProjection[] },
     { key: "paused", label: "Paused", description: "Room work is held until the agent resumes.", agents: [] as AgentInspectorProjection[] },
     { key: "disconnected", label: "Disconnected", description: "The provider is not currently reachable.", agents: [] as AgentInspectorProjection[] },
-    { key: "status_unavailable", label: "Status unavailable", description: "Waiting for fresh supervisor state.", agents: [] as AgentInspectorProjection[] },
+    { key: "status_unavailable", label: "Status unavailable", description: "Reconnecting to this agent…", agents: [] as AgentInspectorProjection[] },
   ];
   for (const agent of inspectorTruthfulAgents.value) {
     const groupState = agentInspectorActivityGroupState(agent);
@@ -585,7 +592,7 @@ function recordedWorkStateLabel(work: DesktopRoomAgentWork): string {
 }
 
 function recordedWorkDetail(work: DesktopRoomAgentWork): string {
-  if ("availability" in work.summary) return "Public structural history was cleared by its owner.";
+  if ("availability" in work.summary) return "The owner cleared this shared work history.";
   const counts = work.summary.operation_counts;
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
   const parts = [`${total} recorded ${total === 1 ? "operation" : "operations"}`];
