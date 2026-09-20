@@ -344,6 +344,26 @@ test("inbox projection preserves cutover, repair, credential, blocked, and queue
   assert.equal(queued.room_agent_state?.inbox.state, "queued");
 });
 
+test("an idle Cursor replacement cannot hide a failed FIFO head", () => {
+  const cursorEntry = { ...entry, provider: "cursor", observed_state: "idle" as const, last_error: null };
+  const failed = receipt({ state: "blocked", receipt_state: "blocked", attempt_count: 1,
+    provider_turn_id: "crashed-turn", last_error: "Cursor's live MCP connector ended before the turn became terminal." });
+  const later = receipt({ inbox_item_id: "inbox_2", source_message_id: "message_2", fifo_sequence: 2 });
+  const projected = projectRoomAgentManifestEntry(facts({ entry: cursorEntry, receipts: [failed, later], activeTurn: null }));
+  assert.equal(projected.condition, "coordination_blocked");
+  assert.equal(projected.last_error, failed.last_error);
+  assert.equal(projected.room_agent_state?.inbox.state, "blocked");
+  assert.equal(projected.room_agent_state?.turn.state, "failed");
+  assert.equal(later.attempt_count, 0, "projection never replays or skips delivery");
+
+  const recovered = projectRoomAgentManifestEntry(facts({ entry: cursorEntry,
+    receipts: [{ ...failed, state: "cancelled_by_user", receipt_state: "cancelled_by_user" }, later], activeTurn: null }));
+  assert.equal(recovered.condition, "none", "Skip clears the derived error immediately");
+  assert.equal(recovered.last_error, null);
+  assert.equal(projectRoomAgentManifestEntry(facts({ entry: { ...cursorEntry, condition: "quarantined" },
+    receipts: [failed], activeTurn: null })).condition, "quarantined");
+});
+
 test("exact stopped ingress authority clears its observed timestamp", () => {
   const projected = projectRoomAgentManifestEntry(facts({
     ingressHealth: {

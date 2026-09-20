@@ -460,6 +460,7 @@ export class SupervisorDaemon {
           start: (entryId, mode) => this.startSupervisedDelivery(entryId, mode ?? "refresh"),
         },
         inbox: {
+          head: (entryId) => this.supervisedInbox.head(entryId),
           cursor: (entryId) => this.supervisedInbox.cursor(entryId),
         },
         host: {
@@ -733,7 +734,7 @@ export class SupervisorDaemon {
       requestConvergence: (entryId) => this.requestConvergence(entryId),
     });
     this.runtimeRecovery = new RuntimeRecoveryCoordinator({
-      releaseRecoveredObservation: (entryId, runtimeId) => this.executionCapture?.releaseRecoveredRuntime(entryId, runtimeId),
+      releaseRecoveredObservation: (entryId, runtimeId, stoppedCursorGeneration) => this.executionCapture?.releaseRecoveredRuntime(entryId, runtimeId, stoppedCursorGeneration),
       streams: this.providerStreams,
       terminals: this.providerTerminals,
       restartDelivery: (entryId) => this.restartSupervisedDeliveryOrConverge(entryId),

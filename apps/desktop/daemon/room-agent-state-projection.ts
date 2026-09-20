@@ -225,6 +225,16 @@ export function projectRoomAgentManifestEntry(
 
   return {
     ...entry,
+    // A replacement Cursor lane can be idle without a native process while
+    // its predecessor's failed turn still blocks every later room delivery.
+    // Project the durable blockage on the agent too; handle presence cannot
+    // clear it, and Retry/Skip must remove it without another lifecycle tick.
+    ...(entry.provider === "cursor" && entry.delivery_mode === "daemon_inbox"
+      && entry.desired_state === "running" && entry.condition === "none"
+      && head?.room_id === entry.room_id && head.state === "blocked"
+      ? { condition: "coordination_blocked" as const,
+          last_error: head.last_error ?? "An earlier room delivery needs attention." }
+      : {}),
     workplace_liveness: deriveLiveness(
       workplaceLiveness,
       ["reachable"],

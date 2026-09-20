@@ -169,9 +169,11 @@ export function canReconnectRoomAgent(
 /** Explicit recovery restarts the same durable agent entry, never a reconnect fallback. */
 export function canRecoverSavedRoomAgent(
   agent: Pick<DesktopSupervisorManifestEntry,
-    "deliveryMode" | "desiredState" | "observedState" | "condition"
+    "provider" | "providerPid" | "deliveryMode" | "desiredState" | "observedState" | "condition"
     | "nativeLiveness" | "roomAgentState" | "executionGenerationId" | "providerContinuationId">,
 ): boolean {
+  const blockedIdleCursor = agent.provider === "cursor" && agent.providerPid === null
+    && agent.observedState === "idle" && agent.roomAgentState?.inbox.state === "blocked";
   const recoveryState = ["absent", "paused", "failed", "recovering"].includes(agent.observedState)
     || agent.condition === "coordination_blocked"
     || agent.condition === "auth_blocked";
@@ -182,6 +184,6 @@ export function canRecoverSavedRoomAgent(
     || agent.roomAgentState?.connection?.state === "disconnected";
   return agent.deliveryMode === "daemon_inbox"
     && agent.desiredState !== "stopped"
-    && recoveryState
-    && runtimeAbsent;
+    && (recoveryState || blockedIdleCursor)
+    && (runtimeAbsent || blockedIdleCursor);
 }

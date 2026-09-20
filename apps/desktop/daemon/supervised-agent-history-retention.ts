@@ -13,6 +13,43 @@ function run(statement: StatementSync, ...values: unknown[]): void {
   statement.run(...values as never[]);
 }
 
+/** Operator-stop settlement shared by turn control and atomic runtime recovery. Caller owns the transaction. */
+export function cancelInterruptedSupervisedTurn(
+  database: DatabaseSync,
+  inboxItemId: string,
+  detail: string,
+  timestamp: string,
+  expected?: { agent_id: string; room_id: string },
+): Row | null {
+  const item = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+  if (!item) return null;
+  if (expected && (item.agent_id !== expected.agent_id || item.room_id !== expected.room_id)) {
+    throw new Error("Interrupted-turn settlement does not match the exact active delivery identity.");
+  }
+  if (!["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"].includes(String(item.state))) return item;
+  const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=?
+    AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+    ORDER BY fifo_sequence LIMIT 1`).get(String(item.agent_id)) as Row | undefined;
+  if (head?.inbox_item_id !== inboxItemId) throw new Error("Only the current FIFO head may change delivery state.");
+  if (readDurableNativeFailure(database, inboxItemId)) {
+    run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',
+      failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
+  } else {
+    run(database.prepare(`UPDATE supervised_agent_inbox
+      SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
+      WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
+    const key = `user_cancelled:${item.fifo_sequence}`;
+    run(database.prepare(`INSERT INTO supervised_agent_inbox_events(inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+      SELECT ?,COALESCE((SELECT MAX(event_sequence) FROM supervised_agent_inbox_events WHERE inbox_item_id=?),0)+1,?,'user_cancelled',?,?
+      WHERE NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key=?)`),
+    inboxItemId, inboxItemId, key, timestamp, detail, inboxItemId, key);
+  }
+  settleSupervisedTerminalItem(database, { inboxItemId, agentId: String(item.agent_id),
+    providerTurnId: item.provider_turn_id === null ? null : String(item.provider_turn_id) }, timestamp);
+  pruneSupervisedAgentHistory(database, String(item.agent_id), () => timestamp);
+  return database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row;
+}
+
 /** Only the exact operational terminal journal may authorize failed settlement. */
 export function readDurableNativeFailure(database: DatabaseSync, inboxItemId: string): "failed" | "interrupted" | null {
   const item = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
