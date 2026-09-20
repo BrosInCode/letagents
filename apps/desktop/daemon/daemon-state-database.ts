@@ -1,3 +1,4 @@
+import { applyPreparedRoomContextSchema, validatePreparedRoomContextSchema } from "./prepared-room-context.js";
 import { validateRoomWorkspaceSchema, validateRoomWorkspaceReviewSchema } from "./room-workspace-store.js";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
@@ -17,7 +18,7 @@ import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js
 import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
 import { applyApprovalRequestClosureSchema, validateApprovalRequestClosureSchema } from "./execution-approval-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 42;
+export const DAEMON_STATE_SCHEMA_VERSION = 43;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -311,6 +312,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion >= 35 && existingVersion <= 41) {
     this.migrateExecutionApprovalPublicationStorage(database);
+    return;
+  }
+  if (existingVersion === 42) {
+    this.migratePreparedRoomContext(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -616,6 +621,23 @@ createSchema(database: DatabaseSync): void {
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+private migratePreparedRoomContext(database: DatabaseSync): void {
+  this.validateLocalRoomMembershipShape(database);
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyPreparedRoomContextSchema(database);
+    this.schemaInitializationHook?.(database);
+    validatePreparedRoomContextSchema(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
     throw error;
   }
 }
@@ -1503,6 +1525,7 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
 private applyLocalRoomMembershipShape(database: DatabaseSync): void {
   applyRuntimeRecoverySchema(database);
   applyApprovalRequestClosureSchema(database);
+  applyPreparedRoomContextSchema(database);
   if (!this.tableColumns(database, "agent_room_memberships").has("local_room_id")) {
     database.exec("ALTER TABLE agent_room_memberships ADD COLUMN local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id))");
   }
@@ -2170,7 +2193,7 @@ private applyV13Shape(database: DatabaseSync): void {
     `);
     this.afterV13RepairJournalBackupHook?.();
   }
-  const restoreNativeTurnBindings = this.detachLaterInboxTables(database, ["supervised_agent_provider_turn_bindings"]);
+  const restoreNativeTurnBindings = this.detachLaterInboxTables(database, ["supervised_agent_provider_turn_bindings", "supervised_agent_prepared_context"]);
   database.exec(`
     PRAGMA defer_foreign_keys = ON;
     ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_pre_v13;
@@ -2982,6 +3005,9 @@ private applyV18Shape(database: DatabaseSync, executionStorageVersion: Execution
       "supervised_agent_publications", "provider_continuation_repairs",
       "supervised_agent_provider_turn_bindings",
     ];
+    // Current-schema repair can rebuild an older physical inbox while
+    // keeping newer, already-retained context alongside its receipt.
+    if (this.tableColumns(database, "supervised_agent_prepared_context").size) children.push("supervised_agent_prepared_context");
     const tables = ["supervised_agent_inbox", ...children];
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Row[]) {
       const table = String(row.name);
@@ -3060,6 +3086,7 @@ repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 
     else validateLifecycleProjectionLedgerSchema(database);
   }
   if (version >= 41) validateRuntimeRecoverySchema(database);
+  if (version >= 43) validatePreparedRoomContextSchema(database);
   if (version >= 39) validateRoomWorkspaceReviewSchema(database);
   if (version >= 38) validateRoomWorkspaceSchema(database);
   if (version >= 27) validateRoomWorkPublicationSchema(database, version < 37);
@@ -3095,6 +3122,7 @@ validateCurrentShape(database: DatabaseSync): void {
     throw new Error("Daemon observation storage requires the already-current schema.");
   }
   this.validateLocalRoomMembershipShape(database);
+  validatePreparedRoomContextSchema(database);
   if (this.hasPendingV6SecretScrub(database)) {
     throw new Error("Daemon observation storage requires completed credential cleanup.");
   }
@@ -3208,7 +3236,7 @@ repairAndValidateV8Shape(database: DatabaseSync): void {
  */
 private applyV9Shape(database: DatabaseSync): void {
   const terminalVersion = validateTerminalResults(database);
-  const restoreLaterAuthority = this.detachLaterInboxTables(database, ["provider_continuation_repairs", "supervised_agent_provider_turn_bindings"]);
+  const restoreLaterAuthority = this.detachLaterInboxTables(database, ["provider_continuation_repairs", "supervised_agent_provider_turn_bindings", "supervised_agent_prepared_context"]);
   database.exec(`
     PRAGMA defer_foreign_keys = ON;
     ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v8;
@@ -3925,6 +3953,7 @@ applyV6Shape(database: DatabaseSync): void {
 
 applyV7Shape(database: DatabaseSync): void {
   if (!this.tableColumns(database, "supervised_agent_terminal_results").size) {
+    const restoreContext = this.detachLaterInboxTables(database, ["supervised_agent_prepared_context"]);
     database.exec(`
       ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v6;
       CREATE TABLE supervised_agent_inbox (
@@ -4032,6 +4061,7 @@ applyV7Shape(database: DatabaseSync): void {
         updated_at TEXT NOT NULL
       ) STRICT;
     `);
+    restoreContext();
   }
   if (!this.tableColumns(database, "supervised_agent_inbox_events").size) {
     database.exec(`

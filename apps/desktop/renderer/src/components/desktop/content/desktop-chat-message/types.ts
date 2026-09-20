@@ -5,6 +5,8 @@ export interface SenderIdentity {
 }
 
 export interface AgentModalTarget {
+  /** Exact activating message to select in the Work trajectory. */
+  workSourceMessageId?: string;
   /** Optional exact room contribution to open in Workspace. */
   workspaceSourceMessageId?: string;
   /** Exact room message whose participant affordance opened the Inspector. */

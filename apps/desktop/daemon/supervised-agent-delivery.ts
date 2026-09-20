@@ -1478,7 +1478,7 @@ export class SupervisedAgentDelivery {
           try { workspaceBaseline = await this.observeStartingWorkspace?.(agent, item.source_message_id, item.inbox_item_id) || null; } catch { /* Optional observation. */ }
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
-        await this.inbox.checkpointDispatchIntent(item.inbox_item_id, this.http.ownedTasks ? agent.agentSessionId : undefined);
+        await this.inbox.checkpointDispatchIntent(item.inbox_item_id, this.http.ownedTasks ? agent.agentSessionId : undefined, observedContext);
       };
       providerCallEntered = true;
       const turn = recovering
