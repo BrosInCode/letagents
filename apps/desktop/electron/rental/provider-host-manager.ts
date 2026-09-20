@@ -141,15 +141,15 @@ export class RentalProviderHostManager {
         authenticated,
         status: rentalReady ? "ready" : "blocked",
         detail: !rentalProfiles.length
-          ? "No verified workspace-rooted rental profile is available for this runtime yet."
-          : check?.detail || check?.message || (rentalReady ? "Ready in a verified rental sandbox." : "Finish local runtime setup first."),
+          ? "This agent app does not yet support the restricted access required for rentals."
+          : check?.detail || check?.message || (rentalReady ? "Ready to work in an isolated rental folder." : "Finish setting up this agent app first."),
         permissionProfileIds: rentalProfiles.map((profile) => profile.id),
       };
     }));
     const blockers: string[] = [];
     if (!daemonStatus) blockers.push("Background agent management is offline.");
     if (!runtimes.some((runtime) => runtime.enabled && runtime.status === "ready")) {
-      blockers.push("Enable at least one authenticated runtime with a verified rental sandbox.");
+      blockers.push("Sign in to an agent app that supports rentals, then enable it here.");
     }
     return {
       enabled: settings.enabled,

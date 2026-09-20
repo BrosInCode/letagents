@@ -34,7 +34,7 @@ test("the message-info event reaches RoomChatView from timeline and thread surfa
 
 test("the surface fetches through IPC and treats local rooms honestly", () => {
   assert.match(surface, /desktopIpc\.room\.getMessageInfo\(props\.roomIdentifier, props\.messageId\)/);
-  assert.match(surface, /Message info is available in shared rooms/);
+  assert.match(surface, /Read and delivery status are available only in shared rooms/);
   assert.match(surface, /localOnly/);
 });
 

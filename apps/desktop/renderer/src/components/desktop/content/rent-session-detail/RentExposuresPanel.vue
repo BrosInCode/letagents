@@ -1,8 +1,8 @@
 <template>
   <section>
-    <p v-if="loading" class="rent-detail-empty">Loading exposures...</p>
+    <p v-if="loading" class="rent-detail-empty">Loading access history...</p>
     <p v-else-if="exposures.length === 0" class="rent-detail-empty">
-      Nothing exposed yet. Every file, search result, or command output the agent sees will be listed here.
+      Nothing accessed yet. Files, search results, and command output shared with the agent will appear here.
     </p>
     <ol v-else class="rent-exposures">
       <li

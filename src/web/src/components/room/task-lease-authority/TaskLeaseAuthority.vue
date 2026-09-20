@@ -2,7 +2,7 @@
   <section class="lease-authority" :data-state="authority.state">
     <div class="lease-authority__header">
       <div class="lease-authority__heading">
-        <span class="lease-authority__kicker">Execution authority</span>
+        <span class="lease-authority__kicker">Who can work on this task</span>
         <h5>{{ authority.label }}</h5>
       </div>
       <AppBadge class="lease-authority__badge" :variant="badgeVariant" size="sm" dot>
@@ -16,8 +16,8 @@
         <strong>{{ formatActorName(task.assignee) || 'Unassigned' }}</strong>
       </div>
       <div class="lease-authority__tile">
-        <span>Work lease</span>
-        <strong>{{ workLease ? formatActorName(workLease.actor_label) : 'No active lease' }}</strong>
+        <span>Working agent</span>
+        <strong>{{ workLease ? formatActorName(workLease.actor_label) : 'None' }}</strong>
       </div>
     </div>
 
@@ -47,7 +47,7 @@
           :loading="pendingAction === 'release'"
           @click="handleReleaseLease"
         >
-          Release lane
+          Remove assignment
         </AppButton>
 
         <div v-if="handoffCandidatesForTask.length" class="lease-authority__handoff">
@@ -56,7 +56,7 @@
             :disabled="updating"
             @update:modelValue="selectedHandoffTarget = $event"
           >
-            <option value="">Handoff to...</option>
+            <option value="">Transfer to…</option>
             <option
               v-for="candidate in handoffCandidatesForTask"
               :key="getHandoffCandidateKey(candidate)"
@@ -73,17 +73,17 @@
             :loading="pendingAction === 'handoff'"
             @click="handleHandoffLease"
           >
-            Handoff
+            Transfer
           </AppButton>
         </div>
 
         <p v-else class="lease-authority__note">
-          No other reachable worker sessions are available for handoff.
+          No other agents are connected and available to take over.
         </p>
       </template>
 
       <p v-else class="lease-authority__note">
-        Lease recovery is restricted to room admins. The active worker can still release its own lane through MCP.
+        Only room admins can change this assignment. The working agent can also give up its own assignment.
       </p>
     </div>
   </section>

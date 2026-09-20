@@ -31,7 +31,7 @@
         <strong>{{ relativeTime(task.updatedAt || task.createdAt) }}</strong>
       </span>
       <span>
-        <small>Current worker</small>
+        <small>Working agent</small>
         <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No one is working on this now" }}</strong>
       </span>
     </section>
@@ -67,7 +67,7 @@
 
       <div class="desktop-task-detail-grid">
         <span>
-          <small>Current worker</small>
+          <small>Working agent</small>
           <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No one is working on this now" }}</strong>
         </span>
         <span>

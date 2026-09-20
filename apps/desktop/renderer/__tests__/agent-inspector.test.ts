@@ -1220,7 +1220,7 @@ test("retirement completion event settles only its exact accepted action", () =>
   assert.deepEqual(settleAgentInspectorRetirementEvent(pending, event), {
     ...pending,
     status: "success",
-    message: "Agent retired. Its worktree is retained.",
+    message: "Agent retired. Its project files and history are kept.",
   });
   assert.equal(settleAgentInspectorRetirementEvent(pending, { ...event, daemonGeneration: 13 }), pending);
   assert.equal(settleAgentInspectorRetirementEvent(pending, { ...event, operationId: "operation_other" }), pending);
@@ -1247,7 +1247,7 @@ test("retirement failure and missed-event durable completion settle without a so
     operationId: pending.operationId,
     entryId: pending.entryId,
     daemonGeneration: 14,
-  }), { ...pending, status: "success", message: "Agent retired. Its worktree is retained." });
+  }), { ...pending, status: "success", message: "Agent retired. Its project files and history are kept." });
 });
 
 test("duplicate supervised names resolve to exact canonical agent mentions", () => {
