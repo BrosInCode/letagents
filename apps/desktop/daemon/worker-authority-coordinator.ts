@@ -631,7 +631,8 @@ export class WorkerAuthorityCoordinator {
             : "supervised worker session bound",
         },
         ...(clearsCoordinationLatch
-          ? { observed_state: "working" as const, condition: "none" as const, last_error: null }
+          ? { observed_state: handle?.observedState === "idle" ? "idle" as const : "working" as const,
+            condition: "none" as const, last_error: null }
           : {}),
         ready_reached_at: resolveReadyReachedAt(current, clearsCoordinationLatch, new Date().toISOString()),
         last_worker_binding: {
