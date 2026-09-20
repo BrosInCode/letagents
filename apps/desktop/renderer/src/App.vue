@@ -142,7 +142,7 @@
         @refresh="refresh"
       />
 
-      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="activeEntry.type === 'messages'" :open-conversation-id="openConversationId" @unread="messagesUnread = $event" />
+      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event" />
       <AuthOnboardingView
         v-if="activeEntry.type === 'room' && selectedNeedsAccess"
         :sidebar-mode="sidebarMode"
@@ -543,7 +543,8 @@ const inboxRentalError = ref('');
 const inboxRooms = ref<string[]>([]);
 const messagesUnread = ref(0);
 const openConversationId = ref<string | null>(null);
-function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
+const openConversationNonce = ref(0);
+function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; openConversationNonce.value += 1; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
 const inboxSection = ref<InboxSection>('needs-you');
 const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
 const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value);

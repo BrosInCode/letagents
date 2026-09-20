@@ -513,8 +513,9 @@ const props = withDefaults(
     accountId: string;
     active?: boolean;
     openConversationId?: string | null;
+    openConversationNonce?: number;
   }>(),
-  { active: true, openConversationId: null },
+  { active: true, openConversationId: null, openConversationNonce: 0 },
 );
 const emit = defineEmits<{ unread: [count: number] }>();
 const chats = ref<Conversation[]>([]),
@@ -975,8 +976,8 @@ watch(
   },
 );
 watch(
-  () => props.openConversationId,
-  (id) => {
+  () => [props.openConversationId, props.openConversationNonce] as const,
+  ([id]) => {
     if (id) void selectChat(id);
   },
 );

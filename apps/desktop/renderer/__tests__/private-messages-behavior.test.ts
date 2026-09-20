@@ -63,10 +63,15 @@ const chat = {
 };
 function setup(api: Record<string, unknown>) {
   cleanup = [];
-  const vm = component.setup(
-    { api, accountId: "me", active: true, openConversationId: null },
-    { expose() {}, emit() {} },
-  );
+  const props = Vue.reactive({
+    api,
+    accountId: "me",
+    active: true,
+    openConversationId: null as string | null,
+    openConversationNonce: 0,
+  });
+  const vm = component.setup(props, { expose() {}, emit() {} });
+  vm.testProps = props;
   const callbacks = cleanup;
   vm.stop = () => callbacks.forEach((fn) => fn());
   return vm;
@@ -276,4 +281,23 @@ test("late send responses cannot acknowledge or fail a newer outbox entry", asyn
       { text: "New send", id: "new", failed: false },
     );
   }
+});
+
+test("a repeated notification reopens its conversation after the person navigates elsewhere", async (t) => {
+  const original = globalThis.document;
+  Object.assign(globalThis, {
+    document: { hasFocus: () => true, visibilityState: "visible" },
+  });
+  t.after(() => Object.assign(globalThis, { document: original }));
+  const vm = setup({
+    messages: async () => ({ messages: [], has_more: false }),
+  });
+  vm.testProps.openConversationId = "chat";
+  vm.testProps.openConversationNonce++;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(vm.selectedId.value, "chat");
+  vm.selectedId.value = "another-chat";
+  vm.testProps.openConversationNonce++;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(vm.selectedId.value, "chat");
 });
