@@ -263,6 +263,7 @@
       :settings-conflict="agentInspectorSettingsConflict"
       :live-feed="agentInspectorLiveFeed"
       :room-identifier="room.identifier"
+      :room-display-name="room.displayName || room.name"
       :request-version="selectedAgentDetailRequestVersion"
       :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
       :managed-sessions="roomManagedAgentSessions"

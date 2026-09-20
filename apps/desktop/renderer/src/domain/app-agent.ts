@@ -421,7 +421,7 @@ function actionTimelineLabel(entry: DesktopAppAgentTraceEntry): string {
 function appAgentTraceDisplayLabel(entry: DesktopAppAgentTraceEntry): string {
   const label = entry.label.toLowerCase();
   if (label.includes("asked model")) return "Understanding request";
-  if (label.includes("retried model")) return "Tried the action again";
+  if (label.includes("retried model")) return "Reconsidered the request";
   if (label.includes("model setup")) return "Prepared model";
   if (label.includes("model run started")) return "Asked model";
   if (label.includes("model returned decision")) return "Planned action";

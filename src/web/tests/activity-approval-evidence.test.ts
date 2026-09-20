@@ -60,12 +60,15 @@ function entry(overrides: Record<string, unknown> = {}) {
 async function render(entries: unknown[]): Promise<string> {
   return renderToString(createSSRApp(ActivityApprovalEvidence, {
     entries, loading: false, loadingMore: false, error: '', hasMore: false,
+    agents: [{ agent_key: publication.agent_key, display_name: 'Gardenpoint' }],
   }))
 }
 
 test('approval card renders verified changes, exact bytes, and decision controls', async () => {
   const html = await render([entry()])
-  assert.ok(html.includes('EmmyMay/gardenpoint needs approval'))
+  assert.ok(html.includes('Gardenpoint needs approval'))
+  assert.ok(!html.includes('EmmyMay/gardenpoint needs approval'))
+  assert.ok(!html.includes(`Expires ${publication.expires_at}`))
   assert.ok(html.includes('src/a.ts'))
   assert.ok(html.includes('Technical details'))
   assert.ok(html.includes('&quot;version&quot;:1'), 'the exact JSON is present without client reserialization')

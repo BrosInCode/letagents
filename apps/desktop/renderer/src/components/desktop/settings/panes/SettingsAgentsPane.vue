@@ -13,7 +13,7 @@
         </div>
         <div class="surface-meta">
           <span class="state-pill" :data-state="worker.state">{{ worker.state.replace(/_/g, " ") }}</span>
-          <span>{{ worker.roomId ? friendlyRoomLabel(worker.roomId) : "No room yet" }}</span>
+          <span>{{ roomName(worker.roomId) }}</span>
         </div>
       </article>
 
@@ -27,9 +27,16 @@
 
 <script setup lang="ts">
 import { friendlyRoomLabel } from "../../../../domain/git-rooms";
-import type { WorkerSnapshot } from "../../../../../../electron/ipc-types";
+import type { DesktopAccountRoomEntry, WorkerSnapshot } from "../../../../../../electron/ipc-types";
 
-defineProps<{
+const props = defineProps<{
   workers: WorkerSnapshot[];
+  rooms?: DesktopAccountRoomEntry[];
 }>();
+
+function roomName(identifier: string | null): string {
+  if (!identifier) return "No room yet";
+  const rooms = (props.rooms || []).flatMap(room => [room, ...room.focusRooms]);
+  return rooms.find(room => room.roomIdentifier === identifier)?.displayName || friendlyRoomLabel(identifier);
+}
 </script>

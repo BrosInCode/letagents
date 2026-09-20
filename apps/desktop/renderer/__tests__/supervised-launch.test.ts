@@ -340,7 +340,7 @@ test("a blocking condition without lastError falls back to a condition message",
     lastError: null,
   }));
   assert.equal(progress.failed, true);
-  assert.match(progress.failureDetail ?? "", /budget|rate cap/i);
+  assert.match(progress.failureDetail ?? "", /budget|automatic approval limit/i);
 });
 
 test("observedState failed is a failure even with condition none", () => {

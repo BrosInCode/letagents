@@ -31,7 +31,7 @@
         :data-invalid="reviewLeaseMatchesWork(lease)"
       >
         <span>{{ formatActorName(lease.actor_label) }}</span>
-        
+
         <button
           v-if="canManageReviewLeases"
           type="button"

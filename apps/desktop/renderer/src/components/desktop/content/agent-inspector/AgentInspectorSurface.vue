@@ -67,7 +67,7 @@
     <div class="agent-inspector-scroll-region">
       <div v-if="selectedTab === 'overview'" id="agent-inspector-overview-panel" role="tabpanel" aria-labelledby="agent-inspector-overview-tab">
         <AgentInspectorOverview
-          :room-name="destinations.find(room => room.identifier === projection.roomId)?.displayName"
+          :room-name="roomDisplayName"
           :projection="projection"
           :busy="actionState?.status === 'running'"
           :runtime-control="workResource.detail?.runtime_control ?? null"
@@ -168,6 +168,7 @@ const AgentInspectorLive = defineAsyncComponent(() => import("./AgentInspectorLi
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
+  roomDisplayName?: string;
   daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
   refreshDiagnostics?: () => Promise<boolean>;
   initialTab?: "overview" | "work" | "workspace";

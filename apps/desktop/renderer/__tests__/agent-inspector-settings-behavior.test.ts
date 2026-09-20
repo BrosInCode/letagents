@@ -20,6 +20,7 @@ interface HostNode {
   options: unknown[];
   classList: { add: (...names: string[]) => void; remove: (...names: string[]) => void; contains: (name: string) => boolean };
   ownerDocument: typeof testDocument;
+  getRootNode: () => typeof testDocument;
   offsetHeight: number;
   focus: () => void;
   contains: (candidate: unknown) => boolean;
@@ -47,6 +48,8 @@ const testDocument = {
   },
 };
 const originalDocument = globalThis.document;
+const originalDocumentConstructor = globalThis.Document;
+const originalShadowRootConstructor = globalThis.ShadowRoot;
 const originalWindow = globalThis.window;
 const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
 const testWindow = {
@@ -62,6 +65,8 @@ const testWindow = {
 };
 Object.assign(globalThis, {
   document: testDocument,
+  Document: class {},
+  ShadowRoot: class {},
   window: testWindow,
   requestAnimationFrame: (callback: FrameRequestCallback) => {
     callback(0);
@@ -99,6 +104,7 @@ function hostNode(type: string, text = ""): HostNode {
       contains: (name: string) => classes.has(name),
     },
     ownerDocument: testDocument,
+    getRootNode: () => testDocument,
     offsetHeight: 0,
     focus() {
       node.focusCount += 1;
@@ -268,6 +274,10 @@ before(async () => {
 
 after(async () => {
   await vite?.close();
+  if (originalDocumentConstructor) Object.assign(globalThis, { Document: originalDocumentConstructor });
+  else Reflect.deleteProperty(globalThis, "Document");
+  if (originalShadowRootConstructor) Object.assign(globalThis, { ShadowRoot: originalShadowRootConstructor });
+  else Reflect.deleteProperty(globalThis, "ShadowRoot");
   if (originalDocument) Object.assign(globalThis, { document: originalDocument });
   else Reflect.deleteProperty(globalThis, "document");
   if (originalWindow) Object.assign(globalThis, { window: originalWindow });
@@ -322,6 +332,7 @@ const provider = {
 function settingsProps(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     entryId: "agent_a",
+    displayName: "Ada",
     workspacePath: "/tmp/worktree",
     retired: false,
     resource: readyResource,
@@ -346,6 +357,25 @@ test("mounted initial settings error has a working Retry control", () => {
   assert.equal(retry.props.disabled, false);
   (retry.props.onClick as () => void)();
   assert.equal(reloads, 1);
+  mounted.app.unmount();
+});
+
+test("deleting retired history requires the displayed agent name", async () => {
+  let purges = 0;
+  const mounted = mount(AgentInspectorSettings, settingsProps({ retired: true, onPurge: () => { purges += 1; } }));
+  const button = buttonByText(mounted.root, "Delete history and settings");
+  const input = descendants(mounted.root).find(node => node.type === "input" && node.props["onUpdate:modelValue"]);
+  assert.ok(input);
+  assert.equal(button.props.disabled, true);
+  (input.props["onUpdate:modelValue"] as (value: string) => void)("agent_a");
+  await nextTick();
+  assert.equal(button.props.disabled, true, "the internal ID is not the confirmation phrase");
+  (input.props["onUpdate:modelValue"] as (value: string) => void)("Ada");
+  await nextTick();
+  assert.equal(button.props.disabled, false);
+  (button.props.onClick as () => void)();
+  assert.equal(purges, 1);
+  assert.match(textContent(mounted.root), /project files will remain/);
   mounted.app.unmount();
 });
 
@@ -382,7 +412,7 @@ test("mounted Settings honors exact supervised profile gates instead of generic 
   const radios = descendants(mounted.root).filter((node) => node.type === "input" && node.props.type === "radio");
   const ask = radios.find((radio) => radio.props.value === "ask_before_write");
   assert.equal(ask?.props.disabled, true);
-  assert.match(textContent(mounted.root), /Claude supervised prompt bridging is not available yet/);
+  assert.match(textContent(mounted.root), /Approval requests are unavailable in this connection mode/);
   mounted.app.unmount();
 });
 
@@ -392,7 +422,7 @@ test("mounted Settings keeps its two-step retirement confirmation", async () => 
   (buttonByText(settings.root, "Retire agent").props.onClick as () => void)();
   await nextTick();
   assert.equal(settingsRetires, 0);
-  assert.match(textContent(settings.root), /history and worktree stay available/);
+  assert.match(textContent(settings.root), /history and project files stay available/);
   (buttonByText(settings.root, "Confirm retire agent").props.onClick as () => void)();
   assert.equal(settingsRetires, 1);
   settings.app.unmount();
@@ -530,17 +560,19 @@ test("mounted inspector preserves selected tabs on refresh and keeps retirement 
       projection: projectionResource.value,
       requestVersion: requestVersion.value,
       initialTab: initialTab.value,
+      roomDisplayName: "My project",
       workResource: workResource.value,
     }),
   };
   const mounted = mount(Harness, {});
 
   assert.ok(descendants(mounted.root).some((node) => String(node.props.class).includes("agent-inspector-overview-retire")));
+  assert.match(textContent(mounted.root), /My project/);
   assert.match(textContent(mounted.root), /Status uncertain/);
   assert.match(textContent(mounted.root), /may still be working/);
   assert.match(textContent(mounted.root), /Checked/);
   assert.equal(descendants(mounted.root).some((node) => node.props.role === "alert"), false);
-  const providerRow = () => descendants(mounted.root).find(node => node.type === "dt" && textContent(node) === "Provider status")?.parent;
+  const providerRow = () => descendants(mounted.root).find(node => node.type === "dt" && textContent(node) === "Agent app status")?.parent;
   const initialProviderRow = providerRow();
   assert.ok(initialProviderRow);
   const timestampSlot = descendants(initialProviderRow).find(node => node.type === "small");
@@ -568,7 +600,7 @@ test("mounted inspector preserves selected tabs on refresh and keeps retirement 
   };
   await nextTick();
   assert.equal(providerRow(), initialProviderRow);
-  assert.match(textContent(initialProviderRow), /Provider status unavailable/);
+  assert.match(textContent(initialProviderRow), /Agent app status unavailable/);
   assert.doesNotMatch(textContent(initialProviderRow), /Checking agent app|Status uncertain|Checked/,
     "failed reconciliation cannot leave health from an absent process birth visible");
   const selectInspectorTab = async (label: string) => {
@@ -656,7 +688,7 @@ test("mounted room-move recovery survives an inspector remount without an in-mem
 
   const reopened = mount(AgentInspectorSettings, settingsProps({ move: preparedMove }));
   assert.ok(buttonByText(reopened.root, "Continue move"));
-  assert.match(textContent(reopened.root), /rediscovered and resumed/);
+  assert.match(textContent(reopened.root), /reopen these settings to resume/);
   reopened.app.unmount();
 });
 
@@ -686,7 +718,7 @@ test("mounted Settings offers an explicit, non-overlapping restart only for a sa
   }));
   const apply = buttonByText(lagging.root, "Restart to apply changes");
   assert.equal(apply.props.disabled, false);
-  assert.match(textContent(lagging.root), /Draft edits are not included until saved/);
+  assert.match(textContent(lagging.root), /Save your edits before restarting/);
   (apply.props.onClick as () => void)();
   assert.equal(applies, 1);
   lagging.app.unmount();
@@ -985,7 +1017,7 @@ test("compact Host gives the overflow menu first Escape ownership before closing
 
   (buttonByText(testBody, "Settings").props.onClick as () => void)();
   await nextTick();
-  const model = descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Provider default");
+  const model = descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Default model");
   assert.ok(model, "expected the mounted Settings model field");
   (model.props.onInput as (event: object) => void)({ target: { value: unsavedModel } });
   await nextTick();
@@ -1018,7 +1050,7 @@ test("compact Host gives the overflow menu first Escape ownership before closing
   assert.equal(testDocument.activeElement, trigger);
   assert.ok(nodeByProp(testBody, "role", "dialog"), "Inspector remains open after menu dismissal");
   assert.equal(currentModel, unsavedModel, "menu dismissal must preserve the Settings draft");
-  assert.equal(descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Provider default")?.props.value, unsavedModel);
+  assert.equal(descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Default model")?.props.value, unsavedModel);
 
   const readerBackdrop = hostNode('div');
   readerBackdrop.props.class = 'workspace-reader-backdrop';

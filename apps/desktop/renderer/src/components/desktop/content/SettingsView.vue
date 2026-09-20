@@ -121,6 +121,7 @@
       <SettingsAgentsPane
         v-else-if="activePane === 'system:agents'"
         :workers="workers"
+        :rooms="accountRooms"
       />
 
       <SettingsDiagnosticsPane

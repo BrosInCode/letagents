@@ -193,7 +193,7 @@ test("Cursor preflight defaults to filter_letagents MCP policy", async () => {
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
   assert.equal(result.message, "Cursor Agent is ready to start with Read-only.");
-  assert.match(result.detail ?? "", /keep user MCPs except LetAgents/);
+  assert.match(result.detail ?? "", /connected tools remain available, except LetAgents/);
   assert.deepEqual(
     JSON.parse(readFileSync(join(cursorManagedHome, ".cursor", "mcp.json"), "utf-8")),
     {
@@ -216,7 +216,7 @@ test("Cursor preflight validates write-capable permission profile flags", async 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
   assert.equal(result.message, "Cursor Agent is ready to start with Full access.");
-  assert.match(result.detail ?? "", /--force and Cursor sandbox disabled/);
+  assert.match(result.detail ?? "", /without its own restrictions or approval prompts/);
 });
 
 test("Cursor supervised preflight requires and accepts its isolated LetAgents bridge", async () => {
@@ -232,8 +232,8 @@ test("Cursor supervised preflight requires and accepts its isolated LetAgents br
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
   assert.equal(result.message, "Cursor Agent is ready to start supervised with Workspace writes.");
-  assert.match(result.detail ?? "", /private per-turn Git workspace/i);
-  assert.match(result.detail ?? "", /per-agent Cursor profile exposes only the daemon-mediated LetAgents bridge/i);
+  assert.match(result.detail ?? "", /separate copy of your project/i);
+  assert.match(result.detail ?? "", /agent connects only to LetAgents room tools/i);
   setFakeCursorMcpMode(null);
 });
 
@@ -390,7 +390,7 @@ test("Cursor supervised preflight rejects a CLI without headless workspace trust
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
   assert.equal(result.message, "Cursor Agent does not support the selected permission profile.");
-  assert.match(result.detail ?? "", /--trust/);
+  assert.match(result.detail ?? "", /Update Cursor Agent/);
   setFakeCursorMcpMode(null);
 });
 
@@ -500,7 +500,7 @@ test("Cursor preflight allows normal MCP policy even when LetAgents is configure
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
-  assert.match(result.detail ?? "", /normal Cursor MCP settings/);
+  assert.match(result.detail ?? "", /Cursor can use your configured tools/);
 });
 
 function workspaceFixture(name: string): string {

@@ -334,14 +334,14 @@ export function useAddAgentPresentation(
     const providerName = selectedProvider.value?.name?.trim() || "this agent";
     if (launchMode.value === "supervised" && selectedProviderId.value === "cursor") {
       if (profile.id === "full_access") {
-        return "Full access disables Cursor's native sandbox inside a private turn workspace. LetAgents carries back only conflict-checked, nonignored file edits; Git history and ignored output are not persisted. Only daemon-mediated room tools are exposed.";
+        return "Cursor edits a separate copy of your project with its own command restrictions off. LetAgents checks for conflicts before copying changes back; files ignored by Git and changes to Git history are not copied back. Only LetAgents room tools are available.";
       }
       if (profile.id === "sandboxed_write") {
-        return "LetAgents runs Cursor in a private turn workspace and carries back conflict-checked, nonignored file edits. Ignored dependencies stay read-only and Git history is not changed. Daemon-mediated LetAgents room tools remain available.";
+        return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, Git history is kept, and LetAgents room tools remain available.";
       }
     }
     if (profile.risk === "high") {
-      return `${profile.label} gives ${providerName} broad write and shell access. Use only with trusted repos and MCPs.`;
+      return `${providerName} can change files and run commands without asking, including outside your project. Use only with projects and connected tools you trust.`;
     }
     if (
       selectedProviderId.value === "cursor" &&
@@ -349,7 +349,7 @@ export function useAddAgentPresentation(
       profile.id === "sandboxed_write" &&
       selectedCursorMcpPolicy.value !== "none"
     ) {
-      return "Sandboxed writes still allow the selected Cursor MCP tools.";
+      return "Connected tools remain available and may make changes outside Cursor’s own restrictions.";
     }
     return null;
   });

@@ -64,7 +64,8 @@ export function buildHumanEscalationText(input: {
   const minutes = Math.max(1, Math.floor(input.waited_for_ms / 60_000));
   const title = intentTitle(input.intent);
   const titled = title ? ` ("${title}")` : "";
-  const base = `[status] A request from ${proposerLabel(input.intent)}${titled} has waited ${minutes}m with no Board Manager available. A room admin needs to approve or deny it under Board Manager > Requests.`;
+  const actionLabels = { task_create: "create a task", task_claim: "claim a task", task_close: "close a task", task_override: "change a task assignment", task_update: "update a task" };
+  const base = `[status] A request to ${actionLabels[input.intent.action_type]} from ${proposerLabel(input.intent)}${titled} has waited ${minutes}m with no Board Manager available. A room admin needs to approve or deny it under Board Manager > Requests.`;
   if (input.rate_capped) {
     return `${base} This agent has reached its automatic approval limit.`;
   }
