@@ -486,7 +486,7 @@ export class SupervisorDaemonClient {
     });
   }
 
-  ensureRunning(): Promise<DesktopSupervisorDaemonStatus> {
+  ensureRunning(startupPreparation?: Promise<void>): Promise<DesktopSupervisorDaemonStatus> {
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Supervised agents currently require macOS."));
     }
@@ -494,7 +494,8 @@ export class SupervisorDaemonClient {
       return Promise.reject(new Error("Supervisor startup is paused while LetAgents installs an application update."));
     }
     if (!this.ensureOperation) {
-      this.ensureOperation = desktopShellEnvironmentReady()
+      this.ensureOperation = Promise.resolve(startupPreparation)
+        .then(() => desktopShellEnvironmentReady())
         .then(() => this.ensureRunningOnce())
         .then((status) => this.rememberReadyStatus(status))
         .finally(() => { this.ensureOperation = null; });
@@ -507,6 +508,9 @@ export class SupervisorDaemonClient {
     try {
       if (!approvalId.safeParse(roomId).success) throw new Error("Invalid approval room.");
       // Opening a composer must not spawn, hand off, or reconfigure a provider.
+      // Wait only for startup already owned by the app; an absent or failed
+      // service still returns unavailable without initiating any recovery.
+      if (this.ensureOperation) await this.ensureOperation;
       const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
       if (rawChallenge === null) {
         this.clearApprovalPresentations(roomId);
