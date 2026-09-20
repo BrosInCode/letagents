@@ -272,7 +272,7 @@ test("Cursor supervised preflight gates writable generations without gating read
     }, unsupported);
     assert.equal(writable.status, "error");
     assert.equal(writable.canStart, false);
-    assert.equal(writable.message, "Cursor writable workspace cannot be supervised exactly.");
+    assert.equal(writable.message, "LetAgents cannot safely track Cursor’s changes in this folder.");
     assert.match(writable.detail ?? "", /canonical Git worktree/i);
 
     const readOnly = await runPreflight({
@@ -355,7 +355,7 @@ test("Cursor supervised preflight fails closed when the bridge is not visible", 
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
-  assert.equal(result.message, "Cursor supervised MCP authority is not exact.");
+  assert.equal(result.message, "LetAgents could not verify Cursor’s connected tools.");
   setFakeCursorMcpMode(null);
 });
 
@@ -372,7 +372,7 @@ test("Cursor supervised preflight rejects extra and false-substring MCP entries"
 
     assert.equal(result.status, "error");
     assert.equal(result.canStart, false);
-    assert.equal(result.message, "Cursor supervised MCP authority is not exact.");
+    assert.equal(result.message, "LetAgents could not verify Cursor’s connected tools.");
     assert.match(result.detail ?? "", /exactly one effective MCP entry/);
   }
   setFakeCursorMcpMode(null);
@@ -402,7 +402,7 @@ test("Cursor supervised preflight rejects a CLI without native project-config is
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
-  assert.equal(result.message, "Cursor supervised MCP authority is not exact.");
+  assert.equal(result.message, "LetAgents could not verify Cursor’s connected tools.");
   setFakeCursorMcpMode(null);
 });
 

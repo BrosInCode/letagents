@@ -1135,7 +1135,7 @@ export function managedAgentPermissionProfileStatusLabel(
   status: DesktopManagedAgentPermissionProfile["status"],
 ): string {
   if (status === "available") return "Available";
-  if (status === "gated") return "Gated";
+  if (status === "gated") return "Not available yet";
   return "Unsupported";
 }
 

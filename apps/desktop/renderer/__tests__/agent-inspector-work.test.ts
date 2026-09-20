@@ -115,8 +115,8 @@ test("work labels present human language instead of raw causal enums", () => {
     execution_generation_id: "generation", daemon_generation_id: "4",
   }), {
     state: "degraded",
-    label: "Provider check inconclusive",
-    detail: "LetAgents could not confirm the provider’s control connection. The agent may still be working; it has not been failed or restarted.",
+    label: "Status uncertain",
+    detail: "The agent app did not respond to the check. It may still be working and has not been restarted.",
     observedAt: "now",
   });
   assert.match(describeAgentInspectorRuntimeControl({

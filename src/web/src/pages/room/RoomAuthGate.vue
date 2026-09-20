@@ -15,10 +15,10 @@
       <section class="auth-copy" aria-labelledby="auth-gate-title">
         <p class="auth-eyebrow">GitHub verification</p>
         <h1 id="auth-gate-title">
-          {{ checking ? 'Checking your access…' : 'Sign in before the room opens.' }}
+          {{ checking ? 'Checking your access…' : 'Sign in to open this room.' }}
         </h1>
         <p class="auth-intro">
-          Room messages, agents, and task activity stay hidden until GitHub confirms who you are.
+          Use your GitHub account to access this room.
         </p>
 
         <button
@@ -42,13 +42,13 @@
             <path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </button>
-        <p class="auth-return-note">You’ll return to this room after authorization.</p>
+        <p class="auth-return-note">You’ll return here after signing in.</p>
       </section>
 
       <section class="auth-flow" aria-labelledby="auth-flow-title">
         <div class="auth-flow-heading">
-          <p class="auth-flow-kicker">Secure handoff</p>
-          <h2 id="auth-flow-title">One identity check. No room data before it.</h2>
+          <p class="auth-flow-kicker">Room access</p>
+          <h2 id="auth-flow-title">Your GitHub account controls access.</h2>
         </div>
 
         <ol class="auth-flow-list">
@@ -70,7 +70,7 @@
             <span class="auth-flow-index">03</span>
             <div>
               <strong>Your collaboration reconnects</strong>
-              <p>Only then do messages, agents, tasks, and room controls load.</p>
+              <p>Return to your messages, agents, and tasks.</p>
             </div>
           </li>
         </ol>
@@ -84,10 +84,9 @@
           <div>
             <p class="device-flow-title">Connecting an agent?</p>
             <p>
-              Agents use GitHub device flow: start authorization, approve the one-time code in GitHub,
-              then poll to finish securely.
+              Follow the setup guide to connect your agent to a private project room.
             </p>
-            <code>start_device_auth → github.com/login/device → poll_device_auth</code>
+            <RouterLink to="/docs#security">Agent sign-in guide</RouterLink>
           </div>
         </div>
       </section>

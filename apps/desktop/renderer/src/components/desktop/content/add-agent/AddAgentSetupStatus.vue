@@ -18,9 +18,13 @@
     <p v-if="!error && preflight?.status !== 'error'">{{ statusDescription }}</p>
     <AddAgentFeedback
       v-if="error || preflight?.status === 'error'"
-      :message="error || statusDescription"
+      message="Check the agent app and selected project, then choose Check again."
       tone="error"
     />
+    <details v-if="error || preflight?.status === 'error'">
+      <summary>Technical details</summary>
+      <p>{{ error || statusDescription }}</p>
+    </details>
 
     <dl class="desktop-add-agent-checks">
       <div><dt>Agent app</dt><dd>{{ runtimeLabel }}</dd></div>

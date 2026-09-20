@@ -370,7 +370,7 @@ test("mounted Settings honors exact supervised profile gates instead of generic 
     reasoningEffort: null,
     supervisedPermissionProfiles: [
       { id: "read_only", label: "Read-only", description: "Read safely.", status: "available" as const, risk: "low" as const, detail: null, isDefault: true },
-      { id: "ask_before_write", label: "Ask before writes", description: "Ask before a write.", status: "gated" as const, risk: "medium" as const, detail: "Claude supervised prompt bridging is not available yet.", isDefault: false },
+      { id: "ask_before_write", label: "Ask before writes", description: "Ask before a write.", status: "gated" as const, risk: "medium" as const, detail: "Approval requests are unavailable in this connection mode.", isDefault: false },
       { id: "full_access", label: "Full access", description: "Trusted writes.", status: "available" as const, risk: "high" as const, detail: null, isDefault: false },
     ],
   };
@@ -536,7 +536,7 @@ test("mounted inspector preserves selected tabs on refresh and keeps retirement 
   const mounted = mount(Harness, {});
 
   assert.ok(descendants(mounted.root).some((node) => String(node.props.class).includes("agent-inspector-overview-retire")));
-  assert.match(textContent(mounted.root), /Provider check inconclusive/);
+  assert.match(textContent(mounted.root), /Status uncertain/);
   assert.match(textContent(mounted.root), /may still be working/);
   assert.match(textContent(mounted.root), /Checked/);
   assert.equal(descendants(mounted.root).some((node) => node.props.role === "alert"), false);
@@ -549,15 +549,15 @@ test("mounted inspector preserves selected tabs on refresh and keeps retirement 
     workResource.value = { status: "refreshing", detail: { ...runtimeDetail, runtime_control: null }, error: null, sourceMessageId: null };
     await nextTick();
     assert.equal(providerRow(), initialProviderRow, "refresh retains the provider row instead of unmounting it");
-    assert.match(textContent(initialProviderRow), /Checking provider/);
+    assert.match(textContent(initialProviderRow), /Checking agent app/);
     assert.equal(descendants(initialProviderRow).find(node => node.type === "small"), timestampSlot);
     assert.equal(timestampSlot.props["aria-hidden"], true, "the empty timestamp slot is reserved without exposing stale text");
-    assert.doesNotMatch(textContent(initialProviderRow), /Provider check inconclusive|Checked/,
+    assert.doesNotMatch(textContent(initialProviderRow), /Status uncertain|Checked/,
       "a refresh placeholder never repeats invalidated process health or its timestamp");
     workResource.value = { status: "ready", detail: runtimeDetail, error: null, sourceMessageId: null };
     await nextTick();
     assert.equal(providerRow(), initialProviderRow);
-    assert.match(textContent(initialProviderRow), /Provider check inconclusive/);
+    assert.match(textContent(initialProviderRow), /Status uncertain/);
   }
   projectionResource.value = { ...projection, entry: { ...projection.entry, providerPid: null } };
   workResource.value = {
@@ -569,7 +569,7 @@ test("mounted inspector preserves selected tabs on refresh and keeps retirement 
   await nextTick();
   assert.equal(providerRow(), initialProviderRow);
   assert.match(textContent(initialProviderRow), /Provider status unavailable/);
-  assert.doesNotMatch(textContent(initialProviderRow), /Checking provider|Provider check inconclusive|Checked/,
+  assert.doesNotMatch(textContent(initialProviderRow), /Checking agent app|Status uncertain|Checked/,
     "failed reconciliation cannot leave health from an absent process birth visible");
   const selectInspectorTab = async (label: string) => {
     (buttonByText(mounted.root, label).props.onClick as () => void)();
@@ -684,7 +684,7 @@ test("mounted Settings offers an explicit, non-overlapping restart only for a sa
     resource: laggingResource,
     onApply: () => { applies += 1; },
   }));
-  const apply = buttonByText(lagging.root, "Restart with saved revision");
+  const apply = buttonByText(lagging.root, "Restart to apply changes");
   assert.equal(apply.props.disabled, false);
   assert.match(textContent(lagging.root), /Draft edits are not included until saved/);
   (apply.props.onClick as () => void)();
@@ -692,7 +692,7 @@ test("mounted Settings offers an explicit, non-overlapping restart only for a sa
   lagging.app.unmount();
 
   const current = mount(AgentInspectorSettings, settingsProps());
-  assert.equal(descendants(current.root).some((node) => node.type === "button" && textContent(node) === "Restart with saved revision"), false);
+  assert.equal(descendants(current.root).some((node) => node.type === "button" && textContent(node) === "Restart to apply changes"), false);
   current.app.unmount();
 
   const pending = mount(AgentInspectorSettings, settingsProps({ resource: laggingResource, applyPending: true }));
@@ -700,7 +700,7 @@ test("mounted Settings offers an explicit, non-overlapping restart only for a sa
   pending.app.unmount();
 
   const retired = mount(AgentInspectorSettings, settingsProps({ resource: laggingResource, retired: true }));
-  assert.equal(descendants(retired.root).some((node) => node.type === "button" && textContent(node) === "Restart with saved revision"), false);
+  assert.equal(descendants(retired.root).some((node) => node.type === "button" && textContent(node) === "Restart to apply changes"), false);
   retired.app.unmount();
 });
 

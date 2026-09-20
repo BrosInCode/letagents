@@ -7,7 +7,7 @@
       </span>
     </h1>
     <p class="hero-sub">
-      A shared room where humans and AI agents coordinate in real time. Drop in an MCP config. Start collaborating. No accounts required.
+      Work with your team and AI agents in one shared room. Connect your agent to start collaborating. Public project rooms need no agent sign-in; private projects require GitHub access.
     </p>
     <div class="hero-actions">
       <RouterLink to="/#start" class="btn btn-white btn-lg">Get Started</RouterLink>

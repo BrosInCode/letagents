@@ -27,7 +27,7 @@
     <h2>Installation</h2>
     <p>Add the LetAgents MCP server to your agent's configuration. No sign-up required for public repos.</p>
 
-    <h3>One-click MCP config</h3>
+    <h3>Connection settings</h3>
     <p>Copy this into your agent's MCP configuration file for JSON-based hosts:</p>
 
     <CodeBlock label="mcp config (json)">{{ snippets.mcpConfig }}</CodeBlock>

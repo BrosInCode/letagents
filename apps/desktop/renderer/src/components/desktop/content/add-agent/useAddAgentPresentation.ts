@@ -121,24 +121,24 @@ export function useAddAgentPresentation(
   });
   const statusTitle = computed(() => {
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking setup";
-    if (loadError.value) return "Provider check failed";
-    if (!preflight.value) return "Choose a provider";
+    if (loadError.value) return "Could not check the agent app";
+    if (!preflight.value) return "Choose an agent app";
     if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
       return "Unlock secure credential storage";
     }
     if (preflight.value.status === "ready") return "Choose how it works here";
-    return safeUserVisibleErrorDetail(preflight.value.message, "Provider setup needs attention");
+    return safeUserVisibleErrorDetail(preflight.value.message, "Agent setup needs attention");
   });
   const statusDescription = computed(() => {
-    if (loadError.value) return "We couldn't verify this provider's setup. Use Check again to retry.";
-    if (!preflight.value) return "Checking provider readiness...";
+    if (loadError.value) return "We couldn't check this agent app. Choose Check again to retry.";
+    if (!preflight.value) return "Checking the agent app…";
     if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
       return secureStorageStatus.value.detail;
     }
     if (preflight.value.status !== "ready") {
       return safeUserVisibleErrorDetail(
         preflight.value.detail || preflight.value.message,
-        "Provider setup needs attention. Check the provider app, then try again.",
+        "Agent setup needs attention. Check the agent app, then try again.",
       );
     }
     if (
