@@ -23,7 +23,6 @@ import type { WorkerAuthorityCoordinator } from "./worker-authority-coordinator.
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { assertRecoveryCoordinates, type RuntimeRestartRequest } from "./runtime-recovery-journal.js";
-import type { ProviderStreamCoordinator } from "./provider-stream-coordinator.js";
 import type { ProviderTerminalCoordinator } from "./provider-terminal-coordinator.js";
 import { processBirthState, type ProcessIdentity } from "./process-identity.js";
 import { serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
@@ -50,13 +49,12 @@ export type RuntimeRecoveryCoordinatorOptions = {
   delivery: SupervisedAgentDelivery | null;
   supervisorGrantHttp: SupervisorGrantHttp;
   provider?: ProviderActionPort;
-  streams?: Pick<ProviderStreamCoordinator, "currentInstallation" | "install">;
+  streams: Pick<ProviderStreamCoordinator, "currentInstallation" | "install" | "remove">;
   terminals?: Pick<ProviderTerminalCoordinator, "handleTerminal">;
   restartDelivery?: (entryId: string) => Promise<void>;
   releaseRecoveredObservation?: (entryId: string, runtimeId: string) => void;
   processIdentity?: ProcessIdentity;
   liveHandles: Map<string, ProviderActionHandle>;
-  streams: Pick<ProviderStreamCoordinator, "currentInstallation" | "remove">;
   authority: RuntimeRecoveryAuthority;
   beginLifecycle: (entryId: string) => () => void;
   bumpControlEpoch: (entryId: string) => number;

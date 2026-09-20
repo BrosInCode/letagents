@@ -748,7 +748,6 @@ export class SupervisorDaemon {
       supervisorGrantHttp: this.supervisorGrantHttp,
       ...(providerPort ? { provider: providerPort } : {}),
       liveHandles: this.liveHandles,
-      streams: this.providerStreams,
       authority: {
         currentDaemonGeneration: () => this.singleton.currentGeneration,
         currentManifestGeneration: () => this.manifestGeneration,
