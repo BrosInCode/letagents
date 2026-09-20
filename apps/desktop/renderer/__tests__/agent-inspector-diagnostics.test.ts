@@ -447,10 +447,22 @@ test("verification rejects changed agent, runtime, daemon, source, or stale evid
   }
 });
 
-test("opening Work or Diagnostics follows the current active message", () => {
+test("opening Work or Diagnostics defaults to the current active message when none is selected", () => {
   const test = observationFixture();
   test.options.selectedProjection.value!.entry.roomAgentState!.turn.sourceMessageId = "current_message";
   test.openWork();
   assert.equal(test.options.workSource.value, "current_message");
   assert.deepEqual(test.calls, ["detail:current_message:true"]);
+});
+
+test("returning to Work or opening Diagnostics preserves the selected historical message", () => {
+  const test = observationFixture();
+  test.options.workSource.value = "historical_message";
+  test.options.selectedProjection.value!.entry.roomAgentState!.turn.sourceMessageId = "current_message";
+  test.options.workResource.value.detail!.items = [
+    { source_message_id: "current_message" }, { source_message_id: "historical_message" },
+  ];
+  test.openWork();
+  assert.equal(test.options.workSource.value, "historical_message");
+  assert.deepEqual(test.calls, ["detail:historical_message:false"]);
 });
