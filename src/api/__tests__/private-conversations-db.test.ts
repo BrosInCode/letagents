@@ -482,3 +482,29 @@ test("private push follows the recipient session, mute and read cursor without c
     [hash(appToken)],
   );
 });
+
+test("invalidation updates every account when the recipient union exceeds one NOTIFY payload", async () => {
+  const affected = Array.from(
+    { length: 240 },
+    () => `notification-limit-${randomUUID()}`,
+  );
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO accounts(id,provider,provider_user_id,login,created_at,updated_at)
+      SELECT id,'github',id,id,now(),now() FROM unnest($1::text[]) id`,
+      [affected],
+    );
+    assert.ok(Buffer.byteLength(JSON.stringify(affected)) > 8000);
+    await store.invalidateConversations(client, affected);
+    const result = await client.query(
+      "SELECT count(*)::int AS n FROM conversation_versions WHERE account_id=ANY($1::text[]) AND version=1",
+      [affected],
+    );
+    assert.equal(result.rows[0].n, affected.length);
+  } finally {
+    await client.query("ROLLBACK");
+    client.release();
+  }
+});

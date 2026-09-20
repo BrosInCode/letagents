@@ -77,9 +77,26 @@ export async function invalidateConversations(
     [ids],
   );
   // Notifications are delivered only on commit and contain no message content.
-  await client.query("SELECT pg_notify('conversation_changed', $1)", [
-    JSON.stringify(ids),
-  ]);
+  // Blocking can affect people across many groups; NOTIFY payloads must remain
+  // below PostgreSQL's 8 KB limit even when that union is large.
+  let chunk: string[] = [];
+  let bytes = 2;
+  for (const id of ids) {
+    const size = Buffer.byteLength(JSON.stringify(id)) + 1;
+    if (bytes + size >= 7900 && chunk.length) {
+      await client.query("SELECT pg_notify('conversation_changed', $1)", [
+        JSON.stringify(chunk),
+      ]);
+      chunk = [];
+      bytes = 2;
+    }
+    chunk.push(id);
+    bytes += size;
+  }
+  if (chunk.length)
+    await client.query("SELECT pg_notify('conversation_changed', $1)", [
+      JSON.stringify(chunk),
+    ]);
 }
 async function membership(
   client: PoolClient,

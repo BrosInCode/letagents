@@ -647,6 +647,7 @@ async function watchChanges() {
 async function markRead(id: string, number: number) {
   if (
     !props.active ||
+    composing.value ||
     !document.hasFocus() ||
     document.visibilityState === "hidden" ||
     id !== selectedId.value ||
@@ -710,7 +711,11 @@ async function loadMessages(reset: boolean) {
       (messages.value[messages.value.length - 1]?.number ?? 0) > previous
     )
       newMessagesBelow.value = true;
-    await markRead(id, messages.value[messages.value.length - 1]?.number ?? 0);
+    if (generation === messageGeneration)
+      await markRead(
+        id,
+        messages.value[messages.value.length - 1]?.number ?? 0,
+      );
   } catch (error) {
     if (id === selectedId.value) actionError.value = errorText(error);
   } finally {
@@ -726,26 +731,28 @@ async function selectChat(id: string) {
   newMessagesBelow.value = false;
   await loadMessages(true);
   await nextTick();
-  composer.value?.focus();
+  if (alive && id === selectedId.value) composer.value?.focus();
 }
 async function loadEarlier() {
   const id = selectedId.value,
     first = messages.value[0]?.number;
   if (!id || !first || messagesLoading.value) return;
+  const generation = ++messageGeneration;
   messagesLoading.value = true;
   const height = messageList.value?.scrollHeight ?? 0;
   try {
     const result = await props.api.messages(id, { before: first });
-    if (!alive || id !== selectedId.value) return;
+    if (!alive || id !== selectedId.value || generation !== messageGeneration)
+      return;
     messages.value = [...result.messages, ...messages.value];
     hasMore.value = result.has_more;
     await nextTick();
     if (messageList.value)
       messageList.value.scrollTop += messageList.value.scrollHeight - height;
   } catch (error) {
-    actionError.value = errorText(error);
+    if (generation === messageGeneration) actionError.value = errorText(error);
   } finally {
-    messagesLoading.value = false;
+    if (generation === messageGeneration) messagesLoading.value = false;
   }
 }
 function rememberScroll() {
@@ -917,13 +924,10 @@ async function send() {
   actionError.value = "";
   await scrollBottom();
   try {
-    const message = await props.api.send(id, pending.text, pending.id);
-    delete outbox.value[id];
-    if (
-      id === selectedId.value &&
-      !messages.value.some((item) => item.number === message.number)
-    )
-      messages.value.push(message);
+    await props.api.send(id, pending.text, pending.id);
+    // Only fetched history advances the pagination/read cursor. Another person
+    // may have sent a message immediately before this acknowledgement.
+    // Keep the optimistic entry until loadMessages observes its client ID.
     await refresh();
     if (alive && id === selectedId.value) {
       await scrollBottom();

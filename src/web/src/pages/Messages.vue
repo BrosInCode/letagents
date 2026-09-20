@@ -1,5 +1,5 @@
 <template>
-  <main class="web-messages">
+  <div class="web-messages">
     <header class="web-messages-nav">
       <RouterLink to="/">LetAgents</RouterLink><span>Messages</span
       ><RouterLink to="/">Back to home</RouterLink>
@@ -17,7 +17,7 @@
         {{ isSigningIn ? "Opening…" : "Sign in with GitHub" }}
       </button>
     </div>
-  </main>
+  </div>
 </template>
 <script setup lang="ts">
 import { onMounted } from "vue";
