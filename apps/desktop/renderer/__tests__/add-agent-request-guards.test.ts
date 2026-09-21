@@ -34,11 +34,15 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   let preflightCalls = 0;
   const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
   let laterPreflight: Promise<DesktopAgentProviderPreflight> | null = null;
+  let focusListener: (() => void) | undefined;
+  const launchMode = ref<"legacy" | "supervised">("legacy");
   Object.assign(globalThis, {
     window: {
       clearTimeout: () => undefined,
       setTimeout: () => 1,
+      addEventListener: (event: string, listener: () => void) => { if (event === "focus") focusListener = listener; },
       letagentsDesktop: {
+        supervisorGrant: { getStorageStatus: async () => ({ available: true }) },
         workers: {
           runAgentProviderPreflight: (providerId: string, input: DesktopAgentProviderPreflightInput) => {
             preflightCalls += 1;
@@ -84,7 +88,7 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
     selectedEffort: ref(""),
-    launchMode: ref("legacy"),
+    launchMode,
     loadOpenModelSettings: async () => undefined,
     loadProviderModels: async () => undefined,
     syncPermissionProfileSelection: () => undefined,
@@ -182,6 +186,20 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   await retry;
   assert.equal(preflightInputs.at(-1)?.refreshEnvironment, true);
   assert.equal(preflightInputs.at(-1)?.refreshModels, true);
+
+  launchMode.value = "supervised";
+  setup.secureStorageStatus.value = { available: false, detail: "Locked" } as never;
+  actions.armSecureStorageFocusRecheck();
+  const beforeFocus = preflightCalls;
+  assert.ok(focusListener);
+  focusListener();
+  await nextTick();
+  await Promise.resolve();
+  assert.equal(preflightCalls, beforeFocus + 1, "returning from storage unlock rechecks readiness");
+  assert.equal(preflightInputs.at(-1)?.refreshEnvironment, undefined,
+    "focus must not replace the service that owns live approvals");
+  focusListener();
+  assert.equal(preflightCalls, beforeFocus + 1, "the storage focus recheck is one-shot");
 });
 
 test("configuration invalidation rejects a stale model-catalog response", async () => {

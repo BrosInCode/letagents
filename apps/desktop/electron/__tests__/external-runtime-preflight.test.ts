@@ -37,7 +37,11 @@ test("missing external runtime preflight fails closed when the registry has no i
   assert.match(result.detail || "", /missing both an install command and an installation guide/i);
 });
 
-test("supervised Codex supplies its own connection while compatibility launches require the global MCP setup", async () => {
+test("supervised Codex supplies its own connection and setup refresh explicitly reconciles the daemon environment", async (t) => {
+  const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
+  let environmentCurrent = true;
+  const compare = t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => environmentCurrent);
+  const refresh = t.mock.method(supervisorDaemonClient, "restartForEnvironmentRefresh", async () => { environmentCurrent = true; return {} as never; });
   const { createElectronTestEnv } = await import("./harness.js");
   const { writeFile } = await import("node:fs/promises");
   const { join } = await import("node:path");
@@ -53,6 +57,22 @@ test("supervised Codex supplies its own connection while compatibility launches 
   assert.equal(supervised.mcpStatus, "not_installed");
   assert.equal(supervised.status, "ready");
   assert.equal(supervised.canStart, true);
+  assert.equal(compare.mock.callCount(), 1);
+  assert.equal(refresh.mock.callCount(), 0, "ordinary setup is read-only");
+  environmentCurrent = false;
+  const stale = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, launchMode: "supervised" });
+  assert.equal(stale.status, "config_required");
+  assert.equal(stale.canStart, false);
+  assert.equal(stale.message, "Agent setup needs refreshing.");
+  assert.equal(refresh.mock.callCount(), 0, "environment drift must not silently replace live runtimes");
+  const { refreshDesktopShellEnvironment } = await import("../main/desktop-shell-environment.js");
+  assert.equal((await refreshDesktopShellEnvironment()).changed, false);
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const refreshed = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, launchMode: "supervised", refreshEnvironment: true });
+  assert.equal(refreshed.canStart, true);
+  assert.equal(refresh.mock.callCount(), 1, "explicit refresh compares the daemon even when Electron PATH is unchanged");
   const legacy = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, launchMode: "legacy" });
   assert.equal(legacy.status, "bridge_required");
   assert.equal(legacy.nextAction, "install_mcp_bridge");
