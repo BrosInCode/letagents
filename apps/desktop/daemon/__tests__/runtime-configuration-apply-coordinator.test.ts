@@ -353,34 +353,3 @@ test("process-death evidence must match the immutable installation, including PI
   const { nativeRuntimeDeath, ...transportOnly } = terminal;
   assert.equal(coordinator.terminalPayload({ ...transportOnly, terminalCause: "protocol_error" }, "provider", connection).native_runtime_death, undefined);
 });
-
-test("a failed terminal approval closure requests recovery after the live listener is removed", async () => {
-  const liveHandles = new Map([["agent-1", handle]]);
-  let removed = false; let persisted: unknown = null; let closures = 0; let retries = 0; let deliveries = 0;
-  const entry = manifestEntry();
-  const coordinator = new ProviderTerminalCoordinator({
-    currentDaemonGeneration: () => 7, nowMs: () => 100, liveHandles,
-    manifest: { getEntry: async () => entry, load: async () => ({ entries: [entry] }) },
-    durability: {
-      getAttempt: async () => ({ execution_generations: [{ execution_generation_id: "generation-1",
-        actor: "daemon-provider", generation: 7, terminal: persisted }] }) as never,
-      recordTerminal: async (_attempt, _generation, payload) => { persisted = payload; return {} as never; },
-      releaseTerminalExecutionFence: async () => { assert.fail("cannot release before closure"); },
-    },
-    runtimeCustody: { deletePendingResumeBinding: () => {} },
-    streams: {
-      remove: () => { if (removed) return false; removed = true; liveHandles.delete("agent-1"); return true; },
-      isLatestInstallation: exact => exact === installation,
-    },
-    settleRuntimeApprovals: async () => { closures++; throw new Error("transient closure failure"); },
-    delivery: { start: async () => { deliveries++; } },
-    serializeEntry: async (_id, operation) => operation(), serializeManifest: async operation => operation(),
-    transitionOnce: async () => { assert.fail("cannot advance before closure"); },
-    requestConvergence: () => { retries++; },
-  });
-  await assert.rejects(coordinator.handleTerminal(installation, { ...terminal,
-    nativeRuntimeDeath: { kind: "codex_app_server", pid: 42, processIdentity: "codex:42" } }), /transient closure failure/);
-  assert.ok(persisted); assert.equal(closures, 1); assert.equal(retries, 1); assert.equal(deliveries, 0);
-  await coordinator.handleTerminal(installation, terminal);
-  assert.equal(retries, 1, "late duplicate callbacks do not create retry storms");
-});

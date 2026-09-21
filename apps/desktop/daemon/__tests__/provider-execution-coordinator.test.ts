@@ -283,6 +283,7 @@ function harness(input: {
       };
     },
     terminalPayload: (value, actor) => ({
+      ...(value.nativeRuntimeDeath ? { native_runtime_death: value.nativeRuntimeDeath } : {}),
       ended_at: value.endedAt,
       exit_code: value.exitCode,
       signal: value.signal,
@@ -1106,8 +1107,6 @@ test("convergence retries durable approval settlement before stopped or recovery
   const entry = baseEntry(); entry.desired_state = "stopped";
   const runtime = harness({ entry });
   let attempts = 0;
-  const retries: Array<{ id: string; delay: number }> = [];
-  runtime.coordinator.scheduleRecovery = (id, delay) => { retries.push({ id, delay }); };
   runtime.options.settleRuntimeApprovals = async () => {
     attempts++;
     if (attempts === 1) throw new Error("closure write failed");
@@ -1116,19 +1115,19 @@ test("convergence retries durable approval settlement before stopped or recovery
   await assert.rejects(runtime.coordinator.converge(entry.id), /closure write failed/);
   await runtime.coordinator.converge(entry.id);
   assert.equal(attempts, 2);
-  assert.deepEqual(retries, [{ id: entry.id, delay: 5_000 }], "only failed settlement schedules another attempt");
   assert.equal(runtime.executionGenerations.length, 0, "no successor starts ahead of settlement");
 });
 
 test("failed attach closure is retried from durable terminal without reattaching", async () => {
   const entry = baseEntry();
   entry.provider_ref = { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
-    provider_continuation_id: "continuation-1", provider_connection: null };
+    provider_continuation_id: "continuation-1", provider_connection: claudeHandle.providerConnection };
   let attaches = 0; let closes = 0; let releases = 0;
   const runtime = harness({ entry, provider: provider({ attach: async () => {
     attaches++;
     return { state: "terminal", terminal: { endedAt: "2026-08-26T00:00:03.000Z", exitCode: 0,
-      signal: null, terminalCause: "exited", providerContinuationId: "continuation-1" } };
+      signal: null, terminalCause: "exited", providerContinuationId: "continuation-1",
+      nativeRuntimeDeath: { kind: "claude_cli", pid: 4444, processIdentity: "birth-4444" } } };
   } }) });
   runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
     started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
@@ -1139,4 +1138,5 @@ test("failed attach closure is retried from durable terminal without reattaching
   assert.equal(releases, 0, "no fence release before closure commits");
   assert.equal(await runtime.coordinator.attachLiveProvider(entry), null);
   assert.equal(closes, 2); assert.equal(attaches, 1); assert.equal(runtime.terminalWrites.length, 1);
+  assert.equal(releases, 1, "retry completes the release interrupted by the failed closure");
 });

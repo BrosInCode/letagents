@@ -592,6 +592,10 @@ export class RuntimeRecoveryCoordinator {
           });
           await this.options.settleRuntimeApprovals(entryId);
           await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
+        } else if (execution.terminal?.native_runtime_death && !recoverIdleCursor) {
+          validatedNativeRuntimeDeath({ nativeRuntimeDeath: execution.terminal.native_runtime_death }, ref.provider_connection);
+          await this.options.settleRuntimeApprovals(entryId);
+          await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
         }
       }
       await this.options.settleRuntimeApprovals(entryId);

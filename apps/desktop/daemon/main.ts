@@ -1579,9 +1579,21 @@ export class SupervisorDaemon {
   }
 
   private async settleRuntimeApprovals(entryId: string): Promise<void> {
-    const changed = await this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(),
-      commit => this.fenceDaemonCommit(commit));
-    if (changed) this.notifyStateChanged();
+    try {
+      const changed = await this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(),
+        commit => this.fenceDaemonCommit(commit));
+      if (changed) this.notifyStateChanged();
+    } catch (error) {
+      // Every operational caller (exit, attach and manual recovery) gets the
+      // same fault-only retry. A healthy pass never creates an approval timer.
+      if (!this.handoffScheduled) {
+        try {
+          await this.singleton.assertCurrent();
+          this.scheduleRecoveryConvergence(entryId, 5_000);
+        } catch { /* A retired daemon cannot schedule its successor's work. */ }
+      }
+      throw error;
+    }
   }
 
   private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {

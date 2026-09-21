@@ -11,6 +11,7 @@ import { serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError } from "./manifest-store.js";
 import {
   sameProviderActionConnectionIdentity,
+  validatedNativeRuntimeDeath,
   sameProviderActionConnectionSnapshot,
   type ProviderActionAttachTerminal,
   type ProviderActionHandle,
@@ -768,6 +769,10 @@ export class ProviderExecutionCoordinator {
     }
     if (execution.terminal) {
       await this.options.settleRuntimeApprovals(entry.id);
+      if (execution.terminal.native_runtime_death) {
+        validatedNativeRuntimeDeath({ nativeRuntimeDeath: execution.terminal.native_runtime_death }, ref.provider_connection);
+        await this.options.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
+      }
       return null;
     }
     const configuration = await this.options.store.getAgentConfiguration(entry.id);
@@ -949,14 +954,7 @@ export class ProviderExecutionCoordinator {
 
   async converge(entryId: string): Promise<void> {
     if (this.options.authority.isHandoffScheduled()) return;
-    try {
-      await this.options.settleRuntimeApprovals(entryId);
-    } catch (error) {
-      // Retry only failed operational settlement, using the existing recovery
-      // scheduler. Healthy convergence never starts an approval polling timer.
-      if (!this.options.authority.isHandoffScheduled()) this.scheduleRecovery(entryId, 5_000);
-      throw error;
-    }
+    await this.options.settleRuntimeApprovals(entryId);
     if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
     let entry = await this.options.store.getEntry(entryId);

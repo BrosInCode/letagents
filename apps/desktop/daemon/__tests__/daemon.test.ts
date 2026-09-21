@@ -6138,7 +6138,7 @@ test(`explicit runtime recovery retires proven-dead ${providerId} without replac
   });
   try {
     await daemon.start();
-    const internals = daemon as unknown as { requestConvergence: (entryId: string) => void };
+    const internals = daemon as unknown as { requestConvergence: (entryId: string) => void; store: ManifestStore; durability: WorkDurabilityStore };
     internals.requestConvergence = (entryId) => {
       assert.equal(entryId, id);
       calls.converge += 1;
@@ -6172,10 +6172,23 @@ test(`explicit runtime recovery retires proven-dead ${providerId} without replac
       "a blocked recovery with no live provider handle cannot masquerade as reconnecting authority",
     );
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
-    const result = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", {
-      entry_id: id,
-      daemon_generation: generation,
-    });
+    let releases = 0;
+    const release = internals.durability.releaseTerminalExecutionFence.bind(internals.durability);
+    internals.durability.releaseTerminalExecutionFence = async (...args) => { releases++; await release(...args); };
+    const settle = internals.store.settleWitnessedRuntimeApprovalClosures.bind(internals.store);
+    let failSettlement = providerId === "codex";
+    internals.store.settleWitnessedRuntimeApprovalClosures = async (...args) => {
+      if (failSettlement) { failSettlement = false; throw new Error("transient closure failure"); }
+      return settle(...args);
+    };
+    const recover = () => daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", { entry_id: id, daemon_generation: generation });
+    let result = await recover();
+    if (providerId === "codex") {
+      assert.equal(result.ok, false); assert.match(result.error!, /transient closure failure/);
+      assert.equal(releases, 0);
+      result = await recover();
+    }
+    assert.equal(releases, 1, "a retry finishes the exact witnessed runtime's fence release");
     assert.equal(result.ok, true, result.error);
     const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
     assert.equal(recovered.id, id);
@@ -12219,4 +12232,40 @@ test("providerStreamLifecycle never fails the agent on a tool call's own error s
   assert.equal(providerStreamLifecycle({ ...base, provider: "codex", kind: "turn_lifecycle", method: "turn/failed", payload: {} }), "terminal");
   assert.equal(providerStreamLifecycle({ ...base, kind: "error", method: "result", payload: { is_error: true } }), "failed");
   assert.equal(providerStreamLifecycle({ ...base, provider: "codex", kind: "command_output", method: "process/systemError", payload: { status: "systemError" } }), "failed");
+});
+
+test("all approval settlement callers schedule fault-only recovery under current daemon authority", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      store: ManifestStore; handoffScheduled: boolean;
+      settleRuntimeApprovals(id: string): Promise<void>;
+      scheduleRecoveryConvergence(id: string, delay: number): void;
+    };
+    const retries: string[] = [];
+    internals.scheduleRecoveryConvergence = (id, delay) => { assert.equal(delay, 5_000); retries.push(id); };
+    let fail = false;
+    internals.store.settleWitnessedRuntimeApprovalClosures = async () => {
+      if (fail) throw new Error("transient closure write");
+      return 0;
+    };
+    await internals.settleRuntimeApprovals("first-convergence-without-terminal");
+    assert.deepEqual(retries, []);
+    fail = true;
+    for (const caller of ["exit", "attach-after-terminal-persistence", "manual-recovery", "retry-convergence"]) {
+      await assert.rejects(internals.settleRuntimeApprovals(caller), /transient closure write/);
+    }
+    assert.deepEqual(retries, ["exit", "attach-after-terminal-persistence", "manual-recovery", "retry-convergence"]);
+    fail = false;
+    await internals.settleRuntimeApprovals("healthy-again");
+    assert.equal(retries.length, 4);
+    internals.handoffScheduled = true; fail = true;
+    await assert.rejects(internals.settleRuntimeApprovals("retired"), /transient closure write/);
+    assert.equal(retries.length, 4, "handoff cannot retry under retired authority");
+    internals.handoffScheduled = false;
+  } finally { await daemon.stop().catch(() => undefined); await env.cleanup(); }
 });
