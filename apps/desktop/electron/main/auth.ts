@@ -583,7 +583,39 @@ export async function cancelDeviceAuthFlow(): Promise<DesktopAuthStatus> {
   return buildAuthStatus({ storedAuth });
 }
 
+let activeAuthPoll: {
+  generation: number;
+  requestId: string | null;
+  result: Promise<DesktopAuthPollResult>;
+} | null = null;
+
 export async function pollDeviceAuthFlow(
+  requestId?: string | null,
+): Promise<DesktopAuthPollResult> {
+  const generation = authGeneration;
+  const storedAuth = await readStoredAuth();
+  if (generation !== authGeneration || (requestId && requestId !== storedAuth.pendingDeviceAuth?.requestId)) {
+    return stalePollResult();
+  }
+  const pendingRequestId = storedAuth.pendingDeviceAuth?.requestId || null;
+  // The exchange consumes a one-time request. Manual and automatic checks must
+  // share it instead of racing to consume it and overwriting the winning session.
+  if (activeAuthPoll?.generation === generation && activeAuthPoll.requestId === pendingRequestId) {
+    return activeAuthPoll.result;
+  }
+  const operation = {
+    generation,
+    requestId: pendingRequestId,
+    result: exchangeDeviceAuthFlow(pendingRequestId),
+  };
+  activeAuthPoll = operation;
+  void operation.result.finally(() => {
+    if (activeAuthPoll === operation) activeAuthPoll = null;
+  }).catch(() => undefined);
+  return operation.result;
+}
+
+async function exchangeDeviceAuthFlow(
   requestId?: string | null,
 ): Promise<DesktopAuthPollResult> {
   const generation = authGeneration;
@@ -600,6 +632,17 @@ export async function pollDeviceAuthFlow(
       expiresInSeconds: null,
       authStatus: buildAuthStatus({ storedAuth }),
       error: "Start GitHub approval first.",
+    };
+  }
+
+  if (!(Date.parse(pending.expiresAt) > Date.now())) {
+    const nextAuth = await updateStoredAuth({ pendingDeviceAuth: null, appLoginVerifier: null }, generation);
+    return {
+      status: "expired",
+      intervalSeconds: null,
+      expiresInSeconds: 0,
+      authStatus: buildAuthStatus({ storedAuth: nextAuth }),
+      error: "This sign-in request expired. Request a new code to continue.",
     };
   }
 
@@ -656,7 +699,9 @@ export async function pollDeviceAuthFlow(
       ...pending,
       intervalSeconds: response.interval || pending.intervalSeconds,
     };
-    const nextAuth = await updateStoredAuth({ pendingDeviceAuth: nextPending }, generation);
+    const nextAuth = nextPending.intervalSeconds === pending.intervalSeconds
+      ? storedAuth
+      : await updateStoredAuth({ pendingDeviceAuth: nextPending }, generation);
     return {
       status: response.status,
       intervalSeconds: nextPending.intervalSeconds,
@@ -685,7 +730,10 @@ export async function pollDeviceAuthFlow(
               intervalSeconds:
                 error.payload?.interval || pending.intervalSeconds,
             };
-      const nextAuth = await updateStoredAuth({ pendingDeviceAuth }, generation);
+      const nextAuth = await updateStoredAuth({
+        pendingDeviceAuth,
+        ...(pendingDeviceAuth ? {} : { appLoginVerifier: null }),
+      }, generation);
       return {
         status,
         intervalSeconds:

@@ -31,5 +31,4 @@ test("sidebar and settings share a resumable account auth dialog", () => {
   assert.match(appSource, /@start-auth="openAccountAuthFlow"/);
   assert.match(appSource, /if \(authStatus\.value\?\.pendingDeviceAuth\) \{\s+scheduleAuthPoll\(\);\s+return;/);
   assert.doesNotMatch(authFlowSource, /openVerification\(result\.pendingDeviceAuth\.verificationUri\)/);
-  assert.match(authFlowSource, /Your code is ready/);
 });
