@@ -1194,3 +1194,56 @@ test("diagnostics never confirms recovery after a failed refresh or an agent swi
   assert.match(textContent(mounted.root), /Troubleshoot this issue/);
   mounted.app.unmount();
 });
+
+test("saved tool permissions refresh with Settings and recover from a failed revoke without a stuck button", async () => {
+  const rule = { id: "rule", revision: 1, ownerId: "host", createdAtMs: 1, scope: { toolLabel: "Bash", projectName: "Do App" } };
+  const revocations: unknown[] = [];
+  let reads = 0;
+  let granted = false;
+  let attempt = 0;
+  let finish!: () => void;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostToolRules: async () => { reads++; return granted ? [rule] : []; },
+    revokeHostToolRule: async (input: unknown) => {
+      revocations.push(input);
+      if (++attempt === 1) throw new Error("temporary disconnect");
+      await new Promise<void>(resolve => { finish = resolve; });
+      granted = false;
+    },
+  } } });
+  const mounted = mount(AgentInspectorSettings, settingsProps());
+  const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await nextTick(); };
+  try {
+    await flush();
+    assert.equal(reads, 1);
+    granted = true;
+    (buttonByText(mounted.root, "Reload").props.onClick as () => void)();
+    await flush();
+    assert.match(textContent(mounted.root), /Bash · Do App/);
+    await (buttonByText(mounted.root, "Revoke").props.onClick as () => Promise<void>)();
+    await flush();
+    const retry = buttonByText(mounted.root, "Retry").props.onClick as () => Promise<void>;
+    const revoking = (buttonByText(mounted.root, "Revoke").props.onClick as () => Promise<void>)();
+    await retry(); // A stale Retry callback must not invalidate the in-flight mutation.
+    finish(); await revoking; await flush();
+    assert.equal(textContent(mounted.root).includes("Revoking…"), false);
+    assert.equal(textContent(mounted.root).includes("Bash · Do App"), false);
+    assert.deepEqual(revocations, Array(2).fill({ agentId: "agent_a", ruleId: "rule", revision: 1 }));
+  } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("saved permission responses from the previous inspector cannot appear for a different agent", async () => {
+  let finishOld!: (rules: unknown[]) => void;
+  const entry = Vue.ref("old-agent");
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostToolRules: (agentId: string) => agentId === "old-agent" ? new Promise(resolve => { finishOld = resolve; }) : Promise.resolve([]),
+  } } });
+  const mounted = mount({ setup: () => () => Vue.h(AgentInspectorSettings, settingsProps({ entryId: entry.value })) }, {});
+  const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await nextTick(); };
+  try {
+    await flush(); entry.value = "new-agent"; await flush();
+    finishOld([{ id: "old-rule", scope: { toolLabel: "Old tool", projectName: "Old project" } }]);
+    await flush();
+    assert.equal(textContent(mounted.root).includes("Old tool"), false);
+  } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});

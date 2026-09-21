@@ -6,12 +6,14 @@ export type HostApprovalReference = {
   connectionId: string; nativeRequestId: string | number;
 };
 export type HostApprovalChoice = "allow_once" | "deny";
+export type HostApprovalSelection = HostApprovalChoice | "allow_always";
 export type HostApprovalPresentation = {
   agentId: string; displayName: string; provider: "codex" | "open-model" | "claude-code";
   title: "Run a command" | "Run a tool" | "Change files" | "Grant for this turn" | "Approval unavailable";
   /** Plain text, host-ephemeral only. Control characters are displayed literally. */
   details: string;
   denyScope: "request" | "session_pending";
+  alwaysAllow?: import("./host-tool-rules.js").HostToolScope;
 };
 export type HostApprovalStatus = "pending" | "decision_recorded" | "decision_sent" | "uncertain" | "request_closed" | "resolved" | "unavailable";
 export type HostApprovalCandidate = {
@@ -24,7 +26,7 @@ export type HostApprovalCandidate = {
 };
 export type HostApprovalDecision = {
   expected: HostApprovalReference; decisionId: string; actorId: string;
-  decision: HostApprovalChoice; projectionSha256: string;
+  decision: HostApprovalSelection; projectionSha256: string;
 };
 /** Renderer receives a presentation handle, never a signing payload or key. */
 export type DesktopHostApproval = {

@@ -1,3 +1,5 @@
+import { listHostToolRules, findHostToolRule, readHostToolProject, bindHostToolRule, assertDecisionToolRule, revokeHostToolRule,
+  withdrawHostToolApproval, type WithdrawHostToolApproval, type HostToolRule, type HostToolScope } from "./host-tool-rules.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { chmod, readFile, rename } from "node:fs/promises";
@@ -532,10 +534,59 @@ export class ManifestStore {
     const db = await this.getDatabase();
     const assertCurrent = () => {
       if (this.closed || this.database !== db) throw new Error("Approval authority store is unavailable.");
-      validateExecutionApprovalAuthority(db, snapshot.expected, snapshot.authority, this.readEntryFromDatabase(db, snapshot.expected.agentId));
+      const entry = this.readEntryFromDatabase(db, snapshot.expected.agentId);
+      validateExecutionApprovalAuthority(db, snapshot.expected, snapshot.authority, entry);
+      const record = getExecutionApproval(db, snapshot.expected);
+      if (record?.decision) assertDecisionToolRule(db, record.decision.decisionId, entry);
     };
     assertCurrent();
     return assertCurrent;
+  }
+
+  async readHostToolProject(workAttemptId: string) {
+    return readHostToolProject(await this.getDatabase(), workAttemptId);
+  }
+
+  async listHostToolRules(ownerId: string, agentId: string): Promise<HostToolRule[]> {
+    return listHostToolRules(await this.getDatabase(), ownerId, agentId);
+  }
+
+  async findHostToolRule(ownerId: string, scope: HostToolScope): Promise<HostToolRule | null> {
+    return findHostToolRule(await this.getDatabase(), ownerId, scope);
+  }
+
+  async withdrawHostToolApproval(input: WithdrawHostToolApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<void> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    await this.writeOperationalJournal(db => {
+      const record = getExecutionApproval(db, snapshot.expected);
+      if (!record) throw new Error("Approval request is unavailable.");
+      withdrawHostToolApproval(db, snapshot, record);
+    }, commitFence);
+  }
+
+  async selectHostToolApproval(input: SelectHostApproval, rule: { scope: HostToolScope; create?: boolean; rule?: { id: string; revision: number } },
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone({ input, rule });
+    return this.writeOperationalJournal(db => {
+      const entry = this.readEntryFromDatabase(db, snapshot.input.expected.agentId);
+      if (snapshot.input.decision !== "allow_once") throw new Error("A tool rule can only select allow once.");
+      const prior = getExecutionApproval(db, snapshot.input.expected);
+      if (prior?.decision && !db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(snapshot.input.decisionId)) {
+        throw new Error("The existing decision did not create a saved tool permission.");
+      }
+      const selected = selectHostApproval(db, snapshot.input, entry);
+      bindHostToolRule(db, { ...snapshot.rule, decisionId: snapshot.input.decisionId, ownerId: snapshot.input.actorId,
+        atMs: snapshot.input.atMs }, entry);
+      return selected;
+    }, commitFence);
+  }
+
+  async revokeHostToolRule(ownerId: string, agentId: string, ruleId: string, revision: number, atMs: number,
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<void> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    await this.writeOperationalJournal(db => revokeHostToolRule(db, ownerId, agentId, ruleId, revision, atMs), commitFence);
   }
 
   async selectHostApproval(input: SelectHostApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {

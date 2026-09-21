@@ -37,6 +37,10 @@
           @click="decideHostApproval(approval.id, 'allow_once')">{{ hostApprovalBusy === approval.id
             ? 'Recording…'
             : approval.presentation.title === 'Grant for this turn' ? 'Grant for this turn' : 'Allow once' }}</button>
+        <button v-if="approval.presentation.alwaysAllow" type="button" class="desktop-composer-permission-allow"
+          :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
+          title="Saved for this agent. Revoke in Permissions. Configured access settings are unchanged."
+          @click="decideHostApproval(approval.id, 'allow_always')">Always allow {{ approval.presentation.alwaysAllow.toolLabel }} in {{ approval.presentation.alwaysAllow.projectName }}</button>
       </div>
       <div v-else-if="approval.status === 'decision_recorded' && approval.retryDecision" class="desktop-composer-permission-actions">
         <button type="button" class="desktop-composer-permission-detail" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
@@ -214,7 +218,7 @@ import type {
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
-import type { DesktopHostApproval, HostApprovalChoice, HostApprovalStatus } from "../../../../../../shared/host-approvals";
+import type { DesktopHostApproval, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
 import { hostApprovalFields } from "./host-approval-presentation";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
@@ -320,7 +324,7 @@ async function refreshHostApprovals(): Promise<void> {
   } finally { hostApprovalLoading.value = false; }
 }
 
-async function decideHostApproval(id: string, decision: HostApprovalChoice): Promise<void> {
+async function decideHostApproval(id: string, decision: HostApprovalSelection): Promise<void> {
   const epoch = approvalEpoch;
   const decide = desktopIpc.supervisor?.decideHostApproval;
   if (!decide || hostApprovalBusy.value || hostApprovalError.value) return;
