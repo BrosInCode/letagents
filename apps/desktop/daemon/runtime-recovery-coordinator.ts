@@ -23,12 +23,12 @@ import type {
 import type { WorkerAuthorityCoordinator } from "./worker-authority-coordinator.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
-import { assertRecoveryCoordinates, type RuntimeRestartRequest } from "./runtime-recovery-journal.js";
+import { assertRecoveryCoordinates, type RuntimeRestartRequest, type RetiredRuntimeEvidence } from "./runtime-recovery-journal.js";
 import type { ProviderTerminalCoordinator } from "./provider-terminal-coordinator.js";
 import { processBirthState, type ProcessIdentity } from "./process-identity.js";
 import { serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 
-export type AgentRuntimeRecoveryRequest = Omit<RuntimeRestartRequest, "entryId" | "mode"> & { mode: "reconnect" | "resume" | "fresh" };
+export type AgentRuntimeRecoveryRequest = Omit<RuntimeRestartRequest, "entryId" | "mode"> & { mode: "reconnect" | "resume" | "fresh"; retiredRuntimeEvidence?: RetiredRuntimeEvidence[] };
 
 type RuntimeRecoveryAuthority = {
   currentDaemonGeneration: () => number;
@@ -367,6 +367,7 @@ export class RuntimeRecoveryCoordinator {
       throw new Error("Recovery is available for saved supervised agents.");
     }
     if (input.mode === "reconnect") {
+      if (input.retiredRuntimeEvidence !== undefined) throw new Error("Retired process evidence requires explicit restart recovery.");
       if (pending) throw new Error("A restart is paused partway through. Retry its original recovery action.");
       if (entry.desired_state !== "running" || !this.options.streams || !this.delivery) throw new Error("Resume this agent before reconnecting it.");
       const installation = this.options.streams.currentInstallation(entryId);
@@ -381,6 +382,8 @@ export class RuntimeRecoveryCoordinator {
       });
       return { outcome: "reconnecting", entry: await this.entryWithDerivedLiveness((await this.store.getEntry(entryId))!) };
     }
+    const retiredPlan = pending?.phase === "stopped" ? undefined
+      : await this.store.prepareRetiredRuntimePlan(request, input.retiredRuntimeEvidence, this.options.processIdentity);
     if (!this.provider) throw new Error("Provider recovery is unavailable.");
     const capabilities = await this.provider.capabilities(entry.work_attempt_id!, entry.provider);
     if (input.mode === "resume" && !capabilities.resume) {
@@ -444,7 +447,7 @@ export class RuntimeRecoveryCoordinator {
           // The durable boundary requires current host proof, not a cached terminal.
           if (birthState() !== "gone") throw new Error("The old process has not been proven stopped. Recovery remains paused; no replacement was started.");
           await commit();
-        }));
+        }), retiredPlan, this.options.processIdentity);
       });
     }
     await this.options.settleRuntimeApprovals(entryId);

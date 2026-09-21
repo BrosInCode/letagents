@@ -1,3 +1,4 @@
+import { retiredRuntimeEvidenceListSchema } from "./runtime-recovery-journal.js";
 import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
 import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
 import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
@@ -431,10 +432,14 @@ export function createDaemonControlRequestHandler(
     if (request.method === "supervisor.recover_agent_runtime") {
       const params = paramsRecord(request.params);
       const error = "Agent runtime recovery requires exact typed coordinates.";
+      if (params.retired_runtime_evidence !== undefined && !["resume", "fresh"].includes(String(params.mode))) throw new Error(error);
       return operations.recoverAgentRuntime(
         requiredStringParam(params, "entry_id", error),
         positiveIntegerParam(params, "daemon_generation", error),
         params.mode === undefined ? undefined : {
+          ...(params.retired_runtime_evidence === undefined ? {} : {
+            retiredRuntimeEvidence: retiredRuntimeEvidenceListSchema.parse(params.retired_runtime_evidence),
+          }),
           mode: runtimeRecoveryMode(params, error),
           operationId: requiredStringParam(params, "operation_id", error),
           roomId: requiredStringParam(params, "room_id", error),
