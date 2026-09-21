@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import {
@@ -16,6 +18,33 @@ import {
 const result = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
 const waitResult = (data: Record<string, unknown> = {}): CallToolResult => result(JSON.stringify({ messages: [], ...data }));
 const withRoom = <T>(roomId: string, callback: () => T): T => runWithSupervisedRoomAuthority(roomId, callback);
+
+test("native discovery distinguishes supervised room reads from writes and unknown tools", async () => {
+  for (const profile of ["supervised_room_turn", "supervised_mcp_polling"] as const) {
+    const server = new McpServer({ name: "approval-metadata-test", version: "1" });
+    const client = new Client({ name: "approval-metadata-client", version: "1" });
+    const facade = profileAwareToolServer(server, profile);
+    for (const name of ["get_board", "read_messages", "get_current_room", "send_message", "claim_task", "new_unknown_tool"]) {
+      facade.tool(name, "test tool", {}, async () => result("unused"));
+    }
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const { tools } = await client.listTools();
+      assert.deepEqual(Object.fromEntries(tools.map(tool => [tool.name, tool.annotations?.readOnlyHint])), {
+        get_board: true, read_messages: true, get_current_room: true,
+        send_message: false, claim_task: false, new_unknown_tool: false,
+      });
+      // Annotation does not replace the daemon's exact-turn authorization.
+      const denied = await client.callTool({ name: "get_board", arguments: {} });
+      assert.equal(denied.isError, true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+});
 
 test("custodial tools gate before work and fence read release without bounded effects", async () => {
   for (const tool of ["send_message", "read_messages", "wait_for_messages"]) {

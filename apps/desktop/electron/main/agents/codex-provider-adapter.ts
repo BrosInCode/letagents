@@ -287,7 +287,7 @@ function custodialMcpOverride(entryPath: string, cwd: string, environment: Recor
     .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`).join(", ");
   // Codex merges installed config beneath CLI overrides. Pin every authority
   // coordinate and clear inherited credential names/tool filters explicitly.
-  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [] }`;
+  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = "writes" }`;
 }
 
 function isCodexExecutionMethod(method: string): boolean {
