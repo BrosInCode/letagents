@@ -36,6 +36,7 @@ import {
   prepareCursorSupervisedProfile,
   type CursorManagedProfile,
 } from "../main/agents/cursor-managed-profile.js";
+import { prepareCursorResumeOwnershipLock } from "../main/agents/cursor-sandbox-policy.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { removeSupervisedWorkspaceGenerationReceipt } from "../main/agents/supervised-workspace-generation.js";
 const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
@@ -696,6 +697,33 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
   assert.equal(handle.providerContinuationId, "sess-cursor-1", "session id captured from the stream");
 });
 
+test("Cursor resume ownership rejects occupied or unsafe structures without changing native state", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "cursor-resume-ownership-")));
+  const id = randomUUID();
+  try {
+    assert.throws(() => prepareCursorResumeOwnershipLock("../escape", root), /exact native conversation UUID/);
+    const lock = prepareCursorResumeOwnershipLock(id.toUpperCase(), root);
+    const shared = dirname(dirname(lock));
+    assert.equal(lock, join(shared, "claim-locks", `${id}.lock`));
+    assert.equal(existsSync(lock), false);
+    mkdirSync(lock, { mode: 0o700 });
+    assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /ownership is already recorded/);
+    assert.equal(existsSync(lock), true);
+    fs.rmdirSync(lock);
+    const binding = join(shared, "bindings", `${id}.json`);
+    symlinkSync(join(root, "absent"), binding);
+    assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /ownership is already recorded/);
+    fs.unlinkSync(binding);
+    chmodSync(join(shared, "bindings"), 0o755);
+    assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /not private/);
+    assert.equal(fs.statSync(join(shared, "bindings")).mode & 0o777, 0o755);
+    fs.rmdirSync(join(shared, "bindings"));
+    symlinkSync(join(root, "elsewhere"), join(shared, "bindings"));
+    assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /not private/);
+    assert.equal(existsSync(join(root, "elsewhere")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags", () => {
   assert.deepEqual(
     cursorLaunchPolicyArgs({ mode: "plan", force: true, sandbox: "disabled" }),
@@ -751,6 +779,25 @@ test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags",
     mcpRuntimeCwd: process.cwd(),
     mcpRuntimeEnv: {},
   };
+  assert.throws(
+    () => defaultLaunchTurn({
+      ...supervisedBoundary,
+      allowedReadSubpaths: [process.cwd()],
+      allowedWriteSubpaths: [process.cwd()],
+      nativeResumeSessionId: randomUUID(),
+      args: [`--resume=${randomUUID()}`],
+    }),
+    /ownership access must match the exact supervised resume session/,
+  );
+  assert.throws(
+    () => defaultLaunchTurn({
+      cursorBin: process.execPath,
+      args: [],
+      cwd: process.cwd(),
+      nativeResumeSessionId: randomUUID(),
+    }),
+    /ownership access must match the exact supervised resume session/,
+  );
   assert.throws(
     () => defaultLaunchTurn({
       ...supervisedBoundary,
@@ -5207,6 +5254,7 @@ test("Cursor preserves its exact native conversation across writable generations
 }, async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-cursor-conversation-restart-")));
   try {
+    const sessionId = randomUUID();
     const workspace = join(root, "workspace");
     const sourceHomeDir = join(root, "source-home");
     const profileRoot = join(root, "profile");
@@ -5214,11 +5262,36 @@ test("Cursor preserves its exact native conversation across writable generations
     initializeGitWorkspace(workspace);
     mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
     writeFileSync(executable, `#!/usr/bin/env node
-${cursorConversationStoreFixtureSource("sess-original-conversation")}
+{
+  const fs = require("node:fs");
+  const path = require("node:path");
+  if (process.argv.some((arg) => arg.startsWith("--resume="))) {
+    const shared = "/tmp/cursor-agent-persist-" + process.getuid();
+    const locks = path.join(shared, "claim-locks");
+    const bindings = path.join(shared, "bindings");
+    const lock = path.join(locks, ${JSON.stringify(sessionId)} + ".lock");
+    for (const directory of [shared, locks, bindings]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(lock, { mode: 0o700 });
+    fs.writeFileSync(path.join(lock, "owner.json"), "owned", { flag: "wx", mode: 0o600 });
+    if (fs.readFileSync(path.join(lock, "owner.json"), "utf8") !== "owned") process.exit(81);
+    const denied = (operation) => {
+      try { operation(); } catch (error) { if (["EPERM", "EACCES"].includes(error.code)) return; throw error; }
+      throw new Error("Resume lock access escaped its exact conversation");
+    };
+    denied(() => fs.mkdirSync(path.join(locks, "unrelated.lock")));
+    denied(() => fs.writeFileSync(path.join(bindings, ${JSON.stringify(sessionId)} + ".json"), "foreign"));
+    denied(() => fs.readdirSync(bindings));
+    denied(() => fs.readdirSync(shared));
+    denied(() => fs.chmodSync(shared, 0o777));
+    denied(() => fs.renameSync(locks, locks + ".moved"));
+    fs.rmSync(lock, { recursive: true });
+  }
+}
+${cursorConversationStoreFixtureSource(sessionId)}
 const fs = require("node:fs");
 fs.writeFileSync("agent-change.txt", "preserved work");
-process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-original-conversation" }) + "\\n");
-process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "conversation retained", session_id: "sess-original-conversation" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(sessionId)} }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "conversation retained", session_id: ${JSON.stringify(sessionId)} }) + "\\n");
 `);
     chmodSync(executable, 0o700);
     const launches: Parameters<CursorProviderAdapterDependencies["launchTurn"]>[0][] = [];
@@ -5254,11 +5327,11 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       ...checkpoint, checkpointTurnStarted: async (id) => { turnId = id; },
     })), /crash after receipt deletion/);
     assert.equal(existsSync(launches[0]!.workspaceGenerationManifestPath!), false);
-    const restingStore = join(profileRoot, "config", "cursor", "chats", createHash("md5").update(workspace).digest("hex"), "sess-original-conversation", "store.db");
+    const restingStore = join(profileRoot, "config", "cursor", "chats", createHash("md5").update(workspace).digest("hex"), sessionId, "store.db");
     assert.deepEqual(JSON.parse(readFileSync(restingStore, "utf8")), { context: "original conversation", turns: 1 });
     const successor = createAdapter();
     const handle = await successor.resume({
-      workAttemptId: request.workAttemptId, providerContinuationId: "sess-original-conversation",
+      workAttemptId: request.workAttemptId, providerContinuationId: sessionId,
       providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
     }, request);
     const recovered = await successor.recoverRoomTurn(handle, { inboxItemId: "first", providerTurnId: turnId }, checkpoint);
@@ -5266,8 +5339,9 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
     assert.equal(launches.length, 1, "restart recovery never replays native work");
     const second = await withLoopAlive(successor.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }), checkpoint));
     assert.equal(second.text, "conversation retained");
+    assert.equal(launches[1]!.nativeResumeSessionId, sessionId);
     assert.notEqual(argValue(launches[0]!.args, "--workspace"), argValue(launches[1]!.args, "--workspace"));
-    assert.equal(argValue(launches[1]!.args, "--resume"), "sess-original-conversation");
+    assert.equal(argValue(launches[1]!.args, "--resume"), sessionId);
     assert.deepEqual(JSON.parse(readFileSync(restingStore, "utf8")), { context: "original conversation", turns: 2 });
     assert.equal(readFileSync(join(workspace, "agent-change.txt"), "utf8"), "preserved work");
   } finally { rmSync(root, { recursive: true, force: true }); }
