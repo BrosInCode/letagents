@@ -6582,6 +6582,10 @@ test("v43 saved-permission migration is atomic and current missing authority fai
   const schema = new DaemonStateSchema();
   try {
     schema.createSchema(database);
+    const closureSql = String(database.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get()!.sql)
+      .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")
+      .replace("dispatch_id TEXT,", "dispatch_id TEXT NOT NULL,");
+    database.exec(`DROP TABLE execution_approval_request_closures; ${closureSql}`);
     database.exec(`DROP TABLE host_tool_rule_withdrawals; DROP TABLE host_tool_rule_decisions; DROP TABLE host_tool_rules;
       UPDATE manifest_metadata SET schema_version=43; PRAGMA user_version=43`);
     const fail = new DaemonStateSchema(() => { throw new Error("Interrupted permission migration"); });
@@ -6589,7 +6593,7 @@ test("v43 saved-permission migration is atomic and current missing authority fai
     assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 43);
     assert.equal(database.prepare("SELECT 1 FROM sqlite_master WHERE name='host_tool_rules'").get(), undefined);
     schema.createSchema(database);
-    assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 44);
+    assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.equal(database.prepare("SELECT COUNT(*) AS n FROM host_tool_rules").get()!.n, 0);
     database.exec("DROP TABLE host_tool_rule_withdrawals");
     assert.throws(() => schema.createSchema(database), /permission storage is missing or invalid/);

@@ -1946,3 +1946,23 @@ test("Claude disconnect clears native pendingness without inventing request clos
     assert.equal(h.closures.length, 0);
   } finally { await h.close(); }
 });
+
+for (const cause of ["cancel", "result"] as const) test(`Claude retires an evicted pending permission on exact ${cause}`, async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); const original = h.requests[0]!;
+    for (let index = 0; index < 65; index++) {
+      const toolId = `later-tool-${index}`;
+      h.child.emit({ type: "assistant", session_id: h.handle.providerContinuationId,
+        message: { content: [{ type: "tool_use", id: toolId, name: "Write", input: {} }] } });
+      h.child.emit({ type: "control_request", request_id: `later-request-${index}`,
+        request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: toolId, input: {} } });
+    }
+    if (cause === "cancel") h.child.emit({ type: "control_cancel_request", request_id: original.id });
+    else h.child.emit({ type: "user", session_id: h.handle.providerContinuationId,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", is_error: true, content: "failed" }] } });
+    assert.ok(h.requests.every(request => request.id !== original.id));
+    assert.equal(h.closures.length, 1);
+    await assert.rejects(h.adapter.replyPermission(h.handle, original, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
