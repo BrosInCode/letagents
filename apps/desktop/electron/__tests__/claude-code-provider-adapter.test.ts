@@ -1707,7 +1707,7 @@ const claudeAskPolicy = {
   allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
 };
 
-async function approvalHarness() {
+async function approvalHarness(detachSignal?: AbortSignal) {
   const harness = createHarness({ versionOutput: "2.1.272 (Claude Code)" });
   const streams: ProviderStreamEvent[] = [];
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, streamSink: event => streams.push(event) });
@@ -1716,7 +1716,7 @@ async function approvalHarness() {
   const controller = new AbortController();
   let requests: import("../../shared/provider-permissions.js").ClaudeNativePermissionRequest[] = [];
   const observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") requests = [...event.requests]; }, controller.signal);
-  const running = adapter.runRoomTurn(handle, { inboxItemId: "approval-inbox", actionId: "approval-action", sourceMessage: { text: "Write a file" }, activation: {} });
+  const running = adapter.runRoomTurn(handle, { inboxItemId: "approval-inbox", actionId: "approval-action", sourceMessage: { text: "Write a file" }, activation: {} }, { detachSignal });
   void running.catch(() => {});
   await flush();
   const turnId = JSON.parse(child.written.at(-1)!).uuid as string;
@@ -1822,20 +1822,51 @@ test("Claude approval serializes replies and refuses retry after an uncertain st
   } finally { await h.close(); }
 });
 
-test("Claude cancellation at a native approval uses its exact aborted-tools turn boundary", async () => {
-  const h = await approvalHarness();
+for (const observer of ["attached", "detached before interrupt", "detached during interrupt"]) test(`Claude cancellation at a native approval uses its exact aborted-tools boundary (${observer})`, async () => {
+  const delivery = new AbortController();
+  const h = await approvalHarness(delivery.signal);
   try {
     h.started(); h.tool(); h.permission(); const pending = h.requests[0]!;
+    if (observer === "detached before interrupt") {
+      delivery.abort();
+      await flush();
+      assert.equal(h.handle.observedState(), "working", "detaching delivery does not stop native work");
+    }
     const interrupted = h.adapter.controlTurn(h.handle, null, { targetTurnId: h.turnId });
+    if (observer === "detached during interrupt") delivery.abort();
     await flush();
     h.child.emit({ type: "control_cancel_request", request_id: pending.id });
     h.child.emit({ type: "result", subtype: "error_during_execution", terminal_reason: "aborted_tools", is_error: true,
       session_id: h.handle.providerContinuationId, user_message_uuid: h.turnId });
     assert.equal((await interrupted).interrupted, true);
     assert.equal(h.handle.observedState(), "idle");
+    const writes = h.child.written.length;
+    const recovered = await h.adapter.recoverRoomTurn(h.handle, { inboxItemId: "approval-inbox", providerTurnId: h.turnId });
+    assert.equal(recovered.outcome, "interrupted");
+    assert.equal(h.child.written.length, writes, "recovery consumes the interrupted result without another native request");
     await assert.rejects(h.adapter.replyPermission(h.handle, pending, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
   } finally { await h.close(); }
 });
+
+for (const invalid of ["foreign session", "foreign turn", "missing tool turn", "natural failure"]) {
+  test(`detached Claude interruption still rejects ${invalid} evidence`, async () => {
+    const delivery = new AbortController();
+    const h = await approvalHarness(delivery.signal);
+    try {
+      h.started(); h.tool(); h.permission();
+      delivery.abort();
+      await flush();
+      const interrupted = h.adapter.controlTurn(h.handle, null, { targetTurnId: h.turnId });
+      const rejected = assert.rejects(interrupted, /instead of an exact-session interrupted boundary/);
+      await flush();
+      h.child.emit({ type: "result", subtype: "error_during_execution", is_error: true,
+        terminal_reason: invalid === "natural failure" ? "tool_error" : "aborted_tools",
+        session_id: invalid === "foreign session" ? "other-session" : h.handle.providerContinuationId,
+        user_message_uuid: invalid === "foreign turn" ? "other-turn" : invalid === "missing tool turn" ? undefined : h.turnId });
+      await rejected;
+    } finally { await h.close(); }
+  });
+}
 
 test("Claude explicit foreign tool-turn UUID cannot create or resolve approval authority", async () => {
   const h = await approvalHarness();
