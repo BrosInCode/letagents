@@ -12,7 +12,7 @@
   "type": "module",
   "letagentsRuntime": {
     "openCodeVersion": "1.18.9",
-    "mcpVersion": "0.12.23"
+    "mcpVersion": "0.12.25"
   },
   "main": "dist-electron/main.js",
   "scripts": {
