@@ -93,7 +93,7 @@ export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: 
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; custodyLaunchAgentSessionId?: string; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { nativeRuntimeDeath?: import("../shared/execution-protocol.js").NativeRuntimeDeath; endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
 /** Validate death against the immutable handle/ref before retaining it as operational evidence. */
-export function validatedNativeRuntimeDeath(terminal: ProviderActionTerminal,
+export function validatedNativeRuntimeDeath(terminal: Pick<ProviderActionTerminal, "nativeRuntimeDeath">,
   expected: ProviderActionConnectionRef | null | undefined) {
   if (terminal.nativeRuntimeDeath === undefined) return undefined;
   const death = nativeRuntimeDeathSchema.parse(terminal.nativeRuntimeDeath);
