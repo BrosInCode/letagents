@@ -2164,6 +2164,7 @@ test("Codex resumed bounded launch supplies only the exact non-secret worker rou
     assert.ok(override.includes('"LETAGENTS_AGENT_SESSION_BEARER" = ""'));
     assert.ok(override.includes('"LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID" = ""'));
     assert.ok(override.includes('env_vars = []'));
+    assert.ok(override.includes('default_tools_approval_mode = "writes"'), "reads need no additional prompt; unmarked and write tools still do");
     assert.ok(!override.includes("complete_room_turn"), "pinned Cursor profile excludes its completion hook for Codex");
     assert.ok(override.includes(`enabled_tools = ${JSON.stringify(custodialRuntimeContract.profiles.cursor_supervised_room_turn.tools.filter((tool) => tool !== "complete_room_turn"))}, disabled_tools = []`));
   }
@@ -2290,6 +2291,7 @@ test("Codex custodial polling verifies its exact MCP runtime and leaves fresh an
     assert.equal(launch.options.configOverrides.length, 1, "pin the MCP executable, custody coordinates and advertised tools together");
     const override = launch.options.configOverrides[0]!;
     assert.ok(override.startsWith("mcp_servers.letagents={ "));
+    assert.ok(override.includes('default_tools_approval_mode = "writes"'));
     assert.ok(override.includes(`command = ${JSON.stringify(process.execPath)}`));
     assert.ok(override.includes('args = ["/verified/runtime/dist/mcp/server.js"]'));
     assert.ok(override.includes("env_vars = [], enabled = true"));
