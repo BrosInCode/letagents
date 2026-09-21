@@ -35,18 +35,13 @@
               <X aria-hidden="true" />
             </button>
           </header>
-          <div class="desktop-add-agent-choice" role="group" aria-label="How to add an agent">
-            <button type="button" :aria-pressed="!connectExisting" @click="connectExisting = false">Start an agent</button>
-            <button type="button" :aria-pressed="connectExisting" @click="connectExisting = true">Connect an existing agent</button>
-          </div>
           <div class="desktop-add-agent-body">
             <AddAgentProviderRail
               :providers="providers"
               :selected-provider-id="selectedProviderId"
               @select="selectProvider"
             />
-            <AddAgentConnection v-if="connectExisting" :provider="selectedProvider" :room-identifier="roomIdentifier" :repo-root-path="repoRootPath" :local-room="roomStorageMode === 'local'" />
-            <AddAgentSetupStatus v-else
+            <AddAgentSetupStatus
               :provider-name="selectedProvider?.name || null"
               :preflight="preflight"
               :loading="loadingProviders || loadingPreflight"
@@ -176,7 +171,6 @@ import AddAgentOpenModelSettings from "./add-agent/AddAgentOpenModelSettings.vue
 import AddAgentModelSettings from "./add-agent/AddAgentModelSettings.vue";
 import AddAgentRuntimeSettings from "./add-agent/AddAgentRuntimeSettings.vue";
 import AddAgentSupervisedLaunch from "./add-agent/AddAgentSupervisedLaunch.vue";
-import AddAgentConnection from "./add-agent/AddAgentConnection.vue";
 import AddAgentFeedback from "./add-agent/AddAgentFeedback.vue";
 import {
   useAddAgentController,
@@ -197,7 +191,6 @@ import {
 const props = defineProps<AddAgentModalProps>();
 const emit = defineEmits<AddAgentModalEvents>();
 const dialogElement = ref<HTMLElement | null>(null);
-const connectExisting = ref(false);
 let previousFocusElement: HTMLElement | null = null;
 
 watch(() => props.open, (open) => {
