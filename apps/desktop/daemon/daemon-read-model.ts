@@ -62,6 +62,8 @@ export class DaemonReadModel {
       implementation_version: DAEMON_IMPLEMENTATION_VERSION,
       runtime_environment_fingerprint:
         process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT ?? null,
+      compatibility_fingerprint:
+        process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT ?? null,
       capabilities: {
         room_delivery_retry: this.ports.capabilities.hasDelivery()
           && this.ports.capabilities.supportsRoomTurns(),

@@ -76,7 +76,9 @@ for (const approval of [false, true]) test(`Claude Code ${approval ? "tool appro
   }
 });
 
-test("Claude Code preflight truthfully includes the managed LetAgents connection", async () => {
+test("Claude Code preflight truthfully includes the managed LetAgents connection", async (t) => {
+  const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
+  t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-ready-"));
   const bin = join(root, "claude");
   const priorBin = process.env.LETAGENTS_CLAUDE_CODE_BIN;
