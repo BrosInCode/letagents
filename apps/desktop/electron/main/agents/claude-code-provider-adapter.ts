@@ -1462,9 +1462,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     message: ClaudeStreamMessage,
   ): string | null {
     const turnId = handle.pendingInterruptTurnId;
+    // Delivery may detach/recover its waiter while this native turn stays live.
+    // Its transient roomTurnOperationId is not native interruption authority.
     if (!turnId
       || handle.activeRoomTurnId !== turnId
-      || handle.roomTurnOperationId !== turnId
       || handle.executionTurnId !== turnId
       || message.type !== "result"
       || sessionIdOf(message) !== handle.providerContinuationId
