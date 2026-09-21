@@ -72,6 +72,7 @@ const {
   setLocalAwareRoomStorageMode,
   setLocalRoomArchived,
   setLocalRoomPinned,
+  updateLocalRoomDisplayName,
   updateLocalTask,
 } = await import("../main/rooms/local-store.js");
 const { updateDesktopRoomTask } = await import("../main/rooms/tasks.js");
@@ -1349,6 +1350,22 @@ test("desktop local Git rooms persist Git metadata for snapshots and account ent
   assert.throws(
     () => assertLocalRoomPublishable(room),
     /Local Git Rooms stay local/,
+  );
+
+  // Reopening a project supplies the folder name again. Preserve a name the
+  // user chose while still refreshing the repository metadata.
+  await updateLocalRoomDisplayName(room.roomIdentifier, "My project");
+  await setLocalRoomArchived(room.roomIdentifier, true);
+  const reopened = await createLocalRoom({
+    roomIdentifier: room.roomIdentifier,
+    displayName: "FBRF",
+    gitRoom: { ...gitRoom, ref: { ...gitRoom.ref, baseRef: "staging" } },
+  });
+  assert.equal(reopened.displayName, "My project");
+  assert.equal(reopened.gitRoom?.ref.baseRef, "staging");
+  assert.equal(
+    (await listLocalRoomEntries()).find((entry) => entry.roomIdentifier === room.roomIdentifier)?.displayName,
+    "My project",
   );
 });
 
