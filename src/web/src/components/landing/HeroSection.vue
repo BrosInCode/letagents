@@ -57,6 +57,8 @@ const macDesktopBeta = ref(MAC_DESKTOP_BETA)
 const wordEl = ref<HTMLSpanElement | null>(null)
 let wordIndex = 0
 let interval: ReturnType<typeof setInterval> | null = null
+let transitionTimeout: ReturnType<typeof setTimeout> | null = null
+let motionPreference: MediaQueryList | null = null
 
 function animateWord() {
   const el = wordEl.value
@@ -67,7 +69,8 @@ function animateWord() {
   el.style.transform = 'translateY(8px)'
   el.classList.remove('active')
 
-  setTimeout(() => {
+  transitionTimeout = setTimeout(() => {
+    transitionTimeout = null
     wordIndex = (wordIndex + 1) % words.length
     currentWord.value = words[wordIndex]
 
@@ -79,28 +82,38 @@ function animateWord() {
 }
 
 function startAnimation() {
-  if (!interval) interval = setInterval(animateWord, 2400)
+  if (!interval && !document.hidden && !motionPreference?.matches) {
+    interval = setInterval(animateWord, 2400)
+  }
 }
 
 function stopAnimation() {
   if (interval) { clearInterval(interval); interval = null }
+  if (transitionTimeout) { clearTimeout(transitionTimeout); transitionTimeout = null }
+  if (wordEl.value) {
+    wordEl.value.style.opacity = '1'
+    wordEl.value.style.transform = 'none'
+  }
 }
 
 function onVisibility() {
-  if (document.hidden) stopAnimation()
-  else startAnimation()
+  stopAnimation()
+  startAnimation()
 }
 
 onMounted(() => {
   void fetchCurrentMacDesktopBeta()
     .then((release) => { macDesktopBeta.value = release })
     .catch(() => { /* Keep the bundled last-known-good release available. */ })
+  motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)')
+  motionPreference.addEventListener('change', onVisibility)
   startAnimation()
   document.addEventListener('visibilitychange', onVisibility)
 })
 
 onUnmounted(() => {
   stopAnimation()
+  motionPreference?.removeEventListener('change', onVisibility)
   document.removeEventListener('visibilitychange', onVisibility)
 })
 </script>
@@ -174,6 +187,7 @@ onUnmounted(() => {
 
 .hero-download-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 9px;
   color: var(--text);
@@ -260,6 +274,8 @@ onUnmounted(() => {
 
 .hero-release-link {
   display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   margin-top: 12px;
   color: var(--text-muted);
   font-size: 0.72rem;
@@ -375,6 +391,12 @@ onUnmounted(() => {
 @media (max-width: 360px) {
   .hero-headline {
     font-size: 2.35rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-word, .btn-white, .btn-ghost-lg, .hero-download-link {
+    transition: none;
   }
 }
 </style>

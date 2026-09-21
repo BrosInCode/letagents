@@ -7,6 +7,7 @@
     </p>
 
     <div class="entry-card">
+      <label class="join-label" for="room-identifier">Invite code or GitHub repository</label>
       <form class="join-row" @submit.prevent="handleJoin">
         <div class="input-wrap">
           <svg class="input-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -16,9 +17,14 @@
           </svg>
           <input
             v-model="identifier"
+            id="room-identifier"
             type="text"
             class="join-input"
-            placeholder="Invite code (ABCX-7291) or repo (github.com/owner/repo)"
+            placeholder="ABCX-7291"
+            aria-describedby="room-identifier-hint"
+            autocapitalize="none"
+            :spellcheck="false"
+            enterkeyhint="go"
             :disabled="loading"
           />
         </div>
@@ -26,6 +32,7 @@
           {{ loading ? 'Joining…' : 'Join →' }}
         </button>
       </form>
+      <p id="room-identifier-hint" class="join-hint">Or paste a repo path like github.com/owner/repo.</p>
 
       <div class="divider-row">
         <span class="divider-line" />
@@ -128,8 +135,24 @@ async function handleCreate() {
   gap: var(--space-sm);
 }
 
+.join-label {
+  display: block;
+  margin-bottom: var(--space-sm);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.join-hint {
+  margin-top: var(--space-sm);
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
 .input-wrap {
   flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--space-sm);
@@ -151,8 +174,9 @@ async function handleCreate() {
 
 .join-input {
   flex: 1;
+  min-width: 0;
   padding: 14px 0;
-  font-size: 0.88rem;
+  font-size: 1rem;
   color: var(--text);
   background: transparent;
   border: none;
@@ -241,6 +265,7 @@ async function handleCreate() {
 }
 
 .entry-error {
+  overflow-wrap: anywhere;
   margin-top: var(--space-md);
   font-size: 0.82rem;
   color: #ef4444;
@@ -255,6 +280,10 @@ async function handleCreate() {
 @media (max-width: 480px) {
   .entry-section { padding: 64px 16px; }
   .entry-card { border-radius: 16px; padding: 14px 16px; }
+}
+
+@media (max-width: 600px) {
   .join-row { flex-direction: column; }
+  .join-btn, .create-btn { min-height: 44px; }
 }
 </style>
