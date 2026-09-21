@@ -92,8 +92,8 @@ export function readDurableNativeFailure(database: DatabaseSync, inboxItemId: st
  * unrecoverable savepoint cleanup must stop the authoritative caller. */
 export function settleCapturedExecutionAttempts(database: DatabaseSync, agentId: string, options: {
   inboxItemId?: string; afterFifoSequence?: number;
-} = {}): { lastFifoSequence: number | null; hasMore: boolean; unavailable: boolean } {
-  const unavailable = { lastFifoSequence: null, hasMore: false, unavailable: true };
+} = {}): { lastFifoSequence: number | null; hasMore: boolean; unavailable: boolean; changed: boolean } {
+  const unavailable = { lastFifoSequence: null, hasMore: false, unavailable: true, changed: false };
   const after = options.afterFifoSequence ?? 0;
   if (!agentId || !Number.isSafeInteger(after) || after < 0
     || (options.inboxItemId !== undefined && !options.inboxItemId)) return unavailable;
@@ -111,7 +111,7 @@ export function settleCapturedExecutionAttempts(database: DatabaseSync, agentId:
         AND i.fifo_sequence>? ${options.inboxItemId === undefined ? "" : "AND i.inbox_item_id=?"}
       ORDER BY i.fifo_sequence LIMIT 33`).all(agentId, after,
       ...(options.inboxItemId === undefined ? [] : [options.inboxItemId])) as Row[];
-    const result = { lastFifoSequence: null as number | null, hasMore: rows.length > 32, unavailable: false };
+    const result = { lastFifoSequence: null as number | null, hasMore: rows.length > 32, unavailable: false, changed: false };
     for (const row of rows.slice(0, 32)) {
       result.lastFifoSequence = Number(row.fifo_sequence);
       const conclusion = capturedReceiptConclusion(database, row);
@@ -120,10 +120,11 @@ export function settleCapturedExecutionAttempts(database: DatabaseSync, agentId:
         result.unavailable = true;
         continue;
       }
-      run(database.prepare(`UPDATE execution_message_attempts SET state=?,conclusion=?,settled_at_ms=?
-        WHERE attempt_id=? AND agent_id=? AND room_id=? AND source_message_id=? AND state='active'`),
-      conclusion === "replied" || conclusion === "acknowledged_no_reply" ? "cleanly_concluded" : conclusion,
-      conclusion, settledAt, String(row.attempt_id), agentId, String(row.room_id), String(row.source_message_id));
+      const update = database.prepare(`UPDATE execution_message_attempts SET state=?,conclusion=?,settled_at_ms=?
+        WHERE attempt_id=? AND agent_id=? AND room_id=? AND source_message_id=? AND state='active'`).run(
+        conclusion === "replied" || conclusion === "acknowledged_no_reply" ? "cleanly_concluded" : conclusion,
+        conclusion, settledAt, String(row.attempt_id), agentId, String(row.room_id), String(row.source_message_id));
+      if (Number(update.changes) > 0) result.changed = true;
     }
     database.exec("RELEASE captured_execution_settlement");
     savepoint = false;
