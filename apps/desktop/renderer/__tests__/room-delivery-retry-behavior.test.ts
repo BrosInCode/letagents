@@ -8,6 +8,7 @@ import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
+import { hostApprovalFields } from "../src/components/desktop/content/room-chat/host-approval-presentation";
 
 interface HostNode {
   kind: "element" | "text" | "comment";
@@ -211,14 +212,14 @@ test("composer presents literal host-only native requests and sends only the sel
     await flushHostApprovals();
     assert.ok(descendants(root).some(node => node.text.includes('<script>notExecutable()</script>')));
     assert.equal(descendants(root).some(node => node.type === "script" || node.props.innerHTML), false);
-    assert.ok(descendants(root).some(node => node.text.includes("other currently pending OpenCode permissions")));
+    assert.ok(descendants(root).some(node => node.text.includes("Deny applies to all pending permissions for this agent.")));
     assert.equal(buttonByText(root, "Allow once").props.type, "button");
     await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
     await nextTick();
     assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
     assert.equal(buttons(root).some(node => descendants(node).some(child => child.text === "Allow once")), false);
-    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), true,
-      "an uncertain decision remains visible without offering another approval");
+    assert.ok(buttonByText(root, "Show 1 approval needing attention"),
+      "an uncertain decision remains accessible without offering another approval");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
@@ -300,7 +301,7 @@ test("composer rejects stale refreshes and removes retry controls after an uncer
     resolveRefresh({ available: true, approvals: [hostApproval()], error: null });
     await flushHostApprovals();
     assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Retry recorded approval)$/.test(child.text))), false);
-    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), true);
+    assert.ok(buttonByText(root, "Show 1 approval needing attention"));
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
@@ -319,6 +320,9 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
+    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 1);
+    await (buttonByText(root, "Show 2 approvals needing attention").props.onClick as () => void)();
+    await nextTick();
     assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 3);
     assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 1);
     const dismiss = descendants(root).find(node => node.props["aria-label"] === "Dismiss approval from GardenPoint");
@@ -328,6 +332,45 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
     assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 2);
     assert.deepEqual(decisions, [], "dismissal is local presentation state and never changes the recorded approval");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("approval details show tool inputs and exact edits without transport JSON", async () => {
+  const approval = hostApproval();
+  approval.presentation = { ...approval.presentation, provider: "claude-code", denyScope: "request",
+    details: JSON.stringify({ id: "private-request-id", request: { subtype: "can_use_tool", tool_use_id: "private-tool-id",
+      tool_name: "Bash", decision_reason: "Runs in another directory", blocked_path: "/project/.git",
+      input: { command: "git status\nprintf '<script>\\u202e'", description: "Inspect repository", cwd: "/project" } } }) };
+  assert.deepEqual(hostApprovalFields(approval.presentation).map(field => field.label), ["Tool", "Command", "Description", "Cwd", "Decision reason", "Blocked path"]);
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [approval], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    const content = descendants(root).map(node => node.text).join("\n");
+    assert.match(content, /git status\nprintf/);
+    assert.match(content, /Runs in another directory/);
+    assert.match(content, /\/project\/\.git/);
+    assert.doesNotMatch(content, /private-request-id|private-tool-id|can_use_tool|visible only on this computer/);
+    assert.equal(descendants(root).some(node => node.type === "script" || node.props.innerHTML), false);
+    assert.equal(descendants(root).find(node => node.type === "details")?.props.open, undefined);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+  const codex = { ...approval.presentation, provider: "codex" as const, details: JSON.stringify({ request: {
+    id: 12, params: { threadId: "thread", turnId: "turn", itemId: "item", cwd: "/repo", command: "npm test", reason: "Verify" } },
+    changes: [{ path: "test.ts", kind: { type: "update", move_path: "new.ts" }, diff: "-old\n+new" }] }) };
+  const fields = hostApprovalFields(codex);
+  assert.deepEqual(fields.map(field => field.label), ["Cwd", "Command", "Reason", "Changes"]);
+  assert.match(fields.at(-1)!.value, /test.ts/); assert.match(fields.at(-1)!.value, /new.ts/);
+  assert.match(fields.at(-1)!.value, /-old\n\+new/);
+  const controls = { ...approval.presentation, details: JSON.stringify({ request: { tool_name: "Read", input: { file_path: "a\u202eb\u001b" } } }) };
+  assert.equal(hostApprovalFields(controls)[1]!.value, "a\\u202eb\\u001b");
+  const openCode = { ...approval.presentation, provider: "open-model" as const, details: JSON.stringify({
+    id: "request-2", sessionID: "session-2", permission: "bash", patterns: ["npm test"],
+    metadata: { command: "npm test", cwd: "/repo", arguments: ["--run", "unit"] }, always: ["npm *"],
+  }) };
+  assert.deepEqual(hostApprovalFields(openCode), [{ label: "Permission", value: "bash" },
+    { label: "Applies to", value: "1. npm test" }, { label: "Command", value: "npm test" },
+    { label: "Cwd", value: "/repo" }, { label: "Arguments", value: "1. --run\n2. unit" }]);
 });
 
 test("composer shows approval-service failure when no request cards have arrived", async () => {
