@@ -20,7 +20,9 @@ const escape = (value: string) =>
 function page(res: Response, title: string, body: string) {
   res.set({
     "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
+    // Native form POSTs under no-referrer send Origin: null. Preserve our
+    // origin for consent validation without leaking the URL to other sites.
+    "Referrer-Policy": "same-origin",
     "Content-Security-Policy":
       "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
   });
