@@ -29,6 +29,15 @@ async function fixture() {
   return { path, database, cleanup: async () => { database.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
+/** Restore the physical v44 closure constraints before changing version markers. */
+function restoreV44ClosureFixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_approval_request_closures").get()!.count, 0);
+  const closureSql = String(database.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get()!.sql)
+    .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")
+    .replace("dispatch_id TEXT,", "dispatch_id TEXT NOT NULL,");
+  database.exec(`DROP TABLE execution_approval_request_closures; ${closureSql}`);
+}
+
 /** Physically restore the preceding constraint, not merely its version marker. */
 function restoreV19TerminalFixture(database: DatabaseSync): void {
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
@@ -689,6 +698,7 @@ test("prepared operational opener requires an already-current schema without mig
       assert.equal(prepared.prepare("PRAGMA synchronous").get()!.synchronous, 2);
     } finally { prepared.close(); }
 
+    restoreV44ClosureFixture(env.database);
     env.database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION - 1} WHERE singleton=1;
       PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION - 1}`);
     const before = {
@@ -711,7 +721,10 @@ test("prepared operational opener never creates missing state and preserves reje
     for (const invalid of ["older", "future", "non_wal"] as const) {
       const path = join(directory, `${invalid}.sqlite`);
       const database = await openDaemonStateDatabase(path, (opened) => new DaemonStateSchema().createSchema(opened));
-      if (invalid === "older") database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION - 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION - 1}`);
+      if (invalid === "older") {
+        restoreV44ClosureFixture(database);
+        database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION - 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION - 1}`);
+      }
       if (invalid === "future") database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION + 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION + 1}`);
       database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
       if (invalid === "non_wal") database.exec("PRAGMA journal_mode=DELETE");
