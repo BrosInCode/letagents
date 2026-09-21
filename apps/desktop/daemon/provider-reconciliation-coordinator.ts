@@ -60,7 +60,7 @@ export type ProviderReconciliationCoordinatorOptions = {
   };
   serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   transitionOnce: ProviderReconciliationTransition;
-  terminalPayload(terminal: ProviderActionTerminal, actor: string): ExecutionTerminalPayload;
+  terminalPayload(terminal: ProviderActionTerminal, actor: string, connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload;
   observeProviderExit(
     entryId: string,
     terminal: ProviderActionTerminal,
@@ -355,7 +355,7 @@ export class ProviderReconciliationCoordinator {
         staleHandle: ProviderActionHandle,
         terminal: ProviderActionTerminal,
       ) => {
-        const payload = this.options.terminalPayload(terminal, actor);
+        const payload = this.options.terminalPayload(terminal, actor, staleHandle.providerConnection);
         await this.options.serializeEntry(entryId, () => this.options.authority.serializeManifest(async () => {
           const entry = (await this.options.store.load()).entries.find(
             (candidate) => candidate.id === entryId,

@@ -8,6 +8,12 @@ export type TurnOutcome = "completed" | "failed" | "interrupted" | "unreadable";
 export type SideEffectState = "none" | "possible" | "observed";
 export type ExecutionOutcome = "succeeded" | "failed" | "denied_before_start" | "cancelled_before_start" | "interrupted_after_start" | "lost_after_start";
 export type HardControlEvidence = "process_exit" | "process_birth_changed" | "transport_refused" | "control_epoch_gone" | "native_session_terminated";
+/** Adapter observation of this exact process birth ending, never just a transport failure. */
+export type NativeRuntimeDeath = {
+  kind: "claude_cli" | "codex_app_server";
+  pid: number;
+  processIdentity: string;
+};
 export type NativeTurnIdentity = { turnId: string; providerContinuationId: string; providerTurnId: string };
 export type FactEnvelope = {
   factId: string; agentId: string; executionGenerationId: string; runtimeGenerationId: string;

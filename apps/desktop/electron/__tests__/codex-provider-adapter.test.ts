@@ -3390,6 +3390,7 @@ test("observed crash emits one synthesized terminal payload and makes attach abs
 
   assert.equal(seen.length, 1);
   assert.equal(seen[0]?.terminalCause, "crashed");
+  assert.deepEqual(seen[0]?.nativeRuntimeDeath, { kind: "codex_app_server", pid: 4100, processIdentity: handle.providerConnection!.processIdentity });
   assert.equal(seen[0]?.providerContinuationId, handle.providerContinuationId);
   assert.equal(handle.observedState(), "failed");
   assert.equal(await adapter.attach({
@@ -3508,7 +3509,8 @@ test("Codex exact-reference stop validates the complete recorded owner before si
     else {
       const { endedAt, ...terminal } = await freshAdapter.stopRef(ref);
       assert.ok(endedAt);
-      assert.deepEqual(terminal, { exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: ref.providerContinuationId });
+      assert.deepEqual(terminal, { exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: ref.providerContinuationId,
+        nativeRuntimeDeath: { kind: "codex_app_server", pid: 4100, processIdentity: ref.providerConnection!.processIdentity } });
     }
   }
   assert.deepEqual(harness.signals, [], "no attachment or signal is needed after exact birth absence/replacement");

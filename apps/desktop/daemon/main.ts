@@ -1,3 +1,4 @@
+import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
 import { restoreLocalRoomAuthorities, localRoomRuntime } from "./local-room-runtime.js";
 import { registerLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
 import { dirname } from "node:path";
@@ -429,6 +430,7 @@ export class SupervisorDaemon {
     });
     this.providerExecution = providerPort
       ? new ProviderExecutionCoordinator({
+        settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
         provider: providerPort,
         store: this.store,
         durability: this.durability,
@@ -452,7 +454,7 @@ export class SupervisorDaemon {
         updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
         transition: (entryId, state, condition, detail, actor) =>
           this.transition(entryId, state, condition, detail, actor),
-        terminalPayload: (terminal, actor) => this.terminalPayload(terminal, actor),
+        terminalPayload: (terminal, actor, connection) => this.providerTerminals.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
           this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),
         completeTurnControlForRuntimeRecovery: (entry) =>
@@ -515,7 +517,7 @@ export class SupervisorDaemon {
         serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
         transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal) =>
           this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal),
-        terminalPayload: (terminal, actor) => this.terminalPayload(terminal, actor),
+        terminalPayload: (terminal, actor, connection) => this.providerTerminals.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor) =>
           this.observeProviderExit(entryId, terminal, actor),
         recordSchedulerFailure: (entryId, error, actor) =>
@@ -671,6 +673,7 @@ export class SupervisorDaemon {
       scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
     });
     this.providerTerminals = new ProviderTerminalCoordinator({
+      settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
       liveHandles: this.liveHandles,
@@ -736,6 +739,7 @@ export class SupervisorDaemon {
       requestConvergence: (entryId) => this.requestConvergence(entryId),
     });
     this.runtimeRecovery = new RuntimeRecoveryCoordinator({
+      settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
       releaseRecoveredObservation: (entryId, runtimeId, stoppedCursorGeneration) => this.executionCapture?.releaseRecoveredRuntime(entryId, runtimeId, stoppedCursorGeneration),
       streams: this.providerStreams,
       terminals: this.providerTerminals,
@@ -1570,8 +1574,14 @@ export class SupervisorDaemon {
     return this.authority.serializeManifestCommit(operation);
   }
 
-  private terminalPayload(terminal: ProviderActionTerminal, actor: string): ExecutionTerminalPayload {
-    return this.providerTerminals.terminalPayload(terminal, actor);
+  private settleRuntimeApprovals(entryId: string): Promise<void> {
+    return settleRuntimeApprovalRequests(entryId, {
+      settle: () => this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(), commit => this.fenceDaemonCommit(commit)),
+      notifyChanged: () => this.notifyStateChanged(),
+      isHandoffScheduled: () => this.handoffScheduled,
+      assertCurrent: () => this.singleton.assertCurrent(),
+      scheduleRecovery: (id, delayMs) => this.scheduleRecoveryConvergence(id, delayMs),
+    });
   }
 
   private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {

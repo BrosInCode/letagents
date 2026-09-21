@@ -1,7 +1,7 @@
 import { assertDecisionToolRule, hostToolDecisionWasWithdrawn } from "./host-tool-rules.js";
 import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
-import { executionIdentity } from "./execution-protocol.js";
+import { executionIdentity, nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import type { ApprovalState } from "./execution-reducer.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeExecutionIdentity } from "./execution-shadow-store.js";
 import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
@@ -364,6 +364,53 @@ export function closeExecutionApprovalRequest(db: DatabaseSync, input: CloseExec
   return exact(db, value.expected);
 }
 
+/** Operational terminal evidence survives daemon restart and optional capture loss. */
+export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: string): ExecutionApprovalRecord[] {
+  parse(executionIdentity, agentId);
+  const rows = db.prepare(`SELECT DISTINCT r.request_id,r.request_version,r.execution_generation_id,
+      r.runtime_generation_id,r.provider_continuation_id,r.created_at_ms,g.provider,t.terminal_json
+    FROM execution_approval_requests r
+    JOIN execution_runtime_generations g ON g.runtime_generation_id=r.runtime_generation_id
+      AND g.execution_generation_id=r.execution_generation_id AND g.agent_id=r.agent_id
+    JOIN work_attempt_executions origin ON origin.execution_generation_id=r.execution_generation_id
+    JOIN work_attempt_executions t ON t.work_attempt_id=origin.work_attempt_id
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND t.terminal_json IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
+  const matches = new Map<string, ExecutionApprovalRecord>();
+  for (const row of rows) {
+    const terminal = JSON.parse(String(row.terminal_json));
+    const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
+    if (!death.success || death.data.kind !== (row.provider === "codex" ? "codex_app_server" : "claude_cli")
+      || terminal.provider_continuation_id !== row.provider_continuation_id
+      || !Number.isSafeInteger(Date.parse(terminal.ended_at))
+      || Date.parse(terminal.ended_at) < Number(row.created_at_ms)) continue;
+    // A recovered turn can retain its origin generation. Recompute the exact
+    // birth in each request's own generation, never substitute the successor.
+    if (executionRuntimeStorageIdentity(agentId, String(row.execution_generation_id), death.data.kind,
+      death.data.pid, death.data.processIdentity) !== row.runtime_generation_id) continue;
+    const record = read(db, String(row.request_id), Number(row.request_version))!;
+    matches.set(JSON.stringify([record.request.requestId, record.request.requestVersion]), record);
+  }
+  return [...matches.values()];
+}
+
+export function settleWitnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: string, nowMs: () => number): number {
+  requireForeignKeys(db);
+  if (!db.isTransaction) reject("invalid_transition");
+  const records = witnessedRuntimeApprovalClosures(db, agentId);
+  const insert = db.prepare(`INSERT INTO execution_approval_request_closures
+    (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`);
+  for (const { request, decision } of records) {
+    const atMs = parse(time, nowMs());
+    if (atMs < (decision?.dispatchStartedAtMs ?? decision?.decidedAtMs ?? request.createdAtMs)) reject("invalid_input");
+    insert.run(request.requestId, request.requestVersion, decision?.decisionId ?? null, decision?.dispatchId ?? null, atMs);
+  }
+  // Closure says only that this native prompt cannot remain actionable. Keep
+  // the selected decision and its application certainty exactly as recorded.
+  return records.length;
+}
+
 /** Evidence must come from the exact broker invocation, never a UI/provider narrative. */
 export function recordExecutionApprovalOutcome(db: DatabaseSync, input: RecordExecutionApprovalOutcome): ExecutionApprovalRecord {
   const value = parse(outcome, input); const current = exact(db, value.expected); const d = current.decision;
@@ -410,4 +457,25 @@ export function loseExecutionApproval(db: DatabaseSync, input: LoseExecutionAppr
   db.prepare("UPDATE execution_approval_requests SET state='lost',application_certainty=? WHERE request_id=? AND request_version=?")
     .run(certainty, value.expected.requestId, value.expected.requestVersion);
   return exact(db, value.expected);
+}
+
+/** All runtime-death closure callers share one fault-only retry policy. */
+export async function settleRuntimeApprovalRequests(entryId: string, ports: {
+  settle(): Promise<number>;
+  notifyChanged(): void;
+  isHandoffScheduled(): boolean;
+  assertCurrent(): Promise<void>;
+  scheduleRecovery(entryId: string, delayMs: number): void;
+}): Promise<void> {
+  try {
+    if (await ports.settle()) ports.notifyChanged();
+  } catch (error) {
+    if (!ports.isHandoffScheduled()) {
+      try {
+        await ports.assertCurrent();
+        ports.scheduleRecovery(entryId, 5_000);
+      } catch { /* A retired daemon cannot schedule its successor's work. */ }
+    }
+    throw error;
+  }
 }
