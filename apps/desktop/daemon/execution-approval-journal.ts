@@ -377,6 +377,28 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
     WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND t.terminal_json IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
         WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
+  // Explicit legacy recovery retains its independently verified death witness
+  // separately from the immutable old terminal. Reconcile completed recoveries
+  // as well, so restarting after that checkpoint cannot strand the old prompt.
+  const recovered = db.prepare(`SELECT r.request_id,r.request_version,r.execution_generation_id,
+      r.runtime_generation_id,r.provider_continuation_id,r.created_at_ms,g.provider,
+      origin.work_attempt_id,recovery.provider_ref_json,recovery.created_at
+    FROM execution_approval_requests r
+    JOIN execution_runtime_generations g ON g.runtime_generation_id=r.runtime_generation_id
+      AND g.execution_generation_id=r.execution_generation_id AND g.agent_id=r.agent_id
+    JOIN work_attempt_executions origin ON origin.execution_generation_id=r.execution_generation_id
+    JOIN agent_runtime_recoveries recovery ON recovery.agent_id=r.agent_id AND recovery.room_id=r.room_id
+      AND recovery.execution_generation_id=r.execution_generation_id AND recovery.runtime_generation_id=r.runtime_generation_id
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND recovery.phase='complete'
+      AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
+  for (const row of recovered) {
+    const ref = JSON.parse(String(row.provider_ref_json));
+    if (ref?.work_attempt_id !== row.work_attempt_id || ref.execution_generation_id !== row.execution_generation_id
+      || ref.provider_connection !== null) continue;
+    rows.push({ ...row, terminal_json: JSON.stringify({ ended_at: row.created_at,
+      provider_continuation_id: ref.provider_continuation_id, native_runtime_death: ref.native_runtime_death }) });
+  }
   const matches = new Map<string, ExecutionApprovalRecord>();
   for (const row of rows) {
     const terminal = JSON.parse(String(row.terminal_json));
