@@ -541,16 +541,17 @@ test("managed Claude MCP config is private, official-runtime-only, and ephemeral
     const config = await createEphemeralClaudeMcpConfig({
       LETAGENTS_API_URL: "https://letagents.example",
       LETAGENTS_TOKEN: "test-worker-token",
-    }, root);
+    }, { entryPath: "/verified/runtime/dist/mcp/server.js", readRoots: ["/verified/runtime"] }, root);
     const parsed = JSON.parse(await readFile(config.path, "utf8"));
     assert.deepEqual(parsed, {
       mcpServers: {
         letagents: {
-          command: "npx",
-          args: ["-y", "--package=letagents-runtime@npm:letagents", "letagents"],
+          command: process.execPath,
+          args: ["/verified/runtime/dist/mcp/server.js"],
           env: {
             LETAGENTS_API_URL: "https://letagents.example",
             LETAGENTS_TOKEN: "test-worker-token",
+            ELECTRON_RUN_AS_NODE: "1",
           },
         },
       },
@@ -566,10 +567,14 @@ test("managed Claude MCP config is private, official-runtime-only, and ephemeral
 test("supervised Claude builds its MCP workplace from the desktop endpoint without a user Claude config", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-managed-endpoint-"));
   try {
-    const config = await createManagedClaudeMcpConfig("https://desktop.letagents.example", root);
+    const config = await createManagedClaudeMcpConfig("https://desktop.letagents.example", root, "/explicit/dev/entry.js", entry => {
+      assert.equal(entry, "/explicit/dev/entry.js");
+      return { entryPath: entry!, readRoots: ["/explicit/dev"] };
+    });
     const parsed = JSON.parse(await readFile(config.path, "utf8"));
     assert.deepEqual(parsed.mcpServers.letagents.env, {
       LETAGENTS_API_URL: "https://desktop.letagents.example",
+      ELECTRON_RUN_AS_NODE: "1",
     });
     assert.equal(JSON.stringify(parsed).includes("LETAGENTS_TOKEN"), false);
     await config.dispose();
@@ -1884,4 +1889,10 @@ test("Claude explicit foreign tool-turn UUID cannot create or resolve approval a
     h.child.emit({ ...result, user_message_uuid: h.turnId });
     assert.equal((await h.adapter.correlatePermissionTurn(h.handle, expected)).outcome, "correlation_unproven");
   } finally { await h.close(); }
+});
+
+test("Claude refuses to fall back to npx when the sealed MCP runtime cannot be verified", async () => {
+  assert.throws(() => createManagedClaudeMcpConfig("https://letagents.example", tmpdir(), undefined, () => {
+    throw new Error("runtime integrity failure");
+  }), /runtime integrity failure/);
 });

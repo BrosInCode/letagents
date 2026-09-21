@@ -71,7 +71,7 @@ import {
   type ClaudeExactTurnFailure,
   type ClaudeExactTurnResult,
 } from "./claude-room-turn-evidence.js";
-import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
+import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import { requireSupportedClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 
@@ -105,7 +105,7 @@ export interface ClaudeCliChild {
 export interface ClaudeCodeProviderAdapterDependencies {
   readVersion(claudeBin: string): Promise<string>;
   launchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild;
-  createLetAgentsMcpConfig(): Promise<{ path: string; dispose(): Promise<void> }>;
+  createLetAgentsMcpConfig(req: ProviderSpawnRequest): Promise<{ path: string; dispose(): Promise<void> }>;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
@@ -454,6 +454,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
 
 export async function createEphemeralClaudeMcpConfig(
   mcpEnv: Record<string, string>,
+  runtime: LetAgentsMcpRuntime,
   temporaryRoot = tmpdir(),
 ): Promise<{ path: string; dispose(): Promise<void> }> {
   const directory = await mkdtemp(join(temporaryRoot, "letagents-claude-mcp-"));
@@ -461,9 +462,9 @@ export async function createEphemeralClaudeMcpConfig(
   await writeFile(configPath, JSON.stringify({
     mcpServers: {
       letagents: {
-        command: "npx",
-        args: [...LETAGENTS_NPX_ARGS],
-        env: mcpEnv,
+        command: process.execPath,
+        args: [runtime.entryPath],
+        env: { ...mcpEnv, ELECTRON_RUN_AS_NODE: "1" },
       },
     },
   }), { encoding: "utf8", mode: 0o600 });
@@ -481,6 +482,9 @@ export async function createEphemeralClaudeMcpConfig(
 export function createManagedClaudeMcpConfig(
   apiBaseUrl = desktopApiUrl,
   temporaryRoot = tmpdir(),
+  devEntryPath?: string,
+  resolveRuntime: (devEntryPath?: string) => LetAgentsMcpRuntime = entry =>
+    resolveLetAgentsMcpRuntime({ devEntryPath: entry, env: desktopRuntimeEnvironment() }),
 ): Promise<{ path: string; dispose(): Promise<void> }> {
   const normalizedApiUrl = apiBaseUrl.trim();
   if (!normalizedApiUrl) {
@@ -488,6 +492,7 @@ export function createManagedClaudeMcpConfig(
   }
   return createEphemeralClaudeMcpConfig(
     { LETAGENTS_API_URL: normalizedApiUrl },
+    resolveRuntime(devEntryPath),
     temporaryRoot,
   );
 }
@@ -530,7 +535,7 @@ async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidence
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   readVersion: defaultReadVersion,
   launchChild: defaultLaunchChild,
-  createLetAgentsMcpConfig: createManagedClaudeMcpConfig,
+  createLetAgentsMcpConfig: req => createManagedClaudeMcpConfig(desktopApiUrl, tmpdir(), req.devMcpServerEntryPath),
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
@@ -1081,7 +1086,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     requireSupportedClaudeCodeVersion(versionOutput, req.permissionProfileId === "ask_before_write");
 
     const policyArgs = claudeLaunchPolicyArgs(attestProviderSpawnPolicy("claude-code", req));
-    const managedMcpConfig = await this.deps.createLetAgentsMcpConfig();
+    const managedMcpConfig = await this.deps.createLetAgentsMcpConfig(req);
     // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
     // the managed room workplace. The short-lived 0600 config lives outside
     // the worktree, its path (never its credential) enters argv, and it is

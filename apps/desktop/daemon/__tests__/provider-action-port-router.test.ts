@@ -980,7 +980,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
         allowedTools: ["mcp__letagents__*"],
         settingSources: "",
       });
-      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "claude-code + both gates: devMcpServerEntryPath must be absent (provider gate)");
+      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js", "Claude uses the same explicitly gated local MCP runtime");
     } finally {
       await daemon3.stop();
     }
