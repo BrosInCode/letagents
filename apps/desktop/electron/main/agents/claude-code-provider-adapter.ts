@@ -878,6 +878,36 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     return result;
   }
 
+  async stopRef(ref: ProviderContinuationRef, options: ProviderStopOptions = {}): Promise<ProviderTerminalPayload> {
+    ref = { ...ref, providerConnection: ref.providerConnection && { ...ref.providerConnection } };
+    const connection = ref.providerConnection;
+    const graceMs = options.graceMs ?? this.stopGraceMs;
+    const birthEvidence = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
+    if (!ref.workAttemptId?.trim() || !ref.providerContinuationId?.trim()
+      || connection?.kind !== "claude_cli" || !Number.isSafeInteger(connection.pid) || connection.pid! <= 0
+      || typeof connection.processIdentity !== "string" || !birthEvidence.test(connection.processIdentity.trim())
+      || !Number.isFinite(graceMs) || graceMs < 0) {
+      throw new Error("Claude exact-reference stop requires an exact continuation and process birth.");
+    }
+    const known = [...this.handles.values()].find(handle => handle.pid === connection.pid
+      && handle.providerConnection.processIdentity
+      && sameProcessBirthIdentity(handle.providerConnection.processIdentity, connection.processIdentity!));
+    if (known && (known.workAttemptId !== ref.workAttemptId || known.providerContinuationId !== ref.providerContinuationId
+      || !sameProviderConnectionIdentity(known.providerConnection, connection))) {
+      throw new Error("Claude exact-reference stop conflicts with the known native process owner.");
+    }
+    if (known) {
+      known.stopRequested = true;
+      known.clearPermissions();
+      known.state = "stopping";
+      known.child.markIntentionalClose();
+    }
+    // A cached protocol terminal is not evidence that the process stopped.
+    const result = await this.fenceRecordedChild(connection, ref.providerContinuationId,
+      { force: options.force === true, graceMs, birthEvidence });
+    return result.terminal;
+  }
+
   async stop(
     providerHandle: ProviderHandle,
     options: ProviderStopOptions = {},
@@ -1300,13 +1330,21 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private async fenceRecordedChild(
     connection: Extract<ProviderConnectionRef, { kind: "claude_cli" }>,
     providerContinuationId: string,
+    stop?: { force: boolean; graceMs: number; birthEvidence: RegExp },
   ): Promise<ProviderAttachTerminal> {
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
         "Claude CLI attach is ambiguous; the durable endpoint has no verified process identity.",
       );
     }
-    const identity = this.deps.getProcessIdentity(connection.pid);
+    const readIdentity = () => {
+      const identity = this.deps.getProcessIdentity(connection.pid!);
+      if (stop && typeof identity === "string" && !stop.birthEvidence.test(identity.trim())) {
+        throw new Error("Claude exact-reference stop is ambiguous because process birth cannot be verified.");
+      }
+      return identity;
+    };
+    const identity = readIdentity();
     if (identity === undefined) {
       throw new Error(
         "Claude CLI attach is ambiguous; the recorded process identity cannot be verified.",
@@ -1321,14 +1359,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     // that exact orphan finish and flush its JSONL terminal boundary before
     // fencing it; recovery can then prove the already-started turn without a
     // duplicate dispatch.
-    const exitedNaturally = await Promise.race([
+    const exitedNaturally = !stop && await Promise.race([
       this.deps.observeProcessExit(connection.pid, connection.processIdentity).then(() => true),
       delay(this.stopGraceMs).then(() => false),
     ]);
     if (exitedNaturally) {
       return this.attachTerminal(connection, providerContinuationId, null, "crashed");
     }
-    const identityBeforeTerm = this.deps.getProcessIdentity(connection.pid);
+    const identityBeforeTerm = readIdentity();
     if (identityBeforeTerm === undefined) {
       throw new Error(
         "Claude CLI attach is ambiguous; the orphaned child's identity cannot be verified.",
@@ -1340,20 +1378,30 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     // The exact recorded child is still alive but unreachable (its stdio died
     // with the previous supervisor). It may still be writing the workspace, so
     // it must be terminal before any replacement generation exists.
-    this.deps.signalProcess(connection.pid, "SIGTERM");
-    await delay(this.stopGraceMs);
-    const identityBeforeKill = this.deps.getProcessIdentity(connection.pid);
+    const signal = stop?.force ? "SIGKILL" : "SIGTERM";
+    this.deps.signalProcess(connection.pid, signal);
+    await delay(stop?.graceMs ?? this.stopGraceMs);
+    const identityBeforeKill = readIdentity();
     if (identityBeforeKill === undefined) {
       throw new Error(
         "Claude CLI attach is ambiguous; the orphaned child's termination could not be verified.",
       );
     }
     if (identityBeforeKill !== null && sameProcessBirthIdentity(identityBeforeKill, connection.processIdentity)) {
+      if (stop?.force) throw new Error("Claude exact-reference stop has not yet proved the recorded process birth is gone.");
       this.deps.signalProcess(connection.pid, "SIGKILL");
-      await this.deps.observeProcessExit(connection.pid, connection.processIdentity);
+      if (stop) {
+        await delay(stop.graceMs);
+        const finalIdentity = readIdentity();
+        if (finalIdentity === undefined || (finalIdentity !== null && sameProcessBirthIdentity(finalIdentity, connection.processIdentity))) {
+          throw new Error("Claude exact-reference stop has not yet proved the recorded process birth is gone.");
+        }
+      } else {
+        await this.deps.observeProcessExit(connection.pid, connection.processIdentity);
+      }
       return this.attachTerminal(connection, providerContinuationId, "SIGKILL", "killed");
     }
-    return this.attachTerminal(connection, providerContinuationId, "SIGTERM", "stopped");
+    return this.attachTerminal(connection, providerContinuationId, signal, signal === "SIGKILL" ? "killed" : "stopped");
   }
 
   private attachTerminal(
