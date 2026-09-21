@@ -10,7 +10,7 @@
         <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
         <div class="desktop-composer-permission-copy">
           <strong>{{ approval.presentation.displayName }} · {{ approval.status === 'pending'
-            ? approval.presentation.title : hostApprovalStatus(approval.status) }}</strong>
+            ? hostApprovalTitle(approval.presentation) : hostApprovalStatus(approval.status) }}</strong>
         </div>
       </div>
       <button type="button" class="desktop-host-approval-dismiss"
@@ -219,7 +219,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import type { DesktopHostApproval, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
-import { hostApprovalFields } from "./host-approval-presentation";
+import { hostApprovalFields, hostApprovalTitle } from "./host-approval-presentation";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import { desktopIpc } from "../../../../ipc";

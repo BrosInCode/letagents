@@ -43,8 +43,8 @@ function toolHandler(
   name: string,
 ): (input: Record<string, unknown>, extra?: { requestId?: string | number }) => Promise<{ content: Array<{ text: string }> }> {
   let handler: ((input: Record<string, unknown>, extra?: { requestId?: string | number }) => Promise<{ content: Array<{ text: string }> }>) | null = null;
-  register({ tool(toolName: string, _description: string, _schema: unknown, callback: unknown) {
-    if (toolName === name) handler = callback as typeof handler;
+  register({ tool(toolName: string, ...registration: unknown[]) {
+    if (toolName === name) handler = registration.at(-1) as typeof handler;
   } } as unknown as McpServer);
   assert.ok(handler, `missing ${name} handler`);
   return handler;

@@ -23,6 +23,43 @@ function valueText(value: unknown, depth = 0): string {
   return String(value);
 }
 
+function payloadOf(presentation: HostApprovalPresentation): Record<string, unknown> | null {
+  try { return record(JSON.parse(presentation.details)); }
+  catch { return null; }
+}
+
+function mcpAction(params: Record<string, unknown>): { tool: string | null; input: Record<string, unknown> } | null {
+  const metadata = record(params._meta);
+  const input = record(metadata?.tool_params);
+  if (params.mode !== "form" || metadata?.codex_approval_kind !== "mcp_tool_call" || !input) return null;
+  // The native elicitation message supplies the tool name; it is a display
+  // label only. Dispatch still uses the unchanged signed native request.
+  const match = typeof params.message === "string"
+    ? /^Allow the .+ MCP server to run tool "([^"\r\n]{1,256})"\?$/.exec(params.message)
+    : null;
+  return { tool: match?.[1] ?? null, input };
+}
+
+export function hostApprovalTitle(presentation: HostApprovalPresentation): string {
+  if (presentation.title !== "Run a tool") return presentation.title;
+  const payload = payloadOf(presentation);
+  const request = record(payload?.request) ?? payload;
+  if (presentation.provider === "claude-code" && request) {
+    const input = record(request.input);
+    if (["Read", "Write", "Edit"].includes(String(request.tool_name)) && typeof input?.file_path === "string") {
+      return `${request.tool_name} ${text(input.file_path.split("/").at(-1) || input.file_path)}`;
+    }
+    if (request.tool_name === "Bash") return "Run a command";
+    if (typeof request.tool_name === "string") return `Run ${text(request.tool_name)}`;
+  }
+  if (presentation.provider === "codex") {
+    const params = record(request?.params);
+    const action = params && mcpAction(params);
+    if (action?.tool) return label(action.tool);
+  }
+  return presentation.title;
+}
+
 /** Display the proposed action, leaving the signed native presentation untouched. */
 export function hostApprovalFields(presentation: HostApprovalPresentation): Field[] {
   let parsed: unknown;
@@ -37,7 +74,7 @@ export function hostApprovalFields(presentation: HostApprovalPresentation): Fiel
     const input = record(request?.input);
     if (request && input) return [{ label: "Tool", value: valueText(request.tool_name) }, ...fields(input),
       ...fields(Object.fromEntries(Object.entries(request).filter(([key, value]) =>
-        !["subtype", "tool_use_id", "tool_name", "input"].includes(key)
+        !["subtype", "tool_use_id", "tool_name", "input", "permission_suggestions", "decision_reason_type"].includes(key)
         && !(key === "display_name" && value === request.tool_name)
         && !(key === "description" && value === input.description)))),
     ];
@@ -45,6 +82,13 @@ export function hostApprovalFields(presentation: HostApprovalPresentation): Fiel
   if (presentation.provider === "codex") {
     const request = record(payload.request) ?? payload;
     const params = record(request.params);
+    const action = params && mcpAction(params);
+    if (params && action) return [
+      { label: "Service", value: valueText(params.serverName) },
+      ...(action.tool ? [{ label: "Tool", value: text(action.tool) }]
+        : [{ label: "Request", value: valueText(params.message) }]),
+      ...fields(action.input),
+    ];
     if (params) return [
       ...fields(Object.fromEntries(Object.entries(params).filter(([key]) => !["threadId", "turnId", "itemId"].includes(key)))),
       ...(Array.isArray(payload.changes) ? [{ label: "Changes", value: valueText(payload.changes) }] : []),

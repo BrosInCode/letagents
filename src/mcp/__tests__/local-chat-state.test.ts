@@ -1226,6 +1226,40 @@ test("a new writer cannot advance local routing past an older unprojected reply"
   database.close();
 });
 
+test("lazy local routing returns a completed repair even when its final yield crosses the deadline", async (t) => {
+  const { DatabaseSync } = require("node:sqlite") as {
+    DatabaseSync: new (path: string) => ReturnType<typeof openSqliteDb> & { close(): void };
+  };
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE local_chat_messages (
+      room_id TEXT NOT NULL, number INTEGER NOT NULL, thread_root_number INTEGER,
+      sender TEXT NOT NULL, source TEXT, PRIMARY KEY (room_id, number)
+    );
+    CREATE INDEX local_chat_messages_thread_root_idx ON local_chat_messages (room_id, thread_root_number);
+    INSERT INTO local_chat_messages VALUES ('completed_root', 1, NULL, 'Human', 'browser');
+    INSERT INTO local_chat_messages VALUES ('completed_root', 2, 1, 'Agent', 'agent');
+  `);
+  ensureLocalThreadRoutingProjectionSchema(database as never);
+  const projected = database.prepare(`SELECT through_message_number FROM local_chat_thread_routing_root_state_v2
+    WHERE room_id = 'completed_root' AND thread_root_number = 1`);
+  let clockCrossedDeadline = false;
+  const clock = t.mock.method(performance, "now", () => {
+    if (Number(projected.get()?.through_message_number) >= 2) clockCrossedDeadline = true;
+    return clockCrossedDeadline ? 1000 : 0;
+  });
+  try {
+    const membership = await getLocalThreadRoutingAgentKeysForRoots(database as never, "completed_root", [1],
+      [{ agentKey: "test/agent", display_name: "Agent" }],
+      { foregroundTimeBudgetMs: 75, scheduleOnTimeout: false });
+    assert.equal(clockCrossedDeadline, true, "the final completed batch must cross the deadline");
+    assert.deepEqual([...membership.get(1) ?? []], ["test/agent"]);
+  } finally {
+    clock.mock.restore();
+    database.close();
+  }
+});
+
 test("lazy local routing yields and returns fail-closed within a foreground budget", async () => {
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => ReturnType<typeof openSqliteDb> & { close(): void };

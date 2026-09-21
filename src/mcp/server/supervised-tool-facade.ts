@@ -235,7 +235,10 @@ export function profileAwareToolServer(
             return result;
           });
         };
-        return (target.tool as (...args: unknown[]) => unknown).call(target, name, ...registration.slice(0, -1), wrapped);
+        // Reuse the daemon effect classification for native MCP approval UI.
+        // Unknown tools remain mutations; this hint never bypasses the turn fence.
+        return (target.tool as (...args: unknown[]) => unknown).call(target, name,
+          ...registration.slice(0, -1), { readOnlyHint: !mutation }, wrapped);
       };
     },
   }) as McpServer;
