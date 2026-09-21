@@ -285,9 +285,12 @@ function boundedCodexTools(value: unknown): string[] {
 function custodialMcpOverride(entryPath: string, cwd: string, environment: Record<string, string>, tools: string[]): string {
   const env = Object.entries({ ...environment, ELECTRON_RUN_AS_NODE: "1" })
     .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`).join(", ");
+  // Native config deep-merges even a parent-table CLI override. Pin each
+  // advertised tool so inherited prompt/approve rules cannot alter this policy.
+  const toolApprovalModes = tools.map((name) => `${JSON.stringify(name)} = { approval_mode = "writes" }`).join(", ");
   // Codex merges installed config beneath CLI overrides. Pin every authority
   // coordinate and clear inherited credential names/tool filters explicitly.
-  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [] }`;
+  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = "writes", tools = { ${toolApprovalModes} } }`;
 }
 
 function isCodexExecutionMethod(method: string): boolean {
