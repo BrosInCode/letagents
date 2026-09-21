@@ -1,48 +1,57 @@
 <template>
   <section class="desktop-add-agent-status" :data-state="secureStorageNeedsAttention ? 'error' : preflight?.status || 'loading'">
-    <div class="desktop-add-agent-status-header">
+    <div v-if="needsAttention" class="desktop-add-agent-status-header">
       <div>
-        <span>{{ providerName || "Provider" }}</span>
         <h4>{{ statusTitle }}</h4>
       </div>
       <div class="desktop-add-agent-status-actions">
-        <span
-          class="desktop-add-agent-status-pill"
-          :data-state="secureStorageNeedsAttention ? 'error' : preflight?.status || 'loading'"
-        >{{ statusLabel }}</span>
         <button type="button" :disabled="loading" @click="emit('refresh')">
           {{ loading ? "Checking..." : providerName ? "Check again" : "Try again" }}
         </button>
       </div>
     </div>
-    <p v-if="!error && preflight?.status !== 'error'">{{ statusDescription }}</p>
+    <p v-if="needsAttention && !error && preflight?.status !== 'error'">{{ statusDescription }}</p>
     <AddAgentFeedback
       v-if="error || preflight?.status === 'error'"
       message="Check the agent app and selected project, then choose Check again."
       tone="error"
     />
     <details v-if="error || preflight?.status === 'error'">
-      <summary>Technical details</summary>
+      <summary tabindex="0">Technical details</summary>
       <p>{{ error || statusDescription }}</p>
     </details>
 
-    <dl class="desktop-add-agent-checks">
-      <div><dt>Agent app</dt><dd>{{ runtimeLabel }}</dd></div>
-      <div><dt>LetAgents connection</dt><dd>{{ bridgeLabel }}</dd></div>
-      <div><dt>Project folder</dt><dd>{{ repoLabel }}</dd></div>
-      <div
-        v-if="showSecureStorage"
-        :data-attention="secureStorageNeedsAttention"
-      >
-        <dt>Secure storage</dt>
-        <dd>{{ secureStorageLabel }}</dd>
-        <button
-          v-if="secureStorageNeedsAttention && canOpenSecureStorage"
-          type="button"
-          @click="emit('open-secure-storage')"
-        >Open Keychain Access</button>
-      </div>
-    </dl>
+    <details
+      class="desktop-add-agent-setup-details"
+      :open="needsAttention"
+      :data-attention="needsAttention"
+    >
+      <summary tabindex="0">Setup details</summary>
+      <dl class="desktop-add-agent-checks">
+        <div><dt>Agent app</dt><dd>{{ runtimeLabel }}</dd></div>
+        <div><dt>LetAgents connection</dt><dd>{{ bridgeLabel }}</dd></div>
+        <div><dt>Project folder</dt><dd>{{ repoLabel }}</dd></div>
+        <div
+          v-if="showSecureStorage"
+          :data-attention="secureStorageNeedsAttention"
+        >
+          <dt>Secure storage</dt>
+          <dd>{{ secureStorageLabel }}</dd>
+          <button
+            v-if="secureStorageNeedsAttention && canOpenSecureStorage"
+            type="button"
+            @click="emit('open-secure-storage')"
+          >Open Keychain Access</button>
+        </div>
+      </dl>
+      <button
+        v-if="!needsAttention"
+        class="desktop-add-agent-recheck"
+        type="button"
+        :disabled="loading"
+        @click="emit('refresh')"
+      >{{ loading ? "Checking…" : "Check again" }}</button>
+    </details>
 
     <section
       v-if="showWorktrees"
@@ -91,24 +100,25 @@
     </section>
 
     <slot />
+    <slot name="actions" />
   </section>
 </template>
 
 <script setup lang="ts">
 import { GitBranch } from "@lucide/vue";
+import { computed } from "vue";
 import AddAgentFeedback from "./AddAgentFeedback.vue";
 import type {
   DesktopAgentProviderPreflight,
   RepoWorktreeEntry,
 } from "../../../../../../electron/ipc-types";
 
-defineProps<{
+const props = defineProps<{
   providerName: string | null;
   preflight: DesktopAgentProviderPreflight | null;
   loading: boolean;
   statusTitle: string;
   statusDescription: string;
-  statusLabel: string;
   runtimeLabel: string;
   bridgeLabel: string;
   repoLabel: string;
@@ -123,6 +133,9 @@ defineProps<{
   installCommand: string | null;
   error: string | null;
 }>();
+const needsAttention = computed(() => Boolean(
+  props.error || props.secureStorageNeedsAttention || props.preflight?.status !== "ready",
+));
 const emit = defineEmits<{
   refresh: [];
   "choose-worktree": [path: string];
