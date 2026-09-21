@@ -1,3 +1,4 @@
+import { prepareRetiredRuntimePlan, archiveRetiredRuntimes } from "../runtime-recovery-journal.js";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
@@ -55,7 +56,7 @@ import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execut
 import type { RuntimeRecoveryCoordinator } from "../runtime-recovery-coordinator.js";
 import type { ProcessIdentity } from "../process-identity.js";
 
-for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery is fenced, durable, and idempotent`, async () => {
+for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery is fenced, durable, and idempotent${predecessors ? " with retired predecessors" : ""}`, async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
@@ -66,7 +67,21 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
     join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
   const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0,
     workspacePath: workspace.path, workAttemptId: workspace.id });
-  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+  const retired = [] as Array<{ executionGenerationId: string; runtimeGenerationId: string;
+    death: { kind: "codex_app_server"; pid: number; processIdentity: string } }>;
+  const predecessorCount = predecessors ? (mode === "fresh" ? 33 : 2) : 0;
+  for (const index of Array.from({ length: predecessorCount }, (_, n) => n + 1)) {
+    const old = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", index);
+    const death = { kind: "codex_app_server" as const, pid: 44000 + index, processIdentity: `Mon Sep 14 14:50:${String(index).padStart(2, "0")} 2026` };
+    retired.push({ executionGenerationId: old.execution_generation_id,
+      runtimeGenerationId: executionRuntimeStorageIdentity(id, old.execution_generation_id, death.kind, death.pid, death.processIdentity), death });
+    await durability.recordTerminal(attempt.work_attempt_id, old.execution_generation_id, {
+      actor: old.actor, generation: old.generation, ended_at: new Date().toISOString(), exit_code: null, signal: null,
+      stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crashed", provider_continuation_id: "saved-conversation",
+      ...(index !== 2 ? { native_runtime_death: death } : {}),
+    });
+  }
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", predecessorCount + 1);
   await durability.close();
   const connection = { kind: "codex_app_server" as const, pid: 45550,
     processIdentity: "Mon Sep 14 15:50:00 2026", url: "ws://127.0.0.1:45550" };
@@ -76,9 +91,14 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
   let allowStop = false;
   let exactStopSupported = false;
   let actualBirth = connection.processIdentity;
+  let predecessorState: "gone" | "live" | "unknown" = "gone";
+  let changePredecessorAfterStop = false;
   const processIdentity: ProcessIdentity = {
-    probe: () => { if (gone) throw Object.assign(new Error("gone"), { code: "ESRCH" }); },
-    readBirthIdentity: () => actualBirth,
+    probe: pid => {
+      if (pid !== 45550 && predecessorState === "unknown") throw Object.assign(new Error("denied"), { code: "EPERM" });
+      if ((pid === 45550 && gone) || (pid !== 45550 && predecessorState === "gone")) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    },
+    readBirthIdentity: pid => pid === 45550 ? actualBirth : retired.find(item => item.death.pid === pid)!.death.processIdentity,
     sameBirthIdentity: (actual, expected) => actual === expected,
   };
   const terminal = { endedAt: new Date().toISOString(), exitCode: null, signal: "SIGKILL",
@@ -95,7 +115,7 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
     stopRef: async ref => {
       stopCalls++;
       assert.deepEqual(ref.providerConnection, connection);
-      if (allowStop) gone = true;
+      if (allowStop) { gone = true; if (changePredecessorAfterStop) predecessorState = "live"; }
       return terminal; // Simulate a cached terminal while the process is alive.
     },
     onExit: async () => () => {}, onStream: async () => () => {},
@@ -152,10 +172,65 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
         domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", turnId: "captured-turn",
         providerContinuationId: "saved-conversation", providerTurnId: "turn" });
       shadow.observeSourcePosition(token.sourceId, token, 776);
+      if (predecessors) {
+        beforeDb.prepare("UPDATE execution_turns SET state='lost',ended_at_ms=101 WHERE turn_id='captured-turn'").run();
+        for (const [index, old] of retired.entries()) {
+          shadow.registerRuntime({ agentId: id, executionGenerationId: old.executionGenerationId,
+            runtimeGenerationId: old.runtimeGenerationId, provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 50 });
+          const oldAttempt = shadow.trackMessage({ agentId: id, roomId: entry.room_id, sourceMessageId: `old-${index}`,
+            executionGenerationId: old.executionGenerationId, workspaceId: attempt.work_attempt_id, createdAtMs: 50 });
+          // Retained legacy state: A's unresolved turn outlived its observer.
+          beforeDb.prepare(`INSERT INTO execution_turns VALUES(?,?,?,?,?,?,?,?,?,'possible',50,?)`)
+            .run(`old-turn-${index}`, oldAttempt, id, entry.room_id, old.executionGenerationId, old.runtimeGenerationId, "saved-conversation", `old-native-turn-${index}`, index === 0 && mode === "resume" ? "active" : "lost", index === 0 && mode === "resume" ? null : 51);
+          beforeDb.prepare(`INSERT INTO supervised_agent_inbox
+            (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
+            VALUES(?,?,?,?,'{}','{}',?,'pending',1,?,?,?,NULL,?,?)`)
+            .run(`old-inbox-${index}`, id, entry.room_id, `old-${index}`, index + 4, `old-action-${index}`, `old-reply-${index}`, `old-native-turn-${index}`, at, at);
+          beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,?,?,?,?,'saved-conversation',?)")
+            .run(`old-inbox-${index}`, id, entry.room_id, attempt.work_attempt_id, old.executionGenerationId, `old-native-turn-${index}`);
+          if (index === 0 && mode === "fresh") beforeDb.prepare("UPDATE supervised_agent_inbox SET state='acknowledged' WHERE inbox_item_id=?").run(`old-inbox-${index}`);
+        }
+        const old = retired[1]!;
+        beforeDb.prepare(`UPDATE execution_observers SET execution_generation_id=?,runtime_generation_id=?,
+          observer_execution_generation_id=?,observer_runtime_generation_id=?,last_source_sequence=1,max_observed_sequence=72
+          WHERE agent_id=?`).run(old.executionGenerationId, old.runtimeGenerationId, old.executionGenerationId, old.runtimeGenerationId, id);
+      }
     } finally { beforeDb.close(); }
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const request = { entry_id: id, daemon_generation: generation, mode, operation_id: `restart-${mode}`,
-      room_id: entry.room_id, execution_generation_id: execution.execution_generation_id, runtime_generation_id: runtimeId };
+      room_id: entry.room_id, execution_generation_id: execution.execution_generation_id, runtime_generation_id: runtimeId,
+      ...(predecessors ? { retired_runtime_evidence: [retired[1]!] } : {}) };
+    if (predecessors) {
+      const missing = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", { ...request, retired_runtime_evidence: [] });
+      assert.equal(missing.ok, false); assert.match(missing.error!, /older runtime needs/);
+      const wrong = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", { ...request,
+        retired_runtime_evidence: [{ ...retired[1]!, death: { ...retired[1]!.death, pid: 44099 } }] });
+      assert.equal(wrong.ok, false); assert.match(wrong.error!, /recorded process owner/);
+      const contradict = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", { ...request,
+        retired_runtime_evidence: [retired[1]!, { ...retired[0]!, death: { ...retired[0]!.death, pid: 44099 } }] });
+      assert.equal(contradict.ok, false); assert.match(contradict.error!, /contradicts/);
+      for (const state of ["live", "unknown"] as const) {
+        predecessorState = state;
+        const unavailable = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", request);
+        assert.equal(unavailable.ok, false); assert.match(unavailable.error!, /not been proven gone/);
+      }
+      predecessorState = "gone";
+      assert.equal(stopCalls, 0);
+      const unchanged = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+      assert.equal(unchanged.desired_state, "running");
+      const db = new DatabaseSync(paths.manifestPath);
+      try {
+        const coordinates = { operationId: request.operation_id, entryId: id, roomId: entry.room_id, mode,
+          executionGenerationId: execution.execution_generation_id, runtimeGenerationId: runtimeId };
+        const plan = prepareRetiredRuntimePlan(db, coordinates, unchanged, [retired[1]!], processIdentity);
+        assert.equal(plan.evidence.length, predecessorCount, "durable candidates are not truncated to the maintenance input limit");
+        db.exec("BEGIN IMMEDIATE");
+        db.prepare("UPDATE execution_observers SET max_observed_sequence=max_observed_sequence+1 WHERE agent_id=?").run(id);
+        assert.throws(() => archiveRetiredRuntimes(db, coordinates, { ...unchanged, desired_state: "paused" }, plan, processIdentity), /observation changed/);
+        db.exec("ROLLBACK");
+        assert.throws(() => prepareRetiredRuntimePlan(db, { ...coordinates, runtimeGenerationId: "different-current" }, unchanged, [retired[1]!], processIdentity), /runtime changed/);
+      } finally { db.close(); }
+    }
     const stale = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", { ...request, runtime_generation_id: "other-runtime" });
     assert.equal(stale.ok, false);
     assert.equal(stopCalls, 0);
@@ -183,6 +258,18 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
     assert.equal(stopCalls, callsBeforeConvergence, "a restarted daemon must not automatically replay the stop");
     allowStop = true;
     if (mode === "fresh") actualBirth = "Tue Sep 15 15:50:00 2026";
+    if (predecessors && mode === "resume") {
+      changePredecessorAfterStop = true;
+      const changed = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", request);
+      assert.equal(changed.ok, false); assert.match(changed.error!, /not been proven gone/);
+      const db = new DatabaseSync(paths.manifestPath);
+      try {
+        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE phase='complete'").get()!.n, 0);
+        assert.equal(db.prepare("SELECT state FROM execution_turns WHERE turn_id='old-turn-0'").get()!.state, "active");
+      } finally { db.close(); }
+      changePredecessorAfterStop = false;
+      predecessorState = "gone";
+    }
     const repaired = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", request);
     assert.equal(repaired.ok, true, repaired.error);
     if (mode === "fresh") assert.equal(stopCalls, callsBeforeConvergence, "a reused PID must never be signalled");
@@ -209,8 +296,25 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
       assert.equal(afterDb.prepare("SELECT state FROM execution_turns WHERE turn_id='captured-turn'").get()!.state, "lost");
       assert.equal(afterDb.prepare("SELECT state FROM execution_message_attempts WHERE source_message_id='source'").get()!.state,
         mode === "resume" ? "active" : "lost");
-      const archive = JSON.parse(String(afterDb.prepare("SELECT observer_json FROM agent_runtime_recoveries").get()!.observer_json));
-      assert.equal(archive.max_observed_sequence, 776);
+      const archive = JSON.parse(String(afterDb.prepare("SELECT observer_json FROM agent_runtime_recoveries WHERE runtime_generation_id=?")
+        .get(predecessors ? retired[1]!.runtimeGenerationId : runtimeId)!.observer_json));
+      assert.equal(archive.max_observed_sequence, predecessors ? 72 : 776);
+      if (predecessors) {
+        assert.equal(afterDb.prepare("SELECT observer_json FROM agent_runtime_recoveries WHERE runtime_generation_id=?").get(retired[0]!.runtimeGenerationId)!.observer_json, null);
+        for (const [index, old] of retired.entries()) {
+          assert.equal(afterDb.prepare("SELECT phase FROM agent_runtime_recoveries WHERE runtime_generation_id=?").get(old.runtimeGenerationId)!.phase, "complete");
+          assert.equal(afterDb.prepare("SELECT state FROM execution_turns WHERE turn_id=?").get(`old-turn-${index}`)!.state, "lost");
+          assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id=?").get(`old-inbox-${index}`)!.state, index === 0 && mode === "fresh" ? "acknowledged" : "cancelled_by_user");
+        }
+        assert.equal(afterDb.prepare("SELECT COUNT(*) AS n FROM execution_facts WHERE agent_id=?").get(id)!.n, 1, "no historical facts removed");
+        const shadow = new ExecutionShadowStore(afterDb);
+        shadow.registerRuntime({ agentId: id, executionGenerationId: "successor", runtimeGenerationId: "successor-runtime",
+          provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: Date.now() });
+        const token = shadow.bindObserver({ agentId: id, subjectRuntimeGenerationId: "successor-runtime",
+          observerRuntimeGenerationId: "successor-runtime", daemonGenerationId: "successor-daemon", sourceId: "successor-source",
+          expectedEpoch: 2, boundAtMs: Date.now() });
+        assert.equal(token.epoch, 3, "successor crosses the retained 1/72 gap only after the exact boundary");
+      }
       assert.equal(archive.last_source_sequence, 1);
     } finally { afterDb.close(); }
     const callsAfterRecovery = stopCalls;

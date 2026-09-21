@@ -1,3 +1,4 @@
+import type { ProcessIdentity } from "./process-identity.js";
 import { listHostToolRules, findHostToolRule, readHostToolProject, bindHostToolRule, assertDecisionToolRule, revokeHostToolRule,
   withdrawHostToolApproval, type WithdrawHostToolApproval, type HostToolRule, type HostToolScope } from "./host-tool-rules.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,7 +43,7 @@ import {
   type SelectDelegatedApproval,
 } from "./execution-delegated-approval.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
-import { prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
+import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
   type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "./runtime-recovery-journal.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
@@ -1519,10 +1520,22 @@ export class ManifestStore {
     return { generation: result.generation, record: result.value };
   }
 
-  async checkpointRuntimeStopped(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {
+  async prepareRetiredRuntimePlan(request: RuntimeRestartRequest, supplied: RetiredRuntimeEvidence[] = [], identity?: ProcessIdentity) {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      return prepareRetiredRuntimePlan(database, request, this.readEntryFromDatabase(database, request.entryId), supplied, identity);
+    });
+  }
+
+  async checkpointRuntimeStopped(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>, retired?: RetiredRuntimePlan, identity?: ProcessIdentity) {
     return this.writeOperationalJournal(database => {
       const record = readRuntimeRecovery(database, operationId);
-      return checkpointRuntimeStopped(database, operationId, record ? this.readEntryFromDatabase(database, record.agent_id) : undefined);
+      const entry = record ? this.readEntryFromDatabase(database, record.agent_id) : undefined;
+      if (record?.phase === "prepared" && entry && retired) archiveRetiredRuntimes(database, {
+        operationId, entryId: record.agent_id, roomId: record.room_id, executionGenerationId: record.execution_generation_id,
+        runtimeGenerationId: record.runtime_generation_id, mode: record.mode,
+      }, entry, retired, identity);
+      return checkpointRuntimeStopped(database, operationId, entry);
     }, commitFence);
   }
 
