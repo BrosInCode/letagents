@@ -10,7 +10,7 @@ import type { createHostApprovalBridge } from "./host-approval-broker.js";
 export interface DaemonControlOperations {
   mutateLocalBoard(input: unknown): Promise<unknown>;
   watchLocalBoard(input: unknown, signal: AbortSignal): Promise<unknown>;
-  hostApprovals: Pick<ReturnType<typeof createHostApprovalBridge>, "challenge" | "verify" | "list" | "decide">;
+  hostApprovals: Pick<ReturnType<typeof createHostApprovalBridge>, "challenge" | "verify" | "list" | "decide" | "listToolRules" | "revokeToolRule">;
   activateCustodialPolling(input: PollingActivationRequest): unknown;
   getPollingActivation(input: DeliveryDrainIdentity): unknown;
   cancelPollingActivation(input: DeliveryDrainIdentity): unknown;
@@ -195,6 +195,8 @@ export function createDaemonControlRequestHandler(
         if (!input || Object.keys(input).length !== 1 || typeof input.roomId !== "string") throw new Error("An exact approval room is required.");
         return operations.hostApprovals.list(input.roomId);
       }
+      if (authenticated.operation === "list_tool_rules") return operations.hostApprovals.listToolRules(input);
+      if (authenticated.operation === "revoke_tool_rule") return operations.hostApprovals.revokeToolRule(input);
       if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
       return operations.hostApprovals.decide(input);
     }

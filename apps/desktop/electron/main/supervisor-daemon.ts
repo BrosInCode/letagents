@@ -34,14 +34,14 @@ import { LETAGENTS_MCP_RUNTIME_TREE_SHA256 } from "./agents/letagents-mcp-runtim
 import { prepareSupervisorState } from "./supervisor-state-recovery.js";
 import { loadHostApprovalSigner, type HostApprovalSigner } from "./host-approval-auth.js";
 import type { HostApprovalChallenge } from "../../shared/host-approval-auth.js";
-import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalCandidate, HostApprovalChoice, HostApprovalStatus } from "../../shared/host-approvals.js";
+import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalCandidate, HostApprovalSelection, HostApprovalStatus } from "../../shared/host-approvals.js";
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.153";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.154";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -324,6 +324,14 @@ const approvalSha = z.string().regex(/^[a-f0-9]{64}$/);
 const approvalStatus = z.enum(["pending", "decision_recorded", "decision_sent", "uncertain", "request_closed", "resolved", "unavailable"]);
 const approvalChallenge = z.strictObject({ daemonGeneration: z.number().int().positive().safe(),
   bootNonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/), keyFingerprint: approvalSha });
+const hostToolLabel = approvalId.regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/);
+const hostToolScope = z.strictObject({
+  agentId: approvalId, accountId: approvalId, projectId: approvalSha, projectName: hostToolLabel, sourceRepoPath: z.string().min(1).max(4096),
+  canonicalSourcePath: z.string().min(1).max(4096), repository: z.string().min(1).max(4096), remoteUrl: z.string().min(1).max(4096),
+  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
+});
+const hostToolRule = z.strictObject({ id: approvalId, revision: z.number().int().positive().safe(), ownerId: approvalId,
+  scope: hostToolScope, createdAtMs: z.number().int().nonnegative().safe() });
 const approvalCandidate = z.strictObject({
   reference: z.strictObject({ requestId: approvalId, requestVersion: z.number().int().positive().safe(), requestSha256: approvalSha,
     agentId: approvalId, roomId: approvalId, executionGenerationId: approvalId, runtimeGenerationId: approvalId,
@@ -331,7 +339,7 @@ const approvalCandidate = z.strictObject({
     nativeRequestId: z.union([approvalId, z.number().int().nonnegative().safe()]) }).nullable(),
   presentation: z.strictObject({ agentId: approvalId, displayName: z.string().max(256),
     provider: z.enum(["codex", "open-model", "claude-code"]), title: z.enum(["Run a command", "Run a tool", "Change files", "Grant for this turn", "Approval unavailable"]),
-    details: z.string().max(24 * 1024), denyScope: z.enum(["request", "session_pending"]) }),
+    details: z.string().max(24 * 1024), denyScope: z.enum(["request", "session_pending"]), alwaysAllow: hostToolScope.optional() }),
   status: approvalStatus, detail: z.string().max(1024).nullable(),
   recordedDecision: z.strictObject({ decisionId: approvalId, actorId: approvalId,
     decision: z.enum(["allow_once", "deny"]), projectionSha256: approvalSha.nullable() }).nullable(),
@@ -445,7 +453,7 @@ export class SupervisorDaemonClient {
   private approvalSigner: { fingerprint: string; promise: Promise<HostApprovalSigner> } | null = null;
   private readonly approvalPresentations = new Map<string, {
     roomId: string; view: DesktopHostApproval; candidate: HostApprovalCandidate; challenge: HostApprovalChallenge;
-    presentationSha256: string; touchedAt: number; decision: { id: string; choice: HostApprovalChoice } | null;
+    presentationSha256: string; touchedAt: number; decision: { id: string; choice: HostApprovalSelection } | null;
   }>();
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
@@ -531,6 +539,8 @@ export class SupervisorDaemonClient {
         if (!parsed.success || Buffer.byteLength(JSON.stringify(candidate)) > 32 * 1024
           || (parsed.data.reference && (parsed.data.reference.roomId !== roomId
             || parsed.data.reference.agentId !== parsed.data.presentation.agentId))
+          || (parsed.data.presentation.alwaysAllow && (parsed.data.presentation.alwaysAllow.agentId !== parsed.data.presentation.agentId
+            || parsed.data.presentation.alwaysAllow.provider !== parsed.data.presentation.provider))
           || (!parsed.data.reference && parsed.data.status !== "unavailable")
           || (parsed.data.presentation.title === "Approval unavailable" && parsed.data.status !== "unavailable"
             && !(parsed.data.status === "uncertain" && parsed.data.reference && parsed.data.recordedDecision))
@@ -602,14 +612,15 @@ export class SupervisorDaemonClient {
     return pending.promise;
   }
 
-  async decideHostApproval(input: { id: string; decision: HostApprovalChoice }, assertCaller?: () => void): Promise<HostApprovalStatus> {
+  async decideHostApproval(input: { id: string; decision: HostApprovalSelection }, assertCaller?: () => void): Promise<HostApprovalStatus> {
     if (!input || Object.keys(input).length !== 2 || typeof input.id !== "string"
-      || (input.decision !== "allow_once" && input.decision !== "deny")) throw new Error("Invalid approval decision.");
+      || !["allow_once", "deny", "allow_always"].includes(input.decision)) throw new Error("Invalid approval decision.");
     const selection = { id: input.id, decision: input.decision };
     assertCaller?.();
     const cached = this.approvalPresentations.get(selection.id);
     if (!cached?.candidate.reference || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000) throw new Error("Refresh the approval before deciding.");
     const assertEligible = () => {
+      if (selection.decision === "allow_always" && !cached.view.presentation.alwaysAllow) throw new Error("This request has no reusable tool permission.");
       if (this.approvalPresentations.get(selection.id) !== cached || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000
         || (cached.view.status !== "pending" && !(cached.view.status === "decision_recorded" && cached.view.retryDecision === selection.decision))) {
         throw new Error("Refresh the approval before deciding; this request cannot currently be sent.");
@@ -655,6 +666,28 @@ export class SupervisorDaemonClient {
       }
       throw new Error("Could not confirm the decision. Refresh to check it; no new decision has been created.");
     }
+  }
+
+  async listHostToolRules(agentId: string): Promise<import("../../shared/host-tool-rules.js").HostToolRule[]> {
+    approvalId.parse(agentId);
+    await this.waitForStartup();
+    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    const signer = await this.signerForApproval(challenge);
+    const raw = await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "list_tool_rules", { agentId }));
+    const rules = z.array(hostToolRule).parse(raw);
+    if (rules.some(rule => rule.scope.agentId !== agentId || rule.ownerId !== `host-${challenge.keyFingerprint}`)) throw new Error("Invalid saved permissions.");
+    return rules;
+  }
+
+  async revokeHostToolRule(input: { agentId: string; ruleId: string; revision: number }, assertCaller?: () => void): Promise<void> {
+    const value = z.strictObject({ agentId: approvalId, ruleId: approvalId, revision: z.number().int().positive().safe() }).parse(input);
+    assertCaller?.();
+    await this.waitForStartup();
+    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    const signer = await this.signerForApproval(challenge);
+    assertCaller?.();
+    await this.request("supervisor.host_approval_request", signer.sign(challenge, "revoke_tool_rule", value),
+      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller);
   }
 
   /**

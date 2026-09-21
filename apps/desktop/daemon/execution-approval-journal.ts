@@ -1,3 +1,4 @@
+import { assertDecisionToolRule, hostToolDecisionWasWithdrawn } from "./host-tool-rules.js";
 import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { executionIdentity } from "./execution-protocol.js";
@@ -64,6 +65,7 @@ type Certainty = "impossible" | "unknown" | null;
 export type ExecutionApprovalRecord = {
   request: AdmitExecutionApproval & { delegatable: boolean; state: ApprovalState; applicationCertainty: Certainty; closedAtMs?: number | null };
   decision: null | {
+    withdrawnBeforeSend?: true;
     decisionId: string; actorId: string; decision: "allow_once" | "deny"; projectionSha256: string | null;
     source: "host" | "delegate"; delegationInstanceId: string | null; delegationRevision: number | null;
     delegationScopeSha256: string | null;
@@ -141,6 +143,7 @@ function read(db: DatabaseSync, id: string, version: number): ExecutionApprovalR
   if (closure && (!decision || closure.decision_id !== decision.decision_id || closure.dispatch_id !== decision.dispatch_id
     || decision.dispatch_started_at_ms === null || Number(closure.observed_at_ms) < Number(decision.dispatch_started_at_ms))) reject("identity_mismatch");
   return { request: { ...requestFromRow(row), closedAtMs: closure ? Number(closure.observed_at_ms) : null }, decision: decision ? {
+    ...(hostToolDecisionWasWithdrawn(db, decision, row) ? { withdrawnBeforeSend: true as const } : {}),
     decisionId: String(decision.decision_id), actorId: String(decision.actor_id), decision: decision.decision as "allow_once" | "deny",
     source: decision.source as "host" | "delegate", delegationInstanceId: decision.delegation_instance_id as string | null,
     delegationRevision: decision.delegation_revision as number | null,
@@ -262,14 +265,19 @@ export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperational
     const old = read(db, value.requestId, Number(latest.request_version))!;
     const bindingKeys = Object.keys(reference.shape).filter(key => !["requestVersion", "requestSha256"].includes(key));
     if (bindingKeys.some(key => value[key as keyof ApprovalReference] !== old.request[key as keyof ApprovalReference])) reject("identity_mismatch");
-    if (value.requestVersion !== old.request.requestVersion + 1 || value.requestSha256 === old.request.requestSha256
-      || !["requested", "decision_recorded"].includes(old.request.state)
-      || (old.decision && old.decision.dispatchState !== "not_dispatched")) reject("invalid_transition");
+    const withdrawn = old.decision?.withdrawnBeforeSend === true && old.request.state === "lost"
+      && old.decision.dispatchState === "lost" && old.decision.applicationCertainty === "impossible";
+    if (value.requestVersion !== old.request.requestVersion + 1
+      || (!withdrawn && (value.requestSha256 === old.request.requestSha256
+        || !["requested", "decision_recorded"].includes(old.request.state)
+        || (old.decision && old.decision.dispatchState !== "not_dispatched")))) reject("invalid_transition");
     if (value.createdAtMs < (old.decision?.decidedAtMs ?? old.request.createdAtMs)) reject("invalid_input");
-    if (old.decision) db.prepare(`UPDATE execution_approval_decisions SET dispatch_state='lost',application_certainty='impossible',resolved_at_ms=?
-      WHERE decision_id=?`).run(value.createdAtMs, old.decision.decisionId);
-    db.prepare("UPDATE execution_approval_requests SET state='superseded' WHERE request_id=? AND request_version=?")
-      .run(value.requestId, old.request.requestVersion);
+    if (!withdrawn) {
+      if (old.decision) db.prepare(`UPDATE execution_approval_decisions SET dispatch_state='lost',application_certainty='impossible',resolved_at_ms=?
+        WHERE decision_id=?`).run(value.createdAtMs, old.decision.decisionId);
+      db.prepare("UPDATE execution_approval_requests SET state='superseded' WHERE request_id=? AND request_version=?")
+        .run(value.requestId, old.request.requestVersion);
+    } // Proven-unsent withdrawals retain their original lost/impossible history.
   }
   const common = { agentId: value.agentId, roomId: value.roomId, executionGenerationId: turn.generation, createdAtMs: turn.createdAtMs };
   materializeExecutionIdentity(db, {
@@ -322,6 +330,7 @@ export function beginExecutionApprovalDispatch(db: DatabaseSync, input: Dispatch
   }
   if (current.request.state !== "decision_recorded" || d.dispatchState !== "not_dispatched") reject("invalid_transition");
   liveSelection(db, current, value.authority, entry, value.atMs);
+  assertDecisionToolRule(db, d.decisionId, entry);
   db.prepare("UPDATE execution_approval_decisions SET dispatch_state='dispatching',dispatch_id=?,dispatch_started_at_ms=? WHERE decision_id=?")
     .run(value.dispatchId, value.atMs, d.decisionId);
   db.prepare("UPDATE execution_approval_requests SET state='dispatching' WHERE request_id=? AND request_version=?")

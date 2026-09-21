@@ -1,3 +1,4 @@
+import { HostToolRuleRevokedError, hostToolScopeSchema, resolveHostToolScope } from "./host-tool-rules.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -34,6 +35,7 @@ export function createHostApprovalBridge(options: Omit<Options, "exactAuthority"
   let verifier: HostApprovalVerifier | null = null;
   const broker = new HostApprovalBroker({
     ...options,
+    hostActorId: () => verifier?.challenge() ? `host-${verifier.challenge()!.keyFingerprint}` : null,
     exactAuthority: async (entry, handle, generation) => {
       const binding = await options.workerBindings.get(entry.id);
       if (!binding || binding.execution_generation_id !== generation) return false;
@@ -56,6 +58,8 @@ export function createHostApprovalBridge(options: Omit<Options, "exactAuthority"
     challenge: () => verifier?.challenge() ?? null,
     verify: (envelope: unknown) => verifier?.verify(envelope) ?? null,
     list: broker.list.bind(broker),
+    listToolRules: broker.listToolRules.bind(broker),
+    revokeToolRule: broker.revokeToolRule.bind(broker),
     admitDelegatable: broker.admitDelegatable.bind(broker),
     decide: broker.decide.bind(broker),
     applyRecordedDecision: broker.applyRecordedDecision.bind(broker),
@@ -67,6 +71,7 @@ type Lane = {
   controller: AbortController; revision: number; state: "pending" | "degraded" | "unavailable";
   connectionId: string | null; requests: readonly ProviderPermissionRequest[];
   approvalExecutions: ApprovalExecutionReconciler | null;
+  rulesRunning?: boolean; rulesDirty?: boolean;
 };
 
 export type DelegatableApprovalAdmission = {
@@ -76,7 +81,7 @@ export type DelegatableApprovalAdmission = {
   sourceMessageId: string;
 };
 type Options = {
-  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "validateExecutionApprovalAuthority">;
+  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "validateExecutionApprovalAuthority" | "readHostToolProject" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
   inbox: Pick<SupervisedAgentInboxStore, "head">;
   provider: ProviderActionPort | undefined;
   currentHandle(agentId: string): ProviderActionHandle | undefined;
@@ -85,6 +90,7 @@ type Options = {
   fenceCommit(commit: () => Promise<void>): Promise<void>;
   onPermissionChanged?(entryId: string): void;
   nowMs?: () => number;
+  hostActorId?(): string | null;
 };
 const MAX_REQUESTS = 32;
 const MAX_PRESENTATION_BYTES = 24 * 1024;
@@ -96,7 +102,7 @@ const decisionSchema = z.strictObject({
   expected: z.strictObject({ requestId: id, requestVersion: z.number().int().positive(), requestSha256: sha,
     agentId: id, roomId: id, executionGenerationId: id, runtimeGenerationId: id, turnId: id,
     providerContinuationId: id, providerTurnId: id, connectionId: id, nativeRequestId: z.union([id, z.number().int().nonnegative().safe()]) }),
-  decisionId: id, actorId: id, decision: z.enum(["allow_once", "deny"]), projectionSha256: sha,
+  decisionId: id, actorId: id, decision: z.enum(["allow_once", "deny", "allow_always"]), projectionSha256: sha,
 });
 
 function digest(value: unknown): string {
@@ -194,6 +200,7 @@ export class HostApprovalBroker {
         lane.state = event.type === "unavailable" ? "unavailable" : "degraded";
       }
       this.options.onPermissionChanged?.(lane.agentId);
+      this.queueToolRules(lane);
     };
     void provider.observePermissions(handle, receive, lane.controller.signal).catch(() => receive({ type: "degraded" }));
     return () => {
@@ -270,6 +277,61 @@ export class HostApprovalBroker {
     return result;
   }
 
+  async listToolRules(input: unknown) {
+    const value = z.strictObject({ agentId: id }).parse(input);
+    const owner = this.options.hostActorId?.();
+    if (!owner) throw new Error("Host permissions are unavailable.");
+    return this.options.store.listHostToolRules(owner, value.agentId);
+  }
+
+  async revokeToolRule(input: unknown): Promise<void> {
+    const value = z.strictObject({ agentId: id, ruleId: id, revision: z.number().int().positive() }).parse(input);
+    const owner = this.options.hostActorId?.();
+    if (!owner) throw new Error("Host permissions are unavailable.");
+    await this.options.store.revokeHostToolRule(owner, value.agentId, value.ruleId, value.revision, this.now(), this.options.fenceCommit);
+  }
+
+  /** Native permission events drive rule matching even when the composer is closed. */
+  private queueToolRules(lane: Lane): void {
+    lane.rulesDirty = true;
+    if (lane.rulesRunning) return;
+    lane.rulesRunning = true;
+    void (async () => {
+      while (lane.rulesDirty && this.current(lane)) {
+        lane.rulesDirty = false;
+        const owner = this.options.hostActorId?.();
+        if (!owner || lane.state !== "pending" || !(await this.options.store.listHostToolRules(owner, lane.agentId)).length) continue;
+        for (const native of [...lane.requests]) {
+          if (!this.current(lane)) break;
+          try {
+            const prepared = await this.prepare(lane, native);
+            const scope = prepared.candidate.presentation.alwaysAllow;
+            if (!scope || prepared.approval.decision || prepared.approval.request.state !== "requested") continue;
+            const rule = await this.options.store.findHostToolRule(owner, scope);
+            if (!rule) continue;
+            const expected = prepared.candidate.reference!;
+            const decisionId = `rule-decision-${digest([rule.id, rule.revision, expected])}`;
+            const projectionSha256 = digest(prepared.candidate.presentation);
+            await this.applyRecordedDecision({ ...expected, decisionId, actorId: owner, decision: "allow_once", projectionSha256 }, async current => {
+              if (!isDeepStrictEqual(current.presentation.alwaysAllow, scope) || digest(current.presentation) !== projectionSha256) {
+                throw new Error("The tool permission scope changed.");
+              }
+              return this.options.store.selectHostToolApproval({ expected, authority: current.approvalAuthority,
+                decisionId, actorId: owner, decision: "allow_once", projectionSha256, atMs: this.now() },
+              { scope, rule: { id: rule.id, revision: rule.revision } }, commit => this.options.fenceCommit(async () => {
+                current.assertCurrent(); await commit();
+              }));
+            });
+          } catch { /* A stale or unmatched permission remains available for manual review. */ }
+        }
+        this.options.onPermissionChanged?.(lane.agentId);
+      }
+    })().catch(() => { this.options.onPermissionChanged?.(lane.agentId); }).finally(() => {
+      lane.rulesRunning = false;
+      if (lane.rulesDirty && this.current(lane)) this.queueToolRules(lane);
+    });
+  }
+
   private presentation(entry: DaemonManifestEntry, native: ProviderPermissionRequest,
     title: HostApprovalPresentation["title"], fileChanges?: readonly CodexPermissionFileChange[]): HostApprovalPresentation {
     const raw = literal(inspectedRequest(native, fileChanges));
@@ -311,8 +373,19 @@ export class HostApprovalBroker {
       configurationRevision: entry.runtime_configuration_revision ?? 1 };
     const requestId = approvalRequestId(lane.agentId, lane.connectionId, native.native.id);
     const requestSha256 = digest(inspected);
-    const prior = await this.options.store.readLatestExecutionApproval(requestId);
-    const unchanged = prior?.request.requestSha256 === requestSha256;
+    let prior = await this.options.store.readLatestExecutionApproval(requestId);
+    if (prior?.decision && !prior.decision.dispatchId && !prior.decision.withdrawnBeforeSend) {
+      try { await this.options.store.validateExecutionApprovalAuthority(reference(prior), owned); }
+      catch (error) {
+        if (error instanceof HostToolRuleRevokedError) {
+          await this.options.store.withdrawHostToolApproval({ expected: reference(prior), decisionId: prior.decision.decisionId,
+            ruleId: error.ruleId, ruleRevision: error.ruleRevision, dispatchId: null, atMs: this.now() },
+          commit => this.options.fenceCommit(async () => { assertCurrent(); await commit(); }));
+          prior = await this.options.store.readLatestExecutionApproval(requestId);
+        } else throw error;
+      }
+    }
+    const unchanged = prior?.request.requestSha256 === requestSha256 && !prior?.decision?.withdrawnBeforeSend;
     const now = this.now();
     const baseRequest = { requestId, requestVersion: unchanged ? prior!.request.requestVersion : (prior?.request.requestVersion ?? 0) + 1,
       requestSha256, agentId: lane.agentId, roomId: entry.room_id,
@@ -360,6 +433,11 @@ export class HostApprovalBroker {
         || (native.provider === "codex" && native.native.method === "mcpServer/elicitation/request") ? "Run a tool"
         : prepared.kind === "command" ? "Run a command"
         : prepared.kind === "file_change" ? "Change files" : "Grant for this turn", prepared.fileChanges);
+    if (this.options.hostActorId?.()) {
+      const scope = await resolveHostToolScope(prepared.entry, native, await this.options.store.readHostToolProject(prepared.owned.workAttemptId)).catch(() => null);
+      prepared.assertCurrent();
+      if (scope) presentation.alwaysAllow = scope;
+    }
     const { entry: _entry, now, kind: _kind, ...result } = prepared;
     const candidate: HostApprovalCandidate = { reference: reference(result.approval), presentation,
       recordedDecision: recordedDecision(result.approval),
@@ -398,14 +476,14 @@ export class HostApprovalBroker {
     const parsed = decisionSchema.safeParse(input);
     if (!parsed.success) throw new Error("Approval decision is invalid.");
     const value = parsed.data;
-    return this.applyRecordedDecision({
+    const status = await this.applyRecordedDecision({
       agentId: value.expected.agentId,
       requestId: value.expected.requestId,
       requestVersion: value.expected.requestVersion,
       requestSha256: value.expected.requestSha256,
       decisionId: value.decisionId,
       actorId: value.actorId,
-      decision: value.decision,
+      decision: value.decision === "allow_always" ? "allow_once" : value.decision,
       projectionSha256: value.projectionSha256,
     }, async (prepared) => {
       if (!isDeepStrictEqual(prepared.expected, value.expected)
@@ -416,12 +494,18 @@ export class HostApprovalBroker {
         prepared.assertCurrent();
         await commit();
       });
-      return this.options.store.selectHostApproval({
-        ...value,
-        authority: prepared.approvalAuthority,
-        atMs: this.now(),
-      }, fence);
+      const selection = { ...value, decision: value.decision === "allow_always" ? "allow_once" as const : value.decision,
+        authority: prepared.approvalAuthority, atMs: this.now() };
+      if (value.decision === "allow_always") {
+        const scope = hostToolScopeSchema.parse(prepared.presentation.alwaysAllow);
+        if (this.options.hostActorId?.() !== value.actorId) throw new Error("The permission owner changed.");
+        return this.options.store.selectHostToolApproval(selection, { scope, create: true }, fence);
+      }
+      return this.options.store.selectHostApproval(selection, fence);
     });
+    const lane = this.lanes.get(value.expected.agentId);
+    if (lane && value.decision === "allow_always") this.queueToolRules(lane);
+    return status;
   }
 
   async applyRecordedDecision(
@@ -459,7 +543,11 @@ export class HostApprovalBroker {
         },
       };
       }, select);
-      if (reconciliation.pending) reconciliation.reconciler?.arm(reconciliation.pending);
+      if (reconciliation.pending) {
+        if (result === "unavailable") reconciliation.reconciler?.discard(reconciliation.pending);
+        else reconciliation.reconciler?.arm(reconciliation.pending);
+      }
+      if (result === "unavailable") this.options.onPermissionChanged?.(input.agentId);
       return result;
     } catch (error) {
       if (reconciliation.pending) reconciliation.reconciler?.discard(reconciliation.pending);

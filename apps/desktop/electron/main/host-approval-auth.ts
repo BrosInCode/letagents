@@ -99,7 +99,7 @@ export async function loadHostApprovalSigner(path?: string, storage?: SecretStor
       try {
         if (!challenge || !Number.isSafeInteger(challenge.daemonGeneration) || challenge.daemonGeneration < 1
           || !/^[A-Za-z0-9_-]{43}$/.test(challenge.bootNonce) || challenge.keyFingerprint !== keyFingerprint
-          || !["list", "decide"].includes(operation) || !Number.isSafeInteger(nowMs) || nowMs < 0
+          || !["list", "decide", "list_tool_rules", "revoke_tool_rule"].includes(operation) || !Number.isSafeInteger(nowMs) || nowMs < 0
           || !Number.isSafeInteger(nowMs + 30_000)) throw unavailable();
         const payload = JSON.stringify({ domain: "letagents.host-approval", version: 1,
           daemonGeneration: challenge.daemonGeneration, bootNonce: challenge.bootNonce, keyFingerprint,

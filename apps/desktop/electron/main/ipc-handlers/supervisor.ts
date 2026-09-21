@@ -75,6 +75,20 @@ function normalizeLaunchId(creationRequestId?: string | null): string {
 }
 
 export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle("desktop:supervisor:list-host-tool-rules", async (event, agentId: string) => {
+    assertHostApprovalSender(event);
+    const result = await supervisorDaemonClient.listHostToolRules(agentId);
+    assertHostApprovalSender(event);
+    return result;
+  });
+  targetIpcMain.handle("desktop:supervisor:revoke-host-tool-rule", async (event, input) => {
+    assertHostApprovalSender(event);
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.revokeHostToolRule(input, () => {
+      assertHostApprovalSender(event);
+      assertDesktopUpdateMutationAllowed();
+    });
+  });
   targetIpcMain.handle("desktop:supervisor:list-host-approvals", async (event, roomIdentifier: string) => {
     assertHostApprovalSender(event);
     if (typeof roomIdentifier !== "string" || !roomIdentifier.trim() || roomIdentifier.length > 256) throw new Error("Choose an approval room.");

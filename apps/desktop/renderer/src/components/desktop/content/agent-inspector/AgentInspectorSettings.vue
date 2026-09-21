@@ -5,7 +5,7 @@
     <section v-else-if="resource.status === 'error' && !resource.configuration" class="agent-inspector-settings-load-error" role="alert">
       <strong>Couldn’t load settings.</strong>
       <p>{{ resource.error || "Try loading this agent’s settings again." }}</p>
-      <button type="button" :disabled="busy" @click="emit('reload')">Retry</button>
+      <button type="button" :disabled="busy" @click="reloadSettings">Retry</button>
     </section>
     <template v-else-if="resource.configuration && resource.draft">
       <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-config-title">
@@ -41,9 +41,19 @@
             </span>
           </label>
         </fieldset>
+        <section v-if="desktopIpc.supervisor?.listHostToolRules" class="agent-inspector-permissions" aria-label="Always allowed tools">
+          <strong>Always allowed</strong>
+          <p v-if="toolRulesLoading" class="agent-inspector-settings-note" role="status">Loading…</p>
+          <p v-else-if="toolRulesError" class="agent-inspector-settings-error" role="alert">{{ toolRulesError }} <button type="button" :disabled="revokingRule !== null" @click="loadToolRules">Retry</button></p>
+          <p v-else-if="!toolRules.length" class="agent-inspector-settings-note">None</p>
+          <div v-for="rule in toolRules" :key="rule.id" class="agent-inspector-settings-actions">
+            <span>{{ rule.scope.toolLabel }} · {{ rule.scope.projectName }}</span>
+            <button type="button" :disabled="revokingRule !== null" @click="revokeToolRule(rule)">{{ revokingRule === rule.id ? 'Revoking…' : 'Revoke' }}</button>
+          </div>
+        </section>
         <p v-if="resource.status === 'error'" class="agent-inspector-settings-error" role="alert">{{ resource.error }}</p>
-        <div v-if="conflict" class="agent-inspector-conflict" role="alert"><strong>These settings were changed elsewhere.</strong><p>Your edits are still here. Reload to use the latest saved settings, or Overwrite to replace them with your edits.</p><button type="button" :disabled="busy" @click="emit('reload')">Reload</button><button type="button" class="primary" :disabled="busy || !settingsEditable || !validDraft" @click="emit('save', true)">Overwrite</button></div>
-        <div v-else class="agent-inspector-settings-actions"><button type="button" :disabled="busy || !settingsEditable || !validDraft" @click="emit('save', false)">{{ busy ? 'Saving…' : 'Save changes' }}</button><button type="button" :disabled="busy" @click="emit('reload')">Reload</button></div>
+        <div v-if="conflict" class="agent-inspector-conflict" role="alert"><strong>These settings were changed elsewhere.</strong><p>Your edits are still here. Reload to use the latest saved settings, or Overwrite to replace them with your edits.</p><button type="button" :disabled="busy" @click="reloadSettings">Reload</button><button type="button" class="primary" :disabled="busy || !settingsEditable || !validDraft" @click="emit('save', true)">Overwrite</button></div>
+        <div v-else class="agent-inspector-settings-actions"><button type="button" :disabled="busy || !settingsEditable || !validDraft" @click="emit('save', false)">{{ busy ? 'Saving…' : 'Save changes' }}</button><button type="button" :disabled="busy" @click="reloadSettings">Reload</button></div>
       </section>
 
       <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-move-title">
@@ -85,7 +95,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { DesktopAgentProvider, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import {
   AGENT_INSPECTOR_RETIRE_CONFIRMATION,
@@ -98,6 +108,8 @@ import {
   type AgentInspectorConfigurationResource,
   type AgentInspectorRoomMoveResource,
 } from "../../../../domain/agent-inspector-settings";
+import { desktopIpc } from "../../../../ipc";
+import type { HostToolRule } from "../../../../../../shared/host-tool-rules";
 const props = defineProps<{ entryId: string; displayName: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean }>();
 const emit = defineEmits<{ patch: [patch: Partial<AgentInspectorConfigurationDraft>]; save: [overwrite: boolean]; apply: []; reload: []; "prepare-move": [destination: string]; "commit-move": []; retire: []; purge: [] }>();
 const destination = ref(""); const purgeConfirmation = ref(""); const confirmRetire = ref(false);
@@ -112,4 +124,39 @@ const moveTerminal = computed(() => Boolean(movePresentation.value?.terminal));
 function patch(value: Partial<AgentInspectorConfigurationDraft>) { emit("patch", value); }
 function confirmRetireAgent(): void { confirmRetire.value = false; emit("retire"); }
 watch(() => props.entryId, () => { destination.value = ""; purgeConfirmation.value = ""; confirmRetire.value = false; });
+const toolRules = ref<HostToolRule[]>([]);
+const toolRulesLoading = ref(false);
+const toolRulesError = ref<string | null>(null);
+const revokingRule = ref<string | null>(null);
+let toolRulesEpoch = 0;
+function reloadSettings(): void { emit("reload"); void loadToolRules(); }
+async function loadToolRules(): Promise<void> {
+  if (revokingRule.value) return;
+  const epoch = ++toolRulesEpoch;
+  const read = desktopIpc.supervisor?.listHostToolRules;
+  if (!read) return;
+  toolRulesLoading.value = true;
+  toolRulesError.value = null;
+  try {
+    const rules = await read(props.entryId);
+    if (epoch === toolRulesEpoch) toolRules.value = rules;
+  } catch {
+    if (epoch === toolRulesEpoch) toolRulesError.value = "Couldn’t load saved permissions.";
+  } finally { if (epoch === toolRulesEpoch) toolRulesLoading.value = false; }
+}
+async function revokeToolRule(rule: HostToolRule): Promise<void> {
+  const revoke = desktopIpc.supervisor?.revokeHostToolRule;
+  if (!revoke || revokingRule.value) return;
+  const epoch = toolRulesEpoch;
+  revokingRule.value = rule.id;
+  toolRulesError.value = null;
+  try {
+    await revoke({ agentId: props.entryId, ruleId: rule.id, revision: rule.revision });
+    if (epoch === toolRulesEpoch) { revokingRule.value = null; await loadToolRules(); }
+  } catch {
+    if (epoch === toolRulesEpoch) toolRulesError.value = "Couldn’t revoke permission. Retry to check its state.";
+  } finally { if (epoch === toolRulesEpoch) revokingRule.value = null; }
+}
+watch(() => props.entryId, () => { toolRules.value = []; revokingRule.value = null; void loadToolRules(); }, { immediate: true });
+onBeforeUnmount(() => { toolRulesEpoch++; });
 </script>

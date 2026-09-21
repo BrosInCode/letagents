@@ -36,12 +36,12 @@ export class HostApprovalVerifier {
         || payload.domain !== "letagents.host-approval" || payload.version !== 1
         || payload.daemonGeneration !== this.boot.daemonGeneration || payload.bootNonce !== this.boot.bootNonce
         || payload.keyFingerprint !== this.boot.keyFingerprint || !Object.hasOwn(payload, "input")
-        || (payload.operation !== "list" && payload.operation !== "decide")
+        || (!["list", "decide", "list_tool_rules", "revoke_tool_rule"].includes(String(payload.operation)))
         || !Number.isSafeInteger(payload.issuedAt) || (payload.issuedAt as number) < 0 || !Number.isSafeInteger(payload.expiresAt)
         || (payload.issuedAt as number) > nowMs || (payload.expiresAt as number) <= nowMs
         || (payload.expiresAt as number) - (payload.issuedAt as number) > 30_000
         || (payload.expiresAt as number) <= (payload.issuedAt as number)) return null;
-      return { operation: payload.operation, input: payload.input };
+      return { operation: payload.operation as AuthenticatedHostApprovalRequest["operation"], input: payload.input };
     } catch { return null; }
   }
 }

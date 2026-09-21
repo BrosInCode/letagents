@@ -923,3 +923,21 @@ test("attachment-only thread acceptance restores composer focus without requirin
     assert.equal(focused, true);
   } finally { app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
 });
+
+test("composer names the saved permission scope before sending Always allow", async () => {
+  const approval = hostApproval();
+  approval.presentation.alwaysAllow = { agentId: "agent-a", accountId: "owner", projectId: "a".repeat(64), projectName: "Do App",
+    sourceRepoPath: "/projects/do-app", canonicalSourcePath: "/projects/do-app", repository: "do-app", remoteUrl: "/projects/do-app",
+    provider: "open-model", toolId: "opencode:bash", toolLabel: "Bash", policySha256: "b".repeat(64) };
+  const requests: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [approval], error: null }),
+    decideHostApproval: async (input: unknown) => { requests.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (buttonByText(root, "Always allow Bash in Do App").props.onClick as () => Promise<void>)();
+    assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_always" }]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});

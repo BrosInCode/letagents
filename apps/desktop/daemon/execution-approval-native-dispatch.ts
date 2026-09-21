@@ -1,3 +1,4 @@
+import { HostToolRuleRevokedError, type WithdrawHostToolApproval } from "./host-tool-rules.js";
 import { randomUUID } from "node:crypto";
 
 import type { CodexPermissionFileChange, ProviderPermissionRequest } from "../shared/provider-permissions.js";
@@ -9,7 +10,7 @@ import type {
 import type { ProviderActionHandle, ProviderActionPort } from "./provider-action-port.js";
 import type { DaemonManifestEntry } from "./types.js";
 
-export type NativeApprovalDispatchStatus = "resolved" | "decision_sent" | "uncertain";
+export type NativeApprovalDispatchStatus = "resolved" | "decision_sent" | "uncertain" | "unavailable";
 
 export type NativeApprovalDispatchInput = {
   expected: ApprovalReference;
@@ -44,6 +45,7 @@ type Options = {
       evidence: "sent_unacknowledged" | "dispatch_uncertain" | "native_processed" | "exact_native_execution";
       atMs: number;
     }, fence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord>;
+    withdrawHostToolApproval(input: WithdrawHostToolApproval, fence: (commit: () => Promise<void>) => Promise<void>): Promise<void>;
     validateExecutionApprovalAuthority(expected: ApprovalReference, authority: ApprovalAuthority): Promise<() => void>;
   };
   provider: ProviderActionPort | undefined;
@@ -65,6 +67,7 @@ export class ExecutionApprovalNativeDispatcher {
     });
     const dispatchId = randomUUID();
     let dispatchStarted = false;
+    let mayHaveSent = false;
     let assertOperationalAuthority: (() => void) | null = null;
     try {
       const result = await provider.replyPermission(
@@ -101,6 +104,7 @@ export class ExecutionApprovalNativeDispatcher {
               throw new Error("Approval authority is unavailable.");
             }
             assertOperationalAuthority();
+            mayHaveSent = true;
             input.markNativeDispatch?.();
           },
         },
@@ -113,7 +117,13 @@ export class ExecutionApprovalNativeDispatcher {
         atMs: this.options.nowMs(),
       }, this.options.fenceCommit);
       return result.outcome === "native_processed" ? "resolved" : "decision_sent";
-    } catch {
+    } catch (error) {
+      if (error instanceof HostToolRuleRevokedError && !mayHaveSent) {
+        await this.options.store.withdrawHostToolApproval({ expected: input.expected, decisionId: input.decisionId,
+          ruleId: error.ruleId, ruleRevision: error.ruleRevision, dispatchId: dispatchStarted ? dispatchId : null,
+          atMs: this.options.nowMs() }, fence);
+        return "unavailable";
+      }
       if (dispatchStarted) {
         await this.options.store.recordExecutionApprovalOutcome({
           expected: input.expected,

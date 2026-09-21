@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
@@ -31,7 +32,7 @@ const now = Date.parse("2026-08-31T00:00:00.000Z");
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 async function fixture(providerId: "codex" | "open-model" | "claude-code" = "codex",
-  overrides: Partial<Pick<ConstructorParameters<typeof HostApprovalBroker>[0], "exactAuthority" | "fenceCommit">> = {}) {
+  overrides: Partial<Pick<ConstructorParameters<typeof HostApprovalBroker>[0], "exactAuthority" | "fenceCommit" | "hostActorId" | "onPermissionChanged">> = {}) {
   const root = await mkdtemp(join(tmpdir(), "letagents-approval-broker-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -47,6 +48,12 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     permission_profile_id: "ask_before_write", delivery_mode: "daemon_inbox", created_by: "owner", created_at: new Date(now).toISOString(),
     work_attempt_id: "workspace", provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation",
       provider_continuation_id: "continuation", provider_connection: connection } };
+  if (overrides.hostActorId) {
+    execFileSync("git", ["init", "-q", workspace]);
+    execFileSync("git", ["-C", workspace, "-c", "user.name=QA", "-c", "user.email=qa@example.test", "commit", "--allow-empty", "-qm", "Fixture"]);
+    execFileSync("git", ["-C", workspace, "remote", "add", "origin", "remote"]);
+    entry.source_repo_path = workspace;
+  }
   await store.write(0, [entry]);
   const db = new DatabaseSync(path); db.exec("PRAGMA foreign_keys=ON");
   db.prepare(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
@@ -70,8 +77,8 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
   const state = { current: true, owned: true, correlation: true, turnId: "native-turn", live: handle as ProviderActionHandle | undefined,
     fileChanges: null as CodexPermissionFileChange[] | null,
     authorityChecks: 0, authorityFailAt: null as number | null,
-    failBefore: false, failAfter: false, afterBefore: null as (() => void | Promise<void>) | null,
-    afterNativeWrite: null as (() => void) | null };
+    failBefore: false, failAfter: false, beforeBefore: null as (() => void | Promise<void>) | null, afterBefore: null as (() => void | Promise<void>) | null,
+    afterNativeWrite: null as (() => void | Promise<void>) | null };
   const sends: string[] = []; const order: string[] = [];
   let permissionChanges = 0;
   let receive: ((event: ProviderPermissionObservation) => void) | null = null;
@@ -97,16 +104,17 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
       : { outcome: "correlation_unproven" as const },
     replyPermission: async (_handle: ProviderActionHandle, _request: ProviderPermissionRequest, reply: "once" | "reject",
       options: Parameters<NonNullable<ProviderActionPort["replyPermission"]>>[3]) => {
-      assert.equal(db.prepare("SELECT dispatch_state FROM execution_approval_decisions").get()!.dispatch_state, "not_dispatched");
+      assert.equal(db.prepare("SELECT dispatch_state FROM execution_approval_decisions ORDER BY rowid DESC LIMIT 1").get()!.dispatch_state, "not_dispatched");
       order.push("decision_committed");
       if (state.failBefore) throw new Error("native request inspection failed");
+      await state.beforeBefore?.();
       await options.beforeNativeDispatch();
-      assert.equal(db.prepare("SELECT dispatch_state FROM execution_approval_decisions").get()!.dispatch_state, "dispatching");
+      assert.equal(db.prepare("SELECT dispatch_state FROM execution_approval_decisions ORDER BY rowid DESC LIMIT 1").get()!.dispatch_state, "dispatching");
       order.push("dispatch_committed");
       await state.afterBefore?.();
       options.assertNativeDispatch!();
       sends.push(reply); order.push("native_write");
-      state.afterNativeWrite?.();
+      await state.afterNativeWrite?.();
       if (state.failAfter) throw new Error("native response lost");
       return providerId !== "open-model" ? { outcome: "sent_unacknowledged" as const, nativeScope: "request" as const }
         : { outcome: "native_processed" as const, nativeScope: reply === "reject" ? "session_pending" as const : "request" as const };
@@ -930,3 +938,253 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
     await f.close();
   }
 }
+
+async function savedRuleFixture(provider: "codex" | "claude-code" | "open-model" = "claude-code") {
+  return fixture(provider, { hostActorId: () => "host-owner" });
+}
+async function until(check: () => boolean | Promise<boolean>): Promise<void> {
+  for (let n = 0; n < 200; n++) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.fail("Expected approval transition was not observed");
+}
+function nextPermission(native: ProviderPermissionRequest, id: string): ProviderPermissionRequest {
+  const next = structuredClone(native);
+  (next.native as { id: string | number }).id = id;
+  if (next.provider === "claude-code") next.native.request.tool_use_id = id;
+  return next;
+}
+
+for (const provider of ["codex", "claude-code", "open-model"] as const) {
+  test(`Always allow persists and responds to a later ${provider} tool request with no composer read`, async () => {
+    const f = await savedRuleFixture(provider);
+    try {
+      const [candidate] = await f.broker.list("room");
+      assert.ok(candidate!.presentation.alwaysAllow);
+      await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+      const rules = await f.broker.listToolRules({ agentId: "agent" });
+      assert.equal(rules.length, 1);
+      assert.equal(rules[0]!.scope.agentId, "agent");
+      f.reinstall();
+      const next = nextPermission(f.native, "next-request");
+      if (next.provider === "claude-code") next.native.request.input = { content: "Different arguments" };
+      f.emit([next]);
+      await until(() => f.sends.length === 2);
+      assert.deepEqual(f.sends, ["once", "once"]);
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM host_tool_rule_decisions").get()!.n, 2);
+      await f.broker.revokeToolRule({ agentId: "agent", ruleId: rules[0]!.id, revision: rules[0]!.revision });
+      f.emit([nextPermission(f.native, "after-revoke")]);
+      const [manual] = await f.broker.list("room");
+      assert.equal(manual!.status, "pending");
+      await f.broker.decide({ ...decision(manual!), decisionId: "manual-after-revoke", decision: "deny" });
+      assert.deepEqual(f.sends, ["once", "once", "reject"]);
+    } finally { await f.close(); }
+  });
+}
+
+for (const stage of ["before-intent", "before-write", "after-write"] as const) {
+  test(`revocation ${stage} preserves either a usable prompt or sent uncertainty`, async () => {
+    const f = await savedRuleFixture();
+    try {
+      const [candidate] = await f.broker.list("room");
+      const selected = { ...decision(candidate!), decision: "allow_always" };
+      const revoke = async () => {
+        const [rule] = await f.broker.listToolRules({ agentId: "agent" });
+        assert.ok(rule);
+        await f.broker.revokeToolRule({ agentId: "agent", ruleId: rule.id, revision: rule.revision });
+      };
+      if (stage === "before-intent") f.state.beforeBefore = revoke;
+      if (stage === "before-write") f.state.afterBefore = revoke;
+      if (stage === "after-write") { f.state.afterNativeWrite = revoke; f.state.failAfter = true; }
+      const result = await f.broker.decide(selected);
+      f.state.beforeBefore = null; f.state.afterBefore = null; f.state.afterNativeWrite = null; f.state.failAfter = false;
+      if (stage === "after-write") {
+        assert.equal(result, "uncertain");
+        assert.deepEqual(f.sends, ["once"]);
+        assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM host_tool_rule_withdrawals").get()!.n, 0);
+        f.reinstall();
+        assert.equal((await f.broker.list("room"))[0]!.status, "uncertain");
+        return;
+      }
+      assert.equal(result, "unavailable");
+      assert.deepEqual(f.sends, []);
+      f.reinstall();
+      const [replacement] = await f.broker.list("room");
+      assert.equal(replacement!.status, "pending");
+      assert.equal(replacement!.reference!.requestVersion, candidate!.reference!.requestVersion + 1);
+      await assert.rejects(f.broker.decide(selected), /changed|recorded|unavailable/i);
+      await f.broker.decide({ ...decision(replacement!), decisionId: "manual-replacement", decision: "deny" });
+      assert.deepEqual(f.sends, ["reject"]);
+      const old = f.db.prepare("SELECT dispatch_state,application_certainty FROM execution_approval_decisions WHERE decision_id='decision'").get()!;
+      assert.equal(old.dispatch_state, "lost"); assert.equal(old.application_certainty, "impossible");
+    } finally { await f.close(); }
+  });
+}
+
+test("saved permissions do not infer a Codex MCP tool from prose or silently follow another source project", async () => {
+  const f = await savedRuleFixture("codex");
+  try {
+    const unknown = nextPermission(f.native, "unknown") as Extract<ProviderPermissionRequest, { provider: "codex" }>;
+    unknown.native = { ...unknown.native, method: "mcpServer/elicitation/request", params: { serverName: "letagents", message: "Run Bash" } };
+    f.emit([unknown]);
+    assert.equal((await f.broker.list("room"))[0]!.presentation.alwaysAllow, undefined);
+    f.emit();
+    execFileSync("git", ["-C", f.workspace, "remote", "set-url", "origin", "another-project"]);
+    assert.equal((await f.broker.list("room"))[0]!.presentation.alwaysAllow, undefined);
+  } finally { await f.close(); }
+});
+
+test("identical active tool scopes share one revocable rule and cannot be revived by a creation replay", async () => {
+  const f = await savedRuleFixture();
+  try {
+    f.emit([f.native, nextPermission(f.native, "second-create")]);
+    const candidates = await f.broker.list("room");
+    assert.equal(candidates.length, 2);
+    f.broker.close(); // Test the two already-admitted selections without automatic matching races.
+    const select = (candidate: HostApprovalCandidate, decisionId: string) => f.store.selectHostToolApproval({
+      ...decision(candidate), decisionId, decision: "allow_once",
+      authority: { inboxItemId: f.item.inbox_item_id, workAttemptId: "workspace", executionGenerationId: "generation",
+        provider: "claude-code", providerConnection: f.handle.providerConnection as any, configurationRevision: 1 }, atMs: now + 10,
+    }, { scope: candidate.presentation.alwaysAllow!, create: true }, async commit => commit());
+    await select(candidates[0]!, "first-create");
+    await select(candidates[1]!, "second-create");
+    const rules = await f.broker.listToolRules({ agentId: "agent" });
+    assert.equal(rules.length, 1);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM host_tool_rule_decisions").get()!.n, 2);
+    await f.broker.revokeToolRule({ agentId: "agent", ruleId: rules[0]!.id, revision: rules[0]!.revision });
+    await assert.rejects(select(candidates[0]!, "first-create"), /revoked/);
+    await assert.rejects(select(candidates[1]!, "second-create"), /revoked/);
+    assert.equal((await f.broker.listToolRules({ agentId: "agent" })).length, 0);
+  } finally { await f.close(); }
+});
+
+test("saved tool rules reject a different tool and ownership mutations without a fence", async () => {
+  const f = await savedRuleFixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    const other = nextPermission(f.native, "other-tool") as Extract<ProviderPermissionRequest, { provider: "claude-code" }>;
+    other.native.request.tool_name = "Bash";
+    f.emit([other]);
+    const [manual] = await f.broker.list("room");
+    assert.equal(manual!.status, "pending");
+    assert.deepEqual(f.sends, ["once"]);
+    const [rule] = await f.broker.listToolRules({ agentId: "agent" });
+    await assert.rejects(f.store.revokeHostToolRule("host-owner", "agent", rule!.id, rule!.revision, now + 10, undefined as never), /commit fence/);
+    await assert.rejects(f.store.selectHostToolApproval({} as never, {} as never, undefined as never), /commit fence/);
+    assert.equal((await f.broker.listToolRules({ agentId: "agent" })).length, 1);
+    assert.deepEqual(await f.store.listHostToolRules("another-host", "agent"), []);
+    assert.deepEqual(await f.store.listHostToolRules("host-owner", "another-agent"), []);
+    assert.equal(await f.store.findHostToolRule("host-owner", { ...rule!.scope, projectId: "b".repeat(64) }), null);
+    assert.equal(await f.store.findHostToolRule("host-owner", { ...rule!.scope, policySha256: "c".repeat(64) }), null);
+  } finally { await f.close(); }
+});
+
+test("a permission snapshot during rule-runner completion is not dropped", async () => {
+  let f!: Awaited<ReturnType<typeof fixture>>;
+  let injected = false;
+  f = await fixture("claude-code", { hostActorId: () => "host-owner", onPermissionChanged: () => {
+    if (f?.sends.length === 2 && !injected) {
+      injected = true;
+      queueMicrotask(() => f.emit([nextPermission(f.native, "during-finally")]));
+    }
+  } });
+  try {
+    const [candidate] = await f.broker.list("room");
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    f.emit([nextPermission(f.native, "automatic-second")]);
+    await until(() => f.sends.length === 3);
+    assert.equal(injected, true);
+    assert.deepEqual(f.sends, ["once", "once", "once"]);
+  } finally { await f.close(); }
+});
+
+test("withdrawal evidence is exact and follows decision retention", async () => {
+  const f = await savedRuleFixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    f.state.afterBefore = async () => {
+      const [rule] = await f.broker.listToolRules({ agentId: "agent" });
+      await f.broker.revokeToolRule({ agentId: "agent", ruleId: rule!.id, revision: rule!.revision });
+    };
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    f.broker.close();
+    f.db.prepare("UPDATE host_tool_rule_withdrawals SET request_sha256=?").run("a".repeat(64));
+    await assert.rejects(f.store.readLatestExecutionApproval(candidate!.reference!.requestId), /evidence is invalid/);
+    f.db.prepare("UPDATE host_tool_rule_withdrawals SET request_sha256=?").run(candidate!.reference!.requestSha256);
+    assert.equal((await f.store.readLatestExecutionApproval(candidate!.reference!.requestId))!.decision!.withdrawnBeforeSend, true);
+    f.db.exec("DELETE FROM execution_approval_decisions");
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM host_tool_rule_withdrawals").get()!.n, 0);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM host_tool_rule_decisions").get()!.n, 0);
+  } finally { await f.close(); }
+});
+
+for (const hadIntent of [false, true]) {
+  test(`restart after a revoked unsent decision ${hadIntent ? 'preserves an uncertain dispatch intent' : 'restores the pending prompt without an intent'}`, async () => {
+    const f = await savedRuleFixture();
+    try {
+      const [candidate] = await f.broker.list("room");
+      if (hadIntent) f.state.afterBefore = () => { throw new Error("Interrupted before final write"); };
+      else f.state.failBefore = true;
+      const choosing = f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+      if (hadIntent) assert.equal(await choosing, "uncertain");
+      else await assert.rejects(choosing, /recorded but could not be sent/);
+      f.state.failBefore = false; f.state.afterBefore = null;
+      const [rule] = await f.broker.listToolRules({ agentId: "agent" });
+      await f.broker.revokeToolRule({ agentId: "agent", ruleId: rule!.id, revision: rule!.revision });
+      f.reinstall();
+      const [replacement] = await f.broker.list("room");
+      assert.deepEqual(f.sends, []);
+      if (hadIntent) {
+        assert.equal(replacement!.status, "uncertain");
+        assert.equal(replacement!.reference!.requestVersion, 1);
+        assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM host_tool_rule_withdrawals").get()!.n, 0);
+      } else {
+        assert.equal(replacement!.status, "pending");
+        assert.equal(replacement!.reference!.requestVersion, 2);
+        await f.broker.decide({ ...decision(replacement!), decisionId: "restart-manual", decision: "deny" });
+        assert.deepEqual(f.sends, ["reject"]);
+      }
+    } finally { await f.close(); }
+  });
+}
+
+test("revoking an automatically matched rule returns that exact native prompt to manual review", async () => {
+  const f = await savedRuleFixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    const [rule] = await f.broker.listToolRules({ agentId: "agent" });
+    f.state.afterBefore = () => f.broker.revokeToolRule({ agentId: "agent", ruleId: rule!.id, revision: rule!.revision });
+    const next = nextPermission(f.native, "revoked-auto");
+    f.emit([next]);
+    await until(() => Number(f.db.prepare("SELECT COUNT(*) AS n FROM host_tool_rule_withdrawals").get()!.n) === 1);
+    f.state.afterBefore = null;
+    const [manual] = await f.broker.list("room");
+    assert.equal(manual!.status, "pending");
+    assert.equal(manual!.reference!.nativeRequestId, "revoked-auto");
+    assert.deepEqual(f.sends, ["once"]);
+    await f.broker.decide({ ...decision(manual!), decisionId: "manual-after-auto", decision: "deny" });
+    assert.deepEqual(f.sends, ["once", "reject"]);
+  } finally { await f.close(); }
+});
+
+test("a saved command rule never covers Codex requests for extra access, stdin, or another environment", async () => {
+  const f = await savedRuleFixture("codex");
+  try {
+    const [candidate] = await f.broker.list("room");
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    for (const extra of [{ additionalPermissions: { network: { enabled: true } } },
+      { additionalPermissions: { fileSystem: { write: ["/private"] } } },
+      { networkApprovalContext: { host: "example.com" } }, { kind: "writeStdin" }, { environmentId: "remote-machine" }]) {
+      const next = nextPermission(f.native, `extra-${Object.keys(extra)[0]}-${JSON.stringify(extra).length}`) as Extract<ProviderPermissionRequest, { provider: "codex" }>;
+      next.native = { ...next.native, params: { ...(next.native.params as object), ...extra } };
+      f.emit([next]);
+      const [manual] = await f.broker.list("room");
+      assert.equal(manual!.status, "pending");
+      assert.equal(manual!.presentation.alwaysAllow, undefined);
+      assert.deepEqual(f.sends, ["once"]);
+    }
+  } finally { await f.close(); }
+});
