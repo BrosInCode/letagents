@@ -376,6 +376,32 @@ test("approval details show tool inputs and exact edits without transport JSON",
     { label: "Cwd", value: "/repo" }, { label: "Arguments", value: "1. --run\n2. unit" }]);
 });
 
+test("native command approval keeps the full action and drops protocol bookkeeping", () => {
+  const native = { id: 41, method: "item/commandExecution/requestApproval", params: {
+    threadId: "thread", turnId: "turn", itemId: "item", kind: "command", startedAtMs: 1790023138137,
+    environmentId: "local", reason: "Verify the combined revision", command: "npm test\nprintf '<script>'",
+    cwd: "/project", commandActions: [{ type: "unknown", command: "npm test" }],
+    proposedExecpolicyAmendment: ["npm", "test"], availableDecisions: ["accept", "cancel"],
+  } };
+  const presentation = { ...hostApproval().presentation, provider: "codex" as const,
+    title: "Run a command" as const, details: JSON.stringify(native) };
+  const unchanged = presentation.details;
+  assert.deepEqual(hostApprovalFields(presentation), [
+    { label: "Reason", value: "Verify the combined revision" },
+    { label: "Command", value: "npm test\nprintf '<script>'" }, { label: "Cwd", value: "/project" },
+  ]);
+  assert.equal(presentation.details, unchanged, "display never changes the signed request");
+  const unfamiliar = { ...native, params: { ...native.params, environmentId: "remote-worker",
+    networkContext: { host: "example.com", protocol: "https" }, newPermissionScope: "retain this" } };
+  const fields = hostApprovalFields({ ...presentation, details: JSON.stringify(unfamiliar) });
+  assert.ok(fields.some(field => field.label === "Environment Id" && field.value === "remote-worker"));
+  assert.ok(fields.some(field => field.label === "Network Context" && field.value.includes("example.com")));
+  assert.ok(fields.some(field => field.value === "retain this"), "unknown scope must remain reviewable");
+  const noCommand = { ...native, params: { ...native.params, command: null } };
+  assert.ok(hostApprovalFields({ ...presentation, details: JSON.stringify(noCommand) })
+    .some(field => field.label === "Command Actions"), "keep the action if there is no full command");
+});
+
 test("native MCP approval shows the action and complete inputs without protocol metadata", () => {
   const presentation = { ...hostApproval().presentation, provider: "codex" as const, title: "Run a tool" as const,
     details: JSON.stringify({ request: { method: "mcpServer/elicitation/request", params: {
