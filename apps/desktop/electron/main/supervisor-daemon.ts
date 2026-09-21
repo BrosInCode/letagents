@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.152";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.153";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -503,6 +503,11 @@ export class SupervisorDaemonClient {
     return this.ensureOperation;
   }
 
+  /** Join startup already registered by the app without starting another service. */
+  async waitForStartup(): Promise<void> {
+    if (this.ensureOperation) await this.ensureOperation;
+  }
+
   /** Main computes and remembers what it actually presents; renderer IDs carry no authority. */
   async listHostApprovals(roomId: string): Promise<DesktopHostApprovalSnapshot> {
     try {
@@ -510,7 +515,7 @@ export class SupervisorDaemonClient {
       // Opening a composer must not spawn, hand off, or reconfigure a provider.
       // Wait only for startup already owned by the app; an absent or failed
       // service still returns unavailable without initiating any recovery.
-      if (this.ensureOperation) await this.ensureOperation;
+      await this.waitForStartup();
       const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
       if (rawChallenge === null) {
         this.clearApprovalPresentations(roomId);

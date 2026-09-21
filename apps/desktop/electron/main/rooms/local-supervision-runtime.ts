@@ -15,6 +15,7 @@ import { getLocalRoomArtifacts, publishLocalRoomArtifact } from "./artifacts/loc
 import { localSupervisionDatabase, authorizeLocalHost, authorizeLocalWorker,
   createLocalSupervisorSession, endLocalSupervisorSession } from "./local-supervision-authority.js";
 export { prepareLocalSupervisorGrant } from "./local-supervision-authority.js";
+export { executeLocalBoardMutation, watchLocalBoard } from "./local-board-service.js";
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): ObjectValue => value && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : {};

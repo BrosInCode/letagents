@@ -654,6 +654,11 @@ export type DesktopRoomStreamEvent =
       task: DesktopTaskSummary;
     }
   | {
+      type: "task_remove";
+      roomIdentifier: string;
+      taskId: string;
+    }
+  | {
       type: "github_event";
       roomIdentifier: string;
       event: DesktopGitHubRoomEvent;

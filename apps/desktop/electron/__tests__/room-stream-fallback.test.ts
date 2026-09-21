@@ -1,5 +1,13 @@
+import { join } from "node:path";
+const { DaemonControlSocket } = await import(new URL("../../daemon/control-socket.ts", import.meta.url).href);
+import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mjs";
+// These storage-domain fixtures run as the board owner. Cross-process calls use the socket below.
+registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { createElectronTestEnv } from "./harness.js";
 import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
@@ -7,7 +15,8 @@ import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-t
 // `paths.ts` reads LETAGENTS_API_URL once at module-eval time; the shared
 // harness pins it to an unroutable address so any un-stubbed fetch fails fast
 // instead of reaching prod. Every fetch in this suite is stubbed regardless.
-const env = createElectronTestEnv({ prefix: "room-stream-fallback-" });
+const env = createElectronTestEnv({ prefix: "room-stream-fallback-",
+  paths: ["state", "chatStorage", "localChatDb", "localProfile"] });
 env.resetState({});
 
 // Shrink the failed-catch-up retry cadence (default 20s) so the retry path is
@@ -57,9 +66,15 @@ mock.module("../main/agents/codex-supervisor.js", {
 const localStore = await import("../main/rooms/local-store.js");
 type RoomStorage = Awaited<ReturnType<typeof localStore.resolveLocalAwareRoomStorageMode>>;
 const deferredStorage = new Map<string, Promise<RoomStorage>>();
+const boardReads = new Map<string, number>();
+const deferredBoardReads = new Map<string, Promise<Awaited<ReturnType<typeof localStore.listLocalTasks>>>>();
 mock.module("../main/rooms/local-store.js", {
   namedExports: {
     ...localStore,
+    listLocalTasks: (roomId: string) => {
+      boardReads.set(roomId, (boardReads.get(roomId) ?? 0) + 1);
+      return deferredBoardReads.get(roomId) ?? localStore.listLocalTasks(roomId);
+    },
     resolveLocalAwareRoomStorageMode: (roomIdentifier: string) =>
       deferredStorage.get(roomIdentifier)
       ?? localStore.resolveLocalAwareRoomStorageMode(roomIdentifier),
@@ -96,6 +111,16 @@ const {
   setExecutionDelegationInvalidationHandler,
 } =
   await import("../main/room-stream.js");
+
+const boardService = await import("../main/rooms/local-board-service.js");
+process.env.LETAGENTS_BOARD_SOCKET_PATH = join(env.tempDir, "board.sock");
+const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
+  if (request.method === "local_board.watch") return boardService.watchLocalBoard(request.params, 1, signal);
+  if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
+  throw new Error("Unknown fixture request");
+});
+await boardSocket.start();
+test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 const ROOM = "focus_fallback_room";
 
@@ -1348,5 +1373,83 @@ test("failed storage selection cleans up startup and permits a same-room retry",
   } finally {
     await stopDesktopRoomStream();
     router.restore();
+  }
+});
+
+test("local board follows cross-process commits with no idle, message, or other-room board reads", async () => {
+  const room = "local_board_events";
+  const otherRoom = "local_other_board";
+  const exec = promisify(execFile);
+  const mcpUrl = new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href;
+  const runMcp = (code: string) => exec(process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", `const m = await import(${JSON.stringify(mcpUrl)}); ${code}`],
+    { cwd: fileURLToPath(new URL("../../../../", import.meta.url)), env: { ...process.env } });
+  const updates = () => emitted.filter((event): event is Extract<DesktopRoomStreamEvent, { type: "task_update" }> =>
+    event.type === "task_update" && event.roomIdentifier === room);
+  try {
+    await startDesktopRoomStream(room);
+    await waitUntil(() => boardReads.get(room) === 1);
+    await sleep(1700); // crosses the existing local-message polling cadence
+    assert.equal(boardReads.get(room), 1, "unchanged board has no timer reads");
+    await localMessages.addLocalChatMessage(room, { sender: "human", text: "message only" });
+    await localStore.addLocalTask(otherRoom, { title: "Other room task" });
+    await sleep(100);
+    assert.equal(boardReads.get(room), 1, "unrelated SQLite writes do not read this board");
+
+    await runMcp(`await m.addLocalTask(${JSON.stringify(room)}, { title: 'Agent task' });`);
+    await waitUntil(() => updates().some(event => event.task.title === "Agent task"));
+    const id = updates().at(-1)!.task.id;
+    await runMcp(`await m.updateLocalTask(${JSON.stringify(room)}, ${JSON.stringify(id)}, { status: 'accepted' });`);
+    await waitUntil(() => updates().some(event => event.task.status === "accepted"));
+    assert.equal(managedEmitted.some(event => event.type === "task_update" && event.roomIdentifier === room), false,
+      "renderer catch-up does not replay task execution to agents");
+
+    const db = await localStore.getLocalTaskDatabase();
+    const beforeRollback = boardReads.get(room);
+    db.exec("BEGIN IMMEDIATE");
+    db.prepare("UPDATE local_tasks SET title='Rolled back' WHERE room_id=?").run(room);
+    db.exec("ROLLBACK");
+    await sleep(100);
+    assert.equal(boardReads.get(room), beforeRollback, "rollback never announces a changed board");
+
+    await stopDesktopRoomStream();
+    const stoppedReads = boardReads.get(room);
+    await runMcp(`await m.updateLocalTask(${JSON.stringify(room)}, ${JSON.stringify(id)}, { status: 'cancelled' });`);
+    await sleep(100);
+    assert.equal(boardReads.get(room), stoppedReads, "stopping closes the board subscription");
+    await startDesktopRoomStream(room);
+    await waitUntil(() => updates().some(event => event.task.status === "cancelled"));
+    assert.equal(boardReads.get(room), stoppedReads! + 1, "reconnect catches up exactly once");
+
+    const start = emitted.length;
+    db.prepare("DELETE FROM local_tasks WHERE room_id=?").run(room);
+    await waitUntil(() => emitted.slice(start).some(event => event.type === "task_remove" && event.taskId === id));
+  } finally {
+    await stopDesktopRoomStream();
+  }
+});
+
+test("switching rooms fences a board read already in flight", async () => {
+  const oldRoom = "local_board_stale_read";
+  const newRoom = "local_board_replacement";
+  const task = await localStore.addLocalTask(oldRoom, { title: "Old room task" });
+  let release!: (tasks: typeof task[]) => void;
+  deferredBoardReads.set(oldRoom, new Promise(resolve => { release = resolve; }));
+  try {
+    await startDesktopRoomStream(oldRoom);
+    await waitUntil(() => boardReads.get(oldRoom) === 1);
+    await startDesktopRoomStream(newRoom);
+    await waitUntil(() => boardReads.get(newRoom) === 1);
+    release([task]);
+    await sleep(100);
+    assert.equal(emitted.some(event => event.type === "task_update" && event.roomIdentifier === oldRoom), false);
+    await localStore.updateLocalTask(oldRoom, task.id, { status: "accepted" });
+    await sleep(100);
+    assert.equal(boardReads.get(oldRoom), 1);
+    assert.equal(boardReads.get(newRoom), 1);
+  } finally {
+    release([task]);
+    deferredBoardReads.delete(oldRoom);
+    await stopDesktopRoomStream();
   }
 });

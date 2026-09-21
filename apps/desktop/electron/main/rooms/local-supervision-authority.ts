@@ -1,3 +1,5 @@
+import { requestDesktopBoardMutation } from "./local-task-subscription.js";
+import { isLocalBoardOwner } from "../../../../../shared/local-board-owner.mjs";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
@@ -154,6 +156,7 @@ export async function authorizeLocalWorker(roomId: string, bearer: string, sessi
 }
 
 export async function endLocalSupervisorSession(grantId: string, sessionId: string) {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("endLocalSupervisorSession", [grantId, sessionId]);
   const db = await localSupervisionDatabase();
   const now = new Date().toISOString();
   beginImmediate(db);
@@ -168,6 +171,7 @@ export async function endLocalSupervisorSession(grantId: string, sessionId: stri
 }
 
 export async function revokeLocalSupervisorEntry(entryId: string, sessionId?: string | null): Promise<void> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("revokeLocalSupervisorEntry", [entryId, sessionId]);
   const db = await localSupervisionDatabase();
   const now = new Date().toISOString();
   let sessions: Record<string, unknown>[];

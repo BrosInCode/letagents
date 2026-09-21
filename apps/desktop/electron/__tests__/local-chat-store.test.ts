@@ -1,3 +1,7 @@
+import { observeLocalTaskCommits } from "../../../../shared/local-task-revisions.mjs";
+import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mjs";
+// These storage-domain fixtures run as the board owner. Cross-process calls use the socket below.
+registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
@@ -1745,7 +1749,7 @@ test("desktop local task reassignment clears stale agent session owner metadata"
       };
     };
   };
-  const raw = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB || "");
+  const raw = observeLocalTaskCommits(new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB || ""));
   try {
     raw
       .prepare(`

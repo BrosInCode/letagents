@@ -1,3 +1,7 @@
+import { createLocalTaskStore } from "../../../shared/local-task-store.mjs";
+import { runWithLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
+import { withRegisteredWorkerStateFence } from "../../../shared/local-worker-state-fence.mjs";
+import { DaemonControlSocket } from "../../../apps/desktop/daemon/control-socket.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -55,6 +59,29 @@ const {
   runLocalThreadRoutingBackfillBatch,
   scheduleLocalThreadRoutingBackfill,
 } = await import("../../../shared/sqlite-thread-routing.mjs");
+
+// Exercise the standalone client against a real socket with the shared owner store.
+const { getLocalKnowledgeDatabase } = await import("../local-state/local-chat.js");
+process.env.LETAGENTS_BOARD_SOCKET_PATH = join(tempDir, "board.sock");
+const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, request =>
+  runWithLocalBoardOwner(() => {}, async () => {
+    assert.equal(request.method, "local_board.mutate");
+    const input = request.params as { domain: string; operation: string; args: unknown[]; worker: unknown; statePath: string };
+    assert.equal(input.domain, "mcp");
+    let current: Record<string, unknown> | undefined;
+    const tasks = createLocalTaskStore({ getDb: getLocalKnowledgeDatabase,
+      currentWorkerCall: () => current as { session_id: string } | undefined,
+      withWorkerStateFence: callback => input.worker === null ? callback() :
+        withRegisteredWorkerStateFence(input.statePath, input.worker, session => {
+          current = session; try { return callback(); } finally { current = undefined; }
+        }),
+    });
+    const operation = tasks[input.operation as keyof typeof tasks] as (...args: unknown[]) => unknown;
+    return operation(...input.args);
+  }));
+await runWithLocalBoardOwner(() => {}, () => getLocalKnowledgeDatabase());
+await boardSocket.start();
+test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 type SendToolHandler = (
   input: Record<string, unknown>,

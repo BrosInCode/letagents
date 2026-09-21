@@ -1,4 +1,7 @@
+import { requestDesktopBoardMutation } from "./local-task-subscription.js";
+import { isLocalBoardOwner } from "../../../../../shared/local-board-owner.mjs";
 import { randomUUID } from "node:crypto";
+import { ensureLocalTaskRevisionSchema } from "../../../../../shared/local-task-revisions.mjs";
 import { mkdir } from "node:fs/promises";
 import { ensureLocalWorkLeaseSchema, readLocalWorkLeases, claimLocalWorkLease, changeLocalWorkLease,
   assertLocalTaskLeaseMutation, assertLocalWorkLeaseWorker, type LocalWorkLeaseWorker, type LocalWorkLeaseAction } from "../../../../../shared/local-work-leases.mjs";
@@ -186,6 +189,7 @@ async function getDb(): Promise<SqliteDatabase> {
     addColumnIfMissing(database, "local_tasks", "review_agent_session_id", "TEXT");
     addColumnIfMissing(database, "local_tasks", "review_updated_at", "TEXT");
     ensureLocalWorkLeaseSchema(database);
+    ensureLocalTaskRevisionSchema(database);
     schemaInitialized = true;
   }
   return database;
@@ -698,6 +702,7 @@ export async function addLocalTask(
   roomId: string,
   input: LocalTaskInput,
 ): Promise<DesktopTaskSummary> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("addLocalTask", [roomId, input]);
   const trimmedRoomId = roomId.trim();
   const title = input.title.trim();
   if (!trimmedRoomId) throw new Error("Choose a room before adding a task.");
@@ -761,7 +766,8 @@ export async function getLocalTask(
   return row ? toTaskSummary(mapTaskRow(row), database) : null;
 }
 
-export async function claimLocalTaskWorkLease(roomId: string, taskId: string, worker: LocalWorkLeaseWorker) {
+export async function claimLocalTaskWorkLease(roomId: string, taskId: string, worker: LocalWorkLeaseWorker): Promise<{ task: DesktopTaskSummary; lease: import("../../../../../shared/local-work-leases.mjs").LocalWorkLease }> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("claimLocalTaskWorkLease", [roomId, taskId, worker]);
   const database = await getDb();
   beginImmediate(database);
   try {
@@ -775,7 +781,8 @@ export async function claimLocalTaskWorkLease(roomId: string, taskId: string, wo
 }
 
 export async function changeLocalTaskWorkLease(roomId: string, taskId: string, input: LocalWorkLeaseAction,
-  worker: LocalWorkLeaseWorker | null = null) {
+  worker: LocalWorkLeaseWorker | null = null): Promise<{ task: DesktopTaskSummary; released_lease: import("../../../../../shared/local-work-leases.mjs").LocalWorkLease; new_lease: import("../../../../../shared/local-work-leases.mjs").LocalWorkLease | null }> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("changeLocalTaskWorkLease", [roomId, taskId, input, worker]);
   const database = await getDb();
   const observed = readLocalWorkLeases(database, roomId, taskId)[0];
   if (!observed) throw new Error("This task has no active work lease.");
@@ -798,6 +805,7 @@ export async function updateLocalTask(
   patch: LocalTaskPatch,
   worker?: LocalWorkLeaseWorker,
 ): Promise<DesktopTaskSummary> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("updateLocalTask", [roomId, taskId, patch, worker]);
   const expected = patch.expectedContent;
   if (expected !== undefined) {
     if (!expected || typeof expected !== "object" || Array.isArray(expected)
@@ -935,6 +943,7 @@ export async function claimLocalTaskReviewLease(
   taskId: string,
   input: LocalReviewLeaseInput,
 ): Promise<{ task: DesktopTaskSummary; lease: DesktopTaskSummary["activeLeases"][number] }> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("claimLocalTaskReviewLease", [roomId, taskId, input]);
   const database = await getDb();
   const currentRow = database
     .prepare("SELECT * FROM local_tasks WHERE room_id = ? AND task_id = ?")
@@ -1002,6 +1011,7 @@ export async function releaseLocalTaskReviewLease(
   task: DesktopTaskSummary;
   releasedLease: DesktopTaskSummary["activeLeases"][number] | null;
 }> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("releaseLocalTaskReviewLease", [roomId, taskId, input]);
   const database = await getDb();
   const currentRow = database
     .prepare("SELECT * FROM local_tasks WHERE room_id = ? AND task_id = ?")
@@ -1049,6 +1059,7 @@ export async function importLocalTasks(
   roomId: string,
   tasks: DesktopTaskSummary[],
 ): Promise<void> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("importLocalTasks", [roomId, tasks]);
   if (!tasks.length) return;
   const taskArtifactInputs = tasks.map((task) => ({
     taskId: task.id,

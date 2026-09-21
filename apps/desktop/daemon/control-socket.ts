@@ -3,14 +3,15 @@ import { dirname } from "node:path";
 import { createServer, type Server, type Socket } from "node:net";
 
 import { DAEMON_PROTOCOL_VERSION, type DaemonRequest, type DaemonResponse } from "./types.js";
+import { LOCAL_BOARD_MAX_FRAME_BYTES } from "../../../shared/local-board-owner.mjs";
 import { DaemonFenceLostError } from "./singleton.js";
 
-export type RequestHandler = (request: DaemonRequest) => Promise<unknown> | unknown;
+export type RequestHandler = (request: DaemonRequest, disconnected: AbortSignal) => Promise<unknown> | unknown;
 
 export class DaemonControlSocket {
   private server: Server | null = null;
   private readonly connections = new Set<Socket>();
-  constructor(readonly path: string, private readonly handle: RequestHandler, private readonly onFatal?: (error: Error) => Promise<void> | void, private readonly maxFrameBytes = 64 * 1024) {}
+  constructor(readonly path: string, private readonly handle: RequestHandler, private readonly onFatal?: (error: Error) => Promise<void> | void, private readonly maxFrameBytes = LOCAL_BOARD_MAX_FRAME_BYTES) {}
 
   async start(): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
@@ -52,15 +53,26 @@ export class DaemonControlSocket {
 
   private async respond(socket: import("node:net").Socket, line: string): Promise<void> {
     let request: DaemonRequest | null = null;
+    const disconnected = new AbortController();
+    const close = () => disconnected.abort();
+    socket.once("close", close);
+    if (socket.destroyed) close();
     try {
       request = JSON.parse(line) as DaemonRequest;
+      // Board imports carry existing task descriptions (up to 100,000 characters
+      // each). Other control requests keep their original 64 KiB admission cap.
+      if (request.method !== "local_board.mutate" && Buffer.byteLength(line) >= 64 * 1024) {
+        throw new Error("Daemon request is too large.");
+      }
       // Negotiation is intentionally version-agnostic: a vN+1 desktop must be
       // able to identify and hand off a healthy vN daemon without blind-killing
       // it or its provider children.
       if (request.version !== DAEMON_PROTOCOL_VERSION && request.method !== "daemon.negotiate") {
         throw new Error(`Protocol version mismatch: expected ${DAEMON_PROTOCOL_VERSION}, received ${request.version}.`);
       }
-      const result = await this.handle(request);
+      // Only read subscriptions consume this signal. Mutations retain their
+      // established lifetime and finish journaling after their caller leaves.
+      const result = await this.handle(request, disconnected.signal);
       this.write(socket, { version: DAEMON_PROTOCOL_VERSION, id: request.id, ok: true, result });
     } catch (error) {
       if (error instanceof DaemonFenceLostError) {
@@ -69,7 +81,7 @@ export class DaemonControlSocket {
         return;
       }
       this.write(socket, { version: DAEMON_PROTOCOL_VERSION, id: request?.id, ok: false, error: error instanceof Error ? error.message : "Invalid daemon request." });
-    }
+    } finally { socket.off("close", close); }
   }
 
   private write(socket: import("node:net").Socket, response: DaemonResponse): void {

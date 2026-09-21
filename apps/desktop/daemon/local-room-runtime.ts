@@ -10,6 +10,8 @@ export type LocalSupervisorGrant = {
 };
 
 type LocalRoomRuntime = {
+  executeLocalBoardMutation(input: unknown): Promise<unknown>;
+  watchLocalBoard(input: unknown, generation: number, signal: AbortSignal): Promise<unknown>;
   requestLocalSupervisor(url: string, init?: RequestInit): Promise<Response>;
   prepareLocalSupervisorGrant(input: { entryId: string; roomId: string; displayName: string; provider: string }): Promise<LocalSupervisorGrant>;
   executeLocalSupervisorTool(input: ExecuteDaemonToolInput): Promise<ExecuteDaemonToolResult>;
@@ -24,6 +26,8 @@ export function localRoomRuntime(): Promise<LocalRoomRuntime> {
     .then((module) => {
       if (typeof module.requestLocalSupervisor !== "function"
         || typeof module.prepareLocalSupervisorGrant !== "function"
+        || typeof module.executeLocalBoardMutation !== "function"
+        || typeof module.watchLocalBoard !== "function"
         || typeof module.executeLocalSupervisorTool !== "function") throw new Error("Local room supervision is unavailable in this build.");
       return module as LocalRoomRuntime;
     }).catch((error) => { runtime = undefined; throw error; });
