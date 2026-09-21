@@ -980,11 +980,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
         throw new CodexPermissionReplyError("not_dispatched");
       }
     } else {
-      const boundary = await this.inspectTurnBoundary(handle);
-      if (boundary.state !== "active" || boundary.providerContinuationId !== continuation || boundary.providerTurnId !== params.turnId) {
+      // A resumed history may retain an in-progress turn from a dead process.
+      // Pending requests belong to this connection's exact latest native turn;
+      // historical discovery cannot establish their dispatch authority.
+      let response: Record<string, unknown> | null;
+      try {
+        response = recordValue(await handle.client.request("thread/turns/list", {
+          threadId: continuation, limit: 1, sortDirection: "desc", itemsView: "full",
+        }));
+      } catch { throw new CodexPermissionReplyError("not_dispatched"); }
+      const turn = Array.isArray(response?.data) && response.data.length === 1 ? recordValue(response.data[0]) : null;
+      if (!turn || turn.id !== params.turnId || turn.status !== "inProgress" || turn.itemsView !== "full") {
         throw new CodexPermissionReplyError("not_dispatched");
       }
     }
+    assertCurrent();
     if (options) await options.beforeNativeDispatch();
     if (fileChange && !isDeepStrictEqual(await this.inspectPermissionFileChanges(handle, expectedRequest), expectedChanges)) {
       throw new CodexPermissionReplyError("not_dispatched");

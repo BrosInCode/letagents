@@ -410,6 +410,61 @@ test("Codex observes native MCP tool approvals without invented item coordinates
   }
 });
 
+test("Codex approvals use the latest exact turn despite an orphaned in-progress historical turn", async (t) => {
+  for (const [method, params] of [
+    ["mcpServer/elicitation/request", mcpToolPermissionParams()],
+    ["item/commandExecution/requestApproval", approvalParams()],
+    ["item/permissions/requestApproval", genericPermissionParams()],
+  ] as const) await t.test(method, async () => {
+    const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!; client.turnStatus = "inProgress";
+    const original = client.request.bind(client);
+    let historyReads = 0;
+    client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+      if (method !== "thread/read") return original<T>(method, params);
+      historyReads++;
+      return { thread: { id: "thread-1", status: { type: "active", activeFlags: ["waitingOnApproval"] }, turns: [
+        { id: "retired-turn", status: "inProgress" }, { id: "turn-thread-1", status: "inProgress" },
+      ] } } as T;
+    };
+    assert.deepEqual(await adapter.inspectTurnBoundary(handle), { state: "unknown" }, "discovery remains conservative");
+    const request = client.askPermission(params, 0, method);
+    let admitted = 0;
+    assert.deepEqual(await adapter.replyPermission(handle, request, "once", {
+      beforeNativeDispatch: async () => { admitted++; },
+    }), { outcome: "sent", scope: "request" });
+    assert.equal(admitted, 1); assert.equal(client.permissionResponses.length, 1);
+    assert.equal(historyReads, 1,
+      "only explicit discovery reads history; approval dispatch uses the latest native turn");
+    assert.deepEqual(requestByMethod(client, "thread/turns/list").params, {
+      threadId: "thread-1", limit: 1, sortDirection: "desc", itemsView: "full",
+    });
+    await assert.rejects(adapter.replyPermission(handle, request, "once"), { outcome: "not_dispatched" });
+    assert.equal(client.permissionResponses.length, 1);
+  });
+});
+
+test("Codex approval latest-turn inspection refuses stale or ambiguous snapshots before admission", async (t) => {
+  for (const data of [undefined, [], [null], [{ id: "retired-turn", status: "inProgress", itemsView: "full" }],
+    [{ id: "turn-thread-1", status: "completed", itemsView: "full" }],
+    [{ id: "turn-thread-1", status: "inProgress" }],
+    [{ id: "turn-thread-1", status: "inProgress", itemsView: "full" }, { id: "other", status: "inProgress", itemsView: "full" }],
+  ]) await t.test(JSON.stringify(data) ?? "missing data", async () => {
+    const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    const original = client.request.bind(client);
+    client.request = async <T>(method: string, params?: unknown): Promise<T> => method === "thread/turns/list"
+      ? { data } as T : original<T>(method, params);
+    const request = client.askPermission(mcpToolPermissionParams(), 0, "mcpServer/elicitation/request");
+    await assert.rejects(adapter.replyPermission(handle, request, "once", {
+      beforeNativeDispatch: async () => { assert.fail("invalid snapshot cannot admit dispatch"); },
+    }), { outcome: "not_dispatched" });
+    assert.deepEqual(client.permissionResponses, []);
+  });
+});
+
 test("Codex MCP approvals refuse uncorrelated, unsupported, cancelled, replaced, or changed requests", async (t) => {
   const cases = [
     { name: "foreign thread", params: { threadId: "foreign" } },
@@ -638,7 +693,7 @@ test("Codex permission replies target exact pending requests and report sent, ne
     await assert.rejects(adapter.replyPermission(handle, once, "once"), { outcome: "not_dispatched" });
   }
   assert.equal(client.permissionResponses.length, 4);
-  assert.equal(client.requests.filter(request => request.method === "thread/read").length, 2, "only command approvals use the historical boundary");
+  assert.equal(client.requests.filter(request => request.method === "thread/read").length, 0, "approval dispatch never scans historical turns");
   assert.deepEqual(facts, [], "approval payloads and decisions never enter execution evidence");
   assert.deepEqual(harness.signals, []);
   assert.equal(client.requests.some(request => request.method === "turn/start"), false);
@@ -816,12 +871,14 @@ test("Codex permission dispatch revalidates exact authority after an awaited nat
       const started = new Promise<void>(resolve => { reading = resolve; });
       const originalRequest = client.request.bind(client);
       client.request = async <T>(method: string, params?: unknown): Promise<T> => {
-        if (method !== "thread/read") return originalRequest<T>(method, params);
+        if (method !== "thread/turns/list") return originalRequest<T>(method, params);
         reading();
         await barrier;
-        return { thread: { id: "thread-1", turns: [{ id: "turn-thread-1", status: "inProgress" }] } } as T;
+        return { data: [{ id: "turn-thread-1", status: "inProgress", itemsView: "full" }] } as T;
       };
-      const response = adapter.replyPermission(handle, permission, "once");
+      const response = adapter.replyPermission(handle, permission, "once", {
+        beforeNativeDispatch: async () => { assert.fail("lost authority cannot admit dispatch"); },
+      });
       const rejected = assert.rejects(response, { outcome: "not_dispatched" });
       await started;
       if (race === "resolved") client.emit({ method: "serverRequest/resolved", params: { requestId: permission.id, threadId: "thread-1" } });
