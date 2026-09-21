@@ -412,7 +412,6 @@ export async function createLocalRoom(input: {
       )
       VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
       ON CONFLICT(room_id) DO UPDATE SET
-        display_name = excluded.display_name,
         cloud_room_id = COALESCE(excluded.cloud_room_id, local_rooms.cloud_room_id),
         git_room_json = COALESCE(excluded.git_room_json, local_rooms.git_room_json),
         updated_at = excluded.updated_at,
