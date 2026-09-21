@@ -173,7 +173,8 @@ export type ProviderExecutionCoordinatorOptions = {
     cause: string,
     actor: string,
   ): Promise<void>;
-  terminalPayload(terminal: ProviderActionTerminal, actor: string): ExecutionTerminalPayload;
+  terminalPayload(terminal: ProviderActionTerminal, actor: string, connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload;
+  settleRuntimeApprovals(entryId: string): Promise<void>;
   observeProviderExit(
     entryId: string,
     terminal: ProviderActionTerminal,
@@ -482,7 +483,7 @@ export class ProviderExecutionCoordinator {
       attempt.work_attempt_id,
       executionGenerationId,
       {
-        ...this.options.terminalPayload(terminal, "daemon-provider"),
+        ...this.options.terminalPayload(terminal, "daemon-provider", handle.providerConnection),
         generation,
         actor: "daemon-provider",
       },
@@ -529,10 +530,11 @@ export class ProviderExecutionCoordinator {
         attempt.work_attempt_id,
         executionGenerationId,
         {
-          ...this.options.terminalPayload(terminal, execution.actor),
+          ...this.options.terminalPayload(terminal, execution.actor, handle.providerConnection),
           generation: execution.generation,
         },
       );
+      await this.options.settleRuntimeApprovals(entryId);
       if (current.desired_state === "stopped") {
         await this.options.durability.releaseTerminalExecutionFence(
           attempt.work_attempt_id,
@@ -764,7 +766,10 @@ export class ProviderExecutionCoordinator {
     if (!execution) {
       throw new Error("Manifest provider reference has no matching durable execution generation.");
     }
-    if (execution.terminal) return null;
+    if (execution.terminal) {
+      await this.options.settleRuntimeApprovals(entry.id);
+      return null;
+    }
     const configuration = await this.options.store.getAgentConfiguration(entry.id);
     const appliedRevision = configuration?.runtime_configuration_revision;
     if (!Number.isSafeInteger(appliedRevision) || appliedRevision! < 1) {
@@ -804,11 +809,12 @@ export class ProviderExecutionCoordinator {
         ref.work_attempt_id,
         execution.execution_generation_id,
         {
-          ...this.options.terminalPayload(terminal, execution.actor),
+          ...this.options.terminalPayload(terminal, execution.actor, ref.provider_connection),
           actor: execution.actor,
           generation: execution.generation,
         },
       );
+      await this.options.settleRuntimeApprovals(entry.id);
       await this.options.durability.releaseTerminalExecutionFence(
         ref.work_attempt_id,
         execution.execution_generation_id,
@@ -943,6 +949,7 @@ export class ProviderExecutionCoordinator {
 
   async converge(entryId: string): Promise<void> {
     if (this.options.authority.isHandoffScheduled()) return;
+    await this.options.settleRuntimeApprovals(entryId);
     if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
     let entry = await this.options.store.getEntry(entryId);
@@ -1751,11 +1758,12 @@ export class ProviderExecutionCoordinator {
           exactStopRef.work_attempt_id,
           exactStopRef.execution_generation_id,
           {
-            ...this.options.terminalPayload(terminal, execution.actor),
+            ...this.options.terminalPayload(terminal, execution.actor, exactStopRef.provider_connection),
             actor: execution.actor,
             generation: execution.generation,
           },
         );
+        await this.options.settleRuntimeApprovals(entry.id);
         if (entry.desired_state === "stopped") {
           await this.options.durability.releaseTerminalExecutionFence(
             exactStopRef.work_attempt_id,

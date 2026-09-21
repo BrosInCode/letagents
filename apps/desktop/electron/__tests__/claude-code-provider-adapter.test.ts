@@ -718,6 +718,7 @@ test("observed crash emits one synthesized terminal payload and makes attach ter
 
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]!.terminalCause, "crashed");
+  assert.deepEqual(terminals[0]!.nativeRuntimeDeath, { kind: "claude_cli", pid: 4100, processIdentity: handle.providerConnection!.processIdentity });
   assert.equal(handle.observedState(), "failed");
   const attachment = await adapter.attach({
     workAttemptId: "wa-claude-1",
@@ -841,6 +842,8 @@ test("a recycled pid can neither authenticate an attach nor be signalled", async
   });
   assert.equal(attached && "state" in attached ? attached.state : null, "terminal", "the recorded child is proven absent");
   assert.equal(attached && "state" in attached ? attached.terminal.terminalCause : null, "crashed");
+  assert.deepEqual(attached && "state" in attached ? attached.terminal.nativeRuntimeDeath : null,
+    { kind: "claude_cli", pid: 4100, processIdentity: `${originalBirth} /opt/homebrew/bin/claude --print --verbose` });
   assert.deepEqual(harness.signals, [], "the recycled pid was never signalled");
 });
 

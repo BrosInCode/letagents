@@ -3,7 +3,7 @@ import type {
   ProviderActionHandle,
   ProviderActionTerminal,
 } from "./provider-action-port.js";
-import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import { sameProviderActionConnectionSnapshot, validatedNativeRuntimeDeath } from "./provider-action-port.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
 import { advanceReconciliationState } from "./reconciler-state.js";
 import type {
@@ -49,6 +49,7 @@ export type ProviderTerminalPorts = {
     terminal?: ExecutionTerminalPayload,
   ): Promise<void>;
   requestConvergence(entryId: string): void;
+  settleRuntimeApprovals(entryId: string): Promise<void>;
 };
 
 type PlannedConfigurationReplacement = {
@@ -115,8 +116,11 @@ export class ProviderTerminalCoordinator {
   terminalPayload(
     terminal: ProviderActionTerminal,
     actor: string,
+    connection?: ProviderActionHandle["providerConnection"],
   ): ExecutionTerminalPayload {
+    const death = validatedNativeRuntimeDeath(terminal, connection);
     return {
+      ...(death ? { native_runtime_death: death } : {}),
       ended_at: terminal.endedAt,
       exit_code: terminal.exitCode,
       signal: terminal.signal,
@@ -157,11 +161,12 @@ export class ProviderTerminalCoordinator {
               entry.work_attempt_id,
               execution.execution_generation_id,
               {
-                ...this.terminalPayload(terminal, execution.actor),
+                ...this.terminalPayload(terminal, execution.actor, installation.providerConnection),
                 generation: execution.generation,
               },
             );
           }
+          await this.ports.settleRuntimeApprovals(entryId);
           if (entry.desired_state === "stopped") {
             await this.ports.durability.releaseTerminalExecutionFence(
               entry.work_attempt_id,
@@ -259,7 +264,7 @@ export class ProviderTerminalCoordinator {
       const currentHandle = this.ports.liveHandles.get(entryId);
       if (expectedHandle && currentHandle && currentHandle !== expectedHandle) return;
       if (expectedInstallation && !this.matchesInstallation(entry, expectedInstallation)) return;
-      const payload = this.terminalPayload(terminal, actor);
+      const payload = this.terminalPayload(terminal, actor, expectedInstallation?.providerConnection ?? expectedHandle?.providerConnection ?? entry.provider_ref?.provider_connection);
       if (entry.condition === "quarantined") {
         await this.ports.transitionOnce(
           entryId,

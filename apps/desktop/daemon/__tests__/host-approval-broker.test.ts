@@ -1320,3 +1320,83 @@ for (const wrong of ["turn", "tool", "retired", "missing_snapshot"] as const) {
     } finally { await f.close(); }
   });
 }
+
+for (const provider of ["claude-code", "codex"] as const) {
+  for (const phase of ["requested", "selected", "dispatched"] as const) {
+    test(`${provider} witnessed process death closes ${phase} approval without acknowledging or replaying`, async () => {
+      const f = await fixture(provider);
+      try {
+        const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+        if (phase === "selected") f.state.failBefore = true;
+        if (phase === "selected") await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
+        else if (phase === "dispatched") await f.broker.decide(selected);
+        const before = (await f.store.getExecutionApproval(selected.expected))!;
+        // This fixture never installs optional execution capture. Its operational
+        // origin generation remains valid after recovery into a later generation.
+        f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,?)")
+          .run(new Date(now + 15).toISOString(), JSON.stringify({ ended_at: new Date(now + 20).toISOString(),
+            provider_continuation_id: "continuation", native_runtime_death: {
+              kind: provider === "codex" ? "codex_app_server" : "claude_cli", pid: 4311, processIdentity: "native-birth" } }));
+        const reopened = new ManifestStore(f.path);
+        try {
+          await assert.rejects(reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
+            async () => { throw new Error("ownership changed"); }), /ownership changed/);
+          assert.equal((await reopened.getExecutionApproval(selected.expected))!.request.closedAtMs, null);
+          assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1);
+          const closed = (await reopened.getExecutionApproval(selected.expected))!;
+          assert.deepEqual(closed, { ...before, request: { ...before.request, closedAtMs: now + 30 } });
+          assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 40,
+            async () => { throw new Error("no empty write expected"); }), 0);
+          if (phase === "dispatched") {
+            await reopened.recordExecutionApprovalOutcome({ expected: selected.expected,
+              decisionId: closed.decision!.decisionId, dispatchId: closed.decision!.dispatchId!,
+              evidence: "exact_native_execution", atMs: now + 40 }, async commit => commit());
+            assert.equal((await reopened.getExecutionApproval(selected.expected))!.decision!.dispatchState, "acknowledged",
+              "late exact execution evidence still counts; closure alone did not count");
+          }
+        } finally { await reopened.close(); }
+        assert.equal(await f.broker.decide(selected), phase === "dispatched" ? "resolved" : "request_closed");
+        assert.equal(f.sends.length, phase === "dispatched" ? 1 : 0);
+      } finally { await f.close(); }
+    });
+  }
+}
+
+test("terminal cleanup refuses unmarked, foreign-continuation, wrong-birth and successor evidence", async () => {
+  const f = await fixture("codex");
+  try {
+    const [candidate] = await f.broker.list("room");
+    const expected = decision(candidate!).expected;
+    const terminal = { ended_at: new Date(now + 20).toISOString(), provider_continuation_id: "continuation",
+      native_runtime_death: { kind: "codex_app_server", pid: 4311, processIdentity: "native-birth" } };
+    for (const evidence of [
+      { ...terminal, native_runtime_death: undefined },
+      { ...terminal, provider_continuation_id: "successor-continuation" },
+      { ...terminal, native_runtime_death: { ...terminal.native_runtime_death, processIdentity: "successor-birth" } },
+      { ...terminal, native_runtime_death: { ...terminal.native_runtime_death, pid: 9000 } },
+      { ...terminal, native_runtime_death: { ...terminal.native_runtime_death, kind: "claude_cli" } },
+    ]) {
+      f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'").run(JSON.stringify(evidence));
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0);
+      assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, null);
+    }
+  } finally { await f.close(); }
+});
+
+test("runtime cleanup covers more than the presentation limit and samples time inside the commit fence", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const requests = Array.from({ length: 70 }, (_, index) => ({ ...f.native,
+      native: { ...f.native.native, id: `permission-${index}` } }) as ProviderPermissionRequest);
+    for (const request of requests) { f.emit([request]); await f.broker.list("room"); }
+    const count = Number(f.db.prepare("SELECT count(*) AS n FROM execution_approval_requests").get()!.n);
+    assert.ok(count >= 70);
+    f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
+      .run(JSON.stringify({ ended_at: new Date(now + 20).toISOString(), provider_continuation_id: "continuation",
+        native_runtime_death: { kind: "claude_cli", pid: 4311, processIdentity: "native-birth" } }));
+    let clock = now;
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => clock,
+      async commit => { clock = now + 50; await commit(); }), count);
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM execution_approval_request_closures WHERE observed_at_ms=?").get(now + 50)!.n, count);
+  } finally { await f.close(); }
+});

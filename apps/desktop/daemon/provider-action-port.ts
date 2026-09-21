@@ -4,6 +4,7 @@
  * outside Electron's failure domain.
  */
 import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
+import { nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import type { ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 export type ProviderActionCapabilities = {
   execution?: NativeExecutionCapabilities;
@@ -90,7 +91,19 @@ export function sameProviderActionConnectionSnapshot(
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; launchPolicy?: unknown; provider?: string; providerConnection?: ProviderActionConnectionRef | null; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed" };
 export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; custodyLaunchAgentSessionId?: string; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
-export type ProviderActionTerminal = { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
+export type ProviderActionTerminal = { nativeRuntimeDeath?: import("../shared/execution-protocol.js").NativeRuntimeDeath; endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
+/** Validate death against the immutable handle/ref before retaining it as operational evidence. */
+export function validatedNativeRuntimeDeath(terminal: ProviderActionTerminal,
+  expected: ProviderActionConnectionRef | null | undefined) {
+  if (terminal.nativeRuntimeDeath === undefined) return undefined;
+  const death = nativeRuntimeDeathSchema.parse(terminal.nativeRuntimeDeath);
+  if (!expected || expected.kind !== death.kind || expected.pid !== death.pid
+    || expected.processIdentity !== death.processIdentity) {
+    throw new Error("Native process death does not match the exact provider installation.");
+  }
+  return death;
+}
+
 export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal };
 export type CustodialPollingActivationRequest = {
   operationId: string; roomId: string; cwd: string; agentDisplayName: string;

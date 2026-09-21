@@ -1572,9 +1572,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
       }
       return !sameProcessBirthIdentity(current, birth);
     };
-    const terminal = () => synthesizeTerminalPayload({
-      endedAt: this.deps.now(), exitCode: null, signal: null,
-      providerContinuationId: ref.providerContinuationId, stopRequested: true,
+    const terminal = (): ProviderTerminalPayload => ({
+      ...synthesizeTerminalPayload({
+        endedAt: this.deps.now(), exitCode: null, signal: null,
+        providerContinuationId: ref.providerContinuationId, stopRequested: true,
+      }),
+      nativeRuntimeDeath: { kind: "codex_app_server", pid, processIdentity: birth },
     });
     if (isGone()) return terminal();
     const known = [...this.handles.values()].find((handle) => handle.pid === pid
@@ -2013,6 +2016,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           signal: null,
           terminalCause: "crashed",
           providerContinuationId: ref.providerContinuationId,
+          nativeRuntimeDeath: { kind: "codex_app_server", pid: connection.pid, processIdentity: connection.processIdentity },
         },
       };
     }
@@ -2155,6 +2159,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             signal: null,
             terminalCause: "crashed",
             providerContinuationId: ref.providerContinuationId,
+            nativeRuntimeDeath: { kind: "codex_app_server", pid: connection.pid, processIdentity: connection.processIdentity },
           },
         };
       }
@@ -2759,6 +2764,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         providerContinuationId: handle.providerContinuationId,
         stopRequested: handle.stopRequested,
       });
+    if (exit.type === "exit" && handle.providerConnection.pid && handle.providerConnection.processIdentity) {
+      (terminal as ProviderTerminalPayload).nativeRuntimeDeath = { kind: "codex_app_server",
+        pid: handle.providerConnection.pid, processIdentity: handle.providerConnection.processIdentity };
+    }
     if (handle.protocolError) terminal.terminalCause = "protocol_error";
     handle.terminal = terminal;
     handle.state = terminal.terminalCause === "exited" || terminal.terminalCause === "stopped"

@@ -429,6 +429,7 @@ export class SupervisorDaemon {
     });
     this.providerExecution = providerPort
       ? new ProviderExecutionCoordinator({
+        settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
         provider: providerPort,
         store: this.store,
         durability: this.durability,
@@ -452,7 +453,7 @@ export class SupervisorDaemon {
         updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
         transition: (entryId, state, condition, detail, actor) =>
           this.transition(entryId, state, condition, detail, actor),
-        terminalPayload: (terminal, actor) => this.terminalPayload(terminal, actor),
+        terminalPayload: (terminal, actor, connection) => this.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
           this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),
         completeTurnControlForRuntimeRecovery: (entry) =>
@@ -515,7 +516,7 @@ export class SupervisorDaemon {
         serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
         transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal) =>
           this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal),
-        terminalPayload: (terminal, actor) => this.terminalPayload(terminal, actor),
+        terminalPayload: (terminal, actor, connection) => this.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor) =>
           this.observeProviderExit(entryId, terminal, actor),
         recordSchedulerFailure: (entryId, error, actor) =>
@@ -671,6 +672,7 @@ export class SupervisorDaemon {
       scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
     });
     this.providerTerminals = new ProviderTerminalCoordinator({
+      settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
       liveHandles: this.liveHandles,
@@ -1570,8 +1572,15 @@ export class SupervisorDaemon {
     return this.authority.serializeManifestCommit(operation);
   }
 
-  private terminalPayload(terminal: ProviderActionTerminal, actor: string): ExecutionTerminalPayload {
-    return this.providerTerminals.terminalPayload(terminal, actor);
+  private terminalPayload(terminal: ProviderActionTerminal, actor: string,
+    connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload {
+    return this.providerTerminals.terminalPayload(terminal, actor, connection);
+  }
+
+  private async settleRuntimeApprovals(entryId: string): Promise<void> {
+    const changed = await this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(),
+      commit => this.fenceDaemonCommit(commit));
+    if (changed) this.notifyStateChanged();
   }
 
   private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {
