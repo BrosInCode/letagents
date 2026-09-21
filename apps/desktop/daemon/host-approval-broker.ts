@@ -81,7 +81,7 @@ export type DelegatableApprovalAdmission = {
   sourceMessageId: string;
 };
 type Options = {
-  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "validateExecutionApprovalAuthority" | "readHostToolProject" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
+  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "closeExecutionApprovalRequest" | "validateExecutionApprovalAuthority" | "readHostToolProject" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
   inbox: Pick<SupervisedAgentInboxStore, "head">;
   provider: ProviderActionPort | undefined;
   currentHandle(agentId: string): ProviderActionHandle | undefined;
@@ -183,7 +183,7 @@ export class HostApprovalBroker {
     const receive = (event: ProviderPermissionObservation) => {
       if (!this.current(lane)) return;
       if (event.type === "request_closed") {
-        lane.approvalExecutions?.observeRequestClosed(event.request);
+        lane.approvalExecutions?.observeRequestClosed(event);
         return;
       }
       if (event.type === "snapshot" && event.requests.length <= MAX_REQUESTS) {
@@ -244,7 +244,10 @@ export class HostApprovalBroker {
       }
       for (const native of lane.requests) {
         if (result.length >= 64) break;
-        try { result.push((await this.prepare(lane, native)).candidate); }
+        try {
+          const candidate = (await this.prepare(lane, native)).candidate;
+          if (candidate.status !== "request_closed") result.push(candidate);
+        }
         catch {
           const requestId = lane.connectionId
             ? approvalRequestId(lane.agentId, lane.connectionId, native.native.id)
@@ -420,6 +423,7 @@ export class HostApprovalBroker {
     assertCurrent();
     const { approval, projection: admittedProjection } = await this.options.store.admitExecutionApprovalPlan(admission, this.now, commit =>
       this.options.fenceCommit(async () => { assertCurrent(); await commit(); }));
+    lane.approvalExecutions?.trackRequest(native, reference(approval));
     await assertAuthority();
     assertCurrent();
     return { owned, approval, projection: admittedProjection, sourceMessageId: head.source_message_id,

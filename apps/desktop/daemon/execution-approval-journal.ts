@@ -53,6 +53,7 @@ const outcome = z.strictObject({
   evidence: z.enum(["sent_unacknowledged", "dispatch_uncertain", "native_processed", "exact_native_execution", "native_request_closed"]), atMs: time,
 });
 const loss = z.strictObject({ expected: reference, atMs: time });
+export type CloseExecutionApprovalRequest = z.infer<typeof loss>;
 export type ApprovalReference = z.infer<typeof reference>;
 export type AdmitExecutionApproval = z.infer<typeof admission>;
 export type ApprovalAuthority = z.infer<typeof authority>;
@@ -77,7 +78,7 @@ export type ExecutionApprovalRecord = {
 type Row = Record<string, unknown>;
 // Closing a provider prompt is independent of acknowledging the chosen decision.
 // Retain only exact structural identity; never retain the request payload.
-const closureSchema = `CREATE TABLE execution_approval_request_closures (
+const legacyClosureSchema = `CREATE TABLE execution_approval_request_closures (
   request_id TEXT NOT NULL,
   request_version INTEGER NOT NULL,
   decision_id TEXT NOT NULL REFERENCES execution_approval_decisions(decision_id) ON DELETE CASCADE,
@@ -86,14 +87,23 @@ const closureSchema = `CREATE TABLE execution_approval_request_closures (
   PRIMARY KEY(request_id,request_version),
   FOREIGN KEY(request_id,request_version) REFERENCES execution_approval_requests(request_id,request_version) ON DELETE CASCADE
 ) STRICT`;
+const closureSchema = legacyClosureSchema.replace("decision_id TEXT NOT NULL", "decision_id TEXT")
+  .replace("dispatch_id TEXT NOT NULL", "dispatch_id TEXT");
 const normalizeClosureSql = (sql: string) => sql.replace(/IF NOT EXISTS /gi, "").replace(/\s+/g, " ").trim();
 export function applyApprovalRequestClosureSchema(db: DatabaseSync): void {
-  db.exec(closureSchema.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get();
+  if (row && normalizeClosureSql(String(row.sql)) === normalizeClosureSql(legacyClosureSchema)) {
+    // The caller owns the migration transaction. Preserve every historical receipt.
+    db.exec(`CREATE TEMP TABLE approval_closures_v44 AS SELECT * FROM execution_approval_request_closures;
+      DROP TABLE execution_approval_request_closures; ${closureSchema};
+      INSERT INTO execution_approval_request_closures SELECT * FROM approval_closures_v44;
+      DROP TABLE approval_closures_v44`);
+  } else db.exec(closureSchema.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
   validateApprovalRequestClosureSchema(db);
 }
-export function validateApprovalRequestClosureSchema(db: DatabaseSync): void {
+export function validateApprovalRequestClosureSchema(db: DatabaseSync, legacy = false): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get();
-  if (!row || normalizeClosureSql(String(row.sql)) !== normalizeClosureSql(closureSchema)) {
+  if (!row || normalizeClosureSql(String(row.sql)) !== normalizeClosureSql(legacy ? legacyClosureSchema : closureSchema)) {
     throw new Error("Approval request closure storage is missing or invalid.");
   }
 }
@@ -140,8 +150,9 @@ function read(db: DatabaseSync, id: string, version: number): ExecutionApprovalR
       && typeof decision.delegation_scope_sha256 === "string")
   )) reject("identity_mismatch");
   const closure = db.prepare("SELECT * FROM execution_approval_request_closures WHERE request_id=? AND request_version=?").get(id, version);
-  if (closure && (!decision || closure.decision_id !== decision.decision_id || closure.dispatch_id !== decision.dispatch_id
-    || decision.dispatch_started_at_ms === null || Number(closure.observed_at_ms) < Number(decision.dispatch_started_at_ms))) reject("identity_mismatch");
+  if (closure && (closure.decision_id !== (decision?.decision_id ?? null)
+    || closure.dispatch_id !== (decision?.dispatch_id ?? null)
+    || Number(closure.observed_at_ms) < Number(decision?.dispatch_started_at_ms ?? decision?.decided_at_ms ?? row.created_at_ms))) reject("identity_mismatch");
   return { request: { ...requestFromRow(row), closedAtMs: closure ? Number(closure.observed_at_ms) : null }, decision: decision ? {
     ...(hostToolDecisionWasWithdrawn(db, decision, row) ? { withdrawnBeforeSend: true as const } : {}),
     decisionId: String(decision.decision_id), actorId: String(decision.actor_id), decision: decision.decision as "allow_once" | "deny",
@@ -204,6 +215,7 @@ function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agent
 export function validateExecutionApprovalAuthority(db: DatabaseSync, expected: ApprovalReference, input: ApprovalAuthority,
   current: DaemonManifestEntry | undefined): void {
   const r = parse(reference, expected); const owned = parse(authority, input);
+  if (exact(db, r).request.closedAtMs != null) reject("invalid_transition");
   const turn = eligibleTurn(db, r, owned, current);
   if (r.executionGenerationId !== turn.generation || r.runtimeGenerationId !== turn.runtimeId || r.turnId !== turn.turnId) reject("missing_turn");
 }
@@ -306,7 +318,7 @@ export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval, 
       || old.projectionSha256 !== value.projectionSha256) reject("decision_conflict");
     return current;
   }
-  if (current.request.state !== "requested") reject("invalid_transition");
+  if (current.request.closedAtMs != null || current.request.state !== "requested") reject("invalid_transition");
   liveSelection(db, current, value.authority, entry, value.atMs);
   const r = current.request;
   db.prepare(`INSERT INTO execution_approval_decisions
@@ -328,7 +340,7 @@ export function beginExecutionApprovalDispatch(db: DatabaseSync, input: Dispatch
     if (d.dispatchId !== value.dispatchId) reject("decision_conflict");
     return { dispatch: false, approval: current }; // Restart/lost response is not a second dispatch permit.
   }
-  if (current.request.state !== "decision_recorded" || d.dispatchState !== "not_dispatched") reject("invalid_transition");
+  if (current.request.closedAtMs != null || current.request.state !== "decision_recorded" || d.dispatchState !== "not_dispatched") reject("invalid_transition");
   liveSelection(db, current, value.authority, entry, value.atMs);
   assertDecisionToolRule(db, d.decisionId, entry);
   db.prepare("UPDATE execution_approval_decisions SET dispatch_state='dispatching',dispatch_id=?,dispatch_started_at_ms=? WHERE decision_id=?")
@@ -336,6 +348,20 @@ export function beginExecutionApprovalDispatch(db: DatabaseSync, input: Dispatch
   db.prepare("UPDATE execution_approval_requests SET state='dispatching' WHERE request_id=? AND request_version=?")
     .run(value.expected.requestId, value.expected.requestVersion);
   return { dispatch: true, approval: exact(db, value.expected) };
+}
+
+/** Exact Claude cancellation/completion closes the prompt independently of any decision. */
+export function closeExecutionApprovalRequest(db: DatabaseSync, input: CloseExecutionApprovalRequest): ExecutionApprovalRecord {
+  const value = parse(loss, input); const current = exact(db, value.expected); const d = current.decision;
+  const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
+    .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
+  if (provider !== "claude-code" || !["requested", "decision_recorded", "dispatching", "resolved"].includes(current.request.state)) reject("invalid_transition");
+  if (current.request.closedAtMs != null) return current;
+  if (value.atMs < (d?.dispatchStartedAtMs ?? d?.decidedAtMs ?? current.request.createdAtMs)) reject("invalid_input");
+  db.prepare(`INSERT INTO execution_approval_request_closures
+    (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`)
+    .run(value.expected.requestId, value.expected.requestVersion, d?.decisionId ?? null, d?.dispatchId ?? null, value.atMs);
+  return exact(db, value.expected);
 }
 
 /** Evidence must come from the exact broker invocation, never a UI/provider narrative. */

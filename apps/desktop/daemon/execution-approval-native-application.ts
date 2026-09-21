@@ -82,6 +82,8 @@ export class ExecutionApprovalNativeApplicationCoordinator {
     select: (prepared: RecordedApprovalSelection) => Promise<ExecutionApprovalRecord>,
   ): Promise<HostApprovalStatus> {
     const prior = await this.options.readLatest(input.requestId);
+    if (prior?.request.closedAtMs != null && prior.request.requestVersion === input.requestVersion
+      && prior.request.requestSha256 === input.requestSha256 && prior.request.agentId === input.agentId) return status(prior);
     if (prior?.decision) {
       const decision = prior.decision;
       if (decision.decisionId !== input.decisionId || decision.actorId !== input.actorId
@@ -104,7 +106,7 @@ export class ExecutionApprovalNativeApplicationCoordinator {
       throw new Error("The recorded approval decision changed.");
     }
     if (decision.dispatchId) return status(selected);
-    return this.options.dispatcher.dispatch({
+    try { return await this.options.dispatcher.dispatch({
       expected: prepared.expected,
       authority: prepared.approvalAuthority,
       approval: prepared.approval,
@@ -117,6 +119,11 @@ export class ExecutionApprovalNativeApplicationCoordinator {
       expectedFileChanges: prepared.expectedFileChanges,
       assertCurrent: prepared.assertCurrent,
       markNativeDispatch: prepared.markNativeDispatch,
-    });
+    }); } catch (error) {
+      const latest = await this.options.readLatest(input.requestId);
+      if (latest?.request.closedAtMs != null && latest.request.requestVersion === input.requestVersion
+        && latest.request.requestSha256 === input.requestSha256 && latest.request.agentId === input.agentId) return status(latest);
+      throw error;
+    }
   }
 }
