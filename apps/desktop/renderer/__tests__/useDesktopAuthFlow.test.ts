@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ref } from "vue";
+import { effectScope, ref, watch } from "vue";
 
 import type {
   DesktopAuthStartResult,
@@ -393,14 +393,18 @@ test("retry timers stop at device-code expiry, including after suspend", async (
       return 1;
     },
     clearTimeout: () => undefined,
-    letagentsDesktop: { auth: { pollDeviceFlow: async () => { polls += 1; } } },
+    letagentsDesktop: { auth: { pollDeviceFlow: async () => {
+      polls += 1;
+      return { status: "expired", authStatus: { ...authStatusFixture(), pendingDeviceAuth: null } };
+    } } },
   }, async () => {
     state.scheduleAuthPoll();
     assert.ok(callback);
     t.mock.timers.tick(2000);
     callback!();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(polls, 0);
+    assert.equal(polls, 1);
+    assert.equal(state.authStatus.value?.pendingDeviceAuth, null);
     assert.match(state.authFeedback.value!, /expired/i);
     callback = undefined;
     state.scheduleAuthPoll();
@@ -513,4 +517,97 @@ test("late transient failures cannot restart cancelled or replaced approval poll
       });
     }
   }
+});
+
+function createPendingFlow() {
+  return useDesktopAuthFlow({
+    authStatus: ref<DesktopAuthStatus | null>(authStatusFixture()),
+    getRoomIdentifier: () => null, isFirstRunGate: () => false,
+    onFirstRunAuthorized: async () => undefined, onAuthorized: async () => undefined,
+    onSignedOut: async () => undefined,
+  });
+}
+
+test("background approval checks never toggle feedback or foreground loading", async () => {
+  const state = createPendingFlow();
+  const changes: unknown[] = [];
+  const stop = watch([state.authFeedback, state.authBusy], value => changes.push(value), { flush: "sync" });
+  let resolvePoll!: (value: unknown) => void;
+  let calls = 0;
+  await withDesktopBridge({
+    setTimeout: () => 1, clearTimeout: () => undefined,
+    letagentsDesktop: { auth: { pollDeviceFlow: () => {
+      calls++;
+      return new Promise(resolve => { resolvePoll = resolve; });
+    } } },
+  }, async () => {
+    for (let i = 0; i < 3; i++) {
+      const poll = state.pollAuthFlow({ automatic: true });
+      await state.pollAuthFlow(); // A manual click joins the in-flight check.
+      assert.equal(calls, i + 1);
+      resolvePoll({ status: "pending", authStatus: authStatusFixture() });
+      await poll;
+    }
+    state.clearAuthPollTimer();
+  });
+  stop();
+  assert.deepEqual(changes, []);
+});
+
+test("failed approval checks back off with stable feedback and reset after recovery", async () => {
+  const state = createPendingFlow();
+  const changes: unknown[] = [];
+  const delays: number[] = [];
+  const stop = watch(state.authFeedback, value => changes.push(value), { flush: "sync" });
+  let failure = true;
+  await withDesktopBridge({
+    setTimeout: (_fn: () => void, delay: number) => { delays.push(delay); return 1; },
+    clearTimeout: () => undefined,
+    letagentsDesktop: { auth: { pollDeviceFlow: async () => {
+      if (failure) throw new Error("Offline");
+      return { status: "pending", authStatus: authStatusFixture() };
+    } } },
+  }, async () => {
+    for (let i = 0; i < 5; i++) await state.pollAuthFlow({ automatic: true });
+    assert.deepEqual(delays, [4000, 8000, 16000, 30000, 30000]);
+    assert.deepEqual(changes, ["Connection interrupted. Retrying automatically."]);
+    failure = false;
+    await state.pollAuthFlow({ automatic: true });
+    assert.equal(delays.at(-1), 2350);
+    assert.equal(state.authFeedback.value, null);
+    state.clearAuthPollTimer();
+  });
+  stop();
+});
+
+test("expired requests reveal restart even if the cleanup IPC fails", async () => {
+  const state = createPendingFlow();
+  state.authStatus.value!.pendingDeviceAuth!.expiresAt = new Date(0).toISOString();
+  let scheduled = 0;
+  await withDesktopBridge({
+    setTimeout: () => ++scheduled, clearTimeout: () => undefined,
+    letagentsDesktop: { auth: { pollDeviceFlow: async () => { throw new Error("IPC unavailable"); } } },
+  }, async () => {
+    await state.pollAuthFlow({ automatic: true });
+    assert.equal(state.authStatus.value?.pendingDeviceAuth, null);
+    assert.match(state.authFeedback.value!, /expired/);
+    assert.equal(scheduled, 0);
+  });
+});
+
+test("disposing the sign-in screen ignores late checks and never schedules more work", async () => {
+  const scope = effectScope();
+  const state = scope.run(createPendingFlow)!;
+  let finishPoll!: (result: unknown) => void;
+  let scheduled = 0;
+  await withDesktopBridge({
+    setTimeout: () => ++scheduled, clearTimeout: () => undefined,
+    letagentsDesktop: { auth: { pollDeviceFlow: () => new Promise(resolve => { finishPoll = resolve; }) } },
+  }, async () => {
+    const pending = state.pollAuthFlow({ automatic: true });
+    scope.stop();
+    finishPoll({ status: "pending", authStatus: authStatusFixture() });
+    await pending;
+    assert.equal(scheduled, 0);
+  });
 });
