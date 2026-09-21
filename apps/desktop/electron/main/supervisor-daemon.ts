@@ -425,7 +425,8 @@ export function supervisorCompatibilityFingerprint(env: Readonly<NodeJS.ProcessE
     ...env,
     HOME: home,
     LETAGENTS_API_URL: env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
-    LETAGENTS_STATE_PATH: env.LETAGENTS_STATE_PATH?.trim() || join(home, ".letagents", "mcp-state.json"),
+    // MCP consumes a nonempty state path verbatim, unlike the desktop chat paths.
+    LETAGENTS_STATE_PATH: env.LETAGENTS_STATE_PATH || join(home, ".letagents", "mcp-state.json"),
     LETAGENTS_LOCAL_CHAT_DB: env.LETAGENTS_LOCAL_CHAT_DB?.trim() || join(home, ".letagents", "local-chat.sqlite"),
     LETAGENTS_LOCAL_FILES_DIR: env.LETAGENTS_LOCAL_FILES_DIR?.trim() || join(home, ".letagents", "local-files"),
     LETAGENTS_LOCAL_PROFILE_PATH: env.LETAGENTS_LOCAL_PROFILE_PATH?.trim() || join(home, ".letagents", "local-profile.json"),

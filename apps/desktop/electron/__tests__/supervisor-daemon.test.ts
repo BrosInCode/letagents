@@ -2440,7 +2440,7 @@ test("compatibility distinguishes storage and sealed runtime identity from provi
   const explicit = {
     ...defaults,
     LETAGENTS_API_URL: " https://letagents.chat ",
-    LETAGENTS_STATE_PATH: " /users/test/.letagents/mcp-state.json ",
+    LETAGENTS_STATE_PATH: "/users/test/.letagents/mcp-state.json",
     LETAGENTS_LOCAL_CHAT_DB: "/users/test/.letagents/local-chat.sqlite",
     LETAGENTS_LOCAL_FILES_DIR: "/users/test/.letagents/local-files",
     LETAGENTS_LOCAL_PROFILE_PATH: "/users/test/.letagents/local-profile.json",
@@ -2448,6 +2448,9 @@ test("compatibility distinguishes storage and sealed runtime identity from provi
   };
   assert.equal(supervisorCompatibilityFingerprint(defaults), supervisorCompatibilityFingerprint(explicit));
   assert.equal(supervisorRuntimeEnvironmentFingerprint(defaults), supervisorRuntimeEnvironmentFingerprint(explicit));
+  assert.notEqual(supervisorCompatibilityFingerprint(explicit),
+    supervisorCompatibilityFingerprint({ ...explicit, LETAGENTS_STATE_PATH: ` ${explicit.LETAGENTS_STATE_PATH} ` }),
+    "MCP reads a nonempty state path verbatim; whitespace is a different state identity");
 });
 
 test("explicit environment refresh is idempotent when the service already has the current environment", async (t) => {
