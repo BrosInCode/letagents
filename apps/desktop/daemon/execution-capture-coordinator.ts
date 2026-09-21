@@ -33,6 +33,8 @@ type Lane = {
   subscriptionFailed: boolean;
   receiptCursor: number;
   expectedAuthorityMode: LifecycleAuthorityMode | null;
+  pendingChange: boolean;
+  notifiedAdmission: string | null;
 };
 export type PreparedRuntime = {
   agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
@@ -112,7 +114,7 @@ export class ExecutionCaptureCoordinator {
     const lane: Lane = { agentId, generation, handle, installation, subscription: null, observer: null,
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
       detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
-      expectedAuthorityMode: installation.authorityMode };
+      expectedAuthorityMode: installation.authorityMode, pendingChange: true, notifiedAdmission: null };
     this.lanes.set(agentId, lane);
     let pending: Promise<NativeExecutionSubscription>;
     try {
@@ -149,6 +151,7 @@ export class ExecutionCaptureCoordinator {
     }
     lane.installation = installation;
     lane.expectedAuthorityMode = installation.authorityMode;
+    lane.pendingChange = true;
     lane.receiptCursor = 0;
     this.schedule(lane);
   }
@@ -228,13 +231,21 @@ export class ExecutionCaptureCoordinator {
       if (this.current(next)) {
         try {
           const receipts = settleCapturedExecutionAttempts(this.database, next.agentId, { afterFifoSequence: next.receiptCursor });
+          if (receipts.changed) next.pendingChange = true;
           if (receipts.lastFifoSequence !== null) next.receiptCursor = receipts.lastFifoSequence;
           if (receipts.unavailable) this.report(next, "settlement_unavailable");
           if (receipts.hasMore) { receiptsPending = true; this.dirty.add(next); }
         } catch { this.report(next, "settlement_unavailable"); }
-        // Runs after both fact capture and receipt settlement. The consumer
-        // coalesces this hint; no transport work may run in this callback.
-        try { this.options.changed?.(next.agentId); } catch { /* optional observation */ }
+        // An operational commit can change admission without adding a native
+        // fact. Compare with the last announced state, not the pre-drain state.
+        const admission = `${this.captureAdmission(next.installation)}:${this.typedLifecycleAdmission(next.installation)}`;
+        if (next.pendingChange || admission !== next.notifiedAdmission) {
+          next.pendingChange = false;
+          next.notifiedAdmission = admission;
+          // Only committed progress or an admission/diagnostic transition is
+          // a change. A refresh of every idle lane must not wake every watcher.
+          try { this.options.changed?.(next.agentId); } catch { /* optional observation */ }
+        }
       }
       if (retire && !receiptsPending) {
         this.remove(next);
@@ -536,6 +547,7 @@ export class ExecutionCaptureCoordinator {
   private detach(lane: Lane): void {
     if (!this.owns(lane) || lane.detached) return;
     lane.detached = true;
+    lane.pendingChange = true;
     lane.frontierStored = false;
     if (lane.subscription) lane.subscription = this.freezeSubscription(lane.subscription);
     this.lanes.delete(lane.agentId);
@@ -567,6 +579,7 @@ export class ExecutionCaptureCoordinator {
     }
     if (lane.diagnostic === code) return;
     lane.diagnostic = code;
+    lane.pendingChange = true;
     if (code !== "settlement_unavailable") {
       const provider = lifecycleProvider(lane.handle.providerConnection);
       if (provider) this.markLifecycleProjectionUnavailable(provider);
@@ -633,10 +646,12 @@ export class ExecutionCaptureCoordinator {
     if (previous && previous.runtimeGenerationId === subject.id && previous.observerRuntimeGenerationId === observer.id
       && previous.recoveryTurnId === (recovery?.turnId ?? null)) return previous;
     const current = this.row("SELECT observer_epoch FROM execution_observers WHERE agent_id=?", lane.agentId);
-    return lane.observer = this.store.bindObserver({ agentId: lane.agentId, subjectRuntimeGenerationId: subject.id,
+    lane.observer = this.store.bindObserver({ agentId: lane.agentId, subjectRuntimeGenerationId: subject.id,
       observerRuntimeGenerationId: observer.id, sourceId: lane.subscription!.sourceId,
       daemonGenerationId: String(this.options.daemonGeneration()), expectedEpoch: Number(current?.observer_epoch ?? 0), boundAtMs: Date.now(),
       ...(recovery ? { recovery } : {}) });
+    lane.pendingChange = true;
+    return lane.observer;
   }
 
   private turn(lane: Lane, event: NativeExecutionObservation, observed: Runtime): { runtime: Runtime; identity: NativeTurnIdentity } | null {
@@ -656,10 +671,17 @@ export class ExecutionCaptureCoordinator {
     if (!binding || binding.work_attempt_id !== lane.handle.workAttemptId || binding.origin_execution_generation_id !== observed.generation) return null;
     const identity = { turnId: opaque("turn", lane.agentId, fact.providerContinuationId, fact.providerTurnId),
       providerContinuationId: fact.providerContinuationId, providerTurnId: fact.providerTurnId };
+    const tracked = this.row(`SELECT 1 FROM execution_message_attempts a
+      JOIN execution_attempt_generations g USING(attempt_id,agent_id,room_id)
+      WHERE a.agent_id=? AND a.room_id=? AND a.source_message_id=?
+        AND g.execution_generation_id=? AND g.workspace_id=?`,
+    lane.agentId, String(binding.room_id), String(binding.source_message_id), observed.generation, String(binding.work_attempt_id));
     const attemptId = this.store.trackMessage({ agentId: lane.agentId, roomId: String(binding.room_id), sourceMessageId: String(binding.source_message_id),
       executionGenerationId: observed.generation, workspaceId: String(binding.work_attempt_id), createdAtMs: Date.parse(String(binding.created_at)) });
+    if (!tracked) lane.pendingChange = true;
     this.store.trackNativeTurn({ agentId: lane.agentId, roomId: String(binding.room_id), executionGenerationId: observed.generation,
       runtimeGenerationId: observed.id, attemptId, ...identity, createdAtMs: event.observedAtMs });
+    lane.pendingChange = true;
     // Late native evidence can materialize an attempt behind the receipt scan.
     lane.receiptCursor = 0;
     return { runtime: observed, identity };
@@ -683,7 +705,7 @@ export class ExecutionCaptureCoordinator {
       lane.checkpoints.delete(birth);
     }
     const source = lane.subscription!.sourceId;
-    const prior = this.row("SELECT source_id,last_source_sequence FROM execution_observers WHERE agent_id=?", lane.agentId);
+    const prior = this.row("SELECT source_id,last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?", lane.agentId);
     // Do not try to re-bind an exited Cursor child merely because the helper
     // replayed its already-committed prefix. Admission below still validates
     // the exact source witness and epoch before accepting anything new.
@@ -706,6 +728,7 @@ export class ExecutionCaptureCoordinator {
       throw new ExecutionProtocolError("invalid_fact");
     }
     this.store.observeSourcePosition(lane.subscription!.sourceId, token, position.latestSequence);
+    if (prior?.source_id !== source || Number(prior.max_observed_sequence) < position.latestSequence) lane.pendingChange = true;
     lane.frontierStored = true;
     if (lane.suspended) return false;
     const current = this.row("SELECT last_source_sequence FROM execution_observers WHERE agent_id=?", lane.agentId)!;
@@ -741,6 +764,7 @@ export class ExecutionCaptureCoordinator {
       if (result.status !== "accepted" && result.status !== "duplicate") {
         lane.suspended = true; this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
       }
+      if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
       cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
     }
     if (cursor < position.latestSequence) { lane.suspended = true; this.report(lane, "source_gap"); }
