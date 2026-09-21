@@ -1,6 +1,6 @@
 <template>
   <section class="desktop-add-agent-providers" aria-label="Agent providers">
-    <span class="desktop-add-agent-providers-label">Provider</span>
+    <span class="desktop-add-agent-providers-label">Agent</span>
     <button
       v-for="provider in providers"
       :key="provider.id"
@@ -17,10 +17,7 @@
           <path d="M5.5 6.5 2.75 10l2.75 3.5M14.5 6.5l2.75 3.5-2.75 3.5M11.5 4l-3 12" />
         </svg>
       </span>
-      <span>
-        <strong>{{ provider.name }}</strong>
-        <small>{{ provider.description }}</small>
-      </span>
+      <strong>{{ provider.name }}</strong>
     </button>
   </section>
 </template>

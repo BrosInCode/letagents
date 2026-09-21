@@ -31,6 +31,22 @@ describe("modal focus helpers", () => {
       assert.equal(document.activeElement, lastControl);
     });
   });
+
+  it("wraps from the last visible control when a collapsed section hides later buttons", () => {
+    withFakeDom(({ dialog, firstControl, lastControl, document }) => {
+      lastControl.visible = false;
+      document.activeElement = firstControl;
+      let prevented = false;
+
+      trapFocusInDialog({
+        shiftKey: false,
+        preventDefault: () => { prevented = true; },
+      } as KeyboardEvent, dialog as unknown as HTMLElement);
+
+      assert.equal(prevented, true);
+      assert.equal(document.activeElement, firstControl);
+    });
+  });
 });
 
 interface FakeDom {
@@ -86,6 +102,7 @@ class FakeDocument {
 
 class FakeElement {
   static document: FakeDocument;
+  visible = true;
 
   constructor(private readonly controls: FakeElement[] = []) {}
 
@@ -103,6 +120,10 @@ class FakeElement {
 
   getClientRects(): object[] {
     return [{}];
+  }
+
+  checkVisibility(): boolean {
+    return this.visible;
   }
 
   hasAttribute(): boolean {

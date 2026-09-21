@@ -244,11 +244,11 @@ test("bounded supervised defaults never tell providers to own polling and Claude
   assert.doesNotMatch(presentationSource, /showEffortSelector[\s\S]{0,160}claude-code/);
 });
 
-test("supervised creation presents the startup text as a one-time initial message", () => {
-  assert.match(runtimeSettingsSource, /<small>Initial message<\/small>/);
+test("supervised creation presents the first task as a one-time message", () => {
+  assert.match(runtimeSettingsSource, /<small>First task<\/small>/);
   assert.match(runtimeSettingsSource, /It is sent once/);
   assert.doesNotMatch(runtimeSettingsSource, /<small>Charter<\/small>/);
-  assert.match(actionBarSource, /Add an initial message before starting/);
+  assert.match(actionBarSource, /Add a first task to start the agent/);
 });
 
 test("supervised providers expose their supervised permission presentation instead of forcing read-only", () => {

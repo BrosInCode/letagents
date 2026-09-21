@@ -83,15 +83,16 @@
 }
 
 .desktop-add-agent-modal {
+  --add-agent-padding: 24px;
   position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  width: min(1120px, calc(100vw - 56px));
-  height: min(820px, calc(100vh - 56px));
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(720px, calc(100vw - 48px));
+  max-height: min(820px, calc(100dvh - 48px));
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
-  border-radius: 20px;
-  background: var(--bg-elevated);
+  border-radius: 16px;
+  background: var(--bg);
   color: var(--text);
   box-shadow:
     0 34px 100px rgba(0, 0, 0, 0.58),
@@ -103,20 +104,9 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 40px;
-  padding: 30px 34px 28px;
+  gap: 24px;
+  padding: 22px 24px 20px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.065);
-}
-
-.desktop-add-agent-header span,
-.desktop-add-agent-status-header span {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--text-tertiary);
-  font-size: 0.7rem;
-  font-weight: 800;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
 }
 
 .desktop-add-agent-header h3,
@@ -128,7 +118,8 @@
 }
 
 .desktop-add-agent-header h3 {
-  font-size: clamp(1.35rem, 2.2vw, 1.7rem);
+  font-size: 1.25rem;
+  font-weight: 600;
   line-height: 1.1;
   letter-spacing: -0.02em;
 }
@@ -147,9 +138,9 @@
 .desktop-add-agent-status-header button,
 .desktop-add-agent-primary {
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 999px;
+  border-radius: 8px;
   cursor: pointer;
-  font-weight: 850;
+  font-weight: 600;
   transition:
     transform 140ms cubic-bezier(0.23, 1, 0.32, 1),
     border-color 140ms ease,
@@ -184,7 +175,8 @@
 
 .desktop-add-agent-body {
   display: grid;
-  grid-template-columns: 252px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0;
   min-height: 0;
   overflow: hidden;
@@ -223,12 +215,11 @@
 .desktop-add-agent-permissions,
 .desktop-add-agent-open-model-config {
   display: grid;
-  gap: 14px;
-  margin-top: 20px;
-  padding: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.025);
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .desktop-add-agent-open-model-config > span,
@@ -326,14 +317,14 @@
 
   .desktop-add-agent-modal,
   .desktop-add-agent-actions {
-    background: #0d0d0e;
+    background: var(--bg);
   }
 }
 
 @media (prefers-contrast: more) {
   .desktop-add-agent-modal,
   .desktop-add-agent-provider[data-selected="true"],
-  .desktop-add-agent-checks div,
+  .desktop-add-agent-checks,
   .desktop-add-agent-delivery,
   .desktop-add-agent-permissions,
   .desktop-add-agent-open-model-config {
@@ -1037,19 +1028,12 @@
   }
 
   .desktop-add-agent-modal {
-    width: 100%;
-    height: calc(100vh - 24px);
+    width: min(720px, 100%);
+    max-height: calc(100dvh - 24px);
   }
 
   .desktop-add-agent-header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .desktop-add-agent-header .desktop-modal-close {
-    position: absolute;
-    top: 22px;
-    right: 22px;
+    align-items: flex-start;
   }
 
   .desktop-add-agent-body {
@@ -1163,8 +1147,12 @@
     display: none;
   }
 
+  .desktop-add-agent-modal {
+    --add-agent-padding: 16px;
+  }
+
   .desktop-add-agent-header {
-    padding: 22px 20px 20px;
+    padding: 18px 16px;
   }
 }
 
@@ -1180,14 +1168,3 @@
     transition-property: border-color, background, color, opacity;
   }
 }
-
-.desktop-add-agent-choice { display: flex; gap: 4px; margin: 16px 24px; padding: 4px; width: min(410px, calc(100% - 48px)); border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); }
-.desktop-add-agent-choice button { flex: 1; min-height: 36px; border: 0; border-radius: 7px; background: transparent; color: var(--text-secondary); font: inherit; font-weight: 500; cursor: pointer; }
-.desktop-add-agent-choice button[aria-pressed="true"] { background: var(--bg-elevated); color: var(--text); box-shadow: 0 1px 3px rgb(0 0 0 / 10%); }
-.desktop-add-agent-choice button:focus-visible, .desktop-add-agent-connect button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.desktop-add-agent-connect { padding: 24px 34px; min-height: 0; overflow: auto; background: var(--bg-elevated); }
-.desktop-add-agent-connect h4 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
-.desktop-add-agent-connect p { color: var(--text-secondary); line-height: 1.55; }
-.desktop-add-agent-connect button { padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); color: var(--text); font: inherit; cursor: pointer; }
-.desktop-add-agent-connect details { margin-top: 16px; color: var(--text-secondary); }
-.desktop-add-agent-connect pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }

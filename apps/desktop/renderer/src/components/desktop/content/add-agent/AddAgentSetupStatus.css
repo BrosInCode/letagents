@@ -1,115 +1,121 @@
 .desktop-add-agent-status {
-  padding: 30px 34px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px var(--add-agent-padding) 0;
+}
+
+.desktop-add-agent-status > * {
+  flex-shrink: 0;
 }
 
 .desktop-add-agent-status-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 30px;
+  gap: 16px;
 }
 
 .desktop-add-agent-status-header h4 {
-  font-size: 1.08rem;
-  line-height: 1.2;
-  letter-spacing: -0.01em;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.desktop-add-agent-status > p {
+  margin: -12px 0 0;
 }
 
 .desktop-add-agent-status-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
   flex: 0 0 auto;
 }
 
-.desktop-add-agent-status-actions .desktop-add-agent-status-pill {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  margin: 0;
-  padding: 0 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
+.desktop-add-agent-setup-details {
   color: var(--text-secondary);
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  text-transform: none;
+  font-size: 0.78rem;
 }
 
-.desktop-add-agent-status-actions .desktop-add-agent-status-pill[data-state="ready"] {
-  border-color: rgba(34, 197, 94, 0.22);
-  background: rgba(34, 197, 94, 0.08);
-  color: #86efac;
+.desktop-add-agent-setup-details summary {
+  width: fit-content;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.desktop-add-agent-setup-details summary:focus-visible,
+.desktop-add-agent-recheck:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 4px;
+  border-radius: 3px;
 }
 
 .desktop-add-agent-checks {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
-  margin: 24px 0 0;
-}
-
-.desktop-add-agent-checks div[data-attention="true"] {
-  border-color: rgba(245, 158, 11, 0.28);
-  background: rgba(245, 158, 11, 0.07);
-}
-
-.desktop-add-agent-checks button {
-  justify-self: start;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-size: 0.76rem;
-  font-weight: 800;
-  cursor: pointer;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-subtle);
 }
 
 .desktop-add-agent-checks div {
   display: grid;
-  align-content: start;
-  gap: 8px;
-  min-height: 94px;
-  padding: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.035);
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 6px 12px;
 }
 
 .desktop-add-agent-checks dt,
 .desktop-add-agent-checks dd {
   margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.45;
 }
 
 .desktop-add-agent-checks dt {
   color: var(--text-tertiary);
-  font-size: 0.72rem;
-  font-weight: 850;
-  text-transform: uppercase;
 }
 
 .desktop-add-agent-checks dd {
   min-width: 0;
   color: var(--text-secondary);
-  font-size: 0.82rem;
-  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
-.desktop-add-agent-status[data-state="ready"] .desktop-add-agent-checks div {
-  border-color: rgba(34, 197, 94, 0.18);
+.desktop-add-agent-checks div[data-attention="true"] dd {
+  color: var(--amber-text);
 }
 
-.desktop-add-agent-status[data-state="missing_runtime"] .desktop-add-agent-checks div:first-child,
-.desktop-add-agent-status[data-state="auth_required"] .desktop-add-agent-checks div:first-child,
-.desktop-add-agent-status[data-state="bridge_required"] .desktop-add-agent-checks div:nth-child(2),
-.desktop-add-agent-status[data-state="repo_required"] .desktop-add-agent-checks div:nth-child(3),
-.desktop-add-agent-status[data-state="branch_mismatch"] .desktop-add-agent-checks div:nth-child(3) {
-  border-color: rgba(245, 158, 11, 0.28);
-  background: rgba(245, 158, 11, 0.07);
+.desktop-add-agent-recheck,
+.desktop-add-agent-checks button {
+  justify-self: start;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.desktop-add-agent-recheck {
+  margin-top: 8px;
+}
+
+.desktop-add-agent-checks button {
+  grid-column: 2;
+}
+
+@media (max-width: 520px) {
+  .desktop-add-agent-checks div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .desktop-add-agent-checks button {
+    grid-column: 1;
+  }
 }
 
 .desktop-add-agent-worktrees {
@@ -201,26 +207,4 @@
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.035);
-}
-
-@media (max-width: 800px) {
-  .desktop-add-agent-checks div {
-      min-height: 74px;
-    }
-}
-
-@media (max-width: 520px) {
-  .desktop-add-agent-status {
-      padding: 22px 20px 24px;
-    }
-
-  .desktop-add-agent-status-header {
-      align-items: flex-start;
-      flex-direction: column;
-      gap: 14px;
-    }
-
-  .desktop-add-agent-checks {
-      grid-template-columns: 1fr;
-    }
 }

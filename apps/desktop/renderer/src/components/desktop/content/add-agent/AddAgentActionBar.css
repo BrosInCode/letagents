@@ -1,19 +1,17 @@
 .desktop-add-agent-actions {
   position: sticky;
-  bottom: -36px;
+  bottom: 0;
   z-index: 1;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
-  margin-top: 24px;
-  margin-right: -34px;
-  margin-bottom: -36px;
-  margin-left: -34px;
-  padding: 18px 34px 24px;
+  margin-top: auto;
+  margin-right: calc(-1 * var(--add-agent-padding));
+  margin-left: calc(-1 * var(--add-agent-padding));
+  padding: 16px var(--add-agent-padding);
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: #0e0e0f;
-  box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.2);
+  background: var(--bg);
 }
 
 .desktop-add-agent-action-buttons {
@@ -26,7 +24,7 @@
   min-height: 44px;
   padding: 0 20px;
   background: var(--text);
-  color: #080808;
+  color: var(--bg);
   font-size: 0.82rem;
 }
 
@@ -75,22 +73,6 @@
   color: var(--text-tertiary);
   font-size: 0.78rem;
   line-height: 1.35;
-}
-
-@media (max-width: 520px) {
-  .desktop-add-agent-actions {
-      bottom: -24px;
-      margin-right: -20px;
-      margin-bottom: -24px;
-      margin-left: -20px;
-      padding: 14px 20px 20px;
-  }
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .desktop-add-agent-actions {
-    background: #0d0d0e;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

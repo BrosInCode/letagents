@@ -19,11 +19,9 @@
         >
           <header class="desktop-add-agent-header">
             <div>
-              <span>Add agent</span>
-              <h3 id="desktop-add-agent-title">Bring an agent into this room</h3>
+              <h3 id="desktop-add-agent-title">Add agent</h3>
               <p>
-                Choose a provider, confirm its setup, then start it in
-                <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>.
+                Start an agent in <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>.
               </p>
             </div>
             <button
@@ -35,25 +33,19 @@
               <X aria-hidden="true" />
             </button>
           </header>
-          <div class="desktop-add-agent-choice" role="group" aria-label="How to add an agent">
-            <button type="button" :aria-pressed="!connectExisting" @click="connectExisting = false">Start an agent</button>
-            <button type="button" :aria-pressed="connectExisting" @click="connectExisting = true">Connect an existing agent</button>
-          </div>
           <div class="desktop-add-agent-body">
             <AddAgentProviderRail
               :providers="providers"
               :selected-provider-id="selectedProviderId"
               @select="selectProvider"
             />
-            <AddAgentConnection v-if="connectExisting" :provider="selectedProvider" :room-identifier="roomIdentifier" :repo-root-path="repoRootPath" :local-room="roomStorageMode === 'local'" />
-            <AddAgentSetupStatus v-else
+            <AddAgentSetupStatus
               :provider-name="selectedProvider?.name || null"
               :preflight="preflight"
               :loading="loadingProviders || loadingPreflight"
               :error="loadError"
               :status-title="statusTitle"
               :status-description="statusDescription"
-              :status-label="preflightStatusLabel"
               :runtime-label="runtimeLabel"
               :bridge-label="bridgeLabel"
               :repo-label="repoLabel"
@@ -120,42 +112,44 @@
 
             <AddAgentFeedback v-if="setupMessage" :message="setupMessage" :tone="setupMessageTone" />
 
-            <AddAgentActionBar
-              :room-identifier="roomIdentifier"
-              :provider-id="selectedProviderId"
-              :provider="selectedProvider"
-              :preflight="preflight"
-              :permission-profile="selectedPermissionProfile"
-              :launch-mode="launchMode"
-              :setup-busy="setupBusy"
-        :setup-action-label="preflight?.nextAction === 'install_runtime' || preflight?.nextAction === 'install_mcp_bridge'
-          ? setupActionButtonText(preflight.nextAction)
-          : ''"
-              :copying-auth-command="copyingAuthCommand"
-              :install-command="installCommand"
-              :install-url="installUrl"
-              :can-create-worktree="canCreateWorktree"
-              :matching-worktree-count="matchingWorktrees.length"
-              :creating-worktree="creatingWorktree"
-              :create-worktree-label="createWorktreeButtonLabel"
-              :can-start-base="canStartManagedAgent"
-              :starting-agent="startingAgent"
-              :setup-confirmation-active="Boolean(activeSetupConfirmation)"
-              :external-instruction="isExternalMcpProviderReady(selectedProvider, preflight)
-                ? externalMcpProviderInstruction(selectedProvider)
-                : null"
-              :permission-warning="selectedPermissionProfileWarning"
-              :supervised="supervisedUi"
-              :charter-missing="launchMode === 'supervised' && !supervisedCharter.trim()"
-              @setup-action="runSetupAction"
-              @copy-auth-command="copyAgentAuthCommand"
-              @copy-install-command="copyAgentAuthCommand(installCommand)"
-              @open-install-guide="openProviderInstallGuide"
-              @refresh="retryProviderSetup"
-              @create-worktree="createWorktree"
-              @start="startManagedAgent"
-              @recover-launch="handleRecoverSupervisedLaunch"
-            />
+            <template #actions>
+              <AddAgentActionBar
+                :room-identifier="roomIdentifier"
+                :provider-id="selectedProviderId"
+                :provider="selectedProvider"
+                :preflight="preflight"
+                :permission-profile="selectedPermissionProfile"
+                :launch-mode="launchMode"
+                :setup-busy="setupBusy"
+          :setup-action-label="preflight?.nextAction === 'install_runtime' || preflight?.nextAction === 'install_mcp_bridge'
+            ? setupActionButtonText(preflight.nextAction)
+            : ''"
+                :copying-auth-command="copyingAuthCommand"
+                :install-command="installCommand"
+                :install-url="installUrl"
+                :can-create-worktree="canCreateWorktree"
+                :matching-worktree-count="matchingWorktrees.length"
+                :creating-worktree="creatingWorktree"
+                :create-worktree-label="createWorktreeButtonLabel"
+                :can-start-base="canStartManagedAgent"
+                :starting-agent="startingAgent"
+                :setup-confirmation-active="Boolean(activeSetupConfirmation)"
+                :external-instruction="isExternalMcpProviderReady(selectedProvider, preflight)
+                  ? externalMcpProviderInstruction(selectedProvider)
+                  : null"
+                :permission-warning="selectedPermissionProfileWarning"
+                :supervised="supervisedUi"
+                :charter-missing="launchMode === 'supervised' && !supervisedCharter.trim()"
+                @setup-action="runSetupAction"
+                @copy-auth-command="copyAgentAuthCommand"
+                @copy-install-command="copyAgentAuthCommand(installCommand)"
+                @open-install-guide="openProviderInstallGuide"
+                @refresh="retryProviderSetup"
+                @create-worktree="createWorktree"
+                @start="startManagedAgent"
+                @recover-launch="handleRecoverSupervisedLaunch"
+              />
+            </template>
 
             </AddAgentSetupStatus>
           </div>
@@ -176,7 +170,6 @@ import AddAgentOpenModelSettings from "./add-agent/AddAgentOpenModelSettings.vue
 import AddAgentModelSettings from "./add-agent/AddAgentModelSettings.vue";
 import AddAgentRuntimeSettings from "./add-agent/AddAgentRuntimeSettings.vue";
 import AddAgentSupervisedLaunch from "./add-agent/AddAgentSupervisedLaunch.vue";
-import AddAgentConnection from "./add-agent/AddAgentConnection.vue";
 import AddAgentFeedback from "./add-agent/AddAgentFeedback.vue";
 import {
   useAddAgentController,
@@ -197,7 +190,6 @@ import {
 const props = defineProps<AddAgentModalProps>();
 const emit = defineEmits<AddAgentModalEvents>();
 const dialogElement = ref<HTMLElement | null>(null);
-const connectExisting = ref(false);
 let previousFocusElement: HTMLElement | null = null;
 
 watch(() => props.open, (open) => {
@@ -224,5 +216,5 @@ async function handleRecoverSupervisedLaunch(): Promise<void> {
   dialogElement.value?.querySelector<HTMLElement>('[data-testid="desktop-add-agent-supervised-runtime"], [data-testid="desktop-add-agent-supervised-lookup-error"]')?.focus();
 }
 
-const { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
+const { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
 </script>

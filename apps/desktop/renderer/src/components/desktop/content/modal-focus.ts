@@ -61,5 +61,6 @@ function focusableElementsInDialog(dialog: HTMLElement): HTMLElement[] {
       !element.hasAttribute("disabled")
       && element.getAttribute("aria-hidden") !== "true"
       && element.getClientRects().length > 0
+      && element.checkVisibility?.() !== false
     );
 }
