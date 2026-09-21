@@ -22,6 +22,7 @@ export type LetAgentsRuntimeContract = {
 export function registeredToolNames(
   profile: LetAgentsExecutionProfile,
   supervisedProvider: string | null = null,
+  apiUrl: string | undefined = process.env.LETAGENTS_API_URL,
 ): string[] {
   const names = new Set<string>();
   const recorder = {
@@ -30,17 +31,17 @@ export function registeredToolNames(
       return {};
     },
   } as unknown as McpServer;
-  registerTools(recorder, profile, supervisedProvider);
+  registerTools(recorder, profile, supervisedProvider, { apiUrl });
   return [...names].sort();
 }
 
-export function letAgentsRuntimeContract(): LetAgentsRuntimeContract {
+export function letAgentsRuntimeContract(apiUrl: string | undefined = process.env.LETAGENTS_API_URL): LetAgentsRuntimeContract {
   return {
     format: 1,
     profiles: {
-      supervised_mcp_polling: { contract: "custodial_polling_v1", tools: registeredToolNames("supervised_mcp_polling", "codex") },
+      supervised_mcp_polling: { contract: "custodial_polling_v1", tools: registeredToolNames("supervised_mcp_polling", "codex", apiUrl) },
       cursor_supervised_room_turn: {
-        tools: registeredToolNames("supervised_room_turn", "cursor"),
+        tools: registeredToolNames("supervised_room_turn", "cursor", apiUrl),
       },
     },
   };

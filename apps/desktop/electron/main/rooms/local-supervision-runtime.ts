@@ -1,3 +1,4 @@
+import { defineLocalSupervisedToolHandlers, localSupervisedRoomToolOperation } from "../../../../../shared/local-supervised-tools.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
@@ -189,6 +190,58 @@ type LocalToolInput = {
   provider: string; toolName: string; input: unknown; requestId: string; roomId: string;
   apiUrl: string; bearer: string; cwd: string; agentSession: { session_id: string; agent_key: string; room_id: string };
 };
+type LocalToolContext = {
+  input: LocalToolInput;
+  args: ObjectValue;
+  worker: Awaited<ReturnType<typeof authorizeLocalWorker>>;
+  leaseWorker: Awaited<ReturnType<typeof authorizeLocalWorker>> & { supervised: boolean };
+};
+const localToolHandlers = defineLocalSupervisedToolHandlers<LocalToolContext>({
+  get_current_room: async ({ input }) => ({ room_id: input.roomId, storage: "local", room: await getLocalRoom(input.roomId) }),
+  read_messages: async ({ input, args }) => {
+    const limit = Math.max(1, Math.min(100, Number(args.limit) || 50));
+    return args.before_message_id ? getLocalChatMessagesBefore(input.roomId, String(args.before_message_id), { limit })
+      : args.after_message_id ? getLocalChatMessages(input.roomId, { after: String(args.after_message_id), limit })
+        : getLatestLocalChatMessages(input.roomId, { limit });
+  },
+  send_message: async ({ input, args, worker }) => {
+    const text = input.toolName === "post_status" ? `[status] ${required(args.status, "status")}`
+      : input.toolName === "post_reasoning" ? `[reasoning] ${required(args.summary, "summary")}` : required(args.text, "text");
+    const thread = optional(args.thread_parent_id ?? args.thread_root_id ?? args.root_message_id);
+    if (input.toolName === "send_thread_message" && !thread) throw new Error("A thread parent is required.");
+    const message = await addLocalChatMessage(input.roomId, { sender: worker.actor_label, text,
+      source: "agent", publisher_agent_key: worker.agent_key, publisher_agent_session_id: worker.session_id,
+      idempotency_key: `local-supervised-tool:${worker.agent_key}:${input.requestId}`,
+      reply_to: optional(args.reply_to ?? args.reply_to_id) ?? (thread ? thread : null), thread_root_id: thread });
+    return { room_id: input.roomId, message };
+  },
+  get_board: async ({ input }) => ({ room_id: input.roomId, tasks: await listLocalTasks(input.roomId) }),
+  add_task: async ({ input, args, worker }) => ({ task: await addLocalTask(input.roomId, { title: required(args.title, "title"),
+    description: optional(args.description), createdBy: worker.actor_label,
+    clientTaskId: `${worker.agent_key}:${required(args.client_task_id, "client task id")}` }) }),
+  claim_task: async ({ input, args, leaseWorker }) => claimLocalTaskWorkLease(input.roomId, required(args.task_id, "task id"), leaseWorker),
+  update_task: async ({ input, args, leaseWorker }) => ({ task: await updateLocalTask(input.roomId, required(args.task_id, "task id"), {
+    status: input.toolName === "complete_task" ? "in_review" : optional(args.status),
+    ...(Object.hasOwn(args, "pr_url") ? { prUrl: optional(args.pr_url) } : {}),
+    ...(Object.hasOwn(args, "assignee") ? { assignee: optional(args.assignee) } : {}),
+    ...(Object.hasOwn(args, "assignee_agent_key") ? { assigneeAgentKey: optional(args.assignee_agent_key) } : {}),
+    ...(Array.isArray(args.workflow_artifacts) ? { workflowArtifacts: args.workflow_artifacts as never } : {}),
+  }, leaseWorker) }),
+  change_task_lease: async ({ input, args, leaseWorker }) => changeLocalTaskWorkLease(input.roomId, required(args.task_id, "task id"), {
+    action: input.toolName === "release_task_lease" ? "release" : "handoff", lease_id: optional(args.lease_id),
+    ...(args.epoch !== undefined ? { epoch: Number(args.epoch) } : {}),
+    target_actor_key: optional(args.target_agent_key), target_actor_instance_id: optional(args.target_actor_instance_id),
+    target_agent_session_id: optional(args.target_agent_session_id),
+  }, leaseWorker),
+  claim_task_review: async ({ input, args, worker }) => claimLocalTaskReviewLease(input.roomId, required(args.task_id, "task id"), {
+    holderLabel: worker.actor_label, agentKey: worker.agent_key, agentSessionId: worker.session_id,
+  }),
+  get_room_artifacts: async ({ input, args }) => getLocalRoomArtifacts(input.roomId, { taskId: optional(args.task_id), limit: Math.min(100, Number(args.limit) || 100) }),
+  publish_room_artifact: async ({ input, args, leaseWorker }) => publishLocalRoomArtifact({ roomId: input.roomId, artifact: object(args.artifact),
+    taskId: optional(args.task_id), linkedTaskIds: Array.isArray(args.linked_task_ids) ? args.linked_task_ids : [], worker: leaseWorker }),
+  get_message_thread: async ({ input, args }) => getLocalMessageThread(input.roomId, required(args.root_message_id ?? args.message_id, "message id")),
+});
+
 /** The daemon performs the same effect fencing and journaling before entering either transport. */
 export async function executeLocalSupervisorTool(input: LocalToolInput) {
   if (input.apiUrl !== LOCAL_ROOM_API_ORIGIN) throw new Error("Invalid local tool authority.");
@@ -198,64 +251,13 @@ export async function executeLocalSupervisorTool(input: LocalToolInput) {
   const args = object(input.input);
   const leaseWorker = { ...worker, supervised: true };
   if (args.room_id && args.room_id !== input.roomId) throw new Error("This tool is scoped to the agent's local room.");
-  let value: unknown;
-  switch (input.toolName) {
-    case "get_current_room": value = { room_id: input.roomId, storage: "local", room: await getLocalRoom(input.roomId) }; break;
-    case "read_messages": {
-      const limit = Math.max(1, Math.min(100, Number(args.limit) || 50));
-      value = args.before_message_id ? await getLocalChatMessagesBefore(input.roomId, String(args.before_message_id), { limit })
-        : args.after_message_id ? await getLocalChatMessages(input.roomId, { after: String(args.after_message_id), limit })
-          : await getLatestLocalChatMessages(input.roomId, { limit });
-      break;
-    }
-    case "send_message":
-    case "send_thread_message":
-    case "post_status":
-    case "post_reasoning": {
-      const text = input.toolName === "post_status" ? `[status] ${required(args.status, "status")}`
-        : input.toolName === "post_reasoning" ? `[reasoning] ${required(args.summary, "summary")}` : required(args.text, "text");
-      const thread = optional(args.thread_parent_id ?? args.thread_root_id ?? args.root_message_id);
-      if (input.toolName === "send_thread_message" && !thread) throw new Error("A thread parent is required.");
-      const message = await addLocalChatMessage(input.roomId, { sender: worker.actor_label, text,
-        source: "agent", publisher_agent_key: worker.agent_key, publisher_agent_session_id: worker.session_id,
-        idempotency_key: `local-supervised-tool:${worker.agent_key}:${input.requestId}`,
-        reply_to: optional(args.reply_to ?? args.reply_to_id) ?? (thread ? thread : null), thread_root_id: thread });
-      value = { room_id: input.roomId, message }; break;
-    }
-    case "get_board": value = { room_id: input.roomId, tasks: await listLocalTasks(input.roomId) }; break;
-    case "create_task":
-    case "add_task": value = { task: await addLocalTask(input.roomId, { title: required(args.title, "title"),
-      description: optional(args.description), createdBy: worker.actor_label,
-      clientTaskId: `${worker.agent_key}:${required(args.client_task_id, "client task id")}` }) }; break;
-    case "claim_task": value = await claimLocalTaskWorkLease(input.roomId, required(args.task_id, "task id"), leaseWorker); break;
-    case "complete_task":
-    case "update_task": value = { task: await updateLocalTask(input.roomId, required(args.task_id, "task id"), {
-      status: input.toolName === "complete_task" ? "in_review" : optional(args.status),
-      ...(Object.hasOwn(args, "pr_url") ? { prUrl: optional(args.pr_url) } : {}),
-      ...(Object.hasOwn(args, "assignee") ? { assignee: optional(args.assignee) } : {}),
-      ...(Object.hasOwn(args, "assignee_agent_key") ? { assigneeAgentKey: optional(args.assignee_agent_key) } : {}),
-      ...(Array.isArray(args.workflow_artifacts) ? { workflowArtifacts: args.workflow_artifacts as never } : {}),
-    }, leaseWorker) }; break;
-    case "release_task_lease":
-    case "handoff_task_lease": value = await changeLocalTaskWorkLease(input.roomId, required(args.task_id, "task id"), {
-      action: input.toolName === "release_task_lease" ? "release" : "handoff", lease_id: optional(args.lease_id),
-      ...(args.epoch !== undefined ? { epoch: Number(args.epoch) } : {}),
-      target_actor_key: optional(args.target_agent_key), target_actor_instance_id: optional(args.target_actor_instance_id),
-      target_agent_session_id: optional(args.target_agent_session_id),
-    }, leaseWorker); break;
-    case "claim_task_review": value = await claimLocalTaskReviewLease(input.roomId, required(args.task_id, "task id"), {
-      holderLabel: worker.actor_label, agentKey: worker.agent_key, agentSessionId: worker.session_id,
-    }); break;
-    case "get_room_artifacts": value = await getLocalRoomArtifacts(input.roomId, { taskId: optional(args.task_id), limit: Math.min(100, Number(args.limit) || 100) }); break;
-    case "publish_room_artifact": value = await publishLocalRoomArtifact({ roomId: input.roomId, artifact: object(args.artifact),
-      taskId: optional(args.task_id), linkedTaskIds: Array.isArray(args.linked_task_ids) ? args.linked_task_ids : [], worker: leaseWorker }); break;
-    case "get_message_thread": value = await getLocalMessageThread(input.roomId, required(args.root_message_id ?? args.message_id, "message id")); break;
-    default: {
-      const result = { isError: true, content: [{ type: "text", text: JSON.stringify({ code: "local_room_tool_unavailable",
-        error: `${input.toolName} is not available in local rooms. Continue with the available room tools.` }) }] };
-      return { liveResult: result, durableResult: result };
-    }
+  const operation = localSupervisedRoomToolOperation(input.toolName);
+  if (!operation) {
+    const result = { isError: true, content: [{ type: "text", text: JSON.stringify({ code: "local_room_tool_unavailable",
+      error: `${input.toolName} is not available in local rooms. Continue with the available room tools.` }) }] };
+    return { liveResult: result, durableResult: result };
   }
+  const value = await localToolHandlers[operation]!({ input, args, worker, leaseWorker });
   const liveResult = { content: [{ type: "text", text: JSON.stringify(value) }] };
   const readOnly = ["get_current_room", "read_messages", "get_board", "get_room_artifacts", "get_message_thread"].includes(input.toolName);
   return { liveResult, durableResult: !readOnly || Buffer.byteLength(JSON.stringify(liveResult)) <= 16_384 ? liveResult
