@@ -317,9 +317,24 @@ test("app login requires browser approval plus its original secret and exchanges
   const page = await fetch(pending.verification_uri, {
     headers: { cookie: `letagents_session=${browserToken}` },
   });
+  // The consent form must retain its same-site Origin in a real browser.
+  // no-referrer turns native POST form origins into null and breaks sign-in.
+  assert.equal(page.headers.get("referrer-policy"), "same-origin");
   const html = await page.text();
   const csrf = html.match(/name="csrf" value="([a-f0-9]+)"/)?.[1];
   assert.ok(csrf);
+  for (const origin of [undefined, "null", "https://untrusted.example"]) {
+    const deniedOrigin = await fetch(pending.verification_uri, {
+      method: "POST",
+      headers: {
+        cookie: `letagents_session=${browserToken}`,
+        ...(origin ? { Origin: origin } : {}),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: `csrf=${csrf}`,
+    });
+    assert.equal(deniedOrigin.status, 403, `Rejected origin: ${origin}`);
+  }
   const denied = await fetch(pending.verification_uri, {
     method: "POST",
     headers: {
