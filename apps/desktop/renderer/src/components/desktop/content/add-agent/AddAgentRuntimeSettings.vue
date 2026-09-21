@@ -5,16 +5,15 @@
     aria-label="Where the agent works"
     data-testid="desktop-add-agent-execution"
   >
-    <span>On this Mac</span>
-    <p>{{ executionDescription }}</p>
     <label class="desktop-add-agent-model-custom-input">
-      <small>Initial message</small>
+      <small>First task</small>
       <textarea
         :value="charter"
         rows="3"
+        placeholder="What should this agent work on?"
         required
         :aria-invalid="!charter.trim()"
-        aria-describedby="desktop-add-agent-supervised-charter-error"
+        :aria-describedby="!charter.trim() ? 'desktop-add-agent-supervised-charter-error' : undefined"
         data-testid="desktop-add-agent-supervised-charter"
         @input="emit('update:charter', ($event.target as HTMLTextAreaElement).value)"
       />
@@ -24,14 +23,22 @@
         class="desktop-add-agent-field-error"
       >Add the first message the agent should handle after it joins. It is sent once.</small>
     </label>
+    <p>{{ executionDescription }}</p>
   </section>
 
-  <section
+  <details
     v-if="hasSupervisedRuntime(provider) && permissionProfiles.length"
     class="desktop-add-agent-permissions"
+    :open="!selectedPermissionProfile || selectedPermissionProfile.status !== 'available'"
     aria-label="Agent permissions"
   >
-    <span>Permissions</span>
+    <summary tabindex="0">
+      <span>Access</span>
+      <span class="desktop-add-agent-access-selection">
+        {{ selectedPermissionProfile?.label || 'Choose permissions' }}
+        <em v-if="selectedPermissionProfile?.risk === 'high'">High risk</em>
+      </span>
+    </summary>
     <div class="desktop-add-agent-permission-options">
       <button
         v-for="profile in permissionProfiles"
@@ -50,7 +57,7 @@
       </button>
     </div>
     <p v-if="selectedPermissionProfile">{{ managedAgentPermissionProfileSummary(selectedPermissionProfile) }}</p>
-  </section>
+  </details>
 
 </template>
 

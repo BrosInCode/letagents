@@ -122,7 +122,7 @@
       {{ externalInstruction }}
     </span>
     <span v-else-if="launchMode === 'supervised' && charterMissing" class="desktop-add-agent-confirmation">
-      Add an initial message before starting the agent.
+      Add a first task to start the agent.
     </span>
     <span v-else-if="launchMode === 'supervised' && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
       {{ recoveryScanStatus === "error"
