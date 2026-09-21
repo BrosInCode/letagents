@@ -1,3 +1,4 @@
+import { applyHostToolRuleSchema, validateHostToolRuleSchema } from "./host-tool-rules.js";
 import { applyPreparedRoomContextSchema, validatePreparedRoomContextSchema } from "./prepared-room-context.js";
 import { validateRoomWorkspaceSchema, validateRoomWorkspaceReviewSchema } from "./room-workspace-store.js";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
@@ -18,7 +19,7 @@ import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js
 import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
 import { applyApprovalRequestClosureSchema, validateApprovalRequestClosureSchema } from "./execution-approval-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 43;
+export const DAEMON_STATE_SCHEMA_VERSION = 44;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -132,6 +133,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
+  if (existingVersion >= 44) validateHostToolRuleSchema(database);
   if (existingVersion >= 39) validateRoomWorkspaceReviewSchema(database);
   if (existingVersion >= 42) validateApprovalRequestClosureSchema(database);
   if (existingVersion >= 38) validateRoomWorkspaceSchema(database);
@@ -312,6 +314,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion >= 35 && existingVersion <= 41) {
     this.migrateExecutionApprovalPublicationStorage(database);
+    return;
+  }
+  if (existingVersion === 43) {
+    this.migrateHostToolRules(database);
     return;
   }
   if (existingVersion === 42) {
@@ -625,12 +631,26 @@ createSchema(database: DatabaseSync): void {
   }
 }
 
+private migrateHostToolRules(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyHostToolRuleSchema(database);
+    this.schemaInitializationHook?.(database);
+    validateHostToolRuleSchema(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) { database.exec("ROLLBACK"); throw error; }
+}
+
 private migratePreparedRoomContext(database: DatabaseSync): void {
   this.validateLocalRoomMembershipShape(database);
   this.repairAndValidateCurrentShape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
     applyPreparedRoomContextSchema(database);
+    applyHostToolRuleSchema(database);
     this.schemaInitializationHook?.(database);
     validatePreparedRoomContextSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -1523,6 +1543,7 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
 
 /** Existing memberships stay cloud-backed. Never reconstruct a missing current authority column. */
 private applyLocalRoomMembershipShape(database: DatabaseSync): void {
+  applyHostToolRuleSchema(database);
   applyRuntimeRecoverySchema(database);
   applyApprovalRequestClosureSchema(database);
   applyPreparedRoomContextSchema(database);
@@ -3087,6 +3108,7 @@ repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 
   }
   if (version >= 41) validateRuntimeRecoverySchema(database);
   if (version >= 43) validatePreparedRoomContextSchema(database);
+  if (version >= 44) validateHostToolRuleSchema(database);
   if (version >= 39) validateRoomWorkspaceReviewSchema(database);
   if (version >= 38) validateRoomWorkspaceSchema(database);
   if (version >= 27) validateRoomWorkPublicationSchema(database, version < 37);

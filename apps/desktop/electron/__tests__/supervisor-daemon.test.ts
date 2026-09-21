@@ -81,7 +81,7 @@ test("host approval client authenticates raw presentations and restores exact re
     if (authenticated.operation === "list") { assert.deepEqual(authenticated.input, { roomId: "room_1" }); return [candidate]; }
     const input = authenticated.input as HostApprovalDecision; decisions.push(input);
     candidate.recordedDecision = { decisionId: input.decisionId, actorId: input.actorId,
-      decision: input.decision, projectionSha256: input.projectionSha256 };
+      decision: input.decision === "allow_always" ? "allow_once" : input.decision, projectionSha256: input.projectionSha256 };
     candidate.status = "decision_recorded";
     if (loseResponse) throw new Error("lost receipt after durable decision");
     return "decision_recorded";
@@ -2638,7 +2638,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.153");
+    assert.equal(status.implementationVersion, "2.0.154");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -3043,5 +3043,34 @@ test("host approval client displays and signs one-time Claude tool decisions ove
     assert.equal(decisions.length, 1); assert.equal(decisions[0]!.expected.nativeRequestId, "claude-native-request");
     assert.equal(decisions[0]!.decision, "allow_once");
     assert.equal(decisions[0]!.projectionSha256, createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"));
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("saved permission list and revoke use the real enrolled signer", async () => {
+  const env = await fixture();
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  const operations: unknown[] = [];
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope);
+    assert.ok(authenticated);
+    operations.push(authenticated);
+    if (authenticated.operation === "list_tool_rules") return [];
+    assert.equal(authenticated.operation, "revoke_tool_rule");
+    return null;
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, loadApprovalSigner: async () => signer });
+  try {
+    assert.deepEqual(await client.listHostToolRules("agent"), []);
+    await client.revokeHostToolRule({ agentId: "agent", ruleId: "rule", revision: 1 });
+    assert.deepEqual(operations, [
+      { operation: "list_tool_rules", input: { agentId: "agent" } },
+      { operation: "revoke_tool_rule", input: { agentId: "agent", ruleId: "rule", revision: 1 } },
+    ]);
+    await assert.rejects(client.revokeHostToolRule({ agentId: "agent", ruleId: "rule", revision: 1 }, () => { throw new Error("Sender changed"); }), /Sender changed/);
+    assert.equal(operations.length, 2);
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });

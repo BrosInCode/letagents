@@ -50,6 +50,7 @@ function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync):
 }
 
 function restoreEmptyExecutionDelegationV23Fixture(database: DatabaseSync): void {
+  database.exec("DROP TABLE IF EXISTS host_tool_rule_withdrawals; DROP TABLE IF EXISTS host_tool_rule_decisions; DROP TABLE IF EXISTS host_tool_rules");
   database.exec("DROP TABLE IF EXISTS execution_approval_request_closures");
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
   database.exec("DROP TRIGGER execution_approval_projection_immutable; DROP TABLE execution_approval_projections");
@@ -6573,4 +6574,24 @@ test("physical schema 39 gains explicit local routing without changing an existi
       inspection.close();
     } finally { await migrated.close(); }
   } finally { await original.close(); await env.cleanup(); }
+});
+
+test("v43 saved-permission migration is atomic and current missing authority fails closed", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys=ON");
+  const schema = new DaemonStateSchema();
+  try {
+    schema.createSchema(database);
+    database.exec(`DROP TABLE host_tool_rule_withdrawals; DROP TABLE host_tool_rule_decisions; DROP TABLE host_tool_rules;
+      UPDATE manifest_metadata SET schema_version=43; PRAGMA user_version=43`);
+    const fail = new DaemonStateSchema(() => { throw new Error("Interrupted permission migration"); });
+    assert.throws(() => fail.createSchema(database), /Interrupted permission migration/);
+    assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 43);
+    assert.equal(database.prepare("SELECT 1 FROM sqlite_master WHERE name='host_tool_rules'").get(), undefined);
+    schema.createSchema(database);
+    assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 44);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM host_tool_rules").get()!.n, 0);
+    database.exec("DROP TABLE host_tool_rule_withdrawals");
+    assert.throws(() => schema.createSchema(database), /permission storage is missing or invalid/);
+  } finally { database.close(); }
 });
