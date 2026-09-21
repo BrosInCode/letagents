@@ -553,8 +553,8 @@ async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void>
 class CodexRoomToolsUnavailableError extends Error {
   readonly providerFailureCode = "provider_room_tools_unavailable";
 
-  constructor() {
-    super("LetAgents room tools could not be verified for this conversation. No model turn was started. Retry the message; if this persists, use Restart and resume in agent Diagnostics, then retry the message.");
+  constructor(detail: string) {
+    super(`${detail} No model turn was started. Retry the message.`);
     this.name = "CodexRoomToolsUnavailableError";
   }
 }
@@ -563,34 +563,44 @@ class CodexRoomToolsUnavailableError extends Error {
 async function requireLetAgentsRoomTools(client: CodexAdapterRpc, threadId: string): Promise<void> {
   let cursor: string | undefined;
   const cursors = new Set<string>();
-  try {
-    for (let page = 0; page < 10; page += 1) {
-      const response = recordValue(await client.request("mcpServerStatus/list", {
+  for (let page = 0; page < 10; page += 1) {
+    let response: Record<string, unknown> | null;
+    try {
+      // Discovery waits for MCP startup. Use the same bounded request budget
+      // as other app-server operations rather than cutting healthy startup short.
+      response = recordValue(await client.request("mcpServerStatus/list", {
         threadId, detail: "toolsAndAuthOnly", limit: 100, ...(cursor ? { cursor } : {}),
-      }, { timeoutMs: 5_000 }));
-      if (!Array.isArray(response?.data)) break;
-      const servers = response.data.map(recordValue).filter(row => row?.name === "letagents");
-      if (servers.length) {
-        const server = servers[0]!;
-        const tools = recordValue(server.tools);
-        const names = tools && Object.values(tools).map(tool => recordValue(tool)?.name);
-        if (servers.length === 1 && tools
-          && (server.runtimeStatus === undefined || server.runtimeStatus === "connected")
-          && names?.every(name => typeof name === "string")
-          && REQUIRED_ROOM_TOOLS.every(name => names.includes(name))) return;
-        break;
-      }
-      const next = response.nextCursor;
-      if (typeof next !== "string" || !next || cursors.has(next)) break;
-      cursors.add(next);
-      cursor = next;
+      }));
+    } catch (error) {
+      // Keep exact-conversation restoration when discovery finds absence.
+      if (isMissingContinuation(error, threadId)) throw new ProviderContinuationMissingError(threadId);
+      throw new CodexRoomToolsUnavailableError(/(?:timed?\s*out|timeout)/i.test(errorMessage(error))
+        ? "Room tool discovery timed out."
+        : "Codex could not read this conversation's room tools.");
     }
-  } catch (error) {
-    // Keep the existing exact-conversation restoration path when the probe
-    // discovers absence before turn/start gets a chance to report it.
-    if (isMissingContinuation(error, threadId)) throw new ProviderContinuationMissingError(threadId);
+    if (!Array.isArray(response?.data)) throw new CodexRoomToolsUnavailableError("Codex returned an invalid room tool inventory.");
+    const servers = response.data.map(recordValue).filter(row => row?.name === "letagents");
+    if (servers.length) {
+      if (servers.length !== 1) throw new CodexRoomToolsUnavailableError("Codex returned an ambiguous room tool inventory.");
+      const server = servers[0]!;
+      if (server.runtimeStatus !== undefined && server.runtimeStatus !== "connected") {
+        throw new CodexRoomToolsUnavailableError("The LetAgents room connection is not ready.");
+      }
+      const tools = recordValue(server.tools);
+      const names = tools && Object.values(tools).map(tool => recordValue(tool)?.name);
+      if (!names?.every(name => typeof name === "string")) {
+        throw new CodexRoomToolsUnavailableError("Codex returned an invalid room tool inventory.");
+      }
+      if (REQUIRED_ROOM_TOOLS.every(name => names.includes(name))) return;
+      throw new CodexRoomToolsUnavailableError("Required LetAgents room tools are missing from this conversation.");
+    }
+    const next = response.nextCursor;
+    if (next === undefined || next === null) throw new CodexRoomToolsUnavailableError("LetAgents is not connected to this conversation.");
+    if (typeof next !== "string" || !next || cursors.has(next)) break;
+    cursors.add(next);
+    cursor = next;
   }
-  throw new CodexRoomToolsUnavailableError();
+  throw new CodexRoomToolsUnavailableError("Codex returned an incomplete room tool inventory.");
 }
 
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
