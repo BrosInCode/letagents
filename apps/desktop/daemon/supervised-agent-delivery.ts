@@ -157,6 +157,7 @@ export class SupervisedAgentDelivery {
   private readonly loopEpochs = new Map<string, number>();
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
+  private readonly pumpWakeups = new Map<string, Promise<void>>();
   private readonly pumpControllers = new Map<string, AbortController>();
   private readonly retries = new Map<string, Set<Promise<void>>>();
   private readonly retryControllers = new Map<string, Set<AbortController>>();
@@ -250,9 +251,11 @@ export class SupervisedAgentDelivery {
     await Promise.allSettled([...this.inFlight]);
   }
 
-  poll(agent: SupervisedIngressAgent): Promise<void> {
-    if (!this.daemonIngressAllowed(agent)) return Promise.resolve();
-    return this.pollOnce(agent);
+  /** One-shot callers may await delivery; continuous intake uses pollOnce directly. */
+  async poll(agent: SupervisedIngressAgent): Promise<void> {
+    if (!this.daemonIngressAllowed(agent)) return;
+    await this.pollOnce(agent);
+    await this.pumping.get(agent.agentId);
   }
 
   /** Starts the daemon-owned long-poll loop and normalizes persisted work first. */
@@ -456,10 +459,9 @@ export class SupervisedAgentDelivery {
     let consecutivePollErrors = 0;
     while (await this.hasIngressAuthority(agent, controller)) {
       try {
-        // Recovery and FIFO work never wait for a potentially hours-long
-        // network poll. A transient store/normalization failure is supervised
-        // here instead of terminating the only delivery loop.
-        await this.pump(agent);
+        // Intake and serialized delivery have independent lifetimes: neither
+        // a long native turn nor a long network poll may block the other.
+        this.schedulePump(agent);
         await this.pollOnce(agent, controller);
         consecutivePollErrors = 0;
       } catch (error) {
@@ -551,7 +553,7 @@ export class SupervisedAgentDelivery {
       // Ingest can be deliberately slow. Do not create detached delivery work
       // after a stop/rebind changed authority while its commit was pending.
       if (!await this.hasIngressAuthority(agent, controller)) return;
-      await this.pump(agent);
+      this.wakePumpAfterSettlement(agent);
     } finally {
       if (this.polling.get(agent.agentId) === controller) this.polling.delete(agent.agentId);
     }
@@ -917,12 +919,18 @@ export class SupervisedAgentDelivery {
       this.schedulePump(agent);
       return;
     }
+    if (this.pumpWakeups.get(agent.agentId) === current) return;
+    this.pumpWakeups.set(agent.agentId, current);
     // schedulePump intentionally coalesces while a pump is registered. If that
     // pump already observed the formerly-blocked head and is merely resolving,
     // coalescing here would lose the wake. The pump's own cleanup continuation
     // was registered when it was installed; one extra microtask guarantees the
     // registry is clear before installing the successor.
-    const wake = () => queueMicrotask(() => { this.schedulePump(agent); });
+    const wake = () => queueMicrotask(() => {
+      if (this.pumpWakeups.get(agent.agentId) !== current) return;
+      this.pumpWakeups.delete(agent.agentId);
+      this.schedulePump(agent);
+    });
     void current.then(wake, wake);
   }
 
@@ -1017,7 +1025,7 @@ export class SupervisedAgentDelivery {
   pump(agent: SupervisedIngressAgent): Promise<void> {
     if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || this.pumping.has(agent.agentId)) return Promise.resolve();
     const controller = new AbortController();
-    const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.pumpOperation(agent, controller)));
+    const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.recoveringPumpOperation(agent, controller)));
     this.pumping.set(agent.agentId, operation);
     this.pumpControllers.set(agent.agentId, controller);
     void operation.then(() => {
@@ -1028,6 +1036,27 @@ export class SupervisedAgentDelivery {
       if (this.pumpControllers.get(agent.agentId) === controller) this.pumpControllers.delete(agent.agentId);
     });
     return operation;
+  }
+
+  private async recoveringPumpOperation(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
+    let failures = 0;
+    while (await this.hasLaneAuthority(agent, controller)) {
+      try {
+        await this.pumpOperation(agent, controller);
+        return;
+      } catch (error) {
+        if (!await this.hasLaneAuthority(agent, controller)) return;
+        failures += 1;
+        // Observation owns ingress health. Delivery recovery must neither hide
+        // a failed poll nor leave a stale warning after an independent retry.
+        if (failures === 1) console.warn(providerFailureDisplayText(
+          `Room delivery recovery for ${agent.agentId}: ${error instanceof Error ? error.message : "Room delivery recovery failed."}`,
+        ));
+        // Fault-only retry belongs to the tracked delivery operation. It must
+        // recover even while room intake is waiting on an otherwise idle poll.
+        if (!await this.waitForNextPoll(controller, pollErrorBackoffMs(failures))) return;
+      }
+    }
   }
 
   private async pumpOperation(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
