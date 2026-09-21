@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -11,7 +13,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
@@ -52,6 +54,7 @@ const {
   prepareCursorManagedProfile,
   prepareCursorSupervisedProfile: prepareCursorSupervisedProfileImpl,
   removeCursorSupervisedProfile,
+  relocateCursorConversationNamespace,
 } = await import("../main/agents/cursor-managed-profile.js");
 
 const prepareCursorSupervisedProfile = (input: CursorSupervisedProfileOptions) =>
@@ -59,6 +62,67 @@ const prepareCursorSupervisedProfile = (input: CursorSupervisedProfileOptions) =
     ...input,
     ...(input.inspectionOnly ? {} : { mcpRuntime: testMcpRuntime }),
   });
+
+test("Cursor conversations travel with sidecars and dependent sessions between unique workspace generations", () => {
+  const profile = { configDir: join(tempDir, "conversation-moves", "config") };
+  const resting = "/canonical/project";
+  const first = "/private/generation-one/live";
+  const second = "/private/generation-two/live";
+  const namespace = (workspace: string) => join(profile.configDir, "cursor", "chats", createHash("md5").update(resolve(workspace)).digest("hex"));
+  relocateCursorConversationNamespace(profile, resting, first, null);
+  assert.equal(existsSync(namespace(first)), false, "a fresh turn does not invent conversation evidence");
+  for (const [path, text] of [["session-one/store.db", "original-context"], ["session-one/store.db-wal", "recent-context"],
+    ["session-one/store.db-shm", "sqlite-shared-memory"], ["dependent-session/store.db", "subagent-context"]]) {
+    const file = join(namespace(first), path!);
+    mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text!);
+  }
+  relocateCursorConversationNamespace(profile, first, resting, "session-one");
+  assert.equal(existsSync(namespace(first)), false);
+  relocateCursorConversationNamespace(profile, first, resting, "session-one");
+  // A new supervisor uses only deterministic paths and existing custody, not
+  // an in-memory previous-workspace pointer or a scan for the newest store.
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+    `import {relocateCursorConversationNamespace as move} from ${JSON.stringify(new URL("../main/agents/cursor-managed-profile.ts", import.meta.url).href)};
+     move(${JSON.stringify(profile)}, ${JSON.stringify(resting)}, ${JSON.stringify(second)}, "session-one");`], { encoding: "utf8" });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(existsSync(namespace(resting)), false);
+  assert.equal(readFileSync(join(namespace(second), "session-one", "store.db"), "utf8"), "original-context");
+  assert.equal(readFileSync(join(namespace(second), "session-one", "store.db-wal"), "utf8"), "recent-context");
+  assert.equal(readFileSync(join(namespace(second), "session-one", "store.db-shm"), "utf8"), "sqlite-shared-memory");
+  assert.equal(readFileSync(join(namespace(second), "dependent-session", "store.db"), "utf8"), "subagent-context");
+  relocateCursorConversationNamespace(profile, second, resting, "session-one");
+});
+
+test("Cursor conversation moves reject missing sessions, collisions and redirected data without replacing anything", () => {
+  const from = "/canonical/source"; const to = "/private/generation/live";
+  for (const kind of ["missing", "wrong-session", "collision", "symlink", "hardlink", "directory-store", "redirected-parent"]) {
+    const profile = { configDir: join(tempDir, `conversation-reject-${kind}`, "config") };
+    relocateCursorConversationNamespace(profile, from, to, null);
+    const namespace = (workspace: string) => join(profile.configDir, "cursor", "chats", createHash("md5").update(resolve(workspace)).digest("hex"));
+    const source = namespace(from); const target = namespace(to);
+    const sourceStore = join(source, "session-one", "store.db");
+    const outside = join(tempDir, `untouched-${kind}`);
+    writeFileSync(outside, "untouched");
+    if (kind !== "missing") {
+      mkdirSync(dirname(sourceStore), { recursive: true });
+      if (kind === "symlink") symlinkSync(outside, sourceStore);
+      else if (kind === "hardlink") linkSync(outside, sourceStore);
+      else if (kind === "directory-store") mkdirSync(sourceStore);
+      else writeFileSync(sourceStore, "context");
+    }
+    if (kind === "collision") mkdirSync(target);
+    if (kind === "redirected-parent") {
+      const redirected = join(profile.configDir, "cursor", "chats", "nested");
+      symlinkSync(dirname(outside), redirected);
+      // Put the link on the path being moved; unrelated namespace entries
+      // are not scanned or adopted as continuation evidence.
+      symlinkSync(redirected, join(source, "redirect"));
+    }
+    assert.throws(() => relocateCursorConversationNamespace(profile, from, to, kind === "wrong-session" ? "different-session" : "session-one"));
+    assert.equal(existsSync(target), kind === "collision");
+    assert.equal(readFileSync(outside, "utf8"), "untouched");
+  }
+});
 
 test("supervised Cursor profiles are stable per attempt, isolated across attempts, and expose only LetAgents", () => {
   const sourceHome = join(tempDir, "source-home-supervised");
