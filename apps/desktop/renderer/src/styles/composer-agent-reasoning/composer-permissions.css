@@ -147,6 +147,27 @@
   color: var(--text-secondary);
 }
 
+.desktop-host-approval-history {
+  justify-self: start;
+  padding: 4px 2px;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 0.75rem;
+}
+
+.desktop-host-approval-details dl {
+  margin: 10px 0 0;
+}
+
+.desktop-host-approval-details dt {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.desktop-host-approval-details dd {
+  margin: 0 0 10px;
+}
+
 .desktop-host-approval-details pre {
   max-height: 220px;
   overflow: auto;
@@ -157,6 +178,7 @@
   unicode-bidi: plaintext;
   background: rgba(0, 0, 0, 0.18);
   border-radius: 6px;
+  margin: 4px 0 0;
 }
 
 .desktop-host-approval p {
