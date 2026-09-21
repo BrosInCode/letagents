@@ -69,18 +69,19 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
     workspacePath: workspace.path, workAttemptId: workspace.id });
   const retired = [] as Array<{ executionGenerationId: string; runtimeGenerationId: string;
     death: { kind: "codex_app_server"; pid: number; processIdentity: string } }>;
-  if (predecessors) for (const index of [1, 2]) {
+  const predecessorCount = predecessors ? (mode === "fresh" ? 33 : 2) : 0;
+  for (const index of Array.from({ length: predecessorCount }, (_, n) => n + 1)) {
     const old = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", index);
-    const death = { kind: "codex_app_server" as const, pid: 44000 + index, processIdentity: `Mon Sep 14 14:50:0${index} 2026` };
+    const death = { kind: "codex_app_server" as const, pid: 44000 + index, processIdentity: `Mon Sep 14 14:50:${String(index).padStart(2, "0")} 2026` };
     retired.push({ executionGenerationId: old.execution_generation_id,
       runtimeGenerationId: executionRuntimeStorageIdentity(id, old.execution_generation_id, death.kind, death.pid, death.processIdentity), death });
     await durability.recordTerminal(attempt.work_attempt_id, old.execution_generation_id, {
       actor: old.actor, generation: old.generation, ended_at: new Date().toISOString(), exit_code: null, signal: null,
       stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crashed", provider_continuation_id: "saved-conversation",
-      ...(index === 1 ? { native_runtime_death: death } : {}),
+      ...(index !== 2 ? { native_runtime_death: death } : {}),
     });
   }
-  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", predecessors ? 3 : 1);
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", predecessorCount + 1);
   await durability.close();
   const connection = { kind: "codex_app_server" as const, pid: 45550,
     processIdentity: "Mon Sep 14 15:50:00 2026", url: "ws://127.0.0.1:45550" };
@@ -222,6 +223,7 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
         const coordinates = { operationId: request.operation_id, entryId: id, roomId: entry.room_id, mode,
           executionGenerationId: execution.execution_generation_id, runtimeGenerationId: runtimeId };
         const plan = prepareRetiredRuntimePlan(db, coordinates, unchanged, [retired[1]!], processIdentity);
+        assert.equal(plan.evidence.length, predecessorCount, "durable candidates are not truncated to the maintenance input limit");
         db.exec("BEGIN IMMEDIATE");
         db.prepare("UPDATE execution_observers SET max_observed_sequence=max_observed_sequence+1 WHERE agent_id=?").run(id);
         assert.throws(() => archiveRetiredRuntimes(db, coordinates, { ...unchanged, desired_state: "paused" }, plan, processIdentity), /observation changed/);

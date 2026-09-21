@@ -13,7 +13,7 @@ const retiredRuntimeEvidenceSchema = z.strictObject({
 });
 export type RetiredRuntimeEvidence = z.infer<typeof retiredRuntimeEvidenceSchema>;
 export const retiredRuntimeEvidenceListSchema = z.array(retiredRuntimeEvidenceSchema).max(32);
-export type RetiredRuntimePlan = { evidence: RetiredRuntimeEvidence[]; observerJson: string | null };
+export type RetiredRuntimePlan = { evidence: RetiredRuntimeEvidence[]; suppliedEvidence: RetiredRuntimeEvidence[]; observerJson: string | null };
 
 /** Retained identities identify candidates; only the host can prove them dead. */
 export function prepareRetiredRuntimePlan(database: DatabaseSync, request: RuntimeRestartRequest,
@@ -25,7 +25,7 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
   const observer = database.prepare("SELECT * FROM execution_observers WHERE agent_id=?").get(entry.id);
   if (!["claude-code", "codex"].includes(entry.provider)) {
     if (supplied.length) throw new Error("This provider does not support retired process evidence.");
-    return { evidence: [], observerJson: null };
+    return { evidence: [], suppliedEvidence: supplied, observerJson: null };
   }
   const rows = database.prepare(`SELECT r.*,e.work_attempt_id,e.terminal_json,e.started_at,e.actor,e.generation,
     (EXISTS(SELECT 1 FROM execution_observers o WHERE o.agent_id=r.agent_id AND o.observer_runtime_generation_id=r.runtime_generation_id)
@@ -78,13 +78,13 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
     evidence.push({ executionGenerationId: String(row.execution_generation_id), runtimeGenerationId: String(row.runtime_generation_id), death });
   }
   if (suppliedByRuntime.size) throw new Error("Retired runtime evidence does not belong to this agent's work attempt.");
-  return { evidence, observerJson: observer && evidence.some(item => item.runtimeGenerationId === observer.observer_runtime_generation_id) ? JSON.stringify(observer) : null };
+  return { evidence, suppliedEvidence: supplied, observerJson: observer && evidence.some(item => item.runtimeGenerationId === observer.observer_runtime_generation_id) ? JSON.stringify(observer) : null };
 }
 
 export function archiveRetiredRuntimes(database: DatabaseSync, request: RuntimeRestartRequest, entry: DaemonManifestEntry,
   plan: RetiredRuntimePlan, identity?: ProcessIdentity): void {
   if (!database.isTransaction || entry.desired_state !== "paused") throw new Error("Retired runtime recovery requires a paused, fenced transaction.");
-  const current = prepareRetiredRuntimePlan(database, request, entry, plan.evidence, identity);
+  const current = prepareRetiredRuntimePlan(database, request, entry, plan.suppliedEvidence, identity);
   if (JSON.stringify(current) !== JSON.stringify(plan)) throw new Error("The predecessor observation changed during recovery. Refresh and retry.");
   const at = new Date().toISOString();
   for (const item of plan.evidence) {
