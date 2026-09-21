@@ -782,6 +782,63 @@ test("daemon client maps an ordered full-state subscription snapshot", async () 
   }
 });
 
+test("daemon client reads large fragmented UTF-8 snapshots and validates the completed frame", async (context) => {
+  for (const mode of ["snapshot", "wrong_id", "error"] as const) {
+    await context.test(mode, async () => {
+      const env = await fixture();
+      const charter = "Review café 🌱\n".repeat(100_000);
+      const server = createServer(socket => {
+        let requestBuffer = "";
+        socket.setEncoding("utf8");
+        socket.on("error", () => {}); // The client deliberately closes after the first frame.
+        socket.on("data", chunk => {
+          requestBuffer += chunk;
+          if (!requestBuffer.includes("\n")) return;
+          const request = JSON.parse(requestBuffer.slice(0, requestBuffer.indexOf("\n")));
+          const response = Buffer.from(JSON.stringify({
+            version: SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+            id: mode === "wrong_id" ? "another-request" : request.id,
+            ok: mode !== "error",
+            error: mode === "error" ? "Fragmented daemon failure" : undefined,
+            result: { daemon_generation: 19, sequence: 7, entries: [{ ...wireEntryWithCausalProjection(), charter }] },
+          }));
+          let offset = 0;
+          const writeChunk = () => {
+            if (socket.destroyed) return;
+            if (offset === response.length) {
+              // The delimiter arrives separately. Bytes after it are not part
+              // of this request, even when they share its last socket chunk.
+              socket.end("\nnot-another-json-response\n");
+              return;
+            }
+            const end = Math.min(offset + 8_191, response.length);
+            const writable = socket.write(response.subarray(offset, end));
+            offset = end;
+            if (writable) setImmediate(writeChunk);
+            else socket.once("drain", writeChunk);
+          };
+          writeChunk();
+        });
+      });
+      try {
+        await new Promise<void>(resolve => server.listen(env.socketPath, resolve));
+        const client = new SupervisorDaemonClient({ socketPath: env.socketPath, requestTimeoutMs: 10_000 });
+        const pending = client.watchState({ afterDaemonGeneration: 19, afterSequence: 6, waitMs: 0 });
+        if (mode === "snapshot") {
+          const snapshot = await pending;
+          assert.equal(snapshot.entries[0]?.charter, charter);
+          assert.equal(snapshot.sequence, 7);
+        } else {
+          await assert.rejects(pending, mode === "wrong_id" ? /response id mismatch/ : /Fragmented daemon failure/);
+        }
+      } finally {
+        await closeServer(server, env.socketPath);
+        await env.cleanup();
+      }
+    });
+  }
+});
+
 test("state subscriptions observe an existing daemon without spawning one", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -2638,7 +2695,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.157");
+    assert.equal(status.implementationVersion, "2.0.158");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

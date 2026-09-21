@@ -2872,13 +2872,13 @@ test("captured receipt settlement accepts typed-capable authority modes but reje
     resetAttempt.run(attempt);
     setAuthorityMode.run("typed", attempt);
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-authority"),
-      { lastFifoSequence: 1, hasMore: false, unavailable: false });
+      { lastFifoSequence: 1, hasMore: false, unavailable: false, changed: true });
     assert.deepEqual(readAttempt(),
       { state: "cleanly_concluded", conclusion: "acknowledged_no_reply" });
     resetAttempt.run(attempt);
     setAuthorityMode.run("legacy", attempt);
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-authority"),
-      { lastFifoSequence: 1, hasMore: false, unavailable: true });
+      { lastFifoSequence: 1, hasMore: false, unavailable: true, changed: false });
     assert.deepEqual(readAttempt(),
       { state: "active", conclusion: null });
   } finally { database?.close(); await store.close(); await env.cleanup(); }
@@ -2899,7 +2899,7 @@ for (const writeFailure of [false, true]) test(`captured attempt settlement prec
       database.exec(`CREATE TRIGGER reject_optional_settlement BEFORE UPDATE ON execution_message_attempts
         BEGIN SELECT RAISE(ABORT,'optional projection unavailable'); END`);
       assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-retention"),
-        { lastFifoSequence: null, hasMore: false, unavailable: true });
+        { lastFifoSequence: null, hasMore: false, unavailable: true, changed: false });
     }
     for (const item of items.slice(1)) await completeCapturedReceipt(store, database, item);
     assert.equal(await store.get(items[0]!.inbox_item_id), null, "receipt retention still prunes the oldest row");
@@ -2931,16 +2931,16 @@ test("captured receipt settlement batches advance past invalid proof without cro
     database.prepare("UPDATE supervised_agent_inbox SET terminal_reason='upgrade_authority_unavailable' WHERE inbox_item_id=?").run(items[3]!.inbox_item_id);
     database.prepare("DELETE FROM supervised_agent_publications WHERE inbox_item_id=?").run(items[4]!.inbox_item_id);
     database.prepare("UPDATE supervised_agent_terminal_results SET terminal_evidence_json='{}' WHERE inbox_item_id=?").run(items[5]!.inbox_item_id);
-    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-batch"), { lastFifoSequence: 32, hasMore: true, unavailable: true });
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-batch"), { lastFifoSequence: 32, hasMore: true, unavailable: true, changed: true });
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.count, 26);
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-batch", { afterFifoSequence: 32 }),
-      { lastFifoSequence: 35, hasMore: false, unavailable: false });
+      { lastFifoSequence: 35, hasMore: false, unavailable: false, changed: true });
     for (const attempt of attempts.slice(0, 6)) assert.equal(database.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id=?").get(attempt)!.state, "active");
     const before = database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all();
     assert.deepEqual(settleCapturedExecutionAttempts(database, "wrong-agent", { inboxItemId: items[5]!.inbox_item_id }),
-      { lastFifoSequence: null, hasMore: false, unavailable: false });
+      { lastFifoSequence: null, hasMore: false, unavailable: false, changed: false });
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-batch", { afterFifoSequence: 35 }),
-      { lastFifoSequence: null, hasMore: false, unavailable: false });
+      { lastFifoSequence: null, hasMore: false, unavailable: false, changed: false });
     assert.deepEqual(database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all(), before);
   } finally { database?.close(); await store.close(); await env.cleanup(); }
 });
@@ -2964,7 +2964,7 @@ test("captured attempt conclusions preserve native failures, cancellation, no-re
     database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
       .run("caller mutation survives", items[0]!.inbox_item_id);
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
-      { lastFifoSequence: null, hasMore: false, unavailable: true });
+      { lastFifoSequence: null, hasMore: false, unavailable: true, changed: false });
     assert.equal(database.isTransaction, true, "a statement abort must preserve the caller transaction");
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='active'").get()!.count, 5,
       "the second update's abort must roll back the successful first projection update too");
@@ -2995,17 +2995,17 @@ test("captured attempt conclusions preserve native failures, cancellation, no-re
 
     database.exec("BEGIN IMMEDIATE");
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
-      { lastFifoSequence: 5, hasMore: false, unavailable: false });
+      { lastFifoSequence: 5, hasMore: false, unavailable: false, changed: true });
     assert.equal(database.isTransaction, true, "optional helper cannot commit its caller's transaction");
     database.exec("ROLLBACK");
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='active'").get()!.count, 5);
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
-      { lastFifoSequence: 5, hasMore: false, unavailable: false });
+      { lastFifoSequence: 5, hasMore: false, unavailable: false, changed: true });
     assert.deepEqual(database.prepare("SELECT conclusion FROM execution_message_attempts ORDER BY source_message_id").all().map((row) => row.conclusion),
       ["failed", "interrupted", "interrupted", "acknowledged_no_reply", "replied"]);
     const settled = database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all();
     assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
-      { lastFifoSequence: null, hasMore: false, unavailable: false });
+      { lastFifoSequence: null, hasMore: false, unavailable: false, changed: false });
     assert.deepEqual(database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all(), settled);
     assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_inbox ORDER BY fifo_sequence").all(), receipts);
     database.close();
@@ -3028,7 +3028,7 @@ test("captured settlement does not conclude publishing, blocked or compensatable
     for (const state of ["publishing", "blocked", "result_recovery", "cancelled_by_room_move"]) {
       database.prepare("UPDATE supervised_agent_inbox SET state=? WHERE inbox_item_id=?").run(state, item!.inbox_item_id);
       assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-unsettled", { inboxItemId: item!.inbox_item_id }),
-        { lastFifoSequence: null, hasMore: false, unavailable: false });
+        { lastFifoSequence: null, hasMore: false, unavailable: false, changed: false });
       assert.equal(database.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id=?").get(attempt)!.state, "active");
     }
   } finally { database?.close(); await store.close(); await env.cleanup(); }

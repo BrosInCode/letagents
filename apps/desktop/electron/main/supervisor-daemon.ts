@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.157";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.158";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -1803,7 +1803,7 @@ export class SupervisorDaemonClient {
       const id = randomUUID();
       const socket = createConnection(this.socketPath);
       if (unrefSocket) socket.unref();
-      let buffer = "";
+      const chunks: string[] = [];
       let settled = false;
       let onAbort: (() => void) | null = null;
       const finish = (error?: Error, value?: T) => {
@@ -1823,11 +1823,14 @@ export class SupervisorDaemonClient {
       socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
       socket.once("error", (error) => finish(error));
       socket.on("data", (chunk: string) => {
-        buffer += chunk;
-        const newline = buffer.indexOf("\n");
+        if (settled) return;
+        // Each earlier chunk is already known to contain no newline. Scanning
+        // the growing response again makes large state snapshots quadratic.
+        const newline = chunk.indexOf("\n");
+        chunks.push(newline < 0 ? chunk : chunk.slice(0, newline));
         if (newline < 0) return;
         try {
-          const response = JSON.parse(buffer.slice(0, newline)) as WireResponse;
+          const response = JSON.parse(chunks.join("")) as WireResponse;
           if (response.id !== id) throw new Error("Supervisor daemon response id mismatch.");
           if (!response.ok) {
             if (/Protocol version mismatch/i.test(response.error ?? "")) {

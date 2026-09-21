@@ -627,7 +627,8 @@ test("control coalescing preserves changed evidence, native events, exact proces
 
 test("committed receipts settle captured attempts independently of capture gaps and late native outcomes", async () => {
   for (const gap of [false, true]) {
-    const f = fixture();
+    let hints = 0;
+    const f = fixture("codex_app_server", undefined, () => { hints++; });
     try {
       f.bindTurn(); await f.install(); f.emit(ready); f.emit(active); await flush();
       if (gap) {
@@ -638,7 +639,9 @@ test("committed receipts settle captured attempts independently of capture gaps 
       f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',
         outcome=?,acknowledged_at=?,updated_at=?`).run(JSON.stringify({ kind: "no_reply", text: null }), now, now);
       const operational = f.db.prepare("SELECT * FROM supervised_agent_inbox").all();
+      const beforeSettlement = hints;
       f.capture.refresh(); await flush();
+      assert.equal(hints, beforeSettlement + 1, "receipt-only progress notifies even when capture is suspended");
       const settled = f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get();
       assert.deepEqual({ ...settled }, { state: "cleanly_concluded", conclusion: "acknowledged_no_reply", settled_at_ms: Date.parse(now) });
       assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "active", "receipt settlement is not native-turn lifecycle authority");
@@ -647,7 +650,9 @@ test("committed receipts settle captured attempts independently of capture gaps 
         f.emit({ ...nativeTurn, domain: "execution", kind: "completed", executionId: "late-read", operation: "file_read", outcome: "failed", sideEffects: "none" });
         await flush(); assert.equal(f.facts().length, 4, "late exact native evidence remains ingestible after logical settlement");
       }
+      const beforeRefresh = hints;
       f.capture.refresh(); await flush();
+      assert.equal(hints, beforeRefresh, "already settled receipts do not notify again");
       assert.deepEqual(f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get(), settled);
       assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), operational);
     } finally { f.capture.close(); }
@@ -673,8 +678,59 @@ test("capture change hints follow fact and receipt commits, survive callback fai
     await flush(); assert.equal(f.facts().length, 4, "a throwing hint cannot suspend subsequent capture");
     assert.deepEqual(f.diagnostics, []);
     const calls = snapshots.length;
+    for (let index = 0; index < 3; index++) { f.capture.refresh(); await flush(); }
+    assert.equal(snapshots.length, calls, "unchanged refreshes do not announce another state change");
     f.emit(ready); f.capture.close(); f.emit(ready); await flush();
     assert.equal(snapshots.length, calls, "shutdown frontier preservation and queued facts never request publication");
+  } finally { f.capture.close(); }
+});
+
+test("an empty capture source announces admission once, then stays quiet until progress", async () => {
+  let hints = 0;
+  const f = fixture("codex_app_server", undefined, () => { hints++; });
+  try {
+    await f.install(); await flush();
+    assert.equal(f.admission(), "ready");
+    assert.equal(hints, 1);
+    const observer = f.db.prepare("SELECT * FROM execution_observers").get();
+    for (let index = 0; index < 3; index++) { f.capture.refresh(); await flush(); }
+    assert.deepEqual(f.db.prepare("SELECT * FROM execution_observers").get(), observer);
+    assert.equal(hints, 1, "no facts, receipt settlement, or admission change means no notification");
+    f.emit(ready); await flush();
+    assert.equal(hints, 2);
+    f.bindTurn(); // External commit changes admission without a new native fact.
+    f.capture.refresh(); await flush();
+    assert.equal(f.admission(), "unavailable");
+    assert.equal(hints, 3);
+    f.capture.refresh(); await flush();
+    assert.equal(hints, 3);
+    f.emit(active); await flush();
+    assert.equal(f.admission(), "ready");
+    assert.equal(hints, 4);
+  } finally { f.capture.close(); }
+});
+
+test("capture announces partial committed progress but not repeated failed no-op retries", async () => {
+  let hints = 0;
+  const f = fixture("codex_app_server", undefined, () => { hints++; });
+  try {
+    await f.install(); await flush();
+    f.bindTurn(); f.capture.refresh(); await flush();
+    const before = hints;
+    f.db.exec(`CREATE TRIGGER reject_native_turn BEFORE INSERT ON execution_turns
+      BEGIN SELECT RAISE(ABORT,'native turn unavailable'); END`);
+    f.emit(active); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts").get()!.n, 1);
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_attempt_generations").get()!.n, 1);
+    assert.equal(f.facts().length, 0);
+    assert.equal(hints, before + 1, "the attempt committed before the native-turn write failed");
+    f.capture.refresh(); await flush();
+    assert.equal(hints, before + 1, "idempotent attempt tracking and the same diagnostic are not new progress");
+    f.db.exec("DROP TRIGGER reject_native_turn");
+    f.capture.refresh(); await flush();
+    assert.equal(f.facts().length, 1);
+    assert.equal(f.admission(), "ready");
+    assert.equal(hints, before + 2);
   } finally { f.capture.close(); }
 });
 
