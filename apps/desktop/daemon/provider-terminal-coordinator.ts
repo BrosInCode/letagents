@@ -141,6 +141,7 @@ export class ProviderTerminalCoordinator {
     const replacement = this.plannedConfigurationReplacements.get(installation);
     if (!this.ports.streams.remove(installation)) return;
     let replacementObserved = false;
+    let approvalSettlementPending = false;
     try {
       this.ports.runtimeCustody.deletePendingResumeBinding(entryId);
       let shouldStartDelivery = false;
@@ -166,7 +167,9 @@ export class ProviderTerminalCoordinator {
               },
             );
           }
+          approvalSettlementPending = Boolean(execution);
           await this.ports.settleRuntimeApprovals(entryId);
+          approvalSettlementPending = false;
           if (entry.desired_state === "stopped") {
             await this.ports.durability.releaseTerminalExecutionFence(
               entry.work_attempt_id,
@@ -205,6 +208,8 @@ export class ProviderTerminalCoordinator {
       replacement?.resolve();
     } catch (error) {
       replacement?.reject(error);
+      if (approvalSettlementPending && this.ports.streams.isLatestInstallation(installation)
+        && !this.ports.liveHandles.get(entryId)) this.ports.requestConvergence(entryId);
       throw error;
     } finally {
       if (replacement && this.plannedConfigurationReplacements.get(installation) === replacement) {

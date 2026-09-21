@@ -1106,6 +1106,8 @@ test("convergence retries durable approval settlement before stopped or recovery
   const entry = baseEntry(); entry.desired_state = "stopped";
   const runtime = harness({ entry });
   let attempts = 0;
+  const retries: Array<{ id: string; delay: number }> = [];
+  runtime.coordinator.scheduleRecovery = (id, delay) => { retries.push({ id, delay }); };
   runtime.options.settleRuntimeApprovals = async () => {
     attempts++;
     if (attempts === 1) throw new Error("closure write failed");
@@ -1114,6 +1116,7 @@ test("convergence retries durable approval settlement before stopped or recovery
   await assert.rejects(runtime.coordinator.converge(entry.id), /closure write failed/);
   await runtime.coordinator.converge(entry.id);
   assert.equal(attempts, 2);
+  assert.deepEqual(retries, [{ id: entry.id, delay: 5_000 }], "only failed settlement schedules another attempt");
   assert.equal(runtime.executionGenerations.length, 0, "no successor starts ahead of settlement");
 });
 
