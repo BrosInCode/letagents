@@ -18,6 +18,7 @@ import {
   cursorSandboxRuntimeReadSubpaths,
   escapeCursorSandboxRegex,
   isExactCursorLoopbackTestOrigin,
+  prepareCursorResumeOwnershipLock,
   validateCursorSandboxPaths,
   validateCursorSandboxRegexes,
 } from "./cursor-sandbox-policy.js";
@@ -88,6 +89,8 @@ export function defaultLaunchTurn(input: {
   mcpRuntimeEnv?: Readonly<Record<string, string>>;
   providerAuthorization?: string;
   restrictRemoteAuthority?: boolean;
+  /** Exact continuation already held by the supervised adapter, never a prompt value. */
+  nativeResumeSessionId?: string;
   /** Injectable only through direct unit tests; adapter production never sets it. */
   testAgentUpstreamEndpoint?: string;
   /** Injectable only through direct unit tests; adapter production never sets it. */
@@ -200,6 +203,18 @@ export function defaultLaunchTurn(input: {
       || arg === "--http-version"
       || arg.startsWith("--http-version="))) {
     throw new Error("Supervised Cursor endpoint and authentication flags are adapter-owned.");
+  }
+  if (input.nativeResumeSessionId !== undefined) {
+    if (!restrictRemoteAuthority
+      || input.args.filter((arg) => arg.startsWith("--resume=")).length !== 1
+      || !input.args.includes(`--resume=${input.nativeResumeSessionId}`)) {
+      throw new Error("Cursor ownership access must match the exact supervised resume session.");
+    }
+    if (process.platform === "darwin") {
+      const lock = prepareCursorResumeOwnershipLock(input.nativeResumeSessionId);
+      allowedReadSubpaths.push(...cursorSandboxPathVariants(lock));
+      allowedWriteSubpaths.push(...cursorSandboxPathVariants(lock));
+    }
   }
   // The wrapper is the durable process identity. It does not launch Cursor
   // until release(), allowing the daemon to checkpoint PID + birth identity
