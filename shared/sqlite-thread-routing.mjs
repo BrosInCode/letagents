@@ -845,10 +845,8 @@ export async function ensureRequestedRootsProjected(database, roomId, rootNumber
       workStartedAt = performance.now();
     }
     if (batch.processed === 0) break;
-    if (performance.now() - foregroundStartedAt >= foregroundTimeBudgetMs) {
-      if (scheduleOnTimeout) scheduleRequestedRootsRepair(database, roomId, rootNumbers);
-      throw new LocalThreadRoutingProjectionUnavailableError();
-    }
+    // Recheck completion before enforcing the next batch's deadline. A final
+    // committed batch may finish just before a long event-loop yield.
   }
 }
 
