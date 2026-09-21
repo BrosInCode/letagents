@@ -1,3 +1,8 @@
+import { join } from "node:path";
+const { DaemonControlSocket } = await import(new URL("../../daemon/control-socket.ts", import.meta.url).href);
+import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mjs";
+// These storage-domain fixtures run as the board owner. Cross-process calls use the socket below.
+registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
@@ -13,6 +18,17 @@ const { addLocalChatMessage, getLocalChatMessages } = await import("../main/room
 const { getStoredAgentSession } = await import("../main/agents/state.js");
 const { prepareLocalSupervisorGrant, revokeLocalSupervisorEntry } = await import("../main/rooms/local-supervision-authority.js");
 const { requestLocalSupervisor, executeLocalSupervisorTool } = await import("../main/rooms/local-supervision-runtime.js");
+const boardService = await import("../main/rooms/local-board-service.js");
+process.env.LETAGENTS_BOARD_SOCKET_PATH = join(environment.tempDir, "board.sock");
+const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
+  if (request.method === "local_board.watch") return boardService.watchLocalBoard(request.params, 1, signal);
+  if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
+  throw new Error("Unknown fixture request");
+});
+await boardSocket.start();
+test.beforeEach(() => registerLocalBoardOwner(() => {}));
+test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
+
 const origin = "letagents-local://rooms";
 
 async function worker(roomId: string, name: string, suffix: string) {

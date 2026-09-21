@@ -741,6 +741,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       return;
     }
 
+    if (event.type === "task_remove") {
+      const snapshot = options.selectedSnapshot.value;
+      if (snapshot) setSelectedSnapshot({
+        ...snapshot, tasks: snapshot.tasks.filter(task => task.id !== event.taskId),
+      });
+      return;
+    }
+
     if (event.type === "github_event") {
       setSelectedSnapshot(upsertSnapshotGitHubEvent(options.selectedSnapshot.value, event.event));
       return;

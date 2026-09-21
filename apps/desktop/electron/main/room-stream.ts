@@ -19,6 +19,7 @@ import {
   getLocalChatThreadRoutingAgentKeysForRoots,
 } from "./rooms/messages/local-store.js";
 import { resolveLocalThreadReaderKey } from "./rooms/messages/thread-reader.js";
+import { subscribeLocalTasks } from "./rooms/local-task-subscription.js";
 import {
   mapDesktopReasoningSessionPayload,
   mapDesktopReasoningUpdatePayload,
@@ -1807,6 +1808,30 @@ export async function startDesktopRoomStream(
       storage,
       trimmedRoomIdentifier,
     );
+    let previousTasks = new Map<string, string>();
+    const reportTaskError = (error: unknown): void => {
+      if (!isCurrentRoomStream(startingStream)) return;
+      emitRoomStreamEvent({ type: "error", roomIdentifier: trimmedRoomIdentifier,
+        message: error instanceof Error ? error.message : "Local board updates disconnected." },
+      { deliverToManagedAgents: false });
+    };
+    void subscribeLocalTasks(startingStream.localRoomIdentifier, startingStream.abortController.signal,
+      tasks => {
+        if (!isCurrentRoomStream(startingStream)) return;
+        const nextTasks = new Map(tasks.map(task => [task.id, JSON.stringify(task)]));
+        for (const task of tasks) {
+          if (previousTasks.get(task.id) === nextTasks.get(task.id)) continue;
+          emitRoomStreamEvent({ type: "task_update", roomIdentifier: trimmedRoomIdentifier, task },
+            { deliverToManagedAgents: false });
+        }
+        for (const taskId of previousTasks.keys()) {
+          if (!nextTasks.has(taskId)) {
+            emitRoomStreamEvent({ type: "task_remove", roomIdentifier: trimmedRoomIdentifier, taskId },
+              { deliverToManagedAgents: false });
+          }
+        }
+        previousTasks = nextTasks;
+      }, reportTaskError).catch(reportTaskError);
     void pollLocalDesktopRoomMessages(
       startingStream,
       startingStream.localRoomIdentifier,
