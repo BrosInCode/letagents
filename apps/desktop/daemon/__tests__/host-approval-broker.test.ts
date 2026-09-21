@@ -1322,8 +1322,9 @@ for (const wrong of ["turn", "tool", "retired", "missing_snapshot"] as const) {
 }
 
 for (const provider of ["claude-code", "codex"] as const) {
+  for (const source of ["terminal", "retired_recovery"] as const) {
   for (const phase of ["requested", "selected", "dispatched"] as const) {
-    test(`${provider} witnessed process death closes ${phase} approval without acknowledging or replaying`, async () => {
+    test(`${provider} ${source} process death closes ${phase} approval without acknowledging or replaying`, async () => {
       const f = await fixture(provider);
       try {
         const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
@@ -1333,10 +1334,17 @@ for (const provider of ["claude-code", "codex"] as const) {
         const before = (await f.store.getExecutionApproval(selected.expected))!;
         // This fixture never installs optional execution capture. Its operational
         // origin generation remains valid after recovery into a later generation.
-        f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,?)")
-          .run(new Date(now + 15).toISOString(), JSON.stringify({ ended_at: new Date(now + 20).toISOString(),
-            provider_continuation_id: "continuation", native_runtime_death: {
-              kind: provider === "codex" ? "codex_app_server" : "claude_cli", pid: 4311, processIdentity: "native-birth" } }));
+        const death = { kind: provider === "codex" ? "codex_app_server" : "claude_cli", pid: 4311, processIdentity: "native-birth" };
+        if (source === "terminal") {
+          f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,?)")
+            .run(new Date(now + 15).toISOString(), JSON.stringify({ ended_at: new Date(now + 20).toISOString(),
+              provider_continuation_id: "continuation", native_runtime_death: death }));
+        } else {
+          f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('retired','agent','room','generation',?,'resume','complete',?,NULL,?,?)")
+            .run(selected.expected.runtimeGenerationId, JSON.stringify({ work_attempt_id: "workspace", execution_generation_id: "generation",
+              provider_continuation_id: "continuation", provider_connection: null, native_runtime_death: death }),
+              new Date(now + 20).toISOString(), new Date(now + 20).toISOString());
+        }
         const reopened = new ManifestStore(f.path);
         try {
           await assert.rejects(reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
@@ -1359,6 +1367,7 @@ for (const provider of ["claude-code", "codex"] as const) {
         assert.equal(f.sends.length, phase === "dispatched" ? 1 : 0);
       } finally { await f.close(); }
     });
+  }
   }
 }
 
@@ -1398,5 +1407,48 @@ test("runtime cleanup covers more than the presentation limit and samples time i
     assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => clock,
       async commit => { clock = now + 50; await commit(); }), count);
     assert.equal(f.db.prepare("SELECT count(*) AS n FROM execution_approval_request_closures WHERE observed_at_ms=?").get(now + 50)!.n, count);
+  } finally { await f.close(); }
+});
+
+
+test("retired recovery cleanup requires a completed exact owner and preserves legacy terminals", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room"); const expected = decision(candidate!).expected;
+    const ref = { work_attempt_id: "workspace", execution_generation_id: "generation", provider_continuation_id: "continuation",
+      provider_connection: null, native_runtime_death: { kind: "claude_cli", pid: 4311, processIdentity: "native-birth" } };
+    const at = new Date(now + 20).toISOString();
+    f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('retired','agent','room','generation',?,'resume','prepared',?,NULL,?,?)")
+      .run(expected.runtimeGenerationId, JSON.stringify(ref), at, at);
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0);
+    f.db.prepare("UPDATE agent_runtime_recoveries SET phase='stopped'").run();
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0);
+    f.db.prepare("UPDATE agent_runtime_recoveries SET phase='complete'").run();
+    for (const bad of [
+      { ...ref, native_runtime_death: undefined },
+      { ...ref, work_attempt_id: "other-workspace" },
+      { ...ref, execution_generation_id: "other-generation" },
+      { ...ref, provider_continuation_id: "other-continuation" },
+      { ...ref, provider_connection: { kind: "claude_cli", pid: 4311, processIdentity: "native-birth" } },
+      { ...ref, native_runtime_death: { ...ref.native_runtime_death, kind: "codex_app_server" } },
+      { ...ref, native_runtime_death: { ...ref.native_runtime_death, pid: 9000 } },
+      { ...ref, native_runtime_death: { ...ref.native_runtime_death, processIdentity: "successor-birth" } },
+    ]) {
+      f.db.prepare("UPDATE agent_runtime_recoveries SET provider_ref_json=?").run(JSON.stringify(bad));
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0);
+      assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, null);
+    }
+    f.db.prepare("UPDATE agent_runtime_recoveries SET provider_ref_json=?").run(JSON.stringify(ref));
+    for (const [column, value] of Object.entries({ agent_id: "agent", room_id: "room", execution_generation_id: "generation",
+      runtime_generation_id: expected.runtimeGenerationId })) {
+      f.db.prepare(`UPDATE agent_runtime_recoveries SET ${column}=?`).run("other-owner");
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0);
+      f.db.prepare(`UPDATE agent_runtime_recoveries SET ${column}=?`).run(value);
+    }
+    f.db.prepare("UPDATE agent_runtime_recoveries SET provider_ref_json=?,created_at=?").run(JSON.stringify(ref), new Date(now - 1).toISOString());
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0);
+    f.db.prepare("UPDATE agent_runtime_recoveries SET created_at=?").run(at);
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1);
+    assert.equal(f.db.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id='generation'").get()!.terminal_json, null);
   } finally { await f.close(); }
 });
