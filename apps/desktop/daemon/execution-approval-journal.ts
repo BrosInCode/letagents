@@ -458,3 +458,24 @@ export function loseExecutionApproval(db: DatabaseSync, input: LoseExecutionAppr
     .run(certainty, value.expected.requestId, value.expected.requestVersion);
   return exact(db, value.expected);
 }
+
+/** All runtime-death closure callers share one fault-only retry policy. */
+export async function settleRuntimeApprovalRequests(entryId: string, ports: {
+  settle(): Promise<number>;
+  notifyChanged(): void;
+  isHandoffScheduled(): boolean;
+  assertCurrent(): Promise<void>;
+  scheduleRecovery(entryId: string, delayMs: number): void;
+}): Promise<void> {
+  try {
+    if (await ports.settle()) ports.notifyChanged();
+  } catch (error) {
+    if (!ports.isHandoffScheduled()) {
+      try {
+        await ports.assertCurrent();
+        ports.scheduleRecovery(entryId, 5_000);
+      } catch { /* A retired daemon cannot schedule its successor's work. */ }
+    }
+    throw error;
+  }
+}
