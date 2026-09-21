@@ -180,13 +180,14 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
             executionGenerationId: old.executionGenerationId, workspaceId: attempt.work_attempt_id, createdAtMs: 50 });
           // Retained legacy state: A's unresolved turn outlived its observer.
           beforeDb.prepare(`INSERT INTO execution_turns VALUES(?,?,?,?,?,?,?,?,?,'possible',50,?)`)
-            .run(`old-turn-${index}`, oldAttempt, id, entry.room_id, old.executionGenerationId, old.runtimeGenerationId, "saved-conversation", `old-native-turn-${index}`, index === 0 ? "active" : "lost", index === 0 ? null : 51);
+            .run(`old-turn-${index}`, oldAttempt, id, entry.room_id, old.executionGenerationId, old.runtimeGenerationId, "saved-conversation", `old-native-turn-${index}`, index === 0 && mode === "resume" ? "active" : "lost", index === 0 && mode === "resume" ? null : 51);
           beforeDb.prepare(`INSERT INTO supervised_agent_inbox
             (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,created_at,updated_at)
             VALUES(?,?,?,?,'{}','{}',?,'pending',1,?,?,?,NULL,?,?)`)
             .run(`old-inbox-${index}`, id, entry.room_id, `old-${index}`, index + 4, `old-action-${index}`, `old-reply-${index}`, `old-native-turn-${index}`, at, at);
           beforeDb.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,?,?,?,?,'saved-conversation',?)")
             .run(`old-inbox-${index}`, id, entry.room_id, attempt.work_attempt_id, old.executionGenerationId, `old-native-turn-${index}`);
+          if (index === 0 && mode === "fresh") beforeDb.prepare("UPDATE supervised_agent_inbox SET state='acknowledged' WHERE inbox_item_id=?").run(`old-inbox-${index}`);
         }
         const old = retired[1]!;
         beforeDb.prepare(`UPDATE execution_observers SET execution_generation_id=?,runtime_generation_id=?,
@@ -301,7 +302,7 @@ for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"]
         for (const [index, old] of retired.entries()) {
           assert.equal(afterDb.prepare("SELECT phase FROM agent_runtime_recoveries WHERE runtime_generation_id=?").get(old.runtimeGenerationId)!.phase, "complete");
           assert.equal(afterDb.prepare("SELECT state FROM execution_turns WHERE turn_id=?").get(`old-turn-${index}`)!.state, "lost");
-          assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id=?").get(`old-inbox-${index}`)!.state, "cancelled_by_user");
+          assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id=?").get(`old-inbox-${index}`)!.state, index === 0 && mode === "fresh" ? "acknowledged" : "cancelled_by_user");
         }
         assert.equal(afterDb.prepare("SELECT COUNT(*) AS n FROM execution_facts WHERE agent_id=?").get(id)!.n, 1, "no historical facts removed");
         const shadow = new ExecutionShadowStore(afterDb);
