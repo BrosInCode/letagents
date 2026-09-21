@@ -6,7 +6,7 @@
     @signIn="handleSignIn"
   />
 
-  <div v-else class="room-shell" :data-theme="theme">
+  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :style="roomViewportStyle">
     <!-- Drawer -->
     <RoomDrawer
       :open="drawerOpen"
@@ -152,7 +152,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
@@ -248,6 +248,32 @@ const roomAccessState = computed(() => resolveRoomAccessState({
 const drawerOpen = ref(false)
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
+const roomViewportStyle = ref<Record<string, string>>({})
+const compactViewport = ref(false)
+
+function syncRoomViewport() {
+  const viewport = window.visualViewport
+  // The software keyboard can resize only the visual viewport. Keep the
+  // composer above it without reflowing the room during pinch-to-zoom.
+  if (!viewport || viewport.scale !== 1) return
+  compactViewport.value = viewport.height < 360
+  roomViewportStyle.value = {
+    '--room-viewport-height': `${viewport.height}px`,
+    '--room-viewport-top': `${viewport.offsetTop}px`,
+  }
+}
+
+onMounted(() => {
+  syncRoomViewport()
+  window.visualViewport?.addEventListener('resize', syncRoomViewport)
+  window.visualViewport?.addEventListener('scroll', syncRoomViewport)
+})
+
+onUnmounted(() => {
+  window.visualViewport?.removeEventListener('resize', syncRoomViewport)
+  window.visualViewport?.removeEventListener('scroll', syncRoomViewport)
+})
+
 const searchQuery = ref('')
 const roomTabPanelsRef = ref<InstanceType<typeof RoomTabPanels> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
@@ -487,14 +513,20 @@ watch(activeTab, async (tab) => {
 
 <style scoped>
 .room-shell {
+  position: fixed;
+  top: var(--room-viewport-top, 0px);
+  inset-inline: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   height: 100vh;
+  height: var(--room-viewport-height, 100dvh);
   background: var(--bg-0, #09090b);
   color: var(--text, #fafafa);
 }
 
-@media (max-width: 768px) {
-  .room-shell { height: 100dvh; }
-}
+.room-shell[data-compact-viewport="true"] :deep(.chat-header) { height: 44px; }
+.room-shell[data-compact-viewport="true"] :deep(.chat-title p) { display: none; }
+.room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
+
 </style>

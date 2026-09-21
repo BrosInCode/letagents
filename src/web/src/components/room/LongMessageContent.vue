@@ -251,6 +251,7 @@ async function copyText() {
   gap: 12px;
   padding: 14px 16px;
   border-bottom: 1px solid var(--line, #27272a);
+  flex-shrink: 0;
 }
 
 .reader-footer {
@@ -297,6 +298,12 @@ async function copyText() {
 
 .reader-content {
   width: 100%;
+}
+
+.reader-content :deep(pre) {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 12px;
 }
 
 .reader-content :deep(> *),
@@ -372,19 +379,20 @@ async function copyText() {
   }
 
   .reader-dialog {
-    max-height: calc(100vh - 20px);
+    max-height: calc(100dvh - 20px);
   }
 
   .reader-header,
   .reader-footer {
-    align-items: flex-start;
-    flex-direction: column;
+    align-items: center;
+    flex-wrap: wrap;
     padding: 12px;
   }
 
   .reader-close,
-  .reader-action {
-    width: 100%;
+  .reader-action,
+  .long-message-button {
+    min-height: 44px;
   }
 
   .reader-content {
