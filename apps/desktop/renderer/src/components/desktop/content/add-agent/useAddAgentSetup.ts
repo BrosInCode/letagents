@@ -466,7 +466,7 @@ export function useAddAgentSetup() {
         && !loadingPreflight.value
       ) {
         secureStorageFocusRecheckArmed = false;
-        void runPreflight({ refreshEnvironment: true });
+        void runPreflight();
       }
     };
     if (typeof window.addEventListener === "function") {

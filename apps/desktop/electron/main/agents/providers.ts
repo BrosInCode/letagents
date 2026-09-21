@@ -423,8 +423,8 @@ export async function runDesktopAgentProviderPreflight(
   options: DesktopAgentProviderPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
   if (input.refreshEnvironment) {
-    const refresh = await refreshDesktopShellEnvironment();
-    if (refresh.changed && (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1")) {
+    await refreshDesktopShellEnvironment();
+    if (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1") {
       await supervisorDaemonClient.restartForEnvironmentRefresh();
     }
   } else {
@@ -443,6 +443,17 @@ export async function runDesktopAgentProviderPreflight(
       )
     ) {
       return result;
+    }
+    if (input.launchMode !== "legacy" && !isDesktopSmokeCheck()
+      && !(await supervisorDaemonClient.isRuntimeEnvironmentCurrent())) {
+      return {
+        ...result,
+        status: "config_required",
+        canStart: false,
+        message: "Agent setup needs refreshing.",
+        detail: "Choose Check again to apply the current provider environment. Running agents may reconnect.",
+        nextAction: null,
+      };
     }
     const validation = await validateDesktopManagedAgentModel({
       providerId,
