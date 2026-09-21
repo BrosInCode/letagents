@@ -10,6 +10,10 @@ export type ClaudeNativePermissionRequest = {
   id: string;
   request: { subtype: "can_use_tool"; tool_name: string; input: Record<string, unknown>; tool_use_id: string; [key: string]: unknown };
 };
+export type ClaudePermissionObservation =
+  | { type: "snapshot"; requests: readonly ClaudeNativePermissionRequest[] }
+  | { type: "request_closed"; request: ClaudeNativePermissionRequest; providerContinuationId: string; providerTurnId: string }
+  | { type: "degraded" | "unavailable" };
 export type ProviderPermissionRequest =
   | { provider: "codex"; native: CodexNativePermissionRequest }
   | { provider: "open-model"; native: OpenCodeNativePermissionRequest }
@@ -17,6 +21,7 @@ export type ProviderPermissionRequest =
 export type ProviderPermissionObservation =
   | { type: "snapshot"; connectionId: string | null; requests: readonly ProviderPermissionRequest[] }
   | { type: "request_closed"; request: { provider: "codex"; native: CodexNativePermissionRequest } }
+  | { type: "request_closed"; request: { provider: "claude-code"; native: ClaudeNativePermissionRequest }; providerContinuationId: string; providerTurnId: string }
   | { type: "degraded" | "unavailable" };
 /** Exact native proposed edits, host-ephemeral like the permission request. */
 export type CodexPermissionFileChange = {

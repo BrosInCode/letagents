@@ -7,7 +7,7 @@ import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import {
   beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
-  recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
+  closeExecutionApprovalRequest, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
   type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
   type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
 } from "./execution-approval-journal.js";
@@ -573,6 +573,7 @@ export class ManifestStore {
       const entry = this.readEntryFromDatabase(db, snapshot.input.expected.agentId);
       if (snapshot.input.decision !== "allow_once") throw new Error("A tool rule can only select allow once.");
       const prior = getExecutionApproval(db, snapshot.input.expected);
+      if (prior?.request.closedAtMs != null) throw new Error("This approval request has closed.");
       if (prior?.decision && !db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(snapshot.input.decisionId)) {
         throw new Error("The existing decision did not create a saved tool permission.");
       }
@@ -605,6 +606,14 @@ export class ManifestStore {
     if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
     const snapshot = structuredClone(input);
     return this.writeOperationalJournal(db => recordExecutionApprovalOutcome(db, snapshot), commitFence);
+  }
+
+  async closeExecutionApprovalRequest(expected: ApprovalReference, nowMs: () => number,
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function" || typeof nowMs !== "function") throw new Error("Approval closure requires a clock and daemon ownership fence.");
+    const snapshot = structuredClone(expected);
+    // Receipt time belongs to this transaction, after any racing selection/dispatch.
+    return this.writeOperationalJournal(db => closeExecutionApprovalRequest(db, { expected: snapshot, atMs: nowMs() }), commitFence);
   }
 
   async loseExecutionApproval(input: LoseExecutionApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
