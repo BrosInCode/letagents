@@ -1,3 +1,4 @@
+import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile } from "node:child_process";
 import { isAbsolute } from "node:path";
@@ -134,7 +135,7 @@ export class CodexPermissionReplyError extends Error {
 
 export interface CodexProviderAdapterDependencies {
   resolveMcpRuntime(devEntryPath?: string): LetAgentsMcpRuntime;
-  readMcpRuntimeContract(entryPath: string): Promise<unknown>;
+  readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unknown>;
   resolveServerUrl(): Promise<string>;
   launchServer(
     serverUrl: string,
@@ -239,12 +240,12 @@ export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
   return [`mcp_servers.letagents.cwd=${JSON.stringify(cwd)}`];
 }
 
-function readMcpRuntimeContract(entryPath: string): Promise<unknown> {
+function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const child = execFile(process.execPath, [entryPath, "--letagents-runtime-contract"], {
       encoding: "utf8", timeout: 8_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
       // The read-only contract probe needs neither user auth nor daemon authority.
-      env: { ELECTRON_RUN_AS_NODE: "1" },
+      env: { ELECTRON_RUN_AS_NODE: "1", ...(isLocalRoomApi(apiUrl) ? { LETAGENTS_API_URL: LOCAL_ROOM_API_ORIGIN } : {}) },
     }, (error, stdout) => {
       if (error) return reject(new Error("The verified LetAgents MCP runtime contract could not be read."));
       try { resolve(JSON.parse(stdout)); }
@@ -1788,7 +1789,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     if (boundedMcp) {
       custodialRuntime = this.deps.resolveMcpRuntime(req.devMcpServerEntryPath);
-      custodialTools = boundedCodexTools(await this.deps.readMcpRuntimeContract(custodialRuntime.entryPath));
+      custodialTools = boundedCodexTools(await this.deps.readMcpRuntimeContract(custodialRuntime.entryPath, req.supervisorWorkerSession?.apiUrl));
     }
     if (hasCompleteSupervisorCoordinates) {
       await this.deps.writeSupervisorBridgeContext(req.cwd, {
