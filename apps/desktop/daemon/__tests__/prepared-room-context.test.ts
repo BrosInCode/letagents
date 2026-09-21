@@ -8,6 +8,17 @@ import { DaemonStateSchema, DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-
 import { prepareRoomContext } from "../prepared-room-context.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 
+function restoreV42Fixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_approval_request_closures").get()!.count, 0);
+  const closureSql = String(database.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get()!.sql)
+    .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")
+    .replace("dispatch_id TEXT,", "dispatch_id TEXT NOT NULL,");
+  database.exec(`DROP TABLE execution_approval_request_closures; ${closureSql};
+    DROP TABLE host_tool_rule_withdrawals; DROP TABLE host_tool_rule_decisions; DROP TABLE host_tool_rules;
+    DROP TABLE supervised_agent_prepared_context;
+    PRAGMA user_version=42; UPDATE manifest_metadata SET schema_version=42`);
+}
+
 test("context snapshots bound retained text and exclude non-text provider fields", () => {
   const snapshot = prepareRoomContext(Array.from({ length: 32 }, (_, index) => ({
     id: String(index), sender: "Emmy", text: "a".repeat(2_001),
@@ -35,7 +46,7 @@ test("dispatch context survives restart, remains exact to its message, and is pr
     // An actual v42 receipt survives upgrade, without invented past context.
     await store.close();
     const predecessor = new DatabaseSync(path);
-    predecessor.exec("DROP TABLE supervised_agent_prepared_context; PRAGMA user_version=42; UPDATE manifest_metadata SET schema_version=42");
+    restoreV42Fixture(predecessor);
     predecessor.close();
     store = new SupervisedAgentInboxStore(path, () => "2026-09-20T09:00:00.000Z");
     assert.equal((await store.detail("stone", "room", "1")).source_message?.text, "Fix auth");
@@ -69,7 +80,7 @@ test("v42 migration preserves manifest generation and rolls back both version ma
   const database = new DatabaseSync(":memory:");
   try {
     new DaemonStateSchema().createSchema(database);
-    database.exec("DROP TABLE supervised_agent_prepared_context; PRAGMA user_version=42; UPDATE manifest_metadata SET schema_version=42");
+    restoreV42Fixture(database);
     const metadata = database.prepare("SELECT generation FROM manifest_metadata").get();
     assert.throws(() => new DaemonStateSchema(() => { throw new Error("interrupted upgrade"); }).createSchema(database), /interrupted upgrade/);
     assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 42);
