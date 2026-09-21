@@ -235,12 +235,14 @@ defineExpose({ matchCount })
 .room-view-viewport {
   position: relative;
   height: 100%;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
 
 .room-tab-panel {
   height: 100%;
+  min-width: 0;
   min-height: 0;
 }
 

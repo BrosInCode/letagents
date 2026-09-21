@@ -209,5 +209,6 @@ const emit = defineEmits<{
 @media (max-width: 768px) {
   .attachment-tray { padding: 0 6px 6px; }
   .attachment-chip { max-width: 100%; }
+  .attachment-remove { min-height: 44px; }
 }
 </style>

@@ -199,7 +199,7 @@ function formatTimestamp(value: string): string {
 
 .image-viewer-dialog {
   width: min(1120px, 100%);
-  max-height: calc(100vh - 24px);
+  height: min(900px, calc(100dvh - 48px));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
@@ -292,6 +292,7 @@ function formatTimestamp(value: string): string {
 
 .image-viewer-stage {
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
   min-height: 0;
   padding: clamp(14px, 2vw, 24px);
@@ -299,7 +300,7 @@ function formatTimestamp(value: string): string {
 
 .image-viewer-image {
   width: 100%;
-  max-height: calc(100vh - 220px);
+  height: 100%;
   min-height: 0;
   object-fit: contain;
   border-radius: 14px;
@@ -332,13 +333,16 @@ function formatTimestamp(value: string): string {
 }
 
 @media (max-width: 760px) {
+  .image-viewer-backdrop { padding: 8px; }
   .image-viewer-dialog {
-    max-height: calc(100vh - 16px);
+    height: calc(100dvh - 16px);
     border-radius: 14px;
   }
 
   .image-viewer-header {
-    padding: 16px 16px 14px;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
   }
 
   .image-viewer-actions {
@@ -347,11 +351,21 @@ function formatTimestamp(value: string): string {
   }
 
   .image-viewer-action {
-    flex: 1 1 140px;
+    flex: 1 1 auto;
+    min-height: 44px;
   }
-
-  .image-viewer-image {
-    max-height: calc(100vh - 290px);
+  .image-viewer-heading h2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .image-viewer-stage { gap: 8px; padding: 12px; }
+  .image-viewer-caption span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 </style>

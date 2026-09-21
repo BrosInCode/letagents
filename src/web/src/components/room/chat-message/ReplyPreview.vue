@@ -41,6 +41,7 @@ const emit = defineEmits<{
 }
 
 .reply-preview-label {
+  overflow-wrap: anywhere;
   font-size: 0.68rem;
   font-weight: 700;
   color: var(--text, #fafafa);

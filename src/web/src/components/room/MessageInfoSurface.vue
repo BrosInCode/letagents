@@ -348,7 +348,7 @@ watch(
 .message-info-surface {
   width: 400px;
   max-width: 90vw;
-  max-height: 85vh;
+  max-height: 85dvh;
   background: var(--surface, #18181b);
   border: 1px solid var(--border, #27272a);
   border-radius: 12px;
@@ -360,6 +360,7 @@ watch(
 }
 
 .message-info-header {
+  flex-shrink: 0;
   padding: 16px;
   border-bottom: 1px solid var(--border, #27272a);
   display: flex;
@@ -391,6 +392,8 @@ watch(
 .close-btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
 
 .message-preview-box {
+  flex-shrink: 0;
+  overflow-wrap: anywhere;
   padding: 12px 16px;
   background: color-mix(in srgb, var(--surface, #18181b) 80%, #000);
   border-bottom: 1px solid var(--border, #27272a);
@@ -401,6 +404,7 @@ watch(
 .preview-text { color: var(--muted, #a1a1aa); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
 .message-info-content {
+  min-height: 0;
   padding: 16px;
   overflow-y: auto;
   display: flex;
@@ -465,6 +469,8 @@ watch(
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .agent-name, .person-name { font-size: 0.82rem; font-weight: 600; }
@@ -520,5 +526,10 @@ watch(
   align-items: center;
   gap: 12px;
   color: var(--muted, #71717a);
+}
+
+@media (max-width: 768px), (pointer: coarse) {
+  .close-btn { min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
+  .action-btn, .details-copy, .disclosure-section summary { min-height: 44px; }
 }
 </style>

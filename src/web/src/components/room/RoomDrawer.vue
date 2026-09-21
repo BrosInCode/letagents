@@ -1,7 +1,7 @@
 <template>
   <Teleport to="body">
     <div v-if="open" class="drawer-overlay" @click="emit('close')" />
-    <aside :class="['drawer', { open }]">
+    <aside :class="['drawer', { open }]" :inert="!open">
       <DrawerBrand @close="emit('close')" />
 
       <ThemeToggle :is-dark="isDark" @toggle="toggleTheme" />
