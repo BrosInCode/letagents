@@ -133,6 +133,7 @@ function harness(input: {
   }> = [];
   const port = input.provider ?? provider();
   const options: ProviderExecutionCoordinatorOptions = {
+    settleRuntimeApprovals: async () => {},
     provider: port,
     store: {
       unresolvedDeliveryDrain: async () => null,
@@ -1069,9 +1070,10 @@ test("attach terminal evidence is durable before the execution fence is released
     ordered.push("release");
   };
 
+  internals.options.settleRuntimeApprovals = async () => { ordered.push("close"); };
   const attached = await runtime.coordinator.attachLiveProvider(current);
   assert.equal(attached, null);
-  assert.deepEqual(ordered, ["terminal", "release"]);
+  assert.deepEqual(ordered, ["terminal", "close", "release"]);
   assert.equal(runtime.installed.length, 0);
 });
 
@@ -1098,4 +1100,40 @@ test("Codex reattachment carries only the exact applied permission configuration
       approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false },
     }, "an unapplied edit cannot overwrite the surviving runtime's permission authority");
   }
+});
+
+test("convergence retries durable approval settlement before stopped or recovery early returns", async () => {
+  const entry = baseEntry(); entry.desired_state = "stopped";
+  const runtime = harness({ entry });
+  let attempts = 0;
+  runtime.options.settleRuntimeApprovals = async () => {
+    attempts++;
+    if (attempts === 1) throw new Error("closure write failed");
+  };
+  runtime.options.store.pendingRuntimeRecovery = async () => ({ operation_id: "recovery" } as never);
+  await assert.rejects(runtime.coordinator.converge(entry.id), /closure write failed/);
+  await runtime.coordinator.converge(entry.id);
+  assert.equal(attempts, 2);
+  assert.equal(runtime.executionGenerations.length, 0, "no successor starts ahead of settlement");
+});
+
+test("failed attach closure is retried from durable terminal without reattaching", async () => {
+  const entry = baseEntry();
+  entry.provider_ref = { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+    provider_continuation_id: "continuation-1", provider_connection: null };
+  let attaches = 0; let closes = 0; let releases = 0;
+  const runtime = harness({ entry, provider: provider({ attach: async () => {
+    attaches++;
+    return { state: "terminal", terminal: { endedAt: "2026-08-26T00:00:03.000Z", exitCode: 0,
+      signal: null, terminalCause: "exited", providerContinuationId: "continuation-1" } };
+  } }) });
+  runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+  runtime.options.settleRuntimeApprovals = async () => { if (++closes === 1) throw new Error("closure unavailable"); };
+  runtime.options.durability.releaseTerminalExecutionFence = async () => { releases++; };
+  await assert.rejects(runtime.coordinator.attachLiveProvider(entry), /closure unavailable/);
+  assert.equal(runtime.terminalWrites.length, 1);
+  assert.equal(releases, 0, "no fence release before closure commits");
+  assert.equal(await runtime.coordinator.attachLiveProvider(entry), null);
+  assert.equal(closes, 2); assert.equal(attaches, 1); assert.equal(runtime.terminalWrites.length, 1);
 });

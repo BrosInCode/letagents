@@ -9,6 +9,11 @@ export type {
 // for command text, output, paths, reasons, credentials, or provider payloads.
 export const executionIdentity = z.string().min(1).max(512).regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/);
 const integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+export const nativeRuntimeDeathSchema = z.strictObject({
+  kind: z.enum(["claude_cli", "codex_app_server"]),
+  pid: integer.min(1),
+  processIdentity: z.string().min(1).max(512),
+});
 export const runtimeStates = z.enum(["starting", "ready", "stopping", "exited"]);
 export const controlStates = z.enum(["connecting", "responsive", "degraded", "lost", "unprobeable"]);
 export const continuationStates = z.enum(["available", "repairing", "unavailable"]);

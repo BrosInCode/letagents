@@ -5,6 +5,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
 import { redactCredentialText } from "./credential-redaction.js";
+import { nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import { isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
 import { acquireWorkspaceFence, WorkspaceFenceError, type WorkspaceFenceHandle } from "./workspace-fence.js";
@@ -63,6 +64,7 @@ const attemptStates = new Set<WorkAttemptState>(["active", "ambiguous", "coordin
 function isTerminal(value: unknown): value is ExecutionTerminalPayload {
   if (!value || typeof value !== "object") return false;
   const terminal = value as Partial<ExecutionTerminalPayload>;
+  if (terminal.native_runtime_death !== undefined && !nativeRuntimeDeathSchema.safeParse(terminal.native_runtime_death).success) return false;
   return isIsoTime(terminal.ended_at) && (terminal.exit_code === null || Number.isInteger(terminal.exit_code))
     && (terminal.signal === null || typeof terminal.signal === "string") && (terminal.stdio_archive_ref === null || typeof terminal.stdio_archive_ref === "string")
     && typeof terminal.stdio_tail === "string" && typeof terminal.terminal_cause === "string" && terminal.terminal_cause.trim().length > 0
