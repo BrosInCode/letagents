@@ -451,6 +451,7 @@ function inspectLine(line) {
       result,
       request_id: typeof message.request_id === "string" ? message.request_id : null,
     };
+    settleMcpCapabilityWaiters(false);
   }
 }
 function consumeText(text) {
@@ -1204,10 +1205,15 @@ function denyControlPlaneRequest(request, response) {
 function startAgentProxy() {
   if (!restrictRemoteAuthority) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
-    let admitted = false;
-    function forward(source, headers, downstream) {
+    // One invocation can retry, process background completions, and run native
+    // subagents concurrently. Bound held and forwarded streams, not total RPCs.
+    let activeRequests = 0;
+    const maxActiveRequests = 24;
+    function forward(source, headers, downstream, release) {
       const path = headers[":path"] || source.url;
-      const upstreamSession = http2.connect(supervisedAgentEndpoint);
+      let upstreamSession;
+      try { upstreamSession = http2.connect(supervisedAgentEndpoint); }
+      catch { release(); downstream.fail(502); return; }
       agentProxyUpstreamSessions.add(upstreamSession);
       upstreamSession.once("close", () => agentProxyUpstreamSessions.delete(upstreamSession));
       const upstreamHeaders = {
@@ -1229,9 +1235,12 @@ function startAgentProxy() {
       }
       let upstream;
       try { upstream = upstreamSession.request(upstreamHeaders); }
-      catch { downstream.fail(502); upstreamSession.destroy(); return; }
+      catch { release(); downstream.fail(502); upstreamSession.destroy(); return; }
       agentProxyUpstreamStreams.add(upstream);
-      upstream.once("close", () => agentProxyUpstreamStreams.delete(upstream));
+      upstream.once("close", () => {
+        agentProxyUpstreamStreams.delete(upstream);
+        release();
+      });
       let requestBytes = 0;
       let responseBytes = 0;
       let failed = false;
@@ -1282,50 +1291,46 @@ function startAgentProxy() {
         try { upstreamSession.close(); } catch {}
       });
     }
-    // Genuine, non-timing violations: a bad proxy token, wrong method/path/
-    // content-type, or a second request after one was already admitted. These
-    // never wait -- they are rejected immediately, independent of attestation.
+    // New admissions end at this invocation's terminal result, even before
+    // native exit retires its already-forwarded streams.
     function requestViolation(method, path, contentType, authorization) {
       return finalizing
         || authorityRetiring
-        || admitted
+        || resultSnapshot !== null
         || authorization !== expectedProxyAuthorization
         || method !== "POST"
         || path !== "/agent.v1.AgentService/Run"
         || typeof contentType !== "string"
         || !/^application\/connect[+]proto(?:\s*;|$)/i.test(contentType.trim());
     }
-    // Decide whether one model request may be forwarded. When the only unmet
-    // condition is live MCP attestation, the request is HELD on the real
-    // attestation signal rather than rejected: rejecting mid-handshake makes
-    // Cursor treat the turn as a dropped connection and retry to death. The hold
-    // is bounded by the capability deadline armed when the connector began
-    // listening -- attestation success admits, failure or timeout rejects -- and
-    // cancel() frees the single admission slot if the caller's stream dies while
-    // held. Fail-closed: every path resolves to a definite allow or deny. A deny
-    // reached during teardown may surface to the client as a connection reset
-    // rather than the 503 body; the durable failure reason is the recorded
-    // terminal evidence, not the wire response.
+    // Requests can race ahead of live MCP attestation. Reserve a bounded slot
+    // while awaiting its signal; release it on cancellation or upstream close.
     function admitRequest(method, path, contentType, authorization) {
-      if (requestViolation(method, path, contentType, authorization)) {
+      if (requestViolation(method, path, contentType, authorization) || activeRequests >= maxActiveRequests) {
         return { promise: Promise.resolve(false), cancel() {} };
       }
-      if (mcpCapabilityAttested) {
-        admitted = true;
-        return { promise: Promise.resolve(true), cancel() {} };
-      }
+      activeRequests += 1;
+      let released = false;
       let resolveAdmit;
+      let waiter = null;
+      function cancel() {
+        if (released) return;
+        released = true;
+        activeRequests -= 1;
+        if (waiter && mcpCapabilityWaiters.delete(waiter)) resolveAdmit(false);
+      }
+      if (mcpCapabilityAttested) return { promise: Promise.resolve(true), cancel };
       const promise = new Promise((resolve) => { resolveAdmit = resolve; });
-      const release = (attested) => {
-        if (!attested || requestViolation(method, path, contentType, authorization)) { resolveAdmit(false); return; }
-        admitted = true;
+      waiter = (attested) => {
+        if (released || !attested || requestViolation(method, path, contentType, authorization)) {
+          cancel();
+          resolveAdmit(false);
+          return;
+        }
         resolveAdmit(true);
       };
-      mcpCapabilityWaiters.add(release);
-      return {
-        promise,
-        cancel() { if (mcpCapabilityWaiters.delete(release)) resolveAdmit(false); },
-      };
+      mcpCapabilityWaiters.add(waiter);
+      return { promise, cancel };
     }
     const h2Server = http2.createServer({ settings: { maxHeaderListSize: 64 * 1024 } });
     agentProxyInternalServers.add(h2Server);
@@ -1349,16 +1354,13 @@ function startAgentProxy() {
       stream.once("close", onClosed);
       void admission.promise.then((allowed) => {
         stream.removeListener("close", onClosed);
-        if (!allowed) {
+        if (!allowed || requestViolation(headers[":method"], headers[":path"], headers["content-type"], headers.authorization)) {
+          admission.cancel();
           try { stream.respond({ ":status": 503, "cache-control": "no-store" }); } catch {}
           try { stream.end("Cursor agent proxy rejected the request."); } catch {}
           return;
         }
-        // The admitted stream died before we could forward (nothing was sent
-        // upstream). Free the single admission slot so a legitimate retry is
-        // not rejected as a replay -- otherwise this reintroduces the
-        // retry-to-death this fix removes.
-        if (stream.destroyed || stream.closed) { admitted = false; return; }
+        if (stream.destroyed || stream.closed) { admission.cancel(); return; }
         forward(stream, headers, {
           respond: (value) => stream.respond(value),
           fail: (status) => {
@@ -1369,7 +1371,7 @@ function startAgentProxy() {
           end: () => stream.end(),
           onceDrain: (listener) => stream.once("drain", listener),
           onceClose: (listener) => stream.once("close", listener),
-        });
+        }, admission.cancel);
       });
     });
     h2Server.on("sessionError", () => {});
@@ -1379,7 +1381,8 @@ function startAgentProxy() {
       response.once("close", onClosed);
       void admission.promise.then((allowed) => {
         response.removeListener("close", onClosed);
-        if (!allowed) {
+        if (!allowed || requestViolation(request.method, request.url, request.headers["content-type"], request.headers.authorization)) {
+          admission.cancel();
           request.resume();
           try {
             response.writeHead(503, { "cache-control": "no-store", "connection": "close" });
@@ -1387,9 +1390,7 @@ function startAgentProxy() {
           } catch {}
           return;
         }
-        // The admitted response died before we could forward. Free the single
-        // admission slot (see the HTTP/2 path) so a legitimate retry is admitted.
-        if (response.writableEnded || response.destroyed) { admitted = false; request.resume(); return; }
+        if (response.writableEnded || response.destroyed) { admission.cancel(); request.resume(); return; }
         forward(request, request.headers, {
           respond: (value) => {
             const status = Number(value[":status"] || 502);
@@ -1407,7 +1408,7 @@ function startAgentProxy() {
           end: () => response.end(),
           onceDrain: (listener) => response.once("drain", listener),
           onceClose: (listener) => response.once("close", listener),
-        });
+        }, admission.cancel);
       });
     });
     agentProxyInternalServers.add(h1Server);
