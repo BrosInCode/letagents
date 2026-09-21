@@ -1,3 +1,4 @@
+import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
 import { restoreLocalRoomAuthorities, localRoomRuntime } from "./local-room-runtime.js";
 import { registerLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
 import { dirname } from "node:path";
@@ -453,7 +454,7 @@ export class SupervisorDaemon {
         updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
         transition: (entryId, state, condition, detail, actor) =>
           this.transition(entryId, state, condition, detail, actor),
-        terminalPayload: (terminal, actor, connection) => this.terminalPayload(terminal, actor, connection),
+        terminalPayload: (terminal, actor, connection) => this.providerTerminals.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
           this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),
         completeTurnControlForRuntimeRecovery: (entry) =>
@@ -516,7 +517,7 @@ export class SupervisorDaemon {
         serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
         transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal) =>
           this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal),
-        terminalPayload: (terminal, actor, connection) => this.terminalPayload(terminal, actor, connection),
+        terminalPayload: (terminal, actor, connection) => this.providerTerminals.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor) =>
           this.observeProviderExit(entryId, terminal, actor),
         recordSchedulerFailure: (entryId, error, actor) =>
@@ -1573,27 +1574,14 @@ export class SupervisorDaemon {
     return this.authority.serializeManifestCommit(operation);
   }
 
-  private terminalPayload(terminal: ProviderActionTerminal, actor: string,
-    connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload {
-    return this.providerTerminals.terminalPayload(terminal, actor, connection);
-  }
-
-  private async settleRuntimeApprovals(entryId: string): Promise<void> {
-    try {
-      const changed = await this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(),
-        commit => this.fenceDaemonCommit(commit));
-      if (changed) this.notifyStateChanged();
-    } catch (error) {
-      // Every operational caller (exit, attach and manual recovery) gets the
-      // same fault-only retry. A healthy pass never creates an approval timer.
-      if (!this.handoffScheduled) {
-        try {
-          await this.singleton.assertCurrent();
-          this.scheduleRecoveryConvergence(entryId, 5_000);
-        } catch { /* A retired daemon cannot schedule its successor's work. */ }
-      }
-      throw error;
-    }
+  private settleRuntimeApprovals(entryId: string): Promise<void> {
+    return settleRuntimeApprovalRequests(entryId, {
+      settle: () => this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(), commit => this.fenceDaemonCommit(commit)),
+      notifyChanged: () => this.notifyStateChanged(),
+      isHandoffScheduled: () => this.handoffScheduled,
+      assertCurrent: () => this.singleton.assertCurrent(),
+      scheduleRecovery: (id, delayMs) => this.scheduleRecoveryConvergence(id, delayMs),
+    });
   }
 
   private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {
