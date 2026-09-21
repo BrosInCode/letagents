@@ -159,7 +159,7 @@ type CursorStreamMessage = Record<string, unknown> & {
 };
 
 export interface CursorProviderAdapterDependencies {
-  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; allowedInternalUnixSocketRoots?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testMcpCapabilityTimeoutMs?: number; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
+  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; allowedInternalUnixSocketRoots?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; nativeResumeSessionId?: string; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testMcpCapabilityTimeoutMs?: number; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
   attestSupervisedMcp(input: {
     cursorBin: string;
     cwd: string;
@@ -2042,6 +2042,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
       ...(providerAuthorization ? { providerAuthorization } : {}),
       ...(handle.deliveryMode === "daemon_inbox" ? { deferStart: true } : {}),
       ...(handle.deliveryMode === "daemon_inbox" ? { restrictRemoteAuthority: true } : {}),
+      ...(handle.deliveryMode === "daemon_inbox" && nativeResumeSession
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nativeResumeSession)
+        ? { nativeResumeSessionId: nativeResumeSession }
+        : {}),
       ...(workspaceGeneration
         ? { workspaceGenerationManifestPath: workspaceGeneration.manifestPath }
         : {}),
