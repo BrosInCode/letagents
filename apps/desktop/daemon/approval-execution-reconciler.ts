@@ -1,4 +1,5 @@
 import type { HostApprovalReference } from "../shared/host-approvals.js";
+import { claudeToolOperation } from "../../../shared/claude-tool-operation.mjs";
 import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
 import type { ProviderPermissionRequest } from "../shared/provider-permissions.js";
 import type { ExecutionApprovalRecord } from "./execution-approval-journal.js";
@@ -22,14 +23,24 @@ type PendingReconciliation = {
   expected: HostApprovalReference;
   decisionId: string;
   decision: "allow_once" | "deny";
-  operation: "command" | "file_change" | null;
+  operation: Extract<NativeExecutionFact, { domain: "execution" }>["operation"] | null;
   armed: boolean;
   dispatched: boolean;
   closedAtMs: number | null;
   lowerBound: { sourceId: string; sequence: number } | null;
 };
 
-function requestIdentity(native: ProviderPermissionRequest): { key: string; operation: "command" | "file_change" } | null {
+function requestIdentity(native: ProviderPermissionRequest, expected: HostApprovalReference): {
+  key: string; operation: NonNullable<PendingReconciliation["operation"]>;
+} | null {
+  if (native.provider === "claude-code") {
+    const request = native.native.request;
+    if (!request.tool_use_id?.trim()) return null;
+    // Claude tool requests lack a turn UUID. The broker has already correlated
+    // this exact request to the live native turn before admitting the reference.
+    return { key: JSON.stringify([expected.providerContinuationId, expected.providerTurnId, request.tool_use_id]),
+      operation: claudeToolOperation(request.tool_name) };
+  }
   if (native.provider !== "codex" || !native.native.params || typeof native.native.params !== "object"
     || Array.isArray(native.native.params)) return null;
   const params = native.native.params as Record<string, unknown>;
@@ -48,13 +59,17 @@ function executionKey(fact: NativeExecutionFact): string | null {
 function confirmsDecision(fact: NativeExecutionFact, pending: PendingReconciliation): boolean {
   if (fact.domain !== "execution") return false;
   if (fact.operation !== pending.operation) return false;
+  // Claude's generic error result also covers refusal/cancellation before a
+  // tool starts. It proves completion of the request, not consumption of allow.
+  if (pending.native.provider === "claude-code") return pending.decision === "allow_once"
+    && fact.kind === "completed" && fact.outcome === "succeeded";
   if (pending.decision === "deny") return fact.kind === "completed" && fact.outcome === "denied_before_start";
   return fact.kind === "started"
     || (fact.kind === "completed" && !["denied_before_start", "cancelled_before_start"].includes(fact.outcome));
 }
 
-/** Settles a Codex approval only after its exact native item proves application. */
-export class CodexApprovalExecutionReconciler {
+/** Settles an approval only after its exact native operation proves application. */
+export class ApprovalExecutionReconciler {
   private subscription: NativeExecutionSubscription | null = null;
   private readonly evidence = new Map<string, NativeExecutionObservation>();
   private readonly pending = new Map<string, PendingReconciliation>();
@@ -80,8 +95,8 @@ export class CodexApprovalExecutionReconciler {
 
   prepare(native: ProviderPermissionRequest, expected: HostApprovalReference, decisionId: string,
     decision: "allow_once" | "deny"): PendingReconciliation | null {
-    if (native.provider !== "codex") return null;
-    const identity = requestIdentity(native);
+    if (native.provider !== "codex" && native.provider !== "claude-code") return null;
+    const identity = requestIdentity(native, expected);
     const value: PendingReconciliation = { key: expected.requestId, native,
       executionKey: identity?.key ?? null, operation: identity?.operation ?? null,
       expected, decisionId, decision, armed: false, dispatched: false, closedAtMs: null, lowerBound: null };
@@ -141,8 +156,13 @@ export class CodexApprovalExecutionReconciler {
     const observation = pending?.executionKey ? this.evidence.get(pending.executionKey) : undefined;
     const lowerBound = pending?.lowerBound;
     if (!pending?.armed || this.closed || !this.options.isCurrent()) return;
+    const connection = this.options.handle.providerConnection;
+    const exactProcess = pending.native.provider !== "claude-code"
+      || (connection?.kind === "claude_cli" && Boolean(connection.processIdentity)
+        && observation?.nativeProcessIdentity === connection.processIdentity
+        && observation?.nativeProcessPid === connection.pid);
     const applied = lowerBound && observation && observation.sourceId === lowerBound.sourceId
-      && observation.sequence > lowerBound.sequence && confirmsDecision(observation.fact, pending);
+      && observation.sequence > lowerBound.sequence && exactProcess && confirmsDecision(observation.fact, pending);
     if (!applied && pending.closedAtMs === null) return;
     try {
       const record = await this.options.store.readLatestExecutionApproval(pending.expected.requestId);

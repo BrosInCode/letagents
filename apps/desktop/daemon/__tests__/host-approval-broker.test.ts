@@ -22,7 +22,7 @@ import type { DaemonManifestEntry } from "../types.js";
 import type { ProviderActionHandle, ProviderActionPort, ProviderActionStreamEvent } from "../provider-action-port.js";
 import { CodexProviderAdapter } from "../../electron/main/agents/codex-provider-adapter.js";
 import { CodexRpcClient } from "../../electron/main/agents/codex-rpc-client.js";
-import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
+import type { NativeExecutionFact, NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionObservation, ProviderPermissionRequest } from "../../shared/provider-permissions.js";
 
@@ -70,12 +70,20 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
   const state = { current: true, owned: true, correlation: true, turnId: "native-turn", live: handle as ProviderActionHandle | undefined,
     fileChanges: null as CodexPermissionFileChange[] | null,
     authorityChecks: 0, authorityFailAt: null as number | null,
-    failBefore: false, failAfter: false, afterBefore: null as (() => void | Promise<void>) | null };
+    failBefore: false, failAfter: false, afterBefore: null as (() => void | Promise<void>) | null,
+    afterNativeWrite: null as (() => void) | null };
   const sends: string[] = []; const order: string[] = [];
   let permissionChanges = 0;
   let receive: ((event: ProviderPermissionObservation) => void) | null = null;
   let signal: AbortSignal | null = null;
+  let executionSequence = 0;
+  const executionListeners = new Set<(event: NativeExecutionObservation) => void>();
   const provider = {
+    onExecution: async (_handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void) => {
+      executionListeners.add(listener);
+      return { sourceId: "test-source", position: () => ({ firstRetainedSequence: 1, latestSequence: executionSequence }),
+        dispose: () => { executionListeners.delete(listener); } };
+    },
     observePermissions: async (_handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, abort: AbortSignal) => {
       receive = listener; signal = abort;
     },
@@ -98,6 +106,7 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
       await state.afterBefore?.();
       options.assertNativeDispatch!();
       sends.push(reply); order.push("native_write");
+      state.afterNativeWrite?.();
       if (state.failAfter) throw new Error("native response lost");
       return providerId !== "open-model" ? { outcome: "sent_unacknowledged" as const, nativeScope: "request" as const }
         : { outcome: "native_processed" as const, nativeScope: reply === "reject" ? "session_pending" as const : "request" as const };
@@ -117,6 +126,11 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
   };
   broker.install("agent", handle, "generation"); emit();
   return { store, inbox, db, item, state, native, handle, workspace, root, path, sends, order, emit,
+    execution(fact: NativeExecutionFact, overrides: Partial<NativeExecutionObservation> = {}) {
+      const event: NativeExecutionObservation = { sourceId: "test-source", sequence: ++executionSequence,
+        observedAtMs: now + 10, nativeProcessIdentity: "native-birth", nativeProcessPid: 4311, fact, ...overrides };
+      for (const listener of executionListeners) listener(event);
+    },
     closed(request: ProviderPermissionRequest = native) {
       assert.equal(request.provider, "codex");
       receive!({ type: "request_closed", request: request as Extract<ProviderPermissionRequest, { provider: "codex" }> });
@@ -511,6 +525,83 @@ for (const provider of ["codex", "claude-code"] as const) test(`${provider} host
     assert.deepEqual(f.sends, ["once"]);
     assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
   } finally { await f.close(); }
+});
+
+test("Claude successful tool result confirms its exact allowed request after dispatch", async () => {
+  const f = await fixture("claude-code");
+  const fact: NativeExecutionFact = { domain: "execution", kind: "completed", operation: "file_change",
+    providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+    outcome: "succeeded", sideEffects: "possible" };
+  try {
+    const [candidate] = await f.broker.list("room");
+    const selected = decision(candidate!);
+    f.execution(fact); // An old result must not settle the later response.
+    await f.broker.decide(selected);
+    const uncertain = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
+    };
+    await uncertain();
+    for (const changed of [{ executionId: "other" }, { providerTurnId: "other" },
+      { providerContinuationId: "other" }, { operation: "command" as const }]) {
+      f.execution({ ...fact, ...changed });
+      await uncertain();
+    }
+    for (const changed of [{ sourceId: "other" }, { nativeProcessIdentity: "other-birth" },
+      { nativeProcessPid: 1234 }, { sequence: 0 }]) {
+      f.execution(fact, changed);
+      await uncertain();
+    }
+    f.emit([]); // Disappearance alone is not acknowledgment.
+    await uncertain();
+    f.execution(fact);
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    const record = (await f.store.getExecutionApproval(selected.expected))!;
+    assert.equal(record.request.state, "resolved");
+    assert.equal(record.decision!.dispatchState, "acknowledged");
+    assert.deepEqual(await f.broker.list("room"), []);
+    assert.equal(await f.broker.decide(selected), "resolved");
+    assert.deepEqual(f.sends, ["once"], "confirmation never resends the response");
+  } finally { await f.close(); }
+});
+
+test("Claude completion arriving inside native dispatch is reconciled after the journal is armed", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+    f.state.afterNativeWrite = () => f.execution({ domain: "execution", kind: "completed", operation: "file_change",
+      providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+      outcome: "succeeded", sideEffects: "possible" });
+    await f.broker.decide(selected);
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "resolved");
+  } finally { await f.close(); }
+});
+
+test("Claude generic failure cannot confirm a decision, and a retired runtime cannot confirm success", async () => {
+  for (const scenario of ["allow", "deny", "retired"] as const) {
+    const f = await fixture("claude-code");
+    try {
+      const [candidate] = await f.broker.list("room");
+      const selected = { ...decision(candidate!), decision: scenario === "deny" ? "deny" as const : "allow_once" as const };
+      await f.broker.decide(selected);
+      if (scenario === "retired") f.state.current = false;
+      f.execution({ domain: "execution", kind: "completed", operation: "file_change",
+        providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+        outcome: scenario === "retired" ? "succeeded" : "failed", sideEffects: "possible" });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
+      f.emit([]);
+      assert.equal(await f.broker.decide(selected), "uncertain");
+      assert.deepEqual(f.sends, [scenario === "deny" ? "reject" : "once"]);
+    } finally { await f.close(); }
+  }
 });
 
 test("host approval final synchronous native fence catches state changes after async dispatch admission", async () => {
