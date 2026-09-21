@@ -31,7 +31,7 @@ export function createGitCommand(stableCwd: string): GitCommand {
  * A supervised launch names a source repository (the selected local project
  * folder) that LetAgents copies into a private per-agent worktree. When that
  * folder is not a usable git repository — the home directory, a plain folder,
- * a repo with no `origin` remote, or one with no commits yet — we must fail
+ * or one with no commits yet — we must fail
  * with an actionable message instead of leaking a raw `git` error.
  */
 export class UnusableSourceRepositoryError extends Error {
@@ -53,7 +53,8 @@ export class RepositoryNetworkError extends Error {
 
 /**
  * Validate the source repository and return the identity the provisioner needs
- * (`origin` remote URL + HEAD commit). Throws {@link UnusableSourceRepositoryError}
+ * (`origin` remote URL or canonical local Git root, plus HEAD commit).
+ * Throws {@link UnusableSourceRepositoryError}
  * — never a raw git failure — when the path cannot back a private project area.
  */
 export async function resolveSourceRepositoryIdentity(
@@ -85,9 +86,18 @@ export async function resolveSourceRepositoryIdentity(
     remoteUrl = "";
   }
   if (!remoteUrl) {
-    throw new UnusableSourceRepositoryError(
-      `The git repository at ${sourcePath} has no "origin" remote, so LetAgents can't identify it for a private project area. Add an origin remote or choose a repository that has one.`,
-    );
+    try {
+      // A configured but unreadable origin must not silently change identity.
+      const remotes = String((await gitCommand(["-C", sourcePath, "remote"])) ?? "").trim().split(/\s+/);
+      if (remotes.includes("origin")) throw new Error("Configured origin is unavailable.");
+      const topLevel = String((await gitCommand(["-C", sourcePath, "rev-parse", "--show-toplevel"])) ?? "").trim();
+      if (!isAbsolute(topLevel)) throw new Error("Local Git root is unavailable.");
+      remoteUrl = await realpath(topLevel);
+    } catch {
+      throw new UnusableSourceRepositoryError(
+        `LetAgents could not identify the git repository at ${sourcePath}. Check that the project folder and its Git configuration are accessible.`,
+      );
+    }
   }
 
   let revision = "";
@@ -208,7 +218,9 @@ export class WorkspaceProvisioner {
           await this.writeMarker(markerPath, repositoryMarker);
         }
       } else {
-        await this.runRemote(["clone", "--bare", input.remoteUrl, bare]);
+        // Local transport must copy objects, including any borrowed through
+        // alternates, instead of hardlinking or inheriting source authority.
+        await this.runRemote(["clone", "--bare", ...(isAbsolute(remoteUrl) ? ["--no-local"] : []), input.remoteUrl, bare]);
         await this.ensureDirectory(bare, await realpath(reposRoot));
         await this.verifyBare(await realpath(bare), remoteUrl);
         await this.writeMarker(join(bare, REPOSITORY_MARKER), repositoryMarker);
@@ -290,7 +302,7 @@ export class WorkspaceProvisioner {
     workAttemptId: string;
   }): Promise<string> {
     const source = await realpath(resolve(input.sourceRepoPath));
-    const sourceRemote = normalizeRemote(await this.query(["-C", source, "remote", "get-url", "origin"]));
+    const sourceRemote = normalizeRemote((await resolveSourceRepositoryIdentity(source, this.git)).remoteUrl);
     if (sourceRemote !== input.remoteUrl) throw new Error("Local source repository remote identity does not match the daemon repository.");
     const sourceRevision = await this.query(["-C", source, "rev-parse", "--verify", `${input.revision}^{commit}`]);
     const targetRef = `refs/letagents/sources/${safeSegment(input.workAttemptId, "work attempt id")}`;
