@@ -771,6 +771,76 @@ test("stop orders SIGTERM before the observed terminal and escalates to SIGKILL 
   assert.equal(killed.terminalCause, "killed");
 });
 
+test("exact-reference Claude stop fences both attached and unreachable processes and emits birth evidence", async () => {
+  for (const cached of [false, true]) for (const force of [false, true]) {
+    const birth = "Mon Sep 21 17:55:18 2026";
+    const h = createHarness({ identities: new Map([[4100, birth]]), dieOnSigterm: false });
+    const owner = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+    const handle = await owner.spawn(spawnRequest());
+    const adapter = cached ? owner : new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+    const terminal = await withLoopAlive(adapter.stopRef({ workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection }, { force, graceMs: 1 }));
+    assert.deepEqual(h.signals.map(value => value.signal), force ? ["SIGKILL"] : ["SIGTERM", "SIGKILL"]);
+    assert.equal(h.identities.get(4100), null);
+    assert.deepEqual(terminal.nativeRuntimeDeath, { kind: "claude_cli", pid: 4100, processIdentity: birth });
+    assert.equal(terminal.providerContinuationId, handle.providerContinuationId);
+    assert.equal(h.launches.length, 1);
+  }
+});
+
+test("exact-reference Claude stop ignores a cached protocol terminal while its process remains alive", async () => {
+  const birth = "Mon Sep 21 17:55:18 2026";
+  const h = createHarness({ identities: new Map([[4100, birth]]) });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  Object.assign(handle, { terminal: { endedAt: h.dependencies.now(), exitCode: null, signal: null,
+    terminalCause: "protocol_error", providerContinuationId: handle.providerContinuationId } });
+  const terminal = await withLoopAlive(adapter.stopRef({ workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection }, { graceMs: 1 }));
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGTERM"]);
+  assert.equal(h.identities.get(4100), null);
+  assert.equal(terminal.nativeRuntimeDeath?.pid, 4100);
+});
+
+test("exact-reference Claude stop refuses invalid births and known foreign ownership", async () => {
+  const birth = "Mon Sep 21 17:55:18 2026";
+  const h = createHarness({ identities: new Map([[4100, birth]]) });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const ref = { workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection };
+  await assert.rejects(adapter.stopRef({ ...ref, workAttemptId: "foreign" }), /known native process owner/);
+  await assert.rejects(adapter.stopRef({ ...ref, providerContinuationId: "foreign" }), /known native process owner/);
+  for (const pid of [-1, 0, 1.1, null]) await assert.rejects(adapter.stopRef({ ...ref,
+    providerConnection: { kind: "claude_cli", pid, processIdentity: birth } }), /exact continuation and process birth/);
+  await assert.rejects(adapter.stopRef({ ...ref, providerConnection: { kind: "claude_cli", pid: 4100, processIdentity: "bad" } }), /exact continuation and process birth/);
+  for (const unknown of [undefined, "bad ps output"]) {
+    h.identities.set(4100, unknown);
+    await assert.rejects(adapter.stopRef(ref), /ambiguous/);
+  }
+  assert.equal(h.signals.length, 0);
+});
+
+test("exact-reference Claude stop never signals a reused PID or accepts an unconfirmed kill", async () => {
+  const birth = "Mon Sep 21 17:55:18 2026";
+  const h = createHarness({ identities: new Map([[4100, "Mon Sep 21 18:55:18 2026"]]) });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const ref = { workAttemptId: "wa-old", providerContinuationId: "session-old",
+    providerConnection: { kind: "claude_cli" as const, pid: 4100, processIdentity: birth } };
+  assert.equal((await adapter.stopRef(ref)).nativeRuntimeDeath?.processIdentity, birth);
+  assert.equal(h.signals.length, 0);
+  h.identities.set(4100, birth);
+  h.dependencies.signalProcess = (pid, signal) => { h.signals.push({ pid, signal }); };
+  const stubborn = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  await assert.rejects(withLoopAlive(stubborn.stopRef(ref, { force: true, graceMs: 1 })), /not yet proved/);
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGKILL"]);
+  h.signals.length = 0;
+  h.dependencies.signalProcess = (pid, signal) => { h.signals.push({ pid, signal }); h.identities.set(pid, "Mon Sep 21 18:55:18 2026"); };
+  const replaced = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  await withLoopAlive(replaced.stopRef(ref, { graceMs: 1 }));
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGTERM"], "no escalation into reused PID");
+});
+
 test("stdio loss on a verified-live child fences the exact child instead of synthesizing death", async () => {
   const harness = createHarness({ dieOnSigterm: false });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
