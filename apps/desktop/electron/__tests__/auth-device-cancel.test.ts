@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -106,4 +106,84 @@ test("cancel during device-code startup does not persist the late code", async (
     await start;
     assert.equal((await readStoredAuth()).pendingDeviceAuth, null);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("manual and automatic checks share one exchange and authorize once", async () => {
+  const originalFetch = globalThis.fetch;
+  let exchanges = 0;
+  let authorized = 0;
+  let finish!: (response: Response) => void;
+  let started!: () => void;
+  const exchangeStarted = new Promise<void>(resolve => { started = resolve; });
+  setAuthAuthorizedHandler(() => { authorized++; });
+  globalThis.fetch = async input => {
+    if (String(input).includes("/auth/app/start")) return Response.json({
+      request_id: "shared-request", user_code: "ABCD1234", verification_uri: "https://letagents.chat/auth/app/authorize/test", expires_in: 600, interval: 2,
+    });
+    exchanges++;
+    started();
+    return new Promise(resolve => { finish = resolve; });
+  };
+  try {
+    await startDeviceAuthFlow();
+    const automatic = pollDeviceAuthFlow();
+    await exchangeStarted;
+    const manual = pollDeviceAuthFlow("shared-request");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(exchanges, 1);
+    finish(Response.json({ status: "authorized", app_session: "app-test", agent_token: "agent-test",
+      account: { id: "test", provider: "github", provider_user_id: "test", login: "test" } }));
+    const results = await Promise.all([automatic, manual]);
+    assert.deepEqual(results.map(result => result.status), ["authorized", "authorized"]);
+    assert.equal(authorized, 1);
+    assert.equal((await readStoredAuth()).token, "app-test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAuthAuthorizedHandler(() => undefined);
+    await cancelDeviceAuthFlow();
+  }
+});
+
+test("unchanged waiting responses never rewrite the encrypted auth store", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async input => Response.json(String(input).includes("/auth/app/start") ? {
+    request_id: "waiting-request", user_code: "ABCD1234", verification_uri: "https://letagents.chat/auth/app/authorize/test", expires_in: 600, interval: 2,
+  } : { status: "pending", interval: 2 });
+  try {
+    await startDeviceAuthFlow();
+    const stored = await readStoredAuth();
+    const file = readFileSync(authStorePath, "utf8");
+    for (let i = 0; i < 3; i++) assert.equal((await pollDeviceAuthFlow()).status, "pending");
+    assert.equal(await readStoredAuth(), stored);
+    assert.equal(readFileSync(authStorePath, "utf8"), file);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await cancelDeviceAuthFlow();
+  }
+});
+
+test("expired approval clears the code and verifier locally without a network exchange", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return Response.json({ request_id: "expired-request", user_code: "ABCD1234",
+      verification_uri: "https://letagents.chat/auth/app/authorize/test", expires_in: -1, interval: 2 });
+  };
+  try {
+    await startDeviceAuthFlow();
+    assert.ok((await readStoredAuth()).appLoginVerifier);
+    const result = await pollDeviceAuthFlow();
+    assert.equal(result.status, "expired");
+    assert.equal(result.authStatus.pendingDeviceAuth, null);
+    assert.equal((await readStoredAuth()).appLoginVerifier, null);
+    assert.equal(calls, 1);
+    const disk = JSON.parse(readFileSync(authStorePath, "utf8"));
+    assert.equal(disk.pendingDeviceAuth, null);
+    assert.equal(disk.encryptedAppLoginVerifier, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await cancelDeviceAuthFlow();
+  }
 });

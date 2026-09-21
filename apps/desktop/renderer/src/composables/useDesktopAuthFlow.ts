@@ -1,4 +1,4 @@
-import { ref, type Ref } from "vue";
+import { getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
 import type { DesktopAuthStatus } from "../../../electron/ipc-types";
 import { desktopIpc } from "../ipc/index.js";
 
@@ -22,9 +22,11 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
   const authSessionLocked = ref(false);
   let authPollTimer: number | null = null;
   let authGeneration = 0;
+  let pollingGeneration: number | null = null;
+  let retryCount = 0;
 
   function clearAuthPollTimer(): void {
-    if (!authPollTimer) return;
+    if (authPollTimer === null) return;
     window.clearTimeout(authPollTimer);
     authPollTimer = null;
   }
@@ -36,24 +38,21 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
 
     const generation = authGeneration;
     const remainingMs = Date.parse(pending.expiresAt) - Date.now();
-    if (!(remainingMs > 0)) {
-      authFeedback.value = "Your GitHub approval code expired. Start again when you are ready.";
-      return;
-    }
-    const waitMs = Math.min(Math.max(2, pending.intervalSeconds) * 1000 + 350, remainingMs);
+    // The main process expires the request locally, including its stored verifier.
+    // One final IPC at the deadline clears the code and reveals the restart action.
+    const intervalMs = Math.max(2, pending.intervalSeconds) * 1000 + 350;
+    const backoffMs = retryCount === 0 ? 0 : Math.min(30_000, 2_000 * 2 ** retryCount);
+    const waitMs = Math.max(0, Math.min(Math.max(intervalMs, backoffMs), remainingMs));
     authPollTimer = window.setTimeout(() => {
       if (generation !== authGeneration) return;
       authPollTimer = null;
-      if (Date.parse(pending.expiresAt) <= Date.now()) {
-        authFeedback.value = "Your GitHub approval code expired. Start again when you are ready.";
-        return;
-      }
       void pollAuthFlow({ automatic: true });
     }, waitMs);
   }
 
   async function startAuthFlow(roomIdentifierOverride?: string | null): Promise<void> {
     const generation = ++authGeneration;
+    retryCount = 0;
     clearAuthPollTimer();
     if (!authStatus.value?.authenticated) authSessionLocked.value = true;
     authBusy.value = true;
@@ -65,31 +64,32 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
       const result = await desktopIpc.auth.startDeviceFlow(roomIdentifier);
       if (generation !== authGeneration) return;
       authStatus.value = result.authStatus;
-      authFeedback.value = "Your code is ready. Copy it, then open GitHub to finish connecting.";
       scheduleAuthPoll();
     } catch (error) {
       if (generation !== authGeneration) return;
-      authFeedback.value = error instanceof Error ? error.message : "Could not start GitHub approval.";
+      authFeedback.value = error instanceof Error ? error.message : "Could not start sign-in.";
     } finally {
       if (generation === authGeneration) authBusy.value = false;
     }
   }
 
   async function openVerification(url: string): Promise<void> {
+    const generation = authGeneration;
     authBusy.value = true;
     authFeedback.value = null;
     try {
       await desktopIpc.auth.openVerification(url);
-      authFeedback.value = "Use the code shown here in GitHub, then return and approve the room.";
     } catch (error) {
-      authFeedback.value = error instanceof Error ? error.message : "Could not open GitHub.";
+      if (generation !== authGeneration) return;
+      authFeedback.value = error instanceof Error ? error.message : "Could not open your browser.";
     } finally {
-      authBusy.value = false;
+      if (generation === authGeneration) authBusy.value = false;
     }
   }
 
   async function cancelAuthFlow(): Promise<void> {
     const generation = ++authGeneration;
+    retryCount = 0;
     clearAuthPollTimer();
     authBusy.value = true;
     authFeedback.value = null;
@@ -111,18 +111,26 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
 
   async function pollAuthFlow(optionsOverride: { automatic?: boolean } = {}): Promise<void> {
     const generation = authGeneration;
+    if (pollingGeneration === generation) return;
+    pollingGeneration = generation;
     clearAuthPollTimer();
     if (!optionsOverride.automatic) {
       authBusy.value = true;
     }
-    authFeedback.value = null;
+    const pending = authStatus.value?.pendingDeviceAuth;
+    const expired = pending && !(Date.parse(pending.expiresAt) > Date.now());
+    if (expired && authStatus.value) {
+      authStatus.value = { ...authStatus.value, pendingDeviceAuth: null };
+      authFeedback.value = "This sign-in request expired. Request a new code to continue.";
+    }
     try {
       const result = await desktopIpc.auth.pollDeviceFlow();
       if (generation !== authGeneration) return;
       authStatus.value = result.authStatus;
 
       if (result.status === "authorized") {
-        authFeedback.value = "Connected. Confirm the room and you are ready.";
+        retryCount = 0;
+        authFeedback.value = null;
         if (options.isFirstRunGate()) {
           await options.onFirstRunAuthorized();
           if (generation !== authGeneration) return;
@@ -137,34 +145,47 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
       }
 
       if (result.status === "pending" || result.status === "slow_down") {
-        authFeedback.value = result.status === "slow_down"
-          ? "GitHub asked us to slow down. LetAgents will check again shortly."
-          : "Waiting for GitHub approval.";
+        retryCount = result.status === "slow_down" ? Math.min(retryCount + 1, 4) : 0;
+        // The view already explains approval. Background transport activity must
+        // not repeatedly remove/reinsert feedback or toggle foreground loading.
+        authFeedback.value = null;
         scheduleAuthPoll();
         return;
       }
 
-      authFeedback.value = result.error || "GitHub approval did not complete. Start again when you are ready.";
       if (result.status === "unknown" && authStatus.value?.pendingDeviceAuth) {
-        authFeedback.value += " LetAgents will check again shortly.";
-        scheduleAuthPoll();
+        retryApproval();
+        return;
       }
+      authFeedback.value = result.status === "expired"
+        ? "This sign-in request expired. Request a new code to continue."
+        : result.status === "denied"
+          ? "This sign-in request was declined. Start again when you are ready."
+          : result.error || "Sign-in did not complete. Start again when you are ready.";
     } catch (error) {
       if (generation !== authGeneration) return;
-      authFeedback.value = error instanceof Error ? error.message : "Could not check GitHub approval.";
       if (authStatus.value?.pendingDeviceAuth) {
-        authFeedback.value += " LetAgents will check again shortly.";
-        scheduleAuthPoll();
+        retryApproval();
+      } else if (!expired) {
+        authFeedback.value = error instanceof Error ? error.message : "Could not finish sign-in.";
       }
     } finally {
+      if (pollingGeneration === generation) pollingGeneration = null;
       if (!optionsOverride.automatic) {
         if (generation === authGeneration) authBusy.value = false;
       }
     }
   }
 
+  function retryApproval(): void {
+    retryCount = Math.min(retryCount + 1, 4);
+    authFeedback.value = "Connection interrupted. Retrying automatically.";
+    scheduleAuthPoll();
+  }
+
   async function signOut(): Promise<void> {
     const generation = ++authGeneration;
+    retryCount = 0;
     clearAuthPollTimer();
     authSessionLocked.value = true;
     authBusy.value = true;
@@ -182,6 +203,13 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     } finally {
       if (generation === authGeneration) authBusy.value = false;
     }
+  }
+
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      ++authGeneration;
+      clearAuthPollTimer();
+    });
   }
 
   return {
