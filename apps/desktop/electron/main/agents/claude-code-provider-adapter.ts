@@ -1024,7 +1024,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   }
 
   private closePermission(handle: ClaudeProviderHandle, id: string): void {
-    const pending = handle.permissionClosures.get(id);
+    const pending = handle.permissionRequests.get(id) ?? handle.permissionClosures.get(id);
     if (!pending || this.handles.get(handle.workAttemptId) !== handle || !handle.permissionControlAvailable
       || handle.providerConnection.kind !== "claude_cli" || !handle.providerConnection.processIdentity
       || this.deps.getProcessIdentity(handle.pid!) !== handle.providerConnection.processIdentity) return;
@@ -1583,7 +1583,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         terminalDiscriminator,
         nativeLifecycle,
       };
-      for (const [id, pending] of handle.permissionClosures) {
+      for (const [id, pending] of new Map([...handle.permissionClosures, ...handle.permissionRequests])) {
         if (pending.turnId === turnId) this.closePermission(handle, id);
       }
       handle.executionTurnId = null;
@@ -1612,7 +1612,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           if (!tool || tool.completed || (block.is_error !== undefined && typeof block.is_error !== "boolean")
             || (typeof block.content !== "string" && !Array.isArray(block.content))) continue;
           tool.completed = true;
-          for (const [id, pending] of handle.permissionClosures) {
+          for (const [id, pending] of new Map([...handle.permissionClosures, ...handle.permissionRequests])) {
             if (pending.turnId === turnId && pending.native.request.tool_use_id === block.tool_use_id) this.closePermission(handle, id);
           }
           emit({ domain: "execution", kind: "completed", executionId: block.tool_use_id, operation: tool.operation,
