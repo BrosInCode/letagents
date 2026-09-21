@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -29,11 +31,13 @@ import type {
 } from "../main/agents/provider-adapter.js";
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
 import {
+  relocateCursorConversationNamespace,
   cursorSupervisedMcpServerName,
   prepareCursorSupervisedProfile,
   type CursorManagedProfile,
 } from "../main/agents/cursor-managed-profile.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { removeSupervisedWorkspaceGenerationReceipt } from "../main/agents/supervised-workspace-generation.js";
 const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -279,6 +283,24 @@ socket.once("close", () => process.exit(0));
   };
 }
 
+function cursorConversationStoreFixtureSource(sessionId: string): string {
+  return `{
+    const fs = require("node:fs");
+    const path = require("node:path");
+    process.chdir(process.argv[process.argv.indexOf("--workspace") + 1]);
+    const hash = require("node:crypto").createHash("md5").update(path.resolve(process.cwd())).digest("hex");
+    const store = path.join(process.env.CURSOR_CONFIG_DIR, "chats", hash, ${JSON.stringify(sessionId)}, "store.db");
+    const resume = process.argv.find((arg) => arg.startsWith("--resume="));
+    if (resume && (resume !== "--resume=" + ${JSON.stringify(sessionId)} || !fs.existsSync(store))) {
+      throw new Error("The original conversation is missing in this workspace");
+    }
+    const previous = fs.existsSync(store) ? JSON.parse(fs.readFileSync(store, "utf8")) : { context: "original conversation", turns: 0 };
+    if (previous.context !== "original conversation") throw new Error("Conversation context was replaced");
+    fs.mkdirSync(path.dirname(store), { recursive: true });
+    fs.writeFileSync(store, JSON.stringify({ ...previous, turns: previous.turns + 1 }));
+  }`;
+}
+
 const cursorMcpAttestationFixtureSource = `
 function attestFixtureMcp() {
   return new Promise((resolve, reject) => {
@@ -411,11 +433,18 @@ function createHarness(options: HarnessOptions = {}) {
   }> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const workspaceGenerationEvents: Array<{ kind: "create" | "retire" | "recover" | "abandon" | "remove"; turnIdentity?: string }> = [];
+  const generations = new Map<string, Awaited<ReturnType<CursorProviderAdapterDependencies["createWorkspaceGeneration"]>>>();
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 5200;
   let mintedSessions = 0;
 
   const dependencies: CursorProviderAdapterDependencies = {
+    relocateConversationNamespace() {},
+    async openWorkspaceGeneration(path) {
+      const generation = generations.get(path);
+      if (!generation) throw new Error("Unexpected generation reopen in fixture");
+      return generation;
+    },
     bindPersonalIdentity() {},
     async attestPersonalIdentity(input) {
       identityAttestations.push(input);
@@ -481,7 +510,7 @@ function createHarness(options: HarnessOptions = {}) {
     async createWorkspaceGeneration(input) {
       workspaceGenerationEvents.push({ kind: "create", turnIdentity: input.turnIdentity });
       const manifestPath = `/tmp/letagents-test-generation-${createHash("sha256").update(input.turnIdentity).digest("hex")}.json`;
-      return {
+      const generation = {
         generationId: createHash("sha256").update(input.turnIdentity).digest("hex").slice(0, 32),
         manifestPath,
         sourceRoot: input.realWorkspace,
@@ -502,6 +531,8 @@ function createHarness(options: HarnessOptions = {}) {
           return { phase: "aborted" as const, appliedPaths: [], manifestPath };
         },
       };
+      generations.set(manifestPath, generation);
+      return generation;
     },
     async recoverWorkspaceGeneration(manifestPath) {
       workspaceGenerationEvents.push({ kind: "recover" });
@@ -3024,6 +3055,9 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
       JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart" }),
       "",
     ].join("\n"));
+    const harness = createHarness();
+    const generation = await harness.dependencies.createWorkspaceGeneration({ realWorkspace: root, turnIdentity: turnId });
+    harness.workspaceGenerationEvents.length = 0;
     writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
       type: "exit", code: 0, signal: null,
       native_process_group_reaped: true,
@@ -3031,11 +3065,10 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
       remote_authority_revoked: true,
       session_contract_valid: true,
       stream_contract_complete: true,
-      workspace_generation_manifest_path: "/tmp/letagents-recovered-workspace-generation.json",
+      workspace_generation_manifest_path: generation.manifestPath,
       init: { type: "system", subtype: "init", session_id: "sess-after-restart" },
       result: { type: "result", subtype: "success", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart", request_id: null },
     }));
-    const harness = createHarness();
     const adapter = new CursorProviderAdapter({
       dependencies: harness.dependencies,
       supervisedProfileFactory: ({ workAttemptId }) => ({
@@ -3043,7 +3076,7 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
         env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
       }),
     });
-    const request = daemonSpawnRequest();
+    const request = daemonSpawnRequest({ cwd: root });
     const handle = await adapter.resume({
       workAttemptId: request.workAttemptId,
       providerContinuationId: "sess-after-restart",
@@ -3068,6 +3101,120 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
     assert.deepEqual(harness.workspaceGenerationEvents.map((event) => event.kind), ["recover"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor recommits a visible settlement before cleanup after a failed directory sync", async (t) => {
+  for (const phase of ["cleaned", "aborted", "before-loan", "fresh-aborted"] as const) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-cursor-settlement-sync-")));
+    const originalSync = fs.fsyncSync;
+    try {
+      const workspace = join(root, "workspace");
+      const live = join(root, "live");
+      const configDir = join(root, "config");
+      mkdirSync(workspace);
+      mkdirSync(live);
+      mkdirSync(configDir);
+      const turnId = `cursor:settlement-${phase}`;
+      const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl.terminal.json`);
+      const harness = createHarness();
+      const generation = { ...await harness.dependencies.createWorkspaceGeneration({ realWorkspace: workspace, turnIdentity: turnId }), liveWorkspace: live };
+      let generationAvailable = true;
+      let removals = 0;
+      let successfulMarkerParentSyncs = 0;
+      let failSync = true;
+      const profile = { homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"), env: { HOME: join(root, "home") } };
+      const makeAdapter = () => new CursorProviderAdapter({
+        dependencies: {
+          ...harness.dependencies,
+          relocateConversationNamespace: relocateCursorConversationNamespace,
+          async openWorkspaceGeneration() {
+            assert.equal(generationAvailable, true, "a settled terminal must not require a removed receipt");
+            return generation;
+          },
+          async removeWorkspaceGenerationReceipt() {
+            assert.ok(successfulMarkerParentSyncs > 0, "marker durability precedes every removal");
+            generationAvailable = false;
+            removals += 1;
+            if (removals === 1) throw new Error("crash after receipt removal");
+          },
+        },
+        supervisedProfileFactory: () => profile,
+      });
+      const adapter = makeAdapter();
+      const request = daemonSpawnRequest({ cwd: workspace });
+      const initial = phase === "fresh-aborted" ? await adapter.spawn(request) : null;
+      const session = initial?.providerContinuationId ?? "sess-sync-recovery";
+      const handle = initial ?? await adapter.resume({
+        workAttemptId: request.workAttemptId, providerContinuationId: session,
+        providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+      }, request);
+      const storeAt = (cwd: string) => join(configDir, "cursor", "chats", createHash("md5").update(cwd).digest("hex"), session, "store.db");
+      if (phase !== "fresh-aborted") {
+        const initialStore = storeAt(phase === "before-loan" ? workspace : live);
+        mkdirSync(dirname(initialStore), { recursive: true });
+        writeFileSync(initialStore, "original conversation");
+      }
+      writeFileSync(terminalPath, JSON.stringify({
+        type: phase === "cleaned" ? "exit" : "not_started", code: 0, signal: null,
+        native_process_group_reaped: true, reap_scope: "native_process_group", remote_authority_revoked: true,
+        session_contract_valid: true, stream_contract_complete: true, turn_contract_version: 1,
+        workspace_generation_manifest_path: generation.manifestPath,
+        init: phase === "cleaned" ? { type: "system", subtype: "init", session_id: session } : null,
+        result: phase === "cleaned" ? { type: "result", subtype: "success", is_error: false, result: "preserved", session_id: session } : null,
+      }));
+      const syncMock = t.mock.method(fs, "fsyncSync", (fd: number) => {
+        const isMarkerParent = fs.fstatSync(fd).isDirectory()
+          && fs.fstatSync(fd).ino === fs.statSync(configDir).ino
+          && JSON.parse(readFileSync(terminalPath, "utf8")).workspace_generation_settlement;
+        if (isMarkerParent && failSync) { failSync = false; throw new Error("injected marker parent sync failure"); }
+        originalSync(fd);
+        if (isMarkerParent) successfulMarkerParentSyncs += 1;
+      });
+      syncBuiltinESMExports();
+      const recovery = { inboxItemId: "settlement", providerTurnId: turnId };
+      const checkpoint = { checkpointTerminalResult: async (raw: ProviderRoomTurnResult) => ({ acceptedResult: raw, cleanupRecoveryEvidence: true }) };
+      await assert.rejects(adapter.recoverRoomTurn(handle, recovery, checkpoint), /injected marker parent sync failure/);
+      assert.equal(removals, 0);
+      assert.equal(successfulMarkerParentSyncs, 0);
+      assert.equal(JSON.parse(readFileSync(terminalPath, "utf8")).workspace_generation_settlement.phase, phase === "cleaned" ? "cleaned" : "aborted");
+      if (phase !== "fresh-aborted") assert.equal(readFileSync(storeAt(workspace), "utf8"), "original conversation");
+      const markedTerminal = readFileSync(terminalPath, "utf8");
+      for (const invalid of [{ version: 2 }, { phase: "unknown" }, { provider_continuation_id: "another-session" }]) {
+        const raw = JSON.parse(markedTerminal);
+        raw.workspace_generation_settlement = { ...raw.workspace_generation_settlement, ...invalid };
+        writeFileSync(terminalPath, JSON.stringify(raw));
+        await assert.rejects(adapter.recoverRoomTurn(handle, recovery, checkpoint), /settlement evidence is invalid/);
+        assert.equal(removals, 0);
+      }
+      writeFileSync(terminalPath, markedTerminal);
+      if (phase !== "fresh-aborted") {
+        fs.renameSync(storeAt(workspace), `${storeAt(workspace)}.held`);
+        await assert.rejects(adapter.recoverRoomTurn(handle, recovery, checkpoint), /exact session store/);
+        assert.equal(removals, 0);
+        fs.renameSync(`${storeAt(workspace)}.held`, storeAt(workspace));
+      }
+      await assert.rejects(adapter.recoverRoomTurn(handle, recovery, checkpoint), /crash after receipt removal/);
+      assert.equal(generationAvailable, false);
+      const successor = makeAdapter();
+      const resumed = await successor.resume({ workAttemptId: request.workAttemptId, providerContinuationId: session,
+        providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null } }, request);
+      if (phase === "cleaned") {
+        assert.equal((await successor.recoverRoomTurn(resumed, recovery, checkpoint)).text, "preserved");
+        assert.equal(existsSync(terminalPath), false);
+      } else {
+        await assert.rejects(successor.recoverRoomTurn(resumed, recovery, checkpoint),
+          (error: unknown) => (error as { roomTurnRecoveryOutcome?: string }).roomTurnRecoveryOutcome === "not_dispatched");
+        assert.equal(existsSync(terminalPath), true, "undispatched evidence remains until the daemon resets that exact turn");
+      }
+      assert.equal(removals, 2);
+      assert.equal(harness.launches.length, 0);
+      syncMock.mock.restore();
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -4973,6 +5120,77 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
+test("Cursor preserves its exact native conversation across writable generations and a supervisor restart", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-cursor-conversation-restart-")));
+  try {
+    const workspace = join(root, "workspace");
+    const sourceHomeDir = join(root, "source-home");
+    const profileRoot = join(root, "profile");
+    const executable = join(root, "fake-cursor-agent");
+    initializeGitWorkspace(workspace);
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    writeFileSync(executable, `#!/usr/bin/env node
+${cursorConversationStoreFixtureSource("sess-original-conversation")}
+const fs = require("node:fs");
+fs.writeFileSync("agent-change.txt", "preserved work");
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-original-conversation" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "conversation retained", session_id: "sess-original-conversation" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const launches: Parameters<CursorProviderAdapterDependencies["launchTurn"]>[0][] = [];
+    let interruptAfterReceiptDeletion = true;
+    const createAdapter = () => new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+        launchTurn(input) { launches.push(input); return defaultLaunchTurn(input); },
+        async removeWorkspaceGenerationReceipt(path, options) {
+          await removeSupervisedWorkspaceGenerationReceipt(path, options);
+          if (interruptAfterReceiptDeletion) {
+            interruptAfterReceiptDeletion = false;
+            throw new Error("crash after receipt deletion");
+          }
+        },
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input, apiBaseUrl: "https://desktop.letagents.example", workspaceRoot: input.cwd,
+        sourceHomeDir, profileRoot: input.profileRoot ?? profileRoot,
+        ...(input.inspectionOnly ? {} : { mcpRuntime: {
+          entryPath: materializeAttestableMcpRuntime(join(root, "mcp-runtime")), readRoots: [join(root, "mcp-runtime")],
+        } }),
+      }),
+    });
+    const request = daemonSpawnRequest({ cwd: workspace, permissionProfileId: "sandboxed_write", launchPolicy: { force: true, sandbox: "enabled" } });
+    const first = createAdapter();
+    const firstHandle = await first.spawn(request);
+    let turnId = "";
+    const checkpoint = { checkpointTerminalResult: async (raw: ProviderRoomTurnResult) => ({ acceptedResult: raw, cleanupRecoveryEvidence: true }) };
+    await assert.rejects(withLoopAlive(first.runRoomTurn(firstHandle, roomTurnRequest(), {
+      ...checkpoint, checkpointTurnStarted: async (id) => { turnId = id; },
+    })), /crash after receipt deletion/);
+    assert.equal(existsSync(launches[0]!.workspaceGenerationManifestPath!), false);
+    const restingStore = join(profileRoot, "config", "cursor", "chats", createHash("md5").update(workspace).digest("hex"), "sess-original-conversation", "store.db");
+    assert.deepEqual(JSON.parse(readFileSync(restingStore, "utf8")), { context: "original conversation", turns: 1 });
+    const successor = createAdapter();
+    const handle = await successor.resume({
+      workAttemptId: request.workAttemptId, providerContinuationId: "sess-original-conversation",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    const recovered = await successor.recoverRoomTurn(handle, { inboxItemId: "first", providerTurnId: turnId }, checkpoint);
+    assert.equal(recovered.text, "conversation retained");
+    assert.equal(launches.length, 1, "restart recovery never replays native work");
+    const second = await withLoopAlive(successor.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }), checkpoint));
+    assert.equal(second.text, "conversation retained");
+    assert.notEqual(argValue(launches[0]!.args, "--workspace"), argValue(launches[1]!.args, "--workspace"));
+    assert.equal(argValue(launches[1]!.args, "--resume"), "sess-original-conversation");
+    assert.deepEqual(JSON.parse(readFileSync(restingStore, "utf8")), { context: "original conversation", turns: 2 });
+    assert.equal(readFileSync(join(workspace, "agent-change.txt"), "utf8"), "preserved work");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("the real supervised boundary starts without inventorying pre-existing project files", {
   skip: process.platform !== "darwin",
 }, async () => {
@@ -5026,6 +5244,7 @@ const outcome = {
   hardlinkCreate: link(path.join(workspace, "hardlink-source.txt"), path.join(workspace, "hardlink-escape.txt")),
   authority: write(path.join(workspace, ".cursor", "mcp.json")),
 };
+${cursorConversationStoreFixtureSource("sess-write-boundary")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-write-boundary" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-write-boundary" }) + "\\n");
 `);
@@ -5190,6 +5409,7 @@ const outcome = {
   insideCopy: run("/bin/cp", [path.join(workspace, "copy-source.txt"), path.join(workspace, "copy-target.txt")]),
   outsideClone: run("/bin/cp", ["-c", ${JSON.stringify(outsideCopySource)}, path.join(workspace, "outside-clone-target.txt")]),
 };
+${cursorConversationStoreFixtureSource("sess-workspace-toolchains")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-workspace-toolchains" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-workspace-toolchains" }) + "\\n");
 `);
@@ -5397,6 +5617,7 @@ const hooksConfig = run(["config", "core.hooksPath", ".planted-hooks"]);
 const add = run(["add", "feature.txt"]);
 const commit = run(["-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test", "commit", "--quiet", "-m", "cursor linked worktree"]);
 const outcome = { add, commit, outside, hook, worktreeConfig, marker, hooksConfig };
+${cursorConversationStoreFixtureSource("sess-linked-worktree")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-linked-worktree" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-linked-worktree" }) + "\\n");
 `);
@@ -5595,6 +5816,7 @@ const outcome = {
   read: attempt(() => fs.readFileSync(path.join(workspace, ".cursor", "settings.json"), "utf8")),
   write: attempt(() => fs.writeFileSync(path.join(workspace, ".cursor", "mcp.json"), "replaced\\n")),
 };
+${cursorConversationStoreFixtureSource("sess-late-authority-symlink")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-late-authority-symlink" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-late-authority-symlink" }) + "\\n");
 `);
