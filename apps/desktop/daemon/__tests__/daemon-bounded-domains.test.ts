@@ -177,7 +177,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // and delivery coordinators; recovery policy and its journal remain extracted.
   // 1592 -> 1611: service-owned local board RPCs and singleton lifecycle wiring;
   // storage, commit notifications, subscriptions, and worker fencing stay extracted.
-  assert.ok(mainSource.split("\n").length < 1_611, "main.ts must remain a thin composition root");
+  // 1611 -> 1620: runtime-death approval settlement ports; storage and fault-only
+  // retry policy stay in execution-approval-journal.ts.
+  assert.ok(mainSource.split("\n").length < 1_620, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {
