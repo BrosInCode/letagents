@@ -31,6 +31,22 @@ function session(roomId: string, suffix: string): StoredAgentSessionState {
   };
 }
 
+test("hosted daemon registry remains hosted under a local ambient API route", async () => {
+  const priorApi = process.env.LETAGENTS_API_URL;
+  process.env.LETAGENTS_API_URL = "letagents-local://rooms";
+  try {
+    // An incomplete input must reach the hosted tool's schema validation,
+    // proving the local ambient environment did not hide or poison its registry.
+    await assert.rejects(executeDaemonTool({ provider: "open-model", toolName: "register_task_close_intent",
+      input: {}, requestId: "hosted_contract", roomId: "focus_42", apiUrl: "https://letagents.example",
+      bearer: "worker", cwd: process.cwd(), agentSession: { ...session("focus_42", "hosted_contract"), runtime: "open-model" },
+    }), { name: "ZodError" });
+  } finally {
+    if (priorApi === undefined) delete process.env.LETAGENTS_API_URL;
+    else process.env.LETAGENTS_API_URL = priorApi;
+  }
+});
+
 test("daemon executor binds exact supervised room authority without crossing the bridge", async () => {
   const output = await executeDaemonTool({
     provider: "cursor",

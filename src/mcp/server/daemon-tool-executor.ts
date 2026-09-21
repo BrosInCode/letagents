@@ -20,7 +20,7 @@ const handlersByProvider = new Map<string, Map<string, ToolHandler>>();
 const SUPERVISED_PROVIDERS = new Set(["claude-code", "cursor", "codex", "open-model"]);
 const WORKSPACE_SCOPED_TOOLS = new Set(["check_repo", "check_repo_visibility", "initialize_repo"]);
 
-function handlersForProvider(provider: string): Map<string, ToolHandler> {
+function handlersForProvider(provider: string, apiUrl: string): Map<string, ToolHandler> {
   const normalizedProvider = provider.trim().toLowerCase();
   const existing = handlersByProvider.get(normalizedProvider);
   if (existing) return existing;
@@ -38,7 +38,7 @@ function handlersForProvider(provider: string): Map<string, ToolHandler> {
       return {};
     },
   } as unknown as McpServer;
-  registerTools(recorder, "supervised_room_turn", normalizedProvider || null, { executionOwner: "daemon" });
+  registerTools(recorder, "supervised_room_turn", normalizedProvider || null, { executionOwner: "daemon", apiUrl });
   handlersByProvider.set(normalizedProvider, handlers);
   return handlers;
 }
@@ -94,7 +94,7 @@ function validateExecutionContext(input: ExecuteDaemonToolInput): ExecuteDaemonT
  */
 export async function executeDaemonTool(input: ExecuteDaemonToolInput): Promise<ExecuteDaemonToolResult> {
   const context = validateExecutionContext(input);
-  const tool = handlersForProvider(context.provider).get(context.toolName);
+  const tool = handlersForProvider(context.provider, context.apiUrl).get(context.toolName);
   if (!tool) throw new Error(`Unsupported supervised tool: ${context.toolName}`);
   const parsedInput = tool.inputSchema
     ? await z.object(tool.inputSchema).parseAsync(context.input)
