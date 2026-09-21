@@ -1,6 +1,6 @@
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, mkdtempSync, openSync, readSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, fsyncSync, mkdtempSync, openSync, readSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
@@ -100,6 +100,7 @@ import {
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import {
   bindCursorSupervisedIdentity,
+  relocateCursorConversationNamespace,
   prepareCursorSupervisedProfile,
   type CursorPersonalIdentity,
   type CursorManagedProfile,
@@ -114,6 +115,7 @@ import { buildCursorChildEnv } from "./cursor-runner.js";
 import { cursorPermissionProfileInstructionLines } from "./cursor-permission-profile.js";
 import {
   createSupervisedWorkspaceGeneration,
+  openSupervisedWorkspaceGeneration,
   recoverSupervisedWorkspaceGeneration,
   removeSupervisedWorkspaceGenerationReceipt,
   type SupervisedWorkspaceGenerationHandle,
@@ -182,6 +184,8 @@ export interface CursorProviderAdapterDependencies {
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   prepareTurnState(path: string): void;
+  relocateConversationNamespace: typeof relocateCursorConversationNamespace;
+  openWorkspaceGeneration: typeof openSupervisedWorkspaceGeneration;
   createWorkspaceGeneration: typeof createSupervisedWorkspaceGeneration;
   recoverWorkspaceGeneration: typeof recoverSupervisedWorkspaceGeneration;
   removeWorkspaceGenerationReceipt: typeof removeSupervisedWorkspaceGenerationReceipt;
@@ -441,6 +445,8 @@ const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   prepareTurnState: (path) => writeFileSync(path, "", { flag: "wx", mode: 0o600 }),
+  relocateConversationNamespace: relocateCursorConversationNamespace,
+  openWorkspaceGeneration: openSupervisedWorkspaceGeneration,
   createWorkspaceGeneration: createSupervisedWorkspaceGeneration,
   recoverWorkspaceGeneration: recoverSupervisedWorkspaceGeneration,
   removeWorkspaceGenerationReceipt: removeSupervisedWorkspaceGenerationReceipt,
@@ -465,6 +471,7 @@ interface LiveTurn {
   /** Writable turns own one private generation until its immutable tree is reconciled. */
   workspaceGeneration: SupervisedWorkspaceGenerationHandle | null;
   workspaceGenerationManifestPath: string | null;
+  workspaceGenerationSettlement?: CursorGenerationSettlement;
   liveDisplayTools: Map<string, { tool: string; input: unknown; completed: boolean }>;
   executionTools: Map<string, { tool: string; completed: boolean }>;
   executionTurnFinished: boolean;
@@ -493,6 +500,13 @@ type CursorTurnTerminal = {
   providerContinuationId?: string;
   /** Trusted wrapper link to the exact private filesystem authority journal. */
   workspaceGenerationManifestPath?: string;
+  workspaceGenerationSettlement?: CursorGenerationSettlement;
+};
+
+type CursorGenerationSettlement = {
+  version: 1;
+  phase: "aborted" | "cleaned";
+  provider_continuation_id: string;
 };
 
 class CursorRoomTurnRecoveryError extends Error {
@@ -501,7 +515,9 @@ class CursorRoomTurnRecoveryError extends Error {
 
 class CursorRoomTurnNotDispatchedError extends Error {
   readonly roomTurnRecoveryOutcome = "not_dispatched" as const;
-  constructor(message: string, readonly providerTurnId: string | null = null) {
+  constructor(message: string, readonly providerTurnId: string | null = null,
+    readonly workspaceGenerationManifestPath?: string,
+    readonly workspaceGenerationSettlement?: CursorGenerationSettlement) {
     super(message);
   }
 }
@@ -984,7 +1000,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
         : false;
       if (cleanupRecoveryEvidence) {
         if (turn.workspaceGenerationManifestPath) {
-          await this.deps.removeWorkspaceGenerationReceipt(turn.workspaceGenerationManifestPath);
+          await this.deps.removeWorkspaceGenerationReceipt(turn.workspaceGenerationManifestPath,
+            { settlementVerified: Boolean(turn.workspaceGenerationSettlement) });
         }
         // The turn journal is the only restart-readable terminal evidence.
         // Retire it last, after every fallible generation cleanup succeeds.
@@ -1038,6 +1055,19 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // cannot be hidden until the next daemon restart.
       terminal = this.readDurableTurnTerminal(handle, turnId) ?? handle.roomTurnResults.get(turnId) ?? null;
     } catch (error) {
+      if (error instanceof CursorRoomTurnNotDispatchedError && error.workspaceGenerationManifestPath) {
+        if (error.workspaceGenerationSettlement) {
+          this.verifyRestingConversation(handle, error.workspaceGenerationSettlement);
+          this.recordGenerationSettlement(handle, turnId, error.workspaceGenerationManifestPath, "aborted");
+        } else {
+          const generation = await this.deps.openWorkspaceGeneration(error.workspaceGenerationManifestPath);
+          this.restoreConversationNamespace(handle, generation);
+          const receipt = await generation.abandon();
+          if (receipt.phase !== "aborted") throw new CursorRoomTurnRecoveryError("Cursor preparation recovery did not abandon its generation.");
+          this.recordGenerationSettlement(handle, turnId, generation.manifestPath, "aborted");
+        }
+        await this.deps.removeWorkspaceGenerationReceipt(error.workspaceGenerationManifestPath, { settlementVerified: true });
+      }
       if (error instanceof CursorRoomTurnNotDispatchedError
         && retainedTurn?.lifecycleSettlementDeferred) {
         try {
@@ -1067,9 +1097,18 @@ export class CursorProviderAdapter implements ProviderAdapter {
         "Cursor room-turn recovery cannot prove the persisted exact turn reached a terminal boundary; refusing to rerun it.",
       );
     }
-    if (terminal.workspaceGenerationManifestPath) {
+    if (terminal.workspaceGenerationSettlement) {
+      this.verifyRestingConversation(handle, terminal.workspaceGenerationSettlement);
+      // A prior rename may have succeeded before its parent sync failed.
+      // Recommit the marker before it can authorize receipt deletion.
+      this.recordGenerationSettlement(handle, turnId, terminal.workspaceGenerationManifestPath!, "cleaned");
+    } else if (terminal.workspaceGenerationManifestPath) {
       let receipt;
       try {
+        const generation = await this.deps.openWorkspaceGeneration(terminal.workspaceGenerationManifestPath);
+        if (generation.realWorkspace !== resolve(handle.cwd) && generation.realWorkspace !== realpathSync(handle.cwd)) {
+          throw new CursorRoomTurnRecoveryError("Cursor generation recovery belongs to another workspace.");
+        }
         receipt = await this.deps.recoverWorkspaceGeneration(
           terminal.workspaceGenerationManifestPath,
           // The trusted wrapper terminal above proves native process-group and
@@ -1078,6 +1117,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
           // of its allowlisted path before sealing its immutable Git tree.
           { retireReadyGeneration: true },
         );
+        if (receipt.phase !== "cleaned") throw new CursorRoomTurnRecoveryError(`Cursor generation recovery ended in ${receipt.phase}.`);
+        this.restoreConversationNamespace(handle, generation);
+        terminal.workspaceGenerationSettlement = this.recordGenerationSettlement(handle, turnId, generation.manifestPath, "cleaned");
       } catch (error) {
         throw new CursorRoomTurnRecoveryError(
           `Cursor's exact workspace generation could not be recovered: ${error instanceof Error ? error.message : String(error)}`,
@@ -1160,7 +1202,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
       : false;
     if (cleanupRecoveryEvidence) {
       if (terminal.workspaceGenerationManifestPath) {
-        await this.deps.removeWorkspaceGenerationReceipt(terminal.workspaceGenerationManifestPath);
+        await this.deps.removeWorkspaceGenerationReceipt(terminal.workspaceGenerationManifestPath,
+          { settlementVerified: Boolean(terminal.workspaceGenerationSettlement) });
       }
       this.removeDurableTurnJournal(handle, turnId);
     }
@@ -1191,6 +1234,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     let initMessage: CursorStreamMessage;
     let resultMessage: CursorStreamMessage | null;
     let workspaceGenerationManifestPath: string | undefined;
+    let workspaceGenerationSettlement: CursorGenerationSettlement | undefined;
     let terminalError: string | undefined;
     let publicationContract: CursorTurnTerminal["publicationContract"] = "structured_room_turn_v1";
     let legacyUnversionedTerminal = false;
@@ -1202,9 +1246,29 @@ export class CursorProviderAdapter implements ProviderAdapter {
       if (!currentRemoteAuthorityEvidence) {
         throw new CursorRoomTurnRecoveryError("Cursor terminal evidence does not prove native process-group retirement and remote-authority revocation.");
       }
+      if (raw.workspace_generation_manifest_path !== undefined && raw.workspace_generation_manifest_path !== null) {
+        if (typeof raw.workspace_generation_manifest_path !== "string" || !isAbsolute(raw.workspace_generation_manifest_path)
+          || raw.workspace_generation_manifest_path.length > 16_384
+          || resolve(raw.workspace_generation_manifest_path) !== raw.workspace_generation_manifest_path) {
+          throw new CursorRoomTurnRecoveryError("Cursor terminal evidence has an invalid workspace-generation journal path.");
+        }
+        workspaceGenerationManifestPath = raw.workspace_generation_manifest_path;
+      }
+      if (raw.workspace_generation_settlement !== undefined) {
+        const settlement = raw.workspace_generation_settlement as CursorGenerationSettlement;
+        const expected = raw.type === "not_started" ? handle.providerContinuationId
+          : raw.init && typeof raw.init === "object" ? sessionIdOf(raw.init as CursorStreamMessage) : null;
+        if (!workspaceGenerationManifestPath || !settlement || settlement.version !== 1
+          || settlement.phase !== (raw.type === "not_started" ? "aborted" : "cleaned")
+          || typeof expected !== "string" || settlement.provider_continuation_id !== expected) {
+          throw new CursorRoomTurnRecoveryError("Cursor conversation settlement evidence is invalid.");
+        }
+        workspaceGenerationSettlement = settlement;
+      }
       if (raw.type === "not_started") {
         throw new CursorRoomTurnNotDispatchedError(
           "Cursor's prepared wrapper exited before native dispatch; the exact inbox item is safe to retry.",
+          turnId, workspaceGenerationManifestPath, workspaceGenerationSettlement,
         );
       }
       if (raw.type !== "exit" && raw.type !== "error") {
@@ -1220,17 +1284,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
         publicationContract = "structured_room_turn_v1";
       } else {
         legacyUnversionedTerminal = true;
-      }
-      if (raw.workspace_generation_manifest_path !== undefined
-        && raw.workspace_generation_manifest_path !== null) {
-        if (typeof raw.workspace_generation_manifest_path !== "string"
-          || raw.workspace_generation_manifest_path.length === 0
-          || raw.workspace_generation_manifest_path.length > 16_384
-          || !isAbsolute(raw.workspace_generation_manifest_path)
-          || resolve(raw.workspace_generation_manifest_path) !== raw.workspace_generation_manifest_path) {
-          throw new CursorRoomTurnRecoveryError("Cursor terminal evidence has an invalid workspace-generation journal path.");
-        }
-        workspaceGenerationManifestPath = raw.workspace_generation_manifest_path;
       }
       if (!raw.init || typeof raw.init !== "object" || Array.isArray(raw.init)) {
         throw new CursorRoomTurnRecoveryError("Cursor terminal evidence has no verified init snapshot.");
@@ -1308,6 +1361,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         ...(terminalError ? { terminalError } : {}),
         providerContinuationId: initSessionId,
         ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
+        ...(workspaceGenerationSettlement ? { workspaceGenerationSettlement } : {}),
       }
       : {
         state: "attempt_terminal",
@@ -1320,6 +1374,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         ...(terminalError ? { terminalError } : {}),
         providerContinuationId: initSessionId,
         ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
+        ...(workspaceGenerationSettlement ? { workspaceGenerationSettlement } : {}),
       };
   }
 
@@ -2019,9 +2074,22 @@ export class CursorProviderAdapter implements ProviderAdapter {
       });
     }
     const nativeLaunchIsDeferred = handle.deliveryMode === "daemon_inbox";
+    let conversationLoanAttempted = false;
     const abandonPreparedGeneration = async (): Promise<void> => {
       if (!workspaceGeneration) return;
-      await this.abandonTurnWorkspaceGeneration(workspaceGeneration);
+      if (!conversationLoanAttempted && !child.requiresDurableTerminalEvidence) {
+        await this.abandonTurnWorkspaceGeneration(workspaceGeneration);
+        workspaceGeneration = null;
+        return;
+      }
+      this.restoreConversationNamespace(handle, workspaceGeneration);
+      const receipt = await workspaceGeneration.abandon();
+      if (receipt.phase !== "aborted") throw new CursorRoomTurnRecoveryError("Cursor preparation did not abandon its generation.");
+      if (roomTurnId && child.requiresDurableTerminalEvidence) {
+        this.recordGenerationSettlement(handle, roomTurnId, workspaceGeneration.manifestPath, "aborted");
+      }
+      await this.deps.removeWorkspaceGenerationReceipt(workspaceGeneration.manifestPath,
+        { settlementVerified: child.requiresDurableTerminalEvidence === true });
       workspaceGeneration = null;
     };
 
@@ -2154,6 +2222,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
           "Cursor turn preparation was interrupted at the durable checkpoint boundary.",
           roomTurnId,
         );
+      }
+      if (workspaceGeneration) {
+        if (!handle.supervisedProfile) throw new Error("Cursor conversation profile is unavailable.");
+        conversationLoanAttempted = true;
+        this.deps.relocateConversationNamespace(handle.supervisedProfile,
+          workspaceGeneration.realWorkspace, workspaceGeneration.liveWorkspace, nativeResumeSession);
       }
       // The exact turn id and wrapper birth are both committed. Flip the
       // daemon's drain boundary and unlink handoff cancellation in one
@@ -2662,12 +2736,76 @@ export class CursorProviderAdapter implements ProviderAdapter {
       if (receipt.phase !== "cleaned") {
         throw new Error(`unexpected terminal phase ${receipt.phase}`);
       }
+      this.restoreConversationNamespace(handle, generation);
+      if (turn.child.requiresDurableTerminalEvidence && turn.roomTurnId) {
+        turn.workspaceGenerationSettlement = this.recordGenerationSettlement(handle, turn.roomTurnId, generation.manifestPath, "cleaned");
+      }
       turn.workspaceGeneration = null;
     } catch (error) {
       throw new CursorRoomTurnRecoveryError(
         `Cursor's private workspace generation could not be retired and reconciled: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  private restoreConversationNamespace(handle: CursorProviderHandle, generation: SupervisedWorkspaceGenerationHandle): void {
+    if (!handle.supervisedProfile || (generation.realWorkspace !== resolve(handle.cwd)
+      && generation.realWorkspace !== realpathSync(handle.cwd))) {
+      throw new CursorRoomTurnRecoveryError("Cursor conversation recovery does not match this attempt's workspace.");
+    }
+    const continuation = handle.providerContinuationId?.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX)
+      ? null : handle.providerContinuationId;
+    this.deps.relocateConversationNamespace(handle.supervisedProfile,
+      generation.liveWorkspace, generation.realWorkspace, continuation);
+  }
+
+  private verifyRestingConversation(handle: CursorProviderHandle, settlement: CursorGenerationSettlement): void {
+    if (!handle.supervisedProfile || settlement.provider_continuation_id !== handle.providerContinuationId) {
+      throw new CursorRoomTurnRecoveryError("Cursor conversation settlement belongs to another continuation.");
+    }
+    const workspace = realpathSync(handle.cwd);
+    this.deps.relocateConversationNamespace(handle.supervisedProfile, workspace, workspace,
+      handle.providerContinuationId.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX) ? null : handle.providerContinuationId);
+  }
+
+  /** Extend the exited wrapper's existing journal before its generation receipt
+   * can be deleted. Native evidence stays intact; a crash after cleanup can
+   * verify this exact settlement without treating a missing file as proof. */
+  private recordGenerationSettlement(handle: CursorProviderHandle, turnId: string, manifestPath: string,
+    phase: CursorGenerationSettlement["phase"]): CursorGenerationSettlement {
+    if (!handle.supervisedProfile || !handle.providerContinuationId) throw new CursorRoomTurnRecoveryError("Cursor conversation settlement has no exact owner.");
+    const path = join(handle.supervisedProfile.configDir,
+      `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl.terminal.json`);
+    const text = readBoundedCursorTurnFile(path, MAX_DURABLE_TURN_TERMINAL_BYTES, "Cursor generation settlement");
+    if (text === null) throw new CursorRoomTurnRecoveryError("Cursor generation settlement has no terminal evidence.");
+    const raw = JSON.parse(text) as Record<string, unknown>;
+    if (raw.workspace_generation_manifest_path !== manifestPath || raw.native_process_group_reaped !== true
+      || raw.reap_scope !== "native_process_group" || raw.remote_authority_revoked !== true
+      || (phase === "aborted" ? raw.type !== "not_started" : raw.type !== "exit" && raw.type !== "error")) {
+      throw new CursorRoomTurnRecoveryError("Cursor generation settlement does not match the retired turn.");
+    }
+    const settlement: CursorGenerationSettlement = { version: 1, phase, provider_continuation_id: handle.providerContinuationId };
+    if (raw.workspace_generation_settlement !== undefined) {
+      const previous = raw.workspace_generation_settlement as CursorGenerationSettlement | null;
+      if (!previous || previous.version !== settlement.version || previous.phase !== phase
+        || previous.provider_continuation_id !== settlement.provider_continuation_id) {
+        throw new CursorRoomTurnRecoveryError("Cursor conversation settlement conflicts with its existing journal.");
+      }
+    }
+    const contents = JSON.stringify({ ...raw, workspace_generation_settlement: settlement });
+    if (Buffer.byteLength(contents) > MAX_DURABLE_TURN_TERMINAL_BYTES) throw new CursorRoomTurnRecoveryError("Cursor generation settlement exceeds its journal limit.");
+    const temporary = `${path}.tmp-${randomUUID()}`;
+    try {
+      const file = openSync(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+      try { writeFileSync(file, contents); fsyncSync(file); } finally { closeSync(file); }
+      renameSync(temporary, path);
+      const parent = openSync(dirname(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+    } catch (error) {
+      try { unlinkSync(temporary); } catch { /* preserve settlement failure */ }
+      throw new CursorRoomTurnRecoveryError(`Cursor conversation settlement could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return settlement;
   }
 
   private async abandonTurnWorkspaceGeneration(
