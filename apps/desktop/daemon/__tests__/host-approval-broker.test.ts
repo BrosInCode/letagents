@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { WebSocketServer } from "ws";
 
+import type { HostApprovalReference } from "../../shared/host-approvals.js";
 import { HostApprovalBroker } from "../host-approval-broker.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
@@ -140,8 +141,12 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
       for (const listener of executionListeners) listener(event);
     },
     closed(request: ProviderPermissionRequest = native) {
-      assert.equal(request.provider, "codex");
-      receive!({ type: "request_closed", request: request as Extract<ProviderPermissionRequest, { provider: "codex" }> });
+      if (request.provider === "claude-code") receive!({ type: "request_closed", request,
+        providerContinuationId: "continuation", providerTurnId: state.turnId });
+      else {
+        assert.equal(request.provider, "codex");
+        receive!({ type: "request_closed", request });
+      }
     },
     observationFailure(type: "degraded" | "unavailable") { receive!({ type }); },
     get permissionChanges() { return permissionChanges; },
@@ -1188,3 +1193,130 @@ test("a saved command rule never covers Codex requests for extra access, stdin, 
     }
   } finally { await f.close(); }
 });
+
+async function waitForClosure(f: Awaited<ReturnType<typeof fixture>>, expected: HostApprovalReference) {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const record = (await f.store.getExecutionApproval(expected))!;
+    if (record.request.closedAtMs != null) return record;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail("exact closure was not persisted");
+}
+
+for (const phase of ["before_selection", "before_dispatch", "after_dispatch", "during_dispatch"] as const) {
+  test(`Claude request closure at ${phase} is durable without claiming application`, async () => {
+    const f = await fixture("claude-code");
+    try {
+      const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+      if (phase === "before_dispatch") f.state.beforeBefore = async () => {
+        f.closed(); await waitForClosure(f, selected.expected);
+      };
+      else if (phase === "during_dispatch") f.state.afterNativeWrite = async () => {
+        f.closed(); f.emit([]); await waitForClosure(f, selected.expected);
+      };
+      if (phase !== "before_selection") await f.broker.decide(selected);
+      if (phase === "before_selection" || phase === "after_dispatch") { f.closed(); f.emit([]); }
+      const record = await waitForClosure(f, selected.expected);
+      assert.notEqual(record.decision?.dispatchState, "acknowledged");
+      assert.equal(record.decision?.resolvedAtMs ?? null, null);
+      assert.equal(await f.broker.decide(selected), "request_closed");
+      assert.equal(f.sends.length, phase === "before_selection" || phase === "before_dispatch" ? 0 : 1);
+      assert.deepEqual(await f.broker.list("room"), []);
+      const reopened = new ManifestStore(f.path);
+      try { assert.equal((await reopened.getExecutionApproval(selected.expected))!.request.closedAtMs, record.request.closedAtMs); }
+      finally { await reopened.close(); }
+    } finally { await f.close(); }
+  });
+}
+
+test("Claude native closure can arrive while request admission returns", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const original = f.store.admitExecutionApprovalPlan.bind(f.store);
+    f.store.admitExecutionApprovalPlan = async (...args) => {
+      const admitted = await original(...args);
+      f.closed(); f.emit([]);
+      return admitted;
+    };
+    await f.broker.list("room");
+    const [record] = await f.store.listExecutionApprovals("room");
+    assert.ok(record);
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if ((await f.store.readLatestExecutionApproval(record.request.requestId))!.request.closedAtMs != null) break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.notEqual((await f.store.readLatestExecutionApproval(record.request.requestId))!.request.closedAtMs, null);
+    assert.deepEqual(await f.broker.list("room"), []);
+  } finally { await f.close(); }
+});
+
+test("Claude closure does not discard later exact success evidence", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+    f.state.afterNativeWrite = () => {
+      f.closed(); f.emit([]);
+      f.execution({ domain: "execution", kind: "completed", operation: "file_change",
+        providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+        outcome: "succeeded", sideEffects: "possible" });
+    };
+    await f.broker.decide(selected);
+    await waitForClosure(f, selected.expected);
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if ((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState === "acknowledged") break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "acknowledged");
+    assert.equal(f.sends.length, 1);
+  } finally { await f.close(); }
+});
+
+
+test("v44 migration preserves Codex closure receipts and refuses a damaged v45 schema", async () => {
+  const f = await fixture();
+  try {
+    const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+    await f.broker.decide(selected); f.closed();
+    await waitForClosure(f, selected.expected);
+    const before = f.db.prepare("SELECT * FROM execution_approval_request_closures").all();
+    await f.store.close();
+    const sql = String(f.db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get()!.sql)
+      .replace("decision_id TEXT REFERENCES", "decision_id TEXT NOT NULL REFERENCES")
+      .replace("dispatch_id TEXT,", "dispatch_id TEXT NOT NULL,");
+    f.db.exec(`CREATE TEMP TABLE saved_closures AS SELECT * FROM execution_approval_request_closures;
+      DROP TABLE execution_approval_request_closures; ${sql};
+      INSERT INTO execution_approval_request_closures SELECT * FROM saved_closures; DROP TABLE saved_closures;
+      PRAGMA user_version=44; UPDATE manifest_metadata SET schema_version=44`);
+    const upgraded = new ManifestStore(f.path);
+    try {
+      assert.equal((await upgraded.getExecutionApproval(selected.expected))!.request.closedAtMs, now + 10);
+      assert.deepEqual(f.db.prepare("SELECT * FROM execution_approval_request_closures").all(), before);
+      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, 45);
+      assert.deepEqual(f.db.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally { await upgraded.close(); }
+    // A current database must not silently recreate even the old valid schema.
+    f.db.exec(`DROP TABLE execution_approval_request_closures; ${sql}`);
+    const damaged = new ManifestStore(f.path);
+    try { await assert.rejects(damaged.load(), /closure storage is missing or invalid/); }
+    finally { await damaged.close(); }
+  } finally { await f.close(); }
+});
+
+for (const wrong of ["turn", "tool", "retired", "missing_snapshot"] as const) {
+  test(`Claude ${wrong} evidence cannot close an admitted request`, async () => {
+    const f = await fixture("claude-code");
+    try {
+      const [candidate] = await f.broker.list("room");
+      if (wrong === "turn") f.state.turnId = "wrong-turn";
+      if (wrong === "retired") f.state.current = false;
+      if (wrong === "missing_snapshot") { f.emit([]); f.observationFailure("degraded"); }
+      else {
+        const native = structuredClone(f.native);
+        if (wrong === "tool" && native.provider === "claude-code") native.native.request.tool_use_id = "wrong-tool";
+        f.closed(native);
+      }
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(candidate!.reference!))!.request.closedAtMs, null);
+    } finally { await f.close(); }
+  });
+}

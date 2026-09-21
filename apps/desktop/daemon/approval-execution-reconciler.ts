@@ -1,11 +1,14 @@
+import { isDeepStrictEqual } from "node:util";
 import type { HostApprovalReference } from "../shared/host-approvals.js";
 import { claudeToolOperation } from "../../../shared/claude-tool-operation.mjs";
 import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
-import type { ProviderPermissionRequest } from "../shared/provider-permissions.js";
+import type { ProviderPermissionObservation, ProviderPermissionRequest } from "../shared/provider-permissions.js";
 import type { ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import type { ProviderActionHandle, ProviderActionPort } from "./provider-action-port.js";
 
 type Store = {
+  closeExecutionApprovalRequest(expected: HostApprovalReference, nowMs: () => number,
+    fence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord>;
   readLatestExecutionApproval(requestId: string): Promise<ExecutionApprovalRecord | null>;
   recordExecutionApprovalOutcome(input: {
     expected: HostApprovalReference;
@@ -74,6 +77,8 @@ export class ApprovalExecutionReconciler {
   private readonly evidence = new Map<string, NativeExecutionObservation>();
   private readonly pending = new Map<string, PendingReconciliation>();
   private closed = false;
+  private readonly admittedRequests = new Map<string, { native: ProviderPermissionRequest; expected: HostApprovalReference }>();
+  private readonly closedRequests: Extract<ProviderPermissionObservation, { type: "request_closed" }>[] = [];
 
   constructor(private readonly options: {
     provider: ProviderActionPort;
@@ -117,8 +122,35 @@ export class ApprovalExecutionReconciler {
     value.lowerBound = { sourceId: subscription.sourceId, sequence: subscription.position().latestSequence };
   }
 
-  observeRequestClosed(native: ProviderPermissionRequest): void {
+  trackRequest(native: ProviderPermissionRequest, expected: HostApprovalReference): void {
+    if (native.provider !== "claude-code" || this.closed || !this.options.isCurrent()) return;
+    this.admittedRequests.set(expected.requestId, { native, expected });
+    while (this.admittedRequests.size > 64) this.admittedRequests.delete(this.admittedRequests.keys().next().value!);
+    for (const event of this.closedRequests) this.closeAdmittedRequest(event, native, expected);
+  }
+
+  private closeAdmittedRequest(event: Extract<ProviderPermissionObservation, { type: "request_closed" }>,
+    native: ProviderPermissionRequest, expected: HostApprovalReference): void {
+    if (event.request.provider !== "claude-code" || native.provider !== "claude-code"
+      || !("providerTurnId" in event) || event.providerTurnId !== expected.providerTurnId
+      || event.providerContinuationId !== expected.providerContinuationId
+      || !isDeepStrictEqual(event.request.native, native.native)) return;
+    void this.options.store.closeExecutionApprovalRequest(expected, this.options.nowMs, commit =>
+      this.options.fenceCommit(async () => {
+        if (this.closed || !this.options.isCurrent()) throw new Error("Approval closure authority changed.");
+        await commit();
+      })).then(() => { this.options.onChanged?.(); }).catch(() => { /* A matching admission replay can retry. */ });
+  }
+
+  observeRequestClosed(event: Extract<ProviderPermissionObservation, { type: "request_closed" }>): void {
+    const native = event.request;
     if (this.closed || !this.options.isCurrent()) return;
+    if (native.provider === "claude-code") {
+      this.closedRequests.push(event);
+      if (this.closedRequests.length > 64) this.closedRequests.shift();
+      for (const { native: admitted, expected } of this.admittedRequests.values()) this.closeAdmittedRequest(event, admitted, expected);
+      return;
+    }
     for (const value of this.pending.values()) {
       if (!value.dispatched || native.provider !== "codex" || value.native.provider !== "codex"
         || value.native.native !== native.native) continue;
@@ -137,6 +169,8 @@ export class ApprovalExecutionReconciler {
     this.subscription = null;
     this.evidence.clear();
     this.pending.clear();
+    this.admittedRequests.clear();
+    this.closedRequests.length = 0;
   }
 
   private observe(observation: NativeExecutionObservation): void {

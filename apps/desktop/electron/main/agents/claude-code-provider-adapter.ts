@@ -3,7 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { claudeToolOperation } from "../../../../../shared/claude-tool-operation.mjs";
-import type { ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
+import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -264,14 +264,12 @@ function claudeTerminalDiscriminator(message: ClaudeStreamMessage): string {
   return `${subtype}:${errorState}`;
 }
 
-function initMcpServerNames(message: ClaudeStreamMessage): string[] {
-  const servers = (message as { mcp_servers?: unknown }).mcp_servers;
-  if (!Array.isArray(servers)) return [];
-  return servers.flatMap((row) => {
-    if (!row || typeof row !== "object") return [];
-    const name = (row as { name?: unknown }).name;
-    return typeof name === "string" ? [name] : [];
-  });
+function hasReadyRoomWorkplace(message: ClaudeStreamMessage): boolean {
+  if (!Array.isArray(message.mcp_servers) || !Array.isArray(message.tools)) return false;
+  const connected = message.mcp_servers.some(row => row && typeof row === "object"
+    && row.name === "letagents" && row.status === "connected");
+  return connected && ["get_board", "read_messages", "send_message"].every(name =>
+    (message.tools as unknown[]).includes(`mcp__letagents__${name}`));
 }
 
 function assistantTextOf(message: ClaudeStreamMessage): string | null {
@@ -575,6 +573,9 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly seenPermissionRequestIds = new Set<string>();
   readonly permissionRequests = new Map<string, { native: ClaudeNativePermissionRequest; turnId: string; dispatching: boolean }>();
   readonly permissionListeners = new Set<() => void>();
+  // Sent prompts still need a request-closure receipt when their tool completes.
+  readonly permissionClosures = new Map<string, { native: ClaudeNativePermissionRequest; turnId: string }>();
+  readonly permissionClosureListeners = new Set<(event: Extract<ClaudePermissionObservation, { type: "request_closed" }>) => void>();
 
   permissionsChanged(): void {
     for (const listener of this.permissionListeners) { try { listener(); } catch { /* Observers cannot control the CLI. */ } }
@@ -582,6 +583,7 @@ class ClaudeProviderHandle implements ProviderHandle {
 
   clearPermissions(): void {
     this.permissionRequests.clear();
+    this.permissionClosures.clear();
     this.permissionsChanged();
   }
 
@@ -945,7 +947,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
 
   async observePermissions(
     providerHandle: ProviderHandle,
-    listener: (event: { type: "snapshot"; requests: readonly ClaudeNativePermissionRequest[] } | { type: "degraded" | "unavailable" }) => void,
+    listener: (event: ClaudePermissionObservation) => void,
     signal: AbortSignal,
   ): Promise<void> {
     const handle = this.requireHandle(providerHandle);
@@ -958,10 +960,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         else listener({ type: "snapshot", requests: [...handle.permissionRequests.values()].map(value => structuredClone(value.native)) });
       } catch { /* Observer failures do not alter permission decisions. */ }
     };
+    const closed = (event: Extract<ClaudePermissionObservation, { type: "request_closed" }>) => {
+      if (!signal.aborted) listener(event);
+    };
+    handle.permissionClosureListeners.add(closed);
     handle.permissionListeners.add(notify);
     notify();
     await new Promise<void>(resolve => {
-      const stop = () => { handle.permissionListeners.delete(notify); resolve(); };
+      const stop = () => { handle.permissionListeners.delete(notify); handle.permissionClosureListeners.delete(closed); resolve(); };
       signal.addEventListener("abort", stop, { once: true });
       if (signal.aborted) stop();
     });
@@ -1022,12 +1028,26 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       && isDeepStrictEqual(tool.input, expected.request.input) ? pending : null;
   }
 
+  private closePermission(handle: ClaudeProviderHandle, id: string): void {
+    const pending = handle.permissionRequests.get(id) ?? handle.permissionClosures.get(id);
+    if (!pending || this.handles.get(handle.workAttemptId) !== handle || !handle.permissionControlAvailable
+      || handle.providerConnection.kind !== "claude_cli" || !handle.providerConnection.processIdentity
+      || this.deps.getProcessIdentity(handle.pid!) !== handle.providerConnection.processIdentity) return;
+    handle.permissionClosures.delete(id);
+    handle.permissionRequests.delete(id);
+    const event = { type: "request_closed" as const, request: structuredClone(pending.native),
+      providerContinuationId: handle.providerContinuationId, providerTurnId: pending.turnId };
+    for (const listener of handle.permissionClosureListeners) {
+      try { listener(event); } catch { /* Closure is observation, never a decision. */ }
+    }
+    handle.permissionsChanged();
+  }
+
   private consumePermission(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
     if (typeof message.request_id !== "string" || !message.request_id.trim() || message.request_id.length > 512) return;
     if (message.type === "control_cancel_request") {
       handle.seenPermissionRequestIds.add(message.request_id);
-      handle.permissionRequests.delete(message.request_id);
-      handle.permissionsChanged();
+      this.closePermission(handle, message.request_id);
       return;
     }
     const request = message.request as ClaudeNativePermissionRequest["request"] | undefined;
@@ -1046,6 +1066,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (handle.seenPermissionRequestIds.has(native.id)) return;
     handle.seenPermissionRequestIds.add(native.id);
     handle.permissionRequests.set(native.id, { native, turnId, dispatching: false });
+    handle.permissionClosures.set(native.id, { native, turnId });
+    while (handle.permissionClosures.size > 64) handle.permissionClosures.delete(handle.permissionClosures.keys().next().value!);
     handle.permissionsChanged();
   }
 
@@ -1202,12 +1224,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         && (!Array.isArray(observedInit.capabilities) || !observedInit.capabilities.includes("msg_lifecycle_v1"))) {
         throw new Error("Claude tool approvals require exact native turn lifecycle support. Update Claude Code, then try again.");
       }
-      // The workplace is inherited from the user's own CLI configuration —
-      // nothing is injected — but a worker without the room channel is useless
-      // and must not be launched (parity with the Codex adapter's check).
-      if (!initMcpServerNames(observedInit).some((name) => name.toLowerCase() === "letagents")) {
+      // A named but failed server is not a usable room connection.
+      if (!hasReadyRoomWorkplace(observedInit)) {
         throw new Error(
-          "LetAgents MCP server is not configured for the Claude CLI; refusing to launch without the room workplace.",
+          "LetAgents room tools did not connect to Claude; refusing to launch without the room workplace.",
         );
       }
       const sessionId = sessionIdOf(observedInit);
@@ -1568,6 +1588,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         terminalDiscriminator,
         nativeLifecycle,
       };
+      for (const [id, pending] of new Map([...handle.permissionClosures, ...handle.permissionRequests])) {
+        if (pending.turnId === turnId) this.closePermission(handle, id);
+      }
       handle.executionTurnId = null;
       handle.executionTurnStarted = false;
       handle.executionTools.clear();
@@ -1594,10 +1617,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           if (!tool || tool.completed || (block.is_error !== undefined && typeof block.is_error !== "boolean")
             || (typeof block.content !== "string" && !Array.isArray(block.content))) continue;
           tool.completed = true;
-          for (const [id, pending] of handle.permissionRequests) {
-            if (pending.native.request.tool_use_id === block.tool_use_id) handle.permissionRequests.delete(id);
+          for (const [id, pending] of new Map([...handle.permissionClosures, ...handle.permissionRequests])) {
+            if (pending.turnId === turnId && pending.native.request.tool_use_id === block.tool_use_id) this.closePermission(handle, id);
           }
-          handle.permissionsChanged();
           emit({ domain: "execution", kind: "completed", executionId: block.tool_use_id, operation: tool.operation,
             outcome: block.is_error === true ? "failed" : "succeeded", sideEffects: tool.operation === "file_read" ? "none" : "possible", ...turn });
         }

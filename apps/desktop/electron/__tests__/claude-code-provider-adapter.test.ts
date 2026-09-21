@@ -102,6 +102,8 @@ interface HarnessOptions {
   initSessionId?: string;
   noInit?: boolean;
   noLetagents?: boolean;
+  mcpStatus?: string;
+  mcpTools?: string[];
   noApprovalLifecycle?: boolean;
   bootstrapResultSubtype?: string;
   /** Overrides per pid; undefined entries mean "cannot verify". */
@@ -172,7 +174,8 @@ function createHarness(options: HarnessOptions = {}) {
             capabilities: options.noApprovalLifecycle ? [] : ["msg_lifecycle_v1"],
             permissionMode: "default",
             cwd: input.cwd,
-            mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: "connected" }],
+            mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }],
+            tools: options.mcpTools ?? ["mcp__letagents__get_board", "mcp__letagents__read_messages", "mcp__letagents__send_message"],
           });
           const frame = JSON.parse(json) as { uuid?: string };
           child.emit({
@@ -663,6 +666,17 @@ test("a CLI without the LetAgents workplace is terminated with no orphan", async
   assert.equal(harness.children[0]!.alive, false, "the fresh child was terminated and awaited");
   assert.equal(harness.mcpConfigDisposals, 1, "startup refusal removes the private MCP config");
 });
+
+for (const options of [{ mcpStatus: "failed" }, { mcpStatus: "pending" }, { mcpTools: ["Bash", "Read"] },
+  { mcpTools: ["mcp__letagents__get_board", "mcp__letagents__read_messages"] }]) {
+  test(`Claude refuses an unusable room connection: ${JSON.stringify(options)}`, async () => {
+    const harness = createHarness(options);
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    await assert.rejects(adapter.spawn(spawnRequest()), /room tools did not connect/);
+    assert.equal(harness.children[0]!.alive, false);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  });
+}
 
 test("startup identity failure terminates and awaits the known fresh child", async () => {
   const identities = new Map<number, string | null | undefined>([[4100, undefined]]);
@@ -1720,7 +1734,8 @@ async function approvalHarness(detachSignal?: AbortSignal) {
   const child = harness.children[0]!;
   const controller = new AbortController();
   let requests: import("../../shared/provider-permissions.js").ClaudeNativePermissionRequest[] = [];
-  const observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") requests = [...event.requests]; }, controller.signal);
+  const closures: import("../../shared/provider-permissions.js").ClaudePermissionObservation[] = [];
+  const observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") requests = [...event.requests]; else if (event.type === "request_closed") closures.push(event); }, controller.signal);
   const running = adapter.runRoomTurn(handle, { inboxItemId: "approval-inbox", actionId: "approval-action", sourceMessage: { text: "Write a file" }, activation: {} }, { detachSignal });
   void running.catch(() => {});
   await flush();
@@ -1732,7 +1747,7 @@ async function approvalHarness(detachSignal?: AbortSignal) {
     request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: "tool-write", input: { file_path: "/tmp/output", content: "private approval content" },
       permission_suggestions: [{ type: "setMode", mode: "bypassPermissions", destination: "session" }] }, ...over });
   return { harness, adapter, handle, child, streams, turnId, started, tool, permission,
-    get requests() { return requests; },
+    get requests() { return requests; }, closures,
     async close() {
       child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId, result: "Done" });
       await running.catch(() => {}); controller.abort(); await observing; await adapter.stop(handle);
@@ -1895,4 +1910,70 @@ test("Claude refuses to fall back to npx when the sealed MCP runtime cannot be v
   assert.throws(() => createManagedClaudeMcpConfig("https://letagents.example", tmpdir(), undefined, () => {
     throw new Error("runtime integrity failure");
   }), /runtime integrity failure/);
+});
+
+for (const cause of ["cancel", "failed", "succeeded", "terminal"] as const) {
+  test(`Claude publishes exact request closure for ${cause}, including a sent prompt`, async () => {
+    const h = await approvalHarness();
+    try {
+      h.started(); h.tool(); h.permission();
+      const expected = h.requests[0]!;
+      if (cause === "failed" || cause === "succeeded") {
+        await h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: async () => {} });
+        assert.equal(h.requests.length, 0);
+        h.child.emit({ type: "user", session_id: h.handle.providerContinuationId,
+          message: { content: [{ type: "tool_result", tool_use_id: "tool-write", is_error: cause === "failed", content: "result" }] } });
+      } else if (cause === "cancel") h.child.emit({ type: "control_cancel_request", request_id: expected.id });
+      else h.child.emit({ type: "result", subtype: "interrupted", is_error: true,
+        session_id: h.handle.providerContinuationId, user_message_uuid: h.turnId });
+      assert.deepEqual(h.closures, [{ type: "request_closed", request: expected,
+        providerContinuationId: h.handle.providerContinuationId, providerTurnId: h.turnId }]);
+      h.child.emit({ type: "control_cancel_request", request_id: expected.id });
+      assert.equal(h.closures.length, 1);
+    } finally { await h.close(); }
+  });
+}
+
+test("Claude cannot close a prompt from foreign tool, turn, session or process evidence", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission();
+    const result = { type: "user", session_id: h.handle.providerContinuationId,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", content: "done" }] } };
+    h.child.emit({ ...result, session_id: "foreign" });
+    h.child.emit({ ...result, user_message_uuid: "foreign" });
+    h.child.emit({ ...result, message: { content: [{ type: "tool_result", tool_use_id: "other", content: "done" }] } });
+    assert.equal(h.closures.length, 0);
+    h.harness.identities.set(h.handle.pid!, "different-birth");
+    h.child.emit({ type: "control_cancel_request", request_id: "native-request" });
+    assert.equal(h.closures.length, 0);
+  } finally { await h.close(); }
+});
+
+test("Claude disconnect clears native pendingness without inventing request closure", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); h.child.disconnect();
+    assert.equal(h.closures.length, 0);
+  } finally { await h.close(); }
+});
+
+for (const cause of ["cancel", "result"] as const) test(`Claude retires an evicted pending permission on exact ${cause}`, async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); const original = h.requests[0]!;
+    for (let index = 0; index < 65; index++) {
+      const toolId = `later-tool-${index}`;
+      h.child.emit({ type: "assistant", session_id: h.handle.providerContinuationId,
+        message: { content: [{ type: "tool_use", id: toolId, name: "Write", input: {} }] } });
+      h.child.emit({ type: "control_request", request_id: `later-request-${index}`,
+        request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: toolId, input: {} } });
+    }
+    if (cause === "cancel") h.child.emit({ type: "control_cancel_request", request_id: original.id });
+    else h.child.emit({ type: "user", session_id: h.handle.providerContinuationId,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", is_error: true, content: "failed" }] } });
+    assert.ok(h.requests.every(request => request.id !== original.id));
+    assert.equal(h.closures.length, 1);
+    await assert.rejects(h.adapter.replyPermission(h.handle, original, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
 });
