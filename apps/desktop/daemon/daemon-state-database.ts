@@ -19,7 +19,7 @@ import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js
 import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
 import { applyApprovalRequestClosureSchema, validateApprovalRequestClosureSchema } from "./execution-approval-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 44;
+export const DAEMON_STATE_SCHEMA_VERSION = 45;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -135,7 +135,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   }
   if (existingVersion >= 44) validateHostToolRuleSchema(database);
   if (existingVersion >= 39) validateRoomWorkspaceReviewSchema(database);
-  if (existingVersion >= 42) validateApprovalRequestClosureSchema(database);
+  if (existingVersion >= 42) validateApprovalRequestClosureSchema(database, existingVersion < 45);
   if (existingVersion >= 38) validateRoomWorkspaceSchema(database);
   if (existingVersion >= 36) validateExecutionApprovalPublicationSchema(database);
   if (existingVersion >= 27) validateRoomWorkPublicationSchema(database, existingVersion < 37);
@@ -316,7 +316,7 @@ createSchema(database: DatabaseSync): void {
     this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
-  if (existingVersion === 43) {
+  if (existingVersion === 43 || existingVersion === 44) {
     this.migrateHostToolRules(database);
     return;
   }
@@ -636,6 +636,7 @@ private migrateHostToolRules(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     applyHostToolRuleSchema(database);
+    applyApprovalRequestClosureSchema(database);
     this.schemaInitializationHook?.(database);
     validateHostToolRuleSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -651,6 +652,7 @@ private migratePreparedRoomContext(database: DatabaseSync): void {
   try {
     applyPreparedRoomContextSchema(database);
     applyHostToolRuleSchema(database);
+    applyApprovalRequestClosureSchema(database);
     this.schemaInitializationHook?.(database);
     validatePreparedRoomContextSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
