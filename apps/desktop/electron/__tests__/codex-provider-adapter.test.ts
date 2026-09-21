@@ -15,7 +15,7 @@ import {
   type CodexAdapterRpc,
   type CodexProviderAdapterDependencies,
 } from "../main/agents/codex-provider-adapter.js";
-import type { RpcNotification, RpcServerRequest } from "../main/agents/codex-rpc-client.js";
+import { CodexRpcClient, type RpcNotification, type RpcServerRequest } from "../main/agents/codex-rpc-client.js";
 import {
   CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE,
   writeCodexSupervisorBridgeContext,
@@ -1388,6 +1388,9 @@ test("Codex blocks a restored conversation with missing room tools before any di
       inboxItemId: "inbox-tools", actionId: "action-tools", sourceMessage: {}, activation: {},
     }, { beforeNativeDispatch: async () => { dispatches += 1; } }), {
       providerFailureCode: "provider_room_tools_unavailable",
+      ...(name === "probe timeout" ? { message: "Room tool discovery timed out. No model turn was started. Retry the message." } : {}),
+      ...(name === "missing board tool" ? { message: "Required LetAgents room tools are missing from this conversation. No model turn was started. Retry the message." } : {}),
+      ...(name === "configured but failed" ? { message: "The LetAgents room connection is not ready. No model turn was started. Retry the message." } : {}),
     });
     assert.equal(dispatches, 0);
     assert.equal(client.requests.some(request => request.method === "turn/start"), false);
@@ -1395,6 +1398,74 @@ test("Codex blocks a restored conversation with missing room tools before any di
     assert.equal(client.closed, false, "observation remains attached");
     assert.deepEqual(harness.signals, [], "a missing tool never kills the provider");
     assert.equal(harness.launches.length, 1);
+  });
+});
+
+test("room tool discovery uses the bounded RPC startup budget without dispatching early", async (t) => {
+  for (const delayMs of [6_500, 35_000]) await t.test(`inventory after ${delayMs}ms`, async (t) => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    const originalRequest = client.request.bind(client);
+    const originalWebSocket = globalThis.WebSocket;
+    let probes = 0;
+    class DiscoverySocket {
+      static readonly OPEN = 1;
+      readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      constructor() { queueMicrotask(() => this.onopen?.()); }
+      close() { this.readyState = 3; }
+      send(raw: string) {
+        const message = JSON.parse(raw);
+        if (message.id === undefined) return;
+        if (message.method === "initialize") {
+          queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: {} }) }));
+          return;
+        }
+        assert.equal(message.method, "mcpServerStatus/list");
+        assert.equal(message.params.threadId, handle.providerContinuationId);
+        probes += 1;
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: {
+          data: [{ name: "letagents", runtimeStatus: "connected", tools: Object.fromEntries(
+            ["claim_task", "get_board", "read_messages", "send_message"].map(name => [name, { name }]),
+          ) }],
+        } }) }), delayMs);
+      }
+    }
+    globalThis.WebSocket = DiscoverySocket as unknown as typeof WebSocket;
+    const rpc = new CodexRpcClient("ws://synthetic.invalid");
+    try {
+      await rpc.connect();
+      client.request = <T>(method: string, params?: unknown, options?: { timeoutMs?: number }) =>
+        method === "mcpServerStatus/list" ? rpc.request<T>(method, params, options) : originalRequest<T>(method, params);
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      let dispatches = 0; let settled = false;
+      const running = adapter.runRoomTurn!(handle, {
+        inboxItemId: "slow-tools", actionId: "slow-tools-action", sourceMessage: {}, activation: {},
+      }, { beforeNativeDispatch: async () => { dispatches += 1; } });
+      void running.then(() => { settled = true; }, () => { settled = true; });
+      const timeout = delayMs > 30_000 ? assert.rejects(running, /Room tool discovery timed out/) : null;
+      await flush();
+      t.mock.timers.tick(5_001); await flush();
+      assert.equal(settled, false, "healthy MCP startup may exceed five seconds");
+      assert.equal(dispatches, 0, "discovery itself never starts a model turn");
+      if (timeout) {
+        t.mock.timers.tick(30_000 - 5_001); await timeout;
+        assert.equal(dispatches, 0);
+        t.mock.timers.tick(delayMs - 30_000); await flush();
+        assert.equal(dispatches, 0, "a late response cannot revive a timed-out delivery");
+      } else {
+        t.mock.timers.tick(delayMs - 5_001); await flush();
+        assert.equal(dispatches, 1);
+        client.emit({ method: "turn/completed", params: {
+          threadId: handle.providerContinuationId, turnId: `turn-${handle.providerContinuationId}`,
+        } });
+        await running;
+      }
+      assert.equal(probes, 1, "discovery does not add a retry or polling loop");
+    } finally { rpc.close(); globalThis.WebSocket = originalWebSocket; }
   });
 });
 
