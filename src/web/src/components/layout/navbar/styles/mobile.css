@@ -5,8 +5,8 @@
 }
 
 .nav-mobile-toggle {
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
@@ -22,6 +22,9 @@
   left: 0;
   right: 0;
   padding: 12px;
+  max-height: calc(100dvh - 96px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
   background: rgba(12, 12, 12, 0.96);
@@ -37,7 +40,7 @@
 .nav-mobile-link,
 .nav-mobile-auth-button,
 .nav-mobile-signout {
-  min-height: 42px;
+  min-height: 44px;
 }
 
 .nav-mobile-link {
