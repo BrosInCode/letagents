@@ -501,6 +501,25 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
     );
   });
 
+  it("replays a local task removal after a stale snapshot and buffered update", async () => {
+    const harness = createHarness();
+    const task = taskSummary("task_removed");
+    harness.selectedSnapshot.value = { ...focusSnapshot(), tasks: [task] };
+    const pending = deferred<DesktopRoomSnapshot>();
+    harness.nextSelectedSnapshot = pending.promise;
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refresh = harness.state.refreshSelectedSnapshot();
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({ type: "task_update", roomIdentifier: "focus_a", task });
+      harness.state.handleRoomStreamEvent({ type: "task_remove", roomIdentifier: "focus_a", taskId: task.id });
+      pending.resolve({ ...focusSnapshot(), tasks: [task] });
+      await refresh;
+    });
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks, []);
+    assert.deepEqual(harness.metadataRefreshCalls, []);
+    assert.equal(harness.getSnapshotRequests.length, 1);
+  });
+
   it("waits for stream readiness and buffers events even before a selected snapshot exists", async () => {
     const harness = createHarness();
     harness.selectedSnapshot.value = null;

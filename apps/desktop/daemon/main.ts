@@ -1,4 +1,5 @@
-import { restoreLocalRoomAuthorities } from "./local-room-runtime.js";
+import { restoreLocalRoomAuthorities, localRoomRuntime } from "./local-room-runtime.js";
+import { registerLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
 import { dirname } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
@@ -159,6 +160,7 @@ export class SupervisorDaemon {
   private readonly startedAt = new Date().toISOString();
   private readonly agentStreamRegistry: AgentStreamRegistry;
   private handoffScheduled = false;
+  private boardOwnershipActive = false;
   private handoffTeardownScheduled = false;
   /** Resolves only once this daemon has relinquished every authority surface. */
   private readonly handoffCompletion: Promise<void>;
@@ -908,6 +910,13 @@ export class SupervisorDaemon {
       verifyWorkerSession: this.workerAuthority.verifyWorkerSession.bind(this.workerAuthority),
       watchAgentStream: this.watchAgentStream.bind(this),
       watchState: this.watchState.bind(this),
+      mutateLocalBoard: async input => {
+        const runtime = await localRoomRuntime();
+        let result: unknown;
+        await this.fenceDaemonCommit(async () => { result = await runtime.executeLocalBoardMutation(input); });
+        return result;
+      },
+      watchLocalBoard: async (input, signal) => (await localRoomRuntime()).watchLocalBoard(input, this.singleton.currentGeneration, signal),
     } satisfies DaemonControlOperations;
     this.socket = new DaemonControlSocket(
       paths.socketPath,
@@ -925,6 +934,13 @@ export class SupervisorDaemon {
   async start(storage: StateRecoveryBootstrap = {}): Promise<void> {
     assertMacOS(this.platform);
     await this.singleton.acquire();
+    this.boardOwnershipActive = true;
+    const boardGeneration = this.singleton.currentGeneration;
+    registerLocalBoardOwner(() => {
+      if (!this.boardOwnershipActive || this.handoffScheduled || this.singleton.currentGeneration !== boardGeneration) {
+        throw new Error("The board service is restarting.");
+      }
+    });
     try {
       await this.hostApprovals.enroll(storage);
       this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
@@ -932,6 +948,7 @@ export class SupervisorDaemon {
         return (await this.store.load()).generation;
       }, storage);
     } catch (error) {
+      this.boardOwnershipActive = false;
       await this.store.close();
       await this.singleton.release();
       throw error;

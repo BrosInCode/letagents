@@ -26,6 +26,8 @@ const expectedControlMethods = [
   "lane.activate_legacy",
   "lane.release_legacy",
   "lane.reserve_legacy",
+  "local_board.mutate",
+  "local_board.watch",
   "manifest.append_activity",
   "manifest.compare_and_set_desired_state",
   "manifest.control_turn",
@@ -173,7 +175,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // credential and storage policy remain in local-room-runtime.ts.
   // 1587 -> 1592: runtime recovery composes existing stream, terminal, capture,
   // and delivery coordinators; recovery policy and its journal remain extracted.
-  assert.ok(mainSource.split("\n").length < 1_592, "main.ts must remain a thin composition root");
+  // 1592 -> 1611: service-owned local board RPCs and singleton lifecycle wiring;
+  // storage, commit notifications, subscriptions, and worker fencing stay extracted.
+  assert.ok(mainSource.split("\n").length < 1_611, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

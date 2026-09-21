@@ -8,6 +8,8 @@ import type { createHostApprovalBridge } from "./host-approval-broker.js";
  * bound by SupervisorDaemon, which remains the authority owner.
  */
 export interface DaemonControlOperations {
+  mutateLocalBoard(input: unknown): Promise<unknown>;
+  watchLocalBoard(input: unknown, signal: AbortSignal): Promise<unknown>;
   hostApprovals: Pick<ReturnType<typeof createHostApprovalBridge>, "challenge" | "verify" | "list" | "decide">;
   activateCustodialPolling(input: PollingActivationRequest): unknown;
   getPollingActivation(input: DeliveryDrainIdentity): unknown;
@@ -152,8 +154,8 @@ function paramsEntry(value: unknown): DaemonManifestEntry {
 export function createDaemonControlRequestHandler(
   context: DaemonControlContext,
   operations: DaemonControlOperations,
-): (request: DaemonRequest) => Promise<unknown> {
-  return async (request) => {
+): (request: DaemonRequest, disconnected?: AbortSignal) => Promise<unknown> {
+  return async (request, disconnected) => {
     await context.assertCurrent();
     const isLifecycleRequest = request.method === "daemon.negotiate"
       || request.method === "daemon.status"
@@ -176,6 +178,14 @@ export function createDaemonControlRequestHandler(
       return { accepted: true, generation: context.currentGeneration() };
     }
     if (request.method === "manifest.list") return operations.listManifest();
+    if (request.method === "local_board.mutate") return operations.mutateLocalBoard(request.params);
+    if (request.method === "local_board.watch") {
+      if (!disconnected) throw new Error("A board subscription requires a live connection.");
+      const result = await operations.watchLocalBoard(request.params, disconnected);
+      await context.assertCurrent();
+      if (context.isHandoffScheduled()) throw new Error("The board service is restarting.");
+      return result;
+    }
     if (request.method === "supervisor.host_approval_challenge") return operations.hostApprovals.challenge();
     if (request.method === "supervisor.host_approval_request") {
       const authenticated = operations.hostApprovals.verify(request.params);
