@@ -7,6 +7,7 @@ import {
   copyFileSync,
   existsSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -31,6 +32,7 @@ import type {
   DesktopManagedAgentPermissionProfileId,
 } from "../../ipc-types.js";
 import type { LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
+import { CURSOR_SESSION_ID_PATTERN, MAX_CURSOR_SESSION_ID_LENGTH } from "./cursor-provider-constants.js";
 
 export interface CursorManagedProfile {
   homeDir: string;
@@ -227,6 +229,68 @@ export function cursorSupervisedMcpServerName(workAttemptId: string): string {
   return `letagents_supervised_${createHash("sha256").update(normalized).digest("hex").slice(0, 24)}`;
 }
 
+/** Move the complete native conversation namespace only while its turn is
+ * fenced. The caller owns the prepared/retired wrapper and generation journal.
+ * Cursor indexes chat stores by md5(resolve(cwd)); stable HOME alone is not
+ * sufficient when every writable turn gets a new physical workspace. */
+export function relocateCursorConversationNamespace(
+  profile: Pick<CursorManagedProfile, "configDir">,
+  fromWorkspace: string,
+  toWorkspace: string,
+  expectedSessionId: string | null,
+): void {
+  if (expectedSessionId && (expectedSessionId.length > MAX_CURSOR_SESSION_ID_LENGTH || !CURSOR_SESSION_ID_PATTERN.test(expectedSessionId))) {
+    throw new Error("Cursor conversation has an invalid session identity.");
+  }
+  const configRoot = join(profile.configDir, "cursor");
+  const chatsRoot = join(configRoot, "chats");
+  ensurePrivateProfileTree(dirname(profile.configDir), [profile.configDir, configRoot, chatsRoot]);
+  const namespace = (workspace: string) => join(chatsRoot, createHash("md5").update(resolve(workspace)).digest("hex"));
+  const source = namespace(fromWorkspace);
+  const target = namespace(toWorkspace);
+  const exists = (path: string) => {
+    try { lstatSync(path); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  };
+  const sourceExists = exists(source);
+  const targetExists = exists(target);
+  if (source !== target && sourceExists && targetExists) throw new Error("Cursor conversation namespaces collide; continuation was not moved.");
+  if (!sourceExists && !targetExists) {
+    if (expectedSessionId) throw new Error("Cursor conversation store is missing; continuation was not moved.");
+    return;
+  }
+  const present = sourceExists ? source : target;
+  const pending = [present];
+  let inspected = 0;
+  while (pending.length) {
+    const path = pending.pop()!;
+    const stat = lstatSync(path);
+    if (++inspected > MAX_CURSOR_PROFILE_ENTRIES || stat.isSymbolicLink()
+      || stat.uid !== process.getuid?.() || (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))) {
+      throw new Error("Cursor conversation store contains unsupported or redirected entries.");
+    }
+    if (stat.isDirectory()) {
+      const directory = opendirSync(path);
+      try {
+        for (;;) {
+          const entry = directory.readSync();
+          if (!entry) break;
+          if (pending.length + inspected >= MAX_CURSOR_PROFILE_ENTRIES) throw new Error("Cursor conversation store is too large to validate safely.");
+          pending.push(join(path, entry.name));
+        }
+      } finally { directory.closeSync(); }
+    }
+  }
+  const sessionStore = expectedSessionId ? join(present, expectedSessionId, "store.db") : null;
+  if (!lstatSync(present).isDirectory() || (sessionStore && (!exists(sessionStore) || !lstatSync(sessionStore).isFile()))) {
+    throw new Error("Cursor conversation namespace does not contain the exact session store.");
+  }
+  if (sourceExists && source !== target) renameSync(source, target);
+  // Also sync an already-moved target: a crash can follow rename before fsync.
+  const parent = openSync(chatsRoot, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try { fsyncSync(parent); } finally { closeSync(parent); }
+}
+
 export function prepareCursorManagedProfile(
   options: CursorManagedProfileOptions = {},
 ): CursorManagedProfile {
@@ -302,8 +366,8 @@ export function prepareCursorManagedProfile(
  * `~/.cursor/mcp.json` is therefore the authority boundary: every supervised
  * attempt gets a distinct HOME containing only the LetAgents bridge, while the
  * user's Cursor auth files and macOS login keychain remain available. The
- * profile is stable across daemon restarts so `--resume <session_id>` resolves
- * the same native conversation, and separate attempts can run concurrently
+ * profile is stable across daemon restarts; the adapter moves its cwd-indexed
+ * conversation namespace between isolated turns. Separate attempts run concurrently
  * without sharing mutable CLI state.
  */
 export function prepareCursorSupervisedProfile(
