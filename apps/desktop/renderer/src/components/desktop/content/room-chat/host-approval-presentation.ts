@@ -90,7 +90,16 @@ export function hostApprovalFields(presentation: HostApprovalPresentation): Fiel
       ...fields(action.input),
     ];
     if (params) return [
-      ...fields(Object.fromEntries(Object.entries(params).filter(([key]) => !["threadId", "turnId", "itemId"].includes(key)))),
+      ...fields(Object.fromEntries(Object.entries(params).filter(([key, value]) => {
+        if (["threadId", "turnId", "itemId"].includes(key)) return false;
+        if (request.method !== "item/commandExecution/requestApproval") return true;
+        if (["startedAtMs", "availableDecisions", "proposedExecpolicyAmendment"].includes(key)) return false;
+        if (key === "kind" && value === "command") return false;
+        if (key === "environmentId" && value === "local") return false;
+        // The full command is the proposal; its parsed duplicate adds no action to review.
+        if (key === "commandActions" && typeof params.command === "string" && params.command.trim()) return false;
+        return true;
+      }))),
       ...(Array.isArray(payload.changes) ? [{ label: "Changes", value: valueText(payload.changes) }] : []),
     ];
   }
