@@ -14,6 +14,7 @@
             :key="ide.id"
             class="ide-tab"
             :class="{ 'ide-tab--active': activeIde === ide.id }"
+            :aria-pressed="activeIde === ide.id"
             @click="activeIde = ide.id"
           >
             <component :is="ide.icon" :size="15" />
@@ -217,6 +218,7 @@ async function copyPrompt() {
   line-height: 1.7;
   color: var(--text-secondary);
   white-space: pre-line;
+  overflow-wrap: anywhere;
   font-family: var(--font-mono);
 }
 
@@ -273,10 +275,10 @@ async function copyPrompt() {
     font-size: 1rem;
     line-height: 1.58;
   }
-  .config-header { flex-direction: column; align-items: flex-start; padding: 10px 14px; }
-  .ide-tabs { gap: 2px; }
-  .ide-tab { padding: 5px 10px; font-size: 0.72rem; gap: 4px; }
-  .config-copy-btn { align-self: flex-end; }
+  .config-header { flex-direction: column; align-items: stretch; padding: 12px; }
+  .ide-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+  .ide-tab { min-height: 44px; justify-content: center; padding: 8px; font-size: 0.8rem; }
+  .config-copy-btn { min-height: 44px; font-size: 0.8rem; }
   .prompt-body { padding: 16px 18px; }
   .config-card { border-radius: 20px; }
 }

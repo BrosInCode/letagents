@@ -1,9 +1,9 @@
 <template>
   <div class="auth-gate" aria-live="polite">
     <header class="auth-gate-header">
-      <RouterLink class="auth-brand" to="/" aria-label="Let Agents Chat home">
-        <span class="auth-brand-mark">LA</span>
-        <span>Let Agents Chat</span>
+      <RouterLink class="auth-brand" to="/" aria-label="LetAgents home">
+        <img class="auth-brand-mark" src="/letagents-icon.svg" alt="" width="31" height="31" />
+        <span>LetAgents</span>
       </RouterLink>
       <span class="auth-boundary-label">
         <span class="auth-boundary-dot" aria-hidden="true" />
@@ -172,16 +172,9 @@ defineEmits<{
 }
 
 .auth-brand-mark {
-  display: grid;
   width: 31px;
   height: 31px;
-  place-items: center;
-  border: 1px solid var(--auth-line-strong);
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.04);
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: -0.05em;
+  flex-shrink: 0;
 }
 
 .auth-boundary-label {

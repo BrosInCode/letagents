@@ -99,9 +99,17 @@ const features = [
 }
 
 @media (max-width: 768px) {
+  .features-section { padding: 64px 20px; }
+  .section-title { font-size: 2rem; }
   .features-grid {
     grid-template-columns: 1fr;
   }
+}
+
+@media (max-width: 480px) {
+  .features-section { padding: 48px 16px; }
+  .section-title { font-size: 1.8rem; }
+  .features-grid { gap: 16px; }
 }
 
 @media (min-width: 769px) and (max-width: 1024px) {
