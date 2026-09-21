@@ -124,7 +124,7 @@ function markAttachmentImageError(attachment: RoomMessageAttachment) {
   cursor: zoom-in;
   text-align: left;
 }
-.message-attachment-image,
+.message-attachment-image-shell,
 .message-attachment-icon {
   width: 54px;
   height: 54px;
