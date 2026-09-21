@@ -1,12 +1,16 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
+    <button v-if="attentionApprovalCount" type="button" class="desktop-host-approval-history"
+      :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
+      {{ `${showApprovalHistory ? 'Hide' : 'Show'} ${attentionApprovalCount} ${attentionApprovalCount === 1 ? 'approval' : 'approvals'} needing attention` }}
+    </button>
     <section v-for="approval in visibleHostApprovals" :key="approval.id" class="desktop-composer-permission-tray desktop-host-approval"
       data-testid="desktop-host-approval" aria-live="polite">
       <div class="desktop-composer-permission-main">
         <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
         <div class="desktop-composer-permission-copy">
-          <strong>{{ approval.presentation.displayName }} · {{ hostApprovalStatus(approval.status) }}</strong>
-          <span>{{ approval.presentation.title }}</span>
+          <strong>{{ approval.presentation.displayName }} · {{ approval.status === 'pending'
+            ? approval.presentation.title : hostApprovalStatus(approval.status) }}</strong>
         </div>
       </div>
       <button type="button" class="desktop-host-approval-dismiss"
@@ -15,12 +19,17 @@
         <X :size="15" aria-hidden="true" />
       </button>
       <details class="desktop-host-approval-details">
-        <summary>Review the request · visible only on this computer</summary>
-        <pre>{{ approval.presentation.details }}</pre>
+        <summary>Details</summary>
+        <dl>
+          <template v-for="(field, index) in hostApprovalFields(approval.presentation)" :key="index">
+            <dt>{{ field.label }}</dt>
+            <dd><pre>{{ field.value }}</pre></dd>
+          </template>
+        </dl>
+        <p v-if="approval.detail">{{ approval.detail }}</p>
+        <p v-if="approval.status === 'uncertain'">Confirmation unavailable. Your decision will not be sent again.</p>
       </details>
-      <p v-if="approval.presentation.denyScope === 'session_pending'">Deny rejects the other currently pending OpenCode permissions in this agent session too.</p>
-      <p v-if="approval.detail">{{ approval.detail }}</p>
-      <p v-if="approval.status === 'uncertain'">The decision may have reached the provider. It will not be sent again automatically.</p>
+      <p v-if="approval.status === 'pending' && approval.presentation.denyScope === 'session_pending'">Deny applies to all pending permissions for this agent.</p>
       <div v-if="approval.status === 'pending'" class="desktop-composer-permission-actions">
         <button type="button" class="desktop-composer-permission-deny" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
           @click="decideHostApproval(approval.id, 'deny')">Deny</button>
@@ -206,6 +215,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import type { DesktopHostApproval, HostApprovalChoice, HostApprovalStatus } from "../../../../../../shared/host-approvals";
+import { hostApprovalFields } from "./host-approval-presentation";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import { desktopIpc } from "../../../../ipc";
@@ -262,6 +272,7 @@ const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const hostApprovals = ref<DesktopHostApproval[]>([]);
 const dismissedHostApprovalIds = ref(new Set<string>());
+const showApprovalHistory = ref(false);
 const hostApprovalError = ref<string | null>(null);
 const hostApprovalBusy = ref<string | null>(null);
 const hostApprovalLoading = ref(false);
@@ -271,13 +282,17 @@ let approvalTimer: ReturnType<typeof setInterval> | null = null;
 
 function hostApprovalStatus(status: HostApprovalStatus): string {
   return { pending: "Needs your approval", decision_recorded: "Decision recorded", decision_sent: "Decision sent",
-    uncertain: "Decision could not be confirmed", request_closed: "Approval request closed", resolved: "Decision applied", unavailable: "Approval unavailable" }[status];
+    uncertain: "Approval unconfirmed", request_closed: "Approval request closed", resolved: "Decision applied", unavailable: "Approval unavailable" }[status];
 }
 
-const visibleHostApprovals = computed(() => hostApprovals.value.filter(approval =>
+const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approval =>
   (approval.status === "pending" || approval.status === "decision_recorded"
     || approval.status === "unavailable" || approval.status === "uncertain")
   && !dismissedHostApprovalIds.value.has(approval.id)));
+const attentionApprovalCount = computed(() => unresolvedHostApprovals.value.filter(approval =>
+  approval.status === "uncertain" || approval.status === "unavailable").length);
+const visibleHostApprovals = computed(() => unresolvedHostApprovals.value.filter(approval =>
+  showApprovalHistory.value || approval.status === "pending" || approval.status === "decision_recorded"));
 
 function dismissHostApproval(id: string): void {
   dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value, id]);
@@ -355,6 +370,7 @@ watch(
     approvalEpoch += 1;
     hostApprovals.value = [];
     dismissedHostApprovalIds.value = new Set();
+    showApprovalHistory.value = false;
     hostApprovalError.value = null;
     void refreshHostApprovals();
     mentionQuery.value = null;
