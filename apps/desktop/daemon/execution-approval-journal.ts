@@ -344,13 +344,13 @@ export function recordExecutionApprovalOutcome(db: DatabaseSync, input: RecordEx
     return exact(db, value.expected);
   }
   if (value.evidence === "native_processed" || value.evidence === "exact_native_execution") {
-    // OpenCode confirms processing in its reply endpoint. Codex requires a
-    // later exact item execution fact; a socket send or serverRequest/resolved
+    // OpenCode confirms processing in its reply endpoint. Codex and Claude require a
+    // later exact tool execution fact; a socket send or serverRequest/resolved
     // alone still proves no chosen decision.
     const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
       .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
     if ((value.evidence === "native_processed" && provider !== "open-model")
-      || (value.evidence === "exact_native_execution" && provider !== "codex")) reject("invalid_transition");
+      || (value.evidence === "exact_native_execution" && provider !== "codex" && provider !== "claude-code")) reject("invalid_transition");
     if (current.request.state === "resolved" && d.dispatchState === "acknowledged") return current;
   }
   if (current.request.state !== "dispatching" || !["dispatching", "uncertain"].includes(d.dispatchState)) reject("invalid_transition");

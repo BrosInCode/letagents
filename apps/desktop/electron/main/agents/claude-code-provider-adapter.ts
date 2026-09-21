@@ -2,6 +2,7 @@ import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { claudeToolOperation } from "../../../../../shared/claude-tool-operation.mjs";
 import type { ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -1580,11 +1581,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           && typeof block.name === "string" && !handle.executionTools.has(block.id)) {
           // Tool requests precede permission. Record correlation only, never
           // claim execution.started (nor expose agent-authored input/text).
-          const operation = block.name === "Bash" ? "command"
-            : ["Read", "Glob", "Grep"].includes(block.name) ? "file_read"
-              : ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(block.name) ? "file_change"
-                : ["WebFetch", "WebSearch"].includes(block.name) ? "network"
-                  : block.name === "AskUserQuestion" ? "question" : "other";
+          const operation = claudeToolOperation(block.name);
           handle.executionTools.set(block.id, { operation, completed: false, name: block.name, input: structuredClone(block.input) });
         } else if (message.type === "user" && block.type === "tool_result" && nativeExecutionId(block.tool_use_id)) {
           const tool = handle.executionTools.get(block.tool_use_id);

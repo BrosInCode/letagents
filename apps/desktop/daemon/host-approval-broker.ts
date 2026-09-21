@@ -4,7 +4,7 @@ import { z } from "zod";
 import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../shared/execution-delegation-decision.mjs";
 import type { HostApprovalCandidate, HostApprovalDecision, HostApprovalPresentation, HostApprovalReference, HostApprovalStatus } from "../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionRequest, ProviderPermissionObservation } from "../shared/provider-permissions.js";
-import { CodexApprovalExecutionReconciler } from "./codex-approval-execution-reconciler.js";
+import { ApprovalExecutionReconciler } from "./approval-execution-reconciler.js";
 import { ApprovalJournalError, type ApprovalAuthority, type ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import type { ExecutionApprovalProjectionRecord } from "./execution-approval-projection-journal.js";
 import {
@@ -66,7 +66,7 @@ type Lane = {
   agentId: string; generation: string; handle: ProviderActionHandle; connection: NonNullable<ProviderActionHandle["providerConnection"]>;
   controller: AbortController; revision: number; state: "pending" | "degraded" | "unavailable";
   connectionId: string | null; requests: readonly ProviderPermissionRequest[];
-  approvalExecutions: CodexApprovalExecutionReconciler | null;
+  approvalExecutions: ApprovalExecutionReconciler | null;
 };
 
 export type DelegatableApprovalAdmission = {
@@ -168,8 +168,8 @@ export class HostApprovalBroker {
       controller: new AbortController(), revision: 0, state: "degraded", connectionId: null, requests: [],
       approvalExecutions: null };
     this.lanes.set(agentId, lane);
-    if (handle.providerConnection.kind === "codex_app_server") {
-      lane.approvalExecutions = new CodexApprovalExecutionReconciler({ provider, handle, store: this.options.store,
+    if (["codex_app_server", "claude_cli"].includes(handle.providerConnection.kind)) {
+      lane.approvalExecutions = new ApprovalExecutionReconciler({ provider, handle, store: this.options.store,
         isCurrent: () => this.current(lane), fenceCommit: this.options.fenceCommit,
         onChanged: () => this.options.onPermissionChanged?.(lane.agentId), nowMs: this.now });
       lane.approvalExecutions.start();
@@ -429,8 +429,8 @@ export class HostApprovalBroker {
     select: (prepared: RecordedApprovalSelection) => Promise<ExecutionApprovalRecord>,
   ): Promise<HostApprovalStatus> {
     const reconciliation: {
-      reconciler: CodexApprovalExecutionReconciler | null;
-      pending: ReturnType<CodexApprovalExecutionReconciler["prepare"]>;
+      reconciler: ApprovalExecutionReconciler | null;
+      pending: ReturnType<ApprovalExecutionReconciler["prepare"]>;
     } = { reconciler: null, pending: null };
     try {
       const result = await this.nativeApplication.apply(input, async () => {
