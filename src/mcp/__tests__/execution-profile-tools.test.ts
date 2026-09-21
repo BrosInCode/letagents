@@ -1,7 +1,11 @@
+import { defineLocalSupervisedToolHandlers } from "../../../shared/local-supervised-tools.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { LOCAL_ROOM_API_ORIGIN } from "../../../shared/room-api-origin.mjs";
 import { registerTools } from "../server/register-tools.js";
 import { letAgentsRuntimeContract } from "../server/runtime-contract.js";
 import type { LetAgentsExecutionProfile } from "../server/runtime/execution-profile.js";
@@ -96,4 +100,47 @@ test("custodial polling advertises the restricted real tool surface with deliver
   assert.deepEqual(letAgentsRuntimeContract().profiles.supervised_mcp_polling, {
     contract: "custodial_polling_v1", tools: [...names].sort(),
   });
+});
+
+
+test("local native discovery and runtime contract agree and expose an executable closeout path", async () => {
+  for (const provider of ["cursor", "codex", "claude-code"]) {
+    const server = new McpServer({ name: "local-tool-contract", version: "1" });
+    const client = new Client({ name: "local-tool-reader", version: "1" });
+    registerTools(server, "supervised_room_turn", provider, { apiUrl: LOCAL_ROOM_API_ORIGIN });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport); await client.connect(clientTransport);
+      const { tools } = await client.listTools();
+      const contract = letAgentsRuntimeContract(LOCAL_ROOM_API_ORIGIN).profiles.cursor_supervised_room_turn.tools;
+      assert.deepEqual(tools.map(tool => tool.name).sort(), contract.filter(name => provider === "cursor" || name !== "complete_room_turn"));
+      for (const name of ["get_board", "read_messages", "claim_task", "complete_task", "update_task", "send_thread_message", "publish_room_artifact"]) {
+        assert.ok(tools.some(tool => tool.name === name), `${provider} keeps ${name}`);
+      }
+      for (const name of ["join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "submit_review_verdict"]) {
+        assert.ok(!tools.some(tool => tool.name === name), `${provider} cannot discover unsupported ${name}`);
+      }
+      assert.match(tools.find(tool => tool.name === "update_task")!.description!, /merged work with status 'done'; no close intent or replacement work lease/);
+      assert.equal(tools.find(tool => tool.name === "get_board")?.annotations?.readOnlyHint, true);
+      assert.equal(tools.find(tool => tool.name === "update_task")?.annotations?.readOnlyHint, false);
+    } finally { await client.close(); await server.close(); }
+  }
+  const hosted = letAgentsRuntimeContract("https://letagents.chat");
+  assert.ok(hosted.profiles.cursor_supervised_room_turn.tools.includes("register_task_close_intent"));
+  assert.ok(hosted.profiles.cursor_supervised_room_turn.tools.includes("join_room"));
+  assert.deepEqual(hosted.profiles.cursor_supervised_room_turn.tools, [...discovered("supervised_room_turn", "cursor")].sort());
+});
+
+
+test("local executor construction refuses incomplete, extra or nonfunction handlers", () => {
+  assert.throws(() => defineLocalSupervisedToolHandlers({}), /advertised tool contract/);
+  const handlers = Object.fromEntries([
+    "get_current_room", "read_messages", "send_message", "get_board", "add_task", "claim_task", "update_task",
+    "change_task_lease", "claim_task_review", "get_room_artifacts", "publish_room_artifact", "get_message_thread",
+  ].map(name => [name, async () => undefined]));
+  assert.ok(Object.isFrozen(defineLocalSupervisedToolHandlers(handlers)));
+  const { update_task: _update, ...incomplete } = handlers;
+  assert.throws(() => defineLocalSupervisedToolHandlers(incomplete), /advertised tool contract/);
+  assert.throws(() => defineLocalSupervisedToolHandlers({ ...handlers, unexpected: async () => undefined }), /advertised tool contract/);
+  assert.throws(() => defineLocalSupervisedToolHandlers({ ...handlers, update_task: null! }), /advertised tool contract/);
 });

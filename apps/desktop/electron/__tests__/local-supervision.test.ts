@@ -691,3 +691,29 @@ test("a concurrent thread correction retries the entire send before persisting r
   assert.equal(messages.length, 3, "rollback cannot leave a duplicate send");
   assert.equal(sent.id, `msg_${rootNumber + 2}`, "rollback cannot consume the message sequence");
 });
+
+
+test("local assignee closes reviewed merged work through discovered update_task after its lease ends", async () => {
+  const roomId = "local_worker_closeout";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "worker_closeout");
+  const elm = await worker(roomId, "Elm", "reviewer_closeout");
+  const task = await addLocalTask(roomId, { title: "Reviewed local delivery" });
+  await updateLocalTask(roomId, task.id, { status: "accepted" });
+  await oak.tool("claim_task", { task_id: task.id });
+  await oak.tool("update_task", { task_id: task.id, status: "in_progress" });
+  await oak.tool("complete_task", { task_id: task.id });
+  await elm.tool("claim_task_review", { task_id: task.id });
+  await elm.tool("publish_room_artifact", { task_id: task.id, artifact: {
+    provider: "git", kind: "review", id: "local-closeout-review", ref: "verified-revision", state: "approved",
+  } });
+  await oak.tool("update_task", { task_id: task.id, status: "merged" });
+  const merged = await getLocalTask(roomId, task.id);
+  assert.equal(merged?.activeLeases.filter(lease => lease.kind === "work").length, 0);
+  const obsolete = await oak.tool("register_task_close_intent", { task_id: task.id, status: "done" });
+  assert.equal(obsolete.code, "local_room_tool_unavailable", "stale clients cannot invoke hosted governance locally");
+  assert.equal((await getLocalTask(roomId, task.id))?.status, "merged");
+  const closed = await oak.tool("update_task", { task_id: task.id, status: "done" });
+  assert.equal(closed.task.status, "done");
+  assert.equal((await oak.tool("get_board", {})).tasks.find((entry: { id: string }) => entry.id === task.id).status, "done");
+});

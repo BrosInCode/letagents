@@ -2231,6 +2231,26 @@ test("Codex resumed bounded launch supplies only the exact non-secret worker rou
   assert.doesNotMatch(JSON.stringify(harness.launchOptions), /session-secret|authorization/);
 });
 
+test("Codex bounded local launch probes and configures the same exact local tool route", async () => {
+  const { letAgentsRuntimeContract } = await import(new URL("../../../../src/mcp/server/runtime-contract.ts", import.meta.url).href);
+  const harness = createHarness();
+  let probedRoute: string | undefined;
+  harness.dependencies.readMcpRuntimeContract = async (_entryPath, apiUrl) => {
+    probedRoute = apiUrl; return letAgentsRuntimeContract(apiUrl);
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox",
+    supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact",
+    supervisorWorkerSession: { agentSessionId: "session_exact", roomCursor: "msg_1", apiUrl: "letagents-local://rooms" },
+  }));
+  assert.equal(probedRoute, "letagents-local://rooms");
+  const config = harness.launchOptions[0]!.options.configOverrides!.join("\n");
+  const names = letAgentsRuntimeContract(probedRoute).profiles.cursor_supervised_room_turn.tools.filter((name: string) => name !== "complete_room_turn");
+  assert.ok(config.includes(`enabled_tools = ${JSON.stringify(names)}`));
+  assert.ok(config.includes('"LETAGENTS_API_URL" = "letagents-local://rooms"'));
+  assert.doesNotMatch(config, /register_task_close_intent|join_room|get_room_memory|complete_room_turn/);
+});
+
 test("Codex bounded launches reject missing or unsafe managed MCP tool contracts before launch", async () => {
   for (const tools of [null, ["get_board"], ["claim_task", "get_board", "read_messages", "send_message", "register_agent_session"]]) {
     const harness = createHarness();
@@ -2442,6 +2462,17 @@ test("Codex custodial polling reads the selected built executable contract witho
     assert.equal(handle.observedState(), "idle");
     assert.equal(harness.clients[0]!.requests.some((call) => call.method === "turn/start"), false);
     assert.ok(harness.launchOptions[0]!.options.configOverrides[0]!.includes(JSON.stringify(await realpath(entry))), "launch uses the resolver's canonical executable");
+    await writeFile(entry, [
+      "if (process.env.LETAGENTS_API_URL !== 'letagents-local://rooms' || process.env.LETAGENTS_TOKEN || process.env.LETAGENTS_SUPERVISOR_ENTRY_ID) process.exit(2);",
+      `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,
+    ].join("\n"));
+    const localHarness = createHarness();
+    const { resolveMcpRuntime: _localResolve, readMcpRuntimeContract: _localRead, ...localDependencies } = localHarness.dependencies;
+    const localAdapter = new CodexProviderAdapter({ dependencies: localDependencies });
+    await localAdapter.spawn({ ...request, deliveryMode: "daemon_inbox", pollingContract: undefined,
+      supervisorWorkerSession: { ...request.supervisorWorkerSession!, apiUrl: "letagents-local://rooms" },
+    });
+    assert.equal(localHarness.launches.length, 1, "credential-free contract subprocess receives the same local route as native MCP");
   } finally {
     if (previousDev === undefined) delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
     else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = previousDev;
