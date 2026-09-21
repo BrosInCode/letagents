@@ -2137,6 +2137,139 @@ test("@everyone delivery is per-agent and one blocked FIFO cannot stall another 
   }
 });
 
+test("room intake continues through a held provider turn while FIFO execution stays serial", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-independent-intake-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const firstTurn = deferred<void>(); const release = deferred<void>();
+  let polls = 0; let concurrent = 0; let peak = 0;
+  const turns: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    concurrent += 1; peak = Math.max(peak, concurrent); turns.push((request.sourceMessage as { id: string }).id);
+    if (turns.length === 1) { firstTurn.resolve(); await release.promise; }
+    concurrent -= 1;
+    return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+  }), {
+    poll: async ({ signal }) => {
+      polls += 1;
+      if (polls <= 3) {
+        if (polls > 1) await firstTurn.promise;
+        return { messages: [{ id: String(polls), activation: { for_current_agent: { decision: "activate" } } }] };
+      }
+      return new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true }));
+    },
+    publish: async () => { throw new Error("no-reply must not publish"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.start(agent); await firstTurn.promise;
+    await waitForAsync(async () => (await store.cursor(agent.agentId))?.last_observed_message_id === "3");
+    assert.equal((await store.receipts(agent.agentId)).length, 3, "later messages are durable before the held turn ends");
+    assert.deepEqual(turns, ["1"]);
+    assert.equal(peak, 1);
+    const internal = delivery as unknown as { pumpWakeups: Map<string, unknown> };
+    assert.equal(internal.pumpWakeups.size, 1, "repeated intake coalesces one settlement wake");
+    release.resolve();
+    await waitForAsync(async () => (await store.receipts(agent.agentId)).every(item => item.state === "acknowledged_no_reply"));
+    assert.deepEqual(turns, ["1", "2", "3"]);
+    assert.equal(peak, 1);
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const intakeState of ["observing", "backoff"] as const) {
+  test(`delivery recovery preserves ${intakeState} health while room polling hangs`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-delivery-independent-recovery-"));
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await ingest(store, "1");
+    const normalize = store.normalizeStartupRecovery.bind(store);
+    const hangingPoll = deferred<void>();
+    const expectedHealth = { room_id: agent.roomId, state: intakeState,
+      detail: intakeState === "backoff" ? "temporary poll failure" : null,
+      execution_generation_id: agent.executionGenerationId };
+    let normalizations = 0; let turns = 0; let polls = 0;
+    store.normalizeStartupRecovery = async (...args) => {
+      await hangingPoll.promise;
+      assert.deepEqual(await store.ingressHealth(agent.agentId), expectedHealth);
+      if (++normalizations <= 2) throw new Error("temporary store failure password=synthetic-secret");
+      return normalize(...args);
+    };
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => { warnings.push(message); });
+    const delays: number[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+      turns += 1; return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+    }), {
+      poll: async ({ signal }) => {
+        if (++polls === 1) {
+          if (intakeState === "backoff") throw new Error("temporary poll failure");
+          return {};
+        }
+        hangingPoll.resolve();
+        return new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true }));
+      },
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    }, currentAuthority, 0, undefined, async delay => { delays.push(delay); });
+    try {
+      await delivery.start(agent);
+      await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
+      assert.equal(normalizations, 3); assert.equal(turns, 1);
+      assert.deepEqual(delays.slice(-2), [250, 500]);
+      assert.deepEqual(await store.ingressHealth(agent.agentId), expectedHealth,
+        "delivery recovery must not change the independent observation state");
+      assert.deepEqual(warnings, ["Room delivery recovery for stone: temporary store failure password=[REDACTED]"],
+        "one redacted diagnostic covers the recovery episode");
+    } finally { hangingPoll.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("an intake commit racing an empty pump still wakes delivery without another message", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-empty-wake-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const emptyClaim = deferred<void>(); const release = deferred<void>();
+  const claim = store.claimHead.bind(store); let claims = 0; let polls = 0; let turns = 0;
+  store.claimHead = async (...args) => {
+    const result = await claim(...args);
+    if (++claims === 1) { assert.equal(result, null); emptyClaim.resolve(); await release.promise; }
+    return result;
+  };
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    turns += 1; return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+  }), {
+    poll: async ({ signal }) => {
+      if (++polls === 1) {
+        await emptyClaim.promise;
+        return { messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] };
+      }
+      return new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true }));
+    }, publish: async () => { throw new Error("no-reply must not publish"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.start(agent);
+    await waitForAsync(async () => (await store.cursor(agent.agentId))?.last_observed_message_id === "1");
+    release.resolve();
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
+    assert.equal(turns, 1);
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("handoff aborts delivery recovery backoff and cannot create a successor pump", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-recovery-drain-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let normalizations = 0; let aborted = false;
+  const waiting = deferred<void>();
+  store.normalizeStartupRecovery = async () => { normalizations += 1; throw new Error("store offline"); };
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("no native turn expected"); }), {
+    poll: ({ signal }) => new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true })),
+    publish: async () => { throw new Error("must not publish"); },
+  }, currentAuthority, 0, undefined, (_delay, signal) => new Promise(resolve => {
+    waiting.resolve(); signal.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true });
+  }));
+  try {
+    await delivery.start(agent); await waiting.promise;
+    await delivery.fenceAndDrain();
+    assert.equal(aborted, true); assert.equal(normalizations, 1);
+    assert.equal(delivery.wake(agent), false);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("the supervised runtime continuously polls and delivers a later activation", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-loop-"));
   try {
@@ -2332,9 +2465,10 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
     assert.equal(refreshed, false, "refresh waits for the old poll's ingest commit");
     releaseIngest.resolve();
     await refresh; await successorPoll.promise;
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
     assert.equal(turns, 1, "the stopped poll cannot launch a stale delivery pump after ingest");
     assert.equal(turnHandles[0], successor.handle, "only the successor context may run the recovered delivery turn");
-    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply", "successor recovery and delivery happen before its hanging poll");
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply", "successor recovery and delivery finish independently of its hanging poll");
     await delivery.fenceAndDrain();
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -2484,6 +2618,7 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
     const currentRefresh = delivery.refresh(current);
     releaseIngest.resolve();
     await Promise.all([staleRefresh, currentRefresh]); await currentPoll.promise;
+    await waitForAsync(async () => (await store.receipts(agent.agentId)).every(item => item.state === "acknowledged_no_reply"));
     assert.deepEqual(turnHandles, [current.handle, current.handle], "the stale refresh cannot own either recovered FIFO turn");
     const internals = delivery as unknown as { loops: Map<string, Promise<void>>; loopEpochs: Map<string, number> };
     assert.equal(internals.loops.has(agent.agentId), true, "the current successor remains in its long poll");
