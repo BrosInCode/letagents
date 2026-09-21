@@ -82,7 +82,8 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
     sameBirthIdentity: (actual, expected) => actual === expected,
   };
   const terminal = { endedAt: new Date().toISOString(), exitCode: null, signal: "SIGKILL",
-    terminalCause: "killed" as const, providerContinuationId: "saved-conversation" };
+    terminalCause: "killed" as const, providerContinuationId: "saved-conversation",
+    nativeRuntimeDeath: { kind: "codex_app_server" as const, pid: connection.pid, processIdentity: connection.processIdentity } };
   const provider: ProviderActionPort = {
     capabilities: async () => ({ deliveryModes: ["daemon_inbox"], resume: true, exactProcessStop: exactStopSupported, midTurnInjection: false,
       transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
@@ -192,6 +193,9 @@ for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery
     assert.equal(recovered.desired_state, "running");
     assert.equal(recovered.runtime_recovery, null);
     assert.equal(recovered.provider_ref?.provider_continuation_id ?? null, mode === "resume" ? "saved-conversation" : null);
+    const stoppedAttempt = await internals.durability.getAttempt(attempt.work_attempt_id);
+    assert.deepEqual(stoppedAttempt.execution_generations.find(value => value.execution_generation_id === execution.execution_generation_id)?.terminal?.native_runtime_death,
+      terminal.nativeRuntimeDeath, "manual recovery retains exact death evidence before resetting the reference");
     const afterDb = new DatabaseSync(paths.manifestPath);
     try {
       assert.equal(afterDb.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='inbox'").get()!.state,
@@ -6051,7 +6055,8 @@ test("recovery-only authority install retains the grant without touching the dea
   }
 });
 
-test("explicit runtime recovery retires a proven-dead provider generation without replacing the durable agent", async () => {
+for (const providerId of ["open-model", "claude-code", "codex"] as const) {
+test(`explicit runtime recovery retires proven-dead ${providerId} without replacing the durable agent`, async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -6079,6 +6084,14 @@ test("explicit runtime recovery retires a proven-dead provider generation withou
   });
   const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
   await durability.close();
+  const deadConnection = providerId === "claude-code"
+    ? { kind: "claude_cli" as const, pid: 45550, processIdentity: "Mon Sep 14 15:50:00 2026" }
+    : providerId === "codex"
+      ? { kind: "codex_app_server" as const, pid: 45550, processIdentity: "Mon Sep 14 15:50:00 2026", url: "ws://127.0.0.1:45550" }
+      : { kind: "opencode_server" as const, pid: 45550, processIdentity: "opencode-birth-45550",
+          url: "http://127.0.0.1:52486", serverAuthPath: join(env.root, "opencode", "server-auth.json") };
+  const death = deadConnection.kind === "opencode_server" ? undefined
+    : { kind: deadConnection.kind, pid: deadConnection.pid, processIdentity: deadConnection.processIdentity };
   const calls = { attach: 0, spawn: 0, resume: 0, converge: 0 };
   const port: ProviderActionPort = {
     capabilities: async () => ({
@@ -6102,6 +6115,7 @@ test("explicit runtime recovery retires a proven-dead provider generation withou
           signal: null,
           terminalCause: "crashed",
           providerContinuationId: "ses_dead_opencode",
+          ...(death ? { nativeRuntimeDeath: death } : {}),
         },
       };
     },
@@ -6132,7 +6146,7 @@ test("explicit runtime recovery retires a proven-dead provider generation withou
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry,
       id,
-      provider: "open-model",
+      provider: providerId,
       delivery_mode: "daemon_inbox",
       desired_state: "running",
       observed_state: "recovering",
@@ -6145,13 +6159,7 @@ test("explicit runtime recovery retires a proven-dead provider generation withou
       provider_ref: {
         work_attempt_id: attempt.work_attempt_id,
         provider_continuation_id: "ses_dead_opencode",
-        provider_connection: {
-          kind: "opencode_server",
-          url: "http://127.0.0.1:52486",
-          pid: 45_550,
-          processIdentity: "opencode-birth-45550",
-          serverAuthPath: join(env.root, "opencode", "server-auth.json"),
-        },
+        provider_connection: deadConnection,
         execution_generation_id: execution.execution_generation_id,
       },
     } });
@@ -6179,16 +6187,18 @@ test("explicit runtime recovery retires a proven-dead provider generation withou
     assert.deepEqual(calls, { attach: 1, spawn: 0, resume: 0, converge: 1 });
 
     const durable = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as {
-      execution_generations: Array<{ execution_generation_id: string; terminal: unknown }>;
+      execution_generations: Array<{ execution_generation_id: string; terminal: { native_runtime_death?: unknown } }>;
     };
     assert.equal(durable.execution_generations.length, 1, "recovery does not start a provider generation inline");
     assert.equal(durable.execution_generations[0]?.execution_generation_id, execution.execution_generation_id);
     assert.ok(durable.execution_generations[0]?.terminal, "exact terminal evidence is persisted before replacement");
+    assert.deepEqual(durable.execution_generations[0]?.terminal.native_runtime_death, death);
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });
+}
 
 for (const cachedLane of [false, true]) {
   test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"})`, async () => {

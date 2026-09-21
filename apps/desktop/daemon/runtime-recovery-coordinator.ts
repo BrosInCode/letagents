@@ -3,6 +3,7 @@ import type { WorkDurabilityStore } from "./durability-store.js";
 import type { ManifestStore } from "./manifest-store.js";
 import {
   sameProviderActionConnectionSnapshot,
+  validatedNativeRuntimeDeath,
   type ProviderActionAttachTerminal,
   type ProviderActionHandle,
   type ProviderActionPort,
@@ -40,6 +41,7 @@ type RuntimeRecoveryAuthority = {
 };
 
 export type RuntimeRecoveryCoordinatorOptions = {
+  settleRuntimeApprovals: (entryId: string) => Promise<void>;
   store: ManifestStore;
   durability: WorkDurabilityStore;
   inbox: SupervisedAgentInboxStore;
@@ -417,7 +419,10 @@ export class RuntimeRecoveryCoordinator {
       const currentBirth = birthState();
       if (currentBirth === "unknown") throw new Error("The saved process identity changed before stopping. Recovery remains paused.");
       const terminal: ProviderActionTerminal = currentBirth === "gone"
-        ? { endedAt: new Date(this.nowMs()).toISOString(), exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: savedRef.provider_continuation_id }
+        ? { endedAt: new Date(this.nowMs()).toISOString(), exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: savedRef.provider_continuation_id,
+            ...((savedRef.provider_connection?.kind === "claude_cli" || savedRef.provider_connection?.kind === "codex_app_server")
+              ? { nativeRuntimeDeath: { kind: savedRef.provider_connection.kind, pid: savedRef.provider_connection.pid!,
+                  processIdentity: savedRef.provider_connection.processIdentity! } } : {}) }
         : await this.provider.stopRef!(exactRef, { force: true, graceMs: 5_000, actionId: record.operation_id });
       if (terminal.providerContinuationId && terminal.providerContinuationId !== savedRef.provider_continuation_id) {
         throw new Error("The stop result belongs to a different conversation. Recovery remains paused.");
@@ -432,7 +437,8 @@ export class RuntimeRecoveryCoordinator {
         const execution = attempt.execution_generations.find(value => value.execution_generation_id === savedRef.execution_generation_id);
         if (!execution) throw new Error("The original execution record is missing. Recovery remains paused.");
         if (!execution.terminal) await this.durability.recordTerminal(savedRef.work_attempt_id, savedRef.execution_generation_id,
-          terminalPayload(terminal, execution.actor, execution.generation));
+          terminalPayload(terminal, execution.actor, execution.generation, savedRef.provider_connection));
+        await this.options.settleRuntimeApprovals(entryId);
         await this.durability.releaseTerminalExecutionFence(savedRef.work_attempt_id, savedRef.execution_generation_id);
         await this.store.checkpointRuntimeStopped(record.operation_id, commit => this.authority.fenceCommit(async () => {
           // The durable boundary requires current host proof, not a cached terminal.
@@ -441,6 +447,7 @@ export class RuntimeRecoveryCoordinator {
         }));
       });
     }
+    await this.options.settleRuntimeApprovals(entryId);
     this.options.releaseRecoveredObservation?.(entryId, record.runtime_generation_id);
     entry = await this.serializeEntry(entryId, async () => {
       await assertAuthority();
@@ -579,13 +586,15 @@ export class RuntimeRecoveryCoordinator {
             throw new Error("Provider recovery returned terminal evidence for a different continuation.");
           }
           await this.durability.recordTerminal(ref.work_attempt_id, ref.execution_generation_id, {
-            ...terminalPayload(attachment.terminal, execution.actor, this.authority.currentDaemonGeneration()),
+            ...terminalPayload(attachment.terminal, execution.actor, this.authority.currentDaemonGeneration(), ref.provider_connection),
             actor: execution.actor,
             generation: execution.generation,
           });
+          await this.options.settleRuntimeApprovals(entryId);
           await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
         }
       }
+      await this.options.settleRuntimeApprovals(entryId);
 
       await this.delivery?.stop(entryId).catch(() => undefined);
       entry = await this.completeTurnControl(await this.store.getEntry(entryId) ?? entry);
@@ -691,8 +700,11 @@ function terminalPayload(
   terminal: ProviderActionTerminal,
   actor: string,
   generation: number,
+  connection?: ProviderActionHandle["providerConnection"],
 ): ExecutionTerminalPayload {
+  const death = validatedNativeRuntimeDeath(terminal, connection);
   return {
+    ...(death ? { native_runtime_death: death } : {}),
     ended_at: terminal.endedAt,
     exit_code: terminal.exitCode,
     signal: terminal.signal,

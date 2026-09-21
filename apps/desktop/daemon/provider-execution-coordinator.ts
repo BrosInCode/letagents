@@ -949,7 +949,14 @@ export class ProviderExecutionCoordinator {
 
   async converge(entryId: string): Promise<void> {
     if (this.options.authority.isHandoffScheduled()) return;
-    await this.options.settleRuntimeApprovals(entryId);
+    try {
+      await this.options.settleRuntimeApprovals(entryId);
+    } catch (error) {
+      // Retry only failed operational settlement, using the existing recovery
+      // scheduler. Healthy convergence never starts an approval polling timer.
+      if (!this.options.authority.isHandoffScheduled()) this.scheduleRecovery(entryId, 5_000);
+      throw error;
+    }
     if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
     let entry = await this.options.store.getEntry(entryId);
