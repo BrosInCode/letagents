@@ -66,7 +66,10 @@ test("rejected bearer credentials cannot fall through to anonymous room access",
   registerHttpMiddleware({ use: (handler: Function) => handlers.push(handler), options() {} } as never, createDeps() as never);
   for (const [authorization, method, path, rejected] of [
     [undefined, "PATCH", "/rooms/public/tasks/task_1", false],
-    ["Bearer ", "PATCH", "/rooms/public/tasks/task_1", false],
+    ["Bearer ", "PATCH", "/rooms/public/tasks/task_1", true],
+    ["Bearer\t", "PATCH", "/rooms/public/tasks/task_1", true],
+    ["Bearer invalid token", "PATCH", "/rooms/public/tasks/task_1", true],
+    ["Bearer\tinvalid", "PATCH", "/rooms/public/tasks/task_1", true],
     ["Bearer revoked-worker", "PATCH", "/rooms/public/tasks/task_1", true],
     ["bearer invalid", "PATCH", "/rooms/public/tasks/task_1", true],
     ["Bearer expired-owner", "GET", "/auth/session", false],

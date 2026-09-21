@@ -34,6 +34,8 @@ app.use(async (req, res, next) => {
   next();
 });
 registerConversationRoutes(app);
+const { registerAuthLogoutRoute } = await import("../routes/auth/index.js");
+registerAuthLogoutRoute(app);
 registerAppLoginRoutes(app);
 const server = createServer(app);
 test.before(async () => {
@@ -262,16 +264,27 @@ test("cookie writes require a same-origin request; a bearer cannot override a di
     body: JSON.stringify({ account_ids: [bob] }),
   });
   assert.equal(response.status, 403);
-  const claimedBearer = await fetch(`${base}/conversations`, {
-    method: "POST",
-    headers: {
-      cookie: `letagents_session=${browserToken}`,
-      Authorization: "Basic bogus",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ account_ids: [bob] }),
-  });
-  assert.equal(claimedBearer.status, 403);
+  for (const [authorization, expectedStatus] of [
+    ["Basic bogus", 403],
+    ["Bearer\tbogus", 401],
+    ["bEaReR bogus", 401],
+    ["Bearer   bogus", 401],
+    ["Bearer", 401],
+    ["Bearer   ", 401],
+    ["Bearer invalid token", 401],
+  ] as const) {
+    const claimedBearer = await fetch(`${base}/conversations`, {
+      method: "POST",
+      headers: {
+        cookie: `letagents_session=${browserToken}`,
+        Authorization: authorization,
+        Origin: "https://untrusted.example",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ account_ids: [bob] }),
+    });
+    assert.equal(claimedBearer.status, expectedStatus, authorization);
+  }
   const confused = await request("/conversations", appToken, "GET", undefined, {
     cookie: `letagents_session=${browserToken}`,
   });
@@ -506,5 +519,19 @@ test("invalidation updates every account when the recipient union exceeds one NO
   } finally {
     await client.query("ROLLBACK");
     client.release();
+  }
+});
+
+test("normalized app bearer headers authenticate and revoke the same session on logout", async () => {
+  for (const prefix of ["Bearer ", "Bearer\t", "bearer   ", "bEaReR "]) {
+    const token = randomUUID();
+    await pool.query(
+      "INSERT INTO auth_sessions(id,account_id,token_hash,expires_at,created_at) VALUES ($1,$2,$3,now()+interval '1 hour',now())",
+      [randomUUID(), alice, hash(token)],
+    );
+    const headers = { Authorization: prefix + token };
+    assert.equal((await request("/conversations", token, "GET", undefined, headers)).status, 200);
+    assert.equal((await request("/auth/logout", token, "POST", undefined, headers)).status, 200);
+    assert.equal((await request("/conversations", token)).status, 401);
   }
 });
