@@ -8,7 +8,7 @@ import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
-import { hostApprovalFields } from "../src/components/desktop/content/room-chat/host-approval-presentation";
+import { hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
 
 interface HostNode {
   kind: "element" | "text" | "comment";
@@ -339,7 +339,10 @@ test("approval details show tool inputs and exact edits without transport JSON",
   approval.presentation = { ...approval.presentation, provider: "claude-code", denyScope: "request",
     details: JSON.stringify({ id: "private-request-id", request: { subtype: "can_use_tool", tool_use_id: "private-tool-id",
       tool_name: "Bash", decision_reason: "Runs in another directory", blocked_path: "/project/.git",
+      permission_suggestions: [{ type: "addRules", destination: "localSettings", behavior: "allow" }],
+      decision_reason_type: "subcommandResults",
       input: { command: "git status\nprintf '<script>\\u202e'", description: "Inspect repository", cwd: "/project" } } }) };
+  assert.equal(hostApprovalTitle(approval.presentation), "Run a command");
   assert.deepEqual(hostApprovalFields(approval.presentation).map(field => field.label), ["Tool", "Command", "Description", "Cwd", "Decision reason", "Blocked path"]);
   Object.assign(window, { letagentsDesktop: { supervisor: {
     listHostApprovals: async () => ({ available: true, approvals: [approval], error: null }),
@@ -351,7 +354,7 @@ test("approval details show tool inputs and exact edits without transport JSON",
     assert.match(content, /git status\nprintf/);
     assert.match(content, /Runs in another directory/);
     assert.match(content, /\/project\/\.git/);
-    assert.doesNotMatch(content, /private-request-id|private-tool-id|can_use_tool|visible only on this computer/);
+    assert.doesNotMatch(content, /private-request-id|private-tool-id|can_use_tool|visible only on this computer|addRules|localSettings|subcommandResults/);
     assert.equal(descendants(root).some(node => node.type === "script" || node.props.innerHTML), false);
     assert.equal(descendants(root).find(node => node.type === "details")?.props.open, undefined);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
@@ -371,6 +374,36 @@ test("approval details show tool inputs and exact edits without transport JSON",
   assert.deepEqual(hostApprovalFields(openCode), [{ label: "Permission", value: "bash" },
     { label: "Applies to", value: "1. npm test" }, { label: "Command", value: "npm test" },
     { label: "Cwd", value: "/repo" }, { label: "Arguments", value: "1. --run\n2. unit" }]);
+});
+
+test("native MCP approval shows the action and complete inputs without protocol metadata", () => {
+  const presentation = { ...hostApproval().presentation, provider: "codex" as const, title: "Run a tool" as const,
+    details: JSON.stringify({ request: { method: "mcpServer/elicitation/request", params: {
+      threadId: "private-thread", turnId: "private-turn", serverName: "letagents", mode: "form",
+      message: 'Allow the letagents MCP server to run tool "send_thread_message"?',
+      _meta: { codex_approval_kind: "mcp_tool_call", persist: ["session", "always"],
+        tool_description: "Protocol description that should not swamp the actual request.",
+        tool_params: { room_id: "room-1", thread_parent_id: "msg_3", text: "A complete proposed message. ".repeat(50) },
+        tool_params_display: [{ name: "text", value: "duplicate message" }] },
+      requestedSchema: { type: "object", properties: {} },
+    } } }) };
+  const unchanged = presentation.details;
+  assert.equal(hostApprovalTitle(presentation), "Send thread message");
+  assert.deepEqual(hostApprovalFields(presentation), [
+    { label: "Service", value: "letagents" }, { label: "Tool", value: "send_thread_message" },
+    { label: "Room id", value: "room-1" }, { label: "Thread parent id", value: "msg_3" },
+    { label: "Text", value: "A complete proposed message. ".repeat(50) },
+  ]);
+  assert.equal(presentation.details, unchanged, "formatting never changes the signed native presentation");
+  const unfamiliar = JSON.parse(presentation.details);
+  unfamiliar.request.params.message = "Please permit this operation";
+  assert.equal(hostApprovalFields({ ...presentation, details: JSON.stringify(unfamiliar) })[1]!.value,
+    "Please permit this operation", "an unfamiliar native message remains visible without inventing a tool name");
+  const edit = { ...presentation, provider: "claude-code" as const, details: JSON.stringify({ request: {
+    tool_name: "Edit", input: { file_path: "/repo/src/TaskList.tsx", old_string: "old", new_string: "new" },
+  } }) };
+  assert.equal(hostApprovalTitle(edit), "Edit TaskList.tsx");
+  assert.equal(hostApprovalTitle({ ...edit, title: "Approval unavailable" }), "Approval unavailable");
 });
 
 test("composer shows approval-service failure when no request cards have arrived", async () => {
