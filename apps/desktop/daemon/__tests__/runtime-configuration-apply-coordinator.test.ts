@@ -242,6 +242,7 @@ test("intentional replacement classifies an onExit/stop-result race exactly once
   let terminalRecords = 0;
   let convergenceRequests = 0;
   const ports: ProviderTerminalPorts = {
+    settleRuntimeApprovals: async () => {},
     currentDaemonGeneration: () => 7,
     nowMs: () => Date.parse("2026-09-02T00:00:00.000Z"),
     liveHandles,
@@ -294,6 +295,7 @@ test("a native stop failure clears the replacement reservation without misclassi
   let removed = false;
   let transitions = 0;
   const ports: ProviderTerminalPorts = {
+    settleRuntimeApprovals: async () => {},
     currentDaemonGeneration: () => 7,
     nowMs: () => Date.parse("2026-09-02T00:00:00.000Z"),
     liveHandles,
@@ -336,4 +338,18 @@ test("a native stop failure clears the replacement reservation without misclassi
 
   await coordinator.replaceConfiguration(installation, async () => terminal);
   assert.equal(transitions, 1, "the exact installation remains replaceable after the failed stop");
+});
+
+test("process-death evidence must match the immutable installation, including PID birth", () => {
+  const coordinator = new ProviderTerminalCoordinator({ currentDaemonGeneration: () => 7 } as ProviderTerminalPorts);
+  const connection = { kind: "codex_app_server" as const, url: "ws://localhost:4000", pid: 4000, processIdentity: "original-birth" };
+  const terminal = { endedAt: "2026-09-02T00:00:00.000Z", exitCode: 0, signal: null,
+    terminalCause: "exited" as const, providerContinuationId: "continuation",
+    nativeRuntimeDeath: { kind: "codex_app_server" as const, pid: 4000, processIdentity: "original-birth" } };
+  assert.deepEqual(coordinator.terminalPayload(terminal, "provider", connection).native_runtime_death, terminal.nativeRuntimeDeath);
+  for (const wrong of [undefined, { ...connection, pid: 5000 }, { ...connection, processIdentity: "successor-birth" }]) {
+    assert.throws(() => coordinator.terminalPayload(terminal, "provider", wrong), /exact provider installation/);
+  }
+  const { nativeRuntimeDeath, ...transportOnly } = terminal;
+  assert.equal(coordinator.terminalPayload({ ...transportOnly, terminalCause: "protocol_error" }, "provider", connection).native_runtime_death, undefined);
 });

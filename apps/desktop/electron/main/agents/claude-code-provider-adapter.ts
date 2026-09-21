@@ -1315,7 +1315,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (identity === null || !sameProcessBirthIdentity(identity, connection.processIdentity)) {
       // The recorded child is verifiably gone (a recycled pid is NOT it and is
       // never signalled). Proven absent — bounded recovery may proceed.
-      return this.attachTerminal(providerContinuationId, null, "crashed");
+      return this.attachTerminal(connection, providerContinuationId, null, "crashed");
     }
     // A previous daemon's stdin disappearing normally gives Claude EOF. Let
     // that exact orphan finish and flush its JSONL terminal boundary before
@@ -1326,7 +1326,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       delay(this.stopGraceMs).then(() => false),
     ]);
     if (exitedNaturally) {
-      return this.attachTerminal(providerContinuationId, null, "crashed");
+      return this.attachTerminal(connection, providerContinuationId, null, "crashed");
     }
     const identityBeforeTerm = this.deps.getProcessIdentity(connection.pid);
     if (identityBeforeTerm === undefined) {
@@ -1335,7 +1335,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       );
     }
     if (identityBeforeTerm === null || !sameProcessBirthIdentity(identityBeforeTerm, connection.processIdentity)) {
-      return this.attachTerminal(providerContinuationId, null, "crashed");
+      return this.attachTerminal(connection, providerContinuationId, null, "crashed");
     }
     // The exact recorded child is still alive but unreachable (its stdio died
     // with the previous supervisor). It may still be writing the workspace, so
@@ -1351,12 +1351,13 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (identityBeforeKill !== null && sameProcessBirthIdentity(identityBeforeKill, connection.processIdentity)) {
       this.deps.signalProcess(connection.pid, "SIGKILL");
       await this.deps.observeProcessExit(connection.pid, connection.processIdentity);
-      return this.attachTerminal(providerContinuationId, "SIGKILL", "killed");
+      return this.attachTerminal(connection, providerContinuationId, "SIGKILL", "killed");
     }
-    return this.attachTerminal(providerContinuationId, "SIGTERM", "stopped");
+    return this.attachTerminal(connection, providerContinuationId, "SIGTERM", "stopped");
   }
 
   private attachTerminal(
+    connection: Extract<ProviderConnectionRef, { kind: "claude_cli" }>,
     providerContinuationId: string,
     signal: string | null,
     terminalCause: ProviderTerminalPayload["terminalCause"],
@@ -1369,6 +1370,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         signal,
         terminalCause,
         providerContinuationId,
+        nativeRuntimeDeath: { kind: "claude_cli", pid: connection.pid!, processIdentity: connection.processIdentity! },
       },
     };
   }
@@ -1813,6 +1815,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         providerContinuationId: handle.providerContinuationId,
         stopRequested: handle.stopRequested,
       });
+    if (exit.type === "exit" && handle.providerConnection.kind === "claude_cli"
+      && handle.providerConnection.pid && handle.providerConnection.processIdentity) {
+      (terminal as ProviderTerminalPayload).nativeRuntimeDeath = { kind: "claude_cli",
+        pid: handle.providerConnection.pid, processIdentity: handle.providerConnection.processIdentity };
+    }
     if (handle.protocolError) terminal.terminalCause = "protocol_error";
     handle.terminal = terminal;
     handle.state = terminal.terminalCause === "exited" || terminal.terminalCause === "stopped"

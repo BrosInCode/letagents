@@ -131,6 +131,7 @@ export type ProviderTerminalCause =
 // `execution_generation` terminal record so the reconciler/attestation can
 // consume it directly.
 export interface ProviderTerminalPayload {
+  nativeRuntimeDeath?: import("../../../shared/execution-protocol.js").NativeRuntimeDeath;
   endedAt: string;
   exitCode: number | null;
   signal: string | null;
