@@ -26,6 +26,7 @@ import {
   supervisorStateWatchRetryDelay,
   supervisorDaemonSpawnEnvironment,
   supervisorRuntimeEnvironmentFingerprint,
+  supervisorCompatibilityFingerprint,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
 import {
@@ -1150,6 +1151,10 @@ async function startWireDaemon(
   const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
   const runtimeRecoveryCapability = { v2: true };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
+  const capturedEnvironment = supervisorDaemonSpawnEnvironment();
+  const compatibilityFingerprint: { value: string | null } = {
+    value: capturedEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!,
+  };
   let handoffPrepared = false;
   const server = createServer((socket) => {
     let buffer = "";
@@ -1163,7 +1168,7 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
@@ -1294,7 +1299,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, statusRecoveryDiagnostics, runtimeRecoveryCapability };
+  return { server, entries, requests, hostApprovals, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -1835,10 +1840,13 @@ test("production create durably proves no mint, grant-only purge survives restar
   const previousPlatformOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   const previousGrantStore = process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
   const previousRuntimeFingerprint = process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  const previousCompatibilityFingerprint = process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
   process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = join(env.root, "supervisor-grants.json");
   process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT =
     supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT =
+    supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
     socketPath: env.socketPath,
@@ -1972,6 +1980,8 @@ test("production create durably proves no mint, grant-only purge survives restar
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousPlatformOverride;
     if (previousGrantStore === undefined) delete process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
     else process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = previousGrantStore;
+    if (previousCompatibilityFingerprint === undefined) delete process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = previousCompatibilityFingerprint;
     if (previousRuntimeFingerprint === undefined) delete process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
     else process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = previousRuntimeFingerprint;
     await env.cleanup();
@@ -2374,7 +2384,93 @@ test("desktop development watches daemon builds and rejects a stale replacement 
   assert.match(healthCheck, /Rebuild the desktop daemon and try again/);
 });
 
-test("desktop safely replaces a same-version daemon with a stale provider runtime environment", async () => {
+test("ordinary reopen preserves a compatible daemon and pending approval across provider environment changes", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture();
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const candidate = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7,
+    () => assert.fail("passive reopen cannot hand off a compatible daemon"),
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, 0, false, true, 0, "earlier-provider-environment");
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  let decisions = 0;
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope); assert.ok(authenticated);
+    if (authenticated.operation === "list") return [candidate];
+    decisions += 1;
+    assert.deepEqual((authenticated.input as HostApprovalDecision).expected, candidate.reference);
+    return "resolved";
+  };
+  const options = { socketPath: env.socketPath, daemonScriptPath, loadApprovalSigner: async () => signer,
+    inspectDaemonProcess: () => fakeDaemonProcessIdentity(),
+    spawnDaemon: () => { assert.fail("provider environment drift cannot spawn a replacement"); } };
+  try {
+    const first = new SupervisorDaemonClient(options);
+    const before = await first.ensureRunning();
+    assert.equal((await first.listHostApprovals("room_1")).approvals[0]?.status, "pending");
+    const reopened = new SupervisorDaemonClient(options);
+    const after = await reopened.ensureRunning();
+    assert.equal(after.pid, before.pid);
+    assert.equal(after.generation, before.generation);
+    assert.equal(await reopened.isRuntimeEnvironmentCurrent(), false, "setup must report the retained older environment");
+    const approval = (await reopened.listHostApprovals("room_1")).approvals[0]!;
+    assert.equal(approval.status, "pending");
+    await reopened.decideHostApproval({ id: approval.id, decision: "allow_once" });
+    assert.equal(decisions, 1);
+    assert.ok(wire.requests.every(request => request.method !== "daemon.prepare_handoff"));
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("compatibility distinguishes storage and sealed runtime identity from provider resolution", () => {
+  const base = supervisorDaemonSpawnEnvironment();
+  const expected = supervisorCompatibilityFingerprint(base);
+  for (const key of ["PATH", "CODEX_INSTALL_DIR", "LETAGENTS_CODEX_BIN", "LETAGENTS_CLAUDE_BIN", "LETAGENTS_CLAUDE_CODE_BIN", "LETAGENTS_CURSOR_AGENT_BIN", "LETAGENTS_OPENCODE_BIN"]) {
+    const changed = { ...base, [key]: "changed" };
+    assert.equal(supervisorCompatibilityFingerprint(changed), expected, key);
+    assert.notEqual(supervisorRuntimeEnvironmentFingerprint(changed), supervisorRuntimeEnvironmentFingerprint(base), key);
+  }
+  for (const key of ["HOME", "LETAGENTS_API_URL", "LETAGENTS_STATE_PATH", "LETAGENTS_LOCAL_CHAT_DB", "LETAGENTS_LOCAL_FILES_DIR", "LETAGENTS_LOCAL_PROFILE_PATH", "LETAGENTS_CHAT_STORAGE_SETTINGS_PATH", "LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY", "LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256", "LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV"]) {
+    assert.notEqual(supervisorCompatibilityFingerprint({ ...base, [key]: "changed" }), expected, key);
+  }
+  const defaults = { HOME: "/users/test" };
+  const explicit = {
+    ...defaults,
+    LETAGENTS_API_URL: " https://letagents.chat ",
+    LETAGENTS_STATE_PATH: " /users/test/.letagents/mcp-state.json ",
+    LETAGENTS_LOCAL_CHAT_DB: "/users/test/.letagents/local-chat.sqlite",
+    LETAGENTS_LOCAL_FILES_DIR: "/users/test/.letagents/local-files",
+    LETAGENTS_LOCAL_PROFILE_PATH: "/users/test/.letagents/local-profile.json",
+    LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: "/users/test/.letagents/chat-storage.json",
+  };
+  assert.equal(supervisorCompatibilityFingerprint(defaults), supervisorCompatibilityFingerprint(explicit));
+  assert.equal(supervisorRuntimeEnvironmentFingerprint(defaults), supervisorRuntimeEnvironmentFingerprint(explicit));
+});
+
+test("explicit environment refresh is idempotent when the service already has the current environment", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+      spawnDaemon: () => { assert.fail("current environment must not replace the daemon"); } });
+    const refresh = client.restartForEnvironmentRefresh();
+    assert.equal(client.restartForEnvironmentRefresh(), refresh);
+    assert.equal(client.ensureRunning(), refresh, "ordinary startup joins the explicit refresh");
+    assert.equal((await refresh).generation, 7);
+    await client.restartForEnvironmentRefresh();
+    assert.equal(await client.isRuntimeEnvironmentCurrent(), true);
+    assert.ok(wire.requests.every(request => request.method === "daemon.negotiate"));
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+for (const reason of ["explicit provider refresh", "incompatible runtime", "missing compatibility proof"] as const)
+test(`desktop safely replaces a same-version daemon for ${reason}`, async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   const previousInstallDirectory = process.env.CODEX_INSTALL_DIR;
@@ -2401,6 +2497,9 @@ test("desktop safely replaces a same-version daemon with a stale provider runtim
     "stale-provider-runtime-environment",
   );
   oldServer = old.server;
+  if (reason !== "explicit provider refresh") {
+    old.compatibilityFingerprint.value = reason === "incompatible runtime" ? "other-runtime" : null;
+  }
   try {
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
@@ -2428,7 +2527,7 @@ test("desktop safely replaces a same-version daemon with a stale provider runtim
       },
     });
 
-    const status = await client.ensureRunning();
+    const status = await (reason === "explicit provider refresh" ? client.restartForEnvironmentRefresh() : client.ensureRunning());
 
     assert.equal(spawns, 1);
     assert.equal(status.generation, 62);
@@ -2695,7 +2794,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.158");
+    assert.equal(status.implementationVersion, "2.0.159");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

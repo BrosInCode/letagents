@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.158";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.159";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -391,8 +391,22 @@ export function supervisorDaemonSpawnEnvironment(
   }
   result.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256 = LETAGENTS_MCP_RUNTIME_TREE_SHA256;
   result.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = supervisorRuntimeEnvironmentFingerprint(result);
+  result.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = supervisorCompatibilityFingerprint(result);
   return result;
 }
+
+const SUPERVISOR_COMPATIBILITY_KEYS = [
+  "HOME",
+  "LETAGENTS_API_URL",
+  "LETAGENTS_LOCAL_CHAT_DB",
+  "LETAGENTS_LOCAL_FILES_DIR",
+  "LETAGENTS_LOCAL_PROFILE_PATH",
+  "LETAGENTS_CHAT_STORAGE_SETTINGS_PATH",
+  "LETAGENTS_STATE_PATH",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV",
+] as const;
 
 const SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS = [
   "PATH",
@@ -402,21 +416,35 @@ const SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS = [
   "LETAGENTS_CLAUDE_CODE_BIN",
   "LETAGENTS_CURSOR_AGENT_BIN",
   "LETAGENTS_OPENCODE_BIN",
-  "LETAGENTS_LOCAL_CHAT_DB",
-  "LETAGENTS_LOCAL_FILES_DIR",
-  "LETAGENTS_LOCAL_PROFILE_PATH",
-  "LETAGENTS_STATE_PATH",
-  "LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY",
-  "LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256",
-  "LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV",
 ] as const;
+
+/** State and runtime identity must agree even when retaining a daemon's provider environment. */
+export function supervisorCompatibilityFingerprint(env: Readonly<NodeJS.ProcessEnv>): string {
+  const home = env.HOME ?? homedir();
+  const effective: NodeJS.ProcessEnv = {
+    ...env,
+    HOME: home,
+    LETAGENTS_API_URL: env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
+    LETAGENTS_STATE_PATH: env.LETAGENTS_STATE_PATH?.trim() || join(home, ".letagents", "mcp-state.json"),
+    LETAGENTS_LOCAL_CHAT_DB: env.LETAGENTS_LOCAL_CHAT_DB?.trim() || join(home, ".letagents", "local-chat.sqlite"),
+    LETAGENTS_LOCAL_FILES_DIR: env.LETAGENTS_LOCAL_FILES_DIR?.trim() || join(home, ".letagents", "local-files"),
+    LETAGENTS_LOCAL_PROFILE_PATH: env.LETAGENTS_LOCAL_PROFILE_PATH?.trim() || join(home, ".letagents", "local-profile.json"),
+    LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH?.trim() || join(home, ".letagents", "chat-storage.json"),
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(SUPERVISOR_COMPATIBILITY_KEYS.map((key) => [key, effective[key] ?? null])))
+    .digest("hex");
+}
 
 /** Opaque equality proof for every environment input that can select a provider executable. */
 export function supervisorRuntimeEnvironmentFingerprint(
   env: Readonly<NodeJS.ProcessEnv>,
 ): string {
   return createHash("sha256")
-    .update(JSON.stringify(SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS.map((key) => [key, env[key] ?? null])))
+    .update(JSON.stringify([
+      ["compatibility", supervisorCompatibilityFingerprint(env)],
+      ...SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS.map((key) => [key, env[key] ?? null]),
+    ]))
     .digest("hex");
 }
 
@@ -501,6 +529,7 @@ export class SupervisorDaemonClient {
     if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
       return Promise.reject(new Error("Supervisor startup is paused while LetAgents installs an application update."));
     }
+    if (this.environmentRefreshHandoff) return this.environmentRefreshHandoff;
     if (!this.ensureOperation) {
       this.ensureOperation = Promise.resolve(startupPreparation)
         .then(() => desktopShellEnvironmentReady())
@@ -718,17 +747,41 @@ export class SupervisorDaemonClient {
     return this.ensureRunning();
   }
 
-  /** Replace the daemon so new provider work inherits the refreshed runtime PATH. */
+  /** Explicit setup action: reconcile provider environment without replacing an already current service. */
   restartForEnvironmentRefresh(): Promise<DesktopSupervisorDaemonStatus> {
+    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+      return Promise.reject(new Error("Supervised agents currently require macOS."));
+    }
     if (!this.environmentRefreshHandoff) {
       this.environmentRefreshHandoff = (async () => {
-        await this.prepareForApplicationUpdate();
-        return this.resumeAfterApplicationUpdateFailure();
+        await desktopShellEnvironmentReady();
+        if (this.ensureOperation) await this.ensureOperation;
+        if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
+          throw new Error("Supervisor startup is paused while LetAgents installs an application update.");
+        }
+        this.ensureOperation = this.ensureRunningOnce(true)
+          .then((status) => this.rememberReadyStatus(status))
+          .finally(() => { this.ensureOperation = null; });
+        return this.ensureOperation;
       })().finally(() => {
         this.environmentRefreshHandoff = null;
       });
     }
     return this.environmentRefreshHandoff;
+  }
+
+  /** Compare only: opening setup must not retire the owner of live approval connections. */
+  async isRuntimeEnvironmentCurrent(): Promise<boolean> {
+    await this.waitForStartup();
+    try {
+      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate");
+      return negotiated.runtime_environment_fingerprint ===
+        supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+    } catch (error) {
+      // An absent daemon will inherit this environment when explicitly started.
+      if (isConnectionUnavailable(error)) return true;
+      throw error;
+    }
   }
 
   /**
@@ -1443,7 +1496,7 @@ export class SupervisorDaemonClient {
     return result.status === "bootstrapped" || result.status === "existing" ? result.status : "stale";
   }
 
-  private async ensureRunningOnce(): Promise<DesktopSupervisorDaemonStatus> {
+  private async ensureRunningOnce(refreshRuntimeEnvironment = false): Promise<DesktopSupervisorDaemonStatus> {
     const spawnEnvironment = supervisorDaemonSpawnEnvironment();
     const expectedRuntimeEnvironmentFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT!;
     let retiredGeneration: number | undefined;
@@ -1454,7 +1507,8 @@ export class SupervisorDaemonClient {
       if (
         daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION
         && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
-        && negotiated.runtime_environment_fingerprint === expectedRuntimeEnvironmentFingerprint
+        && negotiated.compatibility_fingerprint === spawnEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT
+        && (!refreshRuntimeEnvironment || negotiated.runtime_environment_fingerprint === expectedRuntimeEnvironmentFingerprint)
       ) {
         const status = mapStatus(negotiated);
         this.observeAttachedDaemon(status);
@@ -1499,7 +1553,8 @@ export class SupervisorDaemonClient {
     // Migration/OS-key custody has its own bootstrap protocol. The socket's
     // short startup deadline must not expire while a large backup is fsyncing.
     await statePreparation;
-    return this.waitForHealthy(retiredGeneration, expectedRuntimeEnvironmentFingerprint);
+    return this.waitForHealthy(retiredGeneration, expectedRuntimeEnvironmentFingerprint,
+      spawnEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!);
   }
 
   private async prepareForApplicationUpdateOnce(): Promise<void> {
@@ -1534,6 +1589,7 @@ export class SupervisorDaemonClient {
   private async waitForHealthy(
     retiredGeneration: number | undefined,
     expectedRuntimeEnvironmentFingerprint: string,
+    expectedCompatibilityFingerprint: string,
   ): Promise<DesktopSupervisorDaemonStatus> {
     const deadline = Date.now() + this.startTimeoutMs;
     let lastError: unknown = null;
@@ -1551,6 +1607,9 @@ export class SupervisorDaemonClient {
         }
         if (result.runtime_environment_fingerprint !== expectedRuntimeEnvironmentFingerprint) {
           throw new Error("Replacement supervisor daemon did not inherit the current provider runtime environment.");
+        }
+        if (result.compatibility_fingerprint !== expectedCompatibilityFingerprint) {
+          throw new Error("Replacement supervisor daemon did not inherit the current state and runtime identity.");
         }
         if (retiredGeneration !== undefined && status.generation <= retiredGeneration) {
           throw new Error(
