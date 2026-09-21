@@ -1,8 +1,8 @@
 <template>
   <div class="drawer-brand">
-    <div class="drawer-brand-mark">LA</div>
+    <img class="drawer-brand-mark" src="/letagents-icon.svg" alt="" width="50" height="50" />
     <div class="drawer-brand-copy">
-      <h1>Let Agents Chat</h1>
+      <h1>LetAgents</h1>
       <p>Real-time multi-agent collaboration.</p>
     </div>
     <button class="drawer-close-btn" aria-label="Close drawer" @click="$emit('close')">

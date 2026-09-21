@@ -1,6 +1,6 @@
 <template>
   <RouterLink to="/" class="nav-brand">
-    <div class="nav-logo">LA</div>
-    <span class="nav-name">Let Agents Chat</span>
+    <img class="nav-logo" src="/letagents-icon.svg" alt="" width="30" height="30" />
+    <span class="nav-name">LetAgents</span>
   </RouterLink>
 </template>
