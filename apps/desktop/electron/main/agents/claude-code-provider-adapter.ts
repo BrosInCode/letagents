@@ -51,6 +51,7 @@ import {
   rentalIsolatedChildEnvironment,
 } from "./rental-child-environment.js";
 import {
+  ProviderProcessCustody,
   DEFAULT_STOP_GRACE_MS,
   defaultGetProcessIdentity,
   defaultObserveProcessExit,
@@ -90,6 +91,8 @@ type ClaudeStreamMessage = Record<string, unknown> & { type?: unknown; subtype?:
 export interface ClaudeCliChild {
   pid: number | null;
   exited: Promise<ProviderProcessExit>;
+  /** Positive native spawn failure before any child process was acquired. */
+  didNotSpawn?(): boolean;
   /** Ordered stdout stream-json lines (raw, one JSON document per line). */
   onLine(listener: (line: string) => void): () => void;
   /** Control-channel loss (stdout closed while the child was not stopped by us). */
@@ -389,8 +392,14 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     disconnectListeners.clear();
   };
 
+  let spawned = false;
+  let sawPid = child.pid !== undefined;
+  let failedToSpawn = false;
+  child.once("spawn", () => { spawned = true; sawPid ||= child.pid !== undefined; });
   const exited = new Promise<ProviderProcessExit>((resolve) => {
     child.once("error", (error) => {
+      sawPid ||= child.pid !== undefined;
+      failedToSpawn = !spawned && !sawPid;
       exitedSettled = true;
       resolve({ type: "error", error });
     });
@@ -419,6 +428,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
   return {
     pid: child.pid ?? null,
     exited,
+    didNotSpawn: () => failedToSpawn && child.pid === undefined,
     onLine(listener) {
       lineListeners.add(listener);
       return () => lineListeners.delete(listener);
@@ -626,6 +636,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly initTimeoutMs: number;
   private readonly stopGraceMs: number;
   private readonly handles = new Map<string, ClaudeProviderHandle>();
+  private readonly processCustody: ProviderProcessCustody;
   private readonly pendingAttaches = new Map<string, {
     ref: ProviderContinuationRef;
     promise: Promise<ProviderHandle | ProviderAttachTerminal | null>;
@@ -635,10 +646,16 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   constructor(options: ClaudeCodeProviderAdapterOptions = {}) {
     this.claudeBin = options.claudeBin || resolveClaudeCodeExecutable(desktopRuntimeEnvironment());
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+    this.processCustody = new ProviderProcessCustody(this.deps);
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
     this.initTimeoutMs = options.initTimeoutMs ?? INIT_TIMEOUT_MS;
     this.stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  }
+
+  runtimeCustody(workAttemptId: string, providerHandle?: ProviderHandle): "absent" | "owned" | "unknown" {
+    const handle = this.handles.get(workAttemptId);
+    return this.processCustody.state(workAttemptId, handle === providerHandle ? handle?.child : undefined);
   }
 
   capabilities(): ProviderAdapterCapabilities {
@@ -1125,6 +1142,13 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<ClaudeProviderHandle> {
+    return this.processCustody.acquire(req.workAttemptId, () => this.startAcquired(req, resumeRef));
+  }
+
+  private async startAcquired(
+    req: ProviderSpawnRequest,
+    resumeRef: ProviderContinuationRef | null,
+  ): Promise<ClaudeProviderHandle> {
     const current = this.handles.get(req.workAttemptId);
     if (current && !current.terminal) {
       throw new Error(`Claude work attempt '${req.workAttemptId}' already has a live process.`);
@@ -1189,6 +1213,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       throw error;
     }
 
+    const captureBirth = this.processCustody.record(req.workAttemptId, child);
+    const processIdentity = captureBirth();
     if (child.pid === null) {
       // Node exposes no safe signalling target in this state. Fail closed until
       // the launch itself proves terminal instead of retrying beside an orphan.
@@ -1198,7 +1224,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         "Claude CLI launch did not expose a process id; refusing to start an unfenceable writer.",
       );
     }
-    const processIdentity = this.deps.getProcessIdentity(child.pid);
+
     if (typeof processIdentity !== "string" || !processIdentity) {
       child.markIntentionalClose();
       await terminateFreshLaunch(child, this.deps, this.stopGraceMs);
