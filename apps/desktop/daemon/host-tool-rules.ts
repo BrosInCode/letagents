@@ -1,22 +1,29 @@
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import type { ApprovalReference, ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import type { DaemonManifestEntry } from "./types.js";
 import type { ProviderPermissionRequest } from "../shared/provider-permissions.js";
-import { createGitCommand, resolveSourceRepositoryIdentity, normalizeRemote } from "./workspace-provisioner.js";
+import { createGitCommand, resolveSourceRepositoryIdentity, normalizeRemote, WORKSPACE_MARKER } from "./workspace-provisioner.js";
 
 const id = z.string().min(1).max(256);
 const label = id.regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
-export const hostToolScopeSchema = z.strictObject({
+const projectToolScopeSchema = z.strictObject({
   agentId: id, accountId: id, projectId: hash, projectName: label, sourceRepoPath: z.string().min(1).max(4096),
   canonicalSourcePath: z.string().min(1).max(4096), repository: z.string().min(1).max(4096), remoteUrl: z.string().min(1).max(4096),
   provider: z.enum(["codex", "claude-code", "open-model"]), toolId: id, toolLabel: label, policySha256: hash,
 });
+// Existing project serialization is unchanged: stored permission hashes remain valid.
+const roomToolScopeSchema = z.strictObject({
+  kind: z.literal("room_workspace"), version: z.literal(1), agentId: id, accountId: id, roomId: id,
+  workAttemptId: z.string().uuid(), workspacePath: z.string().min(1).max(4096), canonicalWorkspacePath: z.string().min(1).max(4096),
+  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: id, toolLabel: label, policySha256: hash,
+});
+export const hostToolScopeSchema = z.union([projectToolScopeSchema, roomToolScopeSchema]);
 export type HostToolScope = z.infer<typeof hostToolScopeSchema>;
 export type HostToolRule = { id: string; revision: number; ownerId: string; scope: HostToolScope; createdAtMs: number };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -48,9 +55,16 @@ export function nativeToolIdentity(request: ProviderPermissionRequest): { id: st
 
 /** Reuse the provisioner's verified source identity, independent of an attempt's worktree. */
 export async function resolveHostToolScope(entry: DaemonManifestEntry, request: ProviderPermissionRequest,
-  ownedProject: { repo: string; remoteUrl: string } | null): Promise<HostToolScope | null> {
+  ownedProject: HostToolContext | null): Promise<HostToolScope | null> {
   const tool = nativeToolIdentity(request);
-  if (!ownedProject || !tool || !entry.source_repo_path || entry.provider !== request.provider) return null;
+  if (!ownedProject || !tool || entry.provider !== request.provider) return null;
+  if (!entry.source_repo_path) {
+    const canonical = roomWorkspaceIdentity(entry, ownedProject);
+    if (!canonical) return null;
+    return roomToolScopeSchema.parse({ kind: "room_workspace", version: 1, agentId: entry.id, accountId: entry.created_by,
+      roomId: entry.room_id, workAttemptId: ownedProject.workAttemptId, workspacePath: ownedProject.workspacePath,
+      canonicalWorkspacePath: canonical, provider: request.provider, toolId: tool.id, toolLabel: tool.label, policySha256: policy(entry) });
+  }
   const canonical = await realpath(entry.source_repo_path);
   const repository = await resolveSourceRepositoryIdentity(canonical, createGitCommand(canonical));
   if (normalizeRemote(repository.remoteUrl) !== normalizeRemote(ownedProject.remoteUrl)) return null;
@@ -61,7 +75,16 @@ export async function resolveHostToolScope(entry: DaemonManifestEntry, request: 
 }
 
 export function assertHostToolScope(db: DatabaseSync, scope: HostToolScope, entry: DaemonManifestEntry | undefined): void {
-  const project = entry?.work_attempt_id ? readHostToolProject(db, entry.work_attempt_id) : null;
+  const project = entry?.work_attempt_id ? readHostToolContext(db, entry.work_attempt_id) : null;
+  if ("kind" in scope) {
+    if (!entry || !project || entry.id !== scope.agentId || entry.created_by !== scope.accountId
+      || entry.room_id !== scope.roomId || entry.provider !== scope.provider || policy(entry) !== scope.policySha256
+      || project.workAttemptId !== scope.workAttemptId || project.workspacePath !== scope.workspacePath
+      || roomWorkspaceIdentity(entry, project) !== scope.canonicalWorkspacePath) {
+      throw new Error("The saved tool permission no longer matches this agent's room workspace or access settings.");
+    }
+    return;
+  }
   if (!entry || !project || project.repo !== scope.repository || project.remoteUrl !== scope.remoteUrl
     || realpathSync(entry.source_repo_path ?? "") !== scope.canonicalSourcePath
     || digest([scope.canonicalSourcePath, project.repo, project.remoteUrl]) !== scope.projectId || entry.id !== scope.agentId || entry.created_by !== scope.accountId || entry.provider !== scope.provider
@@ -70,9 +93,36 @@ export function assertHostToolScope(db: DatabaseSync, scope: HostToolScope, entr
   }
 }
 
-export function readHostToolProject(db: DatabaseSync, workAttemptId: string): { repo: string; remoteUrl: string } | null {
-  const row = db.prepare("SELECT workspace_repo,workspace_remote_url FROM work_attempts WHERE work_attempt_id=?").get(workAttemptId);
-  return row ? { repo: String(row.workspace_repo), remoteUrl: String(row.workspace_remote_url) } : null;
+export type HostToolContext = {
+  repo: string; remoteUrl: string; workAttemptId: string; taskId: string; workspacePath: string;
+  resolvedRevision: string; barePath: string;
+};
+export function readHostToolContext(db: DatabaseSync, workAttemptId: string): HostToolContext | null {
+  const row = db.prepare(`SELECT workspace_repo,workspace_remote_url,work_attempt_id,task_id,workspace_path,
+    workspace_resolved_revision,workspace_bare_path FROM work_attempts WHERE work_attempt_id=?`).get(workAttemptId);
+  return row ? { repo: String(row.workspace_repo), remoteUrl: String(row.workspace_remote_url), workAttemptId: String(row.work_attempt_id),
+    taskId: String(row.task_id), workspacePath: String(row.workspace_path), resolvedRevision: String(row.workspace_resolved_revision),
+    barePath: String(row.workspace_bare_path) } : null;
+}
+
+/** Both the host-owned durable attempt and its private provisioner marker must agree. */
+function roomWorkspaceIdentity(entry: DaemonManifestEntry, context: HostToolContext): string | null {
+  if (entry.source_repo_path || entry.work_attempt_id !== context.workAttemptId || entry.workspace_path !== context.workspacePath
+    || context.repo !== "room-only" || context.resolvedRevision !== "0".repeat(40)
+    || context.remoteUrl !== `letagents-ephemeral:${createHash("sha256").update(context.taskId).digest("hex")}`) return null;
+  const canonical = realpathSync(context.workspacePath);
+  const directory = lstatSync(context.workspacePath);
+  const markerPath = join(canonical, WORKSPACE_MARKER);
+  const file = lstatSync(markerPath);
+  if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o077)
+    || !file.isFile() || file.isSymbolicLink() || (file.mode & 0o077) || file.size > 16_384
+    || (process.getuid && (directory.uid !== process.getuid() || file.uid !== process.getuid()))
+    || canonical !== context.barePath) return null;
+  const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+  if (!marker || marker.version !== 1 || marker.repo !== context.repo || marker.work_attempt_id !== context.workAttemptId
+    || marker.task_id !== context.taskId || marker.remote_url !== context.remoteUrl
+    || marker.resolved_revision !== context.resolvedRevision || marker.bare_path !== canonical) return null;
+  return canonical;
 }
 
 const schema = [
