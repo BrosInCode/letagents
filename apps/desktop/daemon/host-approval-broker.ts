@@ -250,7 +250,10 @@ export class HostApprovalBroker {
       release: () => {
         if (lane.idleReservation === reservation) {
           delete lane.idleReservation;
-          this.queueToolRules(lane);
+          // Only a request observed while reserved needs rule matching. An
+          // empty run emits a permission notification and would retry an
+          // unproven native idle boundary indefinitely.
+          if (lane.requests.length > 0) this.queueToolRules(lane);
         }
       },
     };
