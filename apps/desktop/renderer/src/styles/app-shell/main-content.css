@@ -11,10 +11,16 @@
   animation: main-enter var(--duration-normal) var(--ease-out);
 }
 
-.app-main[data-room-entry="true"] {
+.app-main[data-room-entry="true"],
+.app-main[data-messages-entry="true"] {
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
   padding: 0;
+}
+
+.app-main[data-messages-entry="true"] {
+  container: private-messages / inline-size;
+  overflow: hidden;
 }
 
 .app-topbar {

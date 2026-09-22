@@ -131,7 +131,7 @@
       @pointerdown="startSidebarResize"
       @keydown="handleSidebarResizeKeydown"
     ></div>
-    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
+    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" :data-messages-entry="activeEntry.type === 'messages'" data-testid="desktop-main">
       <DesktopTopbar
         v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && activeEntry.type !== 'messages' && !isSettingsSurface"
         :active-entry="activeEntry"

@@ -77,6 +77,7 @@ onMounted(checkSession);
 </script>
 <style scoped>
 .web-messages {
+  container: private-messages / inline-size;
   height: 100dvh;
   min-height: 0;
   display: flex;
@@ -84,6 +85,7 @@ onMounted(checkSession);
   overflow: hidden;
 }
 .web-messages-nav {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 24px;
