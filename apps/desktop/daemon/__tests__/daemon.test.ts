@@ -34,7 +34,7 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
   provider_continuation_id: "continuation",
 } as const;
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import type { SupervisedDeliveryHttp, SupervisedIngressAgent } from "../supervised-agent-delivery.js";
+import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { createGitCommand, RepositoryNetworkError, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
@@ -3362,7 +3362,7 @@ test("pause arriving during provider dispatch persists and fences the exact retu
   }
 });
 
-test("handoff during provider dispatch persists the exact handle for successor attach without signaling it", async () => {
+for (const survivesRestart of [true, false]) test(`handoff during provider dispatch ${survivesRestart ? "persists the exact surviving handle for successor attach" : "retains live custody of an admitted non-surviving launch"}`, async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -3377,13 +3377,14 @@ test("handoff during provider dispatch persists the exact handle for successor a
   const spawnStarted = new Promise<void>((resolve) => { spawnEntered = resolve; });
   let releaseSpawn!: () => void;
   const spawnGate = new Promise<void>((resolve) => { releaseSpawn = resolve; });
-  const returnedHandle = { workAttemptId: attempt.work_attempt_id, pid: 55441, providerContinuationId: "handoff-dispatch-continuation", observedState: "working" as const };
+  const returnedHandle = { workAttemptId: attempt.work_attempt_id, pid: 55441, providerContinuationId: "handoff-dispatch-continuation", observedState: "working" as "working" | "idle" };
   let spawns = 0;
   let attaches = 0;
   let stops = 0;
+  const stopActions: string[] = [];
   let exitRegistrations = 0;
   const port: ProviderActionPort = {
-    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart }),
     spawn: async () => { spawns += 1; spawnEntered(); await spawnGate; return returnedHandle; },
     attach: async (ref) => {
       attaches += 1;
@@ -3392,8 +3393,12 @@ test("handoff during provider dispatch persists the exact handle for successor a
     },
     attachAction: async () => { throw new Error("handoff successor uses the durable provider ref, not action inference"); },
     resume: async () => { throw new Error("successor must attach instead of resume/spawn"); }, poke: async () => {},
-    stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: returnedHandle.providerContinuationId }; },
-    onExit: async () => { exitRegistrations += 1; return () => {}; }, onStream: async () => () => {},
+    stop: async (_handle, options) => { stops += 1; stopActions.push(options.actionId); return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: returnedHandle.providerContinuationId }; },
+    onExit: async () => {
+      assert.equal(stops, 0, "ownership and terminal observation are installed before any terminal fence");
+      exitRegistrations += 1;
+      return () => {};
+    }, onStream: async () => () => {},
   };
   const first = new SupervisorDaemon(paths, "darwin", port, true);
   let second: SupervisorDaemon | null = null;
@@ -3411,16 +3416,28 @@ test("handoff during provider dispatch persists the exact handle for successor a
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(handoffFinished, false, "handoff holds stores only after native dispatch has begun");
     releaseSpawn();
-    assert.equal((await prepare).ok, true);
+    const prepared = await prepare;
+    if (!survivesRestart) {
+      assert.equal(prepared.ok, false);
+      assert.match(prepared.error ?? "", /Update deferred/);
+      assert.equal(exitRegistrations, 1, "admitted launch installs its current ownership before deferring");
+      assert.equal((first as unknown as { liveHandles: Map<string, unknown> }).liveHandles.get("handoff_during_dispatch"), returnedHandle);
+      assert.equal(stops, 0);
+      assert.equal(handoffFinished, false);
+      returnedHandle.observedState = "idle";
+      assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    } else assert.equal(prepared.ok, true);
     await within(handoff, "dispatch persistence handoff", 1_000);
     assert.equal(stops, 0, "handoff preserves the provider process");
-    assert.equal(exitRegistrations, 0, "the retiring daemon registers no callbacks on the returned handle");
+    assert.equal(exitRegistrations, survivesRestart ? 0 : 1, "surviving launches retain immediate handoff; non-surviving launches retain live custody through deferral");
 
     second = new SupervisorDaemon(paths, "darwin", port, true);
     await second.start();
     await eventually(async () => attaches === 1
       && (second as unknown as { liveHandles: Map<string, typeof returnedHandle> }).liveHandles.get("handoff_during_dispatch") === returnedHandle,
     "successor exact provider attach");
+    await (second as unknown as { providerExecution: { drainConvergence(): Promise<void> } }).providerExecution.drainConvergence();
+    assert.equal(exitRegistrations, survivesRestart ? 1 : 2, "successor installs its terminal observer before convergence completes");
     const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(current.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId);
     const live = (second as unknown as { liveHandles: Map<string, typeof returnedHandle> }).liveHandles.get("handoff_during_dispatch");
@@ -3431,10 +3448,16 @@ test("handoff during provider dispatch persists the exact handle for successor a
     assert.equal(result.execution_generations[0]?.execution_generation_id, current.provider_ref?.execution_generation_id);
     assert.equal(result.execution_generations[0]?.terminal, null);
     assert.equal(spawns, 1);
-    assert.equal(stops, 0);
+    // This legacy, non-grant fixture is terminal once idle. Its successor
+    // fences that exact installation only after attaching its observers.
+    assert.equal(stops, survivesRestart ? 0 : 1);
+    assert.deepEqual(stopActions, survivesRestart ? [] : [
+      `manifest:handoff_during_dispatch:reattached-terminal:${current.provider_ref?.execution_generation_id}`,
+    ]);
   } finally {
     releaseSpawn?.();
     await second?.stop().catch(() => undefined);
+    await first.stop().catch(() => undefined);
     await env.cleanup();
   }
 });
@@ -5785,6 +5808,171 @@ test("normal daemon shutdown drains an admitted bounded-effect journal mutation 
     if (!stopped) await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
+});
+
+for (const { provider, defer } of [{ provider: "claude-code", defer: false }, { provider: "claude-code", defer: true }, { provider: "cursor", defer: false }] as const) test(`provider-aware ${provider} handoff ${defer ? "defers without interrupting work on timeout" : "drains the exact turn while approvals remain available"}`, { timeout: 10_000 }, async (t) => {
+  let expireHandoff!: () => void;
+  const realSetTimeout = globalThis.setTimeout;
+  if (defer) t.mock.method(globalThis, "setTimeout", (callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+    if (delay === 30_000) {
+      expireHandoff = () => callback(...args);
+      return realSetTimeout(() => {}, delay);
+    }
+    return realSetTimeout(callback, delay, ...args);
+  });
+  let approve!: () => void;
+  const approval = new Promise<void>(resolve => { approve = resolve; });
+  let finish!: () => void;
+  const final = new Promise<void>(resolve => { finish = resolve; });
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let toolDone!: () => void;
+  const toolCompleted = new Promise<void>(resolve => { toolDone = resolve; });
+  let calls = 0;
+  let detached = false;
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), provider, {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: false }),
+    runRoomTurn: async (handle, _request, options) => {
+      const turnId = `handoff-turn-${++calls}`;
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.(turnId);
+      if (calls === 1) {
+        options?.detachSignal?.addEventListener("abort", () => { detached = true; });
+        entered();
+        await approval;
+        toolDone();
+        await final;
+      }
+      if (provider === "cursor") await env.internals.supervisedInbox.prepareEffect({
+        agent_id: env.id, room_id: "room_1", execution_generation_id: env.generation,
+        provider_turn_id: turnId, work_attempt_id: handle.workAttemptId,
+        current_execution_generation_id: env.generation, provider_continuation_id: handle.providerContinuationId!,
+        mcp_request_id: `complete:${turnId}`, tool_name: "complete_room_turn", request: { outcome: "no_reply" }, mutation: true,
+      });
+      handle.observedState = "idle";
+      return { turnId, outcome: "no_reply", text: null, evidence: "stream" };
+    },
+  });
+  const internal = env.daemon as unknown as {
+    supervisedDelivery: SupervisedAgentDelivery;
+    handoffDraining: boolean;
+    hostApprovals: { enroll: (storage: { getHostApprovalPublicKey: () => Promise<string> }) => Promise<void>; decide: (input: unknown) => Promise<string> };
+  };
+  const host = generateKeyPairSync("ed25519");
+  await internal.hostApprovals.enroll({ getHostApprovalPublicKey: async () => host.publicKey.export({ format: "der", type: "spki" }).toString("base64") });
+  internal.hostApprovals.decide = async () => { approve(); return "resolved"; };
+  env.internals.liveHandles.set(env.id, env.handle);
+  const delivery = new SupervisedAgentDelivery(env.internals.supervisedInbox, env.port, {
+    poll: async () => ({ messages: [] }), publish: async () => { throw new Error("no reply expected"); },
+  }, async () => true);
+  internal.supervisedDelivery = delivery;
+  const agent: SupervisedIngressAgent = { agentId: env.id, roomId: "room_1", provider, deliveryMode: "daemon_inbox",
+    apiUrl: "https://letagents.example", agentSessionId: "handoff-worker", bearer: "test-only", handle: env.handle,
+    workAttemptId: env.handle.workAttemptId, providerContinuationId: env.handle.providerContinuationId,
+    providerConnection: env.handle.providerConnection!, executionGenerationId: env.generation, daemonGeneration: 1 };
+  let operation: Promise<void> | null = null;
+  try {
+    const [first, second] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: "room_1", last_observed_message_id: "2",
+      messages: [1, 2].map(id => ({ source_message_id: String(id), source_message: { text: "do work" }, activation: {} })) });
+    operation = delivery.pump(agent);
+    await within(started, "Claude turn starts");
+    let acknowledged = false;
+    const prepare = daemonRequest(env.paths.socketPath, "daemon.prepare_handoff").then(value => { acknowledged = true; return value; });
+    await eventually(async () => internal.handoffDraining || acknowledged, "handoff begins");
+    assert.equal(acknowledged, false, "active approval must keep the daemon alive");
+    const repeatedPrepare = daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    const challengeResponse = await daemonRequest(env.paths.socketPath, "supervisor.host_approval_challenge");
+    assert.equal(challengeResponse.ok, true, challengeResponse.error);
+    const challenge = challengeResponse.result as HostApprovalChallenge;
+    const signed = (operation: HostApprovalOperation, input: unknown) => {
+      const issuedAt = Date.now();
+      const payload = JSON.stringify({ domain: "letagents.host-approval", version: 1, ...challenge, operation, input, issuedAt, expiresAt: issuedAt + 30_000 });
+      return { payload, signature: sign(null, Buffer.from(payload), host.privateKey).toString("base64") };
+    };
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.host_approval_request", signed("list", { roomId: "room_1" }))).ok, true);
+    if (!defer) {
+      const lateLaunch = await daemonRequest(env.paths.socketPath, "manifest.put", { entry: { ...entry, id: "late-launch" } });
+      assert.equal(lateLaunch.ok, false);
+      assert.match(lateLaunch.error ?? "", /waiting for current agent work/);
+    }
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.host_approval_request", signed("decide", { actorId: `host-${challenge.keyFingerprint}` }))).ok, true);
+    await within(toolCompleted, "current tool continues after approval");
+    assert.equal(detached, false, "permission and completion observations are not aborted");
+    if (defer) {
+      expireHandoff();
+      const response = await prepare;
+      assert.equal(response.ok, false);
+      assert.match(response.error ?? "", /Update deferred/);
+      assert.equal((await repeatedPrepare).ok, false, "concurrent requests share one deferred drain");
+      assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
+      const firstAfter = await env.internals.supervisedInbox.get(first!.inbox_item_id);
+      assert.equal(firstAfter?.provider_turn_id, "handoff-turn-1");
+      assert.equal(firstAfter?.outcome, null, "timeout must not fabricate completion");
+      assert.equal(calls, 1);
+      finish();
+      await within(operation, "original turn and queued successor finish");
+      assert.equal(calls, 2, "deferred admission resumes once without rerunning the old turn");
+      assert.equal(internal.handoffDraining, false);
+      assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true, "late completion cannot trigger retired timeout teardown");
+    } else {
+      assert.equal(acknowledged, false, "tool completion is not turn completion");
+      assert.equal(calls, 1);
+      assert.equal((await env.internals.supervisedInbox.get(second!.inbox_item_id))?.state, "pending");
+      finish();
+      assert.equal((await prepare).ok, true);
+      assert.equal((await repeatedPrepare).ok, true, "concurrent requests share one handoff");
+      await within(operation, "durable terminal boundary");
+      assert.equal((await env.internals.supervisedInbox.get(first!.inbox_item_id))?.state, "acknowledged_no_reply");
+      assert.equal(calls, 1, "handoff must not dispatch the queued successor");
+      await within(env.daemon.waitForHandoff(), "safe handoff completion");
+    }
+  } finally {
+    approve(); finish();
+    await operation?.catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+for (const mode of ["idle", "surviving", "missing_turn_id", "missing_terminal", "unreadable_terminal"] as const) test(`provider-aware handoff ${mode}`, async () => {
+  const survivesRestart = mode === "surviving";
+  const unresolved = mode !== "idle" && mode !== "surviving";
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart }),
+  });
+  env.internals.liveHandles.set(env.id, env.handle);
+  env.handle.observedState = survivesRestart ? "working" : "idle";
+  try {
+    if (unresolved) {
+      const [item] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: "room_1", last_observed_message_id: "1",
+        messages: [{ source_message_id: "1", source_message: { text: "original work" }, activation: {} }] });
+      assert.equal((await env.internals.supervisedInbox.claimHead(env.id))?.inbox_item_id, item!.inbox_item_id);
+      await env.internals.supervisedInbox.checkpointDispatchIntent(item!.inbox_item_id);
+      if (mode !== "missing_turn_id") await env.internals.supervisedInbox.checkpointTurnStarted(item!.inbox_item_id, "unresolved-turn", {
+        work_attempt_id: env.handle.workAttemptId, origin_execution_generation_id: env.generation,
+        provider_continuation_id: env.handle.providerContinuationId!,
+      });
+      if (mode === "unreadable_terminal") await env.internals.supervisedInbox.checkpointNormalizedTerminal({
+        inbox_item_id: item!.inbox_item_id, agent_id: env.id, execution_generation_id: env.generation,
+        provider_turn_id: "unresolved-turn", outcome: "unreadable", text: null, evidence: "none", terminal_evidence: {},
+      });
+      await env.internals.supervisedInbox.transition(item!.inbox_item_id, "blocked", { last_error: "native completion is unknown" });
+      if (mode === "missing_turn_id") {
+        const ambiguous = await env.internals.supervisedInbox.get(item!.inbox_item_id);
+        assert.equal(ambiguous?.provider_turn_id, null);
+        assert.equal(ambiguous?.attempt_count, 0, "unacknowledged dispatch has not counted a model turn");
+      }
+    }
+    const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    if (unresolved) {
+      assert.equal(result.ok, false, "idle/bootstrap observation cannot replace exact turn completion");
+      assert.match(result.error ?? "", /no confirmed completion/);
+      assert.equal((await env.internals.supervisedInbox.head(env.id))?.state, "blocked");
+      assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
+    } else {
+      assert.equal(result.ok, true, result.error);
+      await within(env.daemon.waitForHandoff(), "compatible handoff");
+    }
+  } finally { await env.cleanup(); }
 });
 
 test("version handoff releases authority without waiting for wedged callbacks and preserves provider work", async () => {
@@ -8236,7 +8424,17 @@ test(`two Codex room agents keep independent provider executions across stop, re
     onStream: () => () => {},
     onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
-  const router = () => new ProviderActionPortRouter({ codex: async () => adapter });
+  const router = () => {
+    const port = new ProviderActionPortRouter({ codex: async () => adapter });
+    // This legacy fixture has no exact-turn control and tests lifecycle
+    // isolation, not automatic migration to daemon inbox delivery.
+    return modeCase === "mcp_polling" ? new Proxy(port, {
+      get(target, property, receiver) {
+        if (property === "controlExactTurn") return undefined;
+        return Reflect.get(target, property, receiver);
+      },
+    }) : port;
+  };
   let activeRouter = router();
   let tailReads = 0;
   const polls: Array<{ bearer: string; afterMessageId: string | null }> = [];
@@ -8488,6 +8686,13 @@ test(`two Codex room agents keep independent provider executions across stop, re
       assert.equal(detail.execution_generations[0]?.terminal, null);
     }
 
+    // Select the cutover retry ordering around the exact terminal boundary;
+    // this lifecycle fixture must retain its requested delivery mode there too.
+    const cutovers = (daemon as unknown as {
+      deliveryCutovers: { start(entryId: string): Promise<void> };
+    }).deliveryCutovers;
+    if (modeCase === "mcp_polling") await cutovers.start(identities[0].entryId);
+
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: identities[0].entryId, desired_state: "paused",
     })).ok, true);
@@ -8501,6 +8706,8 @@ test(`two Codex room agents keep independent provider executions across stop, re
     assert.equal(bravoWhileAlphaPaused.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
     assert.equal(runtimes.get(bravoBefore.work_attempt_id!)?.state, "working");
     assert.deepEqual(stopRequests, [alphaBefore.work_attempt_id]);
+
+    if (modeCase === "mcp_polling") await cutovers.start(identities[0].entryId);
 
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: identities[0].entryId, desired_state: "running",
