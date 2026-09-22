@@ -23,7 +23,11 @@ test("opening a fetched repo room preserves its identity without calculating bra
   git("checkout", "-b", "feature/room");
 
   let fetchedSnapshot: unknown;
+  let integrationPayload: Record<string, unknown> = {};
   t.mock.module("electron", { defaultExport: {} });
+  t.mock.module("../main/auth.js", { namedExports: {
+    apiFetch: async () => integrationPayload,
+  } });
   t.mock.module("../main/window.js", { namedExports: { focusMainWindow() {} } });
   t.mock.module("../main/rooms/snapshot.js", {
     namedExports: {
@@ -37,14 +41,14 @@ test("opening a fetched repo room preserves its identity without calculating bra
   t.mock.module("../main/rooms/local-store.js", {
     namedExports: {
       resolveLocalAwareRoomStorageMode: async () => ({ effectiveMode: "cloud" }),
-      cloudRoomIdentifierForStorage: unused,
+      cloudRoomIdentifierForStorage: (_storage: unknown, identifier: string) => identifier,
       createLocalRoom: unused,
       localRoomIdentifierForStorage: unused,
       setLocalAwareRoomStorageMode: unused,
       updateLocalRoomDisplayName: unused,
     },
   });
-  const { openRepoRoomFromPath } = await import("../main/rooms/repo.js");
+  const { openRepoRoomFromPath, getDesktopGitHubIntegrationStatus } = await import("../main/rooms/repo.js");
   const tracePath = join(repoPath, ".git", "room-opening-trace.jsonl");
   const previousTrace = process.env.GIT_TRACE2_EVENT;
   try {
@@ -65,6 +69,16 @@ test("opening a fetched repo room preserves its identity without calculating bra
       .map((event) => event.argv as string[]);
     assert.equal(commands.some((argv) => argv.includes("diff")), false,
       "room opening must not wait for branch comparisons after fetching its snapshot");
+    await t.test("integration status preserves review permissions and treats old servers as unknown", async () => {
+      for (const permission of ["write", "missing", "unknown", undefined]) {
+        integrationPayload = { connected: true, repository: { full_name: "example/project" },
+          ...(permission ? { review_submission: { permission, recorded_at: "2026-09-22T12:00:00Z" } } : {}) };
+        const status = await getDesktopGitHubIntegrationStatus("github.com/example/project");
+        assert.equal(status.connected, true);
+        assert.deepEqual(status.reviewSubmission, { permission: permission ?? "unknown",
+          recordedAt: permission ? "2026-09-22T12:00:00Z" : null });
+      }
+    });
   } finally {
     if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT;
     else process.env.GIT_TRACE2_EVENT = previousTrace;
