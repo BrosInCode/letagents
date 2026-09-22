@@ -321,6 +321,163 @@ test("daemon-owned tool execution has a bounded handshake but no correctness tim
   }
 });
 
+for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedEffect]) {
+  const operationName = operation === executeCurrentSupervisedTool ? "execute" : "prepare";
+  const operationResult = { state: "completed", room_id: "room_exact", result: { sent: true } };
+  const negotiationResult = { protocol_version: 2, generation: 41, pid: 123, started_at: "2026-09-22T00:00:00.000Z" };
+
+  test(`${operationName} waits through an absent daemon socket with its original invocation`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "la-prewrite-gap-"));
+    const socketPath = join(root, "daemon.sock");
+    const requests: any[] = [];
+    const server = createServer((socket) => {
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        if (!buffer.includes("\n")) return;
+        const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+        requests.push(request);
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true,
+          result: request.method === "daemon.negotiate" ? negotiationResult : operationResult })}\n`);
+      });
+    });
+    let listenTimer: NodeJS.Timeout | undefined;
+    try {
+      const env = { ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+        LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "turn_exact" };
+      const input = { toolName: "send_thread_message", input: { text: "once", thread_parent_id: "msg_9" },
+        mcpRequestId: "request_exact", mutation: true };
+      const startedAt = Date.now();
+      const pending = operation(input, env, { requestTimeoutMs: 1_000 });
+      env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID = "later_generation";
+      env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID = "later_turn";
+      input.input.text = "later text";
+      input.mcpRequestId = "later_request";
+      const listening = new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        listenTimer = setTimeout(() => server.listen(socketPath, resolve), 120);
+      });
+      const [result] = await Promise.all([pending, listening]);
+      assert.deepEqual(result, { state: "completed", roomId: "room_exact", result: { sent: true } });
+      assert.ok(Date.now() - startedAt >= 100);
+      const effects = requests.filter((request) => request.method !== "daemon.negotiate");
+      assert.equal(effects.length, 1);
+      assert.deepEqual(effects[0].params, {
+        mcp_request_id: "request_exact", tool_name: "send_thread_message",
+        input: { text: "once", thread_parent_id: "msg_9" },
+        ...(operationName === "prepare" ? { mutation: true } : {}),
+        entry_id: "manifest_exact", work_attempt_id: "attempt_exact",
+        execution_generation_id: "generation_exact", provider_turn_id: "turn_exact", daemon_generation: 41,
+      });
+    } finally {
+      clearTimeout(listenTimer);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test(`${operationName} renegotiates when the socket disappears before its write`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "la-prewrite-unlink-"));
+    const socketPath = join(root, "daemon.sock");
+    const requests: any[] = [];
+    let successorTimer: NodeJS.Timeout | undefined;
+    const successor = createServer((socket) => {
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        if (!buffer.includes("\n")) return;
+        const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+        requests.push(request);
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true,
+          result: request.method === "daemon.negotiate" ? { ...negotiationResult, generation: 42 } : operationResult })}\n`);
+      });
+    });
+    const first = createServer((socket) => {
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        if (!buffer.includes("\n")) return;
+        const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+        requests.push(request);
+        first.close(() => {
+          successorTimer = setTimeout(() => successor.listen(socketPath), 120);
+        });
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: negotiationResult })}\n`);
+      });
+    });
+    try {
+      await new Promise<void>((resolve, reject) => { first.once("error", reject); first.listen(socketPath, resolve); });
+      assert.deepEqual(await operation({ toolName: "set_reply_thread", input: { thread_parent_id: "msg_9" },
+        mcpRequestId: "request_gap", mutation: true }, {
+        ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      }, { requestTimeoutMs: 1_000 }), { state: "completed", roomId: "room_exact", result: { sent: true } });
+      assert.equal(requests.filter((request) => request.method === "daemon.negotiate").length, 2);
+      const effects = requests.filter((request) => request.method !== "daemon.negotiate");
+      assert.equal(effects.length, 1);
+      assert.equal(effects[0].params.daemon_generation, 42);
+      assert.equal(effects[0].params.mcp_request_id, "request_gap");
+    } finally {
+      clearTimeout(successorTimer);
+      await new Promise<void>((resolve) => first.close(() => resolve()));
+      await new Promise<void>((resolve) => successor.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const failure of ["post-write close", "authoritative rejection", "negotiation rejection", "post-write timeout"] as const) {
+    if (operationName === "execute" && failure === "post-write timeout") continue; // Admitted execution has no correctness timer.
+    test(`${operationName} does not retry ${failure}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "la-prewrite-no-replay-"));
+      const socketPath = join(root, "daemon.sock");
+      const requests: any[] = [];
+      const server = createServer((socket) => {
+        let buffer = "";
+        socket.setEncoding("utf8");
+        socket.on("data", (chunk: string) => {
+          buffer += chunk;
+          if (!buffer.includes("\n")) return;
+          const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+          requests.push(request);
+          if (request.method === "daemon.negotiate" && failure !== "negotiation rejection") {
+            socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: negotiationResult })}\n`);
+          } else if (failure === "post-write close") socket.destroy();
+          else if (failure !== "post-write timeout") socket.end(`${JSON.stringify({ version: 2, id: request.id,
+            ok: false, error: "Rejected stale daemon generation during handoff" })}\n`);
+        });
+      });
+      try {
+        await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+        await assert.rejects(() => operation({ toolName: "send_thread_message", input: { text: "once" },
+          mcpRequestId: "request_once", mutation: true }, {
+          ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+        }, { requestTimeoutMs: 150 }), /connection closed|Rejected stale|Timed out communicating/);
+        assert.equal(requests.filter((request) => request.method === "daemon.negotiate").length, 1);
+        assert.equal(requests.filter((request) => request.method !== "daemon.negotiate").length,
+          failure === "negotiation rejection" ? 0 : 1);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test(`${operationName} stops reconnecting when its startup budget expires`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "la-prewrite-budget-"));
+    try {
+      const startedAt = Date.now();
+      await assert.rejects(() => operation({ toolName: "send_thread_message", input: { text: "once" },
+        mcpRequestId: "request_budget", mutation: true }, {
+        ...supervisedEnv(join(root, "absent.sock")), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      }, { requestTimeoutMs: 150 }), /ENOENT|Timed out communicating/);
+      assert.ok(Date.now() - startedAt >= 125, "does not fail on the first missing socket");
+      assert.ok(Date.now() - startedAt < 1_000, "does not wait indefinitely");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
 test("daemon-owned tool execution recognizes an old daemon and permits compatibility fallback", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-old-daemon-"));
   const socketPath = join(root, "daemon.sock");
