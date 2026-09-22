@@ -160,6 +160,8 @@ export class SupervisedAgentDelivery {
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
   private readonly pumpWakeups = new Map<string, Promise<void>>();
+  /** Delivery demand survives internal ingress restart on the same handle. */
+  private readonly admissionDemands = new WeakMap<ProviderActionHandle, object>();
   private readonly pumpControllers = new Map<string, AbortController>();
   private readonly retries = new Map<string, Set<Promise<void>>>();
   private readonly retryControllers = new Map<string, Set<AbortController>>();
@@ -205,7 +207,7 @@ export class SupervisedAgentDelivery {
     private readonly observeStartingWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<string | null | void>,
     private readonly releaseWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<void>,
     private readonly onDeliverySettled?: (agentId: string) => void,
-    private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent) => Promise<boolean>,
+    private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent, demand: object) => Promise<boolean>,
   ) {}
 
   /**
@@ -983,6 +985,7 @@ export class SupervisedAgentDelivery {
   }
 
   private wakePumpAfterSettlement(agent: SupervisedIngressAgent): void {
+    if (agent.handle) this.admissionDemands.set(agent.handle, {});
     const current = this.pumping.get(agent.agentId);
     if (!current) {
       this.schedulePump(agent);
@@ -1020,7 +1023,7 @@ export class SupervisedAgentDelivery {
     // The control RPC acknowledges the durable blocked -> pending transition
     // and installation of tracked work, never the provider turn itself. A
     // A provider turn can outlive Electron's control-RPC timeout by minutes.
-    if (!this.schedulePump(agent)) {
+    if (!this.wake(agent)) {
       throw new Error("The room delivery binding changed before retry could start.");
     }
   }
@@ -1051,7 +1054,7 @@ export class SupervisedAgentDelivery {
     // own delivery pump. When the original conversation merely rematerializes,
     // this exact agent remains authoritative and the repaired pending head
     // needs an explicit wake-up; otherwise it waits for an unrelated poll.
-    if (outcome === "restored" && !this.schedulePump(agent)) {
+    if (outcome === "restored" && !this.wake(agent)) {
       throw new Error("The room delivery binding changed before the restored message could resume.");
     }
   }
@@ -1073,7 +1076,7 @@ export class SupervisedAgentDelivery {
     if (!await this.hasIngressAuthority(agent, controller)) {
       throw new Error("The room delivery binding changed after the message was safely skipped.");
     }
-    this.schedulePump(agent);
+    this.wake(agent);
   }
 
   private schedulePump(agent: SupervisedIngressAgent): boolean {
@@ -1087,8 +1090,9 @@ export class SupervisedAgentDelivery {
   /** Install tracked FIFO work without making the control RPC wait for the
    * provider turn or publication to finish. */
   wake(agent: SupervisedIngressAgent): boolean {
-    if (!this.daemonIngressAllowed(agent)) return false;
-    return this.schedulePump(agent);
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.isStopping(agent.agentId)) return false;
+    this.wakePumpAfterSettlement(agent);
+    return !this.fenced && !this.isStopping(agent.agentId);
   }
 
   pump(agent: SupervisedIngressAgent): Promise<void> {
@@ -1211,7 +1215,9 @@ export class SupervisedAgentDelivery {
           }
         }
         if (head?.state === "pending" && !head.provider_turn_id && !head.outcome && this.canAdmitNewTurn) {
-          const admitted = await this.canAdmitNewTurn(agent);
+          const demand = this.admissionDemands.get(agent.handle) ?? {};
+          this.admissionDemands.set(agent.handle, demand);
+          const admitted = await this.canAdmitNewTurn(agent, demand);
           if (!await this.hasExecutionAuthority(agent, controller) || !admitted) return;
         }
         if (this.dispatchIsPaused(agent)) return;
