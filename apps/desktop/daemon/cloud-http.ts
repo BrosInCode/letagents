@@ -20,7 +20,22 @@ export const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 const CLOUD_REQUEST_TIMEOUT_MS = 20_000;
 const EXECUTION_DELEGATION_INVENTORY_PAGE_SIZE = 100;
 
+export type CloudWorkLease = {
+  id: string; room_id: string; task_id: string; agent_session_id: string;
+  agent_key: string; agent_instance_id: string; epoch: number;
+};
+type LeaseReadInput = { apiUrl: string; roomId: string; bearer: string; signal?: AbortSignal };
+type LeaseAttestationInput = {
+  apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
+  lease: CloudWorkLease; workAttemptId: string; executionGenerationId: string;
+  cause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; signal?: AbortSignal;
+};
+
 export interface SupervisorGrantHttp {
+  listWorkLeases?(input: LeaseReadInput): Promise<CloudWorkLease[]>;
+  readWorkLease?(input: LeaseReadInput & { taskId: string; leaseId: string }): Promise<CloudWorkLease | null>;
+  attestWorkLease?(input: LeaseAttestationInput): Promise<string>;
+  rebindWorkLease?(input: LeaseAttestationInput & { attestationId: string; toSessionId: string }): Promise<CloudWorkLease>;
   createWorkerSession(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string;
     provider: string; displayName: string; model?: string | null; charter?: string | null; signal?: AbortSignal;
@@ -317,8 +332,107 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
 };
 
 /** Host grants and worker bearers are process-memory values, never daemon state. */
+function taskWorkLeases(value: unknown, roomId: string): CloudWorkLease[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Lease inventory omitted its task.");
+  const task = value as Record<string, unknown>;
+  if (typeof task.id !== "string" || !task.id || task.room_id !== roomId || !Array.isArray(task.active_leases)) {
+    throw new Error("Lease inventory returned an invalid task identity.");
+  }
+  return task.active_leases.flatMap(value => {
+    if (!value || typeof value !== "object") throw new Error("Lease inventory returned an invalid lease.");
+    const lease = value as Record<string, unknown>;
+    if (lease.kind !== "work" || lease.status !== "active") return [];
+    return [parseWorkLease(lease, roomId, String(task.id))];
+  });
+}
+function parseWorkLease(lease: Record<string, unknown>, roomId: string, taskId: string): CloudWorkLease {
+  if (lease.room_id !== roomId || lease.task_id !== taskId || lease.kind !== "work" || lease.status !== "active"
+    || !Number.isSafeInteger(lease.epoch) || Number(lease.epoch) < 0
+    || ["id", "agent_key"].some(key => typeof lease[key] !== "string" || !lease[key])) {
+    throw new Error("Lease inventory returned an invalid fence.");
+  }
+  // Legacy/manual leases can lack a worker session or instance; they must never
+  // become candidates for a supervised-worker transfer.
+  if (["agent_session_id", "agent_instance_id"].some(key => lease[key] !== null && typeof lease[key] !== "string")) {
+    throw new Error("Lease inventory returned an invalid worker identity.");
+  }
+  return { id: String(lease.id), room_id: roomId, task_id: taskId, epoch: Number(lease.epoch),
+    agent_key: String(lease.agent_key), agent_session_id: lease.agent_session_id as string ?? "",
+    agent_instance_id: lease.agent_instance_id as string ?? "" };
+}
+async function readLeaseTask(input: LeaseReadInput, suffix: string): Promise<Record<string, unknown> | null> {
+  const response = await roomRequest(`${hostGrantApiOrigin(input.apiUrl)}/rooms/${supervisedRoomPath(input.roomId)}/tasks${suffix}`, {
+    headers: { authorization: `Bearer ${input.bearer}` }, signal: boundedCloudSignal(input.signal), redirect: "error",
+  });
+  if (response.status === 404 && suffix.startsWith("/")) return null;
+  if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Worker lease inventory");
+  const body = await response.json() as Record<string, unknown>;
+  if (body.room_id !== input.roomId) throw new Error("Worker lease inventory belongs to another room.");
+  return body;
+}
+async function leaseMutation(input: LeaseAttestationInput, action: "attestation" | "rebind", extra: Record<string, string>) {
+  const response = await roomRequest(`${hostGrantApiOrigin(input.apiUrl)}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/leases/${encodeURIComponent(input.lease.id)}/${action}`, {
+    method: "POST", redirect: "error",
+    headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
+    body: JSON.stringify({ expected_epoch: input.lease.epoch, from_agent_session_id: input.lease.agent_session_id,
+      work_attempt_id: input.workAttemptId, execution_generation_id: input.executionGenerationId, ...extra }),
+    signal: boundedCloudSignal(input.signal),
+  });
+  if (!response.ok) throw new SupervisorGrantRequestError(response.status, `Worker lease ${action}`);
+  return await response.json() as Record<string, unknown>;
+}
+
 export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<SupervisorGrantHttp,
   "getExecutionDelegationDecision" | "listExecutionDelegationDecisionIds">> = {
+  async listWorkLeases(input) {
+    const leases: CloudWorkLease[] = [];
+    const seenTasks = new Set<string>();
+    let after: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      // Include In review and Merged: ownership outlives the implementation phase.
+      const query = new URLSearchParams({ limit: "100" });
+      if (after) query.set("after", after);
+      const body = await readLeaseTask(input, `?${query}`);
+      if (!body || !Array.isArray(body.tasks) || typeof body.has_more !== "boolean") throw new Error("Lease inventory is incomplete.");
+      for (const task of body.tasks) {
+        const selected = taskWorkLeases(task, input.roomId);
+        const id = String(task.id);
+        if (seenTasks.has(id)) throw new Error("Lease inventory repeated a task.");
+        seenTasks.add(id);
+        leases.push(...selected);
+      }
+      if (!body.has_more) return leases;
+      const next = body.tasks.at(-1)?.id;
+      if (typeof next !== "string" || !next || next === after) throw new Error("Lease inventory cursor did not advance.");
+      after = next;
+    }
+    throw new Error("Worker lease inventory exceeded its bounded read budget.");
+  },
+  async readWorkLease(input) {
+    const task = await readLeaseTask(input, `/${encodeURIComponent(input.taskId)}`);
+    if (!task) return null;
+    if (task.id !== input.taskId) throw new Error("Worker lease read returned a different task.");
+    return taskWorkLeases(task, input.roomId).find(lease => lease.id === input.leaseId) ?? null;
+  },
+  async attestWorkLease(input) {
+    const receipt = await leaseMutation(input, "attestation", { cause: input.cause });
+    if (typeof receipt.id !== "string" || !receipt.id || receipt.lease_id !== input.lease.id
+      || receipt.epoch !== input.lease.epoch || receipt.from_agent_session_id !== input.lease.agent_session_id
+      || receipt.grant_id !== input.grantId || receipt.supervisor_generation !== input.grantGeneration
+      || receipt.work_attempt_id !== input.workAttemptId || receipt.execution_generation_id !== input.executionGenerationId
+      || receipt.cause !== input.cause || receipt.consumed_at !== null) throw new Error("Lease attestation returned a different proof.");
+    return receipt.id;
+  },
+  async rebindWorkLease(input) {
+    const lease = parseWorkLease(await leaseMutation(input, "rebind", {
+      attestation_id: input.attestationId, to_agent_session_id: input.toSessionId,
+    }), input.lease.room_id, input.lease.task_id);
+    if (lease.id !== input.lease.id || lease.agent_session_id !== input.toSessionId || lease.epoch !== input.lease.epoch + 1
+      || lease.agent_key !== input.lease.agent_key || lease.agent_instance_id !== input.lease.agent_instance_id) {
+      throw new Error("Lease rebind returned a different successor fence.");
+    }
+    return lease;
+  },
   async createWorkerSession(input) {
     const ideLabel = supervisedProviderLabel(input.provider);
     const response = await roomRequest(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions`, {

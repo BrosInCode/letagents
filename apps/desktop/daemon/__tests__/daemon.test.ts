@@ -484,6 +484,12 @@ test("daemon tool runtime loader requires a sealed package tree outside explicit
   }
 });
 
+const noWorkLeaseHttp = {
+  listWorkLeases: async () => [], readWorkLease: async () => null,
+  attestWorkLease: async () => { throw new Error("Unexpected lease attestation in this fixture"); },
+  rebindWorkLease: async () => { throw new Error("Unexpected lease rebind in this fixture"); },
+};
+
 test("worker mint preserves the exact server-issued identity paired with its bearer", async () => {
   const server = createHttpServer((_request, response) => {
     response.writeHead(201, { "content-type": "application/json" });
@@ -2835,12 +2841,22 @@ test("post-launch worker binding retries the exact provider and preserves the re
   let remoteLiveSessionId: string | null = null;
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
-    spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    spawn: async input => {
+      const db = new DatabaseSync(paths.manifestPath);
+      try {
+        const receipt = db.prepare("SELECT * FROM worker_execution_bindings WHERE entry_id=? AND execution_generation_id=? AND agent_session_id=?")
+          .get("host_grant_bind_retry", input.supervisorExecutionGenerationId!, input.supervisorWorkerSession!.agentSessionId);
+        assert.equal(receipt?.work_attempt_id, attempt.work_attempt_id, "exact worker custody commits before provider spawn");
+        assert.equal(receipt?.grant_id, "grant-1");
+      } finally { db.close(); }
+      spawns += 1; return handle;
+    }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
     resume: async () => { throw new Error("must not resume a fresh host-grant provider"); }, poke: async () => {},
     stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
     onExit: async () => () => {}, onStream: async () => () => {},
   };
   const grants = {
+    ...noWorkLeaseHttp,
     createWorkerSession: async (input: { grantGeneration: number; agentInstanceId: string }) => {
       mintCalls.push(input);
       const prePost = new DatabaseSync(paths.manifestPath);
@@ -2967,6 +2983,7 @@ test("handoff during delayed host-grant mint creates no generation and the succe
   const first = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => {
       mintEntered();
       await mintGate;
@@ -2997,6 +3014,7 @@ test("handoff during delayed host-grant mint creates no generation and the succe
     second = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
       poll: async () => ({ messages: [] }), publish: async () => {},
     }, {
+      ...noWorkLeaseHttp,
       createWorkerSession: async () => ({ sessionId: "successor-session", bearer: "successor-bearer", bearerId: "successor-bearer-id", expiresAt: null }),
     });
     await second.start();
@@ -3054,6 +3072,7 @@ test("pause fences a launch waiting on host-grant mint before any generation or 
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => {
       mintEntered();
       await mintGate;
@@ -3269,6 +3288,7 @@ test("stop during grant mint and pause during capabilities both fence before pro
     const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
       poll: async () => ({ messages: [] }), publish: async () => {},
     }, {
+      ...noWorkLeaseHttp,
       createWorkerSession: async () => {
         if (boundary === "mint") { boundaryEntered(); await boundaryGate; }
         return { sessionId: `${id}-session`, bearer: `${id}-bearer`, bearerId: `${id}-bearer-id`, expiresAt: null };
@@ -3703,6 +3723,7 @@ test("pause during post-install worker bind fences the exact provider before del
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => ({ sessionId: "pause-bind-session", bearer: "pause-bind-bearer", bearerId: "pause-bind-bearer-id", expiresAt: null }),
   });
   try {
@@ -3796,6 +3817,7 @@ for (const [rotationFailures, rotationStatus, providerName] of [[0, 500, "codex"
   }, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => {
       mintCalls += 1;
       if (mintCalls > 1 && mintCalls <= rotationFailures + 1) {
@@ -3975,6 +3997,7 @@ test("host grant renewal retries transient failures, rotates the bearer in place
         grantGeneration: input.grantGeneration, expiresAt: new Date(clock + 24 * 60 * 60_000).toISOString(),
       };
     },
+    ...noWorkLeaseHttp,
     createWorkerSession: async (input) => {
       mintCalls += 1;
       mintParentGrants.push(input.supervisorGrant);
@@ -4087,6 +4110,7 @@ test("expired and definitively rejected host grants become auth-blocked without 
         if (typeof rejection === "number") throw new SupervisorGrantRequestError(rejection, "injected renewal");
         throw new Error("expired grant must not be renewed");
       },
+      ...noWorkLeaseHttp,
       createWorkerSession: async () => ({
         sessionId: `${id}-session`, bearer: `${id}-bearer`, bearerId: `${id}-bearer-id`,
         expiresAt: new Date(clock + 24 * 60 * 60_000).toISOString(),
@@ -6454,6 +6478,7 @@ test("credential-only reconnect rejects a missing exact provider without retaini
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => { throw new Error("reconnect must not mint without an exact live provider"); },
   });
   try {
@@ -7271,6 +7296,7 @@ test("credential-only reconnect reattaches the exact OpenCode runtime and checkp
     poll: async () => ({ messages: [] }),
     publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => {
       calls.mint += 1;
       return {
@@ -7366,6 +7392,7 @@ test("cursor admission repairs pre-upgrade running and stopped daemon-inbox entr
       latest: async () => { lifecycle.tail += 1; return { messages: [{ id: tailId }] }; },
       poll: async () => ({ messages: [] }), publish: async () => {},
     }, {
+      ...noWorkLeaseHttp,
       createWorkerSession: async () => {
         lifecycle.mint += 1;
         return { sessionId: `admission-${desiredState}`, bearer: "admission-bearer", bearerId: "admission-bearer-id", expiresAt: null };
@@ -7434,6 +7461,7 @@ test("fresh desktop bootstrap queues its initial message exactly once while lega
     latest: async () => ({ messages: [{ id: "44" }] }),
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => ({
       sessionId: "initial-message-session", bearer: "initial-message-bearer",
       bearerId: "initial-message-bearer-id", expiresAt: null,
@@ -7514,6 +7542,7 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
     latest: async () => ({ messages: [] }), poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async (input) => {
       mintCalls += 1;
       mintedProvider = input.provider;
@@ -7602,6 +7631,7 @@ test("Open Model launches with its exact memory-only endpoint credential", async
     poll: async () => ({ messages: [] }),
     publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => ({
       sessionId: "open-model-worker",
       bearer: "open-model-worker-bearer",
@@ -7697,6 +7727,7 @@ test("string-thrown transient worker mint failures redact credentials and automa
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, recovery.clock, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => {
       mintCalls += 1;
       if (failMints) throw "worker mint transport failed; Authorization: Bearer transient-mint-secret";
@@ -7769,6 +7800,7 @@ test("429 worker mint failures retry three times and automatically reconverge", 
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, recovery.clock, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => {
       mintCalls += 1;
       if (rateLimited) throw new SupervisorGrantRequestError(429, "Supervisor worker session mint");
@@ -7833,6 +7865,7 @@ test("definitive worker mint rejection attempts once and never schedules automat
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, recovery.clock, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => {
       mintCalls += 1;
       throw new SupervisorGrantRequestError(401, "Supervisor worker session mint");
@@ -7883,6 +7916,7 @@ test("handoff aborts a hung pre-observation room bootstrap without creating a cu
     latest: async () => { tailReads += 1; return { messages: [{ id: "must-not-observe" }] }; },
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async ({ signal }) => new Promise((_resolve, reject) => {
       mintEntered();
       signal?.addEventListener("abort", () => { mintAborted = true; reject(new Error("mint aborted by handoff")); }, { once: true });
@@ -7935,6 +7969,7 @@ test("handoff drains an observed room tail commit and the successor inherits tha
     latest: async () => { firstTailReads += 1; return { messages: [{ id: "50" }] }; },
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => ({ sessionId: "first-session", bearer: "first-bearer", bearerId: "first-bearer-id", expiresAt: null }),
   });
   let successor: SupervisorDaemon | null = null;
@@ -7980,6 +8015,7 @@ test("handoff drains an observed room tail commit and the successor inherits tha
       latest: async () => { successorTailReads += 1; return { messages: [{ id: "51" }] }; },
       poll: async () => ({ messages: [] }), publish: async () => {},
     }, {
+      ...noWorkLeaseHttp,
       createWorkerSession: async () => { throw new Error("successor must not mint before an existing cursor check"); },
     });
     await successor.start();
@@ -8012,6 +8048,7 @@ test("a host-grant install queued before handoff cannot retain plaintext or repo
   }, {}, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => {
       mintCalls += 1;
       return { sessionId: "must-not-mint", bearer: "must-not-retain", bearerId: "must-not-record", expiresAt: null };
@@ -8643,6 +8680,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
       }),
       publish: async () => {},
     }, {
+      ...noWorkLeaseHttp,
       createWorkerSession: async ({ agentInstanceId }) => ({
         sessionId: `session_${agentInstanceId.replace(/:/g, "_")}`,
         bearer: randomUUID(), bearerId: randomUUID(), expiresAt: "2099-01-01T00:00:00.000Z",
@@ -9142,6 +9180,7 @@ test("idle daemon-inbox Cursor resumes the same durable execution after restart 
     publish: async () => {},
   };
   const workers = {
+    ...noWorkLeaseHttp,
     createWorkerSession: async () => ({
       sessionId: "cursor-restart-session", bearer: randomUUID(), bearerId: randomUUID(),
       expiresAt: "2099-01-01T00:00:00.000Z",
@@ -12771,4 +12810,51 @@ test("all approval settlement callers schedule fault-only recovery under current
     assert.equal(retries.length, 4, "handoff cannot retry under retired authority");
     internals.handoffScheduled = false;
   } finally { await daemon.stop().catch(() => undefined); await env.cleanup(); }
+});
+
+test("worker lease HTTP uses complete worker-scoped inventory and exact grant-fenced transfer receipts", async () => {
+  const calls: Array<{ url: string; authorization: string | undefined; generation: string | string[] | undefined; body: Record<string, unknown> }> = [];
+  const lease = { id: "lease-1", room_id: "owner/repo", task_id: "task_1", kind: "work", status: "active", epoch: 3,
+    agent_session_id: "old-session", agent_key: "owner/agent", agent_instance_id: "daemon:agent" };
+  const proof = { id: "proof", lease_id: lease.id, epoch: 3, from_agent_session_id: "old-session", grant_id: "grant",
+    supervisor_generation: 2, work_attempt_id: "attempt", execution_generation_id: "execution", cause: "killed", consumed_at: null };
+  let wrongReceipt = false;
+  let brokenPage = false;
+  const server = createHttpServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+    calls.push({ url: request.url!, authorization: request.headers.authorization, generation: request.headers["x-letagents-supervisor-generation"], body });
+    response.setHeader("content-type", "application/json");
+    if (request.url!.endsWith("/attestation")) return response.end(JSON.stringify({ ...proof, ...(wrongReceipt ? { execution_generation_id: "different" } : {}) }));
+    if (request.url!.endsWith("/rebind")) return response.end(JSON.stringify({ ...lease, agent_session_id: "new-session", epoch: wrongReceipt ? 9 : 4 }));
+    if (request.url!.endsWith("/tasks/task_1")) return response.end(JSON.stringify({ id: "task_1", room_id: "owner/repo", status: "in_review", active_leases: [lease] }));
+    if (request.url!.includes("after=task_1")) return response.end(JSON.stringify({ room_id: "owner/repo", tasks: [{ id: "task_2", room_id: "owner/repo", status: "merged", active_leases: [{ ...lease, kind: "review", id: "review", task_id: "task_2" }] }], has_more: false }));
+    response.end(JSON.stringify({ room_id: "owner/repo", tasks: [{ id: "task_1", room_id: "owner/repo", status: "in_review", active_leases: [lease] }], ...(brokenPage ? {} : { has_more: true }) }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const apiUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const read = { apiUrl, roomId: "owner/repo", bearer: "worker-secret" };
+    const inventory = await productionSupervisorGrantHttp.listWorkLeases!(read);
+    assert.equal(inventory.length, 1, "In review work is retained, review leases are not rebound");
+    assert.ok(calls.slice(0, 2).every(call => call.authorization === "Bearer worker-secret" && !call.url.includes("open=") && !call.url.includes("status=")));
+    assert.equal(calls[1]!.url, "/rooms/owner/repo/tasks?limit=100&after=task_1");
+    assert.deepEqual(await productionSupervisorGrantHttp.readWorkLease!({ ...read, taskId: "task_1", leaseId: "lease-1" }), inventory[0]);
+    const mutation = { apiUrl, grantId: "grant", supervisorGrant: "grant-secret", grantGeneration: 2,
+      lease: inventory[0]!, workAttemptId: "attempt", executionGenerationId: "execution", cause: "killed" as const };
+    assert.equal(await productionSupervisorGrantHttp.attestWorkLease!(mutation), "proof");
+    assert.equal((await productionSupervisorGrantHttp.rebindWorkLease!({ ...mutation, attestationId: "proof", toSessionId: "new-session" })).epoch, 4);
+    assert.ok(calls.slice(-2).every(call => call.authorization === "Bearer grant-secret" && call.generation === "2"));
+    assert.deepEqual(calls.at(-1)!.body, { expected_epoch: 3, from_agent_session_id: "old-session", to_agent_session_id: "new-session",
+      work_attempt_id: "attempt", execution_generation_id: "execution", attestation_id: "proof" });
+    wrongReceipt = true;
+    await assert.rejects(productionSupervisorGrantHttp.attestWorkLease!(mutation), /different proof/);
+    await assert.rejects(productionSupervisorGrantHttp.rebindWorkLease!({ ...mutation, attestationId: "proof", toSessionId: "new-session" }), /different successor/);
+    brokenPage = true;
+    await assert.rejects(productionSupervisorGrantHttp.listWorkLeases!(read), /incomplete/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });

@@ -154,6 +154,10 @@ type HarnessOptions = {
   handle?: ProviderActionHandle | null;
   cursor?: string | null;
   checkpoints?: WorkAttemptCheckpoint[];
+  leaseHttp?: Pick<WorkerAuthorityCoordinatorOptions["supervisorGrantHttp"], "listWorkLeases" | "readWorkLease" | "attestWorkLease" | "rebindWorkLease">;
+  predecessors?: Awaited<ReturnType<WorkerAuthorityCoordinatorOptions["bindings"]["executionPredecessors"]>>;
+  executions?: ExecutionGeneration[];
+  recordExecutionBinding?: WorkerAuthorityCoordinatorOptions["bindings"]["recordExecutionBinding"];
   createWorkerSession?: WorkerAuthorityCoordinatorOptions["supervisorGrantHttp"]["createWorkerSession"];
   getExecutionDelegation?: WorkerAuthorityCoordinatorOptions["supervisorGrantHttp"]["getExecutionDelegation"];
   renewHostGrant?: NonNullable<WorkerAuthorityCoordinatorOptions["supervisorGrantHttp"]["renewHostGrant"]>;
@@ -209,6 +213,8 @@ function fixture(options: HarnessOptions = {}) {
 
   const bindings: WorkerAuthorityCoordinatorOptions["bindings"] = {
     get: async () => binding,
+    executionPredecessors: async () => options.predecessors ?? [],
+    recordExecutionBinding: options.recordExecutionBinding ?? (async () => { events.push("binding:record-execution"); }),
     bind: async (input, bindOptions) => {
       events.push("binding:bind");
       credential = input.agent_session_token;
@@ -362,7 +368,7 @@ function fixture(options: HarnessOptions = {}) {
       },
     },
     durability: {
-      getAttempt: async () => ({ execution_generations: [execution(options.terminal)], checkpoints }),
+      getAttempt: async () => ({ execution_generations: options.executions ?? [execution(options.terminal)], checkpoints }),
       checkpoint: async (_attemptId, checkpoint) => {
         events.push(`attempt:checkpoint:${checkpoint.room_cursor}`);
         durableCheckpoints.push(checkpoint);
@@ -382,6 +388,11 @@ function fixture(options: HarnessOptions = {}) {
       },
     },
     supervisorGrantHttp: {
+      listWorkLeases: async () => [],
+      readWorkLease: async () => null,
+      attestWorkLease: async () => { throw new Error("Unexpected lease attestation"); },
+      rebindWorkLease: async () => { throw new Error("Unexpected lease rebind"); },
+      ...options.leaseHttp,
       createWorkerSession: options.createWorkerSession ?? (async () => {
         events.push("http:mint");
         return {
@@ -701,12 +712,11 @@ test("worker mint durably marks uncertainty before HTTP and exact public identit
   const minted = await harness.subject.mintHostWorkerAuthorization(harness.entry);
 
   assert.equal(minted?.bearer, "minted-secret");
-  assert.deepEqual(harness.events.slice(0, 6), [
+  assert.deepEqual(harness.events.slice(0, 4), [
     "authority:assert",
     "mint:begin-durable",
     "http:mint",
     "mint:record-exact",
-    "authority:assert",
   ]);
   assert.equal(harness.custody.workerAuthorization("agent-1")?.bearer, "minted-secret");
   assert.equal(harness.custody.workerAuthorization("agent-1")?.workAttemptId, "attempt-1");
@@ -1767,4 +1777,156 @@ test("rotation recovery wakes at bearer expiry and does not retry authorization 
   assert.ok(rejected.deliveryStops > 0);
   assert.equal(rejected.entry.desired_state, "running");
   assert.match(rejected.events.filter((event) => event.startsWith("transition:")).at(-1)!, /Use Reconnect to try/);
+});
+
+function retiredLeaseFixture(overrides: HarnessOptions = {}) {
+  const lease = { id: "lease-1", task_id: "task-1", room_id: "room-1", agent_session_id: "session-old",
+    agent_key: "agent-key-1", agent_instance_id: "daemon:agent-1", epoch: 4 };
+  const retired = execution({ ...terminalExecution(), terminal_cause: "stopped",
+    native_runtime_death: { kind: "claude_cli", pid: 42, processIdentity: "exact-old-birth" } });
+  const authority = { entry_id: "agent-1", room_id: "room-1", api_url: "https://letagents.test", grant_id: "grant-1",
+    work_attempt_id: "attempt-1", execution_generation_id: "execution-1", agent_session_id: "session-old", agent_key: "agent-key-1" };
+  let current = { ...lease };
+  const mutations: string[] = [];
+  const harness = fixture({ entry: manifestEntry({ provider: "claude-code" }), executions: [retired],
+    predecessors: [{ execution_generation_id: "execution-1", agent_session_id: "session-old", authority }],
+    leaseHttp: {
+      listWorkLeases: async () => [current], readWorkLease: async () => current,
+      attestWorkLease: async input => { mutations.push(`attest:${input.executionGenerationId}:${input.lease.epoch}`); return "proof-1"; },
+      rebindWorkLease: async input => { mutations.push(`rebind:${input.attestationId}`); current = { ...current, agent_session_id: input.toSessionId, epoch: current.epoch + 1 }; return current; },
+    }, ...overrides });
+  harness.custody.installHostGrant(hostGrant());
+  return { harness, lease, retired, authority, mutations, get current() { return current; } };
+}
+
+test("replacement worker restores an exact retired work lease before exposing its credentials", async () => {
+  const f = retiredLeaseFixture();
+  const minted = await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry);
+  assert.equal(minted?.agentSessionId, f.current.agent_session_id);
+  assert.equal(f.current.epoch, 5);
+  assert.equal(f.current.id, "lease-1");
+  assert.deepEqual(f.mutations, ["attest:execution-1:4", "rebind:proof-1"]);
+  await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry);
+  assert.equal(f.mutations.length, 2, "cached authority does not poll or repeat the transfer");
+});
+
+test("worker lease recovery resumes a partial multi-lease transfer after an ambiguous response", async () => {
+  const seed = retiredLeaseFixture();
+  const leases = [seed.lease, { ...seed.lease, id: "lease-2", task_id: "task-2" }];
+  let attempts = 0;
+  let failSecond = true;
+  const f = retiredLeaseFixture({ leaseHttp: {
+    listWorkLeases: async () => leases,
+    attestWorkLease: async () => "proof",
+    rebindWorkLease: async input => {
+      attempts++;
+      if (input.lease.id === "lease-2" && failSecond) throw new Error("network lost before commit");
+      const next = { ...input.lease, epoch: input.lease.epoch + 1, agent_session_id: input.toSessionId };
+      leases[leases.findIndex(item => item.id === next.id)] = next;
+      if (input.lease.id === "lease-1") throw new Error("network lost after commit");
+      return next;
+    },
+    readWorkLease: async input => leases.find(lease => lease.id === input.leaseId) ?? null,
+  } });
+  await assert.rejects(f.harness.subject.mintHostWorkerAuthorization(f.harness.entry), /lost before commit/);
+  assert.equal(f.harness.custody.workerAuthorization("agent-1"), undefined);
+  assert.equal(leases[0]!.epoch, 5);
+  failSecond = false;
+  assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+  assert.equal(attempts, 3, "a confirmed first transfer is not repeated on the next admission");
+  assert.deepEqual(leases.map(lease => lease.epoch), [5, 5]);
+});
+
+for (const invalid of ["missing-history", "unknown-native", "wrong-birth-kind", "wrong-grant", "unrecovered-legacy", "live-earlier-generation", "cursor"] as const) {
+  test(`worker lease recovery rejects ${invalid} before any attestation`, async () => {
+    const seed = retiredLeaseFixture();
+    let calls = 0;
+    let records: NonNullable<HarnessOptions["predecessors"]> = [{ execution_generation_id: "execution-1", agent_session_id: "session-old", authority: seed.authority }];
+    let executions = [seed.retired];
+    if (invalid === "missing-history") records = [];
+    if (invalid === "wrong-grant") records[0]!.authority = { ...seed.authority, grant_id: "another-host" };
+    if (invalid === "unrecovered-legacy") records[0]!.authority = null;
+    if (invalid === "unknown-native") executions = [execution({ ...terminalExecution(), terminal_cause: "stopped" })];
+    if (invalid === "wrong-birth-kind") executions = [execution({ ...seed.retired.terminal!, native_runtime_death: { kind: "codex_app_server", pid: 42, processIdentity: "same-pid-other-provider" } })];
+    if (invalid === "live-earlier-generation") {
+      records.push({ execution_generation_id: "earlier", agent_session_id: "session-old", authority: { ...seed.authority, execution_generation_id: "earlier" } });
+      executions.push({ ...execution(), execution_generation_id: "earlier", generation: 6 });
+    }
+    const f = retiredLeaseFixture({ predecessors: records, executions,
+      ...(invalid === "cursor" ? { entry: manifestEntry({ provider: "cursor" }) } : {}),
+      leaseHttp: { listWorkLeases: async () => [seed.lease], readWorkLease: async () => seed.lease,
+        attestWorkLease: async () => { calls++; return "bad"; }, rebindWorkLease: async () => seed.lease } });
+    await assert.rejects(f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+    assert.equal(calls, 0);
+    assert.equal(f.harness.custody.workerAuthorization("agent-1"), undefined);
+  });
+}
+
+test("completed legacy recovery may restore its exact published predecessor", async () => {
+  const f = retiredLeaseFixture({ predecessors: [{ execution_generation_id: "execution-1", agent_session_id: "session-old", authority: null, legacy_recovery_complete: true }] });
+  assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+  assert.equal(f.current.epoch, 5);
+});
+
+for (const mismatch of ["session", "epoch", "task", "instance"] as const) {
+  test(`lost lease response rejects a competing ${mismatch} on readback`, async () => {
+    const seed = retiredLeaseFixture();
+    const readback = { ...seed.lease, agent_session_id: "session-minted", epoch: 5 };
+    if (mismatch === "session") readback.agent_session_id = "competing-worker";
+    if (mismatch === "epoch") readback.epoch = 6;
+    if (mismatch === "task") readback.task_id = "different-task";
+    if (mismatch === "instance") readback.agent_instance_id = "daemon:another-host";
+    const f = retiredLeaseFixture({ leaseHttp: {
+      listWorkLeases: async () => [seed.lease], attestWorkLease: async () => "proof",
+      rebindWorkLease: async () => { throw new Error("response lost"); }, readWorkLease: async () => readback,
+    } });
+    await assert.rejects(f.harness.subject.mintHostWorkerAuthorization(f.harness.entry), /response lost/);
+    assert.equal(f.harness.custody.workerAuthorization("agent-1"), undefined);
+  });
+}
+
+test("worker lease recovery loses its grant fence after attestation without issuing rebind", async () => {
+  const seed = retiredLeaseFixture();
+  let rebinds = 0;
+  const f = retiredLeaseFixture({ leaseHttp: {
+    listWorkLeases: async () => [seed.lease], readWorkLease: async () => seed.lease,
+    attestWorkLease: async () => { f.harness.setControlEpoch(1); return "proof"; },
+    rebindWorkLease: async () => { rebinds++; return seed.lease; },
+  } });
+  await assert.rejects(f.harness.subject.mintHostWorkerAuthorization(f.harness.entry), /lost its authority/);
+  assert.equal(rebinds, 0);
+});
+
+test("worker launch custody must commit before a new provider receives its session", async () => {
+  const f = fixture({ recordExecutionBinding: async () => { throw new Error("custody commit failed"); } });
+  f.custody.installHostGrant(hostGrant());
+  const minted = await f.subject.mintHostWorkerAuthorization(f.entry);
+  await assert.rejects(f.subject.recordMintedHostWorkerSession(f.entry, "execution-1", minted!), /custody commit failed/);
+  assert.equal(f.events.includes("session:record"), false);
+});
+
+test("same-session credential rotation leaves ownership alone and never claims another host's work", async () => {
+  const seed = retiredLeaseFixture();
+  let mutations = 0;
+  const f = retiredLeaseFixture({ predecessors: [], leaseHttp: {
+    listWorkLeases: async () => [
+      { ...seed.lease, agent_session_id: "session-minted" },
+      { ...seed.lease, id: "other-lease", agent_instance_id: "daemon:another-host" },
+    ],
+    readWorkLease: async () => { throw new Error("Unexpected readback"); },
+    attestWorkLease: async () => { mutations++; return "proof"; },
+    rebindWorkLease: async () => { mutations++; return seed.lease; },
+  } });
+  assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+  assert.equal(mutations, 0);
+});
+
+test("a retained session can have earlier launch receipts from a replaced host grant", async () => {
+  const seed = retiredLeaseFixture();
+  const f = retiredLeaseFixture({ predecessors: [
+    { execution_generation_id: "execution-1", agent_session_id: "session-old", authority: { ...seed.authority, grant_id: "retired-grant" } },
+    { execution_generation_id: "execution-1", agent_session_id: "session-old", authority: seed.authority },
+  ] });
+  assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+  assert.equal(f.current.epoch, 5);
 });
