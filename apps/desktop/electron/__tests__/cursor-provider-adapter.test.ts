@@ -406,6 +406,7 @@ function createHarness(options: HarnessOptions = {}) {
   const profilePreparations: Array<{
     workAttemptId: string;
     cwd: string;
+    apiBaseUrl: string;
     permissionProfileId?: string | null;
     profileRoot?: string;
     includeAuth?: boolean;
@@ -596,6 +597,7 @@ function supervisedAdapter(harness: ReturnType<typeof createHarness>, stopGraceM
       harness.profilePreparations.push(input);
       const { workAttemptId, profileRoot } = input;
       const root = profileRoot ?? `/private/cursor/${workAttemptId}`;
+      const runtime = input.mcpConnectorSocketPath ? wrapperHostedMcpFixture(root) : {};
       return {
         homeDir: `${root}/home`,
         configDir: `${root}/config`,
@@ -612,7 +614,8 @@ function supervisedAdapter(harness: ReturnType<typeof createHarness>, stopGraceM
         ...(input.inspectionOnly ? {} : {
           mcpRuntimeEntryPath: "/Applications/LetAgents.app/runtime/letagents/server.js",
           mcpRuntimeReadRoots: ["/Applications/LetAgents.app/runtime/letagents"],
-          ...(input.mcpConnectorSocketPath ? wrapperHostedMcpFixture(root) : {}),
+          ...runtime,
+          ...(runtime.mcpRuntimeEnv ? { mcpRuntimeEnv: { ...runtime.mcpRuntimeEnv, LETAGENTS_API_URL: input.apiBaseUrl } } : {}),
         }),
         mcpServerName: cursorSupervisedMcpServerName(workAttemptId),
       };
@@ -885,7 +888,9 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
   process.env.NPM_TOKEN = "npm-must-not-leak";
   try {
     const adapter = supervisedAdapter(harness);
-    const handle = await spawnDaemonLane(adapter, harness);
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      supervisorWorkerSession: { agentSessionId: "agent_session_cursor_1", roomCursor: "msg_7", apiUrl: "letagents-local://rooms" },
+    }));
 
     assert.deepEqual(adapter.capabilities().deliveryModes, ["mcp_polling", "daemon_inbox"]);
     assert.equal(adapter.capabilities().midTurnCorrection, false);
@@ -983,6 +988,9 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     const finalPreparation = harness.profilePreparations.find((entry) =>
       entry.mcpConnectorSocketPath !== undefined
     )!;
+    assert.equal(harness.profilePreparations.length, 6);
+    assert.ok(harness.profilePreparations.every(input => input.apiBaseUrl === "letagents-local://rooms"));
+    assert.equal(launch.mcpRuntimeEnv?.LETAGENTS_API_URL, "letagents-local://rooms");
     assert.equal(finalPreparation.authSourceHomeDir, `${inspectionPreparations[3]!.profileRoot}/home`);
     assert.equal(finalPreparation.supervisorMcpEnv, undefined, "native-readable MCP config contains no supervisor coordinates");
     assert.deepEqual(Object.fromEntries(Object.entries(launch.mcpRuntimeEnv ?? {}).filter(([key]) =>
@@ -1055,6 +1063,9 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     for (let index = 0; index < 100 && !harness.children[1]?.isReleased; index += 1) await flush();
     assert.equal(harness.children[1]?.isReleased, true);
     const resumeLaunch = harness.launches[1]!;
+    assert.equal(harness.profilePreparations.length, 11);
+    assert.ok(harness.profilePreparations.every(input => input.apiBaseUrl === "letagents-local://rooms"));
+    assert.equal(resumeLaunch.mcpRuntimeEnv?.LETAGENTS_API_URL, "letagents-local://rooms");
     const resumeRuntimeDataDir = resumeLaunch.env?.CURSOR_DATA_DIR;
     assert.match(resumeRuntimeDataDir ?? "", /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/);
     assert.notEqual(resumeRuntimeDataDir, firstRuntimeDataDir, "each resumed turn gets a fresh worker socket namespace");
