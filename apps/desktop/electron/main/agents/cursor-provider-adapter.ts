@@ -88,6 +88,7 @@ export type { CursorCliChild };
 
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
+  ProviderProcessCustody,
   DEFAULT_STOP_GRACE_MS,
   defaultGetProcessIdentity,
   defaultSignalProcess,
@@ -645,10 +646,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private readonly stopGraceMs: number;
   private readonly supervisedProfileFactory: NonNullable<CursorProviderAdapterOptions["supervisedProfileFactory"]>;
   private readonly handles = new Map<string, CursorProviderHandle>();
+  private readonly processCustody: ProviderProcessCustody;
 
   constructor(options: CursorProviderAdapterOptions = {}) {
     this.cursorBin = options.cursorBin || desktopRuntimeEnvironment().LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+    this.processCustody = new ProviderProcessCustody(this.deps);
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
     this.turnStartTimeoutMs = options.turnStartTimeoutMs ?? TURN_START_TIMEOUT_MS;
@@ -674,6 +677,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
           devEntryPath: input.devMcpServerEntryPath,
         }),
       }));
+  }
+
+  runtimeCustody(workAttemptId: string): "absent" | "owned" | "unknown" {
+    const handle = this.handles.get(workAttemptId);
+    if (handle && (handle.liveTurn || handle.activeRoomTurnId || handle.roomTurnOperationId
+      || handle.roomTurnAbortController || handle.roomTurnOperationSettled)) return "unknown";
+    return this.processCustody.state(workAttemptId);
   }
 
   capabilities(): ProviderAdapterCapabilities {
@@ -1558,6 +1568,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CursorProviderHandle> {
+    return this.processCustody.acquire(req.workAttemptId, () => this.startAcquired(req, resumeRef));
+  }
+
+  private async startAcquired(
+    req: ProviderSpawnRequest,
+    resumeRef: ProviderContinuationRef | null,
+  ): Promise<CursorProviderHandle> {
     const current = this.handles.get(req.workAttemptId);
     if (current && !current.terminal) {
       throw new Error(`Cursor work attempt '${req.workAttemptId}' already has a live lane.`);
@@ -1658,6 +1675,22 @@ export class CursorProviderAdapter implements ProviderAdapter {
    * long-lived adapters.
    */
   private async beginTurn(
+    handle: CursorProviderHandle,
+    prompt: string,
+    resumeSessionId: string | null,
+    roomTurnId: string | null = null,
+    checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"],
+    checkpointTurnStarted?: ProviderRoomTurnOptions["checkpointTurnStarted"],
+    checkpointPreparedTurn?: ProviderRoomTurnOptions["checkpointPreparedTurn"],
+    launchSignal?: AbortSignal,
+    markDurableTurnStarted?: ProviderRoomTurnOptions["markDurableTurnStarted"],
+    settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"],
+  ): Promise<LiveTurn> {
+    return this.processCustody.acquire(handle.workAttemptId, () => this.beginAcquiredTurn(handle, prompt, resumeSessionId,
+      roomTurnId, checkpointProviderState, checkpointTurnStarted, checkpointPreparedTurn, launchSignal, markDurableTurnStarted, settleLifecycleBeforeIdle));
+  }
+
+  private async beginAcquiredTurn(
     handle: CursorProviderHandle,
     prompt: string,
     resumeSessionId: string | null,
@@ -2068,6 +2101,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       }
       throw error;
     }
+    const captureBirth = this.processCustody.record(handle.workAttemptId, child);
     if (supervisedRuntimeDataDir) {
       const runtimeDataDir = supervisedRuntimeDataDir;
       // The production wrapper removes this before terminal publication. This
@@ -2155,7 +2189,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         );
       }
     }
-    const processIdentity = this.deps.getProcessIdentity(child.pid);
+    const processIdentity = captureBirth();
     if (typeof processIdentity !== "string" || !processIdentity) {
       await this.terminateTurnChild(child.pid, child.exited, processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
       await abandonPreparedGeneration();

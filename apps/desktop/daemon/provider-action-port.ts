@@ -200,7 +200,11 @@ export class ProviderActionFailure extends Error {
   }
 }
 
+/** A synchronous read of native custody already acquired by this process. */
+export type ProviderRuntimeCustody = { state: "absent" } | { state: "owned" | "retired"; handle: ProviderActionHandle } | { state: "unknown" };
+
 export interface ProviderActionPort {
+  runtimeCustody?(workAttemptId: string, provider: string): ProviderRuntimeCustody;
   onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;
   probeControl?(handle: ProviderActionHandle): Promise<ControlProbeResult>;
   observePermissions?(handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, signal: AbortSignal): Promise<void>;

@@ -73,6 +73,11 @@ export class EntryConcurrencyGate {
     return this.lifecycleEntries.has(entryId);
   }
 
+  /** Native control already admitted before update admission closed. */
+  isNativeControlActive(entryId: string): boolean {
+    return this.lifecycleEntries.has(entryId) || this.turnControlEntries.has(entryId);
+  }
+
   /**
    * Announce lifecycle exclusion synchronously, then wake room-move callers
    * queued behind unrelated entry work. The lifecycle owner separately drains

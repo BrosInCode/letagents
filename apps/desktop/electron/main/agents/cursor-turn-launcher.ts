@@ -28,6 +28,8 @@ const CURSOR_MCP_CONNECTOR_ROOT_PATTERN = `^${escapeCursorSandboxRegex(CURSOR_MC
 export interface CursorCliChild {
   pid: number | null;
   exited: Promise<ProviderProcessExit>;
+  /** Positive native spawn failure before any child process was acquired. */
+  didNotSpawn?(): boolean;
   /** Ordered stdout stream-json lines (raw, one JSON document per line). */
   onLine(listener: (line: string) => void): () => void;
   /** Bounded stderr tail — the provider-quota signature lives here (msg_1708). */
@@ -2114,8 +2116,14 @@ if (process.send) process.send({ type: "prepared" });
       resolvePrepared();
     }
   });
+  let spawned = false;
+  let sawPid = child.pid !== undefined;
+  let failedToSpawn = false;
+  child.once("spawn", () => { spawned = true; sawPid ||= child.pid !== undefined; });
   const exited = new Promise<ProviderProcessExit>((resolve) => {
     child.once("error", (error) => {
+      sawPid ||= child.pid !== undefined;
+      failedToSpawn = !spawned && !sawPid;
       if (!wrapperPrepared) rejectPrepared(error);
       resolve({ type: "error", error });
     });
@@ -2194,6 +2202,7 @@ if (process.send) process.send({ type: "prepared" });
   const result: CursorCliChild = {
     pid: child.pid ?? null,
     exited,
+    didNotSpawn: () => failedToSpawn && child.pid === undefined,
     onLine(listener) {
       lineListeners.add(listener);
       return () => lineListeners.delete(listener);

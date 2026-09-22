@@ -1,18 +1,20 @@
 import type { ManifestStore } from "./manifest-store.js";
 import type { ProviderActionHandle, ProviderActionPort } from "./provider-action-port.js";
+import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import type { ProviderExecutionCoordinator } from "./provider-execution-coordinator.js";
 import type { SupervisedAgentDelivery } from "./supervised-agent-delivery.js";
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry } from "./types.js";
 
 type ProviderHandoffCoordinatorOptions = {
-  provider?: Pick<ProviderActionPort, "capabilities">;
+  provider?: Pick<ProviderActionPort, "capabilities" | "runtimeCustody">;
   manifest: Pick<ManifestStore, "load" | "getEntry">;
   inbox: Pick<SupervisedAgentInboxStore, "head" | "providerTurnBinding" | "detail">;
   execution: Pick<ProviderExecutionCoordinator, "drainDispatches"> | null;
   delivery(): Pick<SupervisedAgentDelivery, "pauseDispatch" | "drainAdmittedTurns" | "resumeDispatch"> | null;
   currentHandle(entryId: string): ProviderActionHandle | undefined;
-  isLifecycleActive(entryId: string): boolean;
+  currentExecutionGeneration(entryId: string): string | undefined;
+  isNativeControlActive(entryId: string): boolean;
   isRetiring(): boolean;
   setDraining(draining: boolean): void;
   beginRetirement(): void;
@@ -105,10 +107,31 @@ export class ProviderHandoffCoordinator {
       if (!current) continue;
       const handle = this.options.currentHandle(entry.id);
       const state = handle?.observedState ?? current.observed_state;
-      if (this.options.isLifecycleActive(entry.id)
+      if (this.options.isNativeControlActive(entry.id)
         || !["idle", "stopped", "failed", "paused", "absent"].includes(state)) {
         throw new Error("Update deferred: an agent still has work that cannot survive a background-service restart. Try again after it finishes.");
       }
+      const custody = this.options.provider.runtimeCustody?.(current.work_attempt_id!, current.provider)
+        ?? (handle ? { state: "owned" as const, handle } : { state: "unknown" as const });
+      if (custody.state === "absent" && !handle) {
+        // This daemon owns no native channels for this entry. Its historical
+        // receipts remain unresolved; retiring cannot interrupt their runtime.
+        continue;
+      }
+      const ref = current.provider_ref;
+      if (custody.state === "unknown" || custody.state === "absent" || !ref
+        || ref.work_attempt_id !== current.work_attempt_id
+        || custody.handle.workAttemptId !== ref.work_attempt_id
+        || custody.handle.providerContinuationId !== ref.provider_continuation_id
+        || !sameProviderActionConnectionSnapshot(custody.handle.providerConnection, ref.provider_connection)
+        || (handle && (this.options.currentExecutionGeneration(entry.id) !== ref.execution_generation_id
+          || custody.handle.workAttemptId !== handle.workAttemptId
+          || custody.handle.providerContinuationId !== handle.providerContinuationId
+          || !sameProviderActionConnectionSnapshot(custody.handle.providerConnection, handle.providerConnection)))
+        || (custody.state === "owned" && !handle)) {
+        throw new Error("Update deferred: an agent's native connection could not be confirmed. Its work has been preserved.");
+      }
+      if (custody.state === "retired") continue;
       const head = await this.options.inbox.head(entry.id);
       if (!head) continue;
       if (!head.provider_turn_id) {

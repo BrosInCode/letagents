@@ -705,6 +705,52 @@ test("a turn-limit failure during Claude bootstrap still rejects startup and rea
   assert.equal(harness.mcpConfigDisposals, 1);
 });
 
+test("failed Claude bootstrap retains rejected native custody until exact physical retirement", async () => {
+  const options: HarnessOptions = { noInit: true };
+  const harness = createHarness(options);
+  harness.dependencies.signalProcess = () => { throw new Error("cleanup signal failed"); };
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 20 });
+  await assert.rejects(adapter.spawn(spawnRequest()), /cleanup signal failed/);
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "unknown");
+  options.noInit = false;
+  const successor = await adapter.spawn(spawnRequest());
+  assert.equal(adapter.runtimeCustody("wa-claude-1", successor), "unknown", "the successful retry does not overwrite the old child");
+  harness.identities.set(4100, undefined);
+  assert.equal(adapter.runtimeCustody("wa-claude-1", successor), "unknown");
+  harness.identities.set(4100, null);
+  assert.equal(adapter.runtimeCustody("wa-claude-1", successor), "owned");
+  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal(adapter.runtimeCustody("wa-claude-1", successor), "absent");
+});
+
+test("Claude missing executable proves no native child was acquired", async () => {
+  const harness = createHarness();
+  const { launchChild: _launchChild, ...dependencies } = harness.dependencies;
+  const adapter = new ClaudeCodeProviderAdapter({ claudeBin: "/nonexistent-letagents-test/claude", dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest({ cwd: tmpdir() })), /did not expose a process id/);
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "absent");
+  assert.deepEqual(harness.signals, []);
+});
+
+test("Claude bootstrap transport error is not a native-death receipt", async () => {
+  const harness = createHarness({ noInit: true });
+  const launch = harness.dependencies.launchChild;
+  harness.dependencies.launchChild = input => {
+    const child = launch(input) as FakeClaudeChild;
+    queueMicrotask(() => child.resolveExit({ type: "error", error: new Error("transport failed") }));
+    return child;
+  };
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 20 });
+  await assert.rejects(adapter.spawn(spawnRequest()), /did not report its stream-json init/);
+  assert.equal(harness.signals.length, 0, "existing cleanup resolves early on this transport error");
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "unknown", "birth remains live despite rejected acquisition and resolved error");
+  harness.identities.set(4100, undefined);
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "unknown");
+  harness.identities.set(4100, "reused-pid-birth");
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "absent", "later physical retirement unblocks handoff without history edits");
+});
+
 test("observed crash emits one synthesized terminal payload and makes attach terminal evidence", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
