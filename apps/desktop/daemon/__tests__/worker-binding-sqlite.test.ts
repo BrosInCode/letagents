@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -463,6 +463,77 @@ test("a sibling opener observes a durable legacy-import failure instead of retur
     assert.match(String(right.status === "rejected" && right.reason), /Legacy worker binding import/);
     await first.close(); await second.close();
   } finally { await env.cleanup(); }
+});
+
+test("concurrent failed-import cleanup requires exact retained quarantine evidence", async (t) => {
+  const cases = [
+    { boundary: "publish", retained: "matching" },
+    { boundary: "publish", retained: "missing" },
+    { boundary: "publish", retained: "mismatched" },
+    { boundary: "before-read", retained: "matching" },
+    { boundary: "retire", retained: "matching" },
+  ] as const;
+  for (const { boundary, retained } of cases) await t.test(`${boundary}: ${retained}`, async () => {
+    const env = await fixture();
+    const malformed = "{bad";
+    const quarantine = `${env.legacy}.corrupt.${checksum(malformed).slice(0, 16)}`;
+    const first = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const second = new WorkerBindingStore(env.legacy, undefined, env.database);
+    let db: DatabaseSync | null = null;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let reached!: () => void;
+    const afterSourceRead = new Promise<void>(resolve => { reached = resolve; });
+    const internals = first as unknown as { readOwnerOnly(path: string): Promise<string | undefined> };
+    const readOwnerOnly = internals.readOwnerOnly.bind(first);
+    let claimReads = 0;
+    internals.readOwnerOnly = async path => {
+      const claimedRead = path.startsWith(`${env.legacy}.claimed.`) && ++claimReads === 2;
+      if (boundary === "before-read" && claimedRead) { reached(); await held; }
+      const raw = await readOwnerOnly(path);
+      // First read parses the source. The second has the durable failure
+      // committed and is about to publish the exact quarantine hard-link.
+      if ((boundary === "publish" && claimedRead) || (boundary === "retire" && path === quarantine)) {
+        assert.equal(raw, malformed);
+        reached();
+        await held;
+      }
+      return raw;
+    };
+    try {
+      await writeFile(env.legacy, malformed, { mode: 0o600 });
+      const firstResult = Promise.allSettled([first.list()]);
+      await afterSourceRead;
+      db = new DatabaseSync(env.database);
+      const failureBefore = db.prepare("SELECT * FROM migration_failures").all();
+      assert.equal(failureBefore.length, 1, "the verdict is durable before either cleanup finishes");
+      const [right] = await Promise.allSettled([second.list()]);
+      assert.equal(right.status, "rejected");
+      assert.match(String(right.status === "rejected" && right.reason), /Legacy worker binding import/);
+      assert.equal(await readFile(quarantine, "utf8"), malformed, "the sibling retained the exact source before removing the claim");
+      if (retained === "missing") await unlink(quarantine);
+      if (retained === "mismatched") await writeFile(quarantine, "different evidence", { mode: 0o600 });
+      release();
+      const [left] = await firstResult;
+      assert.equal(left.status, "rejected");
+      assert.match(String(left.status === "rejected" && left.reason), retained === "matching" && boundary !== "before-read"
+        ? /Legacy worker binding import refused/
+        : /Legacy worker binding import integrity error/);
+      assert.deepEqual(db.prepare("SELECT * FROM migration_failures").all(), failureBefore, "cleanup never rewrites the durable verdict");
+      assert.equal((db.prepare("SELECT COUNT(*) AS n FROM migration_records").get() as { n: number }).n, 0);
+      assert.equal((db.prepare("SELECT COUNT(*) AS n FROM worker_session_bindings").get() as { n: number }).n, 0);
+      db.close(); db = null;
+      assert.equal((await readdir(env.root)).filter(name => name.includes(".claimed.")).length, 0);
+      if (retained !== "missing") {
+        assert.equal(await readFile(quarantine, "utf8"), retained === "matching" ? malformed : "different evidence");
+        assert.equal((await stat(quarantine)).mode & 0o777, 0o600);
+      }
+    } finally {
+      release();
+      db?.close();
+      await first.close(); await second.close(); await env.cleanup();
+    }
+  });
 });
 
 test("a durable malformed-A failure preserves a later public B under unique evidence", async () => {
