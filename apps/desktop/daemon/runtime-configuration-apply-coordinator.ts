@@ -7,7 +7,7 @@ import type { ProviderActionPort } from "./provider-action-port.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
 import type { ProviderTerminalCoordinator } from "./provider-terminal-coordinator.js";
-import type { SupervisedAgentDelivery } from "./supervised-agent-delivery.js";
+import type { SupervisedAgentDelivery, SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 
 export type ApplyAgentConfigurationInput = {
@@ -66,7 +66,48 @@ export type RuntimeConfigurationApplyCoordinatorOptions = {
 /** Applies a saved configuration only by replacing a provably idle runtime. */
 export class RuntimeConfigurationApplyCoordinator {
   private readonly desiredContracts = new Map<string, string>();
+  private readonly admissionRefreshRequested = new WeakSet<ProviderInstallationToken>();
   constructor(private readonly options: RuntimeConfigurationApplyCoordinatorOptions) {}
+
+  /** Observe only: replacement drains the caller, so convergence must run separately. */
+  async canAdmitManagedDelivery(agent: SupervisedIngressAgent): Promise<boolean> {
+    if (agent.provider !== "codex" || !this.options.managed || !this.options.provider?.describeManagedLaunchContract) return true;
+    const installation = this.options.streams.currentInstallation(agent.agentId);
+    const matches = () => Boolean(installation
+      && this.options.streams.currentInstallation(agent.agentId) === installation
+      && !this.options.authority.isHandoffScheduled()
+      && this.options.authority.currentDaemonGeneration() === agent.daemonGeneration
+      && installation.handle === agent.handle
+      && installation.workAttemptId === agent.workAttemptId
+      && installation.executionGenerationId === agent.executionGenerationId
+      && installation.providerContinuationId === agent.providerContinuationId
+      && sameProviderActionConnectionSnapshot(installation.providerConnection, agent.providerConnection));
+    if (!matches()) return false;
+    const contract = await this.desiredContract(agent.apiUrl);
+    if (!matches()) return false;
+    if (!contract) return true; // Explicit development runtimes have no managed contract.
+    const launched = await this.options.managed.store.readManagedLaunchContract({
+      agentId: agent.agentId, executionGenerationId: installation!.executionGenerationId,
+      providerConnection: installation!.providerConnection,
+    });
+    if (!matches()) return false;
+    if (launched === contract) return true;
+    // A deferred replacement can restart the same ingress. Wake once per
+    // installation; ordinary approval/lifecycle/recovery events own later wakes.
+    if (!this.admissionRefreshRequested.has(installation!)) {
+      this.admissionRefreshRequested.add(installation!);
+      this.options.requestConvergence(agent.agentId);
+    }
+    return false;
+  }
+
+  private async desiredContract(apiUrl: string): Promise<string | null> {
+    const contract = this.desiredContracts.get(apiUrl) ?? await this.options.provider!.describeManagedLaunchContract!({
+      provider: "codex", apiUrl, devMcpServerEntryPath: devMcpServerEntryFromEnv() ?? undefined,
+    });
+    if (contract) this.desiredContracts.set(apiUrl, contract);
+    return contract;
+  }
 
   async refreshManaged(entryId: string): Promise<void> {
     const managed = this.options.managed;
@@ -82,13 +123,8 @@ export class RuntimeConfigurationApplyCoordinator {
     const binding = await managed.bindings.get(entryId);
     if (!binding || binding.room_id !== entry.room_id || binding.work_attempt_id !== entry.work_attempt_id
       || binding.execution_generation_id !== installation.executionGenerationId) return;
-    const key = `${entry.provider}:${binding.api_url}`;
-    const contract = this.desiredContracts.get(key) ?? await provider.describeManagedLaunchContract({
-      provider: entry.provider, apiUrl: binding.api_url,
-      devMcpServerEntryPath: devMcpServerEntryFromEnv() ?? undefined,
-    });
+    const contract = await this.desiredContract(binding.api_url);
     if (!contract) return;
-    this.desiredContracts.set(key, contract);
     await this.applyInternal({ entryId, daemonGeneration: this.options.authority.currentDaemonGeneration(),
       expectedConfigurationRevision: configuration.config_revision }, { contract, apiUrl: binding.api_url });
   }
