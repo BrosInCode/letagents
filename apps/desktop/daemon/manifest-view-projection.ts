@@ -48,6 +48,8 @@ export function projectDeliveryTurn(
     inbox_item_id: head.inbox_item_id,
     source_message_id: head.source_message_id,
     provider_turn_id: head.provider_turn_id,
-    detail: head.last_error,
+    // The receipt retains prior failures for diagnostics; the active delivery
+    // owns current progress and has not reported a failure of its own.
+    detail: null,
   };
 }
