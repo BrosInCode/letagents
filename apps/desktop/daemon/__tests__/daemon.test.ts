@@ -4915,10 +4915,12 @@ test("scheduled convergence atomically replaces exit subscriptions and preserves
     const listeners = new Map<number, (terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void>();
     let subscriptions = 0;
     const poked: Array<number | null> = [];
+    let observePoke!: () => void;
+    const pokeObserved = new Promise<void>((resolve) => { observePoke = resolve; });
     const replacement = { workAttemptId: "attempt", pid: 2, providerContinuationId: null, observedState: "starting" as const };
     const port: ProviderActionPort = {
       capabilities: async () => ({ resume: false, midTurnInjection: true, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
-      spawn: async () => replacement, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async (handle) => { poked.push(handle.pid); }, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+      spawn: async () => replacement, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async (handle) => { poked.push(handle.pid); observePoke(); }, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
       onExit: async (handle, listener) => { subscriptions += 1; listeners.set(handle.pid ?? -1, listener); return () => { listeners.delete(handle.pid ?? -1); }; },
     };
     daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
@@ -4931,9 +4933,9 @@ test("scheduled convergence atomically replaces exit subscriptions and preserves
     ]);
     assert.equal(subscriptions, 2, "one initial listener is atomically replaced by the spawned child listener");
     assert.equal(listeners.has(1), false, "the superseded child listener is removed");
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.ok(poked.every((pid) => pid === 2) && poked.length > 0, "later scheduler ticks target the installed replacement, not input's stale handle");
+    await within(pokeObserved, "scheduled replacement poke");
     await stop(); await sameStop();
+    assert.ok(poked.every((pid) => pid === 2) && poked.length > 0, "later scheduler ticks target the installed replacement, not input's stale handle");
 
     await daemon.transition(entry.id, "working", "quarantined", "already quarantined", "test");
     await daemon.observeProviderExit(entry.id, { endedAt: "late", exitCode: 9, signal: "SIGKILL", terminalCause: "killed", providerContinuationId: null });
