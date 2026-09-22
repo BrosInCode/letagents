@@ -10,7 +10,7 @@ import test from "node:test";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-test("the packed MCP CLI reports its contract and exposes the supervised Cursor tools", { timeout: 120_000 }, async () => {
+test("the packed MCP CLI reports its contract and active supervised readiness", { timeout: 120_000 }, async () => {
   const tempRoot = mkdtempSync(join(tmpdir(), "letagents-package-runtime-"));
 
   try {
@@ -65,7 +65,7 @@ test("the packed MCP CLI reports its contract and exposes the supervised Cursor 
     assert.equal(existsSync(join(directory, 'review')), true);
     assert.equal(git('diff', '--cached'), '', 'capture must not modify the real index');
     const entry = join(packageRoot, "dist", "mcp", "server.js");
-    for (const apiUrl of ["http://127.0.0.1:9", "letagents-local://rooms"]) {
+    for (const apiUrl of ["http://127.0.0.1:9", "letagents-local://rooms"]) for (const provider of ["cursor", "codex"]) {
       const contract = JSON.parse(execFileSync(
         process.execPath,
         [entry, "--letagents-runtime-contract"],
@@ -85,7 +85,7 @@ test("the packed MCP CLI reports its contract and exposes the supervised Cursor 
           LETAGENTS_API_URL: apiUrl,
           LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
           LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
-          LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
+          LETAGENTS_SUPERVISOR_PROVIDER: provider,
           LETAGENTS_SUPERVISOR_ENTRY_ID: "package_test_entry",
           LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/letagents-package-test.sock",
           LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "package_test_attempt",
@@ -177,7 +177,15 @@ test("the packed MCP CLI reports its contract and exposes the supervised Cursor 
         server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
         const toolResponse = await listed;
         const names = toolResponse.result.tools.map(tool => tool.name).sort();
-        assert.deepEqual(names, contract.profiles.cursor_supervised_room_turn.tools, "packed discovery and contract use the same route");
+        assert.deepEqual(names, contract.profiles.cursor_supervised_room_turn.tools.filter(name => provider === "cursor" || name !== "complete_room_turn"), "packed discovery and contract use the same route");
+        const readiness = waitForResponse(3);
+        server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "resources/read", params: { uri: "letagents://runtime/readiness" } })}\n`);
+        const contents = (await readiness).result.contents;
+        assert.equal(contents.length, 1);
+        assert.equal(contents[0].uri, "letagents://runtime/readiness");
+        assert.equal(contents[0].mimeType, "application/json");
+        assert.deepEqual(JSON.parse(contents[0].text), { format: 1, profile: "supervised_room_turn", provider, tools: names },
+          "the installed CLI serves actual active capabilities without contacting its deliberately absent supervisor");
         assert.equal(names.includes("register_task_close_intent"), apiUrl !== "letagents-local://rooms");
         assert.equal(names.includes("join_room"), apiUrl !== "letagents-local://rooms");
         assert.ok(names.includes("update_task"));
@@ -188,13 +196,15 @@ test("the packed MCP CLI reports its contract and exposes the supervised Cursor 
         assert.equal(threadControl.inputSchema.additionalProperties, false);
         assert.ok(!contract.profiles.supervised_mcp_polling.tools.includes("set_reply_thread"));
         const completionTools = toolResponse.result.tools.filter((tool) => tool.name === "complete_room_turn");
-        assert.equal(completionTools.length, 1, "the packed runtime must expose exactly one completion tool");
-        const completionSchema = completionTools[0].inputSchema;
-        assert.equal(completionSchema?.type, "object");
-        assert.equal(completionSchema?.properties?.outcome?.type, "string");
-        assert.deepEqual(completionSchema?.properties?.outcome?.enum, ["reply", "no_reply"]);
-        assert.equal(completionSchema?.properties?.text?.type, "string");
-        assert.deepEqual(completionSchema?.required, ["outcome"], "text must remain optional for no-reply completion");
+        assert.equal(completionTools.length, provider === "cursor" ? 1 : 0, "only Cursor exposes its completion tool");
+        if (provider === "cursor") {
+          const completionSchema = completionTools[0].inputSchema;
+          assert.equal(completionSchema?.type, "object");
+          assert.equal(completionSchema?.properties?.outcome?.type, "string");
+          assert.deepEqual(completionSchema?.properties?.outcome?.enum, ["reply", "no_reply"]);
+          assert.equal(completionSchema?.properties?.text?.type, "string");
+          assert.deepEqual(completionSchema?.required, ["outcome"], "text must remain optional for no-reply completion");
+        }
       } finally {
         server.kill("SIGTERM");
       }

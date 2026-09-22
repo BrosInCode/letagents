@@ -45,6 +45,11 @@ const { SupervisedAgentInboxStore } = await import(new URL("../../daemon/supervi
 
 type RecordedRequest = { method: string; params: unknown };
 
+function roomReadiness(tools = ["claim_task", "get_board", "read_messages", "send_message"]) {
+  return { contents: [{ uri: "letagents://runtime/readiness", mimeType: "application/json",
+    text: JSON.stringify({ format: 1, profile: "supervised_room_turn", provider: "codex", tools }) }] };
+}
+
 function assertProviderHandle(
   value: ProviderHandle | { state: "terminal" } | null,
 ): asserts value is ProviderHandle {
@@ -99,6 +104,10 @@ class FakeRpc implements CodexAdapterRpc {
         data: this.options.workplacePresent ? [{ name: "letagents", runtimeStatus: "connected",
           tools: Object.fromEntries(["claim_task", "get_board", "read_messages", "send_message"].map(name => [name, { name }])) }] : [],
       } as T;
+    }
+    if (method === "mcpServer/resource/read") {
+      if (this.options.workplaceProbeTimesOut) throw new Error("Codex app-server request timed out: mcpServer/resource/read");
+      return (this.options.workplacePresent ? roomReadiness() : { contents: [] }) as T;
     }
     if (method === "thread/start") {
       this.threadStartCount += 1;
@@ -1467,19 +1476,65 @@ test("Codex bounded room turn verifies its exact terminal state when thread idle
   });
 });
 
-test("Codex blocks a restored conversation with missing room tools before any dispatch", async (t) => {
-  const validTools = Object.fromEntries(["claim_task", "get_board", "read_messages", "send_message"].map(name => [name, { name }]));
-  for (const [name, inventory] of Object.entries({
-    "missing server": { data: [] },
-    "configured but failed": { data: [{ name: "letagents", runtimeStatus: "failed", tools: {} }] },
-    "stale tools on failed server": { data: [{ name: "letagents", runtimeStatus: "failed", tools: validTools }] },
-    "unknown connection with cached tools": { data: [{ name: "letagents", runtimeStatus: null, tools: validTools }] },
-    "missing board tool": { data: [{ name: "letagents", tools: { send_message: { name: "send_message" } } }] },
-    "name only": { data: [{ name: "letagents" }] },
-    "malformed tools": { data: [{ name: "letagents", tools: ["get_board"] }] },
-    "malformed page": {},
-    "repeated cursor": { data: [], nextCursor: "loop" },
-    "probe timeout": null,
+test("room readiness targets the exact thread's LetAgents server while unrelated discovery hangs", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  const probes: RecordedRequest[] = [];
+  let release!: () => void;
+  const ready = new Promise<void>(resolve => { release = resolve; });
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "mcpServerStatus/list") {
+      probes.push({ method, params });
+      return new Promise<T>(() => {});
+    }
+    if (method === "mcpServer/resource/read") {
+      probes.push({ method, params });
+      await ready;
+      return roomReadiness() as T;
+    }
+    return originalRequest<T>(method, params);
+  };
+  let dispatches = 0;
+  const running = adapter.runRoomTurn!(handle, {
+    inboxItemId: "target-tools", actionId: "target-tools-action", sourceMessage: {}, activation: {},
+  }, { beforeNativeDispatch: async () => { dispatches += 1; } });
+  void running.catch(() => undefined);
+  await flush();
+  assert.equal(dispatches, 0, "a pending readiness read cannot start model work");
+  assert.deepEqual(probes, [{ method: "mcpServer/resource/read", params: {
+    threadId: handle.providerContinuationId, server: "letagents", uri: "letagents://runtime/readiness",
+  } }]);
+  release(); await flush();
+  assert.equal(dispatches, 1);
+  client.emit({ method: "turn/completed", params: {
+    threadId: handle.providerContinuationId, turnId: `turn-${handle.providerContinuationId}`,
+  } });
+  await running;
+  assert.equal(probes.length, 1, "no aggregate discovery or polling is needed");
+});
+
+test("Codex blocks invalid or unavailable room readiness before any dispatch", async (t) => {
+  const payload = JSON.parse(roomReadiness().contents[0].text);
+  const resource = (value: unknown) => ({ contents: [{ ...roomReadiness().contents[0], text: JSON.stringify(value) }] });
+  for (const [name, readiness] of Object.entries({
+    "missing resource": { contents: [] },
+    "old runtime without resource": new Error("Resource not found"),
+    "failed connection": new Error("MCP server connection failed"),
+    "malformed result": {},
+    "ambiguous resource": { contents: [...roomReadiness().contents, ...roomReadiness().contents] },
+    "wrong URI": { contents: [{ ...roomReadiness().contents[0], uri: "letagents://other" }] },
+    "wrong MIME type": { contents: [{ ...roomReadiness().contents[0], mimeType: "text/plain" }] },
+    "malformed JSON": { contents: [{ ...roomReadiness().contents[0], text: "{" }] },
+    "oversized resource": { contents: [{ ...roomReadiness().contents[0], text: " ".repeat(64 * 1024 + 1) }] },
+    "wrong format": resource({ ...payload, format: 2 }),
+    "wrong profile": resource({ ...payload, profile: "autonomous_mcp_worker" }),
+    "wrong provider": resource({ ...payload, provider: "cursor" }),
+    "malformed tools": resource({ ...payload, tools: { get_board: {} } }),
+    "missing board tool": roomReadiness(["claim_task", "read_messages", "send_message"]),
+    "probe timeout": new Error("request timed out"),
   })) await t.test(name, async () => {
     const harness = createHarness();
     const spawn = spawnRequest({ deliveryMode: "daemon_inbox" });
@@ -1493,11 +1548,11 @@ test("Codex blocks a restored conversation with missing room tools before any di
     const originalRequest = client.request.bind(client);
     let probes = 0;
     client.request = async <T>(method: string, params?: unknown): Promise<T> => {
-      if (method === "mcpServerStatus/list") {
+      if (method === "mcpServer/resource/read") {
         probes += 1;
-        assert.equal((params as { threadId?: string }).threadId, original.providerContinuationId);
-        if (!inventory) throw new Error("request timed out");
-        return inventory as T;
+        assert.deepEqual(params, { threadId: original.providerContinuationId, server: "letagents", uri: "letagents://runtime/readiness" });
+        if (readiness instanceof Error) throw readiness;
+        return readiness as T;
       }
       return originalRequest<T>(method, params);
     };
@@ -1508,18 +1563,17 @@ test("Codex blocks a restored conversation with missing room tools before any di
       providerFailureCode: "provider_room_tools_unavailable",
       ...(name === "probe timeout" ? { message: "Room tool discovery timed out. No model turn was started. Retry the message." } : {}),
       ...(name === "missing board tool" ? { message: "Required LetAgents room tools are missing from this conversation. No model turn was started. Retry the message." } : {}),
-      ...(name === "configured but failed" ? { message: "The LetAgents room connection is not ready. No model turn was started. Retry the message." } : {}),
     });
     assert.equal(dispatches, 0);
     assert.equal(client.requests.some(request => request.method === "turn/start"), false);
-    assert.ok(probes <= 2, "a repeated pagination cursor terminates");
+    assert.equal(probes, 1, "unavailable readiness never falls back to aggregate discovery");
     assert.equal(client.closed, false, "observation remains attached");
     assert.deepEqual(harness.signals, [], "a missing tool never kills the provider");
     assert.equal(harness.launches.length, 1);
   });
 });
 
-test("room tool discovery uses the bounded RPC startup budget without dispatching early", async (t) => {
+test("room readiness uses the unchanged bounded RPC budget without dispatching early", async (t) => {
   for (const delayMs of [6_500, 35_000]) await t.test(`inventory after ${delayMs}ms`, async (t) => {
     const harness = createHarness();
     const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -1542,14 +1596,10 @@ test("room tool discovery uses the bounded RPC startup budget without dispatchin
           queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: {} }) }));
           return;
         }
-        assert.equal(message.method, "mcpServerStatus/list");
+        assert.equal(message.method, "mcpServer/resource/read");
         assert.equal(message.params.threadId, handle.providerContinuationId);
         probes += 1;
-        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: {
-          data: [{ name: "letagents", runtimeStatus: "connected", tools: Object.fromEntries(
-            ["claim_task", "get_board", "read_messages", "send_message"].map(name => [name, { name }]),
-          ) }],
-        } }) }), delayMs);
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: roomReadiness() }) }), delayMs);
       }
     }
     globalThis.WebSocket = DiscoverySocket as unknown as typeof WebSocket;
@@ -1557,7 +1607,7 @@ test("room tool discovery uses the bounded RPC startup budget without dispatchin
     try {
       await rpc.connect();
       client.request = <T>(method: string, params?: unknown, options?: { timeoutMs?: number }) =>
-        method === "mcpServerStatus/list" ? rpc.request<T>(method, params, options) : originalRequest<T>(method, params);
+        method === "mcpServer/resource/read" ? rpc.request<T>(method, params, options) : originalRequest<T>(method, params);
       t.mock.timers.enable({ apis: ["setTimeout"] });
       let dispatches = 0; let settled = false;
       const running = adapter.runRoomTurn!(handle, {
@@ -1587,7 +1637,7 @@ test("room tool discovery uses the bounded RPC startup budget without dispatchin
   });
 });
 
-test("Codex follows thread-scoped tool pages and rechecks inventory on every new room turn", async () => {
+test("Codex rechecks target readiness on each new turn but not exact prior-turn recovery", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
@@ -1596,13 +1646,9 @@ test("Codex follows thread-scoped tool pages and rechecks inventory on every new
   let healthy = true;
   const probes: unknown[] = [];
   client.request = async <T>(method: string, params?: unknown): Promise<T> => {
-    if (method === "mcpServerStatus/list") {
+    if (method === "mcpServer/resource/read") {
       probes.push(params);
-      if (!healthy) return { data: [{ name: "letagents", tools: {} }] } as T;
-      if (!(params as { cursor?: string }).cursor) return { data: [{ name: "other" }], nextCursor: "page-two" } as T;
-      return { data: [{ name: "letagents", runtimeStatus: "connected", tools: Object.fromEntries(
-        ["claim_task", "get_board", "read_messages", "send_message"].map(name => [`mcp__letagents__${name}`, { name }]),
-      ) }], nextCursor: null } as T;
+      return (healthy ? roomReadiness() : roomReadiness([])) as T;
     }
     return originalRequest<T>(method, params);
   };
@@ -1614,8 +1660,7 @@ test("Codex follows thread-scoped tool pages and rechecks inventory on every new
   } });
   await running;
   assert.deepEqual(probes, [
-    { threadId: handle.providerContinuationId, detail: "toolsAndAuthOnly", limit: 100 },
-    { threadId: handle.providerContinuationId, detail: "toolsAndAuthOnly", limit: 100, cursor: "page-two" },
+    { threadId: handle.providerContinuationId, server: "letagents", uri: "letagents://runtime/readiness" },
   ]);
   healthy = false;
   await assert.rejects(adapter.runRoomTurn!(handle, { ...request, inboxItemId: "inbox-next", actionId: "action-next" }), {
@@ -1624,7 +1669,7 @@ test("Codex follows thread-scoped tool pages and rechecks inventory on every new
   assert.equal(client.requests.filter(request => request.method === "turn/start").length, 1);
   assert.equal((await adapter.recoverRoomTurn!(handle, { inboxItemId: request.inboxItemId,
     providerTurnId: `turn-${handle.providerContinuationId}` })).turnId, `turn-${handle.providerContinuationId}`);
-  assert.equal(probes.length, 3, "exact prior-turn recovery does not depend on current tool availability");
+  assert.equal(probes.length, 2, "exact prior-turn recovery does not depend on current tool availability");
 });
 
 test("Codex refuses readiness evidence from a replaced RPC connection", async () => {
@@ -1635,7 +1680,7 @@ test("Codex refuses readiness evidence from a replaced RPC connection", async ()
   const originalRequest = client.request.bind(client);
   client.request = async <T>(method: string, params?: unknown): Promise<T> => {
     const response = await originalRequest<T>(method, params);
-    if (method === "mcpServerStatus/list") client.connectionEpoch = "replacement";
+    if (method === "mcpServer/resource/read") client.connectionEpoch = "replacement";
     return response;
   };
   let dispatched = false;
@@ -1653,7 +1698,7 @@ test("an exact missing conversation during tool discovery retains automatic cont
   const client = harness.clients[0]!;
   const originalRequest = client.request.bind(client);
   client.request = async <T>(method: string, params?: unknown): Promise<T> => {
-    if (method === "mcpServerStatus/list") throw new Error(`thread not found: ${handle.providerContinuationId}`);
+    if (method === "mcpServer/resource/read") throw new Error(`thread not found: ${handle.providerContinuationId}`);
     return originalRequest<T>(method, params);
   };
   await assert.rejects(adapter.runRoomTurn!(handle, {
