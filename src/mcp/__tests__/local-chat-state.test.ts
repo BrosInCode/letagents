@@ -1613,7 +1613,7 @@ test("local participant lookup remains exact across a normalization and digest c
   database.close();
 });
 
-test("local routing lock retries back off and stop at a bounded deadline", async () => {
+test("local routing lock retries back off and stop at a bounded deadline", { timeout: 5_000 }, async (t) => {
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => ReturnType<typeof openSqliteDb> & { close(): void };
   };
@@ -1636,20 +1636,34 @@ test("local routing lock retries back off and stop at a bounded deadline", async
     },
   };
   writer.exec("BEGIN IMMEDIATE");
-  const startedAt = performance.now();
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
   try {
-    await assert.rejects(
+    const rejected = assert.rejects(
       ensureLocalThreadRoutingProjectionSchemaAsync(wrapped as never, {
         maxWaitMs: 300,
         random: () => 0,
       }),
       /database (?:is )?locked/i,
     );
-    const elapsed = performance.now() - startedAt;
-    assert.ok(elapsed >= 250 && elapsed < 600, `lock retry deadline was ${elapsed.toFixed(1)}ms`);
-    assert.ok(attempts >= 3 && attempts <= 8, `lock retry attempted ${attempts} times`);
+    assert.equal(attempts, 1, "the first lock attempt is immediate");
+    for (const delayMs of [5, 10, 20, 40, 80, 125, 20]) {
+      const before = attempts;
+      t.mock.timers.tick(delayMs - 1);
+      await flush();
+      assert.equal(attempts, before, "no lock retry occurs before its backoff elapses");
+      t.mock.timers.tick(1);
+      await flush();
+      assert.equal(attempts, before + 1, "exactly one lock retry follows each backoff");
+    }
+    await rejected;
+    assert.equal(Date.now(), 300, "the last backoff stops at the requested deadline");
+    t.mock.timers.tick(1_000);
+    await flush();
+    assert.equal(attempts, 8, "no retry remains scheduled after rejection");
     assert.equal(Number(contender.prepare("PRAGMA busy_timeout").get()?.timeout), 5_000);
   } finally {
+    t.mock.timers.reset();
     writer.exec("ROLLBACK");
     writer.close();
     contender.close();
