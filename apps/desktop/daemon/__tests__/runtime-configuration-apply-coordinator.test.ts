@@ -1,6 +1,12 @@
 import { ManagedRuntimeRefreshDeferred } from "../provider-action-port.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import type { ProviderActionPort } from "../provider-action-port.js";
 
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import type { ProviderActionHandle, ProviderActionTerminal } from "../provider-action-port.js";
@@ -467,3 +473,93 @@ test("managed refresh releases both reservations on genuine native failure and s
   assert.equal(env.state.resumedDelivery, 1);
   assert.deepEqual(env.convergenceLifecycleStates, []);
 });
+
+for (const outcome of ["reply", "no_reply", "approval"] as const) {
+  test(`settled ${outcome} delivery wakes deferred managed refresh after releasing its lane`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-refresh-settlement-"));
+    const inbox = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const env = managedHarness();
+    const agent = {
+      agentId: "agent-1", roomId: "room-1", provider: "codex", deliveryMode: "daemon_inbox" as const,
+      apiUrl: "http://127.0.0.1:4000", agentSessionId: "session", bearer: "memory",
+      executionGenerationId: "generation-1", daemonGeneration: 7, handle,
+      workAttemptId: "attempt-1", providerContinuationId: "continuation-1", providerConnection: connection,
+    };
+    let wakes = 0;
+    let workspaceReleased = false;
+    let refresh: Promise<void> | undefined;
+    let reserved = false;
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true,
+        permissionPromptBridging: false, survivesRestart: true }),
+      spawn: async () => { throw new Error("unused"); }, attach: async () => null,
+      attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unused"); },
+      poke: async () => {}, stop: async () => terminal, onExit: async () => () => {},
+      runRoomTurn: async (_handle, _request, options) => {
+        await options?.checkpointTurnStarted?.("turn-1");
+        // Native idle arrives before the daemon has published/acknowledged the answer.
+        await env.coordinator.refreshManaged(agent.agentId);
+        assert.equal(env.state.nativeStops, 0);
+        return { turnId: "turn-1", outcome: outcome === "no_reply" ? "no_reply" : "reply",
+          text: outcome === "no_reply" ? null : "done" };
+      },
+    };
+    const delivery = new SupervisedAgentDelivery(inbox, port, {
+      poll: async () => ({}),
+      publish: async () => {
+        await env.coordinator.refreshManaged(agent.agentId);
+        assert.equal(env.state.nativeStops, 0, "publishing is not a safe replacement boundary");
+        return { messageId: "published-1", roomId: agent.roomId };
+      },
+    }, async () => true, 0, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined,
+    async () => {
+      await env.coordinator.refreshManaged(agent.agentId);
+      assert.equal(env.state.nativeStops, 0, "acknowledgment still owns the active delivery lane");
+      workspaceReleased = true;
+      if (outcome === "approval") env.state.unclosed = true;
+    }, entryId => {
+      assert.equal(workspaceReleased, true);
+      wakes += 1;
+      // Match production's queued convergence: never await the current pump from its finalizer.
+      refresh = Promise.resolve().then(() => env.coordinator.refreshManaged(entryId));
+    });
+    env.options.inbox = inbox;
+    env.options.delivery = {
+      reserveIdle: async entryId => {
+        const release = await delivery.reserveIdle(entryId);
+        if (!release) return null;
+        reserved = true;
+        return () => { reserved = false; release(); };
+      },
+    };
+    env.options.provider!.stopIdle = async (_handle, assertCurrent) => {
+      assert.equal(reserved, true);
+      assert.equal(workspaceReleased, true);
+      assert.equal(env.state.approvalHeld, true);
+      assertCurrent();
+      env.state.nativeStops += 1;
+      return terminal;
+    };
+    try {
+      await inbox.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId,
+        last_observed_message_id: "1", messages: [{ source_message_id: "1",
+          source_message: { id: "1", text: "check" }, activation: {} }] });
+      await delivery.pump(agent);
+      await refresh;
+      assert.equal(wakes, 1, "the final delivery boundary must request another convergence pass");
+      assert.equal(env.state.nativeStops, outcome === "approval" ? 0 : 1,
+        "a settlement wake schedules ordinary guarded refresh, not permission to stop");
+      assert.equal(reserved, false);
+      assert.equal(env.state.approvalHeld, false);
+      assert.equal((await inbox.receipts(agent.agentId))[0]?.state,
+        outcome === "no_reply" ? "acknowledged_no_reply" : "acknowledged");
+      await delivery.pump(agent);
+      assert.equal(wakes, 1, "an empty pump must not create an incessant convergence loop");
+    } finally {
+      await delivery.fenceAndDrain();
+      await inbox.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

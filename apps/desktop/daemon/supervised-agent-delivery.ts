@@ -202,6 +202,7 @@ export class SupervisedAgentDelivery {
     private readonly observeSettledWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summary?: string | null, baseline?: string | null) => Promise<void>,
     private readonly observeStartingWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<string | null | void>,
     private readonly releaseWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<void>,
+    private readonly onDeliverySettled?: (agentId: string) => void,
   ) {}
 
   /**
@@ -1864,6 +1865,10 @@ export class SupervisedAgentDelivery {
         && interrupt.disposition) {
         this.interruptReservations.delete(agent.agentId);
       }
+      // Native idle can arrive while publication or this delivery still owns
+      // the lane. Wake the existing guarded convergence after releasing it;
+      // settlement itself is not proof that the provider may be replaced.
+      this.onDeliverySettled?.(agent.agentId);
     }
   }
 
