@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -14,6 +14,8 @@ import { WebSocketServer } from "ws";
 
 import type { HostApprovalReference } from "../../shared/host-approvals.js";
 import { HostApprovalBroker } from "../host-approval-broker.js";
+import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
+import { assertHostToolScope, hostToolScopeSchema } from "../host-tool-rules.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
@@ -36,10 +38,12 @@ const now = Date.parse("2026-08-31T00:00:00.000Z");
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 async function fixture(providerId: "codex" | "open-model" | "claude-code" = "codex",
-  overrides: Partial<Pick<ConstructorParameters<typeof HostApprovalBroker>[0], "exactAuthority" | "fenceCommit" | "hostActorId" | "onPermissionChanged">> = {}) {
+  overrides: Partial<Pick<ConstructorParameters<typeof HostApprovalBroker>[0], "exactAuthority" | "fenceCommit" | "hostActorId" | "onPermissionChanged">> = {}, roomWorkspace = false) {
   const root = await mkdtemp(join(tmpdir(), "letagents-approval-broker-"));
-  const workspace = join(root, "workspace");
-  await mkdir(workspace);
+  const workAttemptId = roomWorkspace ? "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a" : "workspace";
+  const room = roomWorkspace ? await new EphemeralWorkspaceProvisioner(root).provision({ workAttemptId, taskId: "task" }) : null;
+  const workspace = room?.path ?? join(root, "workspace");
+  await mkdir(workspace, { recursive: true });
   const path = join(root, "daemon-state.sqlite");
   const store = new ManifestStore(path);
   const inbox = new SupervisedAgentInboxStore(path, () => new Date(now).toISOString());
@@ -50,26 +54,28 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
   const entry: DaemonManifestEntry = { id: "agent", room_id: "room", display_name: "GardenPoint", provider: providerId,
     model: null, charter: "Help", desired_state: "running", observed_state: "working", condition: "none",
     permission_profile_id: "ask_before_write", delivery_mode: "daemon_inbox", created_by: "owner", created_at: new Date(now).toISOString(),
-    work_attempt_id: "workspace", provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation",
+    work_attempt_id: workAttemptId, provider_ref: { work_attempt_id: workAttemptId, execution_generation_id: "generation",
       provider_continuation_id: "continuation", provider_connection: connection } };
-  if (overrides.hostActorId) {
+  if (overrides.hostActorId && !roomWorkspace) {
     execFileSync("git", ["init", "-q", workspace]);
     execFileSync("git", ["-C", workspace, "-c", "user.name=QA", "-c", "user.email=qa@example.test", "commit", "--allow-empty", "-qm", "Fixture"]);
     execFileSync("git", ["-C", workspace, "remote", "add", "origin", "remote"]);
     entry.source_repo_path = workspace;
   }
+  if (roomWorkspace) entry.workspace_path = workspace;
   await store.write(0, [entry]);
   const db = new DatabaseSync(path); db.exec("PRAGMA foreign_keys=ON");
   db.prepare(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
     workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
-    VALUES('workspace','task','lease',1,?,'repo','remote','revision','/bare','active',?)`).run(workspace, entry.created_at);
-  db.prepare("INSERT INTO work_attempt_executions VALUES('generation','workspace',?,'provider',1,NULL)").run(entry.created_at);
+    VALUES(?,'task','lease',1,?,?,?,?,?,'active',?)`).run(workAttemptId, workspace, room?.identity.repo ?? 'repo',
+      room?.identity.remote_url ?? 'remote', room?.identity.resolved_revision ?? 'revision', room?.identity.bare_path ?? '/bare', entry.created_at);
+  db.prepare("INSERT INTO work_attempt_executions VALUES('generation',?,?,'provider',1,NULL)").run(workAttemptId, entry.created_at);
   const item = await inbox.enqueueInitialMessage({ agent_id: "agent", room_id: "room", source_message_id: "msg_1",
     source_message: { id: "msg_1", content: "Assess the project" }, activation: { kind: "deliver", reason: "direct_mention" } });
   await inbox.claimHead("agent");
-  await inbox.checkpointTurnStarted(item.inbox_item_id, "native-turn", { work_attempt_id: "workspace",
+  await inbox.checkpointTurnStarted(item.inbox_item_id, "native-turn", { work_attempt_id: workAttemptId,
     origin_execution_generation_id: "generation", provider_continuation_id: "continuation" });
-  const handle: ProviderActionHandle = { workAttemptId: "workspace", pid: 4311, providerContinuationId: "continuation",
+  const handle: ProviderActionHandle = { workAttemptId, pid: 4311, providerContinuationId: "continuation",
     providerConnection: connection, appliedConfigurationRevision: 1, observedState: "working" };
   const native: ProviderPermissionRequest = providerId === "codex"
     ? { provider: "codex", native: { id: 1, connectionId: "connection", method: "item/commandExecution/requestApproval",
@@ -1074,9 +1080,80 @@ for (const provider of ["codex", "claude-code", "open-model"] as const) {
   });
 }
 
-for (const stage of ["before-intent", "before-write", "after-write"] as const) {
-  test(`revocation ${stage} preserves either a usable prompt or sent uncertainty`, async () => {
-    const f = await savedRuleFixture();
+for (const provider of ["claude-code", "codex", "open-model"] as const) {
+  test(`room workspace Always allow persists without a composer read and revokes for ${provider}`, async () => {
+    const f = await fixture(provider, { hostActorId: () => "host-owner" }, true);
+    try {
+      const [candidate] = await f.broker.list("room");
+      assert.equal(candidate!.presentation.alwaysAllow && "kind" in candidate!.presentation.alwaysAllow
+        ? candidate!.presentation.alwaysAllow.kind : null, "room_workspace");
+      await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+      const [rule] = await f.broker.listToolRules({ agentId: "agent" });
+      assert.ok(rule && "kind" in rule.scope);
+      assert.equal(rule.scope.roomId, "room");
+      f.reinstall();
+      f.emit([nextPermission(f.native, "room-next")]);
+      await until(() => f.sends.length === 2);
+      assert.deepEqual(f.sends, ["once", "once"]);
+      await f.broker.revokeToolRule({ agentId: "agent", ruleId: rule.id, revision: rule.revision });
+      f.emit([nextPermission(f.native, "room-revoked")]);
+      const [manual] = await f.broker.list("room");
+      assert.equal(manual!.status, "pending");
+      assert.deepEqual(f.sends, ["once", "once"]);
+      assert.equal((await f.broker.listToolRules({ agentId: "agent" })).length, 0);
+    } finally { await f.close(); }
+  });
+}
+
+test("room workspace rules require the same durable attempt, room, account, policy and private marker", async () => {
+  const f = await fixture("claude-code", { hostActorId: () => "host-owner" }, true);
+  try {
+    const [candidate] = await f.broker.list("room");
+    const scope = candidate!.presentation.alwaysAllow!;
+    assert.ok("kind" in scope);
+    const entry = (await f.store.getEntry("agent"))!;
+    assertHostToolScope(f.db, scope, entry);
+    for (const change of [{ id: "other" }, { room_id: "other" }, { created_by: "other" },
+      { work_attempt_id: "different" }, { workspace_path: join(f.root, "other") },
+      { permission_profile_id: "read_only" }, { provider_launch_policy: { permissionMode: "acceptEdits" } },
+      { source_repo_path: f.workspace }]) {
+      assert.throws(() => assertHostToolScope(f.db, scope, { ...entry, ...change } as DaemonManifestEntry));
+    }
+    const markerPath = join(f.workspace, ".letagents-work-attempt.json");
+    const original = await readFile(markerPath, "utf8");
+    await writeFile(markerPath, JSON.stringify({ ...JSON.parse(original), task_id: "different" }));
+    assert.throws(() => assertHostToolScope(f.db, scope, entry));
+    assert.equal((await f.broker.list("room"))[0]!.presentation.alwaysAllow, undefined);
+    await writeFile(markerPath, original);
+    await chmod(f.workspace, 0o755);
+    assert.throws(() => assertHostToolScope(f.db, scope, entry));
+    await chmod(f.workspace, 0o700);
+    f.db.prepare("UPDATE work_attempts SET workspace_remote_url='letagents-ephemeral:forged' WHERE work_attempt_id=?").run(scope.workAttemptId);
+    assert.throws(() => assertHostToolScope(f.db, scope, entry));
+  } finally { await f.close(); }
+});
+
+test("existing project permission serialization and digest remain unchanged", async () => {
+  const f = await savedRuleFixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    const scope = candidate!.presentation.alwaysAllow!;
+    assert.ok(!("kind" in scope));
+    const old = { agentId: scope.agentId, accountId: scope.accountId, projectId: scope.projectId,
+      projectName: scope.projectName, sourceRepoPath: scope.sourceRepoPath, canonicalSourcePath: scope.canonicalSourcePath,
+      repository: scope.repository, remoteUrl: scope.remoteUrl, provider: scope.provider,
+      toolId: scope.toolId, toolLabel: scope.toolLabel, policySha256: scope.policySha256 };
+    assert.equal(JSON.stringify(hostToolScopeSchema.parse(old)), JSON.stringify(old));
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    const row = f.db.prepare("SELECT scope_json,scope_sha256 FROM host_tool_rules").get()!;
+    assert.equal(row.scope_json, JSON.stringify(old));
+    assert.equal(row.scope_sha256, hash(old));
+  } finally { await f.close(); }
+});
+
+for (const roomWorkspace of [false, true]) for (const stage of ["before-intent", "before-write", "after-write"] as const) {
+  test(`revocation ${stage} preserves either a usable prompt or sent uncertainty (room workspace: ${roomWorkspace})`, async () => {
+    const f = await fixture("claude-code", { hostActorId: () => "host-owner" }, roomWorkspace);
     try {
       const [candidate] = await f.broker.list("room");
       const selected = { ...decision(candidate!), decision: "allow_always" };

@@ -40,7 +40,7 @@
         <button v-if="approval.presentation.alwaysAllow" type="button" class="desktop-composer-permission-allow"
           :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
           title="Saved for this agent. Revoke in Permissions. Configured access settings are unchanged."
-          @click="decideHostApproval(approval.id, 'allow_always')">Always allow {{ approval.presentation.alwaysAllow.toolLabel }} in {{ approval.presentation.alwaysAllow.projectName }}</button>
+          @click="decideHostApproval(approval.id, 'allow_always')">Always allow {{ approval.presentation.alwaysAllow.toolLabel }} in {{ "kind" in approval.presentation.alwaysAllow ? "this room workspace" : approval.presentation.alwaysAllow.projectName }}</button>
       </div>
       <div v-else-if="approval.status === 'decision_recorded' && approval.retryDecision" class="desktop-composer-permission-actions">
         <button type="button" class="desktop-composer-permission-detail" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"

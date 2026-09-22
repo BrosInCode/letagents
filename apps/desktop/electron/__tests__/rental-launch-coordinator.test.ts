@@ -425,7 +425,7 @@ test("recovery resumes a durable pre-accept intent instead of stranding capacity
   }
 });
 
-test("recovery arms a persisted hard deadline before daemon or API connectivity", async () => {
+test("recovery arms a persisted hard deadline before daemon or API connectivity", { timeout: 5_000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-rental-deadline-recovery-"));
   const previous = process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
   process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = join(directory, "launches.json");
@@ -467,13 +467,20 @@ test("recovery arms a persisted hard deadline before daemon or API connectivity"
     } as never,
     {} as never,
   );
+  const teardown = t.mock.method(coordinator, "teardown");
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   try {
     await coordinator.recover();
-    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    t.mock.timers.tick(0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(teardown.mock.callCount(), 1, "the expired deadline initiates teardown despite daemon recovery failure");
+    await teardown.mock.calls[0]!.result;
     assert.equal(completions, 1);
     assert.equal(stops, 1);
     assert.equal((await readRentalLaunch("rsess_deadline"))?.state, "stopped");
   } finally {
+    await Promise.allSettled(teardown.mock.calls.map((call) => call.result));
+    t.mock.timers.reset();
     if (previous === undefined) delete process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
     else process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = previous;
   }

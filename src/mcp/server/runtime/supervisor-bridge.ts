@@ -13,6 +13,9 @@ import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.j
 const NEGOTIATION_PROTOCOL_VERSION = 1;
 const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2, 3]);
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+// A signed desktop update can leave the socket absent for roughly 20 seconds.
+// Only unsent operations receive this startup grace; it never permits replay.
+const SUPERVISED_STARTUP_TIMEOUT_MS = 30_000;
 const CONFIRMED_BINDING_VERIFY_TIMEOUT_MS = 250;
 const SUPERVISOR_CONTEXT_FILE = ".letagents-supervisor-context.json";
 const WORK_ATTEMPT_MARKER_FILE = ".letagents-work-attempt.json";
@@ -187,25 +190,9 @@ export async function executeCurrentSupervisedTool(input: {
   input: unknown;
   mcpRequestId: string;
 }, env: NodeJS.ProcessEnv = process.env, options: SupervisorBridgeOptions = {}): Promise<ExecutedSupervisedTool> {
-  const coordinates = await requireCurrentSupervisedCoordinates(env, options);
-  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
-  if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
-  const response = await supervisorRequest(coordinates.socketPath, {
-    version: negotiated.protocolVersion,
-    id: randomUUID(),
-    method: "supervisor.execute_bounded_tool",
-    params: {
-      entry_id: coordinates.entryId,
-      work_attempt_id: coordinates.workAttemptId,
-      execution_generation_id: coordinates.executionGenerationId,
-      ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
-      daemon_generation: negotiated.generation,
-      mcp_request_id: input.mcpRequestId,
-      tool_name: input.toolName,
-      input: input.input,
-    },
-  }, null);
+  const response = await requestCurrentSupervisedOperation("supervisor.execute_bounded_tool", {
+    mcp_request_id: input.mcpRequestId, tool_name: input.toolName, input: input.input,
+  }, env, options);
   if (!response.ok) {
     if (/Unsupported daemon method:\s*supervisor\.execute_bounded_tool/i.test(response.error ?? "")) {
       return { state: "unsupported" };
@@ -228,26 +215,9 @@ export async function prepareCurrentSupervisedEffect(input: {
   mcpRequestId: string;
   mutation: boolean;
 }, env: NodeJS.ProcessEnv = process.env, options: SupervisorBridgeOptions = {}): Promise<PreparedSupervisedEffect> {
-  const coordinates = await requireCurrentSupervisedCoordinates(env, options);
-  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
-  if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
-  const response = await supervisorRequest(coordinates.socketPath, {
-    version: negotiated.protocolVersion,
-    id: randomUUID(),
-    method: "supervisor.prepare_bounded_effect",
-    params: {
-      entry_id: coordinates.entryId,
-      work_attempt_id: coordinates.workAttemptId,
-      execution_generation_id: coordinates.executionGenerationId,
-      ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
-      daemon_generation: negotiated.generation,
-      mcp_request_id: input.mcpRequestId,
-      tool_name: input.toolName,
-      input: input.input,
-      mutation: input.mutation,
-    },
-  }, timeoutMs);
+  const response = await requestCurrentSupervisedOperation("supervisor.prepare_bounded_effect", {
+    mcp_request_id: input.mcpRequestId, tool_name: input.toolName, input: input.input, mutation: input.mutation,
+  }, env, options);
   if (!response.ok) throw new Error(response.error || "The supervised effect was rejected.");
   const result = response.result && typeof response.result === "object" ? response.result as Record<string, unknown> : {};
   const roomId = typeof result.room_id === "string" ? result.room_id.trim() : "";
@@ -276,6 +246,52 @@ export async function prepareCurrentSupervisedEffect(input: {
     return { state: "prepared", roomId, effectId, action: "room_move_prepared", destinationRoom: result.destination_room };
   }
   throw new Error("The supervised effect journal returned an unsupported action.");
+}
+
+async function requestCurrentSupervisedOperation(
+  method: "supervisor.execute_bounded_tool" | "supervisor.prepare_bounded_effect",
+  params: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+  options: SupervisorBridgeOptions,
+): Promise<SupervisorResponse> {
+  // Keep the original invocation and authority across an unlink-to-listen gap.
+  const invocation = JSON.parse(JSON.stringify(params)) as Record<string, unknown>;
+  const coordinates = await requireCurrentSupervisedCoordinates(env, options);
+  const requestId = randomUUID();
+  const deadline = Date.now() + (options.requestTimeoutMs ?? SUPERVISED_STARTUP_TIMEOUT_MS);
+  let retryAttempt = 0;
+  while (true) {
+    let negotiated: NegotiatedSupervisor;
+    try {
+      negotiated = await negotiateSupervisor(coordinates.socketPath, remainingRequestTimeout(deadline));
+    } catch (error) {
+      // Negotiation is read-only; no operation has been sent at this point.
+      if (!(error instanceof SupervisorTransportError) || !isRetryableSupervisorBridgeError(error)
+        || !await waitForCompletionHandoffRetry(deadline, retryAttempt++)) throw error;
+      continue;
+    }
+    if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
+    try {
+      return await supervisorRequest(coordinates.socketPath, {
+        version: negotiated.protocolVersion, id: requestId, method,
+        params: {
+          ...invocation,
+          entry_id: coordinates.entryId,
+          work_attempt_id: coordinates.workAttemptId,
+          execution_generation_id: coordinates.executionGenerationId,
+          ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
+          daemon_generation: negotiated.generation,
+        },
+      }, method === "supervisor.execute_bounded_tool" ? null : remainingRequestTimeout(deadline),
+      remainingRequestTimeout(deadline));
+    } catch (error) {
+      // Once a write begins, failure is ambiguous. Never replay an operation,
+      // even when its error looks like a transient daemon restart.
+      if (!(error instanceof SupervisorTransportError) || error.writeAttempted
+        || !isRetryableSupervisorBridgeError(error)
+        || !await waitForCompletionHandoffRetry(deadline, retryAttempt++)) throw error;
+    }
+  }
 }
 
 export async function completeCurrentSupervisedEffect(input: {
@@ -964,25 +980,43 @@ async function negotiateSupervisor(socketPath: string, timeoutMs: number): Promi
     custodialPollingOffersV1: (result.capabilities as Record<string, unknown> | undefined)?.custodialPollingOffersV1 === true };
 }
 
-function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number | null): Promise<SupervisorResponse> {
+class SupervisorTransportError extends Error {
+  readonly code: string | undefined;
+  constructor(error: Error, readonly writeAttempted: boolean) {
+    super(error.message, { cause: error });
+    this.code = (error as NodeJS.ErrnoException).code;
+  }
+}
+
+function supervisorRequest(
+  socketPath: string, request: Record<string, unknown>, timeoutMs: number | null,
+  connectTimeoutMs: number | null = null,
+): Promise<SupervisorResponse> {
   return new Promise((resolve, reject) => {
+    const encoded = `${JSON.stringify(request)}\n`;
     const socket = createConnection(socketPath);
     let buffer = "";
     let finished = false;
-    const timer = timeoutMs === null ? null : setTimeout(() => {
-      socket.destroy();
-      finish(() => reject(new Error("Timed out communicating with the supervisor daemon.")));
-    }, timeoutMs);
-    timer?.unref();
+    let writeAttempted = false;
     const finish = (operation: () => void) => {
       if (finished) return;
       finished = true;
       if (timer) clearTimeout(timer);
+      if (connectTimer) clearTimeout(connectTimer);
       operation();
     };
+    const failTransport = (error: Error) => finish(() => reject(new SupervisorTransportError(error, writeAttempted)));
+    const timeout = () => {
+      failTransport(new Error("Timed out communicating with the supervisor daemon."));
+      socket.destroy();
+    };
+    const timer = timeoutMs === null ? null : setTimeout(timeout, timeoutMs);
+    const connectTimer = connectTimeoutMs === null ? null : setTimeout(timeout, connectTimeoutMs);
+    timer?.unref();
+    connectTimer?.unref();
     socket.setEncoding("utf8");
-    socket.once("error", (error) => finish(() => reject(error)));
-    socket.once("close", () => finish(() => reject(new Error("Supervisor connection closed before a response."))));
+    socket.once("error", failTransport);
+    socket.once("close", () => failTransport(new Error("Supervisor connection closed before a response.")));
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       const newline = buffer.indexOf("\n");
@@ -996,6 +1030,15 @@ function supervisorRequest(socketPath: string, request: Record<string, unknown>,
       }
       catch (error) { finish(() => reject(error)); }
     });
-    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.once("connect", () => {
+      if (finished) return;
+      if (connectTimer) clearTimeout(connectTimer);
+      writeAttempted = true;
+      try { socket.write(encoded); }
+      catch (error) {
+        failTransport(error instanceof Error ? error : new Error(String(error)));
+        socket.destroy();
+      }
+    });
   });
 }

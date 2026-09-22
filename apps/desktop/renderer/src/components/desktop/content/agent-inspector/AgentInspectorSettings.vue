@@ -47,7 +47,7 @@
           <p v-else-if="toolRulesError" class="agent-inspector-settings-error" role="alert">{{ toolRulesError }} <button type="button" :disabled="revokingRule !== null" @click="loadToolRules">Retry</button></p>
           <p v-else-if="!toolRules.length" class="agent-inspector-settings-note">None</p>
           <div v-for="rule in toolRules" :key="rule.id" class="agent-inspector-settings-actions">
-            <span>{{ rule.scope.toolLabel }} · {{ rule.scope.projectName }}</span>
+            <span :title='"kind" in rule.scope ? `${rule.scope.workAttemptId} · ${rule.scope.canonicalWorkspacePath}` : undefined'>{{ rule.scope.toolLabel }} · {{ "kind" in rule.scope ? `Room ${rule.scope.roomId} · Workspace ${rule.scope.workAttemptId.slice(0, 8)}` : rule.scope.projectName }}</span>
             <button type="button" :disabled="revokingRule !== null" @click="revokeToolRule(rule)">{{ revokingRule === rule.id ? 'Revoking…' : 'Revoke' }}</button>
           </div>
         </section>

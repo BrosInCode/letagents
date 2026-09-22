@@ -983,9 +983,11 @@ test("attachment-only thread acceptance restores composer focus without requirin
   } finally { app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
 });
 
-test("composer names the saved permission scope before sending Always allow", async () => {
+for (const roomWorkspace of [false, true]) test(`composer names the saved permission scope before sending Always allow (room: ${roomWorkspace})`, async () => {
   const approval = hostApproval();
-  approval.presentation.alwaysAllow = { agentId: "agent-a", accountId: "owner", projectId: "a".repeat(64), projectName: "Do App",
+  approval.presentation.alwaysAllow = roomWorkspace ? { kind: "room_workspace", version: 1, agentId: "agent-a", accountId: "owner",
+    roomId: "room", workAttemptId: "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a", workspacePath: "/private/workspace", canonicalWorkspacePath: "/private/workspace",
+    provider: "open-model", toolId: "opencode:bash", toolLabel: "Bash", policySha256: "b".repeat(64) } : { agentId: "agent-a", accountId: "owner", projectId: "a".repeat(64), projectName: "Do App",
     sourceRepoPath: "/projects/do-app", canonicalSourcePath: "/projects/do-app", repository: "do-app", remoteUrl: "/projects/do-app",
     provider: "open-model", toolId: "opencode:bash", toolLabel: "Bash", policySha256: "b".repeat(64) };
   const requests: unknown[] = [];
@@ -996,7 +998,7 @@ test("composer names the saved permission scope before sending Always allow", as
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    await (buttonByText(root, "Always allow Bash in Do App").props.onClick as () => Promise<void>)();
+    await (buttonByText(root, roomWorkspace ? "Always allow Bash in this room workspace" : "Always allow Bash in Do App").props.onClick as () => Promise<void>)();
     assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_always" }]);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
