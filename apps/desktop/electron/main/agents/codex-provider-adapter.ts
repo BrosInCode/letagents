@@ -123,7 +123,7 @@ export interface CodexAdapterRpc {
 
 /** Native approval payloads stay host-ephemeral, outside execution facts and room projections. */
 export type CodexPermissionObservation =
-  | { type: "snapshot"; requests: readonly RpcServerRequest[] }
+  | { type: "snapshot"; connectionId: string; requests: readonly RpcServerRequest[] }
   | { type: "request_closed"; request: RpcServerRequest }
   | { type: "degraded" }
   | { type: "unavailable" };
@@ -903,7 +903,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         if (disposed || signal.aborted) return;
         const authority = this.permissionAuthority(handle, continuation, connection, rpcConnection);
         const event: CodexPermissionObservation = authority === "current"
-          ? { type: "snapshot", requests: handle.client.listPendingRequests().filter(request =>
+          ? { type: "snapshot", connectionId: rpcConnection!, requests: handle.client.listPendingRequests().filter(request =>
             request.connectionId === rpcConnection && permissionParams(request)?.threadId === continuation) }
           : { type: authority };
         try { listener(event); } catch { /* Observation never controls native work. */ }
