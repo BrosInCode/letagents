@@ -229,6 +229,29 @@ test("projects credential handoff while a starting provider reconnects", () => {
   });
 });
 
+test("an active retry presents its current phase while preserving the previous failure in receipts", () => {
+  const previousError = "Codex could not read this conversation’s room readiness. No model turn was started. Retry the message.";
+  const retry = receipt({ state: "dispatching", receipt_state: "dispatching", attempt_count: 2, last_error: previousError });
+  for (const phase of ["dispatching", "responding", "publishing"] as const) {
+    const projected = projectRoomAgentManifestEntry(facts({
+      receipts: [retry],
+      activeTurn: { inboxItemId: retry.inbox_item_id, sourceMessageId: retry.source_message_id, phase },
+    }));
+    assert.equal(projected.room_agent_state?.turn.state, phase);
+    assert.equal(projected.room_agent_state?.turn.detail, null, "an old failure is not current activity");
+    assert.equal(projected.delivery_receipts?.[0]?.error, previousError);
+    assert.equal(retry.last_error, previousError, "projection never resets the retained receipt");
+  }
+  for (const state of ["blocked", "result_recovery"] as const) {
+    const projected = projectRoomAgentManifestEntry(facts({
+      receipts: [{ ...retry, state, receipt_state: state }],
+      activeTurn: null,
+    }));
+    assert.equal(projected.room_agent_state?.turn.state, state === "blocked" ? "failed" : "retrying");
+    assert.equal(projected.room_agent_state?.turn.detail, previousError, "unresolved failure remains visible without an active delivery");
+  }
+});
+
 test("uncertain legacy cutover overrides inbox and turn projection", () => {
   const projected = projectRoomAgentManifestEntry(facts({
     entry: {

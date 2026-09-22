@@ -316,6 +316,51 @@ test("durable entries remain inspectable before room state exists", () => {
   assert.equal(projection.overallLabel, "Starting");
 });
 
+test("an admitted startup waits for its new room binding without presenting a retained failure", () => {
+  const oldError = "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn.";
+  for (const observedState of ["starting", "recovering"] as const) {
+    for (const lastError of [null, oldError]) {
+      const current = entry({
+        observedState,
+        lastError,
+        providerPid: null,
+        agentSessionBindingState: "none",
+        roomAgentState: {
+          ...entry().roomAgentState!,
+          connection: { state: "reconnecting", observedAt: null, detail: "Restoring the provider and exact worker binding." },
+          ingress: { state: "stopped", observedAt: null, detail: "The new worker binding is not available yet." },
+          inbox: { state: "waiting_for_desktop_credentials", pendingCount: 0, blockedByMessageId: null, detail: "A current worker binding is required before delivery can start." },
+        },
+      });
+      const projection = projectAgentInspector(current, { roomId: "focus_1" });
+      assert.equal(projection?.overallState, "starting");
+      assert.equal(projection?.now, null, "normal startup does not require user intervention");
+      assert.equal(projection?.entry.lastError, lastError, "diagnostic history is retained");
+
+      const room = current.roomAgentState!;
+      const blockers: Partial<DesktopSupervisorManifestEntry>[] = [
+        { condition: "auth_blocked" },
+        { condition: "coordination_blocked" },
+        { condition: "security_blocked" },
+        { condition: "quarantined" },
+        { roomAgentState: { ...room, ingress: { ...room.ingress, state: "blocked" } } },
+        { roomAgentState: { ...room, inbox: { ...room.inbox, state: "blocked" } } },
+        { roomAgentState: { ...room, inbox: { ...room.inbox, blockedByMessageId: "message_1" } } },
+        { roomAgentState: { ...room, turn: { ...room.turn, state: "failed" } } },
+        { roomAgentState: { ...room, connection: { ...room.connection, state: "disconnected" } } },
+        { observedState: "failed" },
+        { observedState: "idle" },
+      ];
+      for (const blocker of blockers) {
+        assert.equal(agentInspectorOverallState({ ...current, ...blocker }), "needs_attention", JSON.stringify(blocker));
+      }
+      assert.equal(agentInspectorOverallState({ ...current, desiredState: "paused" }), "paused");
+      assert.equal(agentInspectorOverallState({ ...current, desiredState: "stopped" }), "retired");
+      assert.equal(agentInspectorOverallState(entry({ lastError })), "online", "the completed startup can become online with retained history");
+    }
+  }
+});
+
 test("Activity groups stale supervisor facts as unavailable", () => {
   assert.equal(agentInspectorActivityGroupState({
     overallState: "online",
