@@ -4,7 +4,9 @@ import {
   lastRoomMessageId,
   SupervisorGrantRequestError,
   type SupervisorGrantHttp,
+  type CloudWorkLease,
 } from "./cloud-http.js";
+import { nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import {
@@ -126,6 +128,8 @@ type WorkerAuthorityDurability = {
 
 type WorkerAuthorityBindings = Pick<WorkerBindingStore,
   | "get"
+  | "executionPredecessors"
+  | "recordExecutionBinding"
   | "bind"
   | "credentialFor"
   | "unbind"
@@ -850,6 +854,89 @@ export class WorkerAuthorityCoordinator {
     throw new WorkerCredentialMintError(attempts, lastRetryable, lastError);
   }
 
+  private async restoreWorkerLeaseContinuity(
+    entry: DaemonManifestEntry,
+    grant: InstalledHostGrant,
+    minted: Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (isLocalRoomApi(grant.apiUrl) || !entry.work_attempt_id) return;
+    const http = this.options.supervisorGrantHttp;
+    if (!http.listWorkLeases || !http.readWorkLease || !http.attestWorkLease || !http.rebindWorkLease) {
+      throw new Error("Worker lease continuity is unavailable. No replacement work was admitted.");
+    }
+    const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
+    const assertCurrent = async () => {
+      if (signal?.aborted || !await this.ownsDaemonGeneration(grant.daemonGeneration)
+        || !this.options.custody.hostGrantIsCurrent(entry.id, grant)
+        || this.options.concurrency.currentControlEpoch(entry.id) !== controlEpoch) throw new Error("Worker lease recovery lost its authority.");
+      const current = await this.options.store.getEntry(entry.id);
+      if (!current || current.room_id !== entry.room_id || current.work_attempt_id !== entry.work_attempt_id
+        || this.currentHostGrant(current) !== grant) throw new Error("Worker lease recovery no longer belongs to this work attempt.");
+      await this.assertRuntimeAdmission(entry.id);
+    };
+    await assertCurrent();
+    const read = { apiUrl: grant.apiUrl, roomId: entry.room_id, bearer: minted.bearer, signal };
+    const inventory = await http.listWorkLeases(read);
+    const predecessors = inventory.filter(lease => lease.agent_key === grant.agentKey
+      && lease.agent_instance_id === `daemon:${entry.id}` && lease.agent_session_id !== minted.sessionId);
+    if (!predecessors.length) { await assertCurrent(); return; }
+    const history = await this.options.bindings.executionPredecessors(entry.id, entry.work_attempt_id, entry.room_id);
+    const attempt = await this.options.durability.getAttempt(entry.work_attempt_id);
+    for (const lease of predecessors) {
+      const records = history.filter(record => record.agent_session_id === lease.agent_session_id);
+      if (!records.length) throw new Error("The previous task owner has no exact retained execution identity. No lease was moved.");
+      // A live worker session may rotate onto a replacement host grant without
+      // replacing its native execution. Keep both receipts, and require proof
+      // that this predecessor was actually held under the current grant.
+      if (records.some(record => record.authority) && !records.some(record => record.authority?.grant_id === grant.grantId)) {
+        throw new Error("The previous task owner belongs to a different authority.");
+      }
+      const executions = records.map(record => {
+        const binding = record.authority;
+        if (!binding && !record.legacy_recovery_complete) throw new Error("The previous worker has no completed exact runtime recovery.");
+        if (binding && (binding.room_id !== entry.room_id || binding.api_url !== grant.apiUrl
+          || binding.agent_key !== grant.agentKey || binding.work_attempt_id !== entry.work_attempt_id)) {
+          throw new Error("The previous task owner belongs to a different authority.");
+        }
+        const execution = attempt.execution_generations.find(value => value.execution_generation_id === record.execution_generation_id);
+        const terminal = execution?.terminal;
+        const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
+        const expectedKind = entry.provider === "claude-code" ? "claude_cli" : entry.provider === "codex" ? "codex_app_server" : null;
+        if (!execution || execution.work_attempt_id !== entry.work_attempt_id || !terminal || !death.success || death.data.kind !== expectedKind
+          || terminal.actor !== execution.actor || terminal.generation !== execution.generation
+          || !Number.isFinite(Date.parse(terminal.ended_at)) || Date.parse(terminal.ended_at) < Date.parse(execution.started_at)
+          || !["exited", "killed", "stopped", "crashed", "protocol_error"].includes(terminal.terminal_cause)) {
+          throw new Error("The previous task owner's native runtime has not been proven stopped. No lease was moved.");
+        }
+        return execution;
+      });
+      const predecessor = executions.reduce((latest, value) => value.generation > latest.generation ? value : latest);
+      const input = { apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
+        grantGeneration: grant.grantGeneration, lease, workAttemptId: entry.work_attempt_id,
+        executionGenerationId: predecessor.execution_generation_id,
+        cause: predecessor.terminal!.terminal_cause as "exited" | "killed" | "stopped" | "crashed" | "protocol_error", signal };
+      const matchesSuccessor = (value: CloudWorkLease | null) => value?.id === lease.id && value.task_id === lease.task_id
+        && value.room_id === lease.room_id && value.agent_session_id === minted.sessionId && value.epoch === lease.epoch + 1
+        && value.agent_key === lease.agent_key && value.agent_instance_id === lease.agent_instance_id;
+      await assertCurrent();
+      try {
+        const attestationId = await http.attestWorkLease(input);
+        await assertCurrent();
+        const rebound = await http.rebindWorkLease({ ...input, attestationId, toSessionId: minted.sessionId });
+        if (!matchesSuccessor(rebound)) throw new Error("Worker lease recovery returned a different owner.");
+      } catch (error) {
+        // The server owns the durable effect. Lost replies and CAS races are
+        // successful only when a fresh exact task read confirms our successor
+        // at precisely the next epoch; never resend an ambiguous mutation here.
+        await assertCurrent();
+        const current = await http.readWorkLease({ ...read, taskId: lease.task_id, leaseId: lease.id });
+        if (!matchesSuccessor(current)) throw error;
+      }
+      await assertCurrent();
+    }
+  }
+
   async mintHostWorkerAuthorization(
     entry: DaemonManifestEntry,
     signal?: AbortSignal,
@@ -882,6 +969,7 @@ export class WorkerAuthorityCoordinator {
     }
     const current = await this.options.store.getEntry(entry.id);
     if (!current || current.work_attempt_id !== entry.work_attempt_id || this.currentHostGrant(current) !== grant) return null;
+    await this.restoreWorkerLeaseContinuity(entry, grant, minted, signal);
     this.options.custody.installWorkerAuthorization({
       entryId: entry.id,
       roomId: entry.room_id,
@@ -930,6 +1018,11 @@ export class WorkerAuthorityCoordinator {
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id);
     if (!attempt.execution_generations.some((candidate) => candidate.execution_generation_id === executionGenerationId && !candidate.terminal)) return null;
     await this.checkPollingActivationWorker(current, minted.agentSessionId, executionGenerationId);
+    await this.options.bindings.recordExecutionBinding({
+      entry_id: entry.id, room_id: entry.room_id, api_url: grant.apiUrl, grant_id: grant.grantId,
+      agent_key: grant.agentKey, work_attempt_id: entry.work_attempt_id,
+      execution_generation_id: executionGenerationId, agent_session_id: minted.agentSessionId,
+    });
     await this.options.bindings.recordSupervisedWorkerSession({
       agent_id: entry.id,
       room_id: entry.room_id,

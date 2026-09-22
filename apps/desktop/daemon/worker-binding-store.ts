@@ -43,6 +43,16 @@ export type SupervisedWorkerMintState = {
   agent_session_id: string | null;
   updated_at: string;
 };
+/** An exact launch authority receipt, retained after mutable bindings rotate. */
+export type WorkerExecutionBinding = {
+  entry_id: string; room_id: string; api_url: string; grant_id: string;
+  work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_key: string;
+};
+export type WorkerExecutionPredecessor = {
+  execution_generation_id: string; agent_session_id: string;
+  authority: WorkerExecutionBinding | null;
+  legacy_recovery_complete?: boolean;
+};
 type Row = Record<string, unknown>;
 type Reservation = { reservationId: string; binding: WorkerSessionBinding; bindingEpoch: number; sequence: number; observedAt: string; observedAtMs: number };
 type LegacyWorkerSessionBinding = WorkerSessionBindingInput & Pick<WorkerSessionBinding, "room_cursor" | "last_sequence" | "last_observed_at_ms" | "updated_at">;
@@ -180,6 +190,54 @@ export class WorkerBindingStore {
         execution_generation_id: String(row.execution_generation_id), credential_ref: String(row.credential_ref),
         expires_at: typeof row.expires_at === "string" ? row.expires_at : null, updated_at: String(row.updated_at),
       } : null;
+    });
+  }
+
+  /** Persist before the provider can receive this session, not on its first heartbeat. */
+  async recordExecutionBinding(input: WorkerExecutionBinding): Promise<void> {
+    for (const value of Object.values(input)) if (!value.trim()) throw new Error("Worker execution custody requires exact identity.");
+    await this.withMutation(async database => this.transaction(database, () => {
+      const execution = database.prepare("SELECT work_attempt_id FROM work_attempt_executions WHERE execution_generation_id=?")
+        .get(input.execution_generation_id);
+      if (execution?.work_attempt_id !== input.work_attempt_id) throw new Error("Worker execution custody belongs to a different attempt.");
+      const prior = database.prepare("SELECT * FROM worker_execution_bindings WHERE entry_id=? AND execution_generation_id=? AND agent_session_id=? AND grant_id=?")
+        .get(input.entry_id, input.execution_generation_id, input.agent_session_id, input.grant_id);
+      if (prior) {
+        if (Object.entries(input).some(([key, value]) => prior[key] !== value)) throw new Error("Worker execution custody is immutable.");
+        return;
+      }
+      database.prepare("INSERT INTO worker_execution_bindings VALUES(?,?,?,?,?,?,?,?,?)").run(
+        input.entry_id, input.room_id, input.api_url, input.grant_id, input.work_attempt_id,
+        input.execution_generation_id, input.agent_session_id, input.agent_key, new Date().toISOString());
+    }));
+  }
+
+  async executionPredecessors(entryId: string, workAttemptId: string, roomId: string): Promise<WorkerExecutionPredecessor[]> {
+    return this.withMutation(async database => {
+      const exact = database.prepare("SELECT * FROM worker_execution_bindings WHERE entry_id=? AND work_attempt_id=?")
+        .all(entryId, workAttemptId);
+      const records: WorkerExecutionPredecessor[] = exact.map(row => ({
+        execution_generation_id: String(row.execution_generation_id), agent_session_id: String(row.agent_session_id),
+        authority: Object.fromEntries(Object.keys(row).filter(key => key !== "recorded_at").map(key => [key, String(row[key])])) as WorkerExecutionBinding,
+      }));
+      // Older clients retained publication/verification reservations, not launch
+      // receipts. Reuse only exact generations in a completed recovery for this
+      // same room and attempt; never manufacture a historical launch receipt.
+      const legacy = database.prepare(`SELECT p.execution_generation_id,p.agent_session_id, MAX(CASE WHEN r.phase='complete' AND r.room_id=?
+        AND json_extract(r.provider_ref_json,'$.work_attempt_id')=e.work_attempt_id THEN 1 ELSE 0 END) AS recovered FROM (
+        SELECT entry_id,execution_generation_id,agent_session_id FROM worker_binding_publications WHERE entry_id=?
+        UNION SELECT entry_id,from_execution_generation_id,agent_session_id FROM worker_generation_verifications WHERE entry_id=?
+        UNION SELECT entry_id,to_execution_generation_id,agent_session_id FROM worker_generation_verifications WHERE entry_id=?
+      ) p JOIN work_attempt_executions e ON e.execution_generation_id=p.execution_generation_id
+      LEFT JOIN agent_runtime_recoveries r ON r.agent_id=p.entry_id AND r.execution_generation_id=p.execution_generation_id
+      WHERE e.work_attempt_id=?
+      GROUP BY p.execution_generation_id,p.agent_session_id`).all(roomId, entryId, entryId, entryId, workAttemptId);
+      for (const row of legacy) {
+        if (!records.some(record => record.execution_generation_id === row.execution_generation_id && record.agent_session_id === row.agent_session_id)) {
+          records.push({ execution_generation_id: String(row.execution_generation_id), agent_session_id: String(row.agent_session_id), authority: null, legacy_recovery_complete: Boolean(row.recovered) });
+        }
+      }
+      return records;
     });
   }
 
