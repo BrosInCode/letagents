@@ -8,12 +8,12 @@
       <header class="conversation-list-heading">
         <h1>Messages</h1>
         <button
-          class="chat-icon-button"
+          class="chat-primary conversation-new-chat"
           title="New chat"
           aria-label="New chat"
           @click="newChat()"
         >
-          <ChatIcon name="plus" />
+          <ChatIcon name="plus" />New chat
         </button>
       </header>
       <label class="conversation-search"
@@ -37,8 +37,11 @@
       <p v-if="loading" class="conversation-list-note" role="status">
         Loading conversations…
       </p>
-      <div v-else-if="!visibleChats.length" class="conversation-list-empty">
-        <ChatIcon name="chat" />
+      <div
+        v-else-if="!visibleChats.length"
+        class="conversation-list-empty"
+        :class="{ 'conversation-list-empty-initial': !chats.length && section === 'chats' && !filter }"
+      >
         <p>
           {{
             filter
@@ -47,16 +50,9 @@
                 ? "No message requests"
                 : section === "archived"
                   ? "No archived chats"
-                  : "Your conversations will appear here"
+                  : "No conversations yet"
           }}
         </p>
-        <button
-          v-if="section === 'chats' && !filter"
-          class="chat-text-button"
-          @click="newChat()"
-        >
-          Start a chat
-        </button>
       </div>
       <div class="conversation-rows">
         <button
@@ -418,13 +414,12 @@
       </template>
       <div v-else class="conversation-welcome">
         <span class="conversation-empty-mark"><ChatIcon name="chat" /></span>
-        <h2>A place to talk</h2>
+        <h2>{{ chats.length ? "Select a conversation" : "Start a conversation" }}</h2>
         <p>
-          Message someone directly, or start a conversation with a few people.
+          {{ chats.length
+            ? "Choose a chat from the list to pick up where you left off."
+            : "Choose New chat to message someone or bring a group together." }}
         </p>
-        <button class="chat-primary" @click="newChat()">
-          <ChatIcon name="plus" />New chat
-        </button>
       </div>
     </section>
     <dialog
