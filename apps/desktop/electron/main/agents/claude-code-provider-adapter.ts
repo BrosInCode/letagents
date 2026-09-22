@@ -533,7 +533,9 @@ async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidence
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   readVersion: defaultReadVersion,
   launchChild: defaultLaunchChild,
-  createLetAgentsMcpConfig: req => createManagedClaudeMcpConfig(desktopApiUrl, tmpdir(), req.devMcpServerEntryPath),
+  createLetAgentsMcpConfig: req => createManagedClaudeMcpConfig(
+    req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl, tmpdir(), req.devMcpServerEntryPath,
+  ),
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
