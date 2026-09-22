@@ -16,8 +16,8 @@ export function localSupervisedRoomToolOperation(name) {
 }
 
 export function localSupervisedRoomToolAvailable(name) {
-  // Cursor completion is handled by the daemon. Local room moves are unsupported.
-  return name === "complete_room_turn" || localSupervisedRoomToolOperation(name) !== null;
+  // Turn controls are handled by the daemon. Local room moves are unsupported.
+  return name === "complete_room_turn" || name === "set_reply_thread" || localSupervisedRoomToolOperation(name) !== null;
 }
 
 export function defineLocalSupervisedToolHandlers(handlers) {

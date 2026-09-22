@@ -296,6 +296,10 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
     const args = input.input && typeof input.input === "object" && !Array.isArray(input.input)
       ? input.input as Record<string, unknown>
       : {};
+    if (input.toolName === "set_reply_thread"
+      && (!input.input || typeof input.input !== "object" || Array.isArray(input.input) || Object.keys(input.input).length !== 0)) {
+      throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
+    }
     if (input.toolName === "complete_room_turn") {
       if (context.entry.provider !== "cursor") {
         throw new Error("The structured room-turn completion channel is reserved for supervised Cursor turns.");
