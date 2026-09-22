@@ -1180,8 +1180,15 @@ export function supervisedCursorPermissionProfilePresentation(
 export function supervisedPermissionProfilePresentation(
   providerId: DesktopAgentProviderId | null | undefined,
   profile: DesktopManagedAgentPermissionProfile,
+  context?: { hasProject: boolean },
 ): DesktopManagedAgentPermissionProfile {
-  if (providerId === "cursor") return supervisedCursorPermissionProfilePresentation(profile);
+  if (providerId === "cursor") {
+    const presented = supervisedCursorPermissionProfilePresentation(profile);
+    if (context?.hasProject === false && (profile.id === "sandboxed_write" || profile.id === "full_access")) {
+      return { ...presented, status: "unsupported", detail: "Connect a project to use workspace writes." };
+    }
+    return presented;
+  }
   if (profile.id !== "ask_before_write"
     || (providerId !== "codex" && providerId !== "open-model" && providerId !== "claude-code")) return profile;
   if (providerId === "claude-code") {

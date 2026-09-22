@@ -25,6 +25,7 @@ import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSub
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
 type NativeHandle = {
+  managedLaunchContract?: string;
   custodyLaunchAgentSessionId?: string;
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   workAttemptId: string;
@@ -64,6 +65,8 @@ export type NativeProviderAdapter = {
     replacementProviderContinuationId: string;
   }>;
   stopRef?(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
+  describeManagedLaunchContract?(input: { apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null>;
+  stopIdle?(handle: NativeHandle, assertCurrent: () => void): Promise<ProviderActionTerminal>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -74,6 +77,7 @@ export type ProviderAdapterLoader = () => Promise<NativeProviderAdapter>;
 function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: number): ProviderActionHandle {
   return {
     workAttemptId: handle.workAttemptId,
+    ...(handle.managedLaunchContract ? { managedLaunchContract: handle.managedLaunchContract } : {}),
     get pid() { return handle.pid; },
     get providerContinuationId() { return handle.providerContinuationId; },
     get providerConnection() { return handle.providerConnection ?? null; },
@@ -429,6 +433,25 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       ...repaired,
       handle: publicHandle(repaired.handle, handle.appliedConfigurationRevision),
     };
+  }
+
+  async describeManagedLaunchContract(input: { provider: string; apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null> {
+    const adapter = await this.adapter(this.requiredProvider(input.provider));
+    if (!adapter.stopIdle || !adapter.describeManagedLaunchContract) return null;
+    return adapter.describeManagedLaunchContract(input);
+  }
+
+  async stopIdle(handle: ProviderActionHandle, assertCurrent: () => void): Promise<ProviderActionTerminal> {
+    const remembered = this.required(handle);
+    const adapter = await this.adapter(remembered.provider);
+    if (!adapter.stopIdle || this.required(handle) !== remembered) {
+      throw new Error("The exact provider cannot prove idle replacement.");
+    }
+    assertCurrent();
+    return adapter.stopIdle(remembered.handle, () => {
+      if (this.required(handle) !== remembered) throw new Error("Provider changed before idle replacement.");
+      assertCurrent();
+    });
   }
 
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {

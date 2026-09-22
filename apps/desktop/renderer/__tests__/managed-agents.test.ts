@@ -2162,3 +2162,14 @@ test("supervised Claude exposes one-time native approval without enabling its le
   assert.match(supervised.detail!, /Each approval allows one action.*Other Claude settings do not apply/);
   assert.equal(legacy.status, "gated");
 });
+
+test("repo-less Cursor setup offers read-only and reserves write profiles for a connected project", () => {
+  for (const id of ["read_only", "sandboxed_write", "full_access"] as const) {
+    const profile = { id, label: id, description: "", detail: "", status: "available" as const, risk: "medium" as const, isDefault: false };
+    const scratch = supervisedPermissionProfilePresentation("cursor", profile, { hasProject: false });
+    assert.equal(scratch.status, id === "read_only" ? "available" : "unsupported");
+    if (id !== "read_only") assert.equal(scratch.detail, "Connect a project to use workspace writes.");
+    assert.equal(supervisedPermissionProfilePresentation("cursor", profile, { hasProject: true }).status, "available");
+    assert.equal(supervisedPermissionProfilePresentation("claude-code", profile, { hasProject: false }).status, "available");
+  }
+});
