@@ -3752,3 +3752,94 @@ test("formal bind and desktop credential installation serialize to the latest ex
     await store.close();
   } finally { await env.cleanup(); }
 });
+
+test("reply-thread intent commits atomically, deduplicates exact requests and permits later work", async () => {
+  const env = await fixture();
+  let store = new SupervisedAgentInboxStore(env.database);
+  const authority = {
+    agent_id: "thread-agent", room_id: "room", execution_generation_id: "generation",
+    provider_turn_id: "native-turn", work_attempt_id: "attempt",
+    current_execution_generation_id: "generation", provider_continuation_id: "continuation",
+  };
+  try {
+    const [item] = await store.ingestPoll({ agent_id: authority.agent_id, room_id: "room", last_observed_message_id: "msg_1",
+      messages: [{ source_message_id: "msg_1", source_message: { id: "msg_1", text: "answer here" }, activation: {} }] });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, authority.provider_turn_id, TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, { agentId: authority.agent_id, roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation" });
+    // A busy turn can outlive the rolling observation window. Silent later
+    // messages must not erase the provenance of its still-active source.
+    await store.ingestPoll({ agent_id: authority.agent_id, room_id: "room", last_observed_message_id: "msg_502", messages: [],
+      observed_messages: Array.from({ length: 501 }, (_, n) => ({ source_message_id: `msg_${n + 2}`,
+        source_message: { id: `msg_${n + 2}` }, activation: {}, activation_decision: "ignore" })) });
+    const request = { ...authority, mcp_request_id: "intent", tool_name: "set_reply_thread", request: {}, mutation: true };
+    await assert.rejects(store.prepareEffect(request, async () => { throw new Error("authority lost before commit"); }), /authority lost/);
+    assert.equal(await store.hasInterceptedThreadReply(item!.inbox_item_id), false, "no half-committed intent");
+    const first = await store.prepareEffect(request);
+    assert.equal(first.effect.state, "completed");
+    assert.equal(first.effect.mutation, true);
+    assert.deepEqual(first.effect.request, {});
+    assert.equal(await store.hasInterceptedThreadReply(item!.inbox_item_id), true);
+    assert.equal((await store.get(item!.inbox_item_id))?.state, "dispatching", "routing cannot complete the turn");
+    await store.close(); store = new SupervisedAgentInboxStore(env.database);
+    assert.deepEqual(await store.prepareEffect(request), { created: false, effect: first.effect }, "lost receipt response is safe across restart");
+    const second = await store.prepareEffect({ ...request, mcp_request_id: "intent-again" });
+    assert.equal(second.effect.state, "completed");
+    for (const mcp_request_id of ["intent", "intent-again"]) {
+      await assert.rejects(store.prepareEffect({ ...request, mcp_request_id, tool_name: "send_message", request: { text: "different" } }), /reused/);
+    }
+    for (const tool_name of ["get_board", "update_task"]) {
+      const next = await store.prepareEffect({ ...authority, mcp_request_id: tool_name, tool_name, request: {} });
+      assert.equal(next.effect.state, "prepared", `${tool_name} remains available after thread selection`);
+    }
+    await store.prepareEffect({ ...authority, mcp_request_id: "finish", tool_name: "complete_room_turn", request: { outcome: "no_reply" } });
+    await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: "too-late" }), /already complete/);
+    await store.checkpointNormalizedTerminal({ inbox_item_id: item!.inbox_item_id, agent_id: authority.agent_id,
+      execution_generation_id: "generation", provider_turn_id: "native-turn", outcome: "no_reply", text: null, evidence: "stream",
+      terminal_evidence: { turnId: "native-turn", providerContinuationId: "continuation", outcome: "no_reply", text: null, evidence: "stream" } });
+    await store.transition(item!.inbox_item_id, "awaiting_result");
+    await store.transition(item!.inbox_item_id, "acknowledged_no_reply");
+    const db = new DatabaseSync(env.database);
+    try {
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM supervised_agent_observed_messages WHERE source_message_id='msg_1'").get()!.n, 0,
+        "terminal turns release their provenance pin back to normal retention");
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM supervised_agent_publications").get()!.n, 0, "no intent publishes text");
+    } finally { db.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("reply-thread intent rejects foreign or stale authority, extra arguments and synthetic sources", async () => {
+  for (const sourceKind of ["observed", "synthetic", "copied-parent"] as const) {
+    const env = await fixture();
+    const store = new SupervisedAgentInboxStore(env.database);
+    try {
+      const source = { source_message_id: sourceKind === "copied-parent" ? "task-continuation:parent" : "msg_1",
+        source_message: { id: "msg_1", text: "source" }, activation: {} };
+      const item = sourceKind === "observed"
+        ? (await store.ingestPoll({ agent_id: "thread-agent", room_id: "room", last_observed_message_id: "msg_1", messages: [source] }))[0]!
+        : await store.enqueueCorrection({ agent_id: "thread-agent", room_id: "room", ...source });
+      await store.transition(item.inbox_item_id, "dispatching");
+      await store.checkpointTurnStarted(item.inbox_item_id, "native-turn", TEST_PROVIDER_TURN_AUTHORITY);
+      await seedActiveAgent(env, { agentId: "thread-agent", roomId: "room", workAttemptId: "attempt",
+        executionGenerationId: "generation", providerContinuationId: "continuation" });
+      const input = { agent_id: "thread-agent", room_id: "room", execution_generation_id: "generation", provider_turn_id: "native-turn",
+        work_attempt_id: "attempt", current_execution_generation_id: "generation", provider_continuation_id: "continuation",
+        mcp_request_id: "intent", tool_name: "set_reply_thread", request: {}, mutation: true };
+      if (sourceKind !== "observed") {
+        await assert.rejects(store.prepareEffect(input), /observed activating room message/);
+      } else {
+        for (const key of ["agent_id", "room_id", "execution_generation_id", "provider_turn_id", "work_attempt_id", "current_execution_generation_id", "provider_continuation_id"] as const) {
+          await assert.rejects(store.prepareEffect({ ...input, [key]: "foreign" }), /authority/);
+        }
+        for (const request of [null, [], { room_id: "other" }, { thread_parent_id: "msg_2" }, { text: "answer" }]) {
+          await assert.rejects(store.prepareEffect({ ...input, request }), /empty object/);
+        }
+        await assert.rejects(store.prepareEffect({ ...input, mutation: false }), /classification/);
+        await store.cancelInterruptedTurn(item.inbox_item_id);
+        await assert.rejects(store.prepareEffect(input), /authority/);
+      }
+      assert.equal(await store.hasInterceptedThreadReply(item.inbox_item_id), false);
+    } finally { await store.close(); await env.cleanup(); }
+  }
+});

@@ -96,7 +96,7 @@ test("interactive desktop sessions retain rental tools", () => {
 
 test("custodial polling advertises the restricted real tool surface with delivery enabled", () => {
   const names = discovered("supervised_mcp_polling", "codex");
-  assert.deepEqual([...names].sort(), [...discovered("supervised_room_turn", "codex"), "wait_for_messages"].sort());
+  assert.deepEqual([...names].sort(), [...discovered("supervised_room_turn", "codex")].filter(name => name !== "set_reply_thread").concat("wait_for_messages").sort());
   assert.deepEqual(letAgentsRuntimeContract().profiles.supervised_mcp_polling, {
     contract: "custodial_polling_v1", tools: [...names].sort(),
   });
@@ -114,7 +114,7 @@ test("local native discovery and runtime contract agree and expose an executable
       const { tools } = await client.listTools();
       const contract = letAgentsRuntimeContract(LOCAL_ROOM_API_ORIGIN).profiles.cursor_supervised_room_turn.tools;
       assert.deepEqual(tools.map(tool => tool.name).sort(), contract.filter(name => provider === "cursor" || name !== "complete_room_turn"));
-      for (const name of ["get_board", "read_messages", "claim_task", "complete_task", "update_task", "send_thread_message", "publish_room_artifact"]) {
+      for (const name of ["get_board", "read_messages", "claim_task", "complete_task", "update_task", "send_thread_message", "set_reply_thread", "publish_room_artifact"]) {
         assert.ok(tools.some(tool => tool.name === name), `${provider} keeps ${name}`);
       }
       for (const name of ["join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "submit_review_verdict"]) {
@@ -143,4 +143,27 @@ test("local executor construction refuses incomplete, extra or nonfunction handl
   assert.throws(() => defineLocalSupervisedToolHandlers(incomplete), /advertised tool contract/);
   assert.throws(() => defineLocalSupervisedToolHandlers({ ...handlers, unexpected: async () => undefined }), /advertised tool contract/);
   assert.throws(() => defineLocalSupervisedToolHandlers({ ...handlers, update_task: null! }), /advertised tool contract/);
+});
+
+
+test("thread routing is a strict bounded-only control, truthfully classified as a mutation", async () => {
+  for (const profile of ["autonomous_mcp_worker", "interactive_desktop", "supervised_mcp_polling"] as const) {
+    assert.equal(discovered(profile).has("set_reply_thread"), false, profile);
+  }
+  const server = new McpServer({ name: "thread-control", version: "1" });
+  const client = new Client({ name: "thread-control-test", version: "1" });
+  registerTools(server, "supervised_room_turn", "codex");
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    const tool = (await client.listTools()).tools.find(tool => tool.name === "set_reply_thread")!;
+    assert.equal(tool.annotations?.readOnlyHint, false);
+    assert.deepEqual(tool.inputSchema.properties, {});
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    for (const args of [{ room_id: "other" }, { thread_parent_id: "msg_2" }, { text: "send this" }]) {
+      const result = await client.callTool({ name: "set_reply_thread", arguments: args });
+      assert.equal(result.isError, true);
+      assert.match(JSON.stringify(result.content), /[Uu]nrecognized|[Uu]nexpected/);
+    }
+  } finally { await client.close(); await server.close(); }
 });

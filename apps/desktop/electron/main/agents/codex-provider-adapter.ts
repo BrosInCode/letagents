@@ -288,7 +288,13 @@ function custodialMcpOverride(entryPath: string, cwd: string, environment: Recor
     .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`).join(", ");
   // Native config deep-merges even a parent-table CLI override. Pin each
   // advertised tool so inherited prompt/approve rules cannot alter this policy.
-  const toolApprovalModes = tools.map((name) => `${JSON.stringify(name)} = { approval_mode = "writes" }`).join(", ");
+  const toolApprovalModes = tools.map((name) => {
+    // This verified bounded capability only records final-answer routing. It
+    // cannot choose a recipient or send text. Actual message tools remain writes.
+    const mode = environment.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn"
+      && name === "set_reply_thread" ? "approve" : "writes";
+    return `${JSON.stringify(name)} = { approval_mode = ${JSON.stringify(mode)} }`;
+  }).join(", ");
   // Codex merges installed config beneath CLI overrides. Pin every authority
   // coordinate and clear inherited credential names/tool filters explicitly.
   return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = "writes", tools = { ${toolApprovalModes} } }`;

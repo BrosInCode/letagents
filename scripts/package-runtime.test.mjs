@@ -181,6 +181,12 @@ test("the packed MCP CLI reports its contract and exposes the supervised Cursor 
         assert.equal(names.includes("register_task_close_intent"), apiUrl !== "letagents-local://rooms");
         assert.equal(names.includes("join_room"), apiUrl !== "letagents-local://rooms");
         assert.ok(names.includes("update_task"));
+        const threadControl = toolResponse.result.tools.find(tool => tool.name === "set_reply_thread");
+        assert.ok(threadControl, "the packed runtime must expose the bounded thread control");
+        assert.equal(threadControl.annotations?.readOnlyHint, false);
+        assert.deepEqual(threadControl.inputSchema.properties, {});
+        assert.equal(threadControl.inputSchema.additionalProperties, false);
+        assert.ok(!contract.profiles.supervised_mcp_polling.tools.includes("set_reply_thread"));
         const completionTools = toolResponse.result.tools.filter((tool) => tool.name === "complete_room_turn");
         assert.equal(completionTools.length, 1, "the packed runtime must expose exactly one completion tool");
         const completionSchema = completionTools[0].inputSchema;
