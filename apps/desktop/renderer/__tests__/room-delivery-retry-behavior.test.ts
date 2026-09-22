@@ -308,6 +308,7 @@ test("composer rejects stale refreshes and removes retry controls after an uncer
 test("composer keeps unresolved approval failures visible and dismisses cards locally", async () => {
   const pending = hostApproval();
   const unavailable = { ...hostApproval(), id: "presentation-2", status: "unavailable" as const,
+    detail: "No decision was recorded for this request.",
     presentation: { ...hostApproval().presentation, displayName: "UnavailableAgent" } };
   const uncertain = { ...hostApproval(), id: "presentation-3", status: "uncertain" as const };
   const resolved = { ...hostApproval(), id: "presentation-4", status: "resolved" as const };
@@ -324,6 +325,12 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
     await (buttonByText(root, "Show 2 approvals needing attention").props.onClick as () => void)();
     await nextTick();
     assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 3);
+    const unavailableCard = descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval"
+      && descendants(node).some(child => child.text.includes("UnavailableAgent")))!;
+    const unavailableText = descendants(unavailableCard).map(node => node.text).join("\n");
+    assert.match(unavailableText, /UnavailableAgent · Approval unavailable/);
+    assert.match(unavailableText, /No decision was recorded for this request\./);
+    assert.doesNotMatch(unavailableText, /unconfirmed|Your decision will not be sent again/);
     assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 1);
     const dismiss = descendants(root).find(node => node.props["aria-label"] === "Dismiss approval from GardenPoint");
     assert.ok(dismiss?.props.onClick);
