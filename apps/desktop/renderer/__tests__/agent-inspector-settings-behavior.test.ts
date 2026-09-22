@@ -1247,3 +1247,30 @@ test("saved permission responses from the previous inspector cannot appear for a
     assert.equal(textContent(mounted.root).includes("Old tool"), false);
   } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
+
+
+test("room workspace permissions distinguish old and current scopes before revocation", async () => {
+  const rules = [
+    { id: "old", revision: 1, ownerId: "host", createdAtMs: 1,
+      scope: { kind: "room_workspace", toolLabel: "Write", roomId: "OLD-ROOM", workAttemptId: "aaaaaaaa-1111", canonicalWorkspacePath: "/old/workspace" } },
+    { id: "current", revision: 1, ownerId: "host", createdAtMs: 2,
+      scope: { kind: "room_workspace", toolLabel: "Write", roomId: "NEW-ROOM", workAttemptId: "bbbbbbbb-2222", canonicalWorkspacePath: "/new/workspace" } },
+  ];
+  const revoked: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostToolRules: async () => rules,
+    revokeHostToolRule: async (input: unknown) => { revoked.push(input); },
+  } } });
+  const mounted = mount(AgentInspectorSettings, settingsProps());
+  try {
+    await new Promise(resolve => setImmediate(resolve)); await nextTick();
+    assert.match(textContent(mounted.root), /Write · Room OLD-ROOM · Workspace aaaaaaaa/);
+    assert.match(textContent(mounted.root), /Write · Room NEW-ROOM · Workspace bbbbbbbb/);
+    assert.doesNotMatch(textContent(mounted.root), /This room workspace/);
+    const current = descendants(mounted.root).find(node => node.type === "span" && node.props.title === "bbbbbbbb-2222 · /new/workspace");
+    assert.ok(current);
+    const buttons = descendants(mounted.root).filter(node => node.type === "button" && textContent(node) === "Revoke");
+    await (buttons[1]!.props.onClick as () => Promise<void>)();
+    assert.equal((revoked[0] as { ruleId: string }).ruleId, "current");
+  } finally { mounted.app.unmount(); }
+});
