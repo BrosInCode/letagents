@@ -155,6 +155,8 @@ export class SupervisedAgentDelivery {
   private readonly pollOperations = new Map<string, Promise<void>>();
   private readonly loops = new Map<string, Promise<void>>();
   private readonly loopEpochs = new Map<string, number>();
+  /** Immutable, memory-only registration identity; the bearer is never logged or persisted. */
+  private readonly loopOwners = new Map<string, { context: string; bearer: string }>();
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
   private readonly pumpWakeups = new Map<string, Promise<void>>();
@@ -338,12 +340,16 @@ export class SupervisedAgentDelivery {
       const operation = this.trackAgentWork(agent.agentId, this.track(controller, lifecycle));
       this.loops.set(agent.agentId, operation);
       this.loopEpochs.set(agent.agentId, expectedEpoch);
+      const owner = { context: this.recoveryContext(agent), bearer: agent.bearer };
+      this.loopOwners.set(agent.agentId, owner);
       void operation.then(() => {
         if (this.loops.get(agent.agentId) === operation) this.loops.delete(agent.agentId);
+        if (this.loopOwners.get(agent.agentId) === owner) this.loopOwners.delete(agent.agentId);
         if (this.loopEpochs.get(agent.agentId) === expectedEpoch) this.loopEpochs.delete(agent.agentId);
         if (this.loopControllers.get(agent.agentId) === controller) this.loopControllers.delete(agent.agentId);
       }, () => {
         if (this.loops.get(agent.agentId) === operation) this.loops.delete(agent.agentId);
+        if (this.loopOwners.get(agent.agentId) === owner) this.loopOwners.delete(agent.agentId);
         if (this.loopEpochs.get(agent.agentId) === expectedEpoch) this.loopEpochs.delete(agent.agentId);
         if (this.loopControllers.get(agent.agentId) === controller) this.loopControllers.delete(agent.agentId);
       });
@@ -367,8 +373,16 @@ export class SupervisedAgentDelivery {
     return this.start(agent, this.currentRefreshEpoch(agent.agentId), false);
   }
 
-  /** Stop one stale binding before a rebind starts its successor loop. */
+  /** Preserve repeated readiness for the exact owner; drain only a stale binding. */
   async refresh(agent: SupervisedIngressAgent): Promise<void> {
+    const owner = this.loopOwners.get(agent.agentId);
+    if (!this.fenced && !this.stoppingAgents.has(agent.agentId)
+      && this.daemonIngressAllowed(agent)
+      && this.loops.has(agent.agentId)
+      && this.loopEpochs.get(agent.agentId) === this.currentRefreshEpoch(agent.agentId)
+      && this.loopControllers.get(agent.agentId)?.signal.aborted === false
+      && owner?.context === this.recoveryContext(agent)
+      && owner.bearer === agent.bearer) return;
     const refreshEpoch = this.nextRefreshEpoch(agent.agentId);
     await this.stopForRefresh(agent.agentId);
     // Multiple callers may share one drain. Only the most recent binding may
@@ -1952,9 +1966,8 @@ export class SupervisedAgentDelivery {
   }
 
   private recoveryContext(agent: SupervisedIngressAgent): string {
-    if (!agent.handle) return [agent.daemonGeneration, agent.executionGenerationId, agent.roomId, agent.agentSessionId, "no-provider"].join("\u0000");
-    let handleId = this.handleContextIds.get(agent.handle);
-    if (!handleId) {
+    let handleId = agent.handle ? this.handleContextIds.get(agent.handle) : undefined;
+    if (agent.handle && !handleId) {
       handleId = this.nextHandleContextId++;
       this.handleContextIds.set(agent.handle, handleId);
     }
@@ -1965,7 +1978,7 @@ export class SupervisedAgentDelivery {
     // workspace, API origin, and handle identity remain immutable fences.
     return [
       agent.daemonGeneration, agent.executionGenerationId, agent.roomId, agent.apiUrl,
-      agent.agentSessionId, agent.workAttemptId, handleId,
+      agent.agentSessionId, agent.workAttemptId, agent.provider, handleId ?? "no-provider",
     ].join("\u0000");
   }
 
