@@ -418,7 +418,8 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
     const receipt = await leaseMutation(input, "attestation", { cause: input.cause });
     if (typeof receipt.id !== "string" || !receipt.id || receipt.lease_id !== input.lease.id
       || receipt.epoch !== input.lease.epoch || receipt.from_agent_session_id !== input.lease.agent_session_id
-      || receipt.grant_id !== input.grantId || receipt.supervisor_generation !== input.grantGeneration
+      || receipt.grant_id !== input.grantId || !Number.isSafeInteger(receipt.supervisor_generation)
+      || Number(receipt.supervisor_generation) < 1 || Number(receipt.supervisor_generation) > input.grantGeneration
       || receipt.work_attempt_id !== input.workAttemptId || receipt.execution_generation_id !== input.executionGenerationId
       || receipt.cause !== input.cause || receipt.consumed_at !== null) throw new Error("Lease attestation returned a different proof.");
     return receipt.id;
