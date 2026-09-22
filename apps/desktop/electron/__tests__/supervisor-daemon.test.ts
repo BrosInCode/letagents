@@ -1156,6 +1156,7 @@ async function startWireDaemon(
     value: capturedEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!,
   };
   let handoffPrepared = false;
+  const handoff = { prepare: null as null | (() => Promise<void>) };
   const server = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -1171,6 +1172,13 @@ async function startWireDaemon(
         result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
+        if (handoff.prepare) {
+          void handoff.prepare().then(
+            () => socket.end(`${JSON.stringify({ version, id: request.id, ok: true, result: { accepted: true } })}\n`),
+            error => socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: String(error) })}\n`),
+          );
+          return;
+        }
         result = { accepted: true };
         handoffPrepared = true;
         responseDelayMs = prepareHandoffResponseDelayMs;
@@ -1299,7 +1307,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint };
+  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -2797,7 +2805,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.174");
+    assert.equal(status.implementationVersion, "2.0.175");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -3236,4 +3244,58 @@ test("saved permission list and revoke use the real enrolled signer", async () =
     await assert.rejects(client.revokeHostToolRule({ agentId: "agent", ruleId: "rule", revision: 1 }, () => { throw new Error("Sender changed"); }), /Sender changed/);
     assert.equal(operations.length, 2);
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+
+for (const takeover of [false, true]) test(`provider-aware ${takeover ? "startup takeover" : "application update"} keeps approvals available and honors deferred handoff`, { timeout: 10_000 }, async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture();
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const candidate = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7,
+    undefined, takeover ? "older-implementation" : SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+  let entered!: () => void;
+  const draining = new Promise<void>(resolve => { entered = resolve; });
+  let defer!: () => void;
+  const timeout = new Promise<void>(resolve => { defer = resolve; });
+  wire.handoff.prepare = async () => { entered(); await timeout; throw new Error("Update deferred: current work has not completed."); };
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  let decisions = 0;
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope); assert.ok(authenticated);
+    if (authenticated.operation === "list") return [candidate];
+    assert.equal(authenticated.operation, "decide");
+    decisions += 1;
+    return "resolved";
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    loadApprovalSigner: async () => signer, inspectDaemonProcess: () => fakeDaemonProcessIdentity(),
+    signalDaemon: () => assert.fail("deferred handoff must not signal the daemon"),
+    spawnDaemon: () => { throw new Error("deferred handoff must not spawn a replacement"); } });
+  try {
+    if (!takeover) await client.ensureRunning();
+    const observation = (client as unknown as { attachedDaemonObservation: unknown }).attachedDaemonObservation;
+    let releaseStartup!: () => void;
+    const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+    const updating = assert.rejects(takeover ? client.ensureRunning(startup) : client.prepareForApplicationUpdate(), /Update deferred/);
+    const reading = client.listHostApprovals("room_1");
+    releaseStartup();
+    await draining;
+    const snapshot = await reading;
+    assert.equal(snapshot.available, true);
+    assert.equal(snapshot.approvals[0]?.status, "pending");
+    await client.decideHostApproval({ id: snapshot.approvals[0]!.id, decision: "allow_once" });
+    assert.equal(decisions, 1);
+    if (!takeover) assert.equal((client as unknown as { attachedDaemonObservation: unknown }).attachedDaemonObservation, observation,
+      "live observation remains attached while the current provider finishes");
+    defer();
+    await updating;
+    assert.equal((await client.listHostApprovals("room_1")).available, true);
+    assert.equal(wire.requests.filter(request => request.method === "daemon.prepare_handoff").length, 1);
+    if (!takeover) assert.equal((await client.ensureRunning()).generation, 7, "deferral restores the original daemon's admission");
+  } finally { defer(); await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });

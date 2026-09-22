@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.174";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.175";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -461,6 +461,8 @@ export class SupervisorDaemonClient {
   private applicationUpdateHandoff: Promise<void> | null = null;
   private environmentRefreshHandoff: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private applicationUpdatePrepared = false;
+  private drainingCurrentDaemon = false;
+  private readonly startupApprovalWaiters = new Set<() => void>();
   private lastReadyGeneration: number | null = null;
   private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
   private readonly spawnDaemon: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
@@ -548,7 +550,15 @@ export class SupervisorDaemonClient {
 
   /** Join startup already registered by the app without starting another service. */
   async waitForStartup(): Promise<void> {
-    if (this.ensureOperation) await this.ensureOperation;
+    if (!this.ensureOperation || this.drainingCurrentDaemon) return;
+    let release!: () => void;
+    const currentDaemonReady = new Promise<void>(resolve => { release = resolve; });
+    this.startupApprovalWaiters.add(release);
+    try {
+      // A negotiated old daemon may need a human approval before startup can
+      // replace it. Also wake reads that joined startup before negotiation.
+      await Promise.race([this.ensureOperation, currentDaemonReady]);
+    } finally { this.startupApprovalWaiters.delete(release); }
   }
 
   /** Main computes and remembers what it actually presents; renderer IDs carry no authority. */
@@ -1520,13 +1530,13 @@ export class SupervisorDaemonClient {
         this.observeAttachedDaemon(status);
         return status;
       }
-      this.stopAttachedDaemonObservation();
       const retired = this.captureRetiredDaemon(negotiated);
       retiredGeneration = Number(negotiated.generation);
       // Handoff drains in-flight provider dispatch reservations, which can
       // span a full provider launch; the tight control timeout aborted real
       // upgrades attempted while any agent was mid-launch.
-      await this.request("daemon.prepare_handoff", undefined, daemonVersion, HANDOFF_DRAIN_REQUEST_TIMEOUT_MS);
+      await this.drainCurrentDaemon(daemonVersion);
+      this.stopAttachedDaemonObservation();
       await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
@@ -1563,9 +1573,20 @@ export class SupervisorDaemonClient {
       spawnEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!);
   }
 
+  private async drainCurrentDaemon(daemonVersion: number): Promise<void> {
+    this.drainingCurrentDaemon = true;
+    for (const ready of this.startupApprovalWaiters) ready();
+    try {
+      // Approval reads must reach this live owner even when ensureOperation is
+      // waiting for an upgrade. Joining that promise would deadlock the turn.
+      await this.request("daemon.prepare_handoff", undefined, daemonVersion, HANDOFF_DRAIN_REQUEST_TIMEOUT_MS);
+    } finally {
+      this.drainingCurrentDaemon = false;
+    }
+  }
+
   private async prepareForApplicationUpdateOnce(): Promise<void> {
     if (this.ensureOperation) await this.ensureOperation;
-    this.stopAttachedDaemonObservation();
     let negotiated: Record<string, unknown>;
     try {
       negotiated = await this.request<Record<string, unknown>>(
@@ -1583,12 +1604,8 @@ export class SupervisorDaemonClient {
     const daemonVersion = Number(negotiated.protocol_version ?? 0);
     const implementationVersion = String(negotiated.implementation_version ?? "unknown");
     const retired = this.captureRetiredDaemon(negotiated);
-    await this.request(
-      "daemon.prepare_handoff",
-      undefined,
-      daemonVersion,
-      HANDOFF_DRAIN_REQUEST_TIMEOUT_MS,
-    );
+    await this.drainCurrentDaemon(daemonVersion);
+    this.stopAttachedDaemonObservation();
     await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
   }
 
