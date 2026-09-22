@@ -161,6 +161,8 @@ export class SupervisorDaemon {
   private readonly startedAt = new Date().toISOString();
   private readonly agentStreamRegistry: AgentStreamRegistry;
   private handoffScheduled = false;
+  private handoffDraining = false;
+  private handoffPreparation: Promise<void> | null = null;
   private boardOwnershipActive = false;
   private handoffTeardownScheduled = false;
   /** Resolves only once this daemon has relinquished every authority surface. */
@@ -197,7 +199,7 @@ export class SupervisorDaemon {
       notifyStateChanged: () => this.notifyStateChanged(),
     });
     this.entryConcurrency = new EntryConcurrencyGate({
-      isHandoffScheduled: () => this.handoffScheduled,
+      isHandoffScheduled: () => this.handoffScheduled || this.handoffDraining,
     });
     this.deliveryCutovers = new DeliveryCutoverCoordinator({
       isHandoffScheduled: () => this.handoffScheduled,
@@ -439,6 +441,7 @@ export class SupervisorDaemon {
         streams: this.providerStreams,
         authority: {
           isHandoffScheduled: () => this.handoffScheduled,
+          isDispatchPaused: () => this.handoffDraining,
           currentDaemonGeneration: () => this.singleton.currentGeneration,
           currentManifestGeneration: () => this.manifestGeneration,
           acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
@@ -939,6 +942,7 @@ export class SupervisorDaemon {
         assertCurrent: () => this.singleton.assertCurrent(),
         currentGeneration: () => this.singleton.currentGeneration,
         isHandoffScheduled: () => this.handoffScheduled,
+        isHandoffDraining: () => this.handoffDraining,
         requestBarrier: this.controlRequestBarrier,
       }, controlOperations),
       async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); },
@@ -1199,9 +1203,71 @@ export class SupervisorDaemon {
     return this.readModel.status();
   }
 
-  private async prepareHandoff(): Promise<void> {
-    if (this.handoffTeardownScheduled) return;
-    if (!this.handoffScheduled) this.handoffScheduled = true;
+  private prepareHandoff(): Promise<void> {
+    if (this.handoffTeardownScheduled) return Promise.resolve();
+    if (!this.handoffPreparation) {
+      this.handoffPreparation = this.prepareHandoffOnce().finally(() => { this.handoffPreparation = null; });
+    }
+    return this.handoffPreparation;
+  }
+
+  /** The approval/stdio owner stays live until non-surviving providers finish. */
+  private async drainNonSurvivingProviders(signal: AbortSignal): Promise<void> {
+    if (!this.providerPort) return;
+    const entries = (await this.store.load()).entries.filter(entry => entry.work_attempt_id);
+    const protectedEntries = (await Promise.all(entries.map(async entry =>
+      (await this.providerPort!.capabilities(entry.work_attempt_id!, entry.provider)).survivesRestart ? null : entry)))
+      .filter((entry): entry is DaemonManifestEntry => entry !== null);
+    signal.throwIfAborted();
+    const protectedIds = protectedEntries.map(entry => entry.id);
+    await this.providerExecution?.drainDispatches(protectedIds);
+    signal.throwIfAborted();
+    await this.supervisedDelivery?.drainAdmittedTurns(protectedIds);
+    signal.throwIfAborted();
+    for (const entry of protectedEntries) {
+      signal.throwIfAborted();
+      const current = await this.store.getEntry(entry.id);
+      if (!current) continue;
+      const handle = this.liveHandles.get(entry.id);
+      const state = handle?.observedState ?? current.observed_state;
+      if (this.entryConcurrency.isLifecycleActive(entry.id)
+        || !["idle", "stopped", "failed", "paused", "absent"].includes(state)) {
+        throw new Error("Update deferred: an agent still has work that cannot survive a background-service restart. Try again after it finishes.");
+      }
+      const head = await this.supervisedInbox.head(entry.id);
+      if (!head?.provider_turn_id) continue;
+      const binding = await this.supervisedInbox.providerTurnBinding(head.inbox_item_id);
+      if (binding?.origin_execution_generation_id !== current.provider_ref?.execution_generation_id) continue;
+      const detail = await this.supervisedInbox.detail(entry.id, current.room_id, head.source_message_id);
+      if (!detail.terminal || detail.terminal.outcome === "unreadable" || detail.terminal.evidence_source === "none") {
+        throw new Error("Update deferred: an agent's current turn has no confirmed completion. Resolve its blocked work before updating.");
+      }
+    }
+  }
+
+  private async prepareHandoffOnce(): Promise<void> {
+    this.handoffDraining = true;
+    this.supervisedDelivery?.pauseDispatch();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    try {
+      await Promise.race([
+        this.drainNonSurvivingProviders(controller.signal),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error("Update deferred: agents are still finishing work. Their current turns and approvals remain available; try again when they finish.")), 30_000);
+        }),
+      ]);
+      if (this.handoffScheduled) return;
+      this.handoffScheduled = true;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      controller.abort();
+      this.handoffDraining = false;
+      if (!this.handoffScheduled) {
+        this.supervisedDelivery?.resumeDispatch();
+        for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id);
+      }
+    }
     const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
     this.hostApprovals.close();
     this.roomWorkPublisher?.close();

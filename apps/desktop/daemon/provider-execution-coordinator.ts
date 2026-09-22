@@ -151,6 +151,7 @@ export type ProviderExecutionCoordinatorOptions = {
   streams: ProviderExecutionStreams;
   authority: {
     isHandoffScheduled(): boolean;
+    isDispatchPaused?(): boolean;
     currentDaemonGeneration(): number;
     currentManifestGeneration(): number;
     acceptManifestGeneration(generation: number): void;
@@ -256,7 +257,7 @@ type DispatchReservation = {
 export class ProviderExecutionCoordinator {
   private readonly convergenceRequests = new Map<string, Promise<void>>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly dispatchReservations = new Set<Promise<void>>();
+  private readonly dispatchReservations = new Map<Promise<void>, string>();
   private readonly activeDispatches = new Map<symbol, DispatchReservation>();
   private fatalDispatchError: unknown = null;
   private readonly setRecoveryTimeout: typeof setTimeout;
@@ -289,7 +290,7 @@ export class ProviderExecutionCoordinator {
   }
 
   request(entryId: string): void {
-    if (this.options.authority.isHandoffScheduled() || !this.options.autoConverge) return;
+    if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.() || !this.options.autoConverge) return;
     const previous = this.convergenceRequests.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -297,7 +298,9 @@ export class ProviderExecutionCoordinator {
         entryId,
         () => this.converge(entryId),
       ))
-      .then(() => this.options.refreshManagedRuntime?.(entryId))
+      .then(() => {
+        if (!this.options.authority.isDispatchPaused?.()) return this.options.refreshManagedRuntime?.(entryId);
+      })
       .catch(async (error) => {
         await this.options.recordSchedulerFailure(
           entryId,
@@ -344,9 +347,11 @@ export class ProviderExecutionCoordinator {
     this.recoveryTimers.clear();
   }
 
-  async drainDispatches(): Promise<void> {
+  async drainDispatches(entryIds?: readonly string[]): Promise<void> {
     if (this.fatalDispatchError) throw this.fatalDispatchError;
-    await Promise.all([...this.dispatchReservations]);
+    await Promise.all([...this.dispatchReservations]
+      .filter(([, entryId]) => !entryIds || entryIds.includes(entryId))
+      .map(([reservation]) => reservation));
     if (this.fatalDispatchError) throw this.fatalDispatchError;
   }
 
@@ -362,7 +367,7 @@ export class ProviderExecutionCoordinator {
       reject = rejectReservation;
     });
     void reservation.catch(() => undefined);
-    this.dispatchReservations.add(reservation);
+    this.dispatchReservations.set(reservation, entryId);
     this.activeDispatches.set(token, {
       entryId,
       executionGenerationId,
@@ -958,7 +963,7 @@ export class ProviderExecutionCoordinator {
   }
 
   async converge(entryId: string): Promise<void> {
-    if (this.options.authority.isHandoffScheduled()) return;
+    if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return;
     await this.options.settleRuntimeApprovals(entryId);
     if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
@@ -1381,6 +1386,7 @@ export class ProviderExecutionCoordinator {
           (max, candidate) => Math.max(max, candidate.generation),
           0,
         ) + 1;
+    if (this.options.authority.isDispatchPaused?.()) return;
     const execution = reusesActiveCursorExecution
       ? activeExecution!
       : await this.options.durability.startGeneration(
@@ -1394,7 +1400,7 @@ export class ProviderExecutionCoordinator {
         "Process-less Cursor recovery found a worker binding for a different execution generation.",
       );
     }
-    if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
+    if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch) || this.options.authority.isDispatchPaused?.()) {
       if (!reusesActiveCursorExecution) {
         await this.terminalizeUnlaunchedGeneration(
           attempt,
@@ -1463,7 +1469,7 @@ export class ProviderExecutionCoordinator {
           },
         });
       }
-      if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
+      if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch) || this.options.authority.isDispatchPaused?.()) {
         if (!reusesActiveCursorExecution) {
           await this.terminalizeUnlaunchedGeneration(
             attempt,

@@ -79,6 +79,7 @@ export class EntryConcurrencyGate {
    * only a room move that already entered its critical section.
    */
   beginLifecycle(entryId: string): () => void {
+    if (this.options.isHandoffScheduled()) throw new Error("Agent lifecycle admission is paused for an update.");
     if (this.lifecycleEntries.has(entryId) || this.turnControlEntries.has(entryId)) {
       throw new Error("This supervised entry already has an in-flight lifecycle or turn-control action.");
     }
@@ -89,6 +90,7 @@ export class EntryConcurrencyGate {
 
   /** Reserve the one process-local turn-control slot for an exact entry. */
   beginTurnControl(entryId: string): () => void {
+    if (this.options.isHandoffScheduled()) throw new Error("Turn-control admission is paused for an update.");
     if (this.lifecycleEntries.has(entryId)) {
       throw new Error("Turn control is unavailable while a lifecycle action is in flight for this supervised entry.");
     }
