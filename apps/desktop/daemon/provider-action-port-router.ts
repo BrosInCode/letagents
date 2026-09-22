@@ -9,6 +9,7 @@ import type {
   ProviderActionHandle,
   ProviderActionPort,
   ProviderActionRef,
+  ProviderRuntimeCustody,
   ProviderRoomTurnCheckpointDisposition,
   ProviderRoomTurnRequest,
   ProviderRoomTurnRecoveryRequest,
@@ -36,6 +37,7 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
+  runtimeCustody?(workAttemptId: string, handle?: NativeHandle): "absent" | "owned" | "unknown";
   observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; connectionId?: string; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
   replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
   correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
@@ -93,10 +95,29 @@ function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: numbe
  */
 export class ProviderActionPortRouter implements ProviderActionPort {
   private readonly adapters = new Map<string, Promise<NativeProviderAdapter>>();
-  private readonly handles = new Map<string, { provider: string; handle: NativeHandle }>();
+  private readonly handles = new Map<string, { provider: string; adapter: NativeProviderAdapter; handle: NativeHandle | null }>();
   private readonly actions = new Map<string, string>();
 
   constructor(private readonly adapterLoaders: Readonly<Record<string, ProviderAdapterLoader>> = {}) {}
+
+  runtimeCustody(workAttemptId: string, provider: string): ProviderRuntimeCustody {
+    const remembered = this.handles.get(workAttemptId);
+    if (!remembered) return { state: "absent" };
+    if (remembered.provider !== provider) return { state: "unknown" };
+    const state = remembered.adapter.runtimeCustody?.(workAttemptId, remembered.handle ?? undefined);
+    if (state === "unknown") return { state: "unknown" };
+    if (state === "absent") return remembered.handle
+      ? { state: "retired", handle: publicHandle(remembered.handle) } : { state: "absent" };
+    if (!remembered.handle || remembered.handle.workAttemptId !== workAttemptId) return { state: "unknown" };
+    return { state: "owned", handle: publicHandle(remembered.handle) };
+  }
+
+  private rememberAcquisition(provider: string, adapter: NativeProviderAdapter, workAttemptId: string): void {
+    const previous = this.handles.get(workAttemptId);
+    this.resolveProvider(previous?.provider, provider);
+    if (previous && previous.adapter !== adapter) throw new Error("Provider custody owner changed for the same work attempt.");
+    this.handles.set(workAttemptId, { provider, adapter, handle: previous?.handle ?? null });
+  }
 
   async capabilities(workAttemptId: string, requestedProvider?: string): Promise<ProviderActionCapabilities> {
     const provider = this.resolveProvider(this.handles.get(workAttemptId)?.provider, requestedProvider);
@@ -105,10 +126,12 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   }
 
   async spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle> {
-    const provider = this.requiredProvider(request.provider);
+    const provider = this.resolveProvider(this.handles.get(request.workAttemptId)?.provider, request.provider);
     if (request.pollingContract && provider !== "codex") throw new Error("Custodial polling is only supported by Codex.");
-    const handle = await (await this.adapter(provider)).spawn(request);
-    this.remember(provider, request, handle);
+    const adapter = await this.adapter(provider);
+    this.rememberAcquisition(provider, adapter, request.workAttemptId);
+    const handle = await adapter.spawn(request);
+    this.remember(provider, adapter, request, handle);
     return publicHandle(handle, request.configurationRevision);
   }
 
@@ -128,7 +151,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       ref.provider,
       providerFromConnection(ref.providerConnection),
     );
-    if (remembered) {
+    if (remembered?.handle) {
       const handle = remembered.handle;
       if (
         handle.providerContinuationId !== ref.providerContinuationId
@@ -148,16 +171,18 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         }) !== handle) return null;
       return publicHandle(handle);
     }
-    const handle = await (await this.adapter(provider)).attach(ref);
+    const adapter = await this.adapter(provider);
+    this.rememberAcquisition(provider, adapter, ref.workAttemptId);
+    const handle = await adapter.attach(ref);
     if (!handle || isAttachTerminal(handle)) return handle;
-    this.handles.set(ref.workAttemptId, { provider, handle });
+    this.handles.set(ref.workAttemptId, { provider, adapter, handle });
     return publicHandle(handle);
   }
 
   async attachAction(actionId: string, workAttemptId: string): Promise<ProviderActionAttachment> {
     if (this.actions.get(actionId) !== workAttemptId) return { state: "absent" };
     const remembered = this.handles.get(workAttemptId);
-    return remembered ? { state: "attached", handle: publicHandle(remembered.handle) } : { state: "absent" };
+    return remembered?.handle ? { state: "attached", handle: publicHandle(remembered.handle) } : { state: "absent" };
   }
 
   async resume(ref: ProviderActionRef, request: ProviderActionSpawn): Promise<ProviderActionHandle> {
@@ -168,8 +193,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       providerFromConnection(ref.providerConnection),
     );
     if (request.pollingContract && provider !== "codex") throw new Error("Custodial polling is only supported by Codex.");
-    const handle = await (await this.adapter(provider)).resume(ref, request);
-    this.remember(provider, request, handle);
+    const adapter = await this.adapter(provider);
+    this.rememberAcquisition(provider, adapter, request.workAttemptId);
+    const handle = await adapter.resume(ref, request);
+    this.remember(provider, adapter, request, handle);
     return publicHandle(handle, request.configurationRevision);
   }
 
@@ -436,7 +463,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     if (repaired.replacementProviderContinuationId === continuation) {
       throw new Error("Provider replacement must establish a different conversation.");
     }
-    this.handles.set(workAttemptId, { provider: remembered.provider, handle: repaired.handle });
+    this.handles.set(workAttemptId, { ...remembered, handle: repaired.handle });
     return {
       ...repaired,
       handle: publicHandle(repaired.handle, handle.appliedConfigurationRevision),
@@ -486,7 +513,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
       return terminal;
     }
-    if (remembered
+    if (remembered?.handle
       && remembered.handle.providerContinuationId === ref.providerContinuationId
       && sameProviderActionConnectionIdentity(remembered.handle.providerConnection, ref.providerConnection)) {
       const terminal = await adapter.stop(remembered.handle, options);
@@ -566,19 +593,19 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return providers[0]!;
   }
 
-  private remember(provider: string, request: ProviderActionSpawn, handle: NativeHandle): void {
-    this.handles.set(request.workAttemptId, { provider, handle });
+  private remember(provider: string, adapter: NativeProviderAdapter, request: ProviderActionSpawn, handle: NativeHandle): void {
+    this.handles.set(request.workAttemptId, { provider, adapter, handle });
     if (request.actionId) this.actions.set(request.actionId, request.workAttemptId);
   }
 
-  private required(handle: ProviderActionHandle): { provider: string; handle: NativeHandle } {
+  private required(handle: ProviderActionHandle): { provider: string; adapter: NativeProviderAdapter; handle: NativeHandle } {
     const remembered = this.handles.get(handle.workAttemptId);
-    if (!remembered
+    if (!remembered?.handle
       || remembered.handle.providerContinuationId !== handle.providerContinuationId
       || (remembered.provider !== "cursor" && remembered.handle.pid !== handle.pid)) {
       throw new Error("Provider handle is not owned by the current daemon generation.");
     }
-    return remembered;
+    return remembered as typeof remembered & { handle: NativeHandle };
   }
 }
 

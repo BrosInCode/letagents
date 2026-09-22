@@ -2682,10 +2682,14 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   const harness = createHarness();
   const adapter = supervisedAdapter(harness);
   const handle = await spawnDaemonLane(adapter, harness);
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
   const order: string[] = [];
   let persistedTurnId = "";
   const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
-    beforeNativeDispatch: async () => { order.push("dispatch_intent"); },
+    beforeNativeDispatch: async () => {
+      assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown", "admitted preparation is owned before child creation");
+      order.push("dispatch_intent");
+    },
     checkpointTurnStarted: async (turnId) => {
       persistedTurnId = turnId;
       order.push("turn_started");
@@ -2696,7 +2700,10 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
       order.push("durable");
       assert.equal(harness.children[0]?.isReleased, false, "the durable milestone precedes native release");
     },
-    checkpointTerminalResult: async () => { order.push("terminal"); },
+    checkpointTerminalResult: async () => {
+      assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown", "native death does not skip in-flight terminal settlement");
+      order.push("terminal");
+    },
   });
   await flush();
 
@@ -2730,6 +2737,7 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   });
   assert.deepEqual(order, ["dispatch_intent", "turn_started", "durable", "terminal"]);
   assert.equal(handle.observedState(), "idle");
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
 });
 
 test("Cursor checkpoints a proven native provider failure and reuses its exact session", async () => {
@@ -6906,6 +6914,54 @@ test("a successful result is TURN-terminal: the lane goes idle with NO claimed p
   assert.equal(handle.pid, null);
   assert.deepEqual(handle.providerConnection, { kind: "cursor_cli", pid: null, processIdentity: null });
   assert.equal(handle.providerContinuationId, "sess-cursor-1", "the session id is the only continuation state");
+});
+
+test("Cursor missing wrapper cwd proves no native child was acquired", async () => {
+  const harness = createHarness();
+  const adapter = new CursorProviderAdapter({ dependencies: { ...harness.dependencies, launchTurn: input => {
+    const child = defaultLaunchTurn({ ...input, deferStart: true });
+    // Join the alternate readiness rejection too: this case deliberately
+    // fails before a wrapper exists or can receive its start IPC message.
+    void child.prepared?.catch(() => {});
+    return child;
+  } } });
+  await assert.rejects(adapter.spawn(spawnRequest({ cwd: "/nonexistent-letagents-test/cursor-cwd" })), /did not expose a process id/);
+  assert.equal(adapter.runtimeCustody("wa-cursor-1"), "absent");
+  assert.deepEqual(harness.signals, []);
+});
+
+test("Cursor legacy poke retains custody while preparing a child before liveTurn installation", async () => {
+  const harness = createHarness();
+  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  harness.children[0]!.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "sess-cursor-1" });
+  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
+  const launch = harness.dependencies.launchTurn;
+  let release!: () => void;
+  const prepared = new Promise<void>(resolve => { release = resolve; });
+  // Early birth lookup may be unavailable before wrapper readiness. Custody
+  // recording must not move the existing launch validation before prepared.
+  const liveDeps = (adapter as unknown as { deps: CursorProviderAdapterDependencies }).deps;
+  liveDeps.launchTurn = input => {
+    const child = launch(input);
+    harness.identities.set(child.pid!, undefined);
+    Object.defineProperty(child, "prepared", { value: prepared.then(() => {
+      harness.identities.set(child.pid!, birthIdentity(child.pid!));
+    }) });
+    return child;
+  };
+  const pending = adapter.poke(handle, "next message");
+  await flush();
+  assert.equal(handle.pid, null, "no public liveTurn is installed during preparation");
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown");
+  release();
+  await pending;
+  harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "sess-cursor-1" });
+  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
 });
 
 test("a turn child that dies WITHOUT its result event is attempt-terminal (crashed) and attach reports absent", async () => {

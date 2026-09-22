@@ -765,6 +765,23 @@ export class ProviderExecutionCoordinator {
     entry: DaemonManifestEntry,
     mayStartDelivery: () => boolean = () => true,
   ): Promise<ProviderActionHandle | null> {
+    if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
+    const ref = entry.provider_ref;
+    if (!ref) return null;
+    // Attachment can acquire native channels (or retire an old child). Reserve
+    // before the first await so handoff drains direct control/grant callers too.
+    const reservation = this.reserveDispatch(entry.id, ref.execution_generation_id);
+    try {
+      return await this.attachReservedProvider(entry, mayStartDelivery);
+    } finally {
+      reservation.release();
+    }
+  }
+
+  private async attachReservedProvider(
+    entry: DaemonManifestEntry,
+    mayStartDelivery: () => boolean,
+  ): Promise<ProviderActionHandle | null> {
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entry.id))) return null;
     const activation = await this.options.store.unresolvedPollingActivation(entry.id);
     if (activation && !matchesPollingActivationRuntime(activation, entry)) return null;
@@ -810,6 +827,7 @@ export class ProviderExecutionCoordinator {
         configurationRevision: appliedRevision!,
       }, configuration!.provider_launch_policy).launchPolicy;
     }
+    if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
     const attachment = await this.options.provider.attach(attachRef);
     if (!attachment) return null;
     if (this.isAttachTerminal(attachment)) {
