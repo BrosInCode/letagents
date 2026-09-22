@@ -157,6 +157,19 @@ export async function runDesktopCursorProviderPreflight(
     && input.roomOnly === true
     && !workspaceRoot
     && permissionProfile.id === "read_only";
+  if (!workspaceRoot && !roomOnlyReadOnly) {
+    return {
+      providerId: provider.id,
+      status: "repo_required",
+      canStart: false,
+      message: "Choose a local repository before starting Cursor.",
+      detail: "A desktop-managed Cursor agent needs a local repo or worktree.",
+      nextAction: "choose_repo",
+      version,
+      mcpStatus,
+    };
+  }
+
   let preflightWorkspaceRoot = workspaceRoot;
   let managedProfile: CursorManagedProfile;
   let supervisedMcpRuntime: LetAgentsMcpRuntime | undefined;
@@ -268,20 +281,6 @@ export async function runDesktopCursorProviderPreflight(
         };
       }
     }
-
-    if (!workspaceRoot && !roomOnlyReadOnly) {
-      return {
-        providerId: provider.id,
-        status: "repo_required",
-        canStart: false,
-        message: "Choose a local repository before starting Cursor.",
-        detail: "A desktop-managed Cursor agent needs a local repo or worktree.",
-        nextAction: "choose_repo",
-        version,
-        mcpStatus,
-      };
-    }
-
     if (supervised && workspaceRoot && (permissionProfile.id === "sandboxed_write" || permissionProfile.id === "full_access")) {
       try {
         await (options.workspaceGenerationSupportChecker ?? assertSupervisedWorkspaceGenerationSupported)(workspaceRoot);

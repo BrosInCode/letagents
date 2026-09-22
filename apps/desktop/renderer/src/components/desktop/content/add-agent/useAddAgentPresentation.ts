@@ -73,7 +73,7 @@ export function useAddAgentPresentation(
   const selectedPermissionProfiles = computed(() => {
     const profiles = selectedProvider.value?.permissionProfiles ?? [];
     return launchMode.value === "supervised"
-      ? profiles.map((profile) => supervisedPermissionProfilePresentation(selectedProviderId.value, profile))
+      ? profiles.map((profile) => supervisedPermissionProfilePresentation(selectedProviderId.value, profile, { hasProject: Boolean(props.repoRootPath?.trim()) }))
       : profiles;
   });
   const selectedPermissionProfile = computed(() =>
