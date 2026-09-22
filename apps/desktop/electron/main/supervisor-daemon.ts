@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.171";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.172";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -325,11 +325,16 @@ const approvalStatus = z.enum(["pending", "decision_recorded", "decision_sent", 
 const approvalChallenge = z.strictObject({ daemonGeneration: z.number().int().positive().safe(),
   bootNonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/), keyFingerprint: approvalSha });
 const hostToolLabel = approvalId.regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/);
-const hostToolScope = z.strictObject({
+const projectHostToolScope = z.strictObject({
   agentId: approvalId, accountId: approvalId, projectId: approvalSha, projectName: hostToolLabel, sourceRepoPath: z.string().min(1).max(4096),
   canonicalSourcePath: z.string().min(1).max(4096), repository: z.string().min(1).max(4096), remoteUrl: z.string().min(1).max(4096),
   provider: z.enum(["codex", "claude-code", "open-model"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
 });
+const hostToolScope = z.union([projectHostToolScope, z.strictObject({
+  kind: z.literal("room_workspace"), version: z.literal(1), agentId: approvalId, accountId: approvalId, roomId: approvalId,
+  workAttemptId: z.string().uuid(), workspacePath: z.string().min(1).max(4096), canonicalWorkspacePath: z.string().min(1).max(4096),
+  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
+})]);
 const hostToolRule = z.strictObject({ id: approvalId, revision: z.number().int().positive().safe(), ownerId: approvalId,
   scope: hostToolScope, createdAtMs: z.number().int().nonnegative().safe() });
 const approvalCandidate = z.strictObject({
