@@ -9,8 +9,10 @@ history for reattachment, exact-turn recovery, approval dispatch, and idle
 replacement. An unsupported history API cannot establish an empty conversation.
 
 The same creation contract applies to adapter startup, missing-continuation
-replacement, and the standalone desktop launcher. Resume retains the existing
-conversation's history mode. No observer cursor or stored conversation is changed.
+replacement, the standalone desktop launcher, and the MCP session starter.
+The fixed contract takes precedence over launch-policy extras. Resume retains the
+existing conversation's history mode. No observer cursor or stored conversation
+is changed.
 
 ## Isolated native proof
 
@@ -31,8 +33,10 @@ The legacy response is the existing narrowly recognized empty-thread proof.
 This no-model probe verifies creation and pre-first-turn attachment compatibility;
 it does not claim a completed native model turn. Adapter regressions cover both
 fresh creation and missing-continuation replacement against a runtime whose
-default history mode is unsupported, plus unchanged refusal to attach, recover,
-or prove idle from unsupported history.
+default history mode is unsupported, including a conflicting launch-policy field.
+The MCP startup regression reaches its immediate history inspection through the
+same creation contract. Unsupported history still cannot authorize attachment,
+recovery, or an idle proof.
 
 ## Existing paginated conversations
 

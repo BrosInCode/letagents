@@ -3361,14 +3361,15 @@ test("fresh and repaired threads retain empty-thread attachment when native defa
       return client;
     };
     const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
-    const first = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const launchPolicy = { ...spawnRequest().launchPolicy as Record<string, unknown>, historyMode: "paginated" };
+    const first = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", launchPolicy }));
     if (repair) {
       harness.clients[0]!.markThreadMissing(first.providerContinuationId!);
       await adapter.repairContinuation(first, {
         workAttemptId: first.workAttemptId,
         expectedProviderContinuationId: first.providerContinuationId!,
         cwd: spawnRequest().cwd,
-        launchPolicy: spawnRequest().launchPolicy,
+        launchPolicy,
       }, { checkpointReplacement: async () => {} });
     }
     const freshAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
