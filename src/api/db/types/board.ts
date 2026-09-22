@@ -85,6 +85,8 @@ export interface BoardIntentConsumptionInput {
   payload: BoardIntentPayload;
   intent_id?: string | null;
   approval_token?: string | null;
+  /** Internal only: authenticated worker authority, never request payload. */
+  trusted_worker?: { agent_session_id: string; agent_key: string };
   now?: Date;
 }
 

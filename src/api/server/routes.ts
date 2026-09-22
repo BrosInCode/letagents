@@ -427,6 +427,8 @@ export function registerApiRoutes(app: Express): void {
   } satisfies RoomPullRequestDiffRouteDeps;
 
   const roomBoardRouteDeps = {
+    taskEvents,
+    ensureTaskGitRoomForActiveWorkLease,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
