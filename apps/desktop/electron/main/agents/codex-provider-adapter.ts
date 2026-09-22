@@ -1,4 +1,5 @@
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
+import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -1573,6 +1574,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
       cwd: request.cwd,
       ...policy,
+      historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
       ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
     });
@@ -1964,6 +1966,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
           cwd: req.cwd,
           ...policy,
+          historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
           ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
         });
