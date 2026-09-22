@@ -651,7 +651,7 @@ test("provider router selects the native adapter by manifest provider and fences
     /Conflicting provider identities/,
   );
   await assert.rejects(
-    router.spawn({ ...claudeSpawn, provider: "cursor" }),
+    router.spawn({ ...claudeSpawn, provider: "cursor", workAttemptId: "cursor-attempt" }),
     /requires the durable agent display name/,
   );
   const cursor = await router.spawn({
@@ -1032,6 +1032,51 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     else process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = savedEntry;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("provider router exposes retained native custody synchronously without acquiring a connection", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("claude-code", calls);
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  assert.deepEqual(router.runtimeCustody("attempt-custody", "claude-code"), { state: "absent" });
+  assert.deepEqual(calls, []);
+  const handle = await router.spawn({ provider: "claude-code", workAttemptId: "attempt-custody", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const before = [...calls];
+  const custody = router.runtimeCustody("attempt-custody", "claude-code");
+  assert.equal(custody.state, "owned");
+  if (custody.state === "owned") {
+    assert.equal(custody.handle.providerContinuationId, handle.providerContinuationId);
+    assert.deepEqual(custody.handle.providerConnection, handle.providerConnection);
+  }
+  assert.deepEqual(router.runtimeCustody("attempt-custody", "cursor"), { state: "unknown" });
+  assert.deepEqual(calls, before, "inspection makes no adapter call");
+});
+
+test("provider router keeps rejected acquisitions unknown until the native owner proves retirement", async () => {
+  const adapter = fakeAdapter("claude-code", []);
+  const originalSpawn = adapter.spawn;
+  let custody: "unknown" | "owned" | "absent" = "unknown";
+  let expected: unknown;
+  adapter.runtimeCustody = (_attempt, handle) => {
+    assert.equal(handle, expected, "the adapter receives the exact cached native handle");
+    return custody;
+  };
+  adapter.spawn = async () => { throw new Error("bootstrap cleanup failed"); };
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const request = { provider: "claude-code", workAttemptId: "failed-native", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  await assert.rejects(router.spawn(request), /bootstrap cleanup failed/);
+  assert.deepEqual(router.runtimeCustody(request.workAttemptId, request.provider), { state: "unknown" });
+  await assert.rejects(router.spawn({ ...request, provider: "cursor" }), /Conflicting provider identities/);
+  assert.deepEqual(router.runtimeCustody(request.workAttemptId, request.provider), { state: "unknown" }, "cross-provider reuse preserves the failed native owner");
+  adapter.spawn = async input => { expected = await originalSpawn(input); return expected as Awaited<ReturnType<typeof originalSpawn>>; };
+  const handle = await router.spawn(request);
+  assert.deepEqual(router.runtimeCustody(request.workAttemptId, request.provider), { state: "unknown" }, "earlier failed birth is still owned");
+  custody = "owned";
+  assert.equal(router.runtimeCustody(request.workAttemptId, request.provider).state, "owned");
+  custody = "absent";
+  const retired = router.runtimeCustody(request.workAttemptId, request.provider);
+  assert.equal(retired.state, "retired");
+  if (retired.state === "retired") assert.equal(retired.handle.providerContinuationId, handle.providerContinuationId);
 });
 
 test("provider router public handle reads the native observed state live", async () => {

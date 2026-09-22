@@ -44,6 +44,65 @@ export interface ProviderProcessEvidenceDeps {
   getProcessIdentity(pid: number): string | null | undefined;
 }
 
+/** Process-local custody retained across failed acquisitions and PID reuse. */
+export class ProviderProcessCustody {
+  private readonly preparations = new Map<string, number>();
+  private readonly births = new Map<string, Set<{ child: object; pid: number | null; birth: string | null | undefined; uncertain: boolean }>>();
+
+  constructor(private readonly evidence: Pick<ProviderProcessEvidenceDeps, "getProcessIdentity">) {}
+
+  async acquire<T>(workAttemptId: string, operation: () => Promise<T>): Promise<T> {
+    this.preparations.set(workAttemptId, (this.preparations.get(workAttemptId) ?? 0) + 1);
+    try { return await operation(); }
+    finally {
+      const remaining = this.preparations.get(workAttemptId)! - 1;
+      if (remaining) this.preparations.set(workAttemptId, remaining);
+      else this.preparations.delete(workAttemptId);
+    }
+  }
+
+  record(workAttemptId: string, child: { pid: number | null; exited: Promise<ProviderProcessExit>; didNotSpawn?(): boolean }): () => string | null | undefined {
+    const record = { child, pid: child.pid, birth: undefined as string | null | undefined, uncertain: false };
+    let records = this.births.get(workAttemptId);
+    if (!records) this.births.set(workAttemptId, records = new Set());
+    records.add(record);
+    void child.exited.then(exit => {
+      // A transport/spawn error can precede physical death. Retain it until
+      // the immutable birth is proven gone by a later read.
+      if (exit.type === "exit" || child.didNotSpawn?.() === true) records!.delete(record);
+      else record.uncertain = true;
+    }, () => { record.uncertain = true; });
+    let captured = false;
+    // Register before any await, but preserve the adapter's native readiness
+    // boundary for its one authoritative birth read. Never adopt a later PID.
+    return () => {
+      if (!captured) {
+        captured = true;
+        try { record.birth = child.pid === null ? undefined : this.evidence.getProcessIdentity(child.pid); } catch { /* unknown custody is retained */ }
+      }
+      return record.birth;
+    };
+  }
+
+  state(workAttemptId: string, expectedChild?: object): "absent" | "owned" | "unknown" {
+    const records = this.births.get(workAttemptId);
+    let live = 0;
+    let unknown = Boolean(this.preparations.get(workAttemptId));
+    for (const record of records ?? []) {
+      if (record.pid === null) { unknown = true; continue; }
+      let current: string | null | undefined;
+      try { current = this.evidence.getProcessIdentity(record.pid); } catch { current = undefined; }
+      if (current === null || (typeof current === "string" && record.birth
+        && !sameProcessBirthIdentity(current, record.birth))) {
+        records!.delete(record);
+      } else if (typeof current === "string" && record.birth && record.child === expectedChild && !record.uncertain) live++;
+      else unknown = true;
+    }
+    if (records?.size === 0) this.births.delete(workAttemptId);
+    return unknown || live > 1 ? "unknown" : live ? "owned" : "absent";
+  }
+}
+
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timeout = setTimeout(resolve, Math.max(0, ms));

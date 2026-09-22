@@ -5863,7 +5863,7 @@ for (const { provider, defer } of [{ provider: "claude-code", defer: false }, { 
   const host = generateKeyPairSync("ed25519");
   await internal.hostApprovals.enroll({ getHostApprovalPublicKey: async () => host.publicKey.export({ format: "der", type: "spki" }).toString("base64") });
   internal.hostApprovals.decide = async () => { approve(); return "resolved"; };
-  env.internals.liveHandles.set(env.id, env.handle);
+  await env.internals.providerStreams.install(env.id, env.handle, env.generation);
   const delivery = new SupervisedAgentDelivery(env.internals.supervisedInbox, env.port, {
     poll: async () => ({ messages: [] }), publish: async () => { throw new Error("no reply expected"); },
   }, async () => true);
@@ -5941,7 +5941,7 @@ for (const mode of ["idle", "surviving", "missing_turn_id", "missing_terminal", 
   const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart }),
   });
-  env.internals.liveHandles.set(env.id, env.handle);
+  await env.internals.providerStreams.install(env.id, env.handle, env.generation);
   env.handle.observedState = survivesRestart ? "working" : "idle";
   try {
     if (unresolved) {
@@ -5974,6 +5974,194 @@ for (const mode of ["idle", "surviving", "missing_turn_id", "missing_terminal", 
       assert.equal(result.ok, true, result.error);
       await within(env.daemon.waitForHandoff(), "compatible handoff");
     }
+  } finally { await env.cleanup(); }
+});
+
+for (const scenario of [
+  { name: "stopped absent", desired: "stopped", custody: "absent", installed: false, allowed: true },
+  { name: "paused absent", desired: "paused", custody: "absent", installed: false, allowed: true },
+  { name: "stopped owned", desired: "stopped", custody: "owned", installed: true, allowed: false },
+  { name: "paused owned", desired: "paused", custody: "owned", installed: true, allowed: false },
+  { name: "unknown custody", desired: "stopped", custody: "unknown", installed: false, allowed: false },
+  { name: "failed installation", desired: "stopped", custody: "owned", installed: false, allowed: false },
+  { name: "mismatched custody", desired: "stopped", custody: "mismatched", installed: true, allowed: false },
+] as const) test(`provider-aware handoff preserves historical Cursor ambiguity: ${scenario.name}`, async () => {
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "cursor", {
+    runtimeCustody: () => scenario.custody === "mismatched"
+      ? { state: "owned", handle: { ...env.handle, providerContinuationId: "another-continuation" } }
+      : scenario.custody === "owned" ? { state: "owned", handle: env.handle } : { state: scenario.custody },
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+  });
+  try {
+    const current = (await env.internals.store.getEntry(env.id))!;
+    assert.equal((await daemonRequest(env.paths.socketPath, "manifest.put", { entry: {
+      ...current, desired_state: scenario.desired, observed_state: scenario.desired,
+    } })).ok, true);
+    env.handle.observedState = "idle";
+    if (scenario.installed) await env.internals.providerStreams.install(env.id, env.handle, env.generation);
+    const [item] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: "room_1", last_observed_message_id: "31",
+      messages: [{ source_message_id: "31", source_message: { text: "historical work" }, activation: {} }] });
+    await env.internals.supervisedInbox.claimHead(env.id);
+    await env.internals.supervisedInbox.checkpointDispatchIntent(item!.inbox_item_id);
+    await env.internals.supervisedInbox.transition(item!.inbox_item_id, "blocked", { last_error: "historical dispatch is unknown" });
+    await env.internals.durability.recordTerminal(env.handle.workAttemptId, env.generation, {
+      actor: "daemon-provider", generation: 1, ended_at: new Date().toISOString(), exit_code: 0, signal: null,
+      stdio_archive_ref: null, stdio_tail: "", terminal_cause: "stopped", provider_continuation_id: env.handle.providerContinuationId,
+    });
+    assert.equal(current.provider_ref?.provider_connection?.pid, null);
+    const before = await env.internals.supervisedInbox.get(item!.inbox_item_id);
+    assert.equal(before?.provider_turn_id, null);
+    assert.equal(before?.attempt_count, 0);
+    assert.equal(await env.internals.supervisedInbox.providerTurnBinding(item!.inbox_item_id), null);
+    const readHistory = () => {
+      const db = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
+      try { return db.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id); }
+      finally { db.close(); }
+    };
+    const history = readHistory();
+    const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(result.ok, scenario.allowed, result.error);
+    if (scenario.allowed) await within(env.daemon.waitForHandoff(), "retirement with historical work preserved");
+    else {
+      assert.match(result.error ?? "", /Update deferred/);
+      assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
+      assert.equal((env.daemon as unknown as { handoffDraining: boolean }).handoffDraining, false);
+    }
+    assert.deepEqual(readHistory(), history, "handoff never settles or rewrites the historical uncertainty");
+  } finally { await env.cleanup(); }
+});
+
+for (const stage of ["before_native_attach", "native_attach", "attach_error"] as const) test(`provider-aware handoff fences direct attachment: ${stage}`, async () => {
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  let acquired = false;
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
+    runtimeCustody: () => acquired ? { state: "owned", handle: env.handle } : { state: "absent" },
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+    attach: async () => {
+      calls++;
+      entered(); await gate;
+      if (stage === "attach_error") throw new Error("attachment unavailable");
+      acquired = true;
+      return env.handle;
+    },
+  });
+  const internal = env.daemon as unknown as {
+    handoffDraining: boolean;
+    providerExecution: { attachLiveProvider(entry: DaemonManifestEntry): Promise<ProviderActionHandle | null> };
+  };
+  let attaching: Promise<ProviderActionHandle | null> | undefined;
+  try {
+    const current = (await env.internals.store.getEntry(env.id))!;
+    if (stage === "before_native_attach") {
+      const original = env.internals.store.unresolvedDeliveryDrain.bind(env.internals.store);
+      env.internals.store.unresolvedDeliveryDrain = async id => { entered(); await gate; return original(id); };
+    }
+    attaching = internal.providerExecution.attachLiveProvider(current);
+    void attaching.catch(() => undefined);
+    await within(started, "direct attachment admitted");
+    let settled = false;
+    const handoff = daemonRequest(env.paths.socketPath, "daemon.prepare_handoff").then(result => { settled = true; return result; });
+    await eventually(async () => internal.handoffDraining || settled, "handoff admission closes");
+    assert.equal(settled, false, "retirement waits for already-admitted attachment");
+    assert.equal(await internal.providerExecution.attachLiveProvider(current), null, "new direct attachment is fenced");
+    assert.equal(calls, stage === "before_native_attach" ? 0 : 1);
+    release();
+    if (stage === "attach_error") await assert.rejects(attaching, /attachment unavailable/);
+    else assert.equal(await attaching, stage === "before_native_attach" ? null : env.handle);
+    const result = await handoff;
+    if (stage === "native_attach") {
+      assert.equal(result.ok, false, "an acquired working connection keeps its daemon alive");
+      assert.equal(internal.handoffDraining, false);
+      env.handle.observedState = "idle";
+      assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true, "deferral reopens and a later idle boundary can retire");
+    } else assert.equal(result.ok, true, result.error);
+    await within(env.daemon.waitForHandoff(), "attachment boundary handoff");
+    assert.equal(calls, stage === "before_native_attach" ? 0 : 1);
+  } finally { release(); await attaching?.catch(() => undefined); await env.cleanup(); }
+});
+
+for (const kind of ["lifecycle", "turn_control"] as const) test(`provider-aware handoff preserves admitted ${kind} without a live handle`, async () => {
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "cursor", {
+    runtimeCustody: () => ({ state: "absent" }),
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+  });
+  const gate = (env.daemon as unknown as { entryConcurrency: { beginLifecycle(id: string): () => void; beginTurnControl(id: string): () => void } }).entryConcurrency;
+  const release = kind === "lifecycle" ? gate.beginLifecycle(env.id) : gate.beginTurnControl(env.id);
+  try {
+    const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /Update deferred/);
+    release();
+    assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    await within(env.daemon.waitForHandoff(), "admitted control finishes");
+  } finally { release(); await env.cleanup(); }
+});
+
+test("provider-aware handoff defers when both handle caches predate the manifest generation", async () => {
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
+    runtimeCustody: () => ({ state: "owned", handle: env.handle }),
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+  });
+  try {
+    env.handle.observedState = "idle";
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation);
+    const current = (await env.internals.store.getEntry(env.id))!;
+    const [item] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: "room_1", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "older turn" }, activation: {} }] });
+    await env.internals.supervisedInbox.claimHead(env.id);
+    await env.internals.supervisedInbox.checkpointTurnStarted(item!.inbox_item_id, "old-turn", {
+      work_attempt_id: env.handle.workAttemptId, origin_execution_generation_id: env.generation,
+      provider_continuation_id: env.handle.providerContinuationId!,
+    });
+    await env.internals.supervisedInbox.transition(item!.inbox_item_id, "blocked", { last_error: "unknown old turn" });
+    await env.internals.durability.recordTerminal(env.handle.workAttemptId, env.generation, {
+      actor: "daemon-provider", generation: 1, ended_at: new Date().toISOString(), exit_code: 0, signal: null,
+      stdio_archive_ref: null, stdio_tail: "", terminal_cause: "stopped", provider_continuation_id: env.handle.providerContinuationId,
+    });
+    const successor = await env.internals.durability.startGeneration(env.handle.workAttemptId, "daemon-provider", 2);
+    await (env.daemon as unknown as { updateManifestEntry(id: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry): Promise<unknown> })
+      .updateManifestEntry(env.id, value => ({ ...value, run_id: successor.execution_generation_id,
+        deployment_id: serializeDaemonDeploymentId(env.id, successor.execution_generation_id),
+        provider_ref: { ...value.provider_ref!, execution_generation_id: successor.execution_generation_id } }));
+    assert.equal((await env.internals.store.getEntry(env.id))?.provider_ref?.execution_generation_id, successor.execution_generation_id);
+    const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(result.ok, false, "matching stale caches cannot authorize retirement using the successor's generation");
+    assert.match(result.error ?? "", /native connection could not be confirmed/);
+    assert.equal((await env.internals.supervisedInbox.get(item!.inbox_item_id))?.state, "blocked");
+  } finally { await env.cleanup(); }
+});
+
+test("provider-aware handoff retains router custody after stream installation fails and recovers after repair", async () => {
+  const adapter = {
+    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+    attach: async () => ({ workAttemptId: env.handle.workAttemptId, pid: env.handle.pid,
+      providerContinuationId: env.handle.providerContinuationId, providerConnection: env.handle.providerConnection,
+      observedState: () => env.handle.observedState }),
+  } as unknown as NativeProviderAdapter;
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
+    capabilities: router.capabilities.bind(router), runtimeCustody: router.runtimeCustody.bind(router), attach: router.attach.bind(router),
+    onStream: async () => { throw new Error("stream installation failed"); },
+  });
+  const internal = env.daemon as unknown as { providerExecution: { attachLiveProvider(entry: DaemonManifestEntry): Promise<ProviderActionHandle | null> }; handoffDraining: boolean };
+  try {
+    env.handle.observedState = "idle";
+    const current = (await env.internals.store.getEntry(env.id))!;
+    await assert.rejects(internal.providerExecution.attachLiveProvider(current), /stream installation failed/);
+    assert.equal(env.internals.liveHandles.has(env.id), false);
+    assert.equal(router.runtimeCustody(env.handle.workAttemptId, "claude-code").state, "owned");
+    const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(result.ok, false, "failed stream setup cannot hide native custody");
+    assert.match(result.error ?? "", /native connection could not be confirmed/);
+    assert.equal(internal.handoffDraining, false);
+    env.port.onStream = async () => () => {};
+    assert.ok(await internal.providerExecution.attachLiveProvider(current));
+    assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    await within(env.daemon.waitForHandoff(), "repaired custody retires without a poisoned dispatch reservation");
   } finally { await env.cleanup(); }
 });
 
