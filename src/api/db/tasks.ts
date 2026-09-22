@@ -272,13 +272,13 @@ export async function getOpenTasks(
   return { tasks: bounded.map(toTask), has_more };
 }
 
-export async function getTaskRowById(roomId: string, taskId: string): Promise<TaskRow | undefined> {
+export async function getTaskRowById(roomId: string, taskId: string, executor: Pick<typeof db, "select"> = db): Promise<TaskRow | undefined> {
   const taskNumber = parseScopedId(taskId, "task");
   if (!taskNumber) {
     return undefined;
   }
 
-  const [task] = await db
+  const [task] = await executor
     .select()
     .from(tasks)
     .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)))
@@ -449,9 +449,10 @@ export async function updateTask(
     // LeaseFenceStaleError instead of a stale predecessor overwriting the
     // successor's task state. Absent for owner/admin or lease-creation writes.
     leaseFence?: LeaseFence | null;
-  }
+  },
+  executor?: Parameters<Parameters<(typeof db)["transaction"]>[0]>[0]
 ): Promise<Task | null> {
-  const task = await getTaskRowById(roomId, taskId);
+  const task = await getTaskRowById(roomId, taskId, executor);
   if (!task) return null;
 
   const fence = options?.leaseFence;
@@ -577,7 +578,7 @@ export async function updateTask(
 
   let progressRetryResult: Task | null = null;
   if (options?.boardIntentApproval || options?.workLeaseCreation || options?.leaseFence) {
-    await db.transaction(async (tx) => {
+    const run = async (tx: NonNullable<typeof executor>) => {
       // Fence FIRST, under the shared lease advisory lock, so the whole write
       // linearizes against a concurrent rebind. A stale fence aborts the tx
       // before any task state changes.
@@ -642,15 +643,16 @@ export async function updateTask(
       if (options.leaseFence) {
         await writeArtifactSideEffects(tx);
       }
-    });
+    };
+    await (executor ? run(executor) : db.transaction(run));
     // Non-fenced tx (board-intent / lease-creation only): the lease ref bind is
     // still performed by enforcement; sync outside the tx as before.
     if (!options?.leaseFence) {
-      await writeArtifactSideEffects(db);
+      await writeArtifactSideEffects(executor ?? db);
     }
   } else {
-    await writeTaskUpdate(db);
-    await writeArtifactSideEffects(db);
+    await writeTaskUpdate(executor ?? db);
+    await writeArtifactSideEffects(executor ?? db);
   }
 
   if (progressRetryResult) return progressRetryResult;

@@ -321,7 +321,7 @@ async function workflowHttp(t: import("node:test").TestContext, effects: Record<
     emitProjectMessage: async () => ({ id: "msg_test" }) };
   const app = express();
   registerHttpMiddleware(app, { resolveRequestAuth });
-  registerRoomBoardRoutes(app, common);
+  registerRoomBoardRoutes(app, { ...common, ...effects });
   const taskDeps = { ...common, ...services,
     getTaskById, getTaskOwnershipState, updateTask, taskEvents: new EventEmitter(),
     enforceFocusParentBoardWriteIsolation: ({ req, targetProject }: any) => services.enforceFocusParentBoardWriteIsolation({ req, targetProjectId: targetProject.id }),
@@ -357,21 +357,25 @@ async function workflowHttp(t: import("node:test").TestContext, effects: Record<
     if (assigned) await updateTask(seeded.room.id, task.id, { status: "assigned", assignee: seeded.from.actor_label, assignee_agent_key: seeded.from.agent_key });
     return task;
   };
-  const approveClaim = async (taskId: string, worker = seeded.from) => {
+  const registerClaim = async (taskId: string, worker = seeded.from) => {
     const registered = await request(worker.worker_bearer, "board-intents", {
       action_type: "task_claim", task_id: taskId,
       payload: { task_id: taskId, status: "assigned", assignee: worker.actor_label, assignee_agent_key: worker.agent_key, pr_url: null },
     });
     assert.equal(registered.status, 201, JSON.stringify(registered.body));
-    const intentId = registered.body.intent.id as string;
-    const approved = await request(manager.worker_bearer, `board-intents/${intentId}/approve`, {});
+    return registered.body.intent.id as string;
+  };
+  const approveIntent = (intentId: string) => request(manager.worker_bearer, `board-intents/${intentId}/approve`, {});
+  const approveClaim = async (taskId: string, worker = seeded.from) => {
+    const intentId = await registerClaim(taskId, worker);
+    const approved = await approveIntent(intentId);
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     return intentId;
   };
   const claim = (taskId: string, intentId?: string, worker = seeded.from) => request(worker.worker_bearer, `tasks/${taskId}`, {
     status: "assigned", assignee: worker.actor_label, ...(intentId ? { board_intent_id: intentId } : {}),
   }, "PATCH");
-  return { ...seeded, request, manager, freshTask, approveClaim, claim };
+  return { ...seeded, request, manager, freshTask, registerClaim, approveIntent, approveClaim, claim };
 }
 
 test("HTTP admin edits persist Markdown and clearing through PATCH and GET without changing workflow", { skip: requiresDatabase }, async t => {
@@ -608,12 +612,12 @@ test("HTTP own assigned work recovers a missing lease only through an approved c
   assert.deepEqual((await db!.getActiveTaskLeases(f.room.id, task.id)).map(l => l.id), [leases[0]!.id]);
 });
 
-test("HTTP concurrent approved claims mint one work lease", { skip: requiresDatabase }, async t => {
+test("HTTP concurrent manager approvals atomically mint one work lease", { skip: requiresDatabase }, async t => {
   const f = await workflowHttp(t);
   const task = await f.freshTask();
-  const firstIntent = await f.approveClaim(task.id);
-  const secondIntent = await f.approveClaim(task.id, f.manager);
-  const results = await Promise.all([f.claim(task.id, firstIntent), f.claim(task.id, secondIntent, f.manager)]);
+  const firstIntent = await f.registerClaim(task.id);
+  const secondIntent = await f.registerClaim(task.id, f.manager);
+  const results = await Promise.all([f.approveIntent(firstIntent), f.approveIntent(secondIntent)]);
   assert.equal(results.filter(r => r.status === 200).length, 1, JSON.stringify(results));
   assert.equal(results.filter(r => r.status === 409).length, 1, JSON.stringify(results));
   const leases = await db!.getActiveTaskLeases(f.room.id, task.id);
@@ -695,4 +699,257 @@ test("HTTP concurrent identical progress requests converge on one committed time
   for (const reply of replies) assert.equal(reply.status, 200, JSON.stringify(reply.body));
   assert.equal(new Set(replies.map(r => Date.parse(r.body.updated_at))).size, 1);
   assert.equal(new Set(publicationIds).size, 1, "concurrent notifications share the existing durable deduplication key");
+});
+
+test("HTTP claim approval owns work before its queued notification and survives the old approval expiry", { skip: requiresDatabase }, async t => {
+  let approvalNotice = "";
+  const events: any[] = [];
+  const taskEvents = new EventEmitter();
+  taskEvents.on("task:updated", event => events.push(event));
+  let enrichment = 0;
+  const f = await workflowHttp(t, { taskEvents,
+    ensureTaskGitRoomForActiveWorkLease: async ({ parentRoomId, taskId }: { parentRoomId: string; taskId: string }) => {
+      assert.equal((await db!.getActiveTaskLeases(parentRoomId, taskId)).length, 1);
+      enrichment++;
+    }, emitProjectMessage: async (_room: string, _sender: string, text: string) => {
+    if (text.includes("was approved")) { approvalNotice = text; throw new Error("proposer is still running; notification unavailable"); }
+    return { id: "queued_notice" };
+  } });
+  const task = await f.freshTask();
+  const intentId = await f.registerClaim(task.id);
+  const result = await f.approveIntent(intentId);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.intent.status, "used");
+  assert.equal(result.body.result.kind, "task_claimed");
+  assert.equal(result.body.result.requires_follow_up, false);
+  assert.equal(result.body.approval_token, undefined);
+  assert.equal(result.body.proposer_notification.delivered, false);
+  assert.equal(enrichment, 1);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].task.active_leases[0].agent_session_id, f.from.session_id);
+  assert.match(approvalNotice, /already applied/);
+  const taskAfter = await getTaskById(f.room.id, task.id);
+  assert.equal(taskAfter!.status, "assigned", "no second claim or notification consumption activates ownership");
+  assert.equal(taskAfter!.assignee_agent_key, f.from.agent_key);
+  const leases = await db!.getActiveTaskLeases(f.room.id, task.id);
+  assert.equal(leases.length, 1);
+  assert.equal(leases[0]!.agent_session_id, f.from.session_id);
+  assert.equal(leases[0]!.expires_at, null);
+  await db!.expireBoardIntents({ room_id: f.room.id, now: new Date(Date.now() + 31 * 60_000) });
+  assert.equal((await db!.getBoardIntent({ room_id: f.room.id, intent_id: intentId }))!.status, "used");
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), leases);
+  const progressed = await f.request(f.from.worker_bearer, `tasks/${task.id}`, { status: "in_progress" }, "PATCH");
+  assert.equal(progressed.status, 200, JSON.stringify(progressed.body));
+});
+
+test("HTTP repeated concurrent claim approvals return one receipt and cannot recreate released ownership", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const intent = await f.registerClaim(task.id);
+  const results = await Promise.all([f.approveIntent(intent), f.approveIntent(intent)]);
+  assert.deepEqual(results.map(r => r.status), [200, 200], JSON.stringify(results));
+  assert.ok(results.every(r => r.body.result.kind === "task_claimed" && r.body.intent.status === "used"));
+  const leases = await db!.getActiveTaskLeases(f.room.id, task.id);
+  assert.equal(leases.length, 1);
+  const released = await db!.applyTaskWorkLeaseAction({ room_id: f.room.id, task_id: task.id,
+    active_lease_id: leases[0]!.id, expected_lease_epoch: leases[0]!.epoch, disposition_status: "released",
+    task_updates: { status: "accepted", assignee: null, assignee_agent_key: null } });
+  assert.equal(released.conflict, null);
+  const replay = await f.approveIntent(intent);
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.result.task.status, "accepted");
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), []);
+});
+
+test("HTTP claim approval rolls intent and assignment back when lease persistence fails", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const intent = await f.registerClaim(task.id);
+  await client!.pool.query(`CREATE FUNCTION reject_claim_lease() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'injected lease failure'; END $$;
+    CREATE TRIGGER reject_claim_lease BEFORE INSERT ON task_leases FOR EACH ROW EXECUTE FUNCTION reject_claim_lease()`);
+  await assert.rejects(db!.approveTaskClaimBoardIntent({ room_id: f.room.id, intent_id: intent, decision_by: "Owner" }), /insert into "task_leases"/);
+  assert.equal((await db!.getBoardIntent({ room_id: f.room.id, intent_id: intent }))!.status, "pending");
+  assert.equal((await getTaskById(f.room.id, task.id))!.status, "accepted");
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), []);
+  await client!.pool.query("DROP TRIGGER reject_claim_lease ON task_leases");
+  assert.equal((await f.approveIntent(intent)).status, 200);
+});
+
+for (const change of ["ended worker", "revoked grant", "revoked worker credential", "restricted worker credential", "wrong room", "wrong instance", "wrong key", "released manager", "revoked manager credential", "task lock"] as const) {
+  test(`HTTP atomic claim rejects ${change} without burning the intent`, { skip: requiresDatabase }, async t => {
+    const f = await workflowHttp(t);
+    const task = await f.freshTask();
+    const intent = await f.registerClaim(task.id);
+    // For manager cases capture the exact authenticated request first, then
+    // change authority before the same production transaction can commit.
+    const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${f.manager.worker_bearer}` } } as never);
+    assert.equal(auth.authKind, "agent_session");
+    if (change === "ended worker") await db!.endRoomAgentSession({ session_id: f.from.session_id });
+    if (change === "revoked grant") await client!.pool.query("UPDATE supervisor_host_grants SET revoked_at = now() WHERE grant_id = $1", [f.grantFence.grant_id]);
+    if (change === "revoked worker credential") await client!.pool.query("UPDATE room_agent_session_bearers SET revoked_at = now() WHERE session_id = $1", [f.from.session_id]);
+    if (change === "restricted worker credential") await client!.pool.query("UPDATE room_agent_session_bearers SET capabilities = ARRAY['coordination.propose'] WHERE session_id = $1", [f.from.session_id]);
+    if (change === "wrong room") {
+      const other = await db!.createProjectWithName("different claim room");
+      await client!.pool.query("UPDATE room_agent_sessions SET room_id = $1 WHERE session_id = $2", [other.id, f.from.session_id]);
+    }
+    if (change === "wrong instance") await client!.pool.query("UPDATE room_agent_sessions SET agent_instance_id = 'other' WHERE session_id = $1", [f.from.session_id]);
+    if (change === "wrong key") await client!.pool.query("UPDATE room_agent_sessions SET agent_key = 'other/key' WHERE session_id = $1", [f.from.session_id]);
+    if (change === "released manager") await db!.releaseBoardManager({ room_id: f.room.id, released_by: "Owner" });
+    if (change === "revoked manager credential") await client!.pool.query("UPDATE room_agent_session_bearers SET revoked_at = now() WHERE bearer_id = $1", [auth.agentSession!.bearer_id]);
+    if (change === "task lock") await db!.createTaskLock({ room_id: f.room.id, scope: "task", task_id: task.id, reason: "human_stop", created_by: "Owner" });
+    const manager = auth.agentSession!;
+    await assert.rejects(db!.approveTaskClaimBoardIntent({ room_id: f.room.id, intent_id: intent, decision_by: manager.actor_label,
+      manager: { agent_session_id: manager.agent_session_id, agent_key: manager.agent_key, agent_instance_id: manager.agent_instance_id,
+        credential_fence: { kind: "bearer", bearer_id: manager.bearer_id, generation: manager.bearer_generation, expires_at: manager.expires_at } } }), db!.BoardIntentClaimConflictError);
+    assert.equal((await db!.getBoardIntent({ room_id: f.room.id, intent_id: intent }))!.status, "pending");
+    assert.equal((await getTaskById(f.room.id, task.id))!.status, "accepted");
+    assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), []);
+  });
+}
+
+test("HTTP body provenance spoofing and legacy dedupe never activate a verified worker claim", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const sessionToken = randomUUID();
+  await db!.createSession(f.ownerId, sessionToken, new Date(Date.now() + 60_000).toISOString());
+  await db!.assignProjectAdmin(f.room.id, f.ownerId);
+  const payload = { task_id: task.id, status: "assigned", assignee: f.from.actor_label, assignee_agent_key: f.from.agent_key, pr_url: null };
+  const legacy = await f.request({ sessionToken }, "board-intents", { action_type: "task_claim", task_id: task.id, payload,
+    proposer_worker_auth_kind: "bearer", actor_key: f.from.agent_key, actor_instance_id: f.from.agent_instance_id,
+    actor_label: f.from.actor_label, agent_session_id: f.from.session_id });
+  assert.equal(legacy.status, 201, JSON.stringify(legacy.body));
+  const id = legacy.body.intent.id;
+  assert.equal(await f.registerClaim(task.id), id, "generic dedupe returns the preexisting intent");
+  assert.equal((await client!.pool.query("SELECT proposer_worker_auth_kind FROM board_intents WHERE id = $1", [id])).rows[0].proposer_worker_auth_kind, null);
+  const result = await f.approveIntent(id);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.result.requires_follow_up, true);
+  assert.equal(result.body.intent.status, "approved");
+  assert.equal((await getTaskById(f.room.id, task.id))!.status, "accepted");
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), []);
+  assert.equal((await f.claim(task.id, id)).status, 200, "legacy follow-up remains explicit and functional");
+});
+
+test("HTTP authenticated claim cannot approve a different worker from the request payload", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const registered = await f.request(f.from.worker_bearer, "board-intents", { action_type: "task_claim", task_id: task.id,
+    actor_key: f.manager.agent_key, actor_instance_id: f.manager.agent_instance_id, proposer_worker_auth_kind: "bearer",
+    payload: { task_id: task.id, status: "assigned", assignee: f.manager.actor_label, assignee_agent_key: f.manager.agent_key, pr_url: null } });
+  assert.equal(registered.status, 201);
+  assert.equal(registered.body.intent.proposer_actor_key, f.from.agent_key);
+  const approved = await f.approveIntent(registered.body.intent.id);
+  assert.equal(approved.status, 409, JSON.stringify(approved.body));
+  assert.equal((await getTaskById(f.room.id, task.id))!.status, "accepted");
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), []);
+});
+
+test("HTTP verified session-token worker registration supports atomic approval and payload task identity", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const token = randomUUID();
+  await db!.createOwnerToken({ accountId: f.ownerId, githubUserId: f.ownerId, token });
+  const registered = await f.request(token, "board-intents", {
+    action_type: "task_claim", agent_session_id: f.from.session_id, agent_session_token: f.from.session_token,
+    payload: { task_id: task.id, status: "assigned", assignee: f.from.actor_label, assignee_agent_key: f.from.agent_key, pr_url: null },
+  });
+  assert.equal(registered.status, 201, JSON.stringify(registered.body));
+  const approved = await f.approveIntent(registered.body.intent.id);
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  assert.equal(approved.body.result.kind, "task_claimed");
+  assert.equal(approved.body.intent.task_id, task.id);
+  assert.equal(approved.body.result.task.active_leases[0].agent_session_id, f.from.session_id);
+});
+
+test("HTTP a new same-key worker cannot adopt a deduplicated predecessor claim", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const intent = await f.registerClaim(task.id);
+  await db!.endRoomAgentSession({ session_id: f.from.session_id });
+  const replacement = await db!.createRoomAgentSession({ room_id: f.room.id, session_kind: "worker", runtime: "codex",
+    actor_label: f.from.actor_label, agent_key: f.from.agent_key, agent_instance_id: "new-incarnation",
+    display_name: f.from.display_name, owner_account_id: f.ownerId, owner_label: "Owner", ide_label: "Agent" });
+  assert.equal(await f.registerClaim(task.id, replacement), intent);
+  const rejected = await f.approveIntent(intent);
+  assert.equal(rejected.status, 409, JSON.stringify(rejected.body));
+  assert.equal((await db!.getBoardIntent({ room_id: f.room.id, intent_id: intent }))!.proposer_agent_session_id, f.from.session_id);
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), []);
+});
+
+test("HTTP claim approval preserves focus-parent isolation and postcommit enrichment failures", { skip: requiresDatabase }, async t => {
+  let isolate = true;
+  const f = await workflowHttp(t, {
+    enforceFocusParentBoardWriteIsolation: async () => isolate
+      ? { kind: "deny", code: "focus_parent_board_write_forbidden", error: "Use the focus room." } : { kind: "allow" },
+    ensureTaskGitRoomForActiveWorkLease: async () => { throw new Error("enrichment unavailable"); },
+  });
+  const task = await f.freshTask();
+  const intent = await f.registerClaim(task.id);
+  const denied = await f.approveIntent(intent);
+  assert.equal(denied.status, 409, JSON.stringify(denied.body));
+  assert.equal(denied.body.code, "focus_parent_board_write_forbidden");
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, task.id), []);
+  isolate = false;
+  const approved = await f.approveIntent(intent);
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  assert.equal(approved.body.intent.status, "used");
+  assert.equal((await db!.getActiveTaskLeases(f.room.id, task.id)).length, 1);
+});
+
+test("HTTP claim provenance survives normal bearer rotation but proposal-only credentials stay legacy", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const intent = await f.registerClaim(task.id);
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${f.from.worker_bearer}` } } as never);
+  const rotated = await db!.rotateRoomAgentSessionBearer({ bearer_id: auth.agentSession!.bearer_id });
+  assert.ok(rotated);
+  assert.equal((await f.approveIntent(intent)).status, 200);
+  assert.equal((await db!.getActiveTaskLeases(f.room.id, task.id))[0]!.agent_session_id, f.from.session_id);
+  const limited = await db!.rotateRoomAgentSessionBearer({ bearer_id: rotated.bearer.bearer_id,
+    capabilities: ["coordination.propose"] });
+  const other = await f.freshTask();
+  const proposed = await f.request(limited!.token, "board-intents", { action_type: "task_claim", task_id: other.id,
+    payload: { task_id: other.id, status: "assigned", assignee: f.from.actor_label, assignee_agent_key: f.from.agent_key, pr_url: null } });
+  assert.equal(proposed.status, 201);
+  const approved = await f.approveIntent(proposed.body.intent.id);
+  assert.equal(approved.status, 200);
+  assert.equal(approved.body.result.requires_follow_up, true);
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, other.id), []);
+});
+
+test("HTTP atomic claim expires old work leases using the existing lease lifecycle", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const lease = await db!.createTaskLease({ room_id: f.room.id, task_id: task.id, kind: "work",
+    agent_key: f.manager.agent_key, actor_label: f.manager.actor_label, agent_session_id: f.manager.session_id,
+    created_by: f.manager.actor_label, expires_at: new Date(Date.now() - 1_000).toISOString() });
+  const intent = await f.registerClaim(task.id);
+  const approved = await f.approveIntent(intent);
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  const leases = await db!.getActiveTaskLeases(f.room.id, task.id);
+  assert.equal(leases.length, 1);
+  assert.notEqual(leases[0]!.id, lease.id);
+  assert.equal(leases[0]!.agent_session_id, f.from.session_id);
+});
+
+test("HTTP verified approval from an older server is consumed once without extending its deadline", { skip: requiresDatabase }, async t => {
+  const f = await workflowHttp(t);
+  const task = await f.freshTask();
+  const intent = await f.registerClaim(task.id);
+  const prior = await db!.approveBoardIntent({ room_id: f.room.id, intent_id: intent, decision_by: f.manager.actor_label });
+  assert.ok(prior);
+  const applied = await f.approveIntent(intent);
+  assert.equal(applied.status, 200, JSON.stringify(applied.body));
+  assert.equal(applied.body.intent.status, "used");
+  assert.equal(applied.body.intent.expires_at, prior.intent.expires_at);
+  assert.equal((await db!.getActiveTaskLeases(f.room.id, task.id)).length, 1);
+  const other = await f.freshTask();
+  const expiredIntent = await f.registerClaim(other.id);
+  await db!.approveBoardIntent({ room_id: f.room.id, intent_id: expiredIntent, decision_by: f.manager.actor_label });
+  await client!.pool.query("UPDATE board_intents SET expires_at = now() - interval '1 second' WHERE id = $1", [expiredIntent]);
+  const expired = await f.approveIntent(expiredIntent);
+  assert.equal(expired.status, 409, JSON.stringify(expired.body));
+  assert.equal(expired.body.code, "board_intent_expired");
+  assert.deepEqual(await db!.getActiveTaskLeases(f.room.id, other.id), []);
 });
