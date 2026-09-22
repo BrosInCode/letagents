@@ -583,3 +583,223 @@ test("configuration preflight admitted before update cannot reserve lifecycle af
   assert.equal(h.deliveryReserved(), false);
   assert.equal(await h.gate.run("agent-1", async () => "current turn can commit"), "current turn can commit");
 });
+
+function deliveryAgentFor(token: ProviderInstallationToken) {
+  return { agentId: token.entryId, roomId: "room-1", provider: "codex", deliveryMode: "daemon_inbox" as const,
+    apiUrl: "http://127.0.0.1:4000", agentSessionId: "session", bearer: "memory",
+    executionGenerationId: token.executionGenerationId, daemonGeneration: 7, handle: token.handle,
+    workAttemptId: token.workAttemptId, providerContinuationId: token.providerContinuationId,
+    providerConnection: token.providerConnection };
+}
+
+test("managed delivery admission coalesces one demand but permits later wakes on the same installation", async () => {
+  const env = managedHarness();
+  const agent = deliveryAgentFor(installation);
+  const demand = {};
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), false);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), false);
+  assert.equal(env.convergenceLifecycleStates.length, 1);
+  assert.equal(env.state.nativeStops, 0, "admission only observes, never drains its caller");
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, {}), false);
+  assert.equal(env.convergenceLifecycleStates.length, 2);
+  env.state.receipt = "a".repeat(64);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), true);
+  assert.equal(env.state.desiredReads, 1);
+  assert.equal(env.convergenceLifecycleStates.length, 2);
+});
+
+test("an older admission read cannot overwrite or consume a newer delivery demand", async () => {
+  const env = managedHarness();
+  const agent = deliveryAgentFor(installation);
+  let entered!: () => void;
+  let release!: () => void;
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  let reads = 0;
+  env.options.managed!.store.readManagedLaunchContract = async () => {
+    if (++reads === 1) { entered(); await barrier; }
+    return "b".repeat(64);
+  };
+  const older = {};
+  const newer = {};
+  const pending = env.coordinator.canAdmitManagedDelivery(agent, older);
+  await reading;
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, newer), false);
+  assert.equal(env.convergenceLifecycleStates.length, 1);
+  release();
+  assert.equal(await pending, false);
+  assert.equal(env.convergenceLifecycleStates.length, 2);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, newer), false);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, older), false);
+  assert.equal(env.convergenceLifecycleStates.length, 2, "each demand is consumed only once despite out-of-order reads");
+});
+
+for (const change of ["installation", "handle", "execution", "continuation", "birth", "daemon", "handoff"] as const) {
+  test(`managed admission rejects ${change} replacement during its receipt read`, async () => {
+    const env = managedHarness();
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const reading = new Promise<void>(resolve => { entered = resolve; });
+    env.options.managed!.store.readManagedLaunchContract = async () => { entered(); await barrier; return "a".repeat(64); };
+    const pending = env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(installation), {});
+    await reading;
+    const candidate = { ...installation };
+    if (change === "handle") candidate.handle = { ...handle };
+    if (change === "execution") candidate.executionGenerationId = "other-generation";
+    if (change === "continuation") candidate.providerContinuationId = "other-thread";
+    if (change === "birth") candidate.providerConnection = { ...connection, processIdentity: "other-birth" };
+    if (change === "daemon") env.options.authority.currentDaemonGeneration = () => 8;
+    else if (change === "handoff") env.options.authority.isHandoffScheduled = () => true;
+    else env.options.streams.currentInstallation = () => candidate;
+    release();
+    assert.equal(await pending, false);
+    assert.equal(env.convergenceLifecycleStates.length, 0, "stale observations cannot request replacement");
+    assert.equal(env.state.nativeStops, 0);
+  });
+}
+
+for (const trigger of ["arrival", "retry", "deferred", "descriptor failure", "receipt failure"] as const) {
+  test(`managed ${trigger} waits for guarded replacement before exact-continuation FIFO delivery`, { timeout: 5_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-managed-admission-"));
+    const inbox = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const env = managedHarness();
+    let current = installation;
+    let wakes = 0;
+    let sawRequest!: () => void;
+    let requested = new Promise<void>(resolve => { sawRequest = resolve; });
+    const scheduled: Promise<void>[] = [];
+    const invoked: string[] = [];
+    const demands: object[] = [];
+    const recoveryDelays: number[] = [];
+    let resumedObserved!: () => void;
+    const resumedObservation = new Promise<void>(resolve => { resumedObserved = resolve; });
+    let polls = 0;
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true,
+        permissionPromptBridging: false, survivesRestart: true }),
+      spawn: async () => { throw new Error("unused"); }, attach: async () => null,
+      attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unused"); },
+      poke: async () => {}, stop: async () => terminal, onExit: async () => () => {},
+      runRoomTurn: async (native, request, options) => {
+        assert.notEqual(native, handle, "the old managed runtime must never reach native preflight");
+        assert.equal(native.providerContinuationId, installation.providerContinuationId);
+        invoked.push(request.inboxItemId);
+        await options?.beforeNativeDispatch?.();
+        const turnId = `turn-${request.inboxItemId}`;
+        await options?.checkpointTurnStarted?.(turnId);
+        return { turnId, outcome: "no_reply", text: null };
+      },
+    };
+    const delivery = new SupervisedAgentDelivery(inbox, port, { poll: async ({ signal }) => {
+      polls += 1;
+      return new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true }));
+    }, publish: async () => {} },
+      async agent => agent.handle === current.handle && agent.executionGenerationId === current.executionGenerationId,
+      0, undefined, async delay => { recoveryDelays.push(delay); }, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      (agent, demand) => {
+        demands.push(demand);
+        if (env.state.resumedDelivery && current === installation) resumedObserved();
+        return env.coordinator.canAdmitManagedDelivery(agent, demand);
+      });
+    env.options.inbox = inbox;
+    env.options.delivery = delivery;
+    env.options.streams.currentInstallation = () => current;
+    env.options.managed!.bindings.get = async () => ({ entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+      execution_generation_id: current.executionGenerationId, agent_session_id: "session", credential_ref: "opaque",
+      api_url: "http://127.0.0.1:4000", room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "now" });
+    env.options.managed!.store.readManagedLaunchContract = async () => current === installation ? "b".repeat(64) : "a".repeat(64);
+    if (trigger === "descriptor failure" || trigger === "receipt failure") {
+      let failed = false;
+      const faultOnce = () => {
+        if (failed) return;
+        failed = true;
+        throw new Error("managed contract read temporarily unavailable");
+      };
+      if (trigger === "descriptor failure") {
+        const describe = env.options.provider!.describeManagedLaunchContract!;
+        env.options.provider!.describeManagedLaunchContract = async input => { faultOnce(); return describe(input); };
+      } else {
+        const read = env.options.managed!.store.readManagedLaunchContract;
+        env.options.managed!.store.readManagedLaunchContract = async input => { faultOnce(); return read(input); };
+      }
+    }
+    env.options.managed!.resumeDelivery = async () => {
+      env.state.resumedDelivery += 1;
+      await delivery.refresh(deliveryAgentFor(current));
+      await resumedObservation;
+      await delivery.drainAdmittedTurns(["agent-1"]);
+    };
+    env.options.provider!.stopIdle = async (_native, guard) => {
+      assert.equal(env.state.approvalHeld, true);
+      guard();
+      if (trigger === "deferred" && env.state.resumedDelivery === 0) {
+        throw new ManagedRuntimeRefreshDeferred("native idle boundary temporarily unreadable");
+      }
+      env.state.nativeStops += 1;
+      return terminal;
+    };
+    env.options.terminals.replaceConfiguration = async (exact, stop) => {
+      assert.equal(exact, installation);
+      await stop();
+      current = { ...installation, nonce: Symbol("replacement"), executionGenerationId: "generation-2",
+        handle: { ...handle, pid: 43, providerConnection: { ...connection, pid: 43, processIdentity: "codex:43" } },
+        providerConnection: { ...connection, pid: 43, processIdentity: "codex:43" } };
+      env.entry.provider_ref = { ...env.entry.provider_ref!, execution_generation_id: current.executionGenerationId,
+        provider_connection: current.providerConnection };
+    };
+    env.options.requestConvergence = () => {
+      wakes += 1;
+      sawRequest();
+      assert.ok(wakes <= 3, "deferred ingress must not create a convergence storm");
+      scheduled.push(Promise.resolve().then(async () => {
+        await env.coordinator.refreshManaged("agent-1");
+        if (current !== installation) await delivery.pump(deliveryAgentFor(current));
+      }));
+    };
+    try {
+      await inbox.ingestPoll({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "2",
+        messages: ["1", "2"].map(id => ({ source_message_id: id, source_message: { id, text: "check" }, activation: {} })) });
+      const originalHead = await inbox.head("agent-1");
+      if (trigger === "retry") {
+        await inbox.transition(originalHead!.inbox_item_id, "dispatching");
+        await inbox.transition(originalHead!.inbox_item_id, "blocked", { last_error: "preflight unavailable" });
+        await delivery.retry(deliveryAgentFor(current), "1");
+      }
+      if (trigger === "deferred") await delivery.start(deliveryAgentFor(current));
+      else await delivery.pump(deliveryAgentFor(current));
+      await requested;
+      for (let index = 0; index < scheduled.length; index += 1) await scheduled[index];
+      if (trigger === "deferred") {
+        assert.equal(wakes, 1);
+        assert.deepEqual(invoked, []);
+        assert.equal((await inbox.head("agent-1"))!.state, "pending");
+        assert.equal(env.state.resumedDelivery, 1);
+        assert.equal(current, installation, "deferral retains the exact original native installation");
+        assert.equal(polls, 2, "deferral restarted the real observation loop");
+        assert.equal(demands[0], demands[1], "loop replacement retains its original delivery demand");
+        requested = new Promise<void>(resolve => { sawRequest = resolve; });
+        // Native idle becomes readable without emitting a provider/approval
+        // event. Only an independent delivery wake retries the same runtime.
+        assert.equal(delivery.wake(deliveryAgentFor(current)), true);
+        await requested;
+        for (let index = 0; index < scheduled.length; index += 1) await scheduled[index];
+      }
+      assert.equal(env.state.nativeStops, 1);
+      if (trigger === "descriptor failure" || trigger === "receipt failure") {
+        assert.deepEqual(recoveryDelays, [250], "existing tracked fault recovery owns the read retry");
+        assert.equal(demands[0], demands[1], "the failed read did not consume or replace its delivery demand");
+      }
+      const receipts = await inbox.receipts("agent-1");
+      assert.equal(receipts.length, 2);
+      assert.deepEqual(invoked, receipts.map(receipt => receipt.inbox_item_id));
+      for (const receipt of receipts) {
+        assert.equal(receipt.state, "acknowledged_no_reply");
+        assert.equal(receipt.attempt_count, 1);
+        assert.equal((await inbox.providerTurnBinding(receipt.inbox_item_id))!.origin_execution_generation_id, "generation-2");
+        assert.equal((await inbox.providerTurnBinding(receipt.inbox_item_id))!.provider_continuation_id, installation.providerContinuationId);
+      }
+    } finally { await delivery.fenceAndDrain(); await inbox.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
