@@ -183,6 +183,8 @@ export class SupervisedAgentDelivery {
   private readonly handleContextIds = new WeakMap<object, number>();
   private nextHandleContextId = 1;
   private fenced = false;
+  private dispatchPaused = false;
+  private readonly pausedDispatchAgents = new Map<string, SupervisedIngressAgent>();
 
   constructor(
     private readonly inbox: SupervisedAgentInboxStore,
@@ -238,6 +240,28 @@ export class SupervisedAgentDelivery {
     return completion.outcome === "no_reply"
       ? { turnId: result.turnId, outcome: "no_reply", text: null, evidence: "stream" }
       : { turnId: result.turnId, outcome: "reply", text: completion.text, evidence: "stream" };
+  }
+
+  /** Pause new FIFO admissions without aborting an admitted turn or its approvals. */
+  pauseDispatch(): void {
+    this.dispatchPaused = true;
+  }
+
+  async drainAdmittedTurns(agentIds: readonly string[]): Promise<void> {
+    await Promise.allSettled(agentIds.map(id => this.pumping.get(id)));
+  }
+
+  resumeDispatch(): void {
+    this.dispatchPaused = false;
+    const agents = [...this.pausedDispatchAgents.values()];
+    this.pausedDispatchAgents.clear();
+    for (const agent of agents) this.wakePumpAfterSettlement(agent);
+  }
+
+  private dispatchIsPaused(agent: SupervisedIngressAgent): boolean {
+    if (!this.dispatchPaused) return false;
+    this.pausedDispatchAgents.set(agent.agentId, agent);
+    return true;
   }
 
   fence(): void {
@@ -1115,6 +1139,7 @@ export class SupervisedAgentDelivery {
         this.startupRecovered.set(agent.agentId, recoveryContext);
       }
       for (;;) {
+        if (this.dispatchIsPaused(agent)) return;
         const head = await this.inbox.head(agent.agentId);
         const exactCursorRecovery = agent.provider === "cursor" && Boolean(head?.provider_turn_id);
         if (!(exactCursorRecovery
@@ -1184,8 +1209,14 @@ export class SupervisedAgentDelivery {
             }
           }
         }
+        if (this.dispatchIsPaused(agent)) return;
         const item = await this.inbox.claimHead(agent.agentId);
         if (!item) return; // blocked, in-flight, or empty: FIFO remains intact.
+        if (this.dispatchIsPaused(agent) && !item.provider_turn_id && !item.outcome) {
+          // The claim raced the admission pause; no provider invocation began.
+          await this.inbox.resetPreNativeHandoff(item.inbox_item_id);
+          return;
+        }
         await this.deliver(agent, item, controller);
       }
     } finally { /* tracked by pump(), including handoff draining. */ }
