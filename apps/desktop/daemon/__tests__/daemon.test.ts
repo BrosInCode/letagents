@@ -12844,6 +12844,13 @@ test("worker lease HTTP uses complete worker-scoped inventory and exact grant-fe
     const mutation = { apiUrl, grantId: "grant", supervisorGrant: "grant-secret", grantGeneration: 2,
       lease: inventory[0]!, workAttemptId: "attempt", executionGenerationId: "execution", cause: "killed" as const };
     assert.equal(await productionSupervisorGrantHttp.attestWorkLease!(mutation), "proof");
+    proof.supervisor_generation = 1;
+    assert.equal(await productionSupervisorGrantHttp.attestWorkLease!(mutation), "proof", "same-grant historical evidence survives handoff unchanged");
+    for (const generation of [3, 0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      proof.supervisor_generation = generation;
+      await assert.rejects(productionSupervisorGrantHttp.attestWorkLease!(mutation), /different proof/, "future or malformed evidence is never accepted");
+    }
+    proof.supervisor_generation = 2;
     assert.equal((await productionSupervisorGrantHttp.rebindWorkLease!({ ...mutation, attestationId: "proof", toSessionId: "new-session" })).epoch, 4);
     assert.ok(calls.slice(-2).every(call => call.authorization === "Bearer grant-secret" && call.generation === "2"));
     assert.deepEqual(calls.at(-1)!.body, { expected_epoch: 3, from_agent_session_id: "old-session", to_agent_session_id: "new-session",
