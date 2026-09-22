@@ -1235,11 +1235,17 @@ export class SupervisorDaemon {
         throw new Error("Update deferred: an agent still has work that cannot survive a background-service restart. Try again after it finishes.");
       }
       const head = await this.supervisedInbox.head(entry.id);
-      if (!head?.provider_turn_id) continue;
+      if (!head) continue;
+      if (!head.provider_turn_id) {
+        if (head.state === "pending" || head.state === "retryable") continue;
+        // A lost native acknowledgement can leave a blocked turn without an
+        // ID or counted attempt. Neither is proof that dispatch never happened.
+        throw new Error("Update deferred: an agent's current turn has no confirmed completion. Resolve its blocked work before updating.");
+      }
       const binding = await this.supervisedInbox.providerTurnBinding(head.inbox_item_id);
-      if (binding?.origin_execution_generation_id !== current.provider_ref?.execution_generation_id) continue;
+      if (binding && binding.origin_execution_generation_id !== current.provider_ref?.execution_generation_id) continue;
       const detail = await this.supervisedInbox.detail(entry.id, current.room_id, head.source_message_id);
-      if (!detail.terminal || detail.terminal.outcome === "unreadable" || detail.terminal.evidence_source === "none") {
+      if (!binding || !detail.terminal || detail.terminal.outcome === "unreadable" || detail.terminal.evidence_source === "none") {
         throw new Error("Update deferred: an agent's current turn has no confirmed completion. Resolve its blocked work before updating.");
       }
     }

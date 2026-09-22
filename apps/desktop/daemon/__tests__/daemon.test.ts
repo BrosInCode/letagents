@@ -5921,19 +5921,21 @@ for (const { provider, defer } of [{ provider: "claude-code", defer: false }, { 
   }
 });
 
-for (const mode of ["idle", "surviving", "missing_terminal", "unreadable_terminal"] as const) test(`provider-aware handoff ${mode}`, async () => {
+for (const mode of ["idle", "surviving", "missing_turn_id", "missing_terminal", "unreadable_terminal"] as const) test(`provider-aware handoff ${mode}`, async () => {
   const survivesRestart = mode === "surviving";
+  const unresolved = mode !== "idle" && mode !== "surviving";
   const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart }),
   });
   env.internals.liveHandles.set(env.id, env.handle);
   env.handle.observedState = survivesRestart ? "working" : "idle";
   try {
-    if (mode.endsWith("terminal")) {
+    if (unresolved) {
       const [item] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: "room_1", last_observed_message_id: "1",
         messages: [{ source_message_id: "1", source_message: { text: "original work" }, activation: {} }] });
-      await env.internals.supervisedInbox.transition(item!.inbox_item_id, "dispatching");
-      await env.internals.supervisedInbox.checkpointTurnStarted(item!.inbox_item_id, "unresolved-turn", {
+      assert.equal((await env.internals.supervisedInbox.claimHead(env.id))?.inbox_item_id, item!.inbox_item_id);
+      await env.internals.supervisedInbox.checkpointDispatchIntent(item!.inbox_item_id);
+      if (mode !== "missing_turn_id") await env.internals.supervisedInbox.checkpointTurnStarted(item!.inbox_item_id, "unresolved-turn", {
         work_attempt_id: env.handle.workAttemptId, origin_execution_generation_id: env.generation,
         provider_continuation_id: env.handle.providerContinuationId!,
       });
@@ -5941,10 +5943,15 @@ for (const mode of ["idle", "surviving", "missing_terminal", "unreadable_termina
         inbox_item_id: item!.inbox_item_id, agent_id: env.id, execution_generation_id: env.generation,
         provider_turn_id: "unresolved-turn", outcome: "unreadable", text: null, evidence: "none", terminal_evidence: {},
       });
-      await env.internals.supervisedInbox.transition(item!.inbox_item_id, "blocked", "native completion is unknown");
+      await env.internals.supervisedInbox.transition(item!.inbox_item_id, "blocked", { last_error: "native completion is unknown" });
+      if (mode === "missing_turn_id") {
+        const ambiguous = await env.internals.supervisedInbox.get(item!.inbox_item_id);
+        assert.equal(ambiguous?.provider_turn_id, null);
+        assert.equal(ambiguous?.attempt_count, 0, "unacknowledged dispatch has not counted a model turn");
+      }
     }
     const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
-    if (mode.endsWith("terminal")) {
+    if (unresolved) {
       assert.equal(result.ok, false, "idle/bootstrap observation cannot replace exact turn completion");
       assert.match(result.error ?? "", /no confirmed completion/);
       assert.equal((await env.internals.supervisedInbox.head(env.id))?.state, "blocked");
