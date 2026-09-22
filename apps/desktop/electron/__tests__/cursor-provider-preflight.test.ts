@@ -307,6 +307,20 @@ test("Cursor supervised preflight admits repo-less read-only without relaxing th
     assert.equal(readOnly.message, "Cursor Agent is ready to start supervised with Read-only.");
     assert.equal(checks, 0);
 
+    for (const permissionProfileId of ["sandboxed_write", "full_access"] as const) {
+      let identityChecks = 0;
+      const writable = await runDesktopCursorProviderPreflight(cursorProvider, {
+        repoRootPath: null, roomOnly: true, launchMode: "supervised", permissionProfileId,
+      }, "installed", { commandTimeoutMs: 0,
+        personalIdentityAttestor: async () => { identityChecks += 1; throw new Error("account check must not run without a profile directory"); },
+        runtimeEnvironment: { ...process.env, LETAGENTS_TEST_CURSOR_PROBE_ENV: "present" },
+      });
+      assert.equal(writable.status, "repo_required");
+      assert.equal(writable.canStart, false);
+      assert.equal(writable.nextAction, "choose_repo");
+      assert.equal(identityChecks, 0);
+    }
+
     const legacy = await runPreflight({ repoRootPath: null, roomOnly: true });
     assert.equal(legacy.status, "repo_required");
     assert.equal(legacy.canStart, false);
