@@ -253,7 +253,7 @@ export interface ProviderSpawnRequest {
   supervisorWorkerSession?: {
     agentSessionId: string;
     roomCursor: string | null;
-    /** Exact authority endpoint, required for the custodial polling contract. */
+    /** Authorized room endpoint for both bounded and polling launches. */
     apiUrl?: string;
   };
   /**

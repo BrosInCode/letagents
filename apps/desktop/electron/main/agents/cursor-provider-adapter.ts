@@ -205,6 +205,8 @@ export interface CursorProviderAdapterOptions {
   supervisedProfileFactory?: (input: {
     workAttemptId: string;
     cwd: string;
+    /** Authorized room route, preserved through each disposable turn profile. */
+    apiBaseUrl: string;
     /** Exact durable permission authority selected for the supervised lane. */
     permissionProfileId?: CursorSupervisedProfileOptions["permissionProfileId"];
     /** Prevent exact scratch workspaces from resolving an ancestor Git project. */
@@ -657,7 +659,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         workspaceRoot: input.cwd,
         permissionProfileId: input.permissionProfileId,
         exactWorkspaceOnly: input.exactWorkspaceOnly,
-        apiBaseUrl: desktopApiUrl,
+        apiBaseUrl: input.apiBaseUrl,
         profileRoot: input.profileRoot,
         includeAuth: input.includeAuth,
         authSourceHomeDir: input.authSourceHomeDir,
@@ -1589,6 +1591,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       supervisedProfile = this.supervisedProfileFactory({
         workAttemptId: req.workAttemptId,
         cwd: req.cwd,
+        apiBaseUrl: req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl,
         permissionProfileId: req.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
         exactWorkspaceOnly: usesExactScratchWorkspace(req),
         includeAuth: false,
@@ -1688,6 +1691,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     let workspaceGeneration: SupervisedWorkspaceGenerationHandle | null = null;
     let providerWorkspace = handle.cwd;
     const exactWorkspaceOnly = usesExactScratchWorkspace(handle.spawnRequest);
+    const apiBaseUrl = handle.spawnRequest.supervisorWorkerSession?.apiUrl ?? desktopApiUrl;
     if (handle.deliveryMode === "daemon_inbox") {
       // First enumerate from a random disposable profile with an inert local
       // MCP and no turn/provider capability. The authority wrapper denies
@@ -1695,6 +1699,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       const inspectionProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-inspection-"));
       try {
         const enumerationProfile = this.supervisedProfileFactory({
+          apiBaseUrl,
           workAttemptId: `${handle.workAttemptId}:mcp-inspection:${randomUUID()}`,
           cwd: handle.cwd,
           profileRoot: inspectionProfileRoot,
@@ -1734,6 +1739,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       const bridgeProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-bridge-"));
       try {
         const bridgeProfile = this.supervisedProfileFactory({
+          apiBaseUrl,
           workAttemptId: `${handle.workAttemptId}:mcp-bridge:${randomUUID()}`,
           cwd: handle.cwd,
           profileRoot: bridgeProfileRoot,
@@ -1795,6 +1801,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       const identityProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-identity-"));
       try {
         let identityProfile = this.supervisedProfileFactory({
+          apiBaseUrl,
           workAttemptId: `${handle.workAttemptId}:identity:${randomUUID()}`,
           cwd: handle.cwd,
           profileRoot: identityProfileRoot,
@@ -1821,6 +1828,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         // Reseal after status so any refreshed teamId is checked before its
         // sanitized auth metadata becomes the final turn's source.
         identityProfile = this.supervisedProfileFactory({
+          apiBaseUrl,
           workAttemptId: `${handle.workAttemptId}:identity:resealed`,
           cwd: handle.cwd,
           profileRoot: identityProfileRoot,
@@ -1856,6 +1864,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         mcpConnectorRoot = join(CURSOR_MCP_CONNECTOR_PARENT, `letagents-cursor-mcp-${randomUUID()}`);
         mcpConnectorSocketPath = join(mcpConnectorRoot, "stdio.sock");
         const profile = this.supervisedProfileFactory({
+          apiBaseUrl,
           workAttemptId: handle.workAttemptId,
           cwd: providerWorkspace,
           permissionProfileId: handle.spawnRequest.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],

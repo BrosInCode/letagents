@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -9,6 +12,7 @@ import {
 import type {
   ProviderActionHandle,
   ProviderActionPort,
+  ProviderActionSpawn,
   ProviderActionTerminal,
 } from "../provider-action-port.js";
 import type { DaemonManifestEntry, ExecutionTerminalPayload, TaskWorkAttempt } from "../types.js";
@@ -364,6 +368,120 @@ const scratchWorkspaceIdentity: TaskWorkAttempt["workspace_identity"] = {
   repo: "room-only", remote_url: "letagents-ephemeral:scratch",
   resolved_revision: "0".repeat(40), bare_path: "/tmp/work",
 };
+
+test("authorized worker routes reach the real provider MCP configuration on launch and resume", async () => {
+  // Exercise default adapter factories, not helpers with a manually supplied
+  // URL. Only native process creation is replaced; no credentials or network.
+  const { ClaudeCodeProviderAdapter } = await import(new URL("../../electron/main/agents/claude-code-provider-adapter.ts", import.meta.url).href);
+  const { CursorProviderAdapter } = await import(new URL("../../electron/main/agents/cursor-provider-adapter.ts", import.meta.url).href);
+  const { CodexProviderAdapter } = await import(new URL("../../electron/main/agents/codex-provider-adapter.ts", import.meta.url).href);
+  const { LETAGENTS_MCP_RUNTIME_VERSION } = await import(new URL("../../electron/main/agents/letagents-mcp-runtime.ts", import.meta.url).href);
+  const { letAgentsRuntimeContract } = await import(new URL("../../../../src/mcp/server/runtime-contract.ts", import.meta.url).href);
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-worker-route-")));
+  const env = {
+    LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://127.0.0.1:5174",
+    LETAGENTS_DEV_MCP_SERVER_ENTRY: join(root, "runtime", "server.js"),
+    LETAGENTS_STATE_PATH: join(root, "state", "mcp-state.json"),
+    LETAGENTS_CURSOR_SOURCE_HOME: join(root, "source-home"),
+  };
+  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  try {
+    for (const directory of ["runtime/node_modules", "workspace", "source-home", "state"]) mkdirSync(join(root, directory), { recursive: true });
+    writeFileSync(join(root, "runtime/package.json"), JSON.stringify({ name: "letagents", version: LETAGENTS_MCP_RUNTIME_VERSION }));
+    writeFileSync(env.LETAGENTS_DEV_MCP_SERVER_ENTRY, "// Never executed by this configuration test.\n");
+    Object.assign(process.env, env);
+    for (const providerName of ["codex", "claude-code", "cursor"] as const) {
+      for (const apiUrl of ["letagents-local://rooms", "https://worker.example.test"]) {
+        for (const mode of ["minted", "retained", "reminted"] as const) {
+          let checked = false;
+          const configure = async (request: ProviderActionSpawn) => {
+            assert.equal(request.supervisorWorkerSession?.apiUrl, apiUrl);
+            const stoppedBeforeNativeLaunch = new Error("configuration captured; no native process");
+            const configRequest = { ...request, cwd: join(root, "workspace") };
+            const invoke = async (adapter: InstanceType<typeof ClaudeCodeProviderAdapter>) => {
+              if (mode === "minted") return adapter.spawn(configRequest);
+              return adapter.resume({ workAttemptId: request.workAttemptId, providerContinuationId: "continuation-1", cwd: configRequest.cwd }, configRequest);
+            };
+            if (providerName === "claude-code") {
+              let configPath = "";
+              const adapter = new ClaudeCodeProviderAdapter({ dependencies: {
+                readVersion: async () => "2.1.220 (Claude Code)",
+                launchChild: (input: { args: string[] }) => {
+                  const path = input.args[input.args.indexOf("--mcp-config") + 1]!;
+                  configPath = path;
+                  const config = JSON.parse(readFileSync(path, "utf8"));
+                  assert.equal(config.mcpServers.letagents.env.LETAGENTS_API_URL, apiUrl);
+                  assert.doesNotMatch(JSON.stringify(config), /test-only|LETAGENTS_TOKEN|LETAGENTS_AGENT_SESSION_BEARER/);
+                  checked = true;
+                  throw stoppedBeforeNativeLaunch;
+                },
+              } });
+              await assert.rejects(invoke(adapter), error => error === stoppedBeforeNativeLaunch);
+              assert.ok(configPath);
+              assert.equal(existsSync(configPath), false, "failed native launch cleans the managed config");
+            } else if (providerName === "cursor") {
+              const adapter = new CursorProviderAdapter();
+              await invoke(adapter);
+              const profile = createHash("sha256").update(request.workAttemptId).digest("hex").slice(0, 32);
+              const config = JSON.parse(readFileSync(join(root, "state", "cursor-supervised", profile, "home/.cursor/mcp.json"), "utf8"));
+              const server = Object.values(config.mcpServers)[0] as { env: Record<string, string> };
+              assert.equal(server.env.LETAGENTS_API_URL, apiUrl);
+              checked = true;
+            } else {
+              const adapter = new CodexProviderAdapter({ dependencies: {
+                writeSupervisorBridgeContext: async () => {},
+                resolveServerUrl: async () => "ws://127.0.0.1:1",
+                readMcpRuntimeContract: async (_entry: string, route: string) => {
+                  assert.equal(route, apiUrl);
+                  return letAgentsRuntimeContract(route);
+                },
+                launchServer: (_url: string, _bin: string, options: { configOverrides: string[] }) => {
+                  assert.ok(options.configOverrides.join("\n").includes(`"LETAGENTS_API_URL" = ${JSON.stringify(apiUrl)}`));
+                  checked = true;
+                  throw stoppedBeforeNativeLaunch;
+                },
+              } });
+              await assert.rejects(invoke(adapter), error => error === stoppedBeforeNativeLaunch);
+            }
+            return returnedHandle;
+          };
+          const runtime = harness({
+            entry: { ...baseEntry(), provider: providerName, permission_profile_id: providerName === "codex" ? "ask_before_write" : "read_only", delivery_mode: "daemon_inbox",
+              ...(mode !== "minted" ? { provider_ref: {
+                work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+                provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection,
+              } } : {}),
+            },
+            workspaceIdentity: scratchWorkspaceIdentity,
+            provider: provider({ spawn: configure, resume: async (_ref, request) => configure(request),
+              capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+            }),
+          });
+          if (mode !== "minted") {
+            runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1", started_at: "2026-08-26T00:00:00.000Z", actor: "test", generation: 1, terminal: runtime.options.terminalPayload(terminal(returnedHandle), "test") });
+            runtime.options.bindings.get = async () => ({ entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "generation-1", agent_session_id: "session-1", credential_ref: "test", api_url: mode === "reminted" ? "https://old.example.test" : apiUrl, room_cursor: "7", last_sequence: 9, last_observed_at_ms: 1_000, updated_at: "2026-08-26T00:00:00.000Z" });
+          }
+          if (mode !== "retained") {
+            const grant: InstalledHostGrant = { entryId: "agent-1", roomId: "room-1", agentKey: "owner/agent-1", grantId: "grant-1", supervisorGrant: "test-only", grantGeneration: 1, apiUrl, daemonGeneration: 7, hostId: "host-1", installationId: "installation-1", expiresAt: "2099-01-01T00:00:00.000Z" };
+            runtime.options.host.requiresGrant = () => true;
+            runtime.options.host.currentGrant = () => grant;
+            runtime.options.host.ensureGrantFresh = async () => grant;
+            runtime.options.host.mintAuthorization = async () => ({ agentSessionId: "session-1", bearer: "test-only", bearerId: "bearer-1", expiresAt: grant.expiresAt, apiUrl, authority: { entryId: "agent-1", roomId: "room-1", workAttemptId: "attempt-1", grant } });
+            runtime.options.host.recordMintedSession = async (_entry, executionGenerationId, authorization) => ({ ...authorization, executionGenerationId });
+          }
+          await runtime.coordinator.converge("agent-1");
+          assert.equal(checked, true, `${providerName}/${apiUrl}/${mode}: ${runtime.entry().last_error}`);
+        }
+      }
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 for (const { label, entryPatch, workspaceIdentity, expectedWorkspaceKind } of [
   {
