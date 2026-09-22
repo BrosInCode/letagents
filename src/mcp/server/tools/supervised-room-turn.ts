@@ -3,6 +3,19 @@ import { z } from "zod";
 
 const MAX_ROOM_REPLY_BYTES = 32 * 1024;
 
+/** Select routing only; the daemon remains the sole final-answer publisher. */
+export function registerReplyThreadTool(server: McpServer): void {
+  const tool = server.tool(
+    "set_reply_thread",
+    "Place your final answer in the activating room message's thread. Takes no arguments, sends no message, and does not finish the turn. Continue working and use your normal final completion when ready. Unavailable for synthetic task continuations or corrections.",
+    {},
+    async () => { throw new Error("set_reply_thread requires the active daemon-owned room turn."); },
+  );
+  // The legacy raw-shape overload strips unknown keys. Preserve a strict schema
+  // so a caller cannot mistake ignored room/recipient/text arguments for authority.
+  tool.inputSchema = z.object({}).strict();
+}
+
 function completionResponse(outcome: "reply" | "no_reply"): {
   content: Array<{ type: "text"; text: string }>;
   structuredContent: Record<string, unknown>;

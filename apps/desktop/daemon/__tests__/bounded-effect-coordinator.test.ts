@@ -686,3 +686,27 @@ test("failed shared execution releases overlap coordination for journal recovery
   await state.subject.execute(input);
   assert.equal(executions, 2, "settled failures return to the journal, which owns recovery policy");
 });
+
+
+test("thread intent returns its atomic receipt without native execution or an external handler", async () => {
+  const result = { content: [{ type: "text", text: "Thread choice recorded" }] };
+  const h = harness({ prepareResult: { created: true, effect: effect({
+    tool_name: "set_reply_thread", request: {}, state: "completed", result,
+  }) } });
+  assert.deepEqual(await h.subject.execute(executeInput({ toolName: "set_reply_thread", input: {} })), {
+    state: "completed", room_id: "room-a", result,
+  });
+  assert.ok(h.events.includes("commit:prepare"));
+  for (const event of ["journal:mark", "runtime:execute", "authorization:get", "journal:complete"]) {
+    assert.equal(h.events.includes(event), false, event);
+  }
+});
+
+test("raw daemon thread intent rejects arguments before admitting a journal effect", async () => {
+  for (const input of [null, [], "", { room_id: "other" }, { thread_parent_id: "source-a" }, { text: "answer" }]) {
+    const h = harness();
+    await assert.rejects(h.subject.execute(executeInput({ toolName: "set_reply_thread", input })), /empty object/);
+    assert.equal(h.events.includes("journal:prepare"), false);
+    assert.equal(h.events.includes("runtime:execute"), false);
+  }
+});

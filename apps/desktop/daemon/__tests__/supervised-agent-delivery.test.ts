@@ -1430,8 +1430,32 @@ test("supervised reply targets inherit true threads but not top-level quote repl
   );
 });
 
+async function recordThreadIntent(path: string, store: SupervisedAgentInboxStore, turnId: string): Promise<void> {
+  const manifest = new ManifestStore(path);
+  try {
+    const loaded = await manifest.load();
+    await manifest.write(loaded.generation, [{
+      id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: "codex", model: null,
+      charter: "test", desired_state: "running", observed_state: "working", condition: "none",
+      permission_profile_id: null, delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
+      created_at: new Date().toISOString(), work_attempt_id: agent.workAttemptId,
+      provider_ref: { work_attempt_id: agent.workAttemptId, execution_generation_id: agent.executionGenerationId,
+        provider_continuation_id: agent.providerContinuationId, provider_connection: agent.providerConnection },
+    }]);
+  } finally { await manifest.close(); }
+  const intent = await store.prepareEffect({ agent_id: agent.agentId, room_id: agent.roomId,
+    execution_generation_id: agent.executionGenerationId, current_execution_generation_id: agent.executionGenerationId,
+    provider_turn_id: turnId, provider_continuation_id: agent.providerContinuationId, work_attempt_id: agent.workAttemptId,
+    mcp_request_id: "thread-choice", tool_name: "set_reply_thread", request: {}, mutation: true });
+  assert.equal(intent.effect.state, "completed");
+}
+
 test("an intercepted thread choice survives publication failure and restart without another provider turn", async () => {
-  for (const toolName of ["send_thread_message", "send_message"]) for (const effectState of ["prepared", "failed"]) {
+  for (const { toolName, effectState, existingRoot } of [
+    ...["send_thread_message", "send_message"].flatMap(toolName => ["prepared", "failed"].map(effectState => ({ toolName, effectState, existingRoot: null }))),
+    { toolName: "set_reply_thread", effectState: "completed", existingRoot: null },
+    { toolName: "set_reply_thread", effectState: "completed", existingRoot: "msg_70" },
+  ]) {
     const root = await mkdtemp(join(tmpdir(), "letagents-thread-intent-"));
     const path = join(root, "state.sqlite");
     let store = new SupervisedAgentInboxStore(path);
@@ -1449,23 +1473,28 @@ test("an intercepted thread choice survives publication failure and restart with
     let delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
       runs++;
       await options?.checkpointTurnStarted?.("native-turn");
-      // The coordinator retains the intercepted request before returning USE_FINAL_ANSWER.
-      const db = new DatabaseSync(path);
-      try {
-        db.prepare(`INSERT INTO supervised_agent_effects
-          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
-          VALUES ('thread-choice',?,?,?,'native-turn','request',?,?,1,?,NULL,NULL,?,?)`)
-          .run(agent.agentId, agent.roomId, "generation-1", toolName,
-            JSON.stringify({ thread_parent_id: "msg_72", text: "draft" }), effectState, new Date().toISOString(), new Date().toISOString());
-      } finally { db.close(); }
+      if (toolName === "set_reply_thread") {
+        await recordThreadIntent(path, store, "native-turn");
+      } else {
+        // The coordinator retains the intercepted request before returning USE_FINAL_ANSWER.
+        const db = new DatabaseSync(path);
+        try {
+          db.prepare(`INSERT INTO supervised_agent_effects
+            (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+            VALUES ('thread-choice',?,?,?,'native-turn','request',?,?,1,?,NULL,NULL,?,?)`)
+            .run(agent.agentId, agent.roomId, "generation-1", toolName,
+              JSON.stringify({ thread_parent_id: "msg_72", text: "draft" }), effectState, new Date().toISOString(), new Date().toISOString());
+        } finally { db.close(); }
+      }
       return { turnId: "native-turn", outcome: "reply", text: "final answer" };
     }), http, async () => ownsLane, 0);
     try {
-      await ingest(store, "msg_72");
+      await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "msg_72",
+        messages: [{ source_message_id: "msg_72", source_message: { id: "msg_72", thread_root_id: existingRoot }, activation: {} }] });
       await delivery.pump(agent);
       assert.equal(publications.length, 1);
       assert.deepEqual(publications[0], {
-        clientMessageId: "supervised-room:stone:room:msg_72:reply:v1", replyTo: "msg_72", threadRootId: "msg_72",
+        clientMessageId: "supervised-room:stone:room:msg_72:reply:v1", replyTo: "msg_72", threadRootId: existingRoot ?? "msg_72",
       });
       await delivery.fenceAndDrain(); await store.close();
       store = new SupervisedAgentInboxStore(path);
@@ -5051,4 +5080,32 @@ test('every provider waits for the workspace snapshot before advancing to its ne
       } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test("recorded reply-thread intent cannot publish a stopped, failed, silent or authority-lost turn", async () => {
+  for (const outcome of ["stop", "failed", "no_reply", "authority_lost"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-thread-no-publish-"));
+    const path = join(root, "state.sqlite");
+    const store = new SupervisedAgentInboxStore(path);
+    const recorded = deferred<void>(); const release = deferred<void>();
+    let ownsLane = true; let publications = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.checkpointTurnStarted?.("native-turn");
+      await recordThreadIntent(path, store, "native-turn");
+      recorded.resolve(); await release.promise;
+      if (outcome === "authority_lost") ownsLane = false;
+      return { turnId: "native-turn", outcome: outcome === "failed" ? "failed" : outcome === "no_reply" ? "no_reply" : "reply",
+        text: outcome === "failed" || outcome === "no_reply" ? null : "must not be sent" };
+    }), { poll: async () => ({}), publish: async () => { publications++; } }, async () => ownsLane, 0);
+    try {
+      await ingest(store, "msg_72");
+      const pumping = delivery.pump(agent);
+      await recorded.promise;
+      if (outcome === "stop") assert.equal(await delivery.interruptActiveDelivery(agent), "settled");
+      release.resolve(); await pumping;
+      assert.equal(publications, 0, outcome);
+      if (outcome === "stop") assert.equal((await store.receipts(agent.agentId))[0]?.state, "cancelled_by_user");
+    } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
 });

@@ -525,9 +525,9 @@ export class SupervisedAgentInboxStore {
       return row ? rowToProviderTurnBinding(row) : null;
     });
   }
-  /** Intercepted message tools never execute; their immutable request carries
-   * the final answer's thread choice. Stop may fail the effect before the
-   * native reply wins publication, so that state must preserve the choice too. */
+  /** Completed routing controls carry no text and grant no publication authority.
+   * Retain legacy intercepted requests for already-running provider versions;
+   * Stop may fail those effects before a native reply wins publication. */
   async hasInterceptedThreadReply(inboxItemId: string): Promise<boolean> {
     return this.read(async (database) => Boolean(database.prepare(`SELECT 1
       FROM supervised_agent_inbox i
@@ -535,9 +535,10 @@ export class SupervisedAgentInboxStore {
         AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
       JOIN supervised_agent_effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
         AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
-      WHERE i.inbox_item_id=? AND e.state IN ('prepared','failed')
-        AND e.tool_name IN ('send_message','send_thread_message')
-        AND json_extract(e.request_json,'$.thread_parent_id')=i.source_message_id
+      WHERE i.inbox_item_id=? AND (
+        (e.state='completed' AND e.tool_name='set_reply_thread') OR
+        (e.state IN ('prepared','failed') AND e.tool_name IN ('send_message','send_thread_message')
+          AND json_extract(e.request_json,'$.thread_parent_id')=i.source_message_id))
       LIMIT 1`).get(inboxItemId)));
   }
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
@@ -1092,6 +1093,9 @@ export class SupervisedAgentInboxStore {
     mcp_request_id: string; tool_name: string; request: unknown; mutation?: boolean;
   }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; effect: SupervisedEffectRecord }> {
     const requestJson = serializeEffectJson(input.request, "request");
+    if (input.tool_name === "set_reply_thread" && requestJson !== "{}") {
+      throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
+    }
     const expectedMutation = !READ_ONLY_EFFECT_TOOLS.has(input.tool_name);
     if (input.mutation !== undefined && input.mutation !== expectedMutation) {
       throw new Error("The supervised effect classification does not match the registered tool policy.");
@@ -1206,9 +1210,31 @@ export class SupervisedAgentInboxStore {
           throw new Error("The supervised room turn cannot complete while an earlier effect is still executing.");
         }
       }
-      this.assertActiveEffectAuthority(database, input);
+      const binding = this.assertActiveEffectAuthority(database, input);
       const timestamp = this.now();
       const effectId = randomUUID();
+      if (input.tool_name === "set_reply_thread") {
+        // Only an observed room message can select a thread. Synthetic initial
+        // assignments, corrections and task continuations are not room messages.
+        const source = database.prepare(`SELECT i.source_message_id FROM supervised_agent_inbox i
+          JOIN supervised_agent_observed_messages o ON o.agent_id=i.agent_id AND o.room_id=i.room_id
+            AND o.source_message_id=i.source_message_id
+          WHERE i.inbox_item_id=? AND json_extract(i.source_message_json,'$.id')=i.source_message_id`)
+          .get(binding.inbox_item_id) as Row | undefined;
+        if (!source) throw new Error("set_reply_thread requires an observed activating room message, not a synthetic turn.");
+        const payload = { code: "REPLY_THREAD_RECORDED", source_message_id: String(source.source_message_id),
+          instruction: "Thread choice recorded. Continue working and finish through your normal final completion; no message has been sent." };
+        const result = serializeEffectJson({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload }, "result");
+        // Keep a receipt per request id so reusing any id for a different tool
+        // still fails. Existing admission limits bound repeated distinct calls.
+        this.assertEffectAdmissionCapacity(database, input, requestJson);
+        run(database.prepare(`INSERT INTO supervised_agent_effects
+          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,1,'completed',?,NULL,?,?)`),
+        effectId, input.agent_id, input.room_id, input.execution_generation_id, input.provider_turn_id,
+        input.mcp_request_id, input.tool_name, requestJson, result, timestamp, timestamp);
+        return { created: true, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row) };
+      }
       if (input.tool_name === "complete_room_turn") {
         const completion = structuredRoomTurnCompletion(input.request)!;
         const completedResultJson = serializeEffectJson(structuredRoomTurnCompletionResult(completion), "result");

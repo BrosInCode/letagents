@@ -353,17 +353,28 @@ export function pruneSupervisedAgentHistory(
     settleCapturedExecutionAttempts(database, agentId, { inboxItemId: String(row.inbox_item_id) });
     run(deleteInbox, String(row.inbox_item_id));
   }
+  // Active turns retain their observed-message provenance even when newer
+  // silent messages fill the rolling window. Synthetic inbox rows have none.
   const observedStale = database.prepare(`SELECT room_id,source_message_id
     FROM supervised_agent_observed_messages
     WHERE agent_id=? AND rowid NOT IN (
       SELECT rowid FROM supervised_agent_observed_messages
       WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
-    ) ORDER BY rowid DESC`).all(agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT) as Row[];
+    ) AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i
+      WHERE i.agent_id=supervised_agent_observed_messages.agent_id
+        AND i.room_id=supervised_agent_observed_messages.room_id
+        AND i.source_message_id=supervised_agent_observed_messages.source_message_id
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user'))
+    ORDER BY rowid DESC`).all(agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT) as Row[];
   run(database.prepare(`DELETE FROM supervised_agent_observed_messages
     WHERE agent_id=? AND rowid NOT IN (
       SELECT rowid FROM supervised_agent_observed_messages
       WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
-    )`), agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT);
+    ) AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i
+      WHERE i.agent_id=supervised_agent_observed_messages.agent_id
+        AND i.room_id=supervised_agent_observed_messages.room_id
+        AND i.source_message_id=supervised_agent_observed_messages.source_message_id
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user'))`), agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT);
   const rooms = database.prepare(`SELECT DISTINCT room_id FROM supervised_agent_inbox WHERE agent_id=?
     UNION SELECT DISTINCT room_id FROM supervised_agent_observed_messages WHERE agent_id=?`)
     .all(agentId, agentId) as Row[];
