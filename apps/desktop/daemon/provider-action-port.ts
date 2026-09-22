@@ -90,7 +90,7 @@ export function sameProviderActionConnectionSnapshot(
 
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; launchPolicy?: unknown; provider?: string; providerConnection?: ProviderActionConnectionRef | null; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed" };
 export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
-export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; custodyLaunchAgentSessionId?: string; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
+export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; managedLaunchContract?: string; custodyLaunchAgentSessionId?: string; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { nativeRuntimeDeath?: import("../shared/execution-protocol.js").NativeRuntimeDeath; endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
 /** Validate death against the immutable handle/ref before retaining it as operational evidence. */
 export function validatedNativeRuntimeDeath(terminal: Pick<ProviderActionTerminal, "nativeRuntimeDeath">,
@@ -274,7 +274,14 @@ export interface ProviderActionPort {
   }): Promise<ProviderContinuationRepairResult>;
   /** Stop an exact durable process birth without first attaching its transport. */
   stopRef?(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
+  describeManagedLaunchContract?(input: { provider: string; apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null>;
+  stopIdle?(handle: ProviderActionHandle, assertCurrent: () => void): Promise<ProviderActionTerminal>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;
+}
+
+/** No native stop was dispatched because its final idle proof changed. */
+export class ManagedRuntimeRefreshDeferred extends Error {
+  readonly code = "MANAGED_RUNTIME_REFRESH_DEFERRED";
 }

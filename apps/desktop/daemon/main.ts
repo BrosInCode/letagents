@@ -430,6 +430,7 @@ export class SupervisorDaemon {
     });
     this.providerExecution = providerPort
       ? new ProviderExecutionCoordinator({
+        refreshManagedRuntime: (entryId) => this.runtimeConfigurationApply.refreshManaged(entryId),
         settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
         provider: providerPort,
         store: this.store,
@@ -694,6 +695,12 @@ export class SupervisorDaemon {
       requestConvergence: (entryId) => this.requestConvergence(entryId),
     });
     this.runtimeConfigurationApply = new RuntimeConfigurationApplyCoordinator({
+      managed: {
+        store: this.store,
+        bindings: this.workerBindings,
+        reserveApprovalIdle: (installation) => this.hostApprovals.reserveIdle(installation),
+        resumeDelivery: (entryId) => this.startSupervisedDelivery(entryId),
+      },
       store: this.store,
       inbox: this.supervisedInbox,
       delivery: this.supervisedDelivery,
@@ -841,7 +848,10 @@ export class SupervisorDaemon {
       currentHandle: entryId => this.liveHandles.get(entryId),
       isCurrent: () => !this.handoffScheduled,
       fenceCommit: commit => this.fenceDaemonCommit(commit),
-      onPermissionChanged: entryId => this.executionDelegations.requestDecisions(entryId),
+      onPermissionChanged: entryId => {
+        this.executionDelegations.requestDecisions(entryId);
+        this.requestConvergence(entryId);
+      },
     });
     this.executionDelegations = new ExecutionDelegationCoordinator({
       entries: this.store,

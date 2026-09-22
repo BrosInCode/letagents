@@ -104,6 +104,7 @@ export type ProviderExecutionStore = {
       executionGenerationId: string;
       providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
       appliedRevision: number;
+      managedLaunchContract?: string;
       requestedAuthorityMode: LifecycleAuthorityMode;
       observedAtMs: number;
     },
@@ -176,6 +177,7 @@ export type ProviderExecutionCoordinatorOptions = {
   ): Promise<void>;
   terminalPayload(terminal: ProviderActionTerminal, actor: string, connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload;
   settleRuntimeApprovals(entryId: string): Promise<void>;
+  refreshManagedRuntime?(entryId: string): Promise<void>;
   observeProviderExit(
     entryId: string,
     terminal: ProviderActionTerminal,
@@ -295,6 +297,7 @@ export class ProviderExecutionCoordinator {
         entryId,
         () => this.converge(entryId),
       ))
+      .then(() => this.options.refreshManagedRuntime?.(entryId))
       .catch(async (error) => {
         await this.options.recordSchedulerFailure(
           entryId,
@@ -599,6 +602,7 @@ export class ProviderExecutionCoordinator {
               executionGenerationId,
               providerConnection,
               appliedRevision,
+              managedLaunchContract: handle.managedLaunchContract,
               requestedAuthorityMode,
               observedAtMs: this.options.nowMs(),
             },
@@ -724,6 +728,7 @@ export class ProviderExecutionCoordinator {
             executionGenerationId,
             providerConnection: handle.providerConnection,
             appliedRevision,
+            managedLaunchContract: handle.managedLaunchContract,
             requestedAuthorityMode,
             observedAtMs: this.options.nowMs(),
           },

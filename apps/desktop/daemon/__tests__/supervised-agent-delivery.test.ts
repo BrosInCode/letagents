@@ -96,6 +96,9 @@ test("daemon delivery treats an absent mode as historical mcp_polling", async ()
 test("the central delivery lifecycle rejects every start until the exact provider birth is admitted", async () => {
   let admitted = false;
   let revokeWhileLoading = false;
+  let lifecycleActive = false;
+  let handoffScheduled = false;
+  let whileCheckingAuthority = () => {};
   let refreshes = 0;
   const entry: DaemonManifestEntry = {
     id: "stone", room_id: "room", display_name: "Stone", provider: "codex", model: null,
@@ -114,9 +117,9 @@ test("the central delivery lifecycle rejects every start until the exact provide
     room_cursor: null,
   };
   const lifecycle = new SupervisedDeliveryLifecycleCoordinator({
-    isHandoffScheduled: () => false,
+    isHandoffScheduled: () => handoffScheduled,
     supportsRoomTurns: () => true,
-    isLifecycleActive: () => false,
+    isLifecycleActive: () => lifecycleActive,
     isOperationallyAdmitted: () => admitted,
     currentDaemonGeneration: () => 1,
     delivery: {
@@ -147,7 +150,7 @@ test("the central delivery lifecycle rejects every start until the exact provide
       credentialFor: async () => "memory",
     },
     liveHandle: () => agent.handle,
-    providerAuthority: { isExactAuthority: async () => true },
+    providerAuthority: { isExactAuthority: async () => { whileCheckingAuthority(); return true; } },
     scheduleRecovery: () => {},
   });
 
@@ -160,6 +163,17 @@ test("the central delivery lifecycle rejects every start until the exact provide
     "a birth replaced while durable identity loads cannot cross the final delivery gate");
   admitted = true;
   revokeWhileLoading = false;
+  for (const mode of ["refresh", "ensure", "wake"] as const) {
+    whileCheckingAuthority = () => { lifecycleActive = true; };
+    await lifecycle.start("stone", mode);
+    assert.equal(refreshes, 0, "a start suspended before lifecycle admission must remain fenced");
+    lifecycleActive = false;
+    whileCheckingAuthority = () => { handoffScheduled = true; };
+    await lifecycle.start("stone", mode);
+    assert.equal(refreshes, 0, "handoff during authority reads must prevent delivery admission");
+    handoffScheduled = false;
+  }
+  whileCheckingAuthority = () => {};
   await lifecycle.start("stone");
   assert.equal(refreshes, 1);
 });
@@ -212,6 +226,44 @@ test("idle-only stop refuses both sides of native turn admission without abortin
     assert.equal(internals.stoppingAgents.has(agent.agentId), false);
     await store.close();
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("idle reservation keeps delayed and new delivery starts fenced until replacement settles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-idle-reservation-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const entered = deferred<void>();
+  const proceed = deferred<void>();
+  let suspend = true;
+  let polls = 0;
+  const delivery = new SupervisedAgentDelivery(store,
+    provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })),
+    { poll: async () => { polls += 1; return {}; }, publish: async () => {} },
+    async () => {
+      if (suspend) { suspend = false; entered.resolve(); await proceed.promise; }
+      return true;
+    });
+  try {
+    const delayed = delivery.ensureStarted(agent);
+    await entered.promise;
+    const release = await delivery.reserveIdle(agent.agentId);
+    assert.ok(release);
+    assert.equal(await delivery.reserveIdle(agent.agentId), null, "one lifecycle owner per agent");
+    proceed.resolve();
+    await delayed;
+    await delivery.ensureStarted(agent);
+    await delivery.refresh(agent);
+    await delivery.poll(agent);
+    assert.equal(polls, 0, "neither a paused predecessor nor a fresh caller may restart intake");
+    release();
+    release();
+    await delivery.poll(agent);
+    assert.equal(polls, 1, "normal delivery can resume after release");
+  } finally {
+    proceed.resolve();
+    await delivery.stop(agent.agentId);
+    await store.close();
     await rm(root, { recursive: true, force: true });
   }
 });
