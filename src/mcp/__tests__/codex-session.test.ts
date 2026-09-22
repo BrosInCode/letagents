@@ -15,7 +15,8 @@ import {
   summarizeCodexRuntimeSnapshotForTest,
   toPublicCodexLiveSession,
 } from "../codex-session.js";
-import { canReuseCodexLiveSessionForStart } from "../codex-session/session-start.js";
+import { canReuseCodexLiveSessionForStart, startLocalCodexSession } from "../codex-session/session-start.js";
+import { RpcClient } from "../codex-session/rpc-client.js";
 import { buildStartPrompt } from "../codex-session/start-prompt.js";
 import { saveCodexLiveSession, type CodexLiveSessionState } from "../local-state.js";
 
@@ -126,6 +127,51 @@ test("canReuseCodexLiveSessionForStart requires the same startup branch", () => 
     }),
     true
   );
+});
+
+test("local Codex startup selects readable history before startup inspection", async (t) => {
+  const previousStatePath = process.env.LETAGENTS_STATE_PATH;
+  const previousObservationMs = process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-codex-history-start-"));
+  process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+  process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS = "1000";
+  let historyMode: unknown = "paginated";
+  let readHistory = false;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    assert.equal(String(url), "http://127.0.0.1:18765/readyz");
+    return new Response(null, { status: 200 });
+  });
+  t.mock.method(RpcClient.prototype, "connect", async () => {});
+  t.mock.method(RpcClient.prototype, "close", () => {});
+  t.mock.method(RpcClient.prototype, "request", async (method: string, params?: Record<string, unknown>) => {
+    if (method === "thread/start") {
+      historyMode = params?.historyMode ?? "paginated";
+      return { thread: { id: "history-thread" } };
+    }
+    if (method === "turn/start") return { turn: { id: "history-turn" } };
+    assert.equal(method, "thread/read");
+    assert.deepEqual(params, { threadId: "history-thread", includeTurns: true });
+    if (historyMode !== "legacy") throw new Error("list_turns is not supported yet");
+    readHistory = true;
+    return { thread: { status: { type: "idle" }, turns: [{ id: "history-turn", status: "completed" }] } };
+  });
+  try {
+    // A completed fixture turn deliberately ends startup before monitors or
+    // room bridges can be installed. Reaching this reason proves history read
+    // succeeded; the unsupported native default instead reports unknown.
+    await assert.rejects(startLocalCodexSession({
+      room_id: "history-room", room_identifier: "history-room", joined_via: "join_room",
+      cwd: tempDir, server_url: "ws://127.0.0.1:18765",
+    }), /turn completed before entering the room polling loop/);
+    assert.equal(historyMode, "legacy");
+    assert.equal(readHistory, true);
+  } finally {
+    if (previousStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = previousStatePath;
+    if (previousObservationMs === undefined) delete process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS;
+    else process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS = previousObservationMs;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("summarizeCodexRuntimeNotificationForTest maps runtime notifications to visible reasoning", () => {

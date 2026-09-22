@@ -1,4 +1,5 @@
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
+import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -17,7 +18,6 @@ import { resolveCodexExecutable } from "./codex-executable.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import {
-  CODEX_THREAD_HISTORY_MODE,
   CodexRpcClient,
   type RpcNotification,
   type RpcServerRequest,
@@ -1572,9 +1572,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
     assertAttached();
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
-      historyMode: CODEX_THREAD_HISTORY_MODE,
       cwd: request.cwd,
       ...policy,
+      historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
       ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
     });
@@ -1964,9 +1964,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
         }
       } else {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
-          historyMode: CODEX_THREAD_HISTORY_MODE,
           cwd: req.cwd,
           ...policy,
+          historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
           ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
         });

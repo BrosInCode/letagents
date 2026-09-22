@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 
 import type {
   DesktopAgentProviderId,
@@ -73,7 +74,6 @@ import type {
   ManagedAgentContextResult,
 } from "./managed-agent-context-protocol.js";
 import {
-  CODEX_THREAD_HISTORY_MODE,
   CodexRpcClient,
   type RpcNotification,
   type ThreadReadResult,
