@@ -15,14 +15,18 @@ const GITHUB_DEFAULT_HEADERS = {
 const INSTALLATION_TOKEN_EXPIRY_SAFETY_MS = 5 * 60_000;
 const INSTALLATION_TOKEN_CACHE_MAX_ENTRIES = 1_000;
 const INSTALLATION_TOKEN_MINT_TIMEOUT_MS = 10_000;
+export interface GitHubInstallationCredential {
+  readonly token: string;
+  readonly permissions: Readonly<Record<string, unknown>> | null;
+}
 const installationTokenCache = new Map<string, {
   installationId: string;
-  token: string;
+  credential: GitHubInstallationCredential;
   reuseUntil: number;
 }>();
 const installationTokenInflight = new Map<string, {
   installationId: string;
-  promise: Promise<string>;
+  promise: Promise<GitHubInstallationCredential>;
 }>();
 const installationTokenGeneration = new Map<string, object>();
 let installationTokenGlobalGeneration: object = {};
@@ -103,14 +107,22 @@ export async function githubRequestJson(input: GitHubRequestInput): Promise<unkn
 }
 
 // Mint a short-lived installation access token from the App credentials.
-export async function mintInstallationToken(input: {
+type InstallationTokenInput = {
   config: GitHubAppConfig;
   installationId: string;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
   timeoutMs?: number;
   now?: Date;
-}): Promise<string> {
+};
+
+export async function mintInstallationToken(input: InstallationTokenInput): Promise<string> {
+  return (await mintInstallationCredential(input)).token;
+}
+
+// Preserve GitHub's permission evidence alongside the exact cached token. Review
+// writes inspect it; existing read callers continue using the token-only API.
+export async function mintInstallationCredential(input: InstallationTokenInput): Promise<GitHubInstallationCredential> {
   const appId = input.config.appId;
   const privateKey = input.config.privateKey;
   if (!appId || !privateKey) {
@@ -122,7 +134,7 @@ export async function mintInstallationToken(input: {
   const flightKey = `${cacheKey}::${mintTimeoutMs}`;
   const nowMs = input.now?.getTime() ?? Date.now();
   const cached = installationTokenCache.get(cacheKey);
-  if (cached && cached.reuseUntil > nowMs) return cached.token;
+  if (cached && cached.reuseUntil > nowMs) return cached.credential;
   if (cached) installationTokenCache.delete(cacheKey);
 
   // Calls carrying an operation-owned signal retain independent cancellation.
@@ -134,7 +146,7 @@ export async function mintInstallationToken(input: {
 
   const generation = getInstallationTokenGeneration(input.installationId);
   const globalGeneration = installationTokenGlobalGeneration;
-  let pending!: Promise<string>;
+  let pending!: Promise<GitHubInstallationCredential>;
   pending = (async () => {
     const jwt = createGitHubAppJwt({
       appId,
@@ -156,6 +168,13 @@ export async function mintInstallationToken(input: {
     if (!token) {
       throw new Error("GitHub installation token response did not include a token");
     }
+    const permissions = typeof result === "object" && result && "permissions" in result
+      ? (result as { permissions: unknown }).permissions : null;
+    const credential: GitHubInstallationCredential = {
+      token,
+      permissions: permissions && typeof permissions === "object" && !Array.isArray(permissions)
+        ? permissions as Record<string, unknown> : null,
+    };
 
     const expiresAt = typeof result === "object" && result && "expires_at" in result
       ? Date.parse(String((result as { expires_at: unknown }).expires_at))
@@ -172,12 +191,12 @@ export async function mintInstallationToken(input: {
       if (!current || current.reuseUntil < reuseUntil) {
         installationTokenCache.set(cacheKey, {
           installationId: input.installationId,
-          token,
+          credential,
           reuseUntil,
         });
       }
     }
-    return token;
+    return credential;
   })().finally(() => {
     if (installationTokenInflight.get(flightKey)?.promise === pending) {
       installationTokenInflight.delete(flightKey);

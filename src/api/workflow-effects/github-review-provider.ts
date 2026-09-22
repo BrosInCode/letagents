@@ -1,5 +1,6 @@
-import { githubRequest, mintInstallationToken } from "../github/app-client.js";
+import { githubRequest, mintInstallationCredential, type GitHubInstallationCredential } from "../github/app-client.js";
 import { getGitHubAppConfig, type GitHubAppConfig } from "../github/config.js";
+import { githubReviewPermission } from "../github/app-installation.js";
 
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -93,14 +94,14 @@ export function createGitHubReviewProvider(options: {
   config?: GitHubAppConfig;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
-  mintToken?: (request: GitHubReviewEffectRequest) => Promise<string>;
+  mintCredential?: (request: GitHubReviewEffectRequest) => Promise<GitHubInstallationCredential>;
 } = {}): GitHubReviewProvider {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  async function tokenFor(request: GitHubReviewEffectRequest): Promise<string> {
-    if (options.mintToken) return options.mintToken(request);
-    return mintInstallationToken({
+  async function credentialFor(request: GitHubReviewEffectRequest): Promise<GitHubInstallationCredential> {
+    if (options.mintCredential) return options.mintCredential(request);
+    return mintInstallationCredential({
       config: options.config ?? await getGitHubAppConfig(),
       installationId: request.installation_id,
       fetchImpl,
@@ -112,7 +113,14 @@ export function createGitHubReviewProvider(options: {
     async create(request, correlationKey) {
       let token: string;
       try {
-        token = await tokenFor(request);
+        const credential = await credentialFor(request);
+        token = credential.token;
+        const permission = githubReviewPermission(credential.permissions);
+        if (permission !== "write") {
+          return { kind: "definite_failure", error: permission === "missing"
+            ? "GitHub installation token does not include Pull requests (write). Ask the repository owner to check the GitHub App permissions; review was not created."
+            : "GitHub did not report the installation token's Pull requests permission. Review publication cannot be verified as available; review was not created." };
+        }
         const pullResponse = await githubRequest({
           url: `${GITHUB_API}/repos/${encodeURIComponent(request.owner)}/${encodeURIComponent(request.repo)}/pulls/${request.pull_number}`,
           token,
@@ -181,7 +189,9 @@ export function createGitHubReviewProvider(options: {
     },
 
     async lookup(request, correlationKey) {
-      const token = await tokenFor(request);
+      // Read-only reconciliation must remain available after write permission
+      // changes. Never turn an uncertain prior write into another create.
+      const { token } = await credentialFor(request);
       const expectedMarker = marker(correlationKey);
       const fetchPage = async (page: number) => {
         const response = await githubRequest({

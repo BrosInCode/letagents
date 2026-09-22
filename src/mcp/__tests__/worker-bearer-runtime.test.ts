@@ -37,6 +37,7 @@ const { registerWaitForMessagesTool } = await import("../server/tools/messages/w
 const { profileAwareToolServer } = await import("../server/supervised-tool-facade.js");
 const { registerDeviceAuthTools } = await import("../server/tools/onboarding/device-auth-tools.js");
 const { registerRoomJoinTools } = await import("../server/tools/rooms/join-tools.js");
+const { registerTaskVerdictTools } = await import("../server/tools/tasks/verdict-tools.js");
 
 function toolHandler(
   register: (server: McpServer) => void,
@@ -115,6 +116,58 @@ function withAuthEnv<T>(
     }
   });
 }
+
+test("review verdicts report publication from the durable effect, including failed and uncertain outcomes", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-review-status-"));
+  process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+  try {
+    await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
+      const submit = toolHandler(registerTaskVerdictTools, "submit_review_verdict");
+      for (const state of ["succeeded", "failed", "pending", "ambiguous"] as const) {
+        let statusText = "";
+        const effect = { id: `effect-${state}`, state, correlation_key: "exact-correlation",
+          external_id: state === "succeeded" ? "42" : null,
+          last_error: state === "failed" ? "GitHub review request failed with 403: Resource not accessible by integration" : null };
+        globalThis.fetch = async (url, init) => {
+          if (String(url).endsWith("/presence")) {
+            statusText = JSON.parse(String(init?.body)).status_text;
+            return new Response(null, { status: 204 });
+          }
+          assert.ok(String(url).endsWith("/tasks/task_1/review-verdict"));
+          const body = JSON.parse(String(init?.body));
+          assert.equal(body.expected_head_sha, "a".repeat(40));
+          assert.equal(body.idempotency_key, "same-verdict");
+          return new Response(JSON.stringify({ room_id: "room_review", task_id: "task_1", effect }), { status: state === "succeeded" ? 200 : 202 });
+        };
+        const result = JSON.parse((await submit({ room_id: "room_review", task_id: "task_1", verdict: "request_changes",
+          expected_head_sha: "a".repeat(40), idempotency_key: "same-verdict", body: "Fix the storage warning." })).content[0]!.text);
+        assert.equal(result.success, state === "succeeded", JSON.stringify(result));
+        assert.deepEqual(result.effect, effect);
+        assert.doesNotMatch(statusText, /submitted/);
+        if (state === "succeeded") assert.match(statusText, /published request_changes/);
+        else {
+          assert.match(statusText, state === "ambiguous" ? /outcome unknown/ : new RegExp(state));
+          assert.match(result.message, /do not submit a new idempotency key/);
+        }
+      }
+      globalThis.fetch = async (url) => String(url).endsWith("/presence")
+        ? new Response("presence unavailable", { status: 503 })
+        : new Response(JSON.stringify({ room_id: "room_review", task_id: "task_1",
+          effect: { id: "published-despite-presence", state: "succeeded", external_id: "42" } }), { status: 200 });
+      const result = JSON.parse((await submit({ room_id: "room_review", task_id: "task_1", verdict: "approve",
+        expected_head_sha: "a".repeat(40), idempotency_key: "same-verdict" })).content[0]!.text);
+      assert.equal(result.success, true);
+      assert.equal(result.effect.id, "published-despite-presence");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("worker bearer mode uses the worker Authorization header without owner credentials", async () => {
   const originalFetch = globalThis.fetch;
