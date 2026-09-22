@@ -2716,6 +2716,14 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   assert.equal(launch.args.at(-1)?.includes("call complete_room_turn exactly once"), true);
   assert.match(launch.args.at(-1)!, /chat reply publication does not publish code or create PRs/);
   assert.match(launch.args.at(-1)!, /standing merge approval/);
+  assert.match(launch.args.at(-1)!, /only LetAgents MCP tools and no browser\/computer-use integration/);
+  assert.match(launch.args.at(-1)!, /Browser QA is unavailable here/);
+  assert.match(launch.args.at(-1)!, /even when Cursor's own sandbox is disabled/);
+  assert.match(launch.args.at(-1)!, /report the specific gap once and continue independent feasible work/);
+  assert.match(launch.args.at(-1)!, /leave affected verification incomplete/);
+  assert.match(launch.args.at(-1)!, /Still respond to explicit user instructions and new questions/);
+  assert.match(launch.args.at(-1)!, /acknowledgment-only closing messages.*no-reply completion/);
+  assert.match(launch.args.at(-1)!, /outcome: "no_reply"/, "quiet completion still uses Cursor's existing structured proposal");
   const child = harness.children[0]!;
   child.emit({
     type: "result",
