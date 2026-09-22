@@ -73,7 +73,7 @@ test("restoration preserves permission ownership while replacement retires it", 
   adapter.observePermissions = async (_handle, listener) => { listeners.push(listener); };
   const events: ProviderPermissionObservation[] = [];
   await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
-  const snapshot = { type: "snapshot" as const, requests: [native] };
+  const snapshot = { type: "snapshot" as const, connectionId: "socket-1", requests: [native] };
   listeners[0]!(snapshot);
   adapter.repairContinuation = async nativeHandle => {
     listeners[0]!(snapshot); // Pending requests can arrive while restoration awaits the provider.
@@ -95,7 +95,7 @@ test("restoration preserves permission ownership while replacement retires it", 
   assert.deepEqual(await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native }), { outcome: "correlation_unproven" });
   await router.observePermissions(replaced.handle, event => events.push(event), new AbortController().signal);
   const current = { ...native, params: { ...native.params, threadId: "replacement" } };
-  listeners[1]!({ type: "snapshot", requests: [current] });
+  listeners[1]!({ type: "snapshot", connectionId: "socket-1", requests: [current] });
   assert.equal(events.at(-1)!.type, "snapshot");
   assert.equal((await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native: current })).outcome, "correlated");
 });
@@ -135,7 +135,7 @@ test("permission routing preserves frozen Codex request identity and fences nati
   const native = Object.freeze({ id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1",
     params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 }) });
   const request = { provider: "codex" as const, native };
-  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", requests: [native] }); };
+  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", connectionId: "socket-1", requests: [native] }); };
   await router.observePermissions(handle, event => {
     assert.equal(event.type, "snapshot");
     if (event.type === "snapshot") { assert.equal(event.requests[0]!.native, native); assert.equal(event.connectionId, "socket-1"); }
@@ -155,6 +155,30 @@ test("permission routing preserves frozen Codex request identity and fences nati
   }), /closed/);
   assert.equal(calls.filter(value => value === "send").length, 1);
   await assert.rejects(router.replyPermission({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "forged" } }, request, "once", { beforeNativeDispatch: async () => {} }), /binding changed/);
+});
+
+test("Codex permission snapshots reject missing or inconsistent RPC identity", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const native = Object.freeze({ id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1",
+    params: { threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 } });
+  let emit!: Parameters<NonNullable<NativeProviderAdapter["observePermissions"]>>[1];
+  adapter.observePermissions = async (_handle, listener) => { emit = listener; };
+  const events: ProviderPermissionObservation[] = [];
+  await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
+  for (const snapshot of [
+    { type: "snapshot" as const, requests: [] },
+    { type: "snapshot" as const, requests: [native] },
+    { type: "snapshot" as const, connectionId: " ", requests: [] },
+    { type: "snapshot" as const, connectionId: "socket-2", requests: [native] },
+    { type: "snapshot" as const, connectionId: "socket-1", requests: [native, { ...native, id: 2, connectionId: "socket-2" }] },
+  ]) {
+    emit(snapshot);
+    assert.deepEqual(events.at(-1), { type: "degraded" });
+  }
+  emit({ type: "snapshot", connectionId: "socket-1", requests: [] });
+  assert.deepEqual(events.at(-1), { type: "snapshot", connectionId: "socket-1", requests: [] });
 });
 
 test("Codex generic permission routing requires an exact bounded current-turn profile", async () => {
@@ -210,7 +234,7 @@ test("permission routing snapshots OpenCode payloads and refuses replacement dur
   const handle = await router.spawn(spawn);
   const native = { id: "request", sessionID: handle.providerContinuationId!, permission: "bash", patterns: [], metadata: {}, always: [] };
   const request = { provider: "open-model" as const, native };
-  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", requests: [native] }); };
+  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", connectionId: "socket-1", requests: [native] }); };
   let observedConnection: string | null = null;
   await router.observePermissions(handle, event => {
     if (event.type === "snapshot") {

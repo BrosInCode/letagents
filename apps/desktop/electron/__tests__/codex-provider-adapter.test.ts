@@ -38,6 +38,10 @@ import type { NativeExecutionObservation, NativeTurnBoundary } from "../../share
 // separately compiled source tree into Electron's production rootDir.
 const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
 const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
+const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+const { HostApprovalBroker } = await import(new URL("../../daemon/host-approval-broker.ts", import.meta.url).href);
+const { ManifestStore } = await import(new URL("../../daemon/manifest-store.ts", import.meta.url).href);
+const { SupervisedAgentInboxStore } = await import(new URL("../../daemon/supervised-agent-inbox-store.ts", import.meta.url).href);
 
 type RecordedRequest = { method: string; params: unknown };
 
@@ -817,6 +821,59 @@ test("Codex permission responses do not replay after an uncertain send or change
   });
 });
 
+test("Codex empty permission observations permit exact idle reservation through the router and broker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "codex-idle-permissions-"));
+  const store = new ManifestStore(join(root, "state.sqlite"));
+  const inbox = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", ...spawnRequest({ deliveryMode: "daemon_inbox" }) });
+  const broker = new HostApprovalBroker({ store, inbox, provider: router,
+    currentHandle: () => handle, isCurrent: () => true, exactAuthority: async () => true,
+    fenceCommit: async (commit: () => Promise<void>) => commit() });
+  const exact = { entryId: "agent", handle, executionGenerationId: "generation", providerConnection: handle.providerConnection };
+  const client = harness.clients[0]!;
+  try {
+    broker.install("agent", handle, "generation");
+    await flush();
+    const empty = broker.reserveIdle(exact);
+    assert.ok(empty, "an observed empty native approval lane retains its verified RPC identity");
+    empty.assertCurrent();
+    const pending = client.askPermission(approvalParams());
+    await flush();
+    assert.throws(empty.assertCurrent, /permissions changed/);
+    empty.release();
+    assert.equal(broker.reserveIdle(exact), null, "a pending native request blocks refresh");
+    client.emit({ method: "serverRequest/resolved", params: { requestId: pending.id, threadId: "thread-1" } });
+    await flush();
+    const resolved = broker.reserveIdle(exact);
+    assert.ok(resolved, "the same connection remains identifiable after its last request closes");
+    resolved.assertCurrent();
+    harness.setIdentityObservable(false);
+    client.askPermission(approvalParams(), "unverifiable-birth");
+    await flush();
+    assert.throws(resolved.assertCurrent, /permissions changed/);
+    resolved.release();
+    assert.equal(broker.reserveIdle(exact), null, "unverifiable process identity never establishes idle authority");
+    harness.setIdentityObservable(true);
+    client.emit({ method: "serverRequest/resolved", params: { requestId: "unverifiable-birth", threadId: "thread-1" } });
+    await flush();
+    const beforeDisconnect = broker.reserveIdle(exact);
+    assert.ok(beforeDisconnect);
+    client.disconnect();
+    await flush();
+    assert.throws(beforeDisconnect.assertCurrent, /permissions changed/);
+    beforeDisconnect.release();
+    assert.equal(broker.reserveIdle(exact), null, "disconnect cannot retain healthy empty authority");
+  } finally {
+    broker.close();
+    await inbox.close();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex permission observation tracks pending requests without projecting resolution as an applied decision", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -829,17 +886,17 @@ test("Codex permission observation tracks pending requests without projecting re
   const events: CodexPermissionObservation[] = [];
   const observation = adapter.observePermissions(handle, event => { events.push(event); }, controller.signal);
   const throwing = adapter.observePermissions(handle, () => { throw new Error("consumer failed"); }, controller.signal);
-  assert.deepEqual(events[0], { type: "snapshot", requests: [initial] });
+  assert.deepEqual(events[0], { type: "snapshot", connectionId: client.currentConnectionId(), requests: [initial] });
   const second = client.askPermission(approvalParams({ itemId: "item-2" }), "second");
   await flush();
-  assert.deepEqual(events.at(-1), { type: "snapshot", requests: [initial, second] });
+  assert.deepEqual(events.at(-1), { type: "snapshot", connectionId: client.currentConnectionId(), requests: [initial, second] });
   client.emit({ method: "serverRequest/resolved", params: { requestId: initial.id, threadId: "thread-1" } });
   await flush();
-  assert.deepEqual(events.at(-1), { type: "snapshot", requests: [second] });
+  assert.deepEqual(events.at(-1), { type: "snapshot", connectionId: client.currentConnectionId(), requests: [second] });
   assert.deepEqual(client.permissionResponses, [], "remote resolution is not evidence of our decision or dispatch");
   await adapter.replyPermission(handle, second, "reject");
   await flush();
-  assert.deepEqual(events.at(-1), { type: "snapshot", requests: [] });
+  assert.deepEqual(events.at(-1), { type: "snapshot", connectionId: client.currentConnectionId(), requests: [] });
   harness.setIdentityObservable(false);
   client.askPermission(approvalParams(), "degraded");
   await flush();
@@ -923,7 +980,7 @@ test("Codex concurrent permission replies send only once for one frozen pending 
 });
 
 test("Codex permission observation withdraws replaced/stopped bindings and disposes on abort", async (t) => {
-  for (const end of ["abort", "continuation", "stop", "already_aborted"]) await t.test(end, async () => {
+  for (const end of ["abort", "continuation", "connection", "stop", "already_aborted"]) await t.test(end, async () => {
     const harness = createHarness({ exitOnSignal: true });
     const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
     const spawn = spawnRequest({ deliveryMode: "daemon_inbox" });
@@ -939,6 +996,10 @@ test("Codex permission observation withdraws replaced/stopped bindings and dispo
       workAttemptId: handle.workAttemptId, expectedProviderContinuationId: "thread-1",
       checkpointedReplacementProviderContinuationId: "thread-repaired", cwd: spawn.cwd, launchPolicy: spawn.launchPolicy,
     }, { checkpointReplacement: async () => {} });
+    if (end === "connection") {
+      client.connectionEpoch = "replacement";
+      client.askPermission(approvalParams(), "replacement-connection");
+    }
     if (end === "stop") await adapter.stop(handle, { force: true });
     await observation;
     assert.equal(events.at(-1)?.type, end === "already_aborted" ? undefined : end === "abort" ? "snapshot" : "unavailable");
