@@ -431,9 +431,18 @@ export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry
     || entry.observedState === "failed"
     || room?.ingress.state === "blocked"
     || room?.inbox.state === "blocked"
-    || room?.inbox.state === "waiting_for_desktop_credentials"
     || room?.turn.state === "failed"
   ) return "needs_attention";
+  if (room?.inbox.state === "waiting_for_desktop_credentials") {
+    // An admitted startup has not installed its new worker binding yet.
+    // That temporary delivery gap is not a request for user intervention.
+    if (entry.desiredState === "running"
+      && ["starting", "recovering"].includes(entry.observedState)
+      && room.connection.state === "reconnecting"
+      && room.ingress.state === "stopped"
+      && !room.inbox.blockedByMessageId) return "starting";
+    return "needs_attention";
+  }
   if (room?.connection.state === "reconnecting" || room?.ingress.state === "backoff") return "reconnecting";
   const hasOnlineDeliveryAuthority = Boolean(
     room?.connection.state === "connected"
