@@ -1,5 +1,5 @@
 import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
-import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
+import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
 
@@ -205,6 +205,7 @@ export class SupervisedAgentDelivery {
     private readonly observeStartingWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<string | null | void>,
     private readonly releaseWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<void>,
     private readonly onDeliverySettled?: (agentId: string) => void,
+    private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent) => Promise<boolean>,
   ) {}
 
   /**
@@ -1209,9 +1210,18 @@ export class SupervisedAgentDelivery {
             }
           }
         }
+        if (head?.state === "pending" && !head.provider_turn_id && !head.outcome && this.canAdmitNewTurn) {
+          const admitted = await this.canAdmitNewTurn(agent);
+          if (!await this.hasExecutionAuthority(agent, controller) || !admitted) return;
+        }
         if (this.dispatchIsPaused(agent)) return;
-        const item = await this.inbox.claimHead(agent.agentId);
-        if (!item) return; // blocked, in-flight, or empty: FIFO remains intact.
+        const item = await this.inbox.claimHead(agent.agentId, head);
+        if (!item) {
+          // Retry or settlement can change the head during admission's awaits.
+          // Inspect it again rather than let uninspected work cross the gate.
+          if (!sameInboxHead(head, await this.inbox.head(agent.agentId))) continue;
+          return; // blocked, in-flight, or empty: FIFO remains intact.
+        }
         if (this.dispatchIsPaused(agent) && !item.provider_turn_id && !item.outcome) {
           // The claim raced the admission pause; no provider invocation began.
           await this.inbox.resetPreNativeHandoff(item.inbox_item_id);

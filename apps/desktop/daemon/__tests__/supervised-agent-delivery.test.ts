@@ -4477,6 +4477,27 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
   }
 });
 
+test("pending new turns wait for managed runtime admission without claiming the FIFO head", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-runtime-admission-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let invocations = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    invocations += 1;
+    return { turnId: "unexpected", outcome: "no_reply", text: null };
+  }), { poll: async () => ({}), publish: async () => {} }, currentAuthority,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  undefined, undefined, undefined, undefined, undefined, undefined, async () => false);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    assert.equal(invocations, 0);
+    const head = await store.head(agent.agentId);
+    assert.equal(head?.state, "pending");
+    assert.equal(head?.attempt_count, 0);
+    assert.equal(head?.provider_turn_id, null);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("missing Codex room tools retain the exact inbox item without spending a model attempt", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-room-tools-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
@@ -5252,3 +5273,115 @@ test("recorded reply-thread intent cannot publish a stopped, failed, silent or a
     } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
   }
 });
+
+for (const change of ["authority", "handoff", "epoch"] as const) {
+  test(`managed admission cannot dispatch after ${change} changes during its await`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-admission-fence-"));
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const entered = deferred<void>(); const gate = deferred<boolean>();
+    let current = true; let calls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      calls += 1; return { turnId: "unexpected", outcome: "no_reply", text: null };
+    }), { poll: async () => ({}), publish: async () => {} }, async () => current,
+    0, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { entered.resolve(); return gate.promise; });
+    try {
+      await ingest(store);
+      const pending = delivery.pump(agent);
+      await entered.promise;
+      if (change === "authority") current = false;
+      if (change === "handoff") delivery.fence();
+      if (change === "epoch") delivery.pauseIngress(agent.agentId);
+      gate.resolve(true);
+      await pending;
+      assert.equal(calls, 0);
+      assert.equal((await store.head(agent.agentId))!.state, "pending");
+    } finally { gate.resolve(false); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const kind of ["exact-turn", "publication", "ambiguous"] as const) {
+  test(`managed admission leaves ${kind} recovery on its existing path`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-admission-recovery-"));
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let gates = 0; let newTurns = 0; let recovered = 0; let published = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      newTurns += 1; throw new Error("must not replay");
+    }, async (_handle, request) => {
+      recovered += 1; assert.equal(request.providerTurnId, "saved-turn");
+      return { turnId: "saved-turn", outcome: "reply", text: "saved reply" };
+    }), { poll: async () => ({}), publish: async input => {
+      published += 1; return { messageId: "saved-publication", roomId: input.roomId };
+    } }, currentAuthority, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { gates += 1; return false; });
+    try {
+      const item = await enqueue(store);
+      if (kind !== "ambiguous") await store.checkpointTurnStarted(item.inbox_item_id, "saved-turn", TEST_PROVIDER_TURN_AUTHORITY);
+      if (kind === "publication") {
+        await store.transition(item.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "saved reply" }) });
+        await store.transition(item.inbox_item_id, "publishing");
+      }
+      await delivery.pump(agent);
+      assert.equal(gates, 0);
+      assert.equal(newTurns, 0);
+      assert.equal(recovered, kind === "exact-turn" ? 1 : 0);
+      assert.equal(published, kind === "ambiguous" ? 0 : 1);
+      const receipt = (await store.receipts(agent.agentId))[0]!;
+      assert.equal(receipt.state, kind === "ambiguous" ? "blocked" : "acknowledged");
+      if (kind === "ambiguous") {
+        assert.equal(receipt.attempt_count, 0);
+        assert.equal(receipt.provider_turn_id, null);
+        assert.match(receipt.last_error!, /without authoritative terminal/);
+      }
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const race of ["retry", "arrival", "successor"] as const) {
+  test(`managed admission rechecks ${race} that changes the inspected FIFO head`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-admission-claim-race-"));
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let calls = 0; let gates = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      calls += 1; throw new Error("uninspected pending work must not run");
+    }), { poll: async () => ({}), publish: async () => {} }, currentAuthority,
+    0, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { gates += 1; return false; });
+    try {
+      if (race !== "arrival") {
+        const item = await enqueue(store);
+        if (race === "retry") await store.transition(item.inbox_item_id, "blocked");
+        else {
+          await store.checkpointTurnStarted(item.inbox_item_id, "saved-turn", TEST_PROVIDER_TURN_AUTHORITY);
+          await store.transition(item.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "saved" }) });
+          await store.normalizeStartupRecovery(agent.agentId);
+          await ingest(store, "2");
+        }
+      }
+      const head = store.head.bind(store);
+      let raced = false;
+      store.head = async id => {
+        const inspected = await head(id);
+        if (!raced) {
+          raced = true;
+          if (race === "arrival") await ingest(store);
+          else if (race === "retry") await store.retryBlocked(inspected!.inbox_item_id);
+          else {
+            await store.transition(inspected!.inbox_item_id, "dispatching");
+            await store.transition(inspected!.inbox_item_id, "awaiting_result");
+            await store.transition(inspected!.inbox_item_id, "publishing");
+            await store.transition(inspected!.inbox_item_id, "acknowledged");
+          }
+        }
+        return inspected;
+      };
+      await delivery.pump(agent);
+      assert.equal(calls, 0);
+      assert.equal(gates, 1, "the changed pending head must pass admission");
+      assert.equal((await head(agent.agentId))!.state, "pending");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}

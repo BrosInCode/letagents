@@ -53,6 +53,12 @@ export type SupervisedInboxItem = {
   next_attempt_at_ms: number | null; terminal_reason: "upgrade_authority_unavailable" | null;
   created_at: string; updated_at: string; acknowledged_at: string | null;
 };
+type InboxHeadSnapshot = Pick<SupervisedInboxItem, "inbox_item_id" | "state" | "provider_turn_id" | "outcome">;
+export function sameInboxHead(left: InboxHeadSnapshot | null, right: InboxHeadSnapshot | null): boolean {
+  return left === null || right === null ? left === right
+    : left.inbox_item_id === right.inbox_item_id && left.state === right.state
+      && left.provider_turn_id === right.provider_turn_id && left.outcome === right.outcome;
+}
 export type SupervisedProviderTurnBinding = {
   inbox_item_id: string;
   agent_id: string;
@@ -744,12 +750,13 @@ export class SupervisedAgentInboxStore {
       return updated;
     }));
   }
-  async claimHead(agentId: string): Promise<SupervisedInboxItem | null> {
+  async claimHead(agentId: string, expected?: InboxHeadSnapshot | null): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       if (pendingRuntimeRecovery(database, agentId)) return null;
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
+      if (expected !== undefined && !sameInboxHead(expected, item)) return null;
       const turnControlBarrier = database.prepare(`SELECT inbox_item_id,status FROM turn_control_journals
         WHERE agent_id=? AND turn_control_present=1
           AND status IN ('prepared','dispatching','uncertain','retryable')`).get(agentId) as Row | undefined;
