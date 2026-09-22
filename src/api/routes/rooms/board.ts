@@ -1,9 +1,15 @@
 import type { Express, Response } from "express";
+import type { EventEmitter } from "node:events";
+import { attachTaskDetails } from "./tasks/task-details.js";
 
 import {
   assignBoardManager,
   approveBoardIntent,
   approveTaskCreateBoardIntent,
+  approveTaskClaimBoardIntent,
+  BoardIntentClaimConflictError,
+  BoardIntentApprovalConsumptionError,
+  LeaseFenceStaleError,
   countBoardIntents,
   createBoardIntent,
   denyBoardIntent,
@@ -34,6 +40,8 @@ import { resolveGitRoomProjectRole } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 
 export interface RoomBoardRouteDeps {
+  taskEvents?: EventEmitter;
+  ensureTaskGitRoomForActiveWorkLease?(input: { parentRoomId: string; taskId: string }): Promise<unknown>;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,
@@ -461,6 +469,9 @@ export function registerRoomBoardRoutes(
       proposer_actor_key: workerIdentity ? workerIdentity.agent_key : deps.normalizeOptionalString(body.actor_key),
       proposer_actor_instance_id: workerIdentity ? workerIdentity.agent_instance_id : deps.normalizeOptionalString(body.actor_instance_id),
       proposer_agent_session_id: workerIdentity ? workerIdentity.agent_session_id : deps.normalizeOptionalString(body.agent_session_id),
+      proposer_worker_auth_kind: workerIdentity?.session_kind === "worker" && workerIdentity.agent_session_id
+        && (req.authKind !== "agent_session" || req.agentSession?.capabilities.includes("coordination.self_write"))
+        ? workerIdentity.credential_fence?.kind ?? null : null,
     });
     const activeManager = await getActiveBoardManagerForRoom(project.id);
     const managerNotification = await emitBoardIntentManagerNotification({
@@ -509,6 +520,50 @@ export function registerRoomBoardRoutes(
       room_id: project.id,
       intent_id: intentId,
     });
+    if (existingIntent?.action_type === "task_claim") {
+      const isolation = await deps.enforceFocusParentBoardWriteIsolation?.({ req, targetProject: project });
+      if (isolation?.kind === "deny") {
+        res.status(409).json({ error: isolation.error, code: isolation.code });
+        return;
+      }
+      try {
+        const claim = await approveTaskClaimBoardIntent({
+          room_id: project.id, intent_id: intentId, decision_by: decisionBy, reason,
+          ...(workerIdentity ? { manager: {
+            agent_session_id: workerIdentity.agent_session_id!, agent_key: workerIdentity.agent_key,
+            agent_instance_id: workerIdentity.agent_instance_id, credential_fence: workerIdentity.credential_fence!,
+          } } : {}),
+        });
+        if (claim) {
+          if (claim.task) {
+            try {
+              await deps.ensureTaskGitRoomForActiveWorkLease?.({ parentRoomId: project.id, taskId: claim.task.id });
+            } catch {
+              console.warn("Task Git room enrichment failed after committed claim", { roomId: project.id, taskId: claim.task.id });
+            }
+            let task = claim.task;
+            try { task = await attachTaskDetails(project.id, task); } catch {
+              console.warn("Task detail enrichment failed after committed claim", { roomId: project.id, taskId: task.id });
+            }
+            try { deps.taskEvents?.emit("task:updated", { projectId: project.id, task }); } catch {
+              console.warn("Task event delivery failed after committed claim", { roomId: project.id, taskId: task.id });
+            }
+            claim.task = task;
+          }
+          const proposerNotification = await emitBoardIntentDecisionNotification({ deps, project, intent: claim.intent });
+          res.json({ room_id: project.id, intent: claim.intent, proposer_notification: proposerNotification,
+            result: { kind: "task_claimed", requires_follow_up: false, task: claim.task } });
+          return;
+        }
+      } catch (error) {
+        if (error instanceof BoardIntentClaimConflictError || error instanceof LeaseFenceStaleError
+          || error instanceof BoardIntentApprovalConsumptionError) {
+          res.status(409).json({ error: error.message, code: error.code });
+          return;
+        }
+        throw error;
+      }
+    }
     if (existingIntent && (existingIntent.status === "used"
       || existingIntent.status === "approved" && (!existingIntent.expires_at || Date.parse(existingIntent.expires_at) > Date.now()))) {
       const proposerNotification = await emitBoardIntentDecisionNotification({ deps, project, intent: existingIntent });
