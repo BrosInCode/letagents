@@ -2195,6 +2195,7 @@ test("Codex resumed bounded launch supplies only the exact non-secret worker rou
     LETAGENTS_SUPERVISOR_PROVIDER: "codex",
     LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
     LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
     LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "agent_session_exact",
     LETAGENTS_SUPERVISOR_ROOM_ID: "focus_37",
     LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "LanternSparrow",
@@ -4391,3 +4392,60 @@ for (const race of ["process_birth", "continuation", "owned_handle"] as const) {
     subscription.dispose();
   });
 }
+
+for (const race of ["none", "permission", "connection", "birth", "active", "unknown", "reservation"] as const) {
+  test(`idle replacement sends no signal after ${race} proof changes`, async () => {
+    const harness = createHarness({ exitOnSignal: true });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    client.request = async <T>(): Promise<T> => {
+      if (race === "permission") client.pendingPermissions.set(22, { id: 22, method: "unknown/request", params: {}, connectionId: client.connectionEpoch });
+      if (race === "connection") client.connectionEpoch = "replacement";
+      if (race === "birth") harness.launches[0]!.processIdentity += "-replacement";
+      return (race === "unknown" ? {} : { thread: { id: handle.providerContinuationId,
+        status: { type: race === "active" ? "active" : "idle" },
+        turns: race === "active" ? [{ id: "turn-live", status: "inProgress" }] : [] } }) as T;
+    };
+    let finalChecks = 0;
+    const stopping = adapter.stopIdle(handle, () => {
+      finalChecks += 1;
+      if (race === "reservation") throw new Error("reservation changed");
+    });
+    if (race === "none") {
+      assert.equal((await stopping).terminalCause, "stopped");
+      assert.equal(finalChecks, 1);
+      assert.deepEqual(harness.signals, [{ pid: handle.pid, signal: "SIGTERM" }]);
+    } else {
+      await assert.rejects(stopping, /not provably idle|reservation changed/);
+      assert.deepEqual(harness.signals, []);
+    }
+  });
+}
+
+test("managed launch receipt freezes the exact generated tool policy and is never invented on attach", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const request = spawnRequest({ deliveryMode: "daemon_inbox", supervisorEntryId: "manifest_exact",
+    supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact",
+    supervisorWorkerSession: { agentSessionId: "session_exact", apiUrl: "letagents-local://rooms", roomCursor: null } });
+  const route = request.supervisorWorkerSession!.apiUrl!;
+  const expected = await adapter.describeManagedLaunchContract({ apiUrl: route });
+  assert.match(expected!, /^[a-f0-9]{64}$/);
+  const launch = harness.dependencies.launchServer;
+  harness.dependencies.launchServer = (...args) => {
+    request.supervisorWorkerSession!.apiUrl = "https://changed.example";
+    return launch(...args);
+  };
+  const exact = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await exact.spawn(request) as ProviderHandle & { managedLaunchContract?: string };
+  assert.equal(handle.managedLaunchContract, expected);
+  assert.ok(harness.launchOptions[0]!.options.configOverrides[0]!.includes(route));
+  assert.notEqual(await adapter.describeManagedLaunchContract({ apiUrl: "https://changed.example" }), expected);
+  assert.equal(await adapter.describeManagedLaunchContract({ apiUrl: route, devMcpServerEntryPath: "/mutable/source.js" }), null);
+  const restored = await new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
+    workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection,
+  });
+  assertProviderHandle(restored);
+  assert.equal((restored as ProviderHandle & { managedLaunchContract?: string }).managedLaunchContract, undefined);
+});

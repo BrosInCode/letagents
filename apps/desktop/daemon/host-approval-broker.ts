@@ -22,6 +22,7 @@ import { sameProviderActionConnectionIdentity, type ProviderActionHandle, type P
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry } from "./types.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
+import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
 import type { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
 import { HostApprovalVerifier } from "./host-approval-auth.js";
 import { requestHostApprovalVerifier, type StateRecoveryBootstrap } from "./state-recovery-key.js";
@@ -51,6 +52,7 @@ export function createHostApprovalBridge(options: Omit<Options, "exactAuthority"
   return {
     install: broker.install.bind(broker),
     close: broker.close.bind(broker),
+    reserveIdle: broker.reserveIdle.bind(broker),
     async enroll(storage: StateRecoveryBootstrap): Promise<void> {
       verifier = new HostApprovalVerifier(options.currentGeneration(),
         await (storage.getHostApprovalPublicKey ?? requestHostApprovalVerifier)());
@@ -72,6 +74,8 @@ type Lane = {
   connectionId: string | null; requests: readonly ProviderPermissionRequest[];
   approvalExecutions: ApprovalExecutionReconciler | null;
   rulesRunning?: boolean; rulesDirty?: boolean;
+  activityEpoch: number; activeDecisions: number;
+  idleReservation?: symbol;
 };
 
 export type DelegatableApprovalAdmission = {
@@ -172,7 +176,7 @@ export class HostApprovalBroker {
       || !["codex_app_server", "opencode_server", "claude_cli"].includes(handle.providerConnection.kind)) return () => {};
     const lane: Lane = { agentId, generation, handle, connection: { ...handle.providerConnection },
       controller: new AbortController(), revision: 0, state: "degraded", connectionId: null, requests: [],
-      approvalExecutions: null };
+      approvalExecutions: null, activityEpoch: 0, activeDecisions: 0 };
     this.lanes.set(agentId, lane);
     if (["codex_app_server", "claude_cli"].includes(handle.providerConnection.kind)) {
       lane.approvalExecutions = new ApprovalExecutionReconciler({ provider, handle, store: this.options.store,
@@ -182,6 +186,8 @@ export class HostApprovalBroker {
     }
     const receive = (event: ProviderPermissionObservation) => {
       if (!this.current(lane)) return;
+      if (event.type !== "snapshot" || event.requests.length > 0
+        || lane.connectionId !== event.connectionId) lane.activityEpoch += 1;
       if (event.type === "request_closed") {
         lane.approvalExecutions?.observeRequestClosed(event);
         return;
@@ -218,6 +224,39 @@ export class HostApprovalBroker {
     return this.options.isCurrent() && !lane.controller.signal.aborted && this.lanes.get(lane.agentId) === lane
       && this.options.currentHandle(lane.agentId) === lane.handle
       && sameProviderActionConnectionIdentity(lane.connection, lane.handle.providerConnection);
+  }
+
+  /** Reserve one healthy, empty native permission lane without suppressing observation. */
+  reserveIdle(installation: Pick<ProviderInstallationToken,
+    "entryId" | "handle" | "executionGenerationId" | "providerConnection">):
+    { assertCurrent(): void; release(): void } | null {
+    const lane = this.lanes.get(installation.entryId);
+    if (!lane || !this.current(lane) || lane.handle !== installation.handle
+      || lane.generation !== installation.executionGenerationId
+      || !sameProviderActionConnectionIdentity(lane.connection, installation.providerConnection)
+      || lane.state !== "pending" || !lane.connectionId || lane.requests.length
+      || lane.activeDecisions || lane.idleReservation) return null;
+    const reservation = Symbol("idle-runtime-approval");
+    const epoch = lane.activityEpoch;
+    lane.idleReservation = reservation;
+    return {
+      assertCurrent: () => {
+        if (!this.current(lane) || lane.idleReservation !== reservation
+          || lane.activityEpoch !== epoch || lane.state !== "pending"
+          || lane.requests.length || lane.activeDecisions) {
+          throw new Error("Runtime permissions changed before idle replacement.");
+        }
+      },
+      release: () => {
+        if (lane.idleReservation === reservation) {
+          delete lane.idleReservation;
+          // Only a request observed while reserved needs rule matching. An
+          // empty run emits a permission notification and would retry an
+          // unproven native idle boundary indefinitely.
+          if (lane.requests.length > 0) this.queueToolRules(lane);
+        }
+      },
+    };
   }
 
   /** Caller authenticates the fixed host-list operation before reaching this method. */
@@ -346,7 +385,7 @@ export class HostApprovalBroker {
   private async prepareCore(lane: Lane, native: ProviderPermissionRequest) {
     const revision = lane.revision;
     const assertCurrent = () => {
-      if (!this.current(lane) || lane.state !== "pending" || lane.revision !== revision || !lane.requests.includes(native)) throw new ApprovalPreparationUnavailableError("Approval request changed.");
+      if (lane.idleReservation || !this.current(lane) || lane.state !== "pending" || lane.revision !== revision || !lane.requests.includes(native)) throw new ApprovalPreparationUnavailableError("Approval request changed.");
     };
     const assertAuthority = async (candidate?: DaemonManifestEntry) => {
       assertCurrent();
@@ -516,6 +555,9 @@ export class HostApprovalBroker {
     input: RecordedApprovalDecision,
     select: (prepared: RecordedApprovalSelection) => Promise<ExecutionApprovalRecord>,
   ): Promise<HostApprovalStatus> {
+    const decisionLane = this.lanes.get(input.agentId);
+    if (decisionLane?.idleReservation) return "unavailable";
+    if (decisionLane) decisionLane.activeDecisions += 1;
     const reconciliation: {
       reconciler: ApprovalExecutionReconciler | null;
       pending: ReturnType<ApprovalExecutionReconciler["prepare"]>;
@@ -556,6 +598,8 @@ export class HostApprovalBroker {
     } catch (error) {
       if (reconciliation.pending) reconciliation.reconciler?.discard(reconciliation.pending);
       throw error;
+    } finally {
+      if (decisionLane) decisionLane.activeDecisions -= 1;
     }
   }
 }
