@@ -236,6 +236,80 @@ test("host approval client fences changed daemon challenges and sender revocatio
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
+test("host approval decisions survive unchanged polls but fence changed authority before dispatch", async (t) => {
+  const changes: Array<[string, (candidate: HostApprovalCandidate) => HostApprovalCandidate]> = [
+    ["unchanged", candidate => structuredClone(candidate)],
+    ["equivalent property order", candidate => ({ ...candidate, reference: Object.fromEntries(Object.entries(candidate.reference!).reverse()) as NonNullable<HostApprovalCandidate["reference"]> })],
+    ...Object.entries({ requestId: "request_2", requestVersion: 2, requestSha256: "b".repeat(64),
+      agentId: "agent_2", roomId: "room_2", executionGenerationId: "execution_2", runtimeGenerationId: "runtime_2",
+      turnId: "turn_2", providerContinuationId: "session_2", providerTurnId: "native_turn_2", connectionId: "connection_2", nativeRequestId: 2,
+    }).map(([key, value]): [string, (candidate: HostApprovalCandidate) => HostApprovalCandidate] => [key,
+      candidate => ({ ...candidate, reference: { ...candidate.reference!, [key]: value } })]),
+    ["presentation", candidate => ({ ...candidate, presentation: { ...candidate.presentation, details: "A different command" } })],
+    ["resolved", candidate => ({ ...candidate, status: "resolved" })],
+    ["uncertain", candidate => ({ ...candidate, status: "uncertain" })],
+    ["recorded decision", candidate => ({ ...candidate, recordedDecision: { decisionId: "other-decision", actorId: "other-host", decision: "deny", projectionSha256: "b".repeat(64) } })],
+  ];
+  for (const stage of ["challenge", "socket dispatch"] as const) {
+    for (const [label, change] of changes) {
+      await t.test(`${stage}: ${label}`, async () => {
+        const env = await fixture();
+        const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+        const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+        const verifier = new HostApprovalVerifier(7, signer.publicKey);
+        const originalCandidate = hostApprovalCandidate(); let candidate = originalCandidate;
+        const decisions: HostApprovalDecision[] = [];
+        const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+        wire.hostApprovals.challenge = () => verifier.challenge();
+        wire.hostApprovals.request = envelope => {
+          const authenticated = verifier.verify(envelope); assert.ok(authenticated);
+          if (authenticated.operation === "list") return [candidate];
+          decisions.push(authenticated.input as HostApprovalDecision); return "resolved";
+        };
+        const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+        // Hold a real request at its asynchronous boundary, then let the poll
+        // complete through the authenticated wire before resuming dispatch.
+        type RequestArgs = [method: string, params?: unknown, ...options: unknown[]];
+        const transport = client as unknown as { request: (...args: RequestArgs) => Promise<unknown> };
+        const request = transport.request.bind(client);
+        let release!: () => void; let entered!: () => void; let held = false;
+        const paused = new Promise<void>(resolve => { entered = resolve; });
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        try {
+          const view = (await client.listHostApprovals("room_1")).approvals[0]!;
+          transport.request = async (...args) => {
+            const envelope = args[1] as { payload?: string } | undefined;
+            const isDecision = args[0] === "supervisor.host_approval_request"
+              && envelope?.payload && JSON.parse(envelope.payload).operation === "decide";
+            if (!held && (stage === "challenge" ? args[0] === "supervisor.host_approval_challenge" : isDecision)) {
+              held = true; entered(); await gate;
+            }
+            return request(...args);
+          };
+          const pending = client.decideHostApproval({ id: view.id, decision: "allow_once" });
+          const result = pending.then(status => ({ status }), error => ({ error }));
+          await paused;
+          candidate = change(originalCandidate);
+          const refreshed = await client.listHostApprovals("room_1");
+          release();
+          const outcome = await result;
+          if (label === "unchanged") {
+            assert.equal(refreshed.approvals[0]?.id, view.id);
+            assert.deepEqual(outcome, { status: "resolved" });
+            assert.equal(decisions.length, 1);
+            assert.deepEqual(decisions[0]!.expected, originalCandidate.reference);
+            assert.equal(decisions[0]!.projectionSha256, createHash("sha256").update(JSON.stringify(originalCandidate.presentation)).digest("hex"));
+            await assert.rejects(client.decideHostApproval({ id: view.id, decision: "allow_once" }), /Refresh/);
+          } else {
+            assert.ok("error" in outcome);
+            assert.equal(decisions.length, 0, "changed approval authority must never reach the daemon");
+          }
+        } finally { release(); transport.request = request; await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+      });
+    }
+  }
+});
+
 test("host approval reads wait for scheduled startup preparation and daemon readiness without starting extra work", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
