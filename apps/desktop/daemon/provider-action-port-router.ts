@@ -36,7 +36,7 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
-  observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
+  observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; connectionId?: string; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
   replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
   correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
   inspectPermissionFileChanges?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
@@ -251,14 +251,22 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         return;
       }
       if (event.type !== "snapshot") { notify(event); return; }
+      // Empty Codex snapshots still attest a live RPC connection. A pending
+      // request cannot supply that authority once the final request closes.
+      const connectionId = remembered.provider === "codex" ? event.connectionId
+        : createHash("sha256").update(JSON.stringify(binding.connection)).digest("hex");
+      if (typeof connectionId !== "string" || !connectionId.trim()
+        || (remembered.provider === "codex" && event.requests.some(native =>
+          (native as CodexNativePermissionRequest).connectionId !== connectionId))) {
+        notify({ type: "degraded" });
+        return;
+      }
       const requests: ProviderPermissionRequest[] = event.requests.map(native => remembered.provider === "codex"
         ? { provider: "codex", native: native as CodexNativePermissionRequest }
         : remembered.provider === "claude-code"
           ? { provider: "claude-code", native: structuredClone(native as ClaudeNativePermissionRequest) }
           : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
-      notify({ type: "snapshot", requests, connectionId: remembered.provider === "codex"
-        ? (requests[0]?.native as CodexNativePermissionRequest | undefined)?.connectionId ?? null
-        : createHash("sha256").update(JSON.stringify(binding.connection)).digest("hex") });
+      notify({ type: "snapshot", requests, connectionId });
     }, signal);
   }
 
