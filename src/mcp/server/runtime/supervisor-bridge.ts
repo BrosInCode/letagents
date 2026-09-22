@@ -13,6 +13,9 @@ import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.j
 const NEGOTIATION_PROTOCOL_VERSION = 1;
 const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2, 3]);
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+// A signed desktop update can leave the socket absent for roughly 20 seconds.
+// Only unsent operations receive this startup grace; it never permits replay.
+const SUPERVISED_STARTUP_TIMEOUT_MS = 30_000;
 const CONFIRMED_BINDING_VERIFY_TIMEOUT_MS = 250;
 const SUPERVISOR_CONTEXT_FILE = ".letagents-supervisor-context.json";
 const WORK_ATTEMPT_MARKER_FILE = ".letagents-work-attempt.json";
@@ -255,7 +258,7 @@ async function requestCurrentSupervisedOperation(
   const invocation = JSON.parse(JSON.stringify(params)) as Record<string, unknown>;
   const coordinates = await requireCurrentSupervisedCoordinates(env, options);
   const requestId = randomUUID();
-  const deadline = Date.now() + (options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  const deadline = Date.now() + (options.requestTimeoutMs ?? SUPERVISED_STARTUP_TIMEOUT_MS);
   let retryAttempt = 0;
   while (true) {
     let negotiated: NegotiatedSupervisor;
