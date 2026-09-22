@@ -1832,6 +1832,11 @@ export class SupervisedAgentDelivery {
     parent.signal.addEventListener("abort", relayAbort, { once: true });
     try {
       const replyTarget = supervisedReplyTargetForSourceMessage(item.source_message);
+      if (await this.inbox.hasInterceptedThreadReply(item.inbox_item_id) && !replyTarget.threadRootId) {
+        replyTarget.replyTo = item.source_message_id;
+        replyTarget.threadRootId = item.source_message_id;
+      }
+      if (!await this.hasLaneAuthority(agent, parent)) return false;
       const publication = await this.track(controller, this.http.publish({
         roomId: agent.roomId,
         apiUrl: agent.apiUrl,

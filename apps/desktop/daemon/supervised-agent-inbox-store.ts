@@ -525,6 +525,21 @@ export class SupervisedAgentInboxStore {
       return row ? rowToProviderTurnBinding(row) : null;
     });
   }
+  /** Intercepted message tools never execute; their immutable request carries
+   * the final answer's thread choice. Stop may fail the effect before the
+   * native reply wins publication, so that state must preserve the choice too. */
+  async hasInterceptedThreadReply(inboxItemId: string): Promise<boolean> {
+    return this.read(async (database) => Boolean(database.prepare(`SELECT 1
+      FROM supervised_agent_inbox i
+      JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+        AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
+      JOIN supervised_agent_effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
+        AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
+      WHERE i.inbox_item_id=? AND e.state IN ('prepared','failed')
+        AND e.tool_name IN ('send_message','send_thread_message')
+        AND json_extract(e.request_json,'$.thread_parent_id')=i.source_message_id
+      LIMIT 1`).get(inboxItemId)));
+  }
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
   }
