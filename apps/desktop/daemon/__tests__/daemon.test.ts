@@ -3381,6 +3381,7 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
   let spawns = 0;
   let attaches = 0;
   let stops = 0;
+  const stopActions: string[] = [];
   let exitRegistrations = 0;
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart }),
@@ -3392,8 +3393,12 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
     },
     attachAction: async () => { throw new Error("handoff successor uses the durable provider ref, not action inference"); },
     resume: async () => { throw new Error("successor must attach instead of resume/spawn"); }, poke: async () => {},
-    stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: returnedHandle.providerContinuationId }; },
-    onExit: async () => { exitRegistrations += 1; return () => {}; }, onStream: async () => () => {},
+    stop: async (_handle, options) => { stops += 1; stopActions.push(options.actionId); return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: returnedHandle.providerContinuationId }; },
+    onExit: async () => {
+      assert.equal(stops, 0, "ownership and terminal observation are installed before any terminal fence");
+      exitRegistrations += 1;
+      return () => {};
+    }, onStream: async () => () => {},
   };
   const first = new SupervisorDaemon(paths, "darwin", port, true);
   let second: SupervisorDaemon | null = null;
@@ -3431,6 +3436,8 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
     await eventually(async () => attaches === 1
       && (second as unknown as { liveHandles: Map<string, typeof returnedHandle> }).liveHandles.get("handoff_during_dispatch") === returnedHandle,
     "successor exact provider attach");
+    await (second as unknown as { providerExecution: { drainConvergence(): Promise<void> } }).providerExecution.drainConvergence();
+    assert.equal(exitRegistrations, survivesRestart ? 1 : 2, "successor installs its terminal observer before convergence completes");
     const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(current.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId);
     const live = (second as unknown as { liveHandles: Map<string, typeof returnedHandle> }).liveHandles.get("handoff_during_dispatch");
@@ -3441,7 +3448,12 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
     assert.equal(result.execution_generations[0]?.execution_generation_id, current.provider_ref?.execution_generation_id);
     assert.equal(result.execution_generations[0]?.terminal, null);
     assert.equal(spawns, 1);
-    assert.equal(stops, 0);
+    // This legacy, non-grant fixture is terminal once idle. Its successor
+    // fences that exact installation only after attaching its observers.
+    assert.equal(stops, survivesRestart ? 0 : 1);
+    assert.deepEqual(stopActions, survivesRestart ? [] : [
+      `manifest:handoff_during_dispatch:reattached-terminal:${current.provider_ref?.execution_generation_id}`,
+    ]);
   } finally {
     releaseSpawn?.();
     await second?.stop().catch(() => undefined);
