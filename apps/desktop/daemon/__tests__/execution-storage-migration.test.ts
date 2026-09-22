@@ -699,8 +699,7 @@ test("prepared operational opener requires an already-current schema without mig
     } finally { prepared.close(); }
 
     restoreV44ClosureFixture(env.database);
-    env.database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION - 1} WHERE singleton=1;
-      PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION - 1}`);
+    env.database.exec("UPDATE manifest_metadata SET schema_version=44 WHERE singleton=1; PRAGMA user_version=44");
     const before = {
       version: versionPair(env.database),
       schema: env.database.prepare("SELECT * FROM sqlite_master ORDER BY name").all(),
@@ -723,7 +722,7 @@ test("prepared operational opener never creates missing state and preserves reje
       const database = await openDaemonStateDatabase(path, (opened) => new DaemonStateSchema().createSchema(opened));
       if (invalid === "older") {
         restoreV44ClosureFixture(database);
-        database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION - 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION - 1}`);
+        database.exec("UPDATE manifest_metadata SET schema_version=44; PRAGMA user_version=44");
       }
       if (invalid === "future") database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION + 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION + 1}`);
       database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
