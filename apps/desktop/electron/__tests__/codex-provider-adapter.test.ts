@@ -1381,6 +1381,15 @@ test("Codex bounded room turn waits for its exact terminal event and publishes o
       const prompt = (params as { input: Array<{ text: string }> }).input[0]!.text;
       assert.match(prompt, /chat reply publication does not publish code or create PRs/);
       assert.match(prompt, /standing merge approval/);
+      assert.match(prompt, /LetAgents room tools do not provide browser automation or a preview service/);
+      assert.match(prompt, /capabilities actually exposed and authorized in this runtime/);
+      assert.match(prompt, /report the specific gap once and continue independent feasible work/);
+      assert.match(prompt, /leave affected verification incomplete/);
+      assert.match(prompt, /Do not repeat an unchanged capability attempt or blocker report/);
+      assert.match(prompt, /Still respond to explicit user instructions and new questions/);
+      assert.match(prompt, /acknowledgment-only closing messages.*no-reply completion/);
+      assert.match(prompt, /return exactly LETAGENTS_NO_ROOM_REPLY with no other text/);
+      assert.doesNotMatch(prompt, /Browser QA is unavailable here/, "Codex may have separately configured authorized tools; the shared prompt must not claim Cursor's sealed capability limits");
       causal.push("turn/start");
       return { turn: { id: "turn-bounded" } } as T;
     }
