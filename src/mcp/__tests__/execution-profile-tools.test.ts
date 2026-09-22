@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { LOCAL_ROOM_API_ORIGIN } from "../../../shared/room-api-origin.mjs";
 import { registerTools } from "../server/register-tools.js";
-import { letAgentsRuntimeContract } from "../server/runtime-contract.js";
+import { LETAGENTS_RUNTIME_READINESS_URI, letAgentsRuntimeContract, registerRuntimeReadinessResource } from "../server/runtime-contract.js";
 import type { LetAgentsExecutionProfile } from "../server/runtime/execution-profile.js";
 
 function discovered(profile: LetAgentsExecutionProfile, provider: string | null = null): Set<string> {
@@ -61,6 +61,32 @@ test("the executable runtime contract is derived from the real Cursor registrati
     [...discovered("supervised_room_turn", "cursor")].sort(),
   );
   assert.equal(contract.profiles.cursor_supervised_room_turn.tools.includes("complete_room_turn"), true);
+});
+
+test("runtime readiness exposes only the active profile's actual registered capabilities", async () => {
+  for (const apiUrl of ["https://letagents.chat", LOCAL_ROOM_API_ORIGIN]) {
+    for (const [profile, provider] of [
+      ["supervised_room_turn", "codex"], ["supervised_room_turn", "cursor"],
+      ["supervised_mcp_polling", "codex"], ["autonomous_mcp_worker", null],
+    ] as const) {
+      const server = new McpServer({ name: "readiness-test", version: "1" });
+      const client = new Client({ name: "readiness-reader", version: "1" });
+      registerTools(server, profile, provider, { apiUrl });
+      registerRuntimeReadinessResource(server, profile, provider, apiUrl);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      try {
+        await server.connect(serverTransport); await client.connect(clientTransport);
+        const { tools } = await client.listTools();
+        const { contents } = await client.readResource({ uri: LETAGENTS_RUNTIME_READINESS_URI });
+        assert.equal(contents.length, 1);
+        assert.equal(contents[0].uri, LETAGENTS_RUNTIME_READINESS_URI);
+        assert.equal(contents[0].mimeType, "application/json");
+        assert.deepEqual(JSON.parse(String(contents[0].text)), {
+          format: 1, profile, provider, tools: tools.map(tool => tool.name).sort(),
+        }, "readiness contains no credentials, room content, or extra authority");
+      } finally { await client.close(); await server.close(); }
+    }
+  }
 });
 
 test("autonomous MCP workers retain the established full tool registry", () => {
