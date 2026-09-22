@@ -85,7 +85,7 @@ export type DelegatableApprovalAdmission = {
   sourceMessageId: string;
 };
 type Options = {
-  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "closeExecutionApprovalRequest" | "validateExecutionApprovalAuthority" | "readHostToolProject" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
+  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "closeExecutionApprovalRequest" | "validateExecutionApprovalAuthority" | "readHostToolContext" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
   inbox: Pick<SupervisedAgentInboxStore, "head">;
   provider: ProviderActionPort | undefined;
   currentHandle(agentId: string): ProviderActionHandle | undefined;
@@ -477,7 +477,7 @@ export class HostApprovalBroker {
         : prepared.kind === "command" ? "Run a command"
         : prepared.kind === "file_change" ? "Change files" : "Grant for this turn", prepared.fileChanges);
     if (this.options.hostActorId?.()) {
-      const scope = await resolveHostToolScope(prepared.entry, native, await this.options.store.readHostToolProject(prepared.owned.workAttemptId)).catch(() => null);
+      const scope = await resolveHostToolScope(prepared.entry, native, await this.options.store.readHostToolContext(prepared.owned.workAttemptId)).catch(() => null);
       prepared.assertCurrent();
       if (scope) presentation.alwaysAllow = scope;
     }

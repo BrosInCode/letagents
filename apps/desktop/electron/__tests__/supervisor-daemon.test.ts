@@ -2797,7 +2797,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.171");
+    assert.equal(status.implementationVersion, "2.0.172");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -3211,19 +3211,23 @@ test("saved permission list and revoke use the real enrolled signer", async () =
   const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
   const verifier = new HostApprovalVerifier(7, signer.publicKey);
   const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  const scope = { kind: "room_workspace" as const, version: 1 as const, agentId: "agent", accountId: "owner", roomId: "room",
+    workAttemptId: "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a", workspacePath: "/private/workspace", canonicalWorkspacePath: "/private/workspace",
+    provider: "claude-code" as const, toolId: "claude:Write", toolLabel: "Write", policySha256: "b".repeat(64) };
+  const rule = { id: "rule", revision: 1, ownerId: `host-${verifier.challenge().keyFingerprint}`, scope, createdAtMs: 1 };
   const operations: unknown[] = [];
   wire.hostApprovals.challenge = () => verifier.challenge();
   wire.hostApprovals.request = envelope => {
     const authenticated = verifier.verify(envelope);
     assert.ok(authenticated);
     operations.push(authenticated);
-    if (authenticated.operation === "list_tool_rules") return [];
+    if (authenticated.operation === "list_tool_rules") return [rule];
     assert.equal(authenticated.operation, "revoke_tool_rule");
     return null;
   };
   const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, loadApprovalSigner: async () => signer });
   try {
-    assert.deepEqual(await client.listHostToolRules("agent"), []);
+    assert.deepEqual(await client.listHostToolRules("agent"), [rule]);
     await client.revokeHostToolRule({ agentId: "agent", ruleId: "rule", revision: 1 });
     assert.deepEqual(operations, [
       { operation: "list_tool_rules", input: { agentId: "agent" } },

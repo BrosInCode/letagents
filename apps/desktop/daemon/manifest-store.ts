@@ -1,6 +1,6 @@
 import { ManagedRuntimeRefreshDeferred } from "./provider-action-port.js";
 import type { ProcessIdentity } from "./process-identity.js";
-import { listHostToolRules, findHostToolRule, readHostToolProject, bindHostToolRule, assertDecisionToolRule, revokeHostToolRule,
+import { listHostToolRules, findHostToolRule, readHostToolContext, bindHostToolRule, assertDecisionToolRule, revokeHostToolRule,
   withdrawHostToolApproval, type WithdrawHostToolApproval, type HostToolRule, type HostToolScope } from "./host-tool-rules.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
@@ -616,8 +616,8 @@ export class ManifestStore {
     return assertCurrent;
   }
 
-  async readHostToolProject(workAttemptId: string) {
-    return readHostToolProject(await this.getDatabase(), workAttemptId);
+  async readHostToolContext(workAttemptId: string) {
+    return readHostToolContext(await this.getDatabase(), workAttemptId);
   }
 
   async listHostToolRules(ownerId: string, agentId: string): Promise<HostToolRule[]> {
