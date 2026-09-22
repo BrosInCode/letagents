@@ -1,3 +1,4 @@
+import { ManagedRuntimeRefreshDeferred } from "./provider-action-port.js";
 import type { ProcessIdentity } from "./process-identity.js";
 import { listHostToolRules, findHostToolRule, readHostToolProject, bindHostToolRule, assertDecisionToolRule, revokeHostToolRule,
   withdrawHostToolApproval, type WithdrawHostToolApproval, type HostToolRule, type HostToolScope } from "./host-tool-rules.js";
@@ -523,6 +524,77 @@ export class ManifestStore {
 
   async readLatestExecutionApproval(requestId: string): Promise<ExecutionApprovalRecord | null> {
     return readLatestExecutionApproval(await this.getDatabase(), requestId);
+  }
+
+  async readManagedLaunchContract(input: {
+    agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
+  }): Promise<string | null> {
+    const connection = input.providerConnection;
+    if (connection.pid === null || !connection.processIdentity) return null;
+    const runtimeId = executionRuntimeStorageIdentity(input.agentId, input.executionGenerationId,
+      connection.kind, connection.pid, connection.processIdentity);
+    const row = (await this.getDatabase()).prepare(`SELECT contract_sha256 FROM managed_launch_contracts
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?`)
+      .get(input.agentId, input.executionGenerationId, runtimeId);
+    return typeof row?.contract_sha256 === "string" ? row.contract_sha256 : null;
+  }
+
+  /** Operational existence check; deliberately independent of the capped UI list. */
+  async hasUnclosedRuntimeApprovals(input: {
+    agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
+  }): Promise<boolean> {
+    return this.runtimeHasUnclosedApprovals(await this.getDatabase(), structuredClone(input));
+  }
+
+  private runtimeHasUnclosedApprovals(database: DatabaseSync, input: {
+    agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
+  }): boolean {
+    const connection = input.providerConnection;
+    if (!input.agentId || !input.executionGenerationId
+      || connection.pid === null || !connection.processIdentity) return true;
+    const runtimeId = executionRuntimeStorageIdentity(input.agentId,
+      input.executionGenerationId, connection.kind, connection.pid, connection.processIdentity);
+    if (!database.prepare(`SELECT 1 FROM execution_runtime_generations
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?`)
+      .get(input.agentId, input.executionGenerationId, runtimeId)) return true;
+    return Boolean(database.prepare(`SELECT 1 FROM execution_approval_requests r
+      WHERE r.agent_id=? AND r.execution_generation_id=? AND r.runtime_generation_id=?
+        AND r.state IN ('requested','decision_recorded','dispatching','lost')
+        AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+          WHERE c.request_id=r.request_id AND c.request_version=r.request_version)
+      LIMIT 1`).get(input.agentId, input.executionGenerationId, runtimeId));
+  }
+
+  /** Re-read durable authority synchronously at the native signal boundary. */
+  async validateManagedRuntimeReplacement(input: {
+    agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
+    configurationRevision: number; apiUrl: string; roomId: string;
+    workAttemptId: string; providerContinuationId: string;
+  }): Promise<() => void> {
+    const snapshot = structuredClone(input);
+    const database = await this.getDatabase();
+    const assertCurrent = () => {
+      if (this.closed || this.database !== database) throw new Error("Runtime authority store is unavailable.");
+      const entry = this.readEntryFromDatabase(database, snapshot.agentId);
+      const configuration = database.prepare(`SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?`).get(snapshot.agentId);
+      const binding = database.prepare(`SELECT room_id,work_attempt_id,execution_generation_id,api_url FROM worker_session_bindings WHERE entry_id=?`).get(snapshot.agentId);
+      if (!entry || entry.room_id !== snapshot.roomId || entry.work_attempt_id !== snapshot.workAttemptId
+        || entry.provider !== "codex" || entry.desired_state !== "running"
+        || entry.delivery_mode !== "daemon_inbox" || entry.condition !== "none" || entry.observed_state !== "idle"
+        || (entry.turn_control && entry.turn_control.status !== "completed")
+        || entry.provider_ref?.provider_continuation_id !== snapshot.providerContinuationId
+        || entry.provider_ref?.execution_generation_id !== snapshot.executionGenerationId
+        || !sameProviderActionConnectionSnapshot(entry.provider_ref.provider_connection, snapshot.providerConnection)
+        || configuration?.config_revision !== snapshot.configurationRevision
+        || configuration.runtime_configuration_revision !== snapshot.configurationRevision
+        || binding?.room_id !== entry.room_id || binding.work_attempt_id !== entry.work_attempt_id
+        || binding.execution_generation_id !== snapshot.executionGenerationId || binding.api_url !== snapshot.apiUrl
+        || this.runtimeHasUnclosedApprovals(database, snapshot)) {
+        throw new ManagedRuntimeRefreshDeferred("Managed runtime replacement lost its durable idle authority.");
+      }
+    };
+    assertCurrent();
+    return assertCurrent;
   }
 
   async listExecutionApprovals(roomId: string, limit = 64): Promise<ExecutionApprovalRecord[]> {
@@ -1413,6 +1485,7 @@ export class ManifestStore {
       executionGenerationId: string;
       providerConnection: DaemonProviderConnection;
       appliedRevision: number;
+      managedLaunchContract?: string;
       requestedAuthorityMode: LifecycleAuthorityMode;
       observedAtMs: number;
     },
@@ -1480,6 +1553,14 @@ export class ManifestStore {
         });
         if (authorityMode !== snapshot.requestedAuthorityMode) {
           throw new Error("Provider birth retained an incompatible frozen lifecycle authority.");
+        }
+        if (snapshot.managedLaunchContract !== undefined) {
+          if (!/^[a-f0-9]{64}$/.test(snapshot.managedLaunchContract)) throw new Error("Invalid managed launch contract.");
+          const prior = database.prepare("SELECT contract_sha256 FROM managed_launch_contracts WHERE runtime_generation_id=?").get(runtimeGenerationId);
+          if (prior && prior.contract_sha256 !== snapshot.managedLaunchContract) throw new Error("Native birth cannot change its managed launch contract.");
+          database.prepare(`INSERT OR IGNORE INTO managed_launch_contracts
+            (runtime_generation_id,agent_id,execution_generation_id,contract_sha256) VALUES(?,?,?,?)`)
+            .run(runtimeGenerationId, normalized.id, snapshot.executionGenerationId, snapshot.managedLaunchContract);
         }
       }
       const persisted = this.readEntryFromDatabase(database, normalized.id);

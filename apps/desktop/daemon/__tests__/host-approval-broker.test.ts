@@ -155,6 +155,89 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
+function idleInstallation(f: Awaited<ReturnType<typeof fixture>>) {
+  return { entryId: "agent", handle: f.handle, executionGenerationId: "generation",
+    providerConnection: f.handle.providerConnection! };
+}
+
+test("idle permission reservation requires a healthy empty exact lane and cannot revive after activity", async () => {
+  const f = await fixture();
+  try {
+    const exact = idleInstallation(f);
+    assert.equal(f.broker.reserveIdle(exact), null, "pending native approval blocks replacement");
+    f.emit([]);
+    assert.equal(f.broker.reserveIdle({ ...exact, executionGenerationId: "stale" }), null);
+    const reservation = f.broker.reserveIdle(exact);
+    assert.ok(reservation);
+    reservation.assertCurrent();
+    assert.equal(f.broker.reserveIdle(exact), null);
+    f.emit();
+    f.emit([]);
+    assert.throws(reservation.assertCurrent, /permissions changed/,
+      "a same-connection request appearing then disappearing permanently invalidates the token");
+    reservation.release();
+    reservation.release();
+    const next = f.broker.reserveIdle(exact);
+    assert.ok(next);
+    f.observationFailure("degraded");
+    assert.throws(next.assertCurrent, /permissions changed/);
+    next.release();
+    assert.equal(f.broker.reserveIdle(exact), null);
+    f.emit([]);
+    const last = f.broker.reserveIdle(exact);
+    assert.ok(last);
+    f.state.current = false;
+    assert.throws(last.assertCurrent, /permissions changed/);
+    last.release();
+  } finally { await f.close(); }
+});
+
+test("an in-flight approval decision blocks idle reservation even after its native request disappears", async () => {
+  const f = await fixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    let entered!: () => void;
+    let resume!: () => void;
+    const paused = new Promise<void>(resolve => { entered = resolve; });
+    const continueDecision = new Promise<void>(resolve => { resume = resolve; });
+    f.state.beforeBefore = async () => { entered(); await continueDecision; };
+    const deciding = f.broker.decide({ expected: candidate.reference!, decisionId: "idle-race", actorId: "host-owner",
+      decision: "allow_once", projectionSha256: hash(candidate.presentation) });
+    await paused;
+    f.emit([]);
+    assert.equal(f.broker.reserveIdle(idleInstallation(f)), null);
+    resume();
+    await assert.rejects(deciding, /could not be sent/);
+    assert.deepEqual(f.sends, []);
+    const reservation = f.broker.reserveIdle(idleInstallation(f));
+    assert.ok(reservation, "only the in-memory dispatch drain has cleared; durable approval still vetoes separately");
+    reservation.release();
+  } finally { await f.close(); }
+});
+
+test("durable idle check permits exact native closure without rewriting an uncertain decision", async () => {
+  const f = await fixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    const scope = { agentId: "agent", executionGenerationId: "generation", providerConnection: f.handle.providerConnection! };
+    assert.equal(await f.store.hasUnclosedRuntimeApprovals(scope), true);
+    const selected = decision(candidate!);
+    f.state.failAfter = true;
+    assert.equal(await f.broker.decide(selected), "uncertain");
+    f.emit([]);
+    assert.equal(await f.store.hasUnclosedRuntimeApprovals(scope), true, "empty native snapshot is not durable closure");
+    assert.equal(await f.store.hasUnclosedRuntimeApprovals({ ...scope, agentId: "unknown" }), true,
+      "missing durable runtime identity is unproven");
+    f.closed();
+    await f.broker.list("room");
+    assert.equal(await f.store.hasUnclosedRuntimeApprovals(scope), false);
+    const record = await f.store.readLatestExecutionApproval(candidate.reference!.requestId);
+    assert.equal(record?.decision?.dispatchState, "uncertain");
+    assert.equal(record?.request.state, "dispatching");
+    assert.deepEqual(f.sends, ["once"], "closure neither retries nor claims acknowledgement");
+  } finally { await f.close(); }
+});
+
 test("native permission observations wake delegated decision reconciliation", async () => {
   const f = await fixture();
   try { assert.equal(f.permissionChanges, 1); }
@@ -1291,7 +1374,7 @@ test("v44 migration preserves Codex closure receipts and refuses a damaged v45 s
     try {
       assert.equal((await upgraded.getExecutionApproval(selected.expected))!.request.closedAtMs, now + 10);
       assert.deepEqual(f.db.prepare("SELECT * FROM execution_approval_request_closures").all(), before);
-      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, 45);
+      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
       assert.deepEqual(f.db.prepare("PRAGMA foreign_key_check").all(), []);
     } finally { await upgraded.close(); }
     // A current database must not silently recreate even the old valid schema.

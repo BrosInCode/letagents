@@ -1,5 +1,6 @@
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -24,7 +25,7 @@ import {
   type TurnStartResult,
 } from "./codex-rpc-client.js";
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
-import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
+import { LETAGENTS_MCP_RUNTIME_TREE_SHA256, resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
@@ -281,6 +282,26 @@ function boundedCodexTools(value: unknown): string[] {
   // The pinned runtime exposes its common bounded surface under Cursor's
   // profile. Codex uses the same registration minus Cursor's completion hook.
   return tools.filter((name) => name !== "complete_room_turn");
+}
+
+const boundedMcpEnvironment = {
+  LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+  LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+  LETAGENTS_TOKEN: "",
+  LETAGENTS_AGENT_SESSION_BEARER: "",
+  LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
+};
+
+function boundedLaunchContract(apiUrl: string, tools: string[]): string {
+  // Reuse the generated override: approval modes, filters, credentials and
+  // command semantics must change the identity too. Birth/workspace coordinates
+  // are independently fenced; replace only those variable launch values.
+  const override = custodialMcpOverride("<sealed-entry>", "<workspace>", {
+    ...boundedMcpEnvironment, LETAGENTS_API_URL: apiUrl,
+  }, [...tools].sort());
+  return createHash("sha256").update(JSON.stringify({
+    version: 1, provider: "codex", runtimeTree: LETAGENTS_MCP_RUNTIME_TREE_SHA256, override,
+  })).digest("hex");
 }
 
 function custodialMcpOverride(entryPath: string, cwd: string, environment: Record<string, string>, tools: string[]): string {
@@ -637,6 +658,7 @@ function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
 class CodexProviderHandle implements ProviderHandle {
   subscriptionAfterMaterialization = false;
   custodyLaunchAgentSessionId?: string;
+  managedLaunchContract?: string;
   readonly execution: ProviderExecutionObserver;
   readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
   readonly nativeActiveOperations = new Map<string, Extract<NativeExecutionFact, { domain: "execution" }>>();
@@ -764,6 +786,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
       resume: this.resumeSupported,
       continuationRepair: "same_process",
     };
+  }
+
+  async describeManagedLaunchContract(input: { apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null> {
+    // Mutable development trees have no release seal and require explicit recovery.
+    if (input.devMcpServerEntryPath) return null;
+    const runtime = this.deps.resolveMcpRuntime();
+    const tools = boundedCodexTools(await this.deps.readMcpRuntimeContract(runtime.entryPath, input.apiUrl));
+    return boundedLaunchContract(input.apiUrl, tools);
   }
 
   async preflightCustodialPolling(input: { devMcpServerEntryPath?: string }): Promise<void> {
@@ -1625,6 +1655,23 @@ export class CodexProviderAdapter implements ProviderAdapter {
     throw new Error("Codex exact-reference stop has not yet proved the recorded process birth is gone.");
   }
 
+  /** The final reservation check and native signal run without an intervening await. */
+  async stopIdle(rawHandle: ProviderHandle, assertCurrent: () => void): Promise<ProviderTerminalPayload> {
+    const handle = this.requireHandle(rawHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const rpcConnection = handle.client.currentConnectionId();
+    const boundary = await this.inspectTurnBoundary(handle);
+    if (boundary.state !== "idle" || boundary.providerContinuationId !== continuation
+      || boundary.nativeProcessIdentity !== connection.processIdentity
+      || this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current"
+      || handle.observedState() !== "idle" || handle.client.listPendingRequests().length > 0) {
+      throw Object.assign(new Error("Codex is not provably idle for configuration replacement."), { code: "MANAGED_RUNTIME_REFRESH_DEFERRED" });
+    }
+    assertCurrent();
+    return this.stop(handle);
+  }
+
   async stop(
     providerHandle: ProviderHandle,
     options: ProviderStopOptions = {},
@@ -1750,10 +1797,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Unsupported Codex polling contract.");
     }
     const custodialPolling = req.pollingContract === "custodial_polling_v1";
-    if (custodialPolling) {
-      req = { ...req, supervisorWorkerSession: req.supervisorWorkerSession && { ...req.supervisorWorkerSession } };
-      resumeRef = resumeRef && { ...resumeRef };
-    }
+    req = { ...req, supervisorWorkerSession: req.supervisorWorkerSession && { ...req.supervisorWorkerSession } };
+    resumeRef = resumeRef && { ...resumeRef };
     const current = this.handles.get(req.workAttemptId);
     if (current && !current.terminal) {
       throw new Error(`Codex work attempt '${req.workAttemptId}' already has a live process.`);
@@ -1827,8 +1872,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             } : {}),
           } : {}),
           ...(req.deliveryMode === "daemon_inbox" ? {
-            LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
-            LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+            ...boundedMcpEnvironment,
             ...(req.supervisorEntryId.startsWith("supervised_rental_") ? {
               [rentalCredentialIsolationMarker]: "1",
             } : {}),
@@ -1841,6 +1885,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
             LETAGENTS_AGENT_SESSION_BEARER: "",
           } : {}),
         } : undefined;
+    const managedLaunchContract = boundedMcp && !req.devMcpServerEntryPath
+      ? boundedLaunchContract(req.supervisorWorkerSession?.apiUrl || desktopApiUrl, custodialTools)
+      : undefined;
     const serverUrl = await this.deps.resolveServerUrl();
     const launch = this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
@@ -1940,6 +1987,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.deps.now,
         turnPolicy,
       );
+      handle.managedLaunchContract = managedLaunchContract;
       handle.setLiveState("idle");
       this.emitNativeExecution(handle, {
         domain: "runtime",
