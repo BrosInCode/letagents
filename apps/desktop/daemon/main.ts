@@ -44,6 +44,7 @@ import { assertMacOS } from "./platform.js";
 import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
 import { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
 import { ProviderExecutionCoordinator } from "./provider-execution-coordinator.js";
+import { ProviderHandoffCoordinator } from "./provider-handoff-coordinator.js";
 import {
   ProviderReconciliationCoordinator,
   type DaemonReconcileInput,
@@ -161,12 +162,9 @@ export class SupervisorDaemon {
   private readonly startedAt = new Date().toISOString();
   private readonly agentStreamRegistry: AgentStreamRegistry;
   private handoffScheduled = false;
+  private handoffDraining = false;
+  private readonly handoff: ProviderHandoffCoordinator;
   private boardOwnershipActive = false;
-  private handoffTeardownScheduled = false;
-  /** Resolves only once this daemon has relinquished every authority surface. */
-  private readonly handoffCompletion: Promise<void>;
-  private resolveHandoffCompletion!: () => void;
-  private rejectHandoffCompletion!: (error: unknown) => void;
 
   private get manifestGeneration(): number {
     return this.authority.generation;
@@ -178,13 +176,6 @@ export class SupervisorDaemon {
 
   constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, private readonly supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp, private readonly loadSupervisedToolRuntime: () => Promise<SupervisedToolRuntime> = supervisedToolRuntime) {
     this.stateDatabasePath = paths.manifestPath;
-    this.handoffCompletion = new Promise<void>((resolve, reject) => {
-      this.resolveHandoffCompletion = resolve;
-      this.rejectHandoffCompletion = reject;
-    });
-    // A library consumer may prepare a handoff without awaiting its completion.
-    // Keep the rejection observed while preserving it for waitForHandoff().
-    void this.handoffCompletion.catch(() => undefined);
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
     const daemonAuthority = {
       currentGeneration: () => this.singleton.currentGeneration,
@@ -197,7 +188,7 @@ export class SupervisorDaemon {
       notifyStateChanged: () => this.notifyStateChanged(),
     });
     this.entryConcurrency = new EntryConcurrencyGate({
-      isHandoffScheduled: () => this.handoffScheduled,
+      isHandoffScheduled: () => this.handoffScheduled || this.handoffDraining,
     });
     this.deliveryCutovers = new DeliveryCutoverCoordinator({
       isHandoffScheduled: () => this.handoffScheduled,
@@ -439,6 +430,7 @@ export class SupervisorDaemon {
         streams: this.providerStreams,
         authority: {
           isHandoffScheduled: () => this.handoffScheduled,
+          isDispatchPaused: () => this.handoffDraining,
           currentDaemonGeneration: () => this.singleton.currentGeneration,
           currentManifestGeneration: () => this.manifestGeneration,
           acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
@@ -866,6 +858,18 @@ export class SupervisorDaemon {
       diagnostic: (domain, entryId, error) => console.warn(`[execution_delegation_${domain}_sync]`,
         JSON.stringify({ entryId, error: String(error) })),
     });
+    this.handoff = new ProviderHandoffCoordinator({
+      provider: providerPort, manifest: this.store, inbox: this.supervisedInbox,
+      execution: this.providerExecution, delivery: () => this.supervisedDelivery,
+      currentHandle: (entryId) => this.liveHandles.get(entryId),
+      isLifecycleActive: (entryId) => this.entryConcurrency.isLifecycleActive(entryId),
+      isRetiring: () => this.handoffScheduled,
+      setDraining: (draining) => { this.handoffDraining = draining; },
+      beginRetirement: () => { this.handoffScheduled = true; },
+      retire: () => this.retireForHandoff(),
+      finish: () => this.stopForHandoff(),
+      requestConvergence: (entryId) => this.requestConvergence(entryId),
+    });
     const controlOperations = {
       hostApprovals: this.hostApprovals,
       activateCustodialPolling: (input) => this.deliveryCutoverExecution.activatePolling(input),
@@ -898,7 +902,7 @@ export class SupervisorDaemon {
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
       prepareBoundedEffect: this.boundedEffects.prepare.bind(this.boundedEffects),
-      prepareHandoff: this.prepareHandoff.bind(this),
+      prepareHandoff: () => this.handoff.prepare(),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
       purgeAgent: this.lifecycleAdministration.purgeAgent.bind(this.lifecycleAdministration),
       putManifestEntry: this.putManifestEntry.bind(this),
@@ -939,6 +943,7 @@ export class SupervisorDaemon {
         assertCurrent: () => this.singleton.assertCurrent(),
         currentGeneration: () => this.singleton.currentGeneration,
         isHandoffScheduled: () => this.handoffScheduled,
+        isHandoffDraining: () => this.handoffDraining,
         requestBarrier: this.controlRequestBarrier,
       }, controlOperations),
       async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); },
@@ -1054,7 +1059,7 @@ export class SupervisorDaemon {
    * must acknowledge before it tears down the connection carrying that reply.
    */
   async waitForHandoff(): Promise<void> {
-    await this.handoffCompletion;
+    await this.handoff.waitForCompletion();
   }
 
   /**
@@ -1199,9 +1204,7 @@ export class SupervisorDaemon {
     return this.readModel.status();
   }
 
-  private async prepareHandoff(): Promise<void> {
-    if (this.handoffTeardownScheduled) return;
-    if (!this.handoffScheduled) this.handoffScheduled = true;
+  private async retireForHandoff(): Promise<void> {
     const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
     this.hostApprovals.close();
     this.roomWorkPublisher?.close();
@@ -1229,14 +1232,6 @@ export class SupervisorDaemon {
     await this.providerExecution?.drainDispatches();
     await this.boundedEffects.drainJournalReservations();
     await this.boundedEffects.drainExternalExecutions();
-    this.handoffTeardownScheduled = true;
-    // Delayed teardown exists only to flush the successful socket reply.
-    setTimeout(() => {
-      void this.stopForHandoff().then(
-        () => this.resolveHandoffCompletion(),
-        (error) => this.rejectHandoffCompletion(error),
-      );
-    }, 25).unref();
   }
 
   private beginBootstrap<T>(run: (input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation) => Promise<T>, input: { entry_id: string; daemon_generation: number }): Promise<T> {

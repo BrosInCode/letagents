@@ -313,8 +313,10 @@ export class HostApprovalBroker {
           title: "Approval unavailable", details: "The native request is no longer available to inspect on this connection.",
           denyScope: entry.provider === "open-model" ? "session_pending" : "request" },
         status: record.decision?.dispatchId && record.request.applicationCertainty !== "impossible" ? "uncertain" : "unavailable",
-        detail: record.decision?.dispatchId ? "A dispatch was recorded. Missing native evidence is not confirmation that the decision was applied."
-          : "The original request must be available and match exactly before its recorded decision can be sent." });
+        detail: !record.decision ? "No decision was recorded for this request."
+          : record.decision.dispatchId && record.request.applicationCertainty !== "impossible"
+            ? "The decision may have been sent, but confirmation is unavailable."
+            : "The decision was recorded but not sent." });
     }
     return result;
   }

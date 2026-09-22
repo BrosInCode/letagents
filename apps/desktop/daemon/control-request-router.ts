@@ -113,8 +113,24 @@ export interface DaemonControlContext {
   assertCurrent(): Promise<void>;
   currentGeneration(): number;
   isHandoffScheduled(): boolean;
+  isHandoffDraining?(): boolean;
   requestBarrier?: (request: DaemonRequest) => Promise<void>;
 }
+
+// During the reversible drain, current-turn tools, approvals and observations
+// retain authority. New owner lifecycle actions wait until the update is deferred.
+const HANDOFF_DRAIN_METHODS = new Set<string>([
+  "daemon.negotiate", "daemon.status", "daemon.prepare_handoff",
+  "manifest.list", "manifest.watch_state", "manifest.append_activity", "manifest.update_workplace_liveness",
+  "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.get_agent_inspector_detail",
+  "supervisor.get_agent_configuration", "supervisor.get_room_move", "supervisor.get_current_room_move",
+  "supervisor.get_delivery_drain", "supervisor.get_polling_activation",
+  "supervisor.host_approval_challenge", "supervisor.host_approval_request",
+  "supervisor.prepare_bounded_effect", "supervisor.execute_bounded_tool", "supervisor.complete_bounded_effect",
+  "supervisor.borrow_worker_credential", "supervisor.verify_worker_session", "supervisor.checkpoint_worker_cursor",
+  "supervisor.install_host_grant", "supervisor.install_worker_credential", "supervisor.bind_worker_session",
+  "supervisor.authorize_custodial_polling", "supervisor.sync_execution_delegations",
+]);
 
 function paramsRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Daemon request params must be an object.");
@@ -165,7 +181,14 @@ export function createDaemonControlRequestHandler(
     if (context.isHandoffScheduled() && !isLifecycleRequest) {
       throw new Error("Supervisor handoff has fenced new daemon mutations.");
     }
+    const assertDrainAdmission = () => {
+      if (context.isHandoffDraining?.() && !HANDOFF_DRAIN_METHODS.has(request.method)) {
+        throw new Error("An update is waiting for current agent work to finish. Try this action after the update completes or is deferred.");
+      }
+    };
+    assertDrainAdmission();
     await context.requestBarrier?.(request);
+    assertDrainAdmission();
     // A request may have been admitted before prepare_handoff and paused in
     // an injected/native barrier. Re-check after that await so it cannot
     // perform provider effects once handoff begins.

@@ -84,12 +84,13 @@ function manifestEntry(): DaemonManifestEntry {
 
 function applyHarness(input: {
   stopIfIdle?: () => Promise<boolean>;
+  isAdmissionPaused?: () => boolean;
   beforeProviderStop?: () => void;
   head?: () => Promise<{ state: string; provider_turn_id: string | null } | null>;
   afterDeliveryInstallation?: ProviderInstallationToken;
   configurationRevisionOnRead?: (read: number) => number;
 } = {}) {
-  const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+  const gate = new EntryConcurrencyGate({ isHandoffScheduled: input.isAdmissionPaused ?? (() => false) });
   const entry = manifestEntry();
   const configuration = {
     provider: "codex", model: null, reasoning_effort: null, charter: "Help",
@@ -563,3 +564,22 @@ for (const outcome of ["reply", "no_reply", "approval"] as const) {
     }
   });
 }
+
+
+test("configuration preflight admitted before update cannot reserve lifecycle after the pause", async () => {
+  let paused = false;
+  let release!: () => void;
+  let entered!: () => void;
+  const preflight = new Promise<void>(resolve => { release = resolve; });
+  const inspecting = new Promise<void>(resolve => { entered = resolve; });
+  const h = applyHarness({ isAdmissionPaused: () => paused,
+    head: async () => { entered(); await preflight; return null; } });
+  const applying = h.coordinator.apply({ entryId: "agent-1", daemonGeneration: 7, expectedConfigurationRevision: 2 });
+  await inspecting;
+  paused = true;
+  release();
+  assert.deepEqual(await applying, { outcome: "conflict" });
+  assert.deepEqual(h.counts(), { providerStops: 0, replacements: 0 });
+  assert.equal(h.deliveryReserved(), false);
+  assert.equal(await h.gate.run("agent-1", async () => "current turn can commit"), "current turn can commit");
+});
