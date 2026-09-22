@@ -399,18 +399,22 @@ test("prepare preserves idempotent terminal, uncertain, duplicate, and final-ans
     /prior supervised effect is still executing; refusing a duplicate side effect/,
   );
 
-  const finalAnswer = harness();
-  assert.deepEqual(await finalAnswer.subject.prepareOnce(prepareInput({
-    toolName: "send_message",
-    input: { reply_to: "source-a", text: "answer" },
-  })), {
-    state: "prepared",
-    effect_id: "effect-a",
-    action: "use_final_answer",
-    source_message_id: "source-a",
-    room_id: "room-a",
-  });
-  assert.equal(finalAnswer.events.includes("journal:mark"), false);
+  for (const [toolName, input] of [
+    ["send_message", { reply_to: "source-a", text: "answer" }],
+    ["send_message", { thread_parent_id: "source-a", text: "answer" }],
+    ["send_thread_message", { thread_parent_id: "source-a", text: "answer" }],
+  ] as const) {
+    const finalAnswer = harness();
+    assert.deepEqual(await finalAnswer.subject.prepareOnce(prepareInput({ toolName, input })), {
+      state: "prepared",
+      effect_id: "effect-a",
+      action: "use_final_answer",
+      source_message_id: "source-a",
+      room_id: "room-a",
+    });
+    assert.equal(finalAnswer.events.includes("journal:mark"), false);
+    assert.deepEqual(finalAnswer.capturedPrepare?.request, input, "the exact reply choice remains durably journaled");
+  }
 });
 
 test("execute turns non-I/O journal actions into the exact supervised instructions", async () => {

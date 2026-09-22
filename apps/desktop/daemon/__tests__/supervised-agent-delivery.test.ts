@@ -1430,6 +1430,97 @@ test("supervised reply targets inherit true threads but not top-level quote repl
   );
 });
 
+test("an intercepted thread choice survives publication failure and restart without another provider turn", async () => {
+  for (const toolName of ["send_thread_message", "send_message"]) for (const effectState of ["prepared", "failed"]) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-thread-intent-"));
+    const path = join(root, "state.sqlite");
+    let store = new SupervisedAgentInboxStore(path);
+    let runs = 0;
+    let ownsLane = true;
+    const publications: Array<{ clientMessageId: string; replyTo: string | null; threadRootId: string | null }> = [];
+    const http = {
+      poll: async () => ({}),
+      publish: async (input: { clientMessageId: string; roomId: string; replyTo: string | null; threadRootId: string | null }) => {
+        publications.push({ clientMessageId: input.clientMessageId, replyTo: input.replyTo, threadRootId: input.threadRootId });
+        if (publications.length === 1) { ownsLane = false; throw new Error("publication acknowledgement lost during handoff"); }
+        return { messageId: "published", roomId: input.roomId };
+      },
+    };
+    let delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      runs++;
+      await options?.checkpointTurnStarted?.("native-turn");
+      // The coordinator retains the intercepted request before returning USE_FINAL_ANSWER.
+      const db = new DatabaseSync(path);
+      try {
+        db.prepare(`INSERT INTO supervised_agent_effects
+          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+          VALUES ('thread-choice',?,?,?,'native-turn','request',?,?,1,?,NULL,NULL,?,?)`)
+          .run(agent.agentId, agent.roomId, "generation-1", toolName,
+            JSON.stringify({ thread_parent_id: "msg_72", text: "draft" }), effectState, new Date().toISOString(), new Date().toISOString());
+      } finally { db.close(); }
+      return { turnId: "native-turn", outcome: "reply", text: "final answer" };
+    }), http, async () => ownsLane, 0);
+    try {
+      await ingest(store, "msg_72");
+      await delivery.pump(agent);
+      assert.equal(publications.length, 1);
+      assert.deepEqual(publications[0], {
+        clientMessageId: "supervised-room:stone:room:msg_72:reply:v1", replyTo: "msg_72", threadRootId: "msg_72",
+      });
+      await delivery.fenceAndDrain(); await store.close();
+      store = new SupervisedAgentInboxStore(path);
+      ownsLane = true;
+      delivery = new SupervisedAgentDelivery(store, provider(async () => {
+        runs++; throw new Error("must not rerun the provider");
+      }), http, currentAuthority, 0);
+      await delivery.pump(agent);
+      assert.equal(runs, 1);
+      assert.deepEqual(publications, [publications[0], publications[0]]);
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("unrelated or non-thread message effects cannot redirect the daemon's activating reply", async () => {
+  for (const variation of ["agent", "room", "generation", "turn", "parent", "quote", "tool", "executing", "completed", "uncertain"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-thread-fence-"));
+    const path = join(root, "state.sqlite");
+    const store = new SupervisedAgentInboxStore(path);
+    let published = false;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.checkpointTurnStarted?.("native-turn");
+      const db = new DatabaseSync(path);
+      try {
+        db.prepare(`INSERT INTO supervised_agent_effects
+          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+          VALUES ('other-effect',?,?,?,?,'request',?,?,1,?,NULL,NULL,?,?)`)
+          .run(variation === "agent" ? "other-agent" : agent.agentId,
+            variation === "room" ? "other-room" : agent.roomId,
+            variation === "generation" ? "old-generation" : "generation-1",
+            variation === "turn" ? "other-turn" : "native-turn",
+            variation === "tool" ? "publish_room_artifact" : "send_message",
+            JSON.stringify(variation === "quote" ? { reply_to: "msg_72" }
+              : { thread_parent_id: variation === "parent" ? "msg_71" : "msg_72" }),
+            ["executing", "completed", "uncertain"].includes(variation) ? variation : "prepared",
+            new Date().toISOString(), new Date().toISOString());
+      } finally { db.close(); }
+      return { turnId: "native-turn", outcome: "reply", text: "final answer" };
+    }), {
+      poll: async () => ({}),
+      publish: async input => {
+        assert.equal(input.replyTo, null, variation);
+        assert.equal(input.threadRootId, null, variation);
+        published = true;
+        return { messageId: "published", roomId: input.roomId };
+      },
+    }, currentAuthority, 0);
+    try {
+      await ingest(store, "msg_72"); await delivery.pump(agent);
+      assert.equal(published, true, variation);
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
 test("worker-authenticated activation ingress deduplicates replay and publishes one bounded reply", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
   try {
