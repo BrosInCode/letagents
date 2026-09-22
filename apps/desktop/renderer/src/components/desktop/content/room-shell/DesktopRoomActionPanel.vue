@@ -207,6 +207,11 @@
               <div>
                 <strong>{{ githubTitle }}</strong>
                 <small>{{ githubDescription }}</small>
+                <small
+                  v-if="githubStatus?.connected"
+                  data-testid="desktop-room-github-reviews"
+                  :title="githubReviewDetails"
+                >{{ githubReviewDescription }}</small>
               </div>
             </div>
             <div class="desktop-room-github-actions">
@@ -378,6 +383,24 @@ const githubStatusLabel = computed(() => {
   if (props.githubStatus?.installUrlAvailable) return "Ready";
   if (props.githubStatus?.configured === false) return "Setup needed";
   return "Offline";
+});
+
+const githubReviewDescription = computed(() => {
+  if (props.githubStatus?.reviewSubmission?.permission === "write") {
+    return "Reviews: write permission recorded";
+  }
+  if (props.githubStatus?.reviewSubmission?.permission === "missing") {
+    return "Reviews: Pull requests (write) permission missing";
+  }
+  return "Reviews: permission unknown";
+});
+
+const githubReviewDetails = computed(() => {
+  const recordedAt = props.githubStatus?.reviewSubmission?.recordedAt;
+  const detail = props.githubStatus?.reviewSubmission?.permission === "write"
+    ? "GitHub confirms authorization when a review is published."
+    : "Ask the repository owner to check the GitHub App's Pull requests (write) permission.";
+  return recordedAt ? `${detail} Installation metadata recorded at ${recordedAt}.` : detail;
 });
 
 const githubFriendlyError = computed(() => {

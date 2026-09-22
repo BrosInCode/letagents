@@ -1,5 +1,21 @@
 import type { GitHubAppInstallation, GitHubAppRepository } from "../db.js";
 
+export type GitHubReviewPermission = "write" | "missing" | "unknown";
+
+/** Permission evidence, never proof that a future provider write will succeed. */
+export function githubReviewPermission(permissions: unknown): GitHubReviewPermission {
+  if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) return "unknown";
+  const permission = (permissions as Record<string, unknown>).pull_requests;
+  if (permission === "write") return "write";
+  if (permission === undefined || permission === "read" || permission === "none") return "missing";
+  return "unknown";
+}
+
+function recordedReviewPermission(json: string | null | undefined): GitHubReviewPermission {
+  try { return githubReviewPermission(json ? JSON.parse(json) : null); }
+  catch { return "unknown"; }
+}
+
 export interface GitHubAppRoomIntegrationStatus {
   configured: boolean;
   install_url_available: boolean;
@@ -7,6 +23,11 @@ export interface GitHubAppRoomIntegrationStatus {
   app_slug: string | null;
   setup_url: string | null;
   connected: boolean;
+  review_submission: {
+    permission: GitHubReviewPermission;
+    source: "installation_metadata";
+    recorded_at: string | null;
+  };
   repository: {
     github_repo_id: string;
     full_name: string;
@@ -87,6 +108,11 @@ export function resolveGitHubAppRoomIntegrationStatus(
     app_slug: input.appSlug?.trim() || null,
     setup_url: input.setupUrl?.trim() || null,
     connected,
+    review_submission: {
+      permission: recordedReviewPermission(installation?.permissions_json),
+      source: "installation_metadata",
+      recorded_at: installation?.last_synced_at ?? null,
+    },
     repository: repository
       ? {
           github_repo_id: repository.github_repo_id,

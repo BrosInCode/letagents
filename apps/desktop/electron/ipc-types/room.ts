@@ -378,6 +378,11 @@ export interface DesktopGitHubIntegrationStatus {
   connected: boolean;
   installUrlAvailable: boolean;
   repository: { fullName: string } | null;
+  /** Missing on older servers; this is recorded metadata, not a publication guarantee. */
+  reviewSubmission?: {
+    permission: "write" | "missing" | "unknown";
+    recordedAt: string | null;
+  };
 }
 
 export interface DesktopGitHubIntegrationActionResult {
