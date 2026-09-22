@@ -139,3 +139,21 @@ test("provider-backed rooms keep the Cloud control enabled", async () => {
   );
   assert.doesNotMatch(html, /No Git provider is attached to this room/);
 });
+
+test("GitHub connection displays review permission evidence separately without promising publication", async () => {
+  for (const [permission, label] of [["write", "write permission recorded"], ["missing", "Pull requests (write) permission missing"],
+    ["unknown", "permission unknown"], [undefined, "permission unknown"]] as const) {
+    const html = await renderPanel({
+      room: { ...localGitRoom, identifier: "github.com/example/project",
+        gitRoom: { ...localGitRoom.gitRoom, provider: "github", host: "github.com", visibility: "private", accessMode: "private", source: "git_remote" } },
+      githubStatus: { connected: true, configured: true, installUrlAvailable: true,
+        repository: { fullName: "example/project" },
+        ...(permission ? { reviewSubmission: { permission, recordedAt: "2026-09-22T12:00:00Z" } } : {}) },
+    });
+    assert.match(html, />Connected</);
+    assert.ok(html.includes(`Reviews: ${label}`));
+    assert.doesNotMatch(html, /Reviews: ready|Reviews: enabled|Review publication available/i);
+    if (permission === "write") assert.match(html, /GitHub confirms authorization when a review is published/);
+    else assert.match(html, /Ask the repository owner/);
+  }
+});

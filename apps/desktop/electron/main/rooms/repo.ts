@@ -309,6 +309,7 @@ export async function getDesktopGitHubIntegrationStatus(
     connected?: boolean;
     install_url_available?: boolean;
     repository?: { full_name?: string } | null;
+    review_submission?: { permission?: string; recorded_at?: string | null } | null;
   }>(`/rooms/${encodeURIComponent(cloudRoomIdentifier)}/integrations/github`);
 
   return {
@@ -321,6 +322,11 @@ export async function getDesktopGitHubIntegrationStatus(
     repository: status.repository?.full_name
       ? { fullName: status.repository.full_name }
       : null,
+    reviewSubmission: {
+      permission: status.review_submission?.permission === "write" ? "write"
+        : status.review_submission?.permission === "missing" ? "missing" : "unknown",
+      recordedAt: status.review_submission?.recorded_at ?? null,
+    },
   };
 }
 

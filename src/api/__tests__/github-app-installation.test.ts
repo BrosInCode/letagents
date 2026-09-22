@@ -84,4 +84,30 @@ test("resolveGitHubAppRoomIntegrationStatus reports a connected installation onl
   assert.equal(status.install_url_available, true);
   assert.equal(status.repository?.full_name, "brosincode/letagents");
   assert.equal(status.installation?.installation_id, "999");
+  assert.deepEqual(status.review_submission, {
+    permission: "write", source: "installation_metadata", recorded_at: "2026-03-29T00:00:00.000Z",
+  });
+});
+
+test("repository connection does not imply review-write permission", () => {
+  for (const [json, expected] of [
+    ['{"pull_requests":"write"}', "write"],
+    ['{"pull_requests":"read"}', "missing"],
+    ['{"issues":"write"}', "missing"],
+    [null, "unknown"], ["not json", "unknown"], ["[]", "unknown"],
+    ['{"pull_requests":true}', "unknown"],
+  ] as const) {
+    const result = resolveGitHubAppRoomIntegrationStatus({
+      configured: true,
+      repository: { removed_at: null } as never,
+      installation: { permissions_json: json, last_synced_at: "2026-09-22T12:00:00Z",
+        suspended_at: null, uninstalled_at: null } as never,
+    });
+    assert.equal(result.connected, true);
+    assert.equal(result.review_submission.permission, expected, String(json));
+    assert.equal(result.review_submission.source, "installation_metadata");
+  }
+  assert.deepEqual(resolveGitHubAppRoomIntegrationStatus({ configured: true }).review_submission, {
+    permission: "unknown", source: "installation_metadata", recorded_at: null,
+  });
 });

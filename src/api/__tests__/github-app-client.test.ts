@@ -6,6 +6,7 @@ import type { GitHubAppConfig } from "../github/config.js";
 import {
   clearGitHubInstallationTokenCache,
   mintInstallationToken,
+  mintInstallationCredential,
 } from "../github/app-client.js";
 
 const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
@@ -29,6 +30,7 @@ test("installation tokens are reused until shortly before GitHub expiry", async 
     return jsonResponse({
       token: `token-${calls}`,
       expires_at: "2026-08-10T01:00:00.000Z",
+      permissions: { pull_requests: "write" },
     });
   }) as typeof fetch;
 
@@ -47,6 +49,11 @@ test("installation tokens are reused until shortly before GitHub expiry", async 
   assert.equal(first, "token-1");
   assert.equal(cached, "token-1");
   assert.equal(calls, 1);
+  assert.deepEqual(await mintInstallationCredential({ config, installationId: "installation-1", fetchImpl,
+    now: new Date("2026-08-10T00:30:00.000Z") }), {
+    token: "token-1", permissions: { pull_requests: "write" },
+  });
+  assert.equal(calls, 1, "token-only and permission-aware callers share the same cache");
 
   const refreshed = await mintInstallationToken({
     config,
@@ -163,6 +170,30 @@ test("installation invalidation prevents an older in-flight mint from repopulati
   assert.equal(await staleMint, "token-1");
   assert.equal(await mintInstallationToken(input), "token-2");
   assert.equal(calls, 2);
+});
+
+test("permission evidence follows its exact cached token and webhook invalidation", async () => {
+  let calls = 0;
+  const fetchImpl = (async () => jsonResponse({
+    token: `permission-token-${++calls}`, expires_at: "2026-08-10T01:00:00.000Z",
+    permissions: { pull_requests: calls === 1 ? "write" : "read" },
+  })) as typeof fetch;
+  const input = { config, installationId: "permission-change", fetchImpl, now: new Date("2026-08-10T00:00:00Z") };
+  const [token, credential] = await Promise.all([mintInstallationToken(input), mintInstallationCredential(input)]);
+  assert.equal(token, credential.token);
+  assert.equal(credential.permissions?.pull_requests, "write");
+  assert.equal(calls, 1);
+  clearGitHubInstallationTokenCache(input.installationId);
+  const changed = await mintInstallationCredential(input);
+  assert.equal(changed.token, "permission-token-2");
+  assert.equal(changed.permissions?.pull_requests, "read");
+});
+
+test("unknown token permissions remain explicit without blocking existing token-only readers", async () => {
+  const input = { config, installationId: "unknown-permissions",
+    fetchImpl: (async () => jsonResponse({ token: "read-token" })) as typeof fetch };
+  assert.deepEqual(await mintInstallationCredential(input), { token: "read-token", permissions: null });
+  assert.equal(await mintInstallationToken(input), "read-token");
 });
 
 function jsonResponse(body: unknown): Response {
