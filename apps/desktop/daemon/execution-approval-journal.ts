@@ -367,6 +367,29 @@ export function closeExecutionApprovalRequest(db: DatabaseSync, input: CloseExec
 /** Operational terminal evidence survives daemon restart and optional capture loss. */
 export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: string): ExecutionApprovalRecord[] {
   parse(executionIdentity, agentId);
+  // A connection may be replaced while its native process survives. An applied
+  // exact-turn terminal closes old connection prompts without claiming their
+  // decisions were consumed. Projection-only or successor-process observations
+  // are not authority to settle an earlier native birth's requests.
+  const completedTurns = db.prepare(`SELECT DISTINCT r.request_id,r.request_version
+    FROM execution_approval_requests r
+    JOIN execution_turns t ON t.turn_id=r.turn_id AND t.agent_id=r.agent_id AND t.room_id=r.room_id
+      AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
+      AND t.provider_continuation_id=r.provider_continuation_id AND t.provider_turn_id=r.provider_turn_id
+    JOIN execution_runtime_generations g ON g.runtime_generation_id=r.runtime_generation_id
+      AND g.execution_generation_id=r.execution_generation_id AND g.agent_id=r.agent_id
+    JOIN execution_facts f ON f.turn_id=t.turn_id AND f.agent_id=r.agent_id
+      AND f.execution_generation_id=r.execution_generation_id AND f.runtime_generation_id=r.runtime_generation_id
+    JOIN execution_lifecycle_effects e ON e.fact_id=f.fact_id AND e.fact_sequence=f.sequence
+      AND e.agent_id=f.agent_id AND e.observer_epoch=f.observer_epoch
+      AND e.observer_execution_generation_id=r.execution_generation_id AND e.observer_runtime_generation_id=r.runtime_generation_id
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND t.state='terminal'
+      AND t.ended_at_ms>=r.created_at_ms AND f.domain='turn' AND f.kind='state_changed' AND f.state='terminal'
+      AND f.turn_outcome IN ('completed','failed','interrupted') AND f.observed_at_ms>=r.created_at_ms
+      AND e.subject_authority_mode='typed' AND e.observer_authority_mode='typed'
+      AND e.effect_kind='manifest_idle' AND e.state='applied'
+      AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
   const rows = db.prepare(`SELECT DISTINCT r.request_id,r.request_version,r.execution_generation_id,
       r.runtime_generation_id,r.provider_continuation_id,r.created_at_ms,g.provider,t.terminal_json
     FROM execution_approval_requests r
@@ -400,6 +423,10 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
       provider_continuation_id: ref.provider_continuation_id, native_runtime_death: ref.native_runtime_death }) });
   }
   const matches = new Map<string, ExecutionApprovalRecord>();
+  for (const row of completedTurns) {
+    const record = read(db, String(row.request_id), Number(row.request_version))!;
+    matches.set(JSON.stringify([record.request.requestId, record.request.requestVersion]), record);
+  }
   for (const row of rows) {
     const terminal = JSON.parse(String(row.terminal_json));
     const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
