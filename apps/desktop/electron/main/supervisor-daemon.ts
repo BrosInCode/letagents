@@ -5,6 +5,7 @@ import { createConnection } from "node:net";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { access, appendFile, chmod, mkdir, stat } from "node:fs/promises";
 import { EventEmitter } from "node:events";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 
 import type {
@@ -610,7 +611,9 @@ export class SupervisorDaemonClient {
             candidate, challenge, presentationSha256, touchedAt: now, decision: null };
           this.approvalPresentations.set(cached.view.id, cached);
         }
-        cached.candidate = candidate;
+        // Polling the same authenticated snapshot must not revoke an in-flight
+        // decision. Any changed candidate still invalidates its dispatch fence.
+        if (!isDeepStrictEqual(cached.candidate, candidate)) cached.candidate = candidate;
         cached.touchedAt = now;
         cached.view.status = candidate.status;
         cached.view.detail = candidate.detail;
