@@ -591,48 +591,39 @@ class CodexRoomToolsUnavailableError extends Error {
   }
 }
 
-/** Configuration presence is enough for observation, never for dispatching new work. */
+const ROOM_READINESS_URI = "letagents://runtime/readiness";
+const roomReadinessSchema = z.strictObject({
+  format: z.literal(1),
+  profile: z.literal("supervised_room_turn"),
+  provider: z.literal("codex"),
+  tools: z.array(z.string().min(1).max(128)).max(256),
+});
+
+/** Read this thread's server directly; aggregate inventory starts unrelated MCPs. */
 async function requireLetAgentsRoomTools(client: CodexAdapterRpc, threadId: string): Promise<void> {
-  let cursor: string | undefined;
-  const cursors = new Set<string>();
-  for (let page = 0; page < 10; page += 1) {
-    let response: Record<string, unknown> | null;
-    try {
-      // Discovery waits for MCP startup. Use the same bounded request budget
-      // as other app-server operations rather than cutting healthy startup short.
-      response = recordValue(await client.request("mcpServerStatus/list", {
-        threadId, detail: "toolsAndAuthOnly", limit: 100, ...(cursor ? { cursor } : {}),
-      }));
-    } catch (error) {
-      // Keep exact-conversation restoration when discovery finds absence.
-      if (isMissingContinuation(error, threadId)) throw new ProviderContinuationMissingError(threadId);
-      throw new CodexRoomToolsUnavailableError(/(?:timed?\s*out|timeout)/i.test(errorMessage(error))
-        ? "Room tool discovery timed out."
-        : "Codex could not read this conversation's room tools.");
-    }
-    if (!Array.isArray(response?.data)) throw new CodexRoomToolsUnavailableError("Codex returned an invalid room tool inventory.");
-    const servers = response.data.map(recordValue).filter(row => row?.name === "letagents");
-    if (servers.length) {
-      if (servers.length !== 1) throw new CodexRoomToolsUnavailableError("Codex returned an ambiguous room tool inventory.");
-      const server = servers[0]!;
-      if (server.runtimeStatus !== undefined && server.runtimeStatus !== "connected") {
-        throw new CodexRoomToolsUnavailableError("The LetAgents room connection is not ready.");
-      }
-      const tools = recordValue(server.tools);
-      const names = tools && Object.values(tools).map(tool => recordValue(tool)?.name);
-      if (!names?.every(name => typeof name === "string")) {
-        throw new CodexRoomToolsUnavailableError("Codex returned an invalid room tool inventory.");
-      }
-      if (REQUIRED_ROOM_TOOLS.every(name => names.includes(name))) return;
-      throw new CodexRoomToolsUnavailableError("Required LetAgents room tools are missing from this conversation.");
-    }
-    const next = response.nextCursor;
-    if (next === undefined || next === null) throw new CodexRoomToolsUnavailableError("LetAgents is not connected to this conversation.");
-    if (typeof next !== "string" || !next || cursors.has(next)) break;
-    cursors.add(next);
-    cursor = next;
+  let response: Record<string, unknown> | null;
+  try {
+    response = recordValue(await client.request("mcpServer/resource/read", {
+      threadId, server: "letagents", uri: ROOM_READINESS_URI,
+    }));
+  } catch (error) {
+    if (isMissingContinuation(error, threadId)) throw new ProviderContinuationMissingError(threadId);
+    throw new CodexRoomToolsUnavailableError(/(?:timed?\s*out|timeout)/i.test(errorMessage(error))
+      ? "Room tool discovery timed out."
+      : "Codex could not read this conversation's room readiness.");
   }
-  throw new CodexRoomToolsUnavailableError("Codex returned an incomplete room tool inventory.");
+  const contents = response?.contents;
+  const resource = Array.isArray(contents) && contents.length === 1 ? recordValue(contents[0]) : null;
+  let payload: unknown;
+  if (resource?.uri === ROOM_READINESS_URI && resource.mimeType === "application/json"
+    && typeof resource.text === "string" && Buffer.byteLength(resource.text, "utf8") <= 64 * 1024) {
+    try { payload = JSON.parse(resource.text); } catch { /* Reject malformed readiness below. */ }
+  }
+  const readiness = roomReadinessSchema.safeParse(payload);
+  if (!readiness.success) throw new CodexRoomToolsUnavailableError("LetAgents returned invalid room readiness.");
+  if (!REQUIRED_ROOM_TOOLS.every(name => readiness.data.tools.includes(name))) {
+    throw new CodexRoomToolsUnavailableError("Required LetAgents room tools are missing from this conversation.");
+  }
 }
 
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
