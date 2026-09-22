@@ -3334,6 +3334,88 @@ test("fresh attach proves an empty unmaterialized daemon-inbox thread without la
   subscription.dispose();
 });
 
+test("fresh and repaired threads retain empty-thread attachment when native default history is unsupported", async () => {
+  for (const repair of [false, true]) {
+    const harness = createHarness();
+    const historyModes = new Map<string, unknown>();
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      const request = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        const input = params as { threadId?: string; historyMode?: string; includeTurns?: boolean };
+        if (method === "thread/read") {
+          client.requests.push({ method, params });
+          if (input.includeTurns) {
+            if (historyModes.get(input.threadId!) !== "legacy") throw new Error("list_turns is not supported yet");
+            throw new Error(`thread ${input.threadId} is not materialized yet; includeTurns is unavailable before first user message`);
+          }
+          return { thread: { id: input.threadId, status: { type: "idle" }, turns: [] } } as T;
+        }
+        const result = await request<T>(method, params);
+        if (method === "thread/start") {
+          historyModes.set((result as { thread: { id: string } }).thread.id, input.historyMode ?? "paginated");
+        }
+        return result;
+      };
+      return client;
+    };
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const first = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    if (repair) {
+      harness.clients[0]!.markThreadMissing(first.providerContinuationId!);
+      await adapter.repairContinuation(first, {
+        workAttemptId: first.workAttemptId,
+        expectedProviderContinuationId: first.providerContinuationId!,
+        cwd: spawnRequest().cwd,
+        launchPolicy: spawnRequest().launchPolicy,
+      }, { checkpointReplacement: async () => {} });
+    }
+    const freshAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const attached = await freshAdapter.attach({ workAttemptId: first.workAttemptId,
+      providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+    assertProviderHandle(attached);
+    assert.equal(attached.providerContinuationId, first.providerContinuationId);
+    const subscription = freshAdapter.onExecution(attached, () => {});
+    assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 1 });
+    subscription.dispose();
+    assert.equal(harness.launches.length, 1);
+    assert.deepEqual(harness.signals, []);
+    assert.equal(harness.clients[1]!.requests.some(entry => entry.method === "thread/resume"), false);
+  }
+});
+
+test("unsupported paginated history cannot become empty-thread attachment or idle proof", async () => {
+  const harness = createHarness();
+  const createRpcClient = harness.dependencies.createRpcClient;
+  harness.dependencies.createRpcClient = (serverUrl, notify) => {
+    const client = createRpcClient(serverUrl, notify) as FakeRpc;
+    const request = client.request.bind(client);
+    client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+      if (method === "thread/read" && (params as { includeTurns?: boolean }).includeTurns) {
+        client.requests.push({ method, params });
+        throw new Error("list_turns is not supported yet");
+      }
+      return request<T>(method, params);
+    };
+    return client;
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const first = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const freshAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(freshAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection }),
+  /attach is ambiguous.*list_turns is not supported yet/);
+  assert.deepEqual(await adapter.inspectTurnBoundary(first), { state: "unknown" });
+  await assert.rejects(adapter.recoverRoomTurn(first, { inboxItemId: "retained-inbox", providerTurnId: "retained-turn" }),
+    /list_turns is not supported yet/);
+  assert.equal(harness.clients.some(client => client.requests.some(entry => entry.method === "turn/start")), false);
+  assert.equal(harness.clients[1]!.requests.some(entry => entry.method === "thread/read"
+    && (entry.params as { includeTurns?: boolean }).includeTurns === false), false);
+  assert.equal(harness.launches.length, 1);
+  assert.deepEqual(harness.signals, []);
+});
+
 test("missing-continuation attach remains gap-free across same-process repair", async () => {
   const harness = createHarness();
   const request = spawnRequest({ deliveryMode: "daemon_inbox" });

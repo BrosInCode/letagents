@@ -10,6 +10,12 @@ function getWebSocketCtor(): typeof WebSocket {
 
 const DEFAULT_RPC_REQUEST_TIMEOUT_MS = 30_000;
 
+// Our attachment and recovery proofs require readable native turn history.
+// Codex 0.153.4 can default to paginated threads whose history API is unavailable.
+// Select the verified contract only when creating a thread; never reinterpret
+// the persisted history mode of an existing continuation.
+export const CODEX_THREAD_HISTORY_MODE = "legacy";
+
 export type RpcRequestId = string | number;
 export interface RpcServerRequest {
   readonly id: RpcRequestId;

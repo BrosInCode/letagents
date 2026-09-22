@@ -73,6 +73,7 @@ import type {
   ManagedAgentContextResult,
 } from "./managed-agent-context-protocol.js";
 import {
+  CODEX_THREAD_HISTORY_MODE,
   CodexRpcClient,
   type RpcNotification,
   type ThreadReadResult,
@@ -1132,7 +1133,7 @@ async function startDesktopManagedCodexEngineAgent(
     });
     await client.connect();
 
-    const threadStart = await client.request<ThreadStartResult>("thread/start", {});
+    const threadStart = await client.request<ThreadStartResult>("thread/start", { historyMode: CODEX_THREAD_HISTORY_MODE });
     const threadId = threadStart.thread?.id;
     if (!threadId) {
       throw new Error("Codex app-server did not return a thread id.");

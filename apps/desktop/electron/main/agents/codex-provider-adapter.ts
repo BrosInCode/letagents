@@ -17,6 +17,7 @@ import { resolveCodexExecutable } from "./codex-executable.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import {
+  CODEX_THREAD_HISTORY_MODE,
   CodexRpcClient,
   type RpcNotification,
   type RpcServerRequest,
@@ -1571,6 +1572,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
     assertAttached();
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
+      historyMode: CODEX_THREAD_HISTORY_MODE,
       cwd: request.cwd,
       ...policy,
       ...(request.model ? { model: request.model } : {}),
@@ -1962,6 +1964,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         }
       } else {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
+          historyMode: CODEX_THREAD_HISTORY_MODE,
           cwd: req.cwd,
           ...policy,
           ...(req.model ? { model: req.model } : {}),
