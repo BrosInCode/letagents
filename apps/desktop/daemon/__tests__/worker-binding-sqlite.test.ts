@@ -654,3 +654,64 @@ test("v4 validator rejects generated columns and NOCASE/DESC unique terms", asyn
     await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /invalid strict schema|canonical definition/);
   } finally { await env.cleanup(); }
 });
+
+function seedCustodyExecution(database: DatabaseSync, id = "run_1", generation = 1) {
+  database.prepare(`INSERT OR IGNORE INTO work_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    "attempt", "supervised-agent", "supervised-agent", 0, "/fixture/workspace", "repo", "remote", "revision", "/fixture/bare", "active", "2026-09-22T00:00:00Z", null, null, null);
+  database.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,?,?,?)").run(id, "attempt", "2026-09-22T00:00:00Z", "provider", generation, "{}");
+}
+const custodyBinding = { entry_id: "agent_a", room_id: "room", api_url: "https://letagents.test", grant_id: "grant-a",
+  work_attempt_id: "attempt", execution_generation_id: "run_1", agent_session_id: "session_a", agent_key: "owner/agent-a" };
+
+test("pre-spawn worker custody survives overwrite, unbind and daemon reopen without requiring a heartbeat", async () => {
+  const env = await fixture();
+  let store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  try {
+    await store.list();
+    const db = new DatabaseSync(env.database);
+    seedCustodyExecution(db); seedCustodyExecution(db, "run_2", 2);
+    db.close();
+    await store.recordExecutionBinding(custodyBinding);
+    await store.recordExecutionBinding(custodyBinding);
+    await assert.rejects(store.recordExecutionBinding({ ...custodyBinding, agent_key: "other-agent" }), /immutable/);
+    await assert.rejects(store.recordExecutionBinding({ ...custodyBinding, work_attempt_id: "other-attempt" }), /different attempt/);
+    await store.recordExecutionBinding({ ...custodyBinding, execution_generation_id: "run_2", agent_session_id: "session_b" });
+    await store.bind(input("agent_a", "run_2", "session_b"));
+    await store.unbind("agent_a");
+    await store.close();
+    store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const history = await store.executionPredecessors("agent_a", "attempt", "room");
+    assert.equal(history.length, 2);
+    assert.deepEqual(history.find(record => record.agent_session_id === "session_a")?.authority, custodyBinding);
+    assert.deepEqual(await store.executionPredecessors("agent_a", "different-attempt", "room"), []);
+    const check = new DatabaseSync(env.database);
+    assert.equal(check.prepare("SELECT count(*) AS n FROM worker_binding_publications").get()!.n, 0);
+    assert.deepEqual({ ...check.prepare("SELECT task_id,lease_id,current_lease_epoch FROM work_attempts").get()! },
+      { task_id: "supervised-agent", lease_id: "supervised-agent", current_lease_epoch: 0 });
+    check.close();
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("legacy custody retains unknown generations and only marks exact completed recovery as proven", async () => {
+  const env = await fixture();
+  const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  try {
+    await store.list();
+    const db = new DatabaseSync(env.database);
+    seedCustodyExecution(db); seedCustodyExecution(db, "run_2", 2);
+    db.prepare("INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,'resume','complete',?,?,?,?)")
+      .run("recovery-1", "agent_a", "room", "run_1", "birth-1", JSON.stringify({ work_attempt_id: "attempt" }), null, "now", "now");
+    db.close();
+    for (const generation of ["run_1", "run_2"]) {
+      await store.bind(input("agent_a", generation));
+      await store.publish("agent_a", Date.now(), async () => ({ accepted: true }));
+    }
+    await store.unbind("agent_a");
+    const history = await store.executionPredecessors("agent_a", "attempt", "room");
+    assert.equal(history.length, 2, "an unrecovered generation cannot disappear from the death-proof obligation");
+    assert.equal(history.find(record => record.execution_generation_id === "run_1")?.legacy_recovery_complete, true);
+    assert.equal(history.find(record => record.execution_generation_id === "run_2")?.legacy_recovery_complete, false);
+    assert.ok(history.every(record => record.authority === null), "legacy evidence never invents a launch grant/API receipt");
+    assert.ok((await store.executionPredecessors("agent_a", "attempt", "different-room")).every(record => !record.legacy_recovery_complete));
+  } finally { await store.close(); await env.cleanup(); }
+});

@@ -2349,3 +2349,19 @@ test("v20 refuses populated orphan or fabricated terminal evidence without chang
     } finally { await env.cleanup(); }
   }
 });
+
+test("v46 adds empty worker execution custody without inventing legacy bindings", async () => {
+  const env = await fixture();
+  try {
+    env.database.exec("DROP TABLE worker_execution_bindings; UPDATE manifest_metadata SET schema_version=46; PRAGMA user_version=46");
+    const before = env.database.prepare("SELECT count(*) AS n FROM worker_binding_publications").get()!.n;
+    new DaemonStateSchema().createSchema(env.database);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal(env.database.prepare("SELECT count(*) AS n FROM worker_execution_bindings").get()!.n, 0);
+    assert.equal(env.database.prepare("SELECT count(*) AS n FROM worker_binding_publications").get()!.n, before);
+    env.database.exec("DROP TABLE worker_execution_bindings");
+    assert.throws(() => new DaemonStateSchema().createSchema(env.database), /custody schema is invalid/,
+      "a missing current custody table cannot be silently recreated");
+  } finally { await env.cleanup(); }
+});
