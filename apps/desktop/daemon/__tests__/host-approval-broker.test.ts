@@ -129,9 +129,9 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     fenceCommit: async commit => { if (!state.current) throw new Error("daemon generation changed"); await commit(); },
     onPermissionChanged: () => { permissionChanges += 1; }, nowMs: () => now + 10, ...overrides });
   let broker = makeBroker();
-  const emit = (requests: ProviderPermissionRequest[] = [native]) => {
+  const emit = (requests: ProviderPermissionRequest[] = [native], connectionId = "connection") => {
     assert.ok(receive, "broker must subscribe before the fixture emits"); assert.equal(signal?.aborted, false);
-    receive!({ type: "snapshot", connectionId: "connection", requests });
+    receive!({ type: "snapshot", connectionId, requests });
   };
   broker.install("agent", handle, "generation"); emit();
   return { store, inbox, db, item, state, native, handle, workspace, root, path, sends, order, emit,
@@ -1317,6 +1317,138 @@ for (const wrong of ["turn", "tool", "retired", "missing_snapshot"] as const) {
       }
       await new Promise(resolve => setImmediate(resolve));
       assert.equal((await f.store.getExecutionApproval(candidate!.reference!))!.request.closedAtMs, null);
+    } finally { await f.close(); }
+  });
+}
+
+function terminalTurnWitness(f: Awaited<ReturnType<typeof fixture>>, expected: HostApprovalReference,
+  variant = "completed") {
+  const turnId = variant === "foreign_turn" ? "other-turn" : expected.turnId;
+  if (variant === "foreign_turn") f.db.prepare(`INSERT INTO execution_turns
+    SELECT ?,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+      provider_continuation_id,'other-native-turn',state,side_effects,created_at_ms,ended_at_ms
+    FROM execution_turns WHERE turn_id=?`).run(turnId, expected.turnId);
+  const terminalAt = variant === "earlier" ? now + 1 : now + 20;
+  const state = variant === "lost" ? "lost" : "terminal";
+  f.db.prepare("UPDATE execution_turns SET state=?,ended_at_ms=? WHERE turn_id=?").run(state, terminalAt, turnId);
+  if (variant === "projection_only") return;
+  const outcome = variant === "null_outcome" || state === "lost" ? null
+    : ["failed", "interrupted", "unreadable"].includes(variant) ? variant : "completed";
+  f.db.prepare(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,
+    observer_epoch,source_sequence,native_event_id,turn_id,domain,kind,state,side_effects,observed_at_ms,turn_outcome)
+    VALUES('terminal-fact',?,?,?,?,1,'native-terminal',?,'turn','state_changed',?,'possible',?,?)`)
+    .run(expected.agentId, expected.executionGenerationId, expected.runtimeGenerationId, 1, turnId, state, terminalAt, outcome);
+  if (variant === "missing_receipt") return;
+  let observerRuntime = expected.runtimeGenerationId;
+  if (variant === "different_birth") {
+    observerRuntime = "replacement-runtime";
+    f.db.prepare(`INSERT INTO execution_runtime_generations SELECT ?,execution_generation_id,agent_id,provider,
+      authority_mode,runtime_state,control_state,continuation_state,config_revision,created_at_ms,ended_at_ms
+      FROM execution_runtime_generations WHERE runtime_generation_id=?`).run(observerRuntime, expected.runtimeGenerationId);
+  }
+  const mode = variant === "legacy" ? "legacy" : variant === "shadow" ? "typed_shadow" : "typed";
+  const disposition = ["pending", "superseded"].includes(variant) ? variant : variant === "shadow" ? "shadowed" : "applied";
+  f.db.prepare(`INSERT INTO execution_lifecycle_effects
+    SELECT fact_id,sequence,agent_id,?,?,observer_epoch,?,?,'manifest_idle',?,observed_at_ms,?
+    FROM execution_facts WHERE fact_id='terminal-fact'`)
+    .run(expected.executionGenerationId, observerRuntime, mode, mode, disposition, disposition === "pending" ? null : now + 25);
+}
+
+for (const provider of ["claude-code", "codex"] as const) {
+  for (const phase of ["requested", "selected", "dispatched"] as const) {
+    test(`${provider} exact completed turn closes ${phase} approval after reconnect without replay`, async () => {
+      const f = await fixture(provider);
+      try {
+        const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+        if (phase === "selected") {
+          f.state.failBefore = true;
+          await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
+        } else if (phase === "dispatched") await f.broker.decide(selected);
+        const before = (await f.store.getExecutionApproval(selected.expected))!;
+        // The native process survives, but its old connection no longer owns
+        // a callback. Only the accepted exact turn terminal can close it.
+        f.reinstall(); f.emit([]);
+        assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0);
+        terminalTurnWitness(f, selected.expected);
+        const reopened = new ManifestStore(f.path);
+        try {
+          await assert.rejects(reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
+            async () => { throw new Error("ownership changed"); }), /ownership changed/);
+          assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1);
+          assert.deepEqual(await reopened.getExecutionApproval(selected.expected),
+            { ...before, request: { ...before.request, closedAtMs: now + 30 } });
+          assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 40,
+            async () => { throw new Error("no empty write expected"); }), 0);
+          assert.equal((await f.broker.list("room")).length, 0);
+          assert.equal(f.sends.length, phase === "dispatched" ? 1 : 0);
+        } finally { await reopened.close(); }
+      } finally { await f.close(); }
+    });
+  }
+}
+
+test("reconnected requests close together only after their turn ends, preserving the successor", async () => {
+  const f = await fixture();
+  try {
+    const [old] = await f.broker.list("room"); const selected = decision(old!);
+    f.state.failBefore = true;
+    await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
+    f.reinstall();
+    assert.equal(f.native.provider, "codex");
+    const replacement = structuredClone(f.native as Extract<ProviderPermissionRequest, { provider: "codex" }>);
+    replacement.native.connectionId = "reconnected";
+    f.emit([replacement], "reconnected");
+    const fresh = (await f.broker.list("room")).find(c => c.reference?.connectionId === "reconnected")!;
+    assert.notEqual(fresh.reference!.requestId, selected.expected.requestId);
+    const before = await f.store.getExecutionApproval(selected.expected);
+    const freshBefore = await f.store.getExecutionApproval(fresh.reference!);
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 0);
+    terminalTurnWitness(f, selected.expected);
+    await f.inbox.cancelInterruptedTurn(f.item.inbox_item_id);
+    const next = await f.inbox.enqueueInitialMessage({ agent_id: "agent", room_id: "room", source_message_id: "msg_2",
+      source_message: { id: "msg_2", content: "Next task" }, activation: { kind: "deliver", reason: "direct_mention" } });
+    await f.inbox.claimHead("agent");
+    await f.inbox.checkpointTurnStarted(next.inbox_item_id, "next-native-turn", { work_attempt_id: "workspace",
+      origin_execution_generation_id: "generation", provider_continuation_id: "continuation" });
+    f.state.turnId = "next-native-turn";
+    const nextNative = structuredClone(replacement); nextNative.native.id = 2;
+    nextNative.native.params = { threadId: "continuation", turnId: "next-native-turn", command: "pwd" };
+    f.emit([nextNative], "reconnected");
+    const successor = (await f.broker.list("room")).find(c => c.reference?.providerTurnId === "next-native-turn")!;
+    assert.ok(successor?.reference);
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 2);
+    assert.deepEqual(await f.store.getExecutionApproval(selected.expected),
+      { ...before, request: { ...before!.request, closedAtMs: now + 30 } });
+    assert.deepEqual(await f.store.getExecutionApproval(fresh.reference!),
+      { ...freshBefore, request: { ...freshBefore!.request, closedAtMs: now + 30 } });
+    assert.equal((await f.store.getExecutionApproval(successor.reference))!.request.closedAtMs, null);
+    assert.equal(await f.broker.decide(selected), "request_closed");
+    assert.equal(f.sends.length, 0);
+  } finally { await f.close(); }
+});
+
+for (const outcome of ["failed", "interrupted"] as const) {
+  test(`exact ${outcome} turn closes prompt without inferring its decision`, async () => {
+    const f = await fixture();
+    try {
+      const [candidate] = await f.broker.list("room"); const expected = candidate!.reference!;
+      terminalTurnWitness(f, expected, outcome);
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1);
+      assert.equal((await f.store.getExecutionApproval(expected))!.decision, null);
+    } finally { await f.close(); }
+  });
+}
+
+for (const weak of ["projection_only", "missing_receipt", "null_outcome", "unreadable", "lost", "legacy", "shadow",
+  "pending", "superseded", "different_birth", "foreign_turn", "earlier"] as const) {
+  test(`${weak} turn evidence cannot close an approval`, async () => {
+    const f = await fixture();
+    try {
+      const [candidate] = await f.broker.list("room"); const expected = candidate!.reference!;
+      terminalTurnWitness(f, expected, weak);
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
+        async () => { throw new Error("weak evidence must not request a write"); }), 0);
+      assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, null);
     } finally { await f.close(); }
   });
 }
