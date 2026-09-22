@@ -1,3 +1,6 @@
+import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
+import { RuntimeConfigurationApplyCoordinator } from "../runtime-configuration-apply-coordinator.js";
+import { ManagedRuntimeRefreshDeferred } from "../provider-action-port.js";
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -1666,4 +1669,51 @@ test("retired recovery cleanup requires a completed exact owner and preserves le
     assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1);
     assert.equal(f.db.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id='generation'").get()!.terminal_json, null);
   } finally { await f.close(); }
+});
+
+test("saved rules do not self-requeue a managed refresh when native idle proof is unknown", async () => {
+  let armed = false;
+  let attempts = 0;
+  let pending = Promise.resolve();
+  let coordinator!: RuntimeConfigurationApplyCoordinator;
+  const request = () => {
+    if (!armed || attempts >= 5) return;
+    pending = pending.then(() => coordinator.refreshManaged("agent"));
+  };
+  const f = await fixture("codex", { hostActorId: () => "host-owner", onPermissionChanged: request });
+  try {
+    const [candidate] = await f.broker.list("room");
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    f.closed(); f.emit([]);
+    await f.broker.list("room");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal((await f.broker.listToolRules({ agentId: "agent" })).length, 1);
+    const manifest = await f.store.load();
+    await f.store.replaceEntry(manifest.generation, { ...manifest.entries[0]!, observed_state: "idle" });
+    f.handle.observedState = "idle";
+    const installation = { ...idleInstallation(f), nonce: Symbol(), listenerLeaseNonce: Symbol(),
+      workAttemptId: "workspace", providerContinuationId: "continuation", configurationRevision: 1, authorityMode: "typed_shadow" as const };
+    coordinator = new RuntimeConfigurationApplyCoordinator({
+      store: f.store, inbox: { head: async () => null }, delivery: { reserveIdle: async () => () => {} },
+      streams: { currentInstallation: () => installation },
+      provider: { stop: async () => { throw new Error("unsafe fallback"); },
+        describeManagedLaunchContract: async () => "a".repeat(64),
+        stopIdle: async () => { attempts += 1; throw new ManagedRuntimeRefreshDeferred("native idle unknown"); } },
+      terminals: { replaceConfiguration: async (_installation, stop) => { await stop(); } },
+      entryConcurrency: new EntryConcurrencyGate({ isHandoffScheduled: () => false }),
+      authority: { assertCurrent: async () => {}, currentDaemonGeneration: () => 1, isHandoffScheduled: () => false },
+      managed: { store: { readManagedLaunchContract: f.store.readManagedLaunchContract.bind(f.store),
+        hasUnclosedRuntimeApprovals: f.store.hasUnclosedRuntimeApprovals.bind(f.store), validateManagedRuntimeReplacement: async () => () => {} },
+        bindings: { get: async () => ({ entry_id: "agent", room_id: "room", work_attempt_id: "workspace", execution_generation_id: "generation",
+          agent_session_id: "session", credential_ref: "opaque", api_url: "https://example.test", room_cursor: null,
+          last_sequence: 0, last_observed_at_ms: 0, updated_at: "now" }) },
+        reserveApprovalIdle: exact => f.broker.reserveIdle(exact), resumeDelivery: async () => {} },
+      requestConvergence: request,
+    });
+    armed = true; request();
+    await pending;
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await pending;
+    assert.equal(attempts, 1, "releasing an empty approval lane must not start another refresh");
+  } finally { armed = false; await pending; await f.close(); }
 });
