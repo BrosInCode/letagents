@@ -2515,6 +2515,97 @@ test("fence aborts a pending error backoff and releases its listener", async () 
   }
 });
 
+for (const phase of ["preflight", "admitted"] as const) {
+  test(`duplicate same-owner start preserves Codex ${phase} and publishes exactly once`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-delivery-duplicate-start-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const release = deferred<void>();
+    let calls = 0; let recovered = 0; let published = 0; let normalizations = 0; let entered = false;
+    let turnSignal: AbortSignal | undefined;
+    const normalize = store.normalizeStartupRecovery.bind(store);
+    store.normalizeStartupRecovery = async (...args) => { normalizations += 1; return normalize(...args); };
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      calls += 1;
+      turnSignal = options?.detachSignal;
+      if (phase === "admitted") {
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.("turn:one");
+      }
+      entered = true;
+      await Promise.race([release.promise, new Promise<void>(resolve => {
+        options?.detachSignal?.addEventListener("abort", () => resolve(), { once: true });
+      })]);
+      if (options?.detachSignal?.aborted) throw new Error("delivery detached during preflight");
+      if (phase === "preflight") {
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.("turn:one");
+      }
+      return { turnId: "turn:one", outcome: "reply", text: "Ready." };
+    }, async () => { recovered += 1; return { turnId: "turn:one", outcome: "unreadable", text: null }; }), {
+      poll: ({ signal }) => new Promise(resolve => {
+        if (signal.aborted) resolve({});
+        else signal.addEventListener("abort", () => resolve({}), { once: true });
+      }),
+      publish: async input => { published += 1; return { messageId: "reply:one", roomId: input.roomId }; },
+    }, currentAuthority);
+    try {
+      await ingest(store);
+      await delivery.start(agent);
+      await waitFor(() => entered);
+      const duplicate = delivery.refresh({ ...agent });
+      await Promise.race([duplicate, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("duplicate start did not settle")), 1000))]);
+      await delivery.refresh({ ...agent });
+      assert.equal(turnSignal?.aborted, false, "duplicate readiness must not detach the existing turn");
+      assert.equal(normalizations, 1, "a live owner must not be mistaken for crash recovery");
+      release.resolve();
+      await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged");
+      assert.equal(calls, 1); assert.equal(recovered, 0); assert.equal(published, 1);
+    } finally {
+      release.resolve(); await delivery.fenceAndDrain(); await store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("refresh still replaces changed ownership, including mutated credentials and provider-less lanes", async (t) => {
+  for (const coordinate of ["handle", "agentSessionId", "executionGenerationId", "daemonGeneration", "bearer", "no-provider-api", "no-provider-workspace"] as const) {
+    await t.test(coordinate, async () => {
+      const root = await mkdtemp(join(tmpdir(), "letagents-delivery-owner-change-"));
+      const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+      const original = { ...agent, handle: coordinate.startsWith("no-provider") ? null : agent.handle };
+      const pollSignals: AbortSignal[] = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("no work queued"); }), {
+        poll: ({ signal }) => new Promise(resolve => {
+          pollSignals.push(signal);
+          if (signal.aborted) resolve({});
+          else signal.addEventListener("abort", () => resolve({}), { once: true });
+        }),
+        publish: async () => { throw new Error("no reply expected"); },
+      }, currentAuthority);
+      try {
+        await delivery.start(original);
+        await waitFor(() => pollSignals.length === 1);
+        if (coordinate === "handle") original.handle = { ...agent.handle };
+        if (coordinate === "agentSessionId") original.agentSessionId = "new-worker";
+        if (coordinate === "executionGenerationId") original.executionGenerationId = "new-execution";
+        if (coordinate === "daemonGeneration") original.daemonGeneration = 2;
+        if (coordinate === "bearer") original.bearer = "rotated-memory-only-token";
+        if (coordinate === "no-provider-api") original.apiUrl = "https://other.letagents.test";
+        if (coordinate === "no-provider-workspace") original.workAttemptId = "new-attempt";
+        await delivery.refresh(original);
+        await waitFor(() => pollSignals.length === 2);
+        assert.equal(pollSignals[0]?.aborted, true, "changed owner must retire the registered lane");
+        assert.equal(pollSignals[1]?.aborted, false);
+        await delivery.refresh({ ...original });
+        assert.equal(pollSignals.length, 2, "the new exact owner is idempotent too");
+      } finally {
+        await delivery.fenceAndDrain(); await store.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("rebind waits for an old provider turn, recovers its interrupted FIFO head, then processes it and the next item", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-rebind-drain-"));
   try {
