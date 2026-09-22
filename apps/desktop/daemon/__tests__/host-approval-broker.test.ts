@@ -1,3 +1,6 @@
+import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
+import { RuntimeConfigurationApplyCoordinator } from "../runtime-configuration-apply-coordinator.js";
+import { ManagedRuntimeRefreshDeferred } from "../provider-action-port.js";
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -154,6 +157,89 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     reinstall() { broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation"); emit(); },
     async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await rm(root, { recursive: true, force: true }); } };
 }
+
+function idleInstallation(f: Awaited<ReturnType<typeof fixture>>) {
+  return { entryId: "agent", handle: f.handle, executionGenerationId: "generation",
+    providerConnection: f.handle.providerConnection! };
+}
+
+test("idle permission reservation requires a healthy empty exact lane and cannot revive after activity", async () => {
+  const f = await fixture();
+  try {
+    const exact = idleInstallation(f);
+    assert.equal(f.broker.reserveIdle(exact), null, "pending native approval blocks replacement");
+    f.emit([]);
+    assert.equal(f.broker.reserveIdle({ ...exact, executionGenerationId: "stale" }), null);
+    const reservation = f.broker.reserveIdle(exact);
+    assert.ok(reservation);
+    reservation.assertCurrent();
+    assert.equal(f.broker.reserveIdle(exact), null);
+    f.emit();
+    f.emit([]);
+    assert.throws(reservation.assertCurrent, /permissions changed/,
+      "a same-connection request appearing then disappearing permanently invalidates the token");
+    reservation.release();
+    reservation.release();
+    const next = f.broker.reserveIdle(exact);
+    assert.ok(next);
+    f.observationFailure("degraded");
+    assert.throws(next.assertCurrent, /permissions changed/);
+    next.release();
+    assert.equal(f.broker.reserveIdle(exact), null);
+    f.emit([]);
+    const last = f.broker.reserveIdle(exact);
+    assert.ok(last);
+    f.state.current = false;
+    assert.throws(last.assertCurrent, /permissions changed/);
+    last.release();
+  } finally { await f.close(); }
+});
+
+test("an in-flight approval decision blocks idle reservation even after its native request disappears", async () => {
+  const f = await fixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    let entered!: () => void;
+    let resume!: () => void;
+    const paused = new Promise<void>(resolve => { entered = resolve; });
+    const continueDecision = new Promise<void>(resolve => { resume = resolve; });
+    f.state.beforeBefore = async () => { entered(); await continueDecision; };
+    const deciding = f.broker.decide({ expected: candidate.reference!, decisionId: "idle-race", actorId: "host-owner",
+      decision: "allow_once", projectionSha256: hash(candidate.presentation) });
+    await paused;
+    f.emit([]);
+    assert.equal(f.broker.reserveIdle(idleInstallation(f)), null);
+    resume();
+    await assert.rejects(deciding, /could not be sent/);
+    assert.deepEqual(f.sends, []);
+    const reservation = f.broker.reserveIdle(idleInstallation(f));
+    assert.ok(reservation, "only the in-memory dispatch drain has cleared; durable approval still vetoes separately");
+    reservation.release();
+  } finally { await f.close(); }
+});
+
+test("durable idle check permits exact native closure without rewriting an uncertain decision", async () => {
+  const f = await fixture();
+  try {
+    const [candidate] = await f.broker.list("room");
+    const scope = { agentId: "agent", executionGenerationId: "generation", providerConnection: f.handle.providerConnection! };
+    assert.equal(await f.store.hasUnclosedRuntimeApprovals(scope), true);
+    const selected = decision(candidate!);
+    f.state.failAfter = true;
+    assert.equal(await f.broker.decide(selected), "uncertain");
+    f.emit([]);
+    assert.equal(await f.store.hasUnclosedRuntimeApprovals(scope), true, "empty native snapshot is not durable closure");
+    assert.equal(await f.store.hasUnclosedRuntimeApprovals({ ...scope, agentId: "unknown" }), true,
+      "missing durable runtime identity is unproven");
+    f.closed();
+    await f.broker.list("room");
+    assert.equal(await f.store.hasUnclosedRuntimeApprovals(scope), false);
+    const record = await f.store.readLatestExecutionApproval(candidate.reference!.requestId);
+    assert.equal(record?.decision?.dispatchState, "uncertain");
+    assert.equal(record?.request.state, "dispatching");
+    assert.deepEqual(f.sends, ["once"], "closure neither retries nor claims acknowledgement");
+  } finally { await f.close(); }
+});
 
 test("native permission observations wake delegated decision reconciliation", async () => {
   const f = await fixture();
@@ -1291,7 +1377,7 @@ test("v44 migration preserves Codex closure receipts and refuses a damaged v45 s
     try {
       assert.equal((await upgraded.getExecutionApproval(selected.expected))!.request.closedAtMs, now + 10);
       assert.deepEqual(f.db.prepare("SELECT * FROM execution_approval_request_closures").all(), before);
-      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, 45);
+      assert.equal(f.db.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
       assert.deepEqual(f.db.prepare("PRAGMA foreign_key_check").all(), []);
     } finally { await upgraded.close(); }
     // A current database must not silently recreate even the old valid schema.
@@ -1583,4 +1669,51 @@ test("retired recovery cleanup requires a completed exact owner and preserves le
     assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1);
     assert.equal(f.db.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id='generation'").get()!.terminal_json, null);
   } finally { await f.close(); }
+});
+
+test("saved rules do not self-requeue a managed refresh when native idle proof is unknown", async () => {
+  let armed = false;
+  let attempts = 0;
+  let pending = Promise.resolve();
+  let coordinator!: RuntimeConfigurationApplyCoordinator;
+  const request = () => {
+    if (!armed || attempts >= 5) return;
+    pending = pending.then(() => coordinator.refreshManaged("agent"));
+  };
+  const f = await fixture("codex", { hostActorId: () => "host-owner", onPermissionChanged: request });
+  try {
+    const [candidate] = await f.broker.list("room");
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    f.closed(); f.emit([]);
+    await f.broker.list("room");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal((await f.broker.listToolRules({ agentId: "agent" })).length, 1);
+    const manifest = await f.store.load();
+    await f.store.replaceEntry(manifest.generation, { ...manifest.entries[0]!, observed_state: "idle" });
+    f.handle.observedState = "idle";
+    const installation = { ...idleInstallation(f), nonce: Symbol(), listenerLeaseNonce: Symbol(),
+      workAttemptId: "workspace", providerContinuationId: "continuation", configurationRevision: 1, authorityMode: "typed_shadow" as const };
+    coordinator = new RuntimeConfigurationApplyCoordinator({
+      store: f.store, inbox: { head: async () => null }, delivery: { reserveIdle: async () => () => {} },
+      streams: { currentInstallation: () => installation },
+      provider: { stop: async () => { throw new Error("unsafe fallback"); },
+        describeManagedLaunchContract: async () => "a".repeat(64),
+        stopIdle: async () => { attempts += 1; throw new ManagedRuntimeRefreshDeferred("native idle unknown"); } },
+      terminals: { replaceConfiguration: async (_installation, stop) => { await stop(); } },
+      entryConcurrency: new EntryConcurrencyGate({ isHandoffScheduled: () => false }),
+      authority: { assertCurrent: async () => {}, currentDaemonGeneration: () => 1, isHandoffScheduled: () => false },
+      managed: { store: { readManagedLaunchContract: f.store.readManagedLaunchContract.bind(f.store),
+        hasUnclosedRuntimeApprovals: f.store.hasUnclosedRuntimeApprovals.bind(f.store), validateManagedRuntimeReplacement: async () => () => {} },
+        bindings: { get: async () => ({ entry_id: "agent", room_id: "room", work_attempt_id: "workspace", execution_generation_id: "generation",
+          agent_session_id: "session", credential_ref: "opaque", api_url: "https://example.test", room_cursor: null,
+          last_sequence: 0, last_observed_at_ms: 0, updated_at: "now" }) },
+        reserveApprovalIdle: exact => f.broker.reserveIdle(exact), resumeDelivery: async () => {} },
+      requestConvergence: request,
+    });
+    armed = true; request();
+    await pending;
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await pending;
+    assert.equal(attempts, 1, "releasing an empty approval lane must not start another refresh");
+  } finally { armed = false; await pending; await f.close(); }
 });

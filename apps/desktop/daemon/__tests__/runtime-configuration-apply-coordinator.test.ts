@@ -1,3 +1,4 @@
+import { ManagedRuntimeRefreshDeferred } from "../provider-action-port.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -77,6 +78,7 @@ function manifestEntry(): DaemonManifestEntry {
 
 function applyHarness(input: {
   stopIfIdle?: () => Promise<boolean>;
+  beforeProviderStop?: () => void;
   head?: () => Promise<{ state: string; provider_turn_id: string | null } | null>;
   afterDeliveryInstallation?: ProviderInstallationToken;
   configurationRevisionOnRead?: (read: number) => number;
@@ -89,6 +91,7 @@ function applyHarness(input: {
     config_revision: 2, runtime_configuration_revision: 1, polling_contract: null,
   };
   let currentInstallation = installation;
+  let deliveryReserved = false;
   let providerStops = 0;
   let replacements = 0;
   let configurationReads = 0;
@@ -108,14 +111,18 @@ function applyHarness(input: {
     },
     inbox: { head: input.head ?? (async () => null) } as RuntimeConfigurationApplyCoordinatorOptions["inbox"],
     delivery: {
-      stopIfIdle: input.stopIfIdle ?? (async () => {
+      reserveIdle: async () => {
+        if (input.stopIfIdle && !await input.stopIfIdle()) return null;
         if (input.afterDeliveryInstallation) currentInstallation = input.afterDeliveryInstallation;
-        return true;
-      }),
+        deliveryReserved = true;
+        return () => { deliveryReserved = false; };
+      },
     },
     provider: {
       stop: async (stoppedHandle) => {
         assert.equal(stoppedHandle, handle);
+        assert.equal(deliveryReserved, true, "delivery remains fenced through native stop");
+        input.beforeProviderStop?.();
         providerStops += 1;
         return terminal;
       },
@@ -138,10 +145,12 @@ function applyHarness(input: {
   };
   return {
     coordinator: new RuntimeConfigurationApplyCoordinator(options),
+    options, entry,
     configuration,
     gate,
     counts: () => ({ providerStops, replacements }),
     convergenceLifecycleStates,
+    deliveryReserved: () => deliveryReserved,
   };
 }
 
@@ -153,6 +162,7 @@ test("configuration apply replaces only the exact idle runtime and leaves revisi
     entryId: "agent-1", daemonGeneration: 7, expectedConfigurationRevision: 2,
   }), { outcome: "restarting" });
   assert.deepEqual(env.counts(), { providerStops: 1, replacements: 1 });
+  assert.equal(env.deliveryReserved(), false);
   assert.equal(env.configuration.runtime_configuration_revision, 1,
     "the stop path cannot claim that a successor has consumed the saved configuration");
   assert.equal(env.gate.currentControlEpoch("agent-1"), 1);
@@ -352,4 +362,108 @@ test("process-death evidence must match the immutable installation, including PI
   }
   const { nativeRuntimeDeath, ...transportOnly } = terminal;
   assert.equal(coordinator.terminalPayload({ ...transportOnly, terminalCause: "protocol_error" }, "provider", connection).native_runtime_death, undefined);
+});
+
+function managedHarness() {
+  const env = applyHarness({ head: async () => ({ state: "pending", provider_turn_id: null }) });
+  env.configuration.config_revision = 1;
+  env.entry.config_revision = 1;
+  const state = { receipt: null as string | null, unclosed: false, permissionBusy: false,
+    approvalHeld: false, nativeStops: 0, resumedDelivery: 0, desiredReads: 0,
+    durableCurrent: true, permissionCurrent: true, nativeFailure: null as Error | null,
+    beforeNativeGuard: null as (() => void) | null };
+  env.options.managed = {
+    store: {
+      readManagedLaunchContract: async () => state.receipt,
+      hasUnclosedRuntimeApprovals: async () => state.unclosed,
+      validateManagedRuntimeReplacement: async () => () => {
+        if (!state.durableCurrent) throw new ManagedRuntimeRefreshDeferred("durable authority changed");
+      },
+    },
+    bindings: { get: async () => ({ entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+      execution_generation_id: "generation-1", agent_session_id: "session", credential_ref: "opaque",
+      api_url: "http://127.0.0.1:4000", room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "now" }) },
+    reserveApprovalIdle: () => {
+      if (state.permissionBusy) return null;
+      state.approvalHeld = true;
+      return { assertCurrent: () => { if (!state.permissionCurrent) throw new Error("permission changed"); },
+        release: () => { state.approvalHeld = false; } };
+    },
+    resumeDelivery: async () => { state.resumedDelivery += 1; },
+  };
+  env.options.provider!.describeManagedLaunchContract = async () => { state.desiredReads += 1; return "a".repeat(64); };
+  env.options.provider!.stopIdle = async (_handle, assertCurrent) => {
+    assert.equal(state.approvalHeld, true);
+    assert.equal(env.deliveryReserved(), true);
+    state.beforeNativeGuard?.();
+    assertCurrent();
+    if (state.nativeFailure) throw state.nativeFailure;
+    state.nativeStops += 1;
+    return terminal;
+  };
+  return { ...env, state };
+}
+
+test("managed refresh normalizes an unknown legacy birth once without editing Inspector revisions or pending work", async () => {
+  const env = managedHarness();
+  await env.coordinator.refreshManaged("agent-1");
+  assert.equal(env.state.nativeStops, 1);
+  assert.equal(env.configuration.config_revision, 1);
+  assert.equal(env.configuration.runtime_configuration_revision, 1);
+  assert.equal(env.state.approvalHeld, false);
+  assert.equal(env.deliveryReserved(), false);
+  assert.deepEqual(env.convergenceLifecycleStates, [false]);
+  // Only the actual successor birth records the descriptor it consumed.
+  assert.equal(env.state.receipt, null);
+  env.state.receipt = "a".repeat(64);
+  await env.coordinator.refreshManaged("agent-1");
+  await env.coordinator.refreshManaged("agent-1");
+  assert.equal(env.state.nativeStops, 1);
+  assert.equal(env.state.desiredReads, 2, "ordinary comparison reuses the daemon's verified desired identity");
+});
+
+for (const reason of ["current", "active", "pending-config", "approval", "permission", "unsupported"] as const) {
+  test(`managed refresh defers ${reason} without disturbing delivery`, async () => {
+    const env = managedHarness();
+    if (reason === "current") env.state.receipt = "a".repeat(64);
+    if (reason === "active") env.entry.observed_state = "working";
+    if (reason === "pending-config") env.configuration.config_revision = 2;
+    if (reason === "approval") env.state.unclosed = true;
+    if (reason === "permission") env.state.permissionBusy = true;
+    if (reason === "unsupported") env.options.provider!.stopIdle = undefined;
+    await env.coordinator.refreshManaged("agent-1");
+    assert.equal(env.state.nativeStops, 0);
+    assert.equal(env.deliveryReserved(), false);
+    assert.equal(env.state.approvalHeld, false);
+    assert.equal(env.state.resumedDelivery, 0);
+    assert.deepEqual(env.convergenceLifecycleStates, [], "deferral cannot schedule itself forever");
+  });
+}
+
+for (const reason of ["permission", "durable", "installation", "handoff"] as const) {
+  test(`managed refresh rechecks ${reason} after native inspection and restores ingress on deferral`, async () => {
+    const env = managedHarness();
+    env.state.beforeNativeGuard = () => {
+      if (reason === "permission") env.state.permissionCurrent = false;
+      if (reason === "durable") env.state.durableCurrent = false;
+      if (reason === "installation") env.options.streams.currentInstallation = () => ({ ...installation });
+      if (reason === "handoff") env.options.authority.isHandoffScheduled = () => true;
+    };
+    await env.coordinator.refreshManaged("agent-1");
+    assert.equal(env.state.nativeStops, 0);
+    assert.equal(env.state.approvalHeld, false);
+    assert.equal(env.deliveryReserved(), false);
+    assert.equal(env.state.resumedDelivery, 1);
+    assert.deepEqual(env.convergenceLifecycleStates, []);
+  });
+}
+
+test("managed refresh releases both reservations on genuine native failure and surfaces it", async () => {
+  const env = managedHarness();
+  env.state.nativeFailure = new Error("native stop failed");
+  await assert.rejects(env.coordinator.refreshManaged("agent-1"), /native stop failed/);
+  assert.equal(env.state.approvalHeld, false);
+  assert.equal(env.deliveryReserved(), false);
+  assert.equal(env.state.resumedDelivery, 1);
+  assert.deepEqual(env.convergenceLifecycleStates, []);
 });

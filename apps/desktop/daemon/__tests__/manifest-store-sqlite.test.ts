@@ -6654,3 +6654,43 @@ test("v43 saved-permission migration is atomic and current missing authority fai
     assert.throws(() => schema.createSchema(database), /permission storage is missing or invalid/);
   } finally { database.close(); }
 });
+
+test("managed launch receipts survive reopening, reject relabeling, and legacy migration never invents provenance", async () => {
+  const env = await fixture();
+  let store = new ManifestStore(env.databasePath);
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "managed-birth" };
+  const agent: DaemonManifestEntry = { ...entry, condition: "none", observed_state: "idle", delivery_mode: "daemon_inbox",
+    turn_control: undefined, work_attempt_id: "attempt_1", provider_ref: { work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      provider_continuation_id: "thread_1", provider_connection: connection } };
+  const scope = { agentId: agent.id, executionGenerationId: "run_1", providerConnection: connection };
+  const birth = { entry: agent, executionGenerationId: "run_1", providerConnection: connection, appliedRevision: 1,
+    requestedAuthorityMode: "typed_shadow" as const, observedAtMs: 100, managedLaunchContract: "a".repeat(64) };
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const written = await store.write(0, [agent]);
+    seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
+    await assert.rejects(store.checkpointProviderBirth(written.generation, birth, async () => { throw new Error("fenced"); }), /fenced/);
+    assert.equal(await store.readManagedLaunchContract(scope), null, "a rejected birth has no receipt");
+    const first = await store.checkpointProviderBirth(written.generation, birth);
+    assert.equal(await store.readManagedLaunchContract(scope), birth.managedLaunchContract);
+    await assert.rejects(store.checkpointProviderBirth(first.generation, { ...birth, managedLaunchContract: "b".repeat(64) }), /cannot change/);
+    assert.equal((await store.load()).generation, first.generation);
+    assert.equal(await store.readManagedLaunchContract({ ...scope, providerConnection: { ...connection, processIdentity: "other-birth" } }), null);
+    await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      agent_session_id: "session", agent_session_token: "test-token", api_url: "https://example.test" });
+    const current = await store.validateManagedRuntimeReplacement({ ...scope, configurationRevision: 1, apiUrl: "https://example.test",
+      roomId: agent.room_id, workAttemptId: "attempt_1", providerContinuationId: "thread_1" });
+    current();
+    await store.replaceEntry(first.generation, { ...first.entry, desired_state: "stopped" });
+    assert.throws(current, /durable idle authority/);
+    await store.close();
+    store = new ManifestStore(env.databasePath);
+    assert.equal(await store.readManagedLaunchContract(scope), birth.managedLaunchContract);
+    await store.close();
+    const legacy = new DatabaseSync(env.databasePath);
+    legacy.exec("DROP TABLE managed_launch_contracts; PRAGMA user_version=45; UPDATE manifest_metadata SET schema_version=45");
+    legacy.close();
+    store = new ManifestStore(env.databasePath);
+    assert.equal(await store.readManagedLaunchContract(scope), null, "upgrade must not label a surviving process as newly configured");
+  } finally { await bindings.close(); await store.close(); await env.cleanup(); }
+});

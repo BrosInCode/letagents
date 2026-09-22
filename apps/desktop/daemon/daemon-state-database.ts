@@ -1,3 +1,4 @@
+import { applyManagedLaunchContractSchema, validateManagedLaunchContractSchema } from "./managed-launch-contract.js";
 import { applyHostToolRuleSchema, validateHostToolRuleSchema } from "./host-tool-rules.js";
 import { applyPreparedRoomContextSchema, validatePreparedRoomContextSchema } from "./prepared-room-context.js";
 import { validateRoomWorkspaceSchema, validateRoomWorkspaceReviewSchema } from "./room-workspace-store.js";
@@ -19,7 +20,7 @@ import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js
 import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
 import { applyApprovalRequestClosureSchema, validateApprovalRequestClosureSchema } from "./execution-approval-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 45;
+export const DAEMON_STATE_SCHEMA_VERSION = 46;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -316,7 +317,7 @@ createSchema(database: DatabaseSync): void {
     this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
-  if (existingVersion === 43 || existingVersion === 44) {
+  if (existingVersion === 43 || existingVersion === 44 || existingVersion === 45) {
     this.migrateHostToolRules(database);
     return;
   }
@@ -639,6 +640,7 @@ private migrateHostToolRules(database: DatabaseSync): void {
     applyApprovalRequestClosureSchema(database);
     this.schemaInitializationHook?.(database);
     validateHostToolRuleSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
@@ -655,6 +657,7 @@ private migratePreparedRoomContext(database: DatabaseSync): void {
     applyApprovalRequestClosureSchema(database);
     this.schemaInitializationHook?.(database);
     validatePreparedRoomContextSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
@@ -684,6 +687,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -712,6 +716,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -740,6 +745,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -807,6 +813,7 @@ migrateV4ToV5(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -861,6 +868,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -887,6 +895,7 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -909,6 +918,7 @@ migrateV7ToV8(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -929,6 +939,7 @@ migrateV8ToV9(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -948,6 +959,7 @@ migrateV9ToV10(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -967,6 +979,7 @@ migrateV10ToV11(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -986,6 +999,7 @@ migrateV11ToV12(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1017,6 +1031,7 @@ migrateV12ToV13(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1046,6 +1061,7 @@ migrateV13ToV14(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1073,6 +1089,7 @@ migrateV14ToV15(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1098,6 +1115,7 @@ migrateV15ToV16(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1121,6 +1139,7 @@ migrateV16ToV17(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1142,6 +1161,7 @@ migrateV17ToV18(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1169,6 +1189,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1195,6 +1216,7 @@ migrateV19ToV20(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1222,6 +1244,7 @@ migrateV20ToV21(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1248,6 +1271,7 @@ migrateV21ToV22(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1270,6 +1294,7 @@ migrateV22ToV23(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1292,6 +1317,7 @@ migrateV23ToV24(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1314,6 +1340,7 @@ migratePollingOfferStorage(database: DatabaseSync): void {
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1341,6 +1368,7 @@ private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
     validateRoomWorkPublicationSchema(database);
     validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1366,6 +1394,7 @@ private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1390,6 +1419,7 @@ private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1413,6 +1443,7 @@ private migrateLifecycleEffectStorage(database: DatabaseSync): void {
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1435,6 +1466,7 @@ private migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1455,6 +1487,7 @@ private migrateIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
     this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1477,6 +1510,7 @@ private migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
     this.schemaInitializationHook?.(database);
     validateLifecycleProjectionLedgerSchema(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1496,6 +1530,7 @@ private migrateExecutionDelegationAuthorityStorage(database: DatabaseSync): void
     migrateExecutionStorageV24ToV25(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1514,6 +1549,7 @@ private migrateExecutionApprovalProjectionStorage(database: DatabaseSync): void 
     migrateExecutionStorageV24ToV25(database);
     this.schemaInitializationHook?.(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1533,6 +1569,7 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
     this.schemaInitializationHook?.(database);
     validateExecutionApprovalPublicationSchema(database);
     applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1545,6 +1582,7 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
 
 /** Existing memberships stay cloud-backed. Never reconstruct a missing current authority column. */
 private applyLocalRoomMembershipShape(database: DatabaseSync): void {
+  applyManagedLaunchContractSchema(database);
   applyHostToolRuleSchema(database);
   applyRuntimeRecoverySchema(database);
   applyApprovalRequestClosureSchema(database);
@@ -3102,6 +3140,7 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: Execut
 
 repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 19 | 20 | 21 | 22 | 23 | 24 | 25): void {
   const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+  if (version >= 46) validateManagedLaunchContractSchema(database);
   const storageVersion = executionStorageVersion ?? (version >= 35 ? 25 : version >= 34 ? 24 : version >= 31 ? 23 : version >= 30 ? 22 : 21);
   if (version >= 36) validateExecutionApprovalPublicationSchema(database);
   if (version >= 28) {

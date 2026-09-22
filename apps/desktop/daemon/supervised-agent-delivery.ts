@@ -163,6 +163,7 @@ export class SupervisedAgentDelivery {
   private readonly retryControllers = new Map<string, Set<AbortController>>();
   private readonly agentWork = new Map<string, Set<Promise<void>>>();
   private readonly stoppingAgents = new Set<string>();
+  private readonly idleReservations = new Set<string>();
   private readonly stoppingOperations = new Map<string, Promise<void>>();
   private readonly refreshEpochs = new Map<string, number>();
   private readonly controllers = new Set<AbortController>();
@@ -267,7 +268,7 @@ export class SupervisedAgentDelivery {
     for (;;) {
       if (!this.daemonIngressAllowed(agent)
         || this.fenced
-        || this.stoppingAgents.has(agent.agentId)
+        || this.isStopping(agent.agentId)
         || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)) return;
 
       const existingLoop = this.loops.get(agent.agentId);
@@ -291,7 +292,7 @@ export class SupervisedAgentDelivery {
       // lets stopForRefresh abort and join even a start paused in SQLite.
       if (!await this.hasIngressAuthority(agent)
         || this.fenced
-        || this.stoppingAgents.has(agent.agentId)
+        || this.isStopping(agent.agentId)
         || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)) return;
       if (this.loops.has(agent.agentId)) {
         if (!replaceMismatchedLoop) return;
@@ -322,7 +323,7 @@ export class SupervisedAgentDelivery {
           }
           if (!await this.hasIngressAuthority(agent, controller)
             || this.fenced
-            || this.stoppingAgents.has(agent.agentId)
+            || this.isStopping(agent.agentId)
             || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)) {
             resolveStarted();
             return;
@@ -361,7 +362,7 @@ export class SupervisedAgentDelivery {
    * drain and a later convergence pass fills the resulting absence.
    */
   ensureStarted(agent: SupervisedIngressAgent): Promise<void> {
-    if (this.loops.has(agent.agentId) || this.stoppingAgents.has(agent.agentId)) {
+    if (this.loops.has(agent.agentId) || this.isStopping(agent.agentId)) {
       return Promise.resolve();
     }
     return this.start(agent, this.currentRefreshEpoch(agent.agentId), false);
@@ -393,11 +394,39 @@ export class SupervisedAgentDelivery {
    * before native dispatch, while activeTurns owns the admitted provider turn.
    * Once stoppingAgents is set, no new pump can cross the synchronous fence.
    */
-  stopIfIdle(agentId: string): Promise<boolean> {
+  async stopIfIdle(agentId: string): Promise<boolean> {
+    const release = await this.reserveIdle(agentId);
+    if (!release) return false;
+    release();
+    return true;
+  }
+
+  /** Keep admission closed until the lifecycle owner finishes replacing the runtime. */
+  async reserveIdle(agentId: string): Promise<(() => void) | null> {
     if (this.activeTurnAborts.has(agentId)
       || this.activeTurns.has(agentId)
-      || this.stoppingOperations.has(agentId)) return Promise.resolve(false);
-    return this.startStopOperation(agentId).then(() => true);
+      || this.isStopping(agentId)
+      || this.stoppingOperations.has(agentId)) return null;
+    this.idleReservations.add(agentId);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.idleReservations.delete(agentId);
+    };
+    try {
+      // Invalidate a start/refresh already paused before loop registration.
+      this.nextRefreshEpoch(agentId);
+      await this.startStopOperation(agentId);
+      return release;
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
+  private isStopping(agentId: string): boolean {
+    return this.stoppingAgents.has(agentId) || this.idleReservations.has(agentId);
   }
 
   private startStopOperation(agentId: string): Promise<void> {
@@ -476,7 +505,7 @@ export class SupervisedAgentDelivery {
   }
 
   private pollOnce(agent: SupervisedIngressAgent, parent?: AbortController): Promise<void> {
-    if (this.fenced || this.stoppingAgents.has(agent.agentId)) return Promise.resolve();
+    if (this.fenced || this.isStopping(agent.agentId)) return Promise.resolve();
     const prior = this.polling.get(agent.agentId);
     if (prior) return Promise.resolve();
     const controller = new AbortController();
@@ -560,7 +589,7 @@ export class SupervisedAgentDelivery {
   }
 
   retry(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
-    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId)) {
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.isStopping(agent.agentId)) {
       return Promise.reject(new Error("The room delivery binding changed before retry could start."));
     }
     const controller = new AbortController();
@@ -957,7 +986,7 @@ export class SupervisedAgentDelivery {
   }
 
   restoreConversation(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
-    if (!this.restoreMissingContinuation || !this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId)) {
+    if (!this.restoreMissingContinuation || !this.daemonIngressAllowed(agent) || this.fenced || this.isStopping(agent.agentId)) {
       return Promise.reject(new Error("Conversation restoration is unavailable for this exact agent."));
     }
     const controller = new AbortController();
@@ -988,7 +1017,7 @@ export class SupervisedAgentDelivery {
   }
 
   skipMessage(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
-    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId)) {
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.isStopping(agent.agentId)) {
       return Promise.reject(new Error("The room delivery binding changed before the message could be skipped."));
     }
     const controller = new AbortController();
@@ -1008,11 +1037,11 @@ export class SupervisedAgentDelivery {
   }
 
   private schedulePump(agent: SupervisedIngressAgent): boolean {
-    if (this.fenced || this.stoppingAgents.has(agent.agentId)) return false;
+    if (this.fenced || this.isStopping(agent.agentId)) return false;
     // pump() registers its controller and operation before its first await, so
     // handoff/refresh still drains this work even though the RPC returns now.
     void this.pump(agent).catch(() => undefined);
-    return !this.fenced && !this.stoppingAgents.has(agent.agentId);
+    return !this.fenced && !this.isStopping(agent.agentId);
   }
 
   /** Install tracked FIFO work without making the control RPC wait for the
@@ -1023,7 +1052,7 @@ export class SupervisedAgentDelivery {
   }
 
   pump(agent: SupervisedIngressAgent): Promise<void> {
-    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || this.pumping.has(agent.agentId)) return Promise.resolve();
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.isStopping(agent.agentId) || this.pumping.has(agent.agentId)) return Promise.resolve();
     const controller = new AbortController();
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.recoveringPumpOperation(agent, controller)));
     this.pumping.set(agent.agentId, operation);
@@ -1918,7 +1947,7 @@ export class SupervisedAgentDelivery {
     controller?: AbortController,
     scope: SupervisedAuthorityScope = "lane_lease",
   ): Promise<boolean> {
-    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || controller?.signal.aborted) return false;
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.isStopping(agent.agentId) || controller?.signal.aborted) return false;
     const allowed = await this.revalidateAuthority({
       agentId: agent.agentId,
       roomId: agent.roomId,
@@ -1933,7 +1962,7 @@ export class SupervisedAgentDelivery {
       providerConnection: agent.providerConnection,
       handle: agent.handle,
     }, scope);
-    return allowed && !this.fenced && !this.stoppingAgents.has(agent.agentId) && !controller?.signal.aborted;
+    return allowed && !this.fenced && !this.isStopping(agent.agentId) && !controller?.signal.aborted;
   }
 
   private async hasExecutionAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
