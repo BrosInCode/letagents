@@ -279,6 +279,7 @@ export function boundedCursorRoomTurnPrompt(
   return [
     ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     ...cursorPermissionProfileInstructionLines(permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"]),
+    "This managed Cursor profile supplies only LetAgents MCP tools and no browser/computer-use integration. Browser QA is unavailable here. Host isolation does not permit starting TCP preview servers, accessing arbitrary loopback previews, or opening desktop browsers, even when Cursor's own sandbox is disabled. Report this capability gap instead of probing or bypassing it.",
     "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Assistant text generated during this turn is live activity only. Cursor's terminal result concatenates that activity, so it is never published as the room reply.",
     "After all work is finished, call complete_room_turn exactly once with either { outcome: \"reply\", text: \"your concise public answer\" } or { outcome: \"no_reply\" }.",
