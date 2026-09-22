@@ -137,3 +137,5 @@ export {
   verifyBoardIntentApproval,
   getBoardGovernanceSnapshot,
 } from "./db/coordination.js";
+
+export { approveTaskClaimBoardIntent, BoardIntentClaimConflictError } from "./db/coordination/board-intent-claim.js";

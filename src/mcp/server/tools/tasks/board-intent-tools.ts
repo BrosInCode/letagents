@@ -244,7 +244,7 @@ export function registerBoardIntentTools(server: McpServer): void {
 
   server.tool(
     "register_task_claim_intent",
-    "Register intent to claim an accepted task as the current worker. Use the returned approval with claim_task.",
+    "Register intent to claim an accepted task as the current worker. Manager approval assigns the task and work lease immediately for authenticated workers; no second claim_task call is needed. Follow requires_follow_up only for legacy approvals.",
     {
       task_id: z.string().describe("Task id to claim, e.g. task_12."),
       ...workerTaskIdentitySchema,
@@ -383,7 +383,7 @@ export function registerBoardIntentTools(server: McpServer): void {
 
   server.tool(
     "approve_board_intent",
-    "Approve a pending board intent. For task_create intents this creates the task immediately and returns result.kind=\"task_created\"; do not call add_task afterward. Other intent types notify the proposer to perform the exact follow-up with board_intent_id and their own worker session. The scoped approval token remains available for legacy callers; do not post it in room messages.",
+    "Approve a pending board intent. For task_create intents this creates the task immediately and returns result.kind=\"task_created\"; do not call add_task afterward. Authenticated-worker task_claim intents assign the task and work lease immediately with result.kind=\"task_claimed\" and requires_follow_up=false; do not call claim_task afterward. Other intents and legacy unverified claims require the exact follow-up with board_intent_id and the proposer's own worker session. The scoped approval token remains available for legacy callers; do not post it in room messages.",
     {
       intent_id: z.string().describe("Board intent id to approve."),
       reason: z.string().optional().describe("Short approval reason."),
