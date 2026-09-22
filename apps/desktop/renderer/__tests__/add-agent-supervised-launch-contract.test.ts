@@ -253,7 +253,7 @@ test("supervised creation presents the first task as a one-time message", () => 
 
 test("supervised providers expose their supervised permission presentation instead of forcing read-only", () => {
   assert.match(presentationSource, /const profiles = selectedProvider\.value\?\.permissionProfiles \?\? \[\]/);
-  assert.match(presentationSource, /profiles\.map\(\(profile\) => supervisedPermissionProfilePresentation\(selectedProviderId\.value, profile\)\)/);
+  assert.match(presentationSource, /profiles\.map\(\(profile\) => supervisedPermissionProfilePresentation\(selectedProviderId\.value, profile, \{ hasProject: Boolean\(props\.repoRootPath\?\.trim\(\)\) \}\)\)/);
   assert.match(configurationSource, /const permissionProfiles = bindings\.selectedPermissionProfiles\.value/);
   assert.match(controllerSource, /selectedPermissionProfiles,[\s\S]*?selectedPermissionProfile,/);
   assert.doesNotMatch(presentationSource, /profiles\.filter\(\(profile\) => profile\.id === "read_only"\)/);

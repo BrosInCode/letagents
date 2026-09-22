@@ -214,7 +214,8 @@ export class SupervisedDeliveryLifecycleCoordinator {
     if (!await this.ports.providerAuthority.isExactAuthority(agent)) return;
     // Durable identity may have loaded across a provider-birth replacement.
     // Recheck the exact operational latch immediately before delivery.
-    if (!this.ports.isOperationallyAdmitted(entryId)) return;
+    if (this.ports.isHandoffScheduled() || this.ports.isLifecycleActive(entryId)
+      || !this.ports.isOperationallyAdmitted(entryId)) return;
     if (mode === "ensure" || mode === "wake") {
       await delivery.ensureStarted(agent);
       if (mode === "wake") delivery.wake(agent);
