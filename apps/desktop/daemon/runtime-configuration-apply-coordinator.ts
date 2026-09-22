@@ -66,11 +66,11 @@ export type RuntimeConfigurationApplyCoordinatorOptions = {
 /** Applies a saved configuration only by replacing a provably idle runtime. */
 export class RuntimeConfigurationApplyCoordinator {
   private readonly desiredContracts = new Map<string, string>();
-  private readonly admissionRefreshRequested = new WeakSet<ProviderInstallationToken>();
+  private readonly admissionRefreshRequested = new WeakMap<object, ProviderInstallationToken>();
   constructor(private readonly options: RuntimeConfigurationApplyCoordinatorOptions) {}
 
   /** Observe only: replacement drains the caller, so convergence must run separately. */
-  async canAdmitManagedDelivery(agent: SupervisedIngressAgent): Promise<boolean> {
+  async canAdmitManagedDelivery(agent: SupervisedIngressAgent, demand: object): Promise<boolean> {
     if (agent.provider !== "codex" || !this.options.managed || !this.options.provider?.describeManagedLaunchContract) return true;
     const installation = this.options.streams.currentInstallation(agent.agentId);
     const matches = () => Boolean(installation
@@ -92,10 +92,11 @@ export class RuntimeConfigurationApplyCoordinator {
     });
     if (!matches()) return false;
     if (launched === contract) return true;
-    // A deferred replacement can restart the same ingress. Wake once per
-    // installation; ordinary approval/lifecycle/recovery events own later wakes.
-    if (!this.admissionRefreshRequested.has(installation!)) {
-      this.admissionRefreshRequested.add(installation!);
+    // Internal restart after deferral retains the demand; an independent
+    // delivery wake may retry this same installation. Capture each demand
+    // separately so a late read cannot consume a newer wake.
+    if (this.admissionRefreshRequested.get(demand) !== installation) {
+      this.admissionRefreshRequested.set(demand, installation!);
       this.options.requestConvergence(agent.agentId);
     }
     return false;

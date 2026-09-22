@@ -623,7 +623,7 @@ export class SupervisorDaemon {
         async (agent, source, inbox) => this.roomWorkPublisher?.beginWorkspace(agent, source, inbox),
         async (agent, source, inbox) => { await this.roomWorkPublisher?.releaseWorkspace(agent, source, inbox); },
         (agentId) => this.requestConvergence(agentId),
-        (agent) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent),
+        (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
       ) : null;
     this.readModel = new DaemonReadModel({
       currentDaemonGeneration: () => this.singleton.currentGeneration,

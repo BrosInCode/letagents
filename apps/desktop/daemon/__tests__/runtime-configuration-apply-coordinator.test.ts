@@ -592,17 +592,46 @@ function deliveryAgentFor(token: ProviderInstallationToken) {
     providerConnection: token.providerConnection };
 }
 
-test("managed delivery admission requires the current receipt and coalesces a deferred installation wake", async () => {
+test("managed delivery admission coalesces one demand but permits later wakes on the same installation", async () => {
   const env = managedHarness();
   const agent = deliveryAgentFor(installation);
-  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent), false);
-  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent), false);
+  const demand = {};
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), false);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), false);
   assert.equal(env.convergenceLifecycleStates.length, 1);
   assert.equal(env.state.nativeStops, 0, "admission only observes, never drains its caller");
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, {}), false);
+  assert.equal(env.convergenceLifecycleStates.length, 2);
   env.state.receipt = "a".repeat(64);
-  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent), true);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), true);
   assert.equal(env.state.desiredReads, 1);
+  assert.equal(env.convergenceLifecycleStates.length, 2);
+});
+
+test("an older admission read cannot overwrite or consume a newer delivery demand", async () => {
+  const env = managedHarness();
+  const agent = deliveryAgentFor(installation);
+  let entered!: () => void;
+  let release!: () => void;
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  let reads = 0;
+  env.options.managed!.store.readManagedLaunchContract = async () => {
+    if (++reads === 1) { entered(); await barrier; }
+    return "b".repeat(64);
+  };
+  const older = {};
+  const newer = {};
+  const pending = env.coordinator.canAdmitManagedDelivery(agent, older);
+  await reading;
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, newer), false);
   assert.equal(env.convergenceLifecycleStates.length, 1);
+  release();
+  assert.equal(await pending, false);
+  assert.equal(env.convergenceLifecycleStates.length, 2);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, newer), false);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, older), false);
+  assert.equal(env.convergenceLifecycleStates.length, 2, "each demand is consumed only once despite out-of-order reads");
 });
 
 for (const change of ["installation", "handle", "execution", "continuation", "birth", "daemon", "handoff"] as const) {
@@ -613,7 +642,7 @@ for (const change of ["installation", "handle", "execution", "continuation", "bi
     let entered!: () => void;
     const reading = new Promise<void>(resolve => { entered = resolve; });
     env.options.managed!.store.readManagedLaunchContract = async () => { entered(); await barrier; return "a".repeat(64); };
-    const pending = env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(installation));
+    const pending = env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(installation), {});
     await reading;
     const candidate = { ...installation };
     if (change === "handle") candidate.handle = { ...handle };
@@ -630,7 +659,7 @@ for (const change of ["installation", "handle", "execution", "continuation", "bi
   });
 }
 
-for (const trigger of ["arrival", "retry", "deferred"] as const) {
+for (const trigger of ["arrival", "retry", "deferred", "descriptor failure", "receipt failure"] as const) {
   test(`managed ${trigger} waits for guarded replacement before exact-continuation FIFO delivery`, { timeout: 5_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), "letagents-managed-admission-"));
     const inbox = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
@@ -638,9 +667,14 @@ for (const trigger of ["arrival", "retry", "deferred"] as const) {
     let current = installation;
     let wakes = 0;
     let sawRequest!: () => void;
-    const requested = new Promise<void>(resolve => { sawRequest = resolve; });
+    let requested = new Promise<void>(resolve => { sawRequest = resolve; });
     const scheduled: Promise<void>[] = [];
     const invoked: string[] = [];
+    const demands: object[] = [];
+    const recoveryDelays: number[] = [];
+    let resumedObserved!: () => void;
+    const resumedObservation = new Promise<void>(resolve => { resumedObserved = resolve; });
+    let polls = 0;
     const port: ProviderActionPort = {
       capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true,
         permissionPromptBridging: false, survivesRestart: true }),
@@ -657,11 +691,18 @@ for (const trigger of ["arrival", "retry", "deferred"] as const) {
         return { turnId, outcome: "no_reply", text: null };
       },
     };
-    const delivery = new SupervisedAgentDelivery(inbox, port, { poll: async () => ({}), publish: async () => {} },
+    const delivery = new SupervisedAgentDelivery(inbox, port, { poll: async ({ signal }) => {
+      polls += 1;
+      return new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true }));
+    }, publish: async () => {} },
       async agent => agent.handle === current.handle && agent.executionGenerationId === current.executionGenerationId,
-      0, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      0, undefined, async delay => { recoveryDelays.push(delay); }, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      agent => env.coordinator.canAdmitManagedDelivery(agent));
+      (agent, demand) => {
+        demands.push(demand);
+        if (env.state.resumedDelivery && current === installation) resumedObserved();
+        return env.coordinator.canAdmitManagedDelivery(agent, demand);
+      });
     env.options.inbox = inbox;
     env.options.delivery = delivery;
     env.options.streams.currentInstallation = () => current;
@@ -669,21 +710,38 @@ for (const trigger of ["arrival", "retry", "deferred"] as const) {
       execution_generation_id: current.executionGenerationId, agent_session_id: "session", credential_ref: "opaque",
       api_url: "http://127.0.0.1:4000", room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "now" });
     env.options.managed!.store.readManagedLaunchContract = async () => current === installation ? "b".repeat(64) : "a".repeat(64);
+    if (trigger === "descriptor failure" || trigger === "receipt failure") {
+      let failed = false;
+      const faultOnce = () => {
+        if (failed) return;
+        failed = true;
+        throw new Error("managed contract read temporarily unavailable");
+      };
+      if (trigger === "descriptor failure") {
+        const describe = env.options.provider!.describeManagedLaunchContract!;
+        env.options.provider!.describeManagedLaunchContract = async input => { faultOnce(); return describe(input); };
+      } else {
+        const read = env.options.managed!.store.readManagedLaunchContract;
+        env.options.managed!.store.readManagedLaunchContract = async input => { faultOnce(); return read(input); };
+      }
+    }
     env.options.managed!.resumeDelivery = async () => {
       env.state.resumedDelivery += 1;
-      await delivery.pump(deliveryAgentFor(current));
+      await delivery.refresh(deliveryAgentFor(current));
+      await resumedObservation;
+      await delivery.drainAdmittedTurns(["agent-1"]);
     };
     env.options.provider!.stopIdle = async (_native, guard) => {
       assert.equal(env.state.approvalHeld, true);
       guard();
+      if (trigger === "deferred" && env.state.resumedDelivery === 0) {
+        throw new ManagedRuntimeRefreshDeferred("native idle boundary temporarily unreadable");
+      }
       env.state.nativeStops += 1;
       return terminal;
     };
     env.options.terminals.replaceConfiguration = async (exact, stop) => {
       assert.equal(exact, installation);
-      if (trigger === "deferred" && env.state.nativeStops === 0 && env.state.resumedDelivery === 0) {
-        throw new ManagedRuntimeRefreshDeferred("permission changed after delivery reservation");
-      }
       await stop();
       current = { ...installation, nonce: Symbol("replacement"), executionGenerationId: "generation-2",
         handle: { ...handle, pid: 43, providerConnection: { ...connection, pid: 43, processIdentity: "codex:43" } },
@@ -709,7 +767,8 @@ for (const trigger of ["arrival", "retry", "deferred"] as const) {
         await inbox.transition(originalHead!.inbox_item_id, "blocked", { last_error: "preflight unavailable" });
         await delivery.retry(deliveryAgentFor(current), "1");
       }
-      await delivery.pump(deliveryAgentFor(current));
+      if (trigger === "deferred") await delivery.start(deliveryAgentFor(current));
+      else await delivery.pump(deliveryAgentFor(current));
       await requested;
       for (let index = 0; index < scheduled.length; index += 1) await scheduled[index];
       if (trigger === "deferred") {
@@ -717,10 +776,21 @@ for (const trigger of ["arrival", "retry", "deferred"] as const) {
         assert.deepEqual(invoked, []);
         assert.equal((await inbox.head("agent-1"))!.state, "pending");
         assert.equal(env.state.resumedDelivery, 1);
-        env.options.requestConvergence("agent-1"); // An independent permission/lifecycle event retries convergence.
+        assert.equal(current, installation, "deferral retains the exact original native installation");
+        assert.equal(polls, 2, "deferral restarted the real observation loop");
+        assert.equal(demands[0], demands[1], "loop replacement retains its original delivery demand");
+        requested = new Promise<void>(resolve => { sawRequest = resolve; });
+        // Native idle becomes readable without emitting a provider/approval
+        // event. Only an independent delivery wake retries the same runtime.
+        assert.equal(delivery.wake(deliveryAgentFor(current)), true);
+        await requested;
         for (let index = 0; index < scheduled.length; index += 1) await scheduled[index];
       }
       assert.equal(env.state.nativeStops, 1);
+      if (trigger === "descriptor failure" || trigger === "receipt failure") {
+        assert.deepEqual(recoveryDelays, [250], "existing tracked fault recovery owns the read retry");
+        assert.equal(demands[0], demands[1], "the failed read did not consume or replace its delivery demand");
+      }
       const receipts = await inbox.receipts("agent-1");
       assert.equal(receipts.length, 2);
       assert.deepEqual(invoked, receipts.map(receipt => receipt.inbox_item_id));

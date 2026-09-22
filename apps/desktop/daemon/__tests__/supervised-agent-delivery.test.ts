@@ -4498,6 +4498,39 @@ test("pending new turns wait for managed runtime admission without claiming the 
   } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("a delivery wake during admission survives the active pump and internal restarts retain its demand", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-admission-wake-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const demands: object[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    throw new Error("unadmitted delivery cannot reach the provider");
+  }), { poll: async () => ({}), publish: async () => {} }, currentAuthority,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  undefined, undefined, undefined, undefined, undefined, undefined, async (_agent, demand) => {
+    demands.push(demand);
+    if (demands.length === 1) { entered.resolve(); await release.promise; }
+    return false;
+  });
+  try {
+    await ingest(store);
+    const first = delivery.pump(agent);
+    await entered.promise;
+    assert.equal(delivery.wake(agent), true);
+    release.resolve();
+    await first;
+    await waitFor(() => demands.length === 2);
+    await delivery.drainAdmittedTurns([agent.agentId]);
+    assert.notEqual(demands[0], demands[1], "the independent wake has its own captured demand");
+    await delivery.pump(agent);
+    assert.equal(demands[2], demands[1], "internal restart must not create recursive refresh demand");
+    await delivery.poll(agent);
+    assert.notEqual(demands[3], demands[2], "a completed independent poll can retry a deferred native boundary");
+    assert.equal((await store.head(agent.agentId))!.state, "pending");
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("missing Codex room tools retain the exact inbox item without spending a model attempt", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-room-tools-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
