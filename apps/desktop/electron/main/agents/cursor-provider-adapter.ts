@@ -52,7 +52,7 @@ import {
   TURN_START_TIMEOUT_MS,
   CURSOR_SESSION_ID_PATTERN,
 } from "./cursor-provider-constants.js";
-import { safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
+import { createCursorRuntimeCustodyReader, safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
 import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 import {
@@ -647,11 +647,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private readonly supervisedProfileFactory: NonNullable<CursorProviderAdapterOptions["supervisedProfileFactory"]>;
   private readonly handles = new Map<string, CursorProviderHandle>();
   private readonly processCustody: ProviderProcessCustody;
+  readonly runtimeCustody: ReturnType<typeof createCursorRuntimeCustodyReader>;
 
   constructor(options: CursorProviderAdapterOptions = {}) {
     this.cursorBin = options.cursorBin || desktopRuntimeEnvironment().LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.processCustody = new ProviderProcessCustody(this.deps);
+    this.runtimeCustody = createCursorRuntimeCustodyReader(this.processCustody, this.handles);
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
     this.turnStartTimeoutMs = options.turnStartTimeoutMs ?? TURN_START_TIMEOUT_MS;
@@ -677,13 +679,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
           devEntryPath: input.devMcpServerEntryPath,
         }),
       }));
-  }
-
-  runtimeCustody(workAttemptId: string): "absent" | "owned" | "unknown" {
-    const handle = this.handles.get(workAttemptId);
-    if (handle && (handle.liveTurn || handle.activeRoomTurnId || handle.roomTurnOperationId
-      || handle.roomTurnAbortController || handle.roomTurnOperationSettled)) return "unknown";
-    return this.processCustody.state(workAttemptId);
   }
 
   capabilities(): ProviderAdapterCapabilities {
@@ -1568,13 +1563,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CursorProviderHandle> {
-    return this.processCustody.acquire(req.workAttemptId, () => this.startAcquired(req, resumeRef));
-  }
-
-  private async startAcquired(
-    req: ProviderSpawnRequest,
-    resumeRef: ProviderContinuationRef | null,
-  ): Promise<CursorProviderHandle> {
     const current = this.handles.get(req.workAttemptId);
     if (current && !current.terminal) {
       throw new Error(`Cursor work attempt '${req.workAttemptId}' already has a live lane.`);
@@ -1686,899 +1674,885 @@ export class CursorProviderAdapter implements ProviderAdapter {
     markDurableTurnStarted?: ProviderRoomTurnOptions["markDurableTurnStarted"],
     settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"],
   ): Promise<LiveTurn> {
-    return this.processCustody.acquire(handle.workAttemptId, () => this.beginAcquiredTurn(handle, prompt, resumeSessionId,
-      roomTurnId, checkpointProviderState, checkpointTurnStarted, checkpointPreparedTurn, launchSignal, markDurableTurnStarted, settleLifecycleBeforeIdle));
-  }
-
-  private async beginAcquiredTurn(
-    handle: CursorProviderHandle,
-    prompt: string,
-    resumeSessionId: string | null,
-    roomTurnId: string | null = null,
-    checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"],
-    checkpointTurnStarted?: ProviderRoomTurnOptions["checkpointTurnStarted"],
-    checkpointPreparedTurn?: ProviderRoomTurnOptions["checkpointPreparedTurn"],
-    launchSignal?: AbortSignal,
-    markDurableTurnStarted?: ProviderRoomTurnOptions["markDurableTurnStarted"],
-    settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"],
-  ): Promise<LiveTurn> {
-    throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
-    let childEnv: NodeJS.ProcessEnv | undefined;
-    let deniedReadPaths: string[] | undefined;
-    let deniedReadSubpaths: string[] | undefined;
-    let deniedReadMetadataPaths: string[] | undefined;
-    let deniedReadWriteRegexes: string[] | undefined;
-    let deniedWriteRegexes: string[] | undefined;
-    let deniedWritePaths: string[] | undefined;
-    let deniedWriteStructuralPaths: string[] | undefined;
-    let deniedWriteSubpaths: string[] | undefined;
-    let deniedExecSubpaths: string[] | undefined;
-    let allowedWriteSubpaths: string[] | undefined;
-    let allowedReadSubpaths: string[] | undefined;
-    let mcpConnectorRoot: string | undefined;
-    let mcpConnectorSocketPath: string | undefined;
-    let mcpRuntimeEntryPath: string | undefined;
-    let mcpRuntimeEnv: Readonly<Record<string, string>> | undefined;
-    let providerAuthorization: string | undefined;
-    let supervisedRuntimeDataDir: string | undefined;
-    let workspaceGeneration: SupervisedWorkspaceGenerationHandle | null = null;
-    let providerWorkspace = handle.cwd;
-    const exactWorkspaceOnly = usesExactScratchWorkspace(handle.spawnRequest);
-    const apiBaseUrl = handle.spawnRequest.supervisorWorkerSession?.apiUrl ?? desktopApiUrl;
-    if (handle.deliveryMode === "daemon_inbox") {
-      // First enumerate from a random disposable profile with an inert local
-      // MCP and no turn/provider capability. The authority wrapper denies
-      // direct networking and confines readable data/process execution.
-      const inspectionProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-inspection-"));
-      try {
-        const enumerationProfile = this.supervisedProfileFactory({
-          apiBaseUrl,
-          workAttemptId: `${handle.workAttemptId}:mcp-inspection:${randomUUID()}`,
-          cwd: handle.cwd,
-          profileRoot: inspectionProfileRoot,
-          includeAuth: false,
-          inspectionOnly: true,
-          exactWorkspaceOnly,
-          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
-        });
-        const enumerationEnv = cursorMcpInspectionEnv({
-          ...buildCursorChildEnv(enumerationProfile.env),
-          AGENT_CLI_CREDENTIAL_STORE: "file",
-        });
-        await this.deps.attestSupervisedMcp({
-          cursorBin: this.cursorBin,
-          cwd: inspectionProfileRoot,
-          env: enumerationEnv,
-          writableProfileRoot: inspectionProfileRoot,
-          expectedServerName: enumerationProfile.mcpServerName,
-          signal: launchSignal,
-        });
-      } catch (error) {
-        if (launchSignal?.aborted) {
-          throw new CursorRoomTurnNotDispatchedError(
-            "Cursor MCP attestation was interrupted and reaped before native dispatch.",
-            roomTurnId,
-          );
-        }
-        throw error;
-      } finally {
-        rmSync(inspectionProfileRoot, { recursive: true, force: true });
-      }
+    return this.processCustody.acquire(handle.workAttemptId, async () => {
       throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
-
-      // Pass one can only write its own now-deleted root. Create pass two
-      // afterward so an escaped pass-one descendant never had path authority
-      // over the profile that exercises the packaged bridge.
-      const bridgeProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-bridge-"));
-      try {
-        const bridgeProfile = this.supervisedProfileFactory({
-          apiBaseUrl,
-          workAttemptId: `${handle.workAttemptId}:mcp-bridge:${randomUUID()}`,
-          cwd: handle.cwd,
-          profileRoot: bridgeProfileRoot,
-          includeAuth: false,
-          inspectionOnly: false,
-          exactWorkspaceOnly,
-          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
-          mcpWorkingDirectory: bridgeProfileRoot,
-          // Exercise the packaged server in its real credentialless bounded
-          // mode. Owner mode would attempt repository auto-join after stdio
-          // connect and can fail for reasons unrelated to MCP readiness. The
-          // inspection never invokes a tool and its network sandbox admits no
-          // supervisor socket, so these two non-secret mode markers cannot
-          // borrow or exercise turn authority.
-          supervisorMcpEnv: {
-            LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
-            LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
-            LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
-          },
-        });
-        const bridgeEnv = cursorMcpInspectionEnv({
-          ...buildCursorChildEnv(bridgeProfile.env),
-          // Prevent Cursor's shell launcher from consulting the login keychain
-          // while validating a credentialless, local packaged bridge.
-          AGENT_CLI_CREDENTIAL_STORE: "file",
-        });
-        await this.deps.attestSupervisedMcp({
-          cursorBin: this.cursorBin,
-          cwd: bridgeProfileRoot,
-          env: bridgeEnv,
-          writableProfileRoot: bridgeProfileRoot,
-          requiredReadableRoots: bridgeProfile.mcpRuntimeReadRoots,
-          expectedServerName: bridgeProfile.mcpServerName,
-          timeoutMs: CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS,
-          signal: launchSignal,
-        });
-      } catch (error) {
-        if (supervisedRuntimeDataDir) {
-          removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
-          supervisedRuntimeDataDir = undefined;
+      let childEnv: NodeJS.ProcessEnv | undefined;
+      let deniedReadPaths: string[] | undefined;
+      let deniedReadSubpaths: string[] | undefined;
+      let deniedReadMetadataPaths: string[] | undefined;
+      let deniedReadWriteRegexes: string[] | undefined;
+      let deniedWriteRegexes: string[] | undefined;
+      let deniedWritePaths: string[] | undefined;
+      let deniedWriteStructuralPaths: string[] | undefined;
+      let deniedWriteSubpaths: string[] | undefined;
+      let deniedExecSubpaths: string[] | undefined;
+      let allowedWriteSubpaths: string[] | undefined;
+      let allowedReadSubpaths: string[] | undefined;
+      let mcpConnectorRoot: string | undefined;
+      let mcpConnectorSocketPath: string | undefined;
+      let mcpRuntimeEntryPath: string | undefined;
+      let mcpRuntimeEnv: Readonly<Record<string, string>> | undefined;
+      let providerAuthorization: string | undefined;
+      let supervisedRuntimeDataDir: string | undefined;
+      let workspaceGeneration: SupervisedWorkspaceGenerationHandle | null = null;
+      let providerWorkspace = handle.cwd;
+      const exactWorkspaceOnly = usesExactScratchWorkspace(handle.spawnRequest);
+      const apiBaseUrl = handle.spawnRequest.supervisorWorkerSession?.apiUrl ?? desktopApiUrl;
+      if (handle.deliveryMode === "daemon_inbox") {
+        // First enumerate from a random disposable profile with an inert local
+        // MCP and no turn/provider capability. The authority wrapper denies
+        // direct networking and confines readable data/process execution.
+        const inspectionProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-inspection-"));
+        try {
+          const enumerationProfile = this.supervisedProfileFactory({
+            apiBaseUrl,
+            workAttemptId: `${handle.workAttemptId}:mcp-inspection:${randomUUID()}`,
+            cwd: handle.cwd,
+            profileRoot: inspectionProfileRoot,
+            includeAuth: false,
+            inspectionOnly: true,
+            exactWorkspaceOnly,
+            devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+          });
+          const enumerationEnv = cursorMcpInspectionEnv({
+            ...buildCursorChildEnv(enumerationProfile.env),
+            AGENT_CLI_CREDENTIAL_STORE: "file",
+          });
+          await this.deps.attestSupervisedMcp({
+            cursorBin: this.cursorBin,
+            cwd: inspectionProfileRoot,
+            env: enumerationEnv,
+            writableProfileRoot: inspectionProfileRoot,
+            expectedServerName: enumerationProfile.mcpServerName,
+            signal: launchSignal,
+          });
+        } catch (error) {
+          if (launchSignal?.aborted) {
+            throw new CursorRoomTurnNotDispatchedError(
+              "Cursor MCP attestation was interrupted and reaped before native dispatch.",
+              roomTurnId,
+            );
+          }
+          throw error;
+        } finally {
+          rmSync(inspectionProfileRoot, { recursive: true, force: true });
         }
-        if (launchSignal?.aborted) {
-          throw new CursorRoomTurnNotDispatchedError(
-            "Cursor MCP attestation was interrupted and reaped before native dispatch.",
-            roomTurnId,
-          );
-        }
-        throw error;
-      } finally {
-        rmSync(bridgeProfileRoot, { recursive: true, force: true });
-      }
-      throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
-      // Prove the live credential-store identity immediately before every
-      // dispatch. Cursor's cached authInfo can lag account/team membership and
-      // ambient API credentials are deliberately scrubbed, so a fresh random
-      // profile runs only `status --format json`, requires real userInfo, and
-      // fails closed for team-managed identities. The attested auth-only files
-      // then overwrite stale metadata in the stable attempt profile.
-      const identityProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-identity-"));
-      try {
-        let identityProfile = this.supervisedProfileFactory({
-          apiBaseUrl,
-          workAttemptId: `${handle.workAttemptId}:identity:${randomUUID()}`,
-          cwd: handle.cwd,
-          profileRoot: identityProfileRoot,
-          includeAuth: true,
-          identityAttestationOnly: true,
-          inspectionOnly: true,
-          exactWorkspaceOnly,
-          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
-          mcpWorkingDirectory: identityProfileRoot,
-        });
-        const personalIdentity = await this.deps.attestPersonalIdentity({
-          cursorBin: this.cursorBin,
-          cwd: identityProfileRoot,
-          env: cursorDaemonChildEnv(identityProfile.env),
-          writableProfileRoot: identityProfileRoot,
-          requiredReadableRoots: identityProfile.authReadRoots,
-          timeoutMs: CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
-          signal: launchSignal,
-        });
-        providerAuthorization = personalIdentity.providerAuthorization;
-        if (!providerAuthorization) {
-          throw new Error("Cursor live identity attestation returned no provider authorization proof.");
-        }
-        // Reseal after status so any refreshed teamId is checked before its
-        // sanitized auth metadata becomes the final turn's source.
-        identityProfile = this.supervisedProfileFactory({
-          apiBaseUrl,
-          workAttemptId: `${handle.workAttemptId}:identity:resealed`,
-          cwd: handle.cwd,
-          profileRoot: identityProfileRoot,
-          includeAuth: true,
-          authSourceHomeDir: identityProfile.homeDir,
-          attestedPersonalIdentity: personalIdentity,
-          exposeLoginCredentials: false,
-          inspectionOnly: true,
-          exactWorkspaceOnly,
-          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
-          mcpWorkingDirectory: identityProfileRoot,
-        });
         throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
 
-        // Only after both credentialless probes are removed and live identity
-        // is proven do we atomically reseal the stable profile and mint the
-        // real MCP child's exact turn capability.
-        // Scratch attempts already run in a disposable room-only workspace. A
-        // Git-backed generation here would either fail for the ordinary
-        // non-repository directory or walk up into an unrelated owner repo.
-        if (
-          roomTurnId
-          && cursorPermissionUsesWorkspaceGeneration(handle.spawnRequest.permissionProfileId)
-          && !usesExactScratchWorkspace(handle.spawnRequest)
-        ) {
-          workspaceGeneration = await this.deps.createWorkspaceGeneration({
-            realWorkspace: handle.cwd,
-            turnIdentity: roomTurnId,
+        // Pass one can only write its own now-deleted root. Create pass two
+        // afterward so an escaped pass-one descendant never had path authority
+        // over the profile that exercises the packaged bridge.
+        const bridgeProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-bridge-"));
+        try {
+          const bridgeProfile = this.supervisedProfileFactory({
+            apiBaseUrl,
+            workAttemptId: `${handle.workAttemptId}:mcp-bridge:${randomUUID()}`,
+            cwd: handle.cwd,
+            profileRoot: bridgeProfileRoot,
+            includeAuth: false,
+            inspectionOnly: false,
+            exactWorkspaceOnly,
+            devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+            mcpWorkingDirectory: bridgeProfileRoot,
+            // Exercise the packaged server in its real credentialless bounded
+            // mode. Owner mode would attempt repository auto-join after stdio
+            // connect and can fail for reasons unrelated to MCP readiness. The
+            // inspection never invokes a tool and its network sandbox admits no
+            // supervisor socket, so these two non-secret mode markers cannot
+            // borrow or exercise turn authority.
+            supervisorMcpEnv: {
+              LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+              LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+              LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
+            },
           });
+          const bridgeEnv = cursorMcpInspectionEnv({
+            ...buildCursorChildEnv(bridgeProfile.env),
+            // Prevent Cursor's shell launcher from consulting the login keychain
+            // while validating a credentialless, local packaged bridge.
+            AGENT_CLI_CREDENTIAL_STORE: "file",
+          });
+          await this.deps.attestSupervisedMcp({
+            cursorBin: this.cursorBin,
+            cwd: bridgeProfileRoot,
+            env: bridgeEnv,
+            writableProfileRoot: bridgeProfileRoot,
+            requiredReadableRoots: bridgeProfile.mcpRuntimeReadRoots,
+            expectedServerName: bridgeProfile.mcpServerName,
+            timeoutMs: CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS,
+            signal: launchSignal,
+          });
+        } catch (error) {
+          if (supervisedRuntimeDataDir) {
+            removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
+            supervisedRuntimeDataDir = undefined;
+          }
+          if (launchSignal?.aborted) {
+            throw new CursorRoomTurnNotDispatchedError(
+              "Cursor MCP attestation was interrupted and reaped before native dispatch.",
+              roomTurnId,
+            );
+          }
+          throw error;
+        } finally {
+          rmSync(bridgeProfileRoot, { recursive: true, force: true });
         }
-        providerWorkspace = workspaceGeneration?.liveWorkspace ?? handle.cwd;
-        const supervisorMcpEnv = cursorSupervisorMcpEnv(handle.spawnRequest, roomTurnId);
-        mcpConnectorRoot = join(CURSOR_MCP_CONNECTOR_PARENT, `letagents-cursor-mcp-${randomUUID()}`);
-        mcpConnectorSocketPath = join(mcpConnectorRoot, "stdio.sock");
-        const profile = this.supervisedProfileFactory({
-          apiBaseUrl,
-          workAttemptId: handle.workAttemptId,
-          cwd: providerWorkspace,
-          permissionProfileId: handle.spawnRequest.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
-          exactWorkspaceOnly,
-          authSourceHomeDir: identityProfile.homeDir,
-          attestedPersonalIdentity: personalIdentity,
-          exposeLoginCredentials: false,
-          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
-          mcpConnectorSocketPath,
+        throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
+        // Prove the live credential-store identity immediately before every
+        // dispatch. Cursor's cached authInfo can lag account/team membership and
+        // ambient API credentials are deliberately scrubbed, so a fresh random
+        // profile runs only `status --format json`, requires real userInfo, and
+        // fails closed for team-managed identities. The attested auth-only files
+        // then overwrite stale metadata in the stable attempt profile.
+        const identityProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-identity-"));
+        try {
+          let identityProfile = this.supervisedProfileFactory({
+            apiBaseUrl,
+            workAttemptId: `${handle.workAttemptId}:identity:${randomUUID()}`,
+            cwd: handle.cwd,
+            profileRoot: identityProfileRoot,
+            includeAuth: true,
+            identityAttestationOnly: true,
+            inspectionOnly: true,
+            exactWorkspaceOnly,
+            devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+            mcpWorkingDirectory: identityProfileRoot,
+          });
+          const personalIdentity = await this.deps.attestPersonalIdentity({
+            cursorBin: this.cursorBin,
+            cwd: identityProfileRoot,
+            env: cursorDaemonChildEnv(identityProfile.env),
+            writableProfileRoot: identityProfileRoot,
+            requiredReadableRoots: identityProfile.authReadRoots,
+            timeoutMs: CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
+            signal: launchSignal,
+          });
+          providerAuthorization = personalIdentity.providerAuthorization;
+          if (!providerAuthorization) {
+            throw new Error("Cursor live identity attestation returned no provider authorization proof.");
+          }
+          // Reseal after status so any refreshed teamId is checked before its
+          // sanitized auth metadata becomes the final turn's source.
+          identityProfile = this.supervisedProfileFactory({
+            apiBaseUrl,
+            workAttemptId: `${handle.workAttemptId}:identity:resealed`,
+            cwd: handle.cwd,
+            profileRoot: identityProfileRoot,
+            includeAuth: true,
+            authSourceHomeDir: identityProfile.homeDir,
+            attestedPersonalIdentity: personalIdentity,
+            exposeLoginCredentials: false,
+            inspectionOnly: true,
+            exactWorkspaceOnly,
+            devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+            mcpWorkingDirectory: identityProfileRoot,
+          });
+          throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
+
+          // Only after both credentialless probes are removed and live identity
+          // is proven do we atomically reseal the stable profile and mint the
+          // real MCP child's exact turn capability.
+          // Scratch attempts already run in a disposable room-only workspace. A
+          // Git-backed generation here would either fail for the ordinary
+          // non-repository directory or walk up into an unrelated owner repo.
+          if (
+            roomTurnId
+            && cursorPermissionUsesWorkspaceGeneration(handle.spawnRequest.permissionProfileId)
+            && !usesExactScratchWorkspace(handle.spawnRequest)
+          ) {
+            workspaceGeneration = await this.deps.createWorkspaceGeneration({
+              realWorkspace: handle.cwd,
+              turnIdentity: roomTurnId,
+            });
+          }
+          providerWorkspace = workspaceGeneration?.liveWorkspace ?? handle.cwd;
+          const supervisorMcpEnv = cursorSupervisorMcpEnv(handle.spawnRequest, roomTurnId);
+          mcpConnectorRoot = join(CURSOR_MCP_CONNECTOR_PARENT, `letagents-cursor-mcp-${randomUUID()}`);
+          mcpConnectorSocketPath = join(mcpConnectorRoot, "stdio.sock");
+          const profile = this.supervisedProfileFactory({
+            apiBaseUrl,
+            workAttemptId: handle.workAttemptId,
+            cwd: providerWorkspace,
+            permissionProfileId: handle.spawnRequest.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
+            exactWorkspaceOnly,
+            authSourceHomeDir: identityProfile.homeDir,
+            attestedPersonalIdentity: personalIdentity,
+            exposeLoginCredentials: false,
+            devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+            mcpConnectorSocketPath,
+          });
+          this.deps.bindPersonalIdentity(profile, personalIdentity);
+          childEnv = cursorDaemonChildEnv(profile.env);
+          const toolchainPath = cursorSandboxToolchainBinPaths();
+          if (toolchainPath.length > 0) {
+            // Apple's /usr/bin compiler drivers are xcrun shims, which require
+            // host temp/cache writes. Prefer the real selected compiler bins so
+            // ordinary repo builds work without widening the repo-only fence.
+            childEnv.PATH = cursorSandboxPathWithToolchains(childEnv.PATH ?? "", toolchainPath);
+          }
+          const sdkRoot = cursorSandboxSdkRoot();
+          if (sdkRoot) childEnv.SDKROOT = sdkRoot;
+          // Cursor's long stable Application Support path otherwise falls back
+          // to the shared /tmp/.cursor worker socket. A new unpredictable short
+          // root per turn prevents both ambient-worker reuse and a detached old
+          // helper from colliding with the next resumed turn.
+          supervisedRuntimeDataDir = prepareCursorTurnRuntimeDataDir();
+          childEnv.CURSOR_DATA_DIR = supervisedRuntimeDataDir;
+          // Cursor's installed launcher adds `--use-system-ca` for memory/Keychain
+          // stores, which makes Node enumerate the user's macOS Keychain. The
+          // file store is confined to this owner-private profile; Cursor writes
+          // only our public argv placeholder and the wrapper removes it before
+          // publishing terminal evidence.
+          childEnv.AGENT_CLI_CREDENTIAL_STORE = "file";
+          deniedReadPaths = profile.nativeDeniedReadPaths;
+          deniedReadSubpaths = profile.nativeDeniedReadSubpaths;
+          deniedReadMetadataPaths = profile.nativeDeniedReadMetadataPaths;
+          deniedReadWriteRegexes = profile.nativeDeniedReadWriteRegexes;
+          deniedWriteRegexes = profile.nativeDeniedWriteRegexes;
+          deniedWritePaths = profile.nativeDeniedWritePaths;
+          deniedWriteStructuralPaths = profile.nativeDeniedWriteStructuralPaths;
+          deniedWriteSubpaths = profile.nativeDeniedWriteSubpaths;
+          deniedExecSubpaths = profile.nativeDeniedExecSubpaths;
+          allowedWriteSubpaths = profile.nativeAllowedWriteSubpaths?.length
+            ? [...new Set([
+              ...profile.nativeAllowedWriteSubpaths,
+              ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+            ])]
+            : undefined;
+          allowedReadSubpaths = profile.nativeAllowedReadSubpaths?.length
+            ? [...new Set([
+              ...profile.nativeAllowedReadSubpaths,
+              ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+              ...(workspaceGeneration?.readOnlyRoots.flatMap((entry) => [
+                ...cursorSandboxPathVariants(entry.sourcePath),
+                ...(entry.generationPath ? cursorSandboxPathVariants(entry.generationPath) : []),
+              ]) ?? []),
+            ])]
+            : undefined;
+          deniedExecSubpaths = [...new Set([
+            ...(deniedExecSubpaths ?? []),
+            ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+          ])];
+          mcpRuntimeEntryPath = profile.mcpRuntimeEntryPath;
+          if (!profile.mcpRuntimeEnv) {
+            throw new Error("Supervised Cursor's wrapper-hosted MCP environment is unavailable.");
+          }
+          const mcpRuntimeRoot = dirname(mcpConnectorSocketPath);
+          mcpRuntimeEnv = {
+            ELECTRON_RUN_AS_NODE: "1",
+            LETAGENTS_API_URL: profile.mcpRuntimeEnv.LETAGENTS_API_URL,
+            HOME: join(mcpRuntimeRoot, "home"),
+            XDG_CONFIG_HOME: join(mcpRuntimeRoot, "config"),
+            XDG_DATA_HOME: join(mcpRuntimeRoot, "data"),
+            XDG_CACHE_HOME: join(mcpRuntimeRoot, "cache"),
+            CURSOR_CONFIG_DIR: join(mcpRuntimeRoot, "config", "cursor"),
+            CURSOR_DATA_DIR: join(mcpRuntimeRoot, "data", "cursor"),
+            NODE_COMPILE_CACHE: join(mcpRuntimeRoot, "cache", "node-compile-cache"),
+            CURSOR_API_KEY: "",
+            CURSOR_AUTH_TOKEN: "",
+            ...supervisorMcpEnv,
+          };
+        } catch (error) {
+          if (workspaceGeneration) {
+            await this.abandonTurnWorkspaceGeneration(workspaceGeneration);
+            workspaceGeneration = null;
+          }
+          if (launchSignal?.aborted) {
+            throw new CursorRoomTurnNotDispatchedError(
+              "Cursor identity attestation was interrupted before native dispatch.",
+              roomTurnId,
+            );
+          }
+          throw error;
+        } finally {
+          rmSync(identityProfileRoot, { recursive: true, force: true });
+        }
+      }
+      const nativeResumeSession = resumeSessionId?.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX)
+        ? null
+        : resumeSessionId
+          ? requireCursorSessionId(resumeSessionId, "Cursor resume session")
+          : null;
+      const args = [
+        "-p",
+        "--output-format", "stream-json",
+        // Cursor otherwise merges every .cursor/cli.json from the Git root down
+        // to --workspace after our static check. Keep the provider's own native
+        // suppression in addition to the per-turn filesystem revalidation.
+        ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-project-configs"] : []),
+        ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-auto-update"] : []),
+        // cursor-agent has no headless per-server MCP approval (Cursor confirms
+        // it is unimplemented); --approve-mcps is the ONLY non-interactive way to
+        // load an MCP server. Without it the sealed HOME letagents MCP never
+        // loads, so complete_room_turn is never exposed and the turn can never
+        // attest (its "did not attest ... before model authority" timeout). This
+        // is scoped, not blanket: the sealed profile is the sole MCP surface --
+        // the HOME profile mcp.json holds only the letagents server, and every
+        // workspace .cursor/mcp.json is denied-read by the native sandbox (see
+        // SUPERVISED_CURSOR_PROJECT_HIDDEN_AUTHORITY_FILES -> nativeDeniedReadPaths),
+        // so a checked-in or concurrently-added project server cannot be read,
+        // let alone approved. --approve-mcps therefore approves exactly one MCP.
+        ...(handle.deliveryMode === "daemon_inbox" ? ["--approve-mcps"] : []),
+        "--trust",
+        // Read-only has no native sandbox field in its durable policy, so add
+        // the supervised outer boundary explicitly. Write profiles carry their
+        // exact enabled/disabled native choice in policyArgs; both stay inside
+        // the independent OS workspace/process/network boundary.
+        ...(handle.deliveryMode === "daemon_inbox" && handle.spawnRequest.permissionProfileId === "read_only"
+          ? ["--sandbox", "enabled"]
+          : []),
+        "--workspace", providerWorkspace,
+        ...handle.policyArgs,
+        ...(nativeResumeSession ? [`--resume=${nativeResumeSession}`] : []),
+        prompt,
+      ];
+      const statePath = roomTurnId && handle.supervisedProfile
+        ? join(
+          handle.supervisedProfile.configDir,
+          `letagents-cursor-turn-${createHash("sha256").update(roomTurnId).digest("hex")}.jsonl`,
+        )
+        : null;
+      if (statePath) {
+        this.deps.prepareTurnState(statePath);
+      }
+      let child: CursorCliChild;
+      try {
+        child = this.deps.launchTurn({
+        cursorBin: this.cursorBin,
+        args,
+        // Start inside the sealed private profile so no ambient launch cwd can
+        // contribute config before Cursor resolves --workspace. Cursor later
+        // changes into that workspace and can discover a concurrently-added
+        // project MCP; the unpredictable bridge alias, approval-state purge, and
+        // the native sandbox denying every workspace .cursor/mcp.json read keep
+        // such a late server unreadable, so --approve-mcps (above) can only ever
+        // approve the sealed HOME letagents server.
+        cwd: handle.deliveryMode === "daemon_inbox" && handle.supervisedProfile
+          ? dirname(handle.supervisedProfile.homeDir)
+          : handle.cwd,
+        ...(childEnv ? { env: childEnv } : {}),
+        ...(deniedReadPaths?.length ? { deniedReadPaths } : {}),
+        ...(deniedReadSubpaths?.length ? { deniedReadSubpaths } : {}),
+        ...(deniedReadMetadataPaths?.length ? { deniedReadMetadataPaths } : {}),
+        ...(deniedReadWriteRegexes?.length ? { deniedReadWriteRegexes } : {}),
+        ...(deniedWriteRegexes?.length ? { deniedWriteRegexes } : {}),
+        ...(deniedWritePaths?.length ? { deniedWritePaths } : {}),
+        ...(deniedWriteStructuralPaths?.length ? { deniedWriteStructuralPaths } : {}),
+        ...(deniedWriteSubpaths?.length ? { deniedWriteSubpaths } : {}),
+        ...(deniedExecSubpaths?.length ? { deniedExecSubpaths } : {}),
+        ...(allowedWriteSubpaths?.length ? { allowedWriteSubpaths } : {}),
+        ...(allowedReadSubpaths?.length ? { allowedReadSubpaths } : {}),
+        ...(handle.deliveryMode === "daemon_inbox"
+          ? {
+            allowedNetworkUnixSockets: [mcpConnectorSocketPath!],
+            // Cursor's headless worker binds a private stdio socket under this
+            // per-turn data dir; the sandbox must admit that one bind+connect.
+            allowedInternalUnixSocketRoots: [supervisedRuntimeDataDir!],
+          }
+          : {}),
+        ...(mcpConnectorSocketPath ? { mcpConnectorSocketPath } : {}),
+        ...(mcpRuntimeEntryPath ? { mcpRuntimeEntryPath } : {}),
+        ...(handle.deliveryMode === "daemon_inbox" ? { mcpRuntimeCwd: providerWorkspace } : {}),
+        ...(mcpRuntimeEnv ? { mcpRuntimeEnv } : {}),
+        ...(providerAuthorization ? { providerAuthorization } : {}),
+        ...(handle.deliveryMode === "daemon_inbox" ? { deferStart: true } : {}),
+        ...(handle.deliveryMode === "daemon_inbox" ? { restrictRemoteAuthority: true } : {}),
+        ...(handle.deliveryMode === "daemon_inbox" && nativeResumeSession
+          && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nativeResumeSession)
+          ? { nativeResumeSessionId: nativeResumeSession }
+          : {}),
+        ...(workspaceGeneration
+          ? { workspaceGenerationManifestPath: workspaceGeneration.manifestPath }
+          : {}),
+        ...(statePath ? { statePath } : {}),
         });
-        this.deps.bindPersonalIdentity(profile, personalIdentity);
-        childEnv = cursorDaemonChildEnv(profile.env);
-        const toolchainPath = cursorSandboxToolchainBinPaths();
-        if (toolchainPath.length > 0) {
-          // Apple's /usr/bin compiler drivers are xcrun shims, which require
-          // host temp/cache writes. Prefer the real selected compiler bins so
-          // ordinary repo builds work without widening the repo-only fence.
-          childEnv.PATH = cursorSandboxPathWithToolchains(childEnv.PATH ?? "", toolchainPath);
-        }
-        const sdkRoot = cursorSandboxSdkRoot();
-        if (sdkRoot) childEnv.SDKROOT = sdkRoot;
-        // Cursor's long stable Application Support path otherwise falls back
-        // to the shared /tmp/.cursor worker socket. A new unpredictable short
-        // root per turn prevents both ambient-worker reuse and a detached old
-        // helper from colliding with the next resumed turn.
-        supervisedRuntimeDataDir = prepareCursorTurnRuntimeDataDir();
-        childEnv.CURSOR_DATA_DIR = supervisedRuntimeDataDir;
-        // Cursor's installed launcher adds `--use-system-ca` for memory/Keychain
-        // stores, which makes Node enumerate the user's macOS Keychain. The
-        // file store is confined to this owner-private profile; Cursor writes
-        // only our public argv placeholder and the wrapper removes it before
-        // publishing terminal evidence.
-        childEnv.AGENT_CLI_CREDENTIAL_STORE = "file";
-        deniedReadPaths = profile.nativeDeniedReadPaths;
-        deniedReadSubpaths = profile.nativeDeniedReadSubpaths;
-        deniedReadMetadataPaths = profile.nativeDeniedReadMetadataPaths;
-        deniedReadWriteRegexes = profile.nativeDeniedReadWriteRegexes;
-        deniedWriteRegexes = profile.nativeDeniedWriteRegexes;
-        deniedWritePaths = profile.nativeDeniedWritePaths;
-        deniedWriteStructuralPaths = profile.nativeDeniedWriteStructuralPaths;
-        deniedWriteSubpaths = profile.nativeDeniedWriteSubpaths;
-        deniedExecSubpaths = profile.nativeDeniedExecSubpaths;
-        allowedWriteSubpaths = profile.nativeAllowedWriteSubpaths?.length
-          ? [...new Set([
-            ...profile.nativeAllowedWriteSubpaths,
-            ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
-          ])]
-          : undefined;
-        allowedReadSubpaths = profile.nativeAllowedReadSubpaths?.length
-          ? [...new Set([
-            ...profile.nativeAllowedReadSubpaths,
-            ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
-            ...(workspaceGeneration?.readOnlyRoots.flatMap((entry) => [
-              ...cursorSandboxPathVariants(entry.sourcePath),
-              ...(entry.generationPath ? cursorSandboxPathVariants(entry.generationPath) : []),
-            ]) ?? []),
-          ])]
-          : undefined;
-        deniedExecSubpaths = [...new Set([
-          ...(deniedExecSubpaths ?? []),
-          ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
-        ])];
-        mcpRuntimeEntryPath = profile.mcpRuntimeEntryPath;
-        if (!profile.mcpRuntimeEnv) {
-          throw new Error("Supervised Cursor's wrapper-hosted MCP environment is unavailable.");
-        }
-        const mcpRuntimeRoot = dirname(mcpConnectorSocketPath);
-        mcpRuntimeEnv = {
-          ELECTRON_RUN_AS_NODE: "1",
-          LETAGENTS_API_URL: profile.mcpRuntimeEnv.LETAGENTS_API_URL,
-          HOME: join(mcpRuntimeRoot, "home"),
-          XDG_CONFIG_HOME: join(mcpRuntimeRoot, "config"),
-          XDG_DATA_HOME: join(mcpRuntimeRoot, "data"),
-          XDG_CACHE_HOME: join(mcpRuntimeRoot, "cache"),
-          CURSOR_CONFIG_DIR: join(mcpRuntimeRoot, "config", "cursor"),
-          CURSOR_DATA_DIR: join(mcpRuntimeRoot, "data", "cursor"),
-          NODE_COMPILE_CACHE: join(mcpRuntimeRoot, "cache", "node-compile-cache"),
-          CURSOR_API_KEY: "",
-          CURSOR_AUTH_TOKEN: "",
-          ...supervisorMcpEnv,
-        };
       } catch (error) {
+        if (supervisedRuntimeDataDir) removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
         if (workspaceGeneration) {
           await this.abandonTurnWorkspaceGeneration(workspaceGeneration);
           workspaceGeneration = null;
         }
-        if (launchSignal?.aborted) {
-          throw new CursorRoomTurnNotDispatchedError(
-            "Cursor identity attestation was interrupted before native dispatch.",
-            roomTurnId,
-          );
-        }
         throw error;
-      } finally {
-        rmSync(identityProfileRoot, { recursive: true, force: true });
       }
-    }
-    const nativeResumeSession = resumeSessionId?.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX)
-      ? null
-      : resumeSessionId
-        ? requireCursorSessionId(resumeSessionId, "Cursor resume session")
-        : null;
-    const args = [
-      "-p",
-      "--output-format", "stream-json",
-      // Cursor otherwise merges every .cursor/cli.json from the Git root down
-      // to --workspace after our static check. Keep the provider's own native
-      // suppression in addition to the per-turn filesystem revalidation.
-      ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-project-configs"] : []),
-      ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-auto-update"] : []),
-      // cursor-agent has no headless per-server MCP approval (Cursor confirms
-      // it is unimplemented); --approve-mcps is the ONLY non-interactive way to
-      // load an MCP server. Without it the sealed HOME letagents MCP never
-      // loads, so complete_room_turn is never exposed and the turn can never
-      // attest (its "did not attest ... before model authority" timeout). This
-      // is scoped, not blanket: the sealed profile is the sole MCP surface --
-      // the HOME profile mcp.json holds only the letagents server, and every
-      // workspace .cursor/mcp.json is denied-read by the native sandbox (see
-      // SUPERVISED_CURSOR_PROJECT_HIDDEN_AUTHORITY_FILES -> nativeDeniedReadPaths),
-      // so a checked-in or concurrently-added project server cannot be read,
-      // let alone approved. --approve-mcps therefore approves exactly one MCP.
-      ...(handle.deliveryMode === "daemon_inbox" ? ["--approve-mcps"] : []),
-      "--trust",
-      // Read-only has no native sandbox field in its durable policy, so add
-      // the supervised outer boundary explicitly. Write profiles carry their
-      // exact enabled/disabled native choice in policyArgs; both stay inside
-      // the independent OS workspace/process/network boundary.
-      ...(handle.deliveryMode === "daemon_inbox" && handle.spawnRequest.permissionProfileId === "read_only"
-        ? ["--sandbox", "enabled"]
-        : []),
-      "--workspace", providerWorkspace,
-      ...handle.policyArgs,
-      ...(nativeResumeSession ? [`--resume=${nativeResumeSession}`] : []),
-      prompt,
-    ];
-    const statePath = roomTurnId && handle.supervisedProfile
-      ? join(
-        handle.supervisedProfile.configDir,
-        `letagents-cursor-turn-${createHash("sha256").update(roomTurnId).digest("hex")}.jsonl`,
-      )
-      : null;
-    if (statePath) {
-      this.deps.prepareTurnState(statePath);
-    }
-    let child: CursorCliChild;
-    try {
-      child = this.deps.launchTurn({
-      cursorBin: this.cursorBin,
-      args,
-      // Start inside the sealed private profile so no ambient launch cwd can
-      // contribute config before Cursor resolves --workspace. Cursor later
-      // changes into that workspace and can discover a concurrently-added
-      // project MCP; the unpredictable bridge alias, approval-state purge, and
-      // the native sandbox denying every workspace .cursor/mcp.json read keep
-      // such a late server unreadable, so --approve-mcps (above) can only ever
-      // approve the sealed HOME letagents server.
-      cwd: handle.deliveryMode === "daemon_inbox" && handle.supervisedProfile
-        ? dirname(handle.supervisedProfile.homeDir)
-        : handle.cwd,
-      ...(childEnv ? { env: childEnv } : {}),
-      ...(deniedReadPaths?.length ? { deniedReadPaths } : {}),
-      ...(deniedReadSubpaths?.length ? { deniedReadSubpaths } : {}),
-      ...(deniedReadMetadataPaths?.length ? { deniedReadMetadataPaths } : {}),
-      ...(deniedReadWriteRegexes?.length ? { deniedReadWriteRegexes } : {}),
-      ...(deniedWriteRegexes?.length ? { deniedWriteRegexes } : {}),
-      ...(deniedWritePaths?.length ? { deniedWritePaths } : {}),
-      ...(deniedWriteStructuralPaths?.length ? { deniedWriteStructuralPaths } : {}),
-      ...(deniedWriteSubpaths?.length ? { deniedWriteSubpaths } : {}),
-      ...(deniedExecSubpaths?.length ? { deniedExecSubpaths } : {}),
-      ...(allowedWriteSubpaths?.length ? { allowedWriteSubpaths } : {}),
-      ...(allowedReadSubpaths?.length ? { allowedReadSubpaths } : {}),
-      ...(handle.deliveryMode === "daemon_inbox"
-        ? {
-          allowedNetworkUnixSockets: [mcpConnectorSocketPath!],
-          // Cursor's headless worker binds a private stdio socket under this
-          // per-turn data dir; the sandbox must admit that one bind+connect.
-          allowedInternalUnixSocketRoots: [supervisedRuntimeDataDir!],
+      const captureBirth = this.processCustody.record(handle.workAttemptId, child);
+      if (supervisedRuntimeDataDir) {
+        const runtimeDataDir = supervisedRuntimeDataDir;
+        // The production wrapper removes this before terminal publication. This
+        // post-exit fallback also retires it for injected/test launchers and a
+        // wrapper that exits before entering its finalizer.
+        void child.exited.then(() => {
+          try { removeCursorTurnRuntimeDataDir(runtimeDataDir); } catch { /* terminal evidence remains authoritative */ }
+        });
+      }
+      if (mcpConnectorRoot) {
+        const connectorRoot = mcpConnectorRoot;
+        // The wrapper normally retires this root before terminal evidence. If
+        // the wrapper itself is SIGKILLed, the supervising adapter still owns
+        // the unpredictable path and removes the now-dead socket tree on exit.
+        void child.exited.then(() => {
+          try { rmSync(connectorRoot, { recursive: true, force: true }); } catch { /* no live socket authority remains */ }
+        });
+      }
+      const nativeLaunchIsDeferred = handle.deliveryMode === "daemon_inbox";
+      let conversationLoanAttempted = false;
+      const abandonPreparedGeneration = async (): Promise<void> => {
+        if (!workspaceGeneration) return;
+        if (!conversationLoanAttempted && !child.requiresDurableTerminalEvidence) {
+          await this.abandonTurnWorkspaceGeneration(workspaceGeneration);
+          workspaceGeneration = null;
+          return;
         }
-        : {}),
-      ...(mcpConnectorSocketPath ? { mcpConnectorSocketPath } : {}),
-      ...(mcpRuntimeEntryPath ? { mcpRuntimeEntryPath } : {}),
-      ...(handle.deliveryMode === "daemon_inbox" ? { mcpRuntimeCwd: providerWorkspace } : {}),
-      ...(mcpRuntimeEnv ? { mcpRuntimeEnv } : {}),
-      ...(providerAuthorization ? { providerAuthorization } : {}),
-      ...(handle.deliveryMode === "daemon_inbox" ? { deferStart: true } : {}),
-      ...(handle.deliveryMode === "daemon_inbox" ? { restrictRemoteAuthority: true } : {}),
-      ...(handle.deliveryMode === "daemon_inbox" && nativeResumeSession
-        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nativeResumeSession)
-        ? { nativeResumeSessionId: nativeResumeSession }
-        : {}),
-      ...(workspaceGeneration
-        ? { workspaceGenerationManifestPath: workspaceGeneration.manifestPath }
-        : {}),
-      ...(statePath ? { statePath } : {}),
-      });
-    } catch (error) {
-      if (supervisedRuntimeDataDir) removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
-      if (workspaceGeneration) {
-        await this.abandonTurnWorkspaceGeneration(workspaceGeneration);
+        this.restoreConversationNamespace(handle, workspaceGeneration);
+        const receipt = await workspaceGeneration.abandon();
+        if (receipt.phase !== "aborted") throw new CursorRoomTurnRecoveryError("Cursor preparation did not abandon its generation.");
+        if (roomTurnId && child.requiresDurableTerminalEvidence) {
+          this.recordGenerationSettlement(handle, roomTurnId, workspaceGeneration.manifestPath, "aborted");
+        }
+        await this.deps.removeWorkspaceGenerationReceipt(workspaceGeneration.manifestPath,
+          { settlementVerified: child.requiresDurableTerminalEvidence === true });
         workspaceGeneration = null;
-      }
-      throw error;
-    }
-    const captureBirth = this.processCustody.record(handle.workAttemptId, child);
-    if (supervisedRuntimeDataDir) {
-      const runtimeDataDir = supervisedRuntimeDataDir;
-      // The production wrapper removes this before terminal publication. This
-      // post-exit fallback also retires it for injected/test launchers and a
-      // wrapper that exits before entering its finalizer.
-      void child.exited.then(() => {
-        try { removeCursorTurnRuntimeDataDir(runtimeDataDir); } catch { /* terminal evidence remains authoritative */ }
-      });
-    }
-    if (mcpConnectorRoot) {
-      const connectorRoot = mcpConnectorRoot;
-      // The wrapper normally retires this root before terminal evidence. If
-      // the wrapper itself is SIGKILLed, the supervising adapter still owns
-      // the unpredictable path and removes the now-dead socket tree on exit.
-      void child.exited.then(() => {
-        try { rmSync(connectorRoot, { recursive: true, force: true }); } catch { /* no live socket authority remains */ }
-      });
-    }
-    const nativeLaunchIsDeferred = handle.deliveryMode === "daemon_inbox";
-    let conversationLoanAttempted = false;
-    const abandonPreparedGeneration = async (): Promise<void> => {
-      if (!workspaceGeneration) return;
-      if (!conversationLoanAttempted && !child.requiresDurableTerminalEvidence) {
-        await this.abandonTurnWorkspaceGeneration(workspaceGeneration);
-        workspaceGeneration = null;
-        return;
-      }
-      this.restoreConversationNamespace(handle, workspaceGeneration);
-      const receipt = await workspaceGeneration.abandon();
-      if (receipt.phase !== "aborted") throw new CursorRoomTurnRecoveryError("Cursor preparation did not abandon its generation.");
-      if (roomTurnId && child.requiresDurableTerminalEvidence) {
-        this.recordGenerationSettlement(handle, roomTurnId, workspaceGeneration.manifestPath, "aborted");
-      }
-      await this.deps.removeWorkspaceGenerationReceipt(workspaceGeneration.manifestPath,
-        { settlementVerified: child.requiresDurableTerminalEvidence === true });
-      workspaceGeneration = null;
-    };
+      };
 
-    if (launchSignal?.aborted || handle.stopRequested) {
-      if (child.pid !== null) {
-        const wrapperIdentity = nativeLaunchIsDeferred ? this.deps.getProcessIdentity(child.pid) : undefined;
-        await this.terminateTurnChild(child.pid, child.exited, wrapperIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
-      } else {
-        await child.exited;
-      }
-      await abandonPreparedGeneration();
-      throw new CursorRoomTurnNotDispatchedError(
-        "Cursor turn preparation was interrupted before native dispatch.",
-        roomTurnId,
-      );
-    }
-
-    if (child.pid === null) {
-      // Fail closed until the launch proves terminal; never retry beside an
-      // unobservable writer.
-      await child.exited;
-      await abandonPreparedGeneration();
-      this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
-      throw new Error("cursor-agent launch did not expose a process id; refusing an unfenceable turn.");
-    }
-    if (child.prepared) {
-      let preparation: "prepared" | "exited" | "aborted";
-      try {
-        preparation = await Promise.race([
-          child.prepared.then(() => "prepared" as const),
-          child.exited.then(() => "exited" as const),
-          cursorTurnLaunchAbort(launchSignal),
-        ]);
-      } catch (error) {
-        await child.exited;
-        await abandonPreparedGeneration();
-        throw new Error(`Cursor wrapper could not prepare its durable boundary: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (preparation === "exited") {
-        await abandonPreparedGeneration();
-        throw new Error("Cursor wrapper exited before preparing its durable boundary; native work was not launched.");
-      }
-      if (preparation === "aborted") {
-        const wrapperIdentity = nativeLaunchIsDeferred ? this.deps.getProcessIdentity(child.pid) : undefined;
-        await this.terminateTurnChild(child.pid, child.exited, wrapperIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+      if (launchSignal?.aborted || handle.stopRequested) {
+        if (child.pid !== null) {
+          const wrapperIdentity = nativeLaunchIsDeferred ? this.deps.getProcessIdentity(child.pid) : undefined;
+          await this.terminateTurnChild(child.pid, child.exited, wrapperIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+        } else {
+          await child.exited;
+        }
         await abandonPreparedGeneration();
         throw new CursorRoomTurnNotDispatchedError(
           "Cursor turn preparation was interrupted before native dispatch.",
           roomTurnId,
         );
       }
-    }
-    const processIdentity = captureBirth();
-    if (typeof processIdentity !== "string" || !processIdentity) {
-      await this.terminateTurnChild(child.pid, child.exited, processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
-      await abandonPreparedGeneration();
-      this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
-      throw new Error("cursor-agent process identity could not be verified; refusing an unfenceable turn.");
-    }
-    if (launchSignal?.aborted || handle.stopRequested) {
-      await this.terminateTurnChild(child.pid, child.exited, processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
-      await abandonPreparedGeneration();
-      throw new CursorRoomTurnNotDispatchedError(
-        "Cursor turn preparation was interrupted before native dispatch.",
-        roomTurnId,
-      );
-    }
 
-    const turn: LiveTurn = {
-      child,
-      pid: child.pid,
-      processIdentity,
-      sawInit: false,
-      sawResult: false,
-      resultWasError: false,
-      resultText: null,
-      providerRequestId: null,
-      interruptRequested: false,
-      roomTurnId,
-      controlTurnId: roomTurnId ?? randomUUID(),
-      statePath,
-      workspaceGeneration,
-      workspaceGenerationManifestPath: workspaceGeneration?.manifestPath ?? null,
-      liveDisplayTools: new Map(),
-      executionTools: new Map(),
-      executionTurnFinished: false,
-      executionRuntimeFinished: false,
-      lifecycleSettlementDeferred: Boolean(roomTurnId && settleLifecycleBeforeIdle),
-      executionTerminalCheckpoint: null,
-      executionContinuationId: null,
-    };
-    void child.exited.then(async (exit) => {
-      // As in completeTurn, drain final stdout before deciding what was lost.
-      await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
-      if (!turn.lifecycleSettlementDeferred) this.observeNativeExit(handle, turn, exit);
-    });
-    handle.liveTurn = turn;
-    handle.state = "working";
-    let turnCheckpointed = false;
-    try {
-      // The wrapper already exists and has installed its disconnect/SIGTERM
-      // not-started journal, but native Cursor is still paused. Production
-      // daemon delivery persists the exact supervisor turn and wrapper birth
-      // in one transaction before release. The split callbacks remain only as
-      // a compatibility path for direct adapter consumers during upgrade.
-      if (roomTurnId) {
-        if (checkpointPreparedTurn) {
-          await checkpointPreparedTurn({
-            providerTurnId: roomTurnId,
-            providerContinuationId: handle.providerContinuationId!,
-            providerConnection: handle.providerConnection,
-          });
-        } else {
-          await checkpointTurnStarted?.(roomTurnId);
-          await checkpointProviderState?.({
-            providerContinuationId: handle.providerContinuationId!,
-            providerConnection: handle.providerConnection,
-          });
+      if (child.pid === null) {
+        // Fail closed until the launch proves terminal; never retry beside an
+        // unobservable writer.
+        await child.exited;
+        await abandonPreparedGeneration();
+        this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
+        throw new Error("cursor-agent launch did not expose a process id; refusing an unfenceable turn.");
+      }
+      if (child.prepared) {
+        let preparation: "prepared" | "exited" | "aborted";
+        try {
+          preparation = await Promise.race([
+            child.prepared.then(() => "prepared" as const),
+            child.exited.then(() => "exited" as const),
+            cursorTurnLaunchAbort(launchSignal),
+          ]);
+        } catch (error) {
+          await child.exited;
+          await abandonPreparedGeneration();
+          throw new Error(`Cursor wrapper could not prepare its durable boundary: ${error instanceof Error ? error.message : String(error)}`);
         }
-        turnCheckpointed = true;
-      } else {
-        await checkpointProviderState?.({
-          providerContinuationId: handle.providerContinuationId!,
-          providerConnection: handle.providerConnection,
-        });
-      }
-      throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
-      if (handle.liveTurn !== turn || turn.interruptRequested || handle.stopRequested) {
-        throw new CursorRoomTurnNotDispatchedError(
-          "Cursor turn preparation was interrupted at the durable checkpoint boundary.",
-          roomTurnId,
-        );
-      }
-      if (workspaceGeneration) {
-        if (!handle.supervisedProfile) throw new Error("Cursor conversation profile is unavailable.");
-        conversationLoanAttempted = true;
-        this.deps.relocateConversationNamespace(handle.supervisedProfile,
-          workspaceGeneration.realWorkspace, workspaceGeneration.liveWorkspace, nativeResumeSession);
-      }
-      // The exact turn id and wrapper birth are both committed. Flip the
-      // daemon's drain boundary and unlink handoff cancellation in one
-      // synchronous callback immediately before native release.
-      markDurableTurnStarted?.();
-      if (handle.liveTurn !== turn || turn.interruptRequested || handle.stopRequested) {
-        throw new CursorRoomTurnNotDispatchedError(
-          "Cursor turn preparation was interrupted before native release.",
-          roomTurnId,
-        );
-      }
-    } catch (error) {
-      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
-      const exit = turnCheckpointed && turn.lifecycleSettlementDeferred
-        ? await this.readTerminatedTurnExit(turn)
-        : null;
-      await abandonPreparedGeneration();
-      turn.workspaceGeneration = null;
-      if (turnCheckpointed) {
-        // The atomic prepared checkpoint may already have committed the exact
-        // wrapper birth even though native work was never released. Retire
-        // that dead birth while the exact inbox turn still fences this
-        // callback. The daemon permits this narrow live->idle edge during
-        // handoff because the old owner still holds the singleton and drain.
-        if (turn.lifecycleSettlementDeferred) {
-          try {
-            await this.settlePreparedTurnIdle(
-              handle,
-              turn,
-              exit!,
-              settleLifecycleBeforeIdle,
-              checkpointProviderState,
-            );
-          } catch (retirementError) {
-            // The exact turn+wrapper checkpoint is already durable. Route
-            // through exact-turn recovery so the dead birth is retired before
-            // delivery can classify this inbox item as safe to rerun.
-            throw new CursorPostDispatchCheckpointError(
-              `Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
-            );
-          }
-        } else {
-          handle.liveTurn = null;
-          handle.state = "idle";
-          await checkpointProviderState?.({
-            providerContinuationId: handle.providerContinuationId!,
-            providerConnection: handle.providerConnection,
-          });
+        if (preparation === "exited") {
+          await abandonPreparedGeneration();
+          throw new Error("Cursor wrapper exited before preparing its durable boundary; native work was not launched.");
         }
+        if (preparation === "aborted") {
+          const wrapperIdentity = nativeLaunchIsDeferred ? this.deps.getProcessIdentity(child.pid) : undefined;
+          await this.terminateTurnChild(child.pid, child.exited, wrapperIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+          await abandonPreparedGeneration();
+          throw new CursorRoomTurnNotDispatchedError(
+            "Cursor turn preparation was interrupted before native dispatch.",
+            roomTurnId,
+          );
+        }
+      }
+      const processIdentity = captureBirth();
+      if (typeof processIdentity !== "string" || !processIdentity) {
+        await this.terminateTurnChild(child.pid, child.exited, processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+        await abandonPreparedGeneration();
+        this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
+        throw new Error("cursor-agent process identity could not be verified; refusing an unfenceable turn.");
+      }
+      if (launchSignal?.aborted || handle.stopRequested) {
+        await this.terminateTurnChild(child.pid, child.exited, processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+        await abandonPreparedGeneration();
         throw new CursorRoomTurnNotDispatchedError(
-          `Cursor wrapper state could not be checkpointed before native dispatch: ${error instanceof Error ? error.message : String(error)}`,
+          "Cursor turn preparation was interrupted before native dispatch.",
           roomTurnId,
         );
       }
-      if (handle.liveTurn === turn) handle.liveTurn = null;
-      handle.state = "idle";
-      if (launchSignal?.aborted) {
-        throw new CursorRoomTurnNotDispatchedError(
-          "Cursor turn preparation was interrupted and reaped before native dispatch.",
-          roomTurnId,
-        );
-      }
-      throw error;
-    }
-    // Startup gates on a VALID system/init — not on arbitrary stdout bytes. A
-    // raw diagnostic line preceding init is published as evidence but must not
-    // let spawn() return an uninitialized handle with no session identity
-    // (msg_1758). init is the first event in the proven ordering (msg_1685),
-    // so this bound is a protocol assertion, not a latency allowance.
-    let signalInit: (() => void) | null = null;
-    const initSeen = new Promise<"init">((resolve) => {
-      signalInit = () => resolve("init");
-    });
-    const unsubscribe = child.onLine((line) => {
-      this.consumeLine(handle, turn, line);
-      if (turn.sawInit) signalInit?.();
-    });
-    const checkpointReleasedTurnIdle = async (): Promise<void> => {
-      if (!turnCheckpointed || !roomTurnId || !checkpointProviderState) return;
-      const providerContinuationId = handle.providerContinuationId ?? resumeSessionId;
-      if (!providerContinuationId) return;
-      await checkpointProviderState({
-        providerContinuationId,
-        providerConnection: handle.providerConnection,
+
+      const turn: LiveTurn = {
+        child,
+        pid: child.pid,
+        processIdentity,
+        sawInit: false,
+        sawResult: false,
+        resultWasError: false,
+        resultText: null,
+        providerRequestId: null,
+        interruptRequested: false,
+        roomTurnId,
+        controlTurnId: roomTurnId ?? randomUUID(),
+        statePath,
+        workspaceGeneration,
+        workspaceGenerationManifestPath: workspaceGeneration?.manifestPath ?? null,
+        liveDisplayTools: new Map(),
+        executionTools: new Map(),
+        executionTurnFinished: false,
+        executionRuntimeFinished: false,
+        lifecycleSettlementDeferred: Boolean(roomTurnId && settleLifecycleBeforeIdle),
+        executionTerminalCheckpoint: null,
+        executionContinuationId: null,
+      };
+      void child.exited.then(async (exit) => {
+        // As in completeTurn, drain final stdout before deciding what was lost.
+        await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
+        if (!turn.lifecycleSettlementDeferred) this.observeNativeExit(handle, turn, exit);
       });
-    };
-    const settleReleasedTurnIdle = async (
-      exit: ProviderProcessExit,
-      outcome: "completed" | "failed" | "interrupted" | "lost",
-    ): Promise<void> => {
-      if (turn.lifecycleSettlementDeferred) {
-        this.observeValidatedTurnTerminal(handle, turn, outcome);
-        this.observeNativeRuntimeExit(handle, turn, exit);
-        await settleLifecycleBeforeIdle?.();
-      }
-      if (handle.liveTurn === turn) handle.liveTurn = null;
-      handle.state = "idle";
+      handle.liveTurn = turn;
+      handle.state = "working";
+      let turnCheckpointed = false;
       try {
-        await checkpointReleasedTurnIdle();
+        // The wrapper already exists and has installed its disconnect/SIGTERM
+        // not-started journal, but native Cursor is still paused. Production
+        // daemon delivery persists the exact supervisor turn and wrapper birth
+        // in one transaction before release. The split callbacks remain only as
+        // a compatibility path for direct adapter consumers during upgrade.
+        if (roomTurnId) {
+          if (checkpointPreparedTurn) {
+            await checkpointPreparedTurn({
+              providerTurnId: roomTurnId,
+              providerContinuationId: handle.providerContinuationId!,
+              providerConnection: handle.providerConnection,
+            });
+          } else {
+            await checkpointTurnStarted?.(roomTurnId);
+            await checkpointProviderState?.({
+              providerContinuationId: handle.providerContinuationId!,
+              providerConnection: handle.providerConnection,
+            });
+          }
+          turnCheckpointed = true;
+        } else {
+          await checkpointProviderState?.({
+            providerContinuationId: handle.providerContinuationId!,
+            providerConnection: handle.providerConnection,
+          });
+        }
+        throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
+        if (handle.liveTurn !== turn || turn.interruptRequested || handle.stopRequested) {
+          throw new CursorRoomTurnNotDispatchedError(
+            "Cursor turn preparation was interrupted at the durable checkpoint boundary.",
+            roomTurnId,
+          );
+        }
+        if (workspaceGeneration) {
+          if (!handle.supervisedProfile) throw new Error("Cursor conversation profile is unavailable.");
+          conversationLoanAttempted = true;
+          this.deps.relocateConversationNamespace(handle.supervisedProfile,
+            workspaceGeneration.realWorkspace, workspaceGeneration.liveWorkspace, nativeResumeSession);
+        }
+        // The exact turn id and wrapper birth are both committed. Flip the
+        // daemon's drain boundary and unlink handoff cancellation in one
+        // synchronous callback immediately before native release.
+        markDurableTurnStarted?.();
+        if (handle.liveTurn !== turn || turn.interruptRequested || handle.stopRequested) {
+          throw new CursorRoomTurnNotDispatchedError(
+            "Cursor turn preparation was interrupted before native release.",
+            roomTurnId,
+          );
+        }
       } catch (error) {
-        if (turn.lifecycleSettlementDeferred && !handle.liveTurn) handle.liveTurn = turn;
+        await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+        const exit = turnCheckpointed && turn.lifecycleSettlementDeferred
+          ? await this.readTerminatedTurnExit(turn)
+          : null;
+        await abandonPreparedGeneration();
+        turn.workspaceGeneration = null;
+        if (turnCheckpointed) {
+          // The atomic prepared checkpoint may already have committed the exact
+          // wrapper birth even though native work was never released. Retire
+          // that dead birth while the exact inbox turn still fences this
+          // callback. The daemon permits this narrow live->idle edge during
+          // handoff because the old owner still holds the singleton and drain.
+          if (turn.lifecycleSettlementDeferred) {
+            try {
+              await this.settlePreparedTurnIdle(
+                handle,
+                turn,
+                exit!,
+                settleLifecycleBeforeIdle,
+                checkpointProviderState,
+              );
+            } catch (retirementError) {
+              // The exact turn+wrapper checkpoint is already durable. Route
+              // through exact-turn recovery so the dead birth is retired before
+              // delivery can classify this inbox item as safe to rerun.
+              throw new CursorPostDispatchCheckpointError(
+                `Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
+              );
+            }
+          } else {
+            handle.liveTurn = null;
+            handle.state = "idle";
+            await checkpointProviderState?.({
+              providerContinuationId: handle.providerContinuationId!,
+              providerConnection: handle.providerConnection,
+            });
+          }
+          throw new CursorRoomTurnNotDispatchedError(
+            `Cursor wrapper state could not be checkpointed before native dispatch: ${error instanceof Error ? error.message : String(error)}`,
+            roomTurnId,
+          );
+        }
+        if (handle.liveTurn === turn) handle.liveTurn = null;
+        handle.state = "idle";
+        if (launchSignal?.aborted) {
+          throw new CursorRoomTurnNotDispatchedError(
+            "Cursor turn preparation was interrupted and reaped before native dispatch.",
+            roomTurnId,
+          );
+        }
         throw error;
       }
-    };
-    try {
-      child.release();
-    } catch (error) {
-      // A failed IPC send is ambiguous: the wrapper may have received release
-      // immediately before the channel reported failure. Reap first and
-      // reconcile as post-dispatch work; never abandon the generation or tell
-      // the daemon that this exact inbox item is automatically safe to rerun.
-      unsubscribe();
-      await this.terminateTurnChild(
-        turn.pid,
-        child.exited,
-        turn.processIdentity,
-        child.ownsDescendantReaping,
-        nativeLaunchIsDeferred,
-      );
-      const exit = await this.readTerminatedTurnExit(turn);
-      await this.retireTurnWorkspaceGeneration(handle, turn);
-      await settleReleasedTurnIdle(exit, "lost");
-      if (roomTurnId) {
-        throw new CursorPostDispatchCheckpointError(
-          `Cursor native release acknowledgement was ambiguous; exact terminal recovery is required: ${error instanceof Error ? error.message : String(error)}`,
+      // Startup gates on a VALID system/init — not on arbitrary stdout bytes. A
+      // raw diagnostic line preceding init is published as evidence but must not
+      // let spawn() return an uninitialized handle with no session identity
+      // (msg_1758). init is the first event in the proven ordering (msg_1685),
+      // so this bound is a protocol assertion, not a latency allowance.
+      let signalInit: (() => void) | null = null;
+      const initSeen = new Promise<"init">((resolve) => {
+        signalInit = () => resolve("init");
+      });
+      const unsubscribe = child.onLine((line) => {
+        this.consumeLine(handle, turn, line);
+        if (turn.sawInit) signalInit?.();
+      });
+      const checkpointReleasedTurnIdle = async (): Promise<void> => {
+        if (!turnCheckpointed || !roomTurnId || !checkpointProviderState) return;
+        const providerContinuationId = handle.providerContinuationId ?? resumeSessionId;
+        if (!providerContinuationId) return;
+        await checkpointProviderState({
+          providerContinuationId,
+          providerConnection: handle.providerConnection,
+        });
+      };
+      const settleReleasedTurnIdle = async (
+        exit: ProviderProcessExit,
+        outcome: "completed" | "failed" | "interrupted" | "lost",
+      ): Promise<void> => {
+        if (turn.lifecycleSettlementDeferred) {
+          this.observeValidatedTurnTerminal(handle, turn, outcome);
+          this.observeNativeRuntimeExit(handle, turn, exit);
+          await settleLifecycleBeforeIdle?.();
+        }
+        if (handle.liveTurn === turn) handle.liveTurn = null;
+        handle.state = "idle";
+        try {
+          await checkpointReleasedTurnIdle();
+        } catch (error) {
+          if (turn.lifecycleSettlementDeferred && !handle.liveTurn) handle.liveTurn = turn;
+          throw error;
+        }
+      };
+      try {
+        child.release();
+      } catch (error) {
+        // A failed IPC send is ambiguous: the wrapper may have received release
+        // immediately before the channel reported failure. Reap first and
+        // reconcile as post-dispatch work; never abandon the generation or tell
+        // the daemon that this exact inbox item is automatically safe to rerun.
+        unsubscribe();
+        await this.terminateTurnChild(
+          turn.pid,
+          child.exited,
+          turn.processIdentity,
+          child.ownsDescendantReaping,
+          nativeLaunchIsDeferred,
+        );
+        const exit = await this.readTerminatedTurnExit(turn);
+        await this.retireTurnWorkspaceGeneration(handle, turn);
+        await settleReleasedTurnIdle(exit, "lost");
+        if (roomTurnId) {
+          throw new CursorPostDispatchCheckpointError(
+            `Cursor native release acknowledgement was ambiguous; exact terminal recovery is required: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        this.finishAttempt(handle, exit, "protocol_error");
+        throw error;
+      }
+
+      // The timer is REF'D and cleared: startup must stay observable even on an
+      // otherwise idle loop. A turn that has passed init may run arbitrarily long
+      // (quiet models are not dead — the exit event is the only terminal evidence).
+      let startTimer: ReturnType<typeof setTimeout> | null = null;
+      const startTimeout = new Promise<"timeout">((resolve) => {
+        startTimer = setTimeout(() => resolve("timeout"), this.turnStartTimeoutMs);
+      });
+      const first = await Promise.race([
+        initSeen,
+        child.exited.then(() => "exited" as const),
+        startTimeout,
+      ]);
+      if (startTimer) clearTimeout(startTimer);
+      if (first !== "init" && turn.interruptRequested) {
+        // A user Stop can land after the prepared wrapper is released but before
+        // Cursor emits its first valid init. The exact child has been fenced, so
+        // this is a turn interruption—not evidence that the durable Cursor lane
+        // itself died. Retire the wrapper birth and preserve the continuation.
+        unsubscribe();
+        let exit: ProviderProcessExit;
+        if (first === "timeout") {
+          await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
+          exit = await this.readTerminatedTurnExit(turn);
+        } else {
+          exit = await child.exited;
+        }
+        await this.retireTurnWorkspaceGeneration(handle, turn);
+        await settleReleasedTurnIdle(exit, "interrupted");
+        // Release already admitted native work. Missing init cannot prove that
+        // nothing ran; the exact Stop reservation must settle this invocation.
+        throw new CursorRoomTurnRecoveryError(
+          "Cursor turn was interrupted after native release but before stream-json init; native work may have begun. The continuation remains available.",
         );
       }
-      this.finishAttempt(handle, exit, "protocol_error");
-      throw error;
-    }
-
-    // The timer is REF'D and cleared: startup must stay observable even on an
-    // otherwise idle loop. A turn that has passed init may run arbitrarily long
-    // (quiet models are not dead — the exit event is the only terminal evidence).
-    let startTimer: ReturnType<typeof setTimeout> | null = null;
-    const startTimeout = new Promise<"timeout">((resolve) => {
-      startTimer = setTimeout(() => resolve("timeout"), this.turnStartTimeoutMs);
-    });
-    const first = await Promise.race([
-      initSeen,
-      child.exited.then(() => "exited" as const),
-      startTimeout,
-    ]);
-    if (startTimer) clearTimeout(startTimer);
-    if (first !== "init" && turn.interruptRequested) {
-      // A user Stop can land after the prepared wrapper is released but before
-      // Cursor emits its first valid init. The exact child has been fenced, so
-      // this is a turn interruption—not evidence that the durable Cursor lane
-      // itself died. Retire the wrapper birth and preserve the continuation.
-      unsubscribe();
-      let exit: ProviderProcessExit;
       if (first === "timeout") {
+        unsubscribe();
         await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
-        exit = await this.readTerminatedTurnExit(turn);
-      } else {
-        exit = await child.exited;
+        const exit = turn.lifecycleSettlementDeferred
+          ? await this.readTerminatedTurnExit(turn)
+          : { type: "exit" as const, code: null, signal: null };
+        await this.retireTurnWorkspaceGeneration(handle, turn);
+        await settleReleasedTurnIdle(exit, "lost");
+        this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
+        throw new Error("cursor-agent reported no stream-json init within the startup bound; refusing an unobservable turn.");
       }
-      await this.retireTurnWorkspaceGeneration(handle, turn);
-      await settleReleasedTurnIdle(exit, "interrupted");
-      // Release already admitted native work. Missing init cannot prove that
-      // nothing ran; the exact Stop reservation must settle this invocation.
-      throw new CursorRoomTurnRecoveryError(
-        "Cursor turn was interrupted after native release but before stream-json init; native work may have begun. The continuation remains available.",
-      );
-    }
-    if (first === "timeout") {
-      unsubscribe();
-      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
-      const exit = turn.lifecycleSettlementDeferred
-        ? await this.readTerminatedTurnExit(turn)
-        : { type: "exit" as const, code: null, signal: null };
-      await this.retireTurnWorkspaceGeneration(handle, turn);
-      await settleReleasedTurnIdle(exit, "lost");
-      this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
-      throw new Error("cursor-agent reported no stream-json init within the startup bound; refusing an unobservable turn.");
-    }
-    if (first === "exited") {
-      // The child died before a valid init: terminal evidence, and the launch
-      // is REJECTED — a caller must never receive an already-terminal handle.
-      // (A fenced session-contract violation lands here too, since the fence
-      // terminates the child before readiness can resolve.)
-      unsubscribe();
-      const exit = await child.exited;
-      const preInitFailure = this.readTrustedPreInitTurnFailure(turn);
-      const liveFailureDetail = preInitFailure?.errorDetail
-        ?? safeCursorTerminalErrorDetail(child.terminalError?.());
-      let retirementError: unknown;
-      try {
-        await this.retireTurnWorkspaceGeneration(handle, turn, preInitFailure ? true : undefined);
-      } catch (error) {
-        // Never reconcile a writable generation without durable containment
-        // proof. Preserve the causal live-MCP diagnosis while making the safe
-        // retained-for-recovery state explicit to the caller.
-        retirementError = error;
-      }
-      await settleReleasedTurnIdle(exit, "lost");
-      this.finishAttempt(handle, exit);
-      if (retirementError) {
-        if (liveFailureDetail) {
-          const recoveryContext = preInitFailure
-            ? "Its private workspace generation was retained because safe reconciliation did not complete."
-            : "Its private workspace generation was retained for safe recovery because durable containment proof was unavailable.";
-          throw new Error(
-            `Cursor supervised startup failed: ${liveFailureDetail} ${recoveryContext}`,
-          );
-        }
-        throw retirementError;
-      }
-      throw new Error(liveFailureDetail
-        ? `Cursor supervised startup failed: ${liveFailureDetail}`
-        : handle.protocolError
-          ? "cursor-agent init violated the session contract; the turn was fenced."
-          : "cursor-agent exited before reporting its stream-json init; the turn never became observable.");
-    }
-    if (handle.protocolError) {
-      // consumeLine fenced a stranger session id in the init itself.
-      unsubscribe();
-      const exit = await child.exited;
-      await this.retireTurnWorkspaceGeneration(handle, turn);
-      await settleReleasedTurnIdle(exit, "lost");
-      this.finishAttempt(handle, exit);
-      throw new Error("cursor-agent reported a different session than the durable continuation.");
-    }
-    if (!handle.providerContinuationId) {
-      unsubscribe();
-      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
-      const exit = await this.readTerminatedTurnExit(turn);
-      await this.retireTurnWorkspaceGeneration(handle, turn);
-      await settleReleasedTurnIdle(exit, "lost");
-      this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
-      throw new Error("cursor-agent init carried no session id; refusing an unverifiable continuation.");
-    }
-
-    try {
-      await checkpointProviderState?.({
-        providerContinuationId: handle.providerContinuationId,
-        providerConnection: handle.providerConnection,
-      });
-    } catch (error) {
-      unsubscribe();
-      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
-      const exit = await this.readTerminatedTurnExit(turn);
-      this.interruptLiveDisplayTools(handle, turn);
-      const reportedContinuationId = handle.providerContinuationId;
-      // Do not roll back a session identity proven by Cursor's exact init.
-      // The daemon checkpoint may have committed its manifest update before a
-      // later durability write failed; retaining the real identity lets the
-      // recovery pass retry idempotently from either persisted side.
-      let trustedDurableTerminal: CursorTurnTerminal | undefined;
-      if (turn.child.requiresDurableTerminalEvidence) {
+      if (first === "exited") {
+        // The child died before a valid init: terminal evidence, and the launch
+        // is REJECTED — a caller must never receive an already-terminal handle.
+        // (A fenced session-contract violation lands here too, since the fence
+        // terminates the child before readiness can resolve.)
+        unsubscribe();
+        const exit = await child.exited;
+        const preInitFailure = this.readTrustedPreInitTurnFailure(turn);
+        const liveFailureDetail = preInitFailure?.errorDetail
+          ?? safeCursorTerminalErrorDetail(child.terminalError?.());
+        let retirementError: unknown;
         try {
-          // This post-init failure enters recoverRoomTurn immediately. Never
-          // seed that recovery with buffered live output: the wrapper may have
-          // been SIGKILLed during teardown before proving process-group and
-          // authority retirement. The same trusted terminal check used by the
-          // ordinary completion path is mandatory here too. It also preserves
-          // a result emitted only during TERM teardown when no live result was
-          // observed before the listener detached.
-          trustedDurableTerminal = this.readTrustedDurableTurnTerminal(handle, turn);
-        } catch (evidenceError) {
-          handle.protocolError = true;
-          this.publishStream(handle, "turn/terminal_invalid", {
-            reason: evidenceError instanceof Error ? evidenceError.message : String(evidenceError),
-          }, "error");
-          if (!turn.lifecycleSettlementDeferred) {
-            this.finishAttempt(handle, exit, "protocol_error");
-          }
-          throw new CursorRoomTurnRecoveryError(
-            `Cursor reported a real session but its durable checkpoint failed, and trusted terminal recovery was unavailable: ${evidenceError instanceof Error ? evidenceError.message : String(evidenceError)}`,
-          );
+          await this.retireTurnWorkspaceGeneration(handle, turn, preInitFailure ? true : undefined);
+        } catch (error) {
+          // Never reconcile a writable generation without durable containment
+          // proof. Preserve the causal live-MCP diagnosis while making the safe
+          // retained-for-recovery state explicit to the caller.
+          retirementError = error;
         }
+        await settleReleasedTurnIdle(exit, "lost");
+        this.finishAttempt(handle, exit);
+        if (retirementError) {
+          if (liveFailureDetail) {
+            const recoveryContext = preInitFailure
+              ? "Its private workspace generation was retained because safe reconciliation did not complete."
+              : "Its private workspace generation was retained for safe recovery because durable containment proof was unavailable.";
+            throw new Error(
+              `Cursor supervised startup failed: ${liveFailureDetail} ${recoveryContext}`,
+            );
+          }
+          throw retirementError;
+        }
+        throw new Error(liveFailureDetail
+          ? `Cursor supervised startup failed: ${liveFailureDetail}`
+          : handle.protocolError
+            ? "cursor-agent init violated the session contract; the turn was fenced."
+            : "cursor-agent exited before reporting its stream-json init; the turn never became observable.");
       }
-      await this.retireTurnWorkspaceGeneration(handle, turn, trustedDurableTerminal);
-      const recoveredTerminal = trustedDurableTerminal
-        ?? (turn.sawResult && !handle.protocolError
-          ? {
-              state: "result",
-              exit,
-              text: turn.resultText,
-              isError: turn.resultWasError,
-              providerRequestId: turn.providerRequestId,
-              attemptTerminal: null,
-              publicationContract: "structured_room_turn_v1",
-              ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
-            } satisfies CursorTurnTerminal
-          : {
-              state: "attempt_terminal",
-              exit,
-              text: null,
-              isError: true,
-              providerRequestId: turn.providerRequestId,
-              attemptTerminal: null,
-              publicationContract: "structured_room_turn_v1",
-              ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
-            } satisfies CursorTurnTerminal);
-      this.rememberRoomTurnTerminal(handle, turn, recoveredTerminal, !turn.lifecycleSettlementDeferred);
-      throw new CursorPostDispatchCheckpointError(
-        `Cursor reported a real session but its durable checkpoint failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+      if (handle.protocolError) {
+        // consumeLine fenced a stranger session id in the init itself.
+        unsubscribe();
+        const exit = await child.exited;
+        await this.retireTurnWorkspaceGeneration(handle, turn);
+        await settleReleasedTurnIdle(exit, "lost");
+        this.finishAttempt(handle, exit);
+        throw new Error("cursor-agent reported a different session than the durable continuation.");
+      }
+      if (!handle.providerContinuationId) {
+        unsubscribe();
+        await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
+        const exit = await this.readTerminatedTurnExit(turn);
+        await this.retireTurnWorkspaceGeneration(handle, turn);
+        await settleReleasedTurnIdle(exit, "lost");
+        this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
+        throw new Error("cursor-agent init carried no session id; refusing an unverifiable continuation.");
+      }
 
-    turn.completion = this.completeTurn(handle, turn, unsubscribe);
-    void turn.completion;
-    return turn;
+      try {
+        await checkpointProviderState?.({
+          providerContinuationId: handle.providerContinuationId,
+          providerConnection: handle.providerConnection,
+        });
+      } catch (error) {
+        unsubscribe();
+        await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
+        const exit = await this.readTerminatedTurnExit(turn);
+        this.interruptLiveDisplayTools(handle, turn);
+        const reportedContinuationId = handle.providerContinuationId;
+        // Do not roll back a session identity proven by Cursor's exact init.
+        // The daemon checkpoint may have committed its manifest update before a
+        // later durability write failed; retaining the real identity lets the
+        // recovery pass retry idempotently from either persisted side.
+        let trustedDurableTerminal: CursorTurnTerminal | undefined;
+        if (turn.child.requiresDurableTerminalEvidence) {
+          try {
+            // This post-init failure enters recoverRoomTurn immediately. Never
+            // seed that recovery with buffered live output: the wrapper may have
+            // been SIGKILLed during teardown before proving process-group and
+            // authority retirement. The same trusted terminal check used by the
+            // ordinary completion path is mandatory here too. It also preserves
+            // a result emitted only during TERM teardown when no live result was
+            // observed before the listener detached.
+            trustedDurableTerminal = this.readTrustedDurableTurnTerminal(handle, turn);
+          } catch (evidenceError) {
+            handle.protocolError = true;
+            this.publishStream(handle, "turn/terminal_invalid", {
+              reason: evidenceError instanceof Error ? evidenceError.message : String(evidenceError),
+            }, "error");
+            if (!turn.lifecycleSettlementDeferred) {
+              this.finishAttempt(handle, exit, "protocol_error");
+            }
+            throw new CursorRoomTurnRecoveryError(
+              `Cursor reported a real session but its durable checkpoint failed, and trusted terminal recovery was unavailable: ${evidenceError instanceof Error ? evidenceError.message : String(evidenceError)}`,
+            );
+          }
+        }
+        await this.retireTurnWorkspaceGeneration(handle, turn, trustedDurableTerminal);
+        const recoveredTerminal = trustedDurableTerminal
+          ?? (turn.sawResult && !handle.protocolError
+            ? {
+                state: "result",
+                exit,
+                text: turn.resultText,
+                isError: turn.resultWasError,
+                providerRequestId: turn.providerRequestId,
+                attemptTerminal: null,
+                publicationContract: "structured_room_turn_v1",
+                ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
+              } satisfies CursorTurnTerminal
+            : {
+                state: "attempt_terminal",
+                exit,
+                text: null,
+                isError: true,
+                providerRequestId: turn.providerRequestId,
+                attemptTerminal: null,
+                publicationContract: "structured_room_turn_v1",
+                ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
+              } satisfies CursorTurnTerminal);
+        this.rememberRoomTurnTerminal(handle, turn, recoveredTerminal, !turn.lifecycleSettlementDeferred);
+        throw new CursorPostDispatchCheckpointError(
+          `Cursor reported a real session but its durable checkpoint failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      turn.completion = this.completeTurn(handle, turn, unsubscribe);
+      void turn.completion;
+      return turn;
+    });
   }
 
   /** Await the turn's real exit and apply the honest end state. */
