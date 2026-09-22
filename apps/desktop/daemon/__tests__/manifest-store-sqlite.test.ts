@@ -3615,6 +3615,58 @@ test("operator not-applied never resurrects an ordinary user-cancelled exact tur
   }
 });
 
+test("a native reply winning Stop preserves its intercepted thread choice across restart", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  let inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const controlled: DaemonManifestEntry = {
+    ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined, last_turn_control_sequence: 0,
+    provider_ref: { ...entry.provider_ref!, provider_connection: {
+      kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex:4311",
+    } },
+  };
+  try {
+    const initial = await store.write(0, [controlled]);
+    const item = await inbox.enqueueCorrection({ agent_id: controlled.id, room_id: controlled.room_id,
+      source_message_id: "A", source_message: { id: "A", text: "check in this thread" }, activation: { decision: "activate" } });
+    await inbox.claimHead(controlled.id);
+    await inbox.checkpointTurnStarted(item.inbox_item_id, "turn-A", TEST_PROVIDER_TURN_AUTHORITY);
+    const prepared = await inbox.prepareEffect({
+      agent_id: controlled.id, room_id: controlled.room_id, execution_generation_id: "run_1",
+      work_attempt_id: "attempt_1", current_execution_generation_id: "run_1", provider_continuation_id: "thread_1",
+      provider_turn_id: "turn-A", mcp_request_id: "thread-choice", tool_name: "send_thread_message",
+      request: { thread_parent_id: "A", text: "draft" }, mutation: true,
+    });
+    assert.equal(await inbox.hasInterceptedThreadReply(item.inbox_item_id), true);
+    const control = await store.prepareTurnControlState(initial.generation, {
+      agentId: controlled.id, roomId: controlled.room_id, expectedInboxItemId: item.inbox_item_id,
+      expectedSourceMessageId: "A", expectedProviderTurnId: "turn-A", actionId: "stop", actionSequence: 1,
+      workAttemptId: "attempt_1", executionGenerationId: "run_1", providerContinuationId: "thread_1",
+      providerConnection: controlled.provider_ref!.provider_connection, deliveryMode: "daemon_inbox",
+      hasCorrection: false, correctionText: null, correctionStrategy: null, capability: "native_interrupt",
+      recordedAt: new Date().toISOString(),
+    });
+    const db = new DatabaseSync(env.databasePath);
+    try { assert.equal(db.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id=?").get(prepared.effect.effect_id)?.state, "failed"); }
+    finally { db.close(); }
+    await inbox.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: controlled.id,
+      execution_generation_id: "run_1", provider_turn_id: "turn-A", outcome: "reply", text: "final answer", evidence: "stream",
+      terminal_evidence: { turnId: "turn-A", providerContinuationId: "thread_1", outcome: "reply", text: "final answer", evidence: "stream" } });
+    const dispatching = await store.replaceEntry(control.generation, { ...control.entry,
+      turn_control: { ...control.entry.turn_control!, status: "dispatching", stages: ["interrupting"] } });
+    const resolved = await store.commitTurnControlState(dispatching.generation, {
+      agentId: controlled.id, roomId: controlled.room_id, actionId: "stop", workAttemptId: "attempt_1",
+      executionGenerationId: "run_1", mode: "native_applied", settleOriginal: true, activateCorrection: false,
+      observedAt: new Date().toISOString(),
+    }, current => ({ ...current, turn_control: { ...current.turn_control!, status: "completed", interrupted: false,
+      resumed: false, state: "idle", stages: ["applied"] } }));
+    assert.equal(resolved.original, "publication_won");
+    await inbox.close(); inbox = new SupervisedAgentInboxStore(env.databasePath);
+    assert.equal(await inbox.hasInterceptedThreadReply(item.inbox_item_id), true);
+    assert.equal((await inbox.get(item.inbox_item_id))?.reply_client_message_id, item.reply_client_message_id);
+  } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
 test("exact native failure wins every Stop resolution and admits only the new correction", async () => {
   for (const outcome of ["failed", "interrupted"] as const) {
     for (const mode of ["native_applied", "operator_applied", "operator_not_applied"] as const) {
