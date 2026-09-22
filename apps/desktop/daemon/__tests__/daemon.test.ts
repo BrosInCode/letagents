@@ -10421,6 +10421,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(resumeCount, 1);
     assert.deepEqual(resumeRequests[0]?.supervisorWorkerSession, {
       agentSessionId: "agent_session_exact",
+      apiUrl,
       roomCursor: "msg_2822",
     }, "resume receives the exact prior worker identity and cursor without its secret");
     assert.doesNotMatch(JSON.stringify(resumeRequests[0]), /session-secret/, "provider request never receives worker session authority");
@@ -10548,6 +10549,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(resumeCount, 2);
     assert.deepEqual(resumeRequests[1]?.supervisorWorkerSession, {
       agentSessionId: "agent_session_exact",
+      apiUrl,
       roomCursor: "msg_2824",
     });
     assert.equal((await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.execution_generation_id, resumedGenerationId);
