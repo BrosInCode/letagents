@@ -8236,7 +8236,17 @@ test(`two Codex room agents keep independent provider executions across stop, re
     onStream: () => () => {},
     onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
-  const router = () => new ProviderActionPortRouter({ codex: async () => adapter });
+  const router = () => {
+    const port = new ProviderActionPortRouter({ codex: async () => adapter });
+    // This legacy fixture has no exact-turn control and tests lifecycle
+    // isolation, not automatic migration to daemon inbox delivery.
+    return modeCase === "mcp_polling" ? new Proxy(port, {
+      get(target, property, receiver) {
+        if (property === "controlExactTurn") return undefined;
+        return Reflect.get(target, property, receiver);
+      },
+    }) : port;
+  };
   let activeRouter = router();
   let tailReads = 0;
   const polls: Array<{ bearer: string; afterMessageId: string | null }> = [];
@@ -8488,6 +8498,13 @@ test(`two Codex room agents keep independent provider executions across stop, re
       assert.equal(detail.execution_generations[0]?.terminal, null);
     }
 
+    // Select the cutover retry ordering around the exact terminal boundary;
+    // this lifecycle fixture must retain its requested delivery mode there too.
+    const cutovers = (daemon as unknown as {
+      deliveryCutovers: { start(entryId: string): Promise<void> };
+    }).deliveryCutovers;
+    if (modeCase === "mcp_polling") await cutovers.start(identities[0].entryId);
+
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: identities[0].entryId, desired_state: "paused",
     })).ok, true);
@@ -8501,6 +8518,8 @@ test(`two Codex room agents keep independent provider executions across stop, re
     assert.equal(bravoWhileAlphaPaused.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
     assert.equal(runtimes.get(bravoBefore.work_attempt_id!)?.state, "working");
     assert.deepEqual(stopRequests, [alphaBefore.work_attempt_id]);
+
+    if (modeCase === "mcp_polling") await cutovers.start(identities[0].entryId);
 
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: identities[0].entryId, desired_state: "running",
