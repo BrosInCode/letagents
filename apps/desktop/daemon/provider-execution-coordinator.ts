@@ -1275,6 +1275,7 @@ export class ProviderExecutionCoordinator {
       && priorBinding.work_attempt_id === attempt.work_attempt_id
       ? {
           agentSessionId: priorBinding.agent_session_id,
+          apiUrl: priorBinding.api_url,
           roomCursor: priorBinding.room_cursor ?? null,
         }
       : null;
@@ -1450,7 +1451,7 @@ export class ProviderExecutionCoordinator {
         Object.assign(spawn, {
           supervisorWorkerSession: {
             agentSessionId: mintedHostSession.agentSessionId,
-            ...(launchConfiguration.polling_contract ? { apiUrl: mintedHostSession.apiUrl } : {}),
+            apiUrl: mintedHostSession.apiUrl,
             roomCursor: launchConfiguration.polling_contract
               ? resumeWorker?.roomCursor ?? attempt.checkpoints.at(-1)?.room_cursor ?? null
               : null,
