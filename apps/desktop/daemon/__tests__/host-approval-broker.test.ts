@@ -487,6 +487,8 @@ test("exact safe Codex file changes are delegatable while sensitive paths stay h
         assert.equal(unavailable.length, 1, "authority loss does not duplicate a live request and its durable recovery card");
         assert.deepEqual(unavailable[0]!.reference, candidate.reference);
         assert.equal(unavailable[0]!.status, "unavailable");
+        assert.equal(unavailable[0]!.recordedDecision, null);
+        assert.equal(unavailable[0]!.detail, "No decision was recorded for this request.");
         assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 1);
         assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 1);
         f.state.owned = true;
@@ -623,6 +625,7 @@ for (const provider of ["codex", "claude-code"] as const) test(`${provider} host
     f.emit([]);
     const [retained] = await f.broker.list("room");
     assert.equal(retained?.status, "uncertain"); assert.deepEqual(retained.reference, candidate!.reference);
+    assert.equal(retained.detail, "The decision may have been sent, but confirmation is unavailable.");
     assert.doesNotMatch(retained.presentation.details, /PRIVATE-APPROVAL-CONTENT/);
     f.reinstall(); f.emit([]);
     assert.equal((await f.broker.list("room"))[0]!.status, "uncertain");
@@ -757,6 +760,11 @@ test("host approval retains an unsent chosen decision for exact recovery without
       await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
       assert.deepEqual(f.sends, []);
       assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchId, null);
+      f.emit([]);
+      const [unavailable] = await f.broker.list("room");
+      assert.equal(unavailable!.status, "unavailable");
+      assert.equal(unavailable!.recordedDecision?.decisionId, selected.decisionId);
+      assert.equal(unavailable!.detail, "The decision was recorded but not sent.");
       f.reinstall();
       if (kind === "file_change") f.emit([fileChange]);
       const [retained] = await f.broker.list("room"); assert.equal(retained!.status, "decision_recorded");
@@ -1177,6 +1185,10 @@ for (const roomWorkspace of [false, true]) for (const stage of ["before-intent",
       }
       assert.equal(result, "unavailable");
       assert.deepEqual(f.sends, []);
+      f.emit([]);
+      const [withdrawn] = await f.broker.list("room");
+      assert.equal(withdrawn!.status, "unavailable");
+      assert.equal(withdrawn!.detail, "The decision was recorded but not sent.");
       f.reinstall();
       const [replacement] = await f.broker.list("room");
       assert.equal(replacement!.status, "pending");
