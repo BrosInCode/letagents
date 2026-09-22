@@ -44,6 +44,7 @@ import { assertMacOS } from "./platform.js";
 import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
 import { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
 import { ProviderExecutionCoordinator } from "./provider-execution-coordinator.js";
+import { ProviderHandoffCoordinator } from "./provider-handoff-coordinator.js";
 import {
   ProviderReconciliationCoordinator,
   type DaemonReconcileInput,
@@ -162,13 +163,8 @@ export class SupervisorDaemon {
   private readonly agentStreamRegistry: AgentStreamRegistry;
   private handoffScheduled = false;
   private handoffDraining = false;
-  private handoffPreparation: Promise<void> | null = null;
+  private readonly handoff: ProviderHandoffCoordinator;
   private boardOwnershipActive = false;
-  private handoffTeardownScheduled = false;
-  /** Resolves only once this daemon has relinquished every authority surface. */
-  private readonly handoffCompletion: Promise<void>;
-  private resolveHandoffCompletion!: () => void;
-  private rejectHandoffCompletion!: (error: unknown) => void;
 
   private get manifestGeneration(): number {
     return this.authority.generation;
@@ -180,13 +176,6 @@ export class SupervisorDaemon {
 
   constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, private readonly supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp, private readonly loadSupervisedToolRuntime: () => Promise<SupervisedToolRuntime> = supervisedToolRuntime) {
     this.stateDatabasePath = paths.manifestPath;
-    this.handoffCompletion = new Promise<void>((resolve, reject) => {
-      this.resolveHandoffCompletion = resolve;
-      this.rejectHandoffCompletion = reject;
-    });
-    // A library consumer may prepare a handoff without awaiting its completion.
-    // Keep the rejection observed while preserving it for waitForHandoff().
-    void this.handoffCompletion.catch(() => undefined);
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
     const daemonAuthority = {
       currentGeneration: () => this.singleton.currentGeneration,
@@ -869,6 +858,18 @@ export class SupervisorDaemon {
       diagnostic: (domain, entryId, error) => console.warn(`[execution_delegation_${domain}_sync]`,
         JSON.stringify({ entryId, error: String(error) })),
     });
+    this.handoff = new ProviderHandoffCoordinator({
+      provider: providerPort, manifest: this.store, inbox: this.supervisedInbox,
+      execution: this.providerExecution, delivery: () => this.supervisedDelivery,
+      currentHandle: (entryId) => this.liveHandles.get(entryId),
+      isLifecycleActive: (entryId) => this.entryConcurrency.isLifecycleActive(entryId),
+      isRetiring: () => this.handoffScheduled,
+      setDraining: (draining) => { this.handoffDraining = draining; },
+      beginRetirement: () => { this.handoffScheduled = true; },
+      retire: () => this.retireForHandoff(),
+      finish: () => this.stopForHandoff(),
+      requestConvergence: (entryId) => this.requestConvergence(entryId),
+    });
     const controlOperations = {
       hostApprovals: this.hostApprovals,
       activateCustodialPolling: (input) => this.deliveryCutoverExecution.activatePolling(input),
@@ -901,7 +902,7 @@ export class SupervisorDaemon {
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
       prepareBoundedEffect: this.boundedEffects.prepare.bind(this.boundedEffects),
-      prepareHandoff: this.prepareHandoff.bind(this),
+      prepareHandoff: () => this.handoff.prepare(),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
       purgeAgent: this.lifecycleAdministration.purgeAgent.bind(this.lifecycleAdministration),
       putManifestEntry: this.putManifestEntry.bind(this),
@@ -1058,7 +1059,7 @@ export class SupervisorDaemon {
    * must acknowledge before it tears down the connection carrying that reply.
    */
   async waitForHandoff(): Promise<void> {
-    await this.handoffCompletion;
+    await this.handoff.waitForCompletion();
   }
 
   /**
@@ -1203,77 +1204,7 @@ export class SupervisorDaemon {
     return this.readModel.status();
   }
 
-  private prepareHandoff(): Promise<void> {
-    if (this.handoffTeardownScheduled) return Promise.resolve();
-    if (!this.handoffPreparation) {
-      this.handoffPreparation = this.prepareHandoffOnce().finally(() => { this.handoffPreparation = null; });
-    }
-    return this.handoffPreparation;
-  }
-
-  /** The approval/stdio owner stays live until non-surviving providers finish. */
-  private async drainNonSurvivingProviders(signal: AbortSignal): Promise<void> {
-    if (!this.providerPort) return;
-    const entries = (await this.store.load()).entries.filter(entry => entry.work_attempt_id);
-    const protectedEntries = (await Promise.all(entries.map(async entry =>
-      (await this.providerPort!.capabilities(entry.work_attempt_id!, entry.provider)).survivesRestart ? null : entry)))
-      .filter((entry): entry is DaemonManifestEntry => entry !== null);
-    signal.throwIfAborted();
-    const protectedIds = protectedEntries.map(entry => entry.id);
-    await this.providerExecution?.drainDispatches(protectedIds);
-    signal.throwIfAborted();
-    await this.supervisedDelivery?.drainAdmittedTurns(protectedIds);
-    signal.throwIfAborted();
-    for (const entry of protectedEntries) {
-      signal.throwIfAborted();
-      const current = await this.store.getEntry(entry.id);
-      if (!current) continue;
-      const handle = this.liveHandles.get(entry.id);
-      const state = handle?.observedState ?? current.observed_state;
-      if (this.entryConcurrency.isLifecycleActive(entry.id)
-        || !["idle", "stopped", "failed", "paused", "absent"].includes(state)) {
-        throw new Error("Update deferred: an agent still has work that cannot survive a background-service restart. Try again after it finishes.");
-      }
-      const head = await this.supervisedInbox.head(entry.id);
-      if (!head) continue;
-      if (!head.provider_turn_id) {
-        if (head.state === "pending" || head.state === "retryable") continue;
-        // A lost native acknowledgement can leave a blocked turn without an
-        // ID or counted attempt. Neither is proof that dispatch never happened.
-        throw new Error("Update deferred: an agent's current turn has no confirmed completion. Resolve its blocked work before updating.");
-      }
-      const binding = await this.supervisedInbox.providerTurnBinding(head.inbox_item_id);
-      if (binding && binding.origin_execution_generation_id !== current.provider_ref?.execution_generation_id) continue;
-      const detail = await this.supervisedInbox.detail(entry.id, current.room_id, head.source_message_id);
-      if (!binding || !detail.terminal || detail.terminal.outcome === "unreadable" || detail.terminal.evidence_source === "none") {
-        throw new Error("Update deferred: an agent's current turn has no confirmed completion. Resolve its blocked work before updating.");
-      }
-    }
-  }
-
-  private async prepareHandoffOnce(): Promise<void> {
-    this.handoffDraining = true;
-    this.supervisedDelivery?.pauseDispatch();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const controller = new AbortController();
-    try {
-      await Promise.race([
-        this.drainNonSurvivingProviders(controller.signal),
-        new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => reject(new Error("Update deferred: agents are still finishing work. Their current turns and approvals remain available; try again when they finish.")), 30_000);
-        }),
-      ]);
-      if (this.handoffScheduled) return;
-      this.handoffScheduled = true;
-    } finally {
-      if (timeout) clearTimeout(timeout);
-      controller.abort();
-      this.handoffDraining = false;
-      if (!this.handoffScheduled) {
-        this.supervisedDelivery?.resumeDispatch();
-        for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id);
-      }
-    }
+  private async retireForHandoff(): Promise<void> {
     const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
     this.hostApprovals.close();
     this.roomWorkPublisher?.close();
@@ -1301,14 +1232,6 @@ export class SupervisorDaemon {
     await this.providerExecution?.drainDispatches();
     await this.boundedEffects.drainJournalReservations();
     await this.boundedEffects.drainExternalExecutions();
-    this.handoffTeardownScheduled = true;
-    // Delayed teardown exists only to flush the successful socket reply.
-    setTimeout(() => {
-      void this.stopForHandoff().then(
-        () => this.resolveHandoffCompletion(),
-        (error) => this.rejectHandoffCompletion(error),
-      );
-    }, 25).unref();
   }
 
   private beginBootstrap<T>(run: (input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation) => Promise<T>, input: { entry_id: string; daemon_generation: number }): Promise<T> {
