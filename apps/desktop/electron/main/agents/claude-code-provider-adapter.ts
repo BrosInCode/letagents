@@ -1286,8 +1286,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     // delay): startup must stay observable even when nothing else keeps the
     // supervising process's event loop alive. Cleared as soon as the race ends.
     let initTimer: ReturnType<typeof setTimeout> | null = null;
-    const initTimeout = new Promise<{ type: "deadline" }>((resolve) => {
-      initTimer = setTimeout(() => resolve({ type: "deadline" }), this.initTimeoutMs);
+    const bootstrapFailure = Symbol("bootstrap-failure");
+    const initTimeout = new Promise<{ [bootstrapFailure]: { type: "deadline" } }>((resolve) => {
+      initTimer = setTimeout(() => resolve({ [bootstrapFailure]: { type: "deadline" } }), this.initTimeoutMs);
     });
     try {
       // Claude does not emit init until it receives one stdin user frame. This
@@ -1295,15 +1296,16 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       // work; every real message is claimed and dispatched by the daemon.
       child.writeLine(userStreamJsonLine(CLAUDE_DAEMON_BOOTSTRAP_PROMPT, bootstrapTurnId));
 
-      const initOutcome = await Promise.race([
-        initPromise.then(message => ({ type: "init" as const, message })),
-        child.exited,
+      // Keep the raw observation promises and map only process exit, retaining
+      // the established precedence for exact results consumed in the same batch.
+      const observedInit = await Promise.race([
+        initPromise,
+        child.exited.then(exit => ({ [bootstrapFailure]: exit })),
         initTimeout,
       ]);
-      if (initOutcome.type !== "init") {
-        throw new ClaudeBootstrapError("init", initOutcome);
+      if (bootstrapFailure in observedInit) {
+        throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure]);
       }
-      const observedInit = initOutcome.message;
       if (req.permissionProfileId === "ask_before_write"
         && (!Array.isArray(observedInit.capabilities) || !observedInit.capabilities.includes("msg_lifecycle_v1"))) {
         throw new Error("Claude tool approvals require exact native turn lifecycle support. Update Claude Code, then try again.");
@@ -1350,14 +1352,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         this.consumeLine(handle, line);
       }
       const bootstrapTerminal = await Promise.race([
-        bootstrapResult.then(result => ({ type: "result" as const, result })),
-        child.exited,
+        bootstrapResult,
+        child.exited.then(exit => ({ [bootstrapFailure]: exit })),
         initTimeout,
       ]);
-      if (bootstrapTerminal.type !== "result") {
-        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal);
+      if (bootstrapFailure in bootstrapTerminal) {
+        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure]);
       }
-      if ("error" in bootstrapTerminal.result) {
+      if ("error" in bootstrapTerminal) {
         throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" });
       }
       handle.roomTurnResults.delete(bootstrapTurnId);

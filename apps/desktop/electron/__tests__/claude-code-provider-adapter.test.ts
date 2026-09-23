@@ -107,6 +107,7 @@ interface HarnessOptions {
   noApprovalLifecycle?: boolean;
   bootstrapResultSubtype?: string;
   omitBootstrapResult?: boolean;
+  exitAfterBootstrapResult?: ProviderProcessExit;
   /** Overrides per pid; undefined entries mean "cannot verify". */
   identities?: Map<number, string | null | undefined>;
   /** Defaults to true (a well-behaved CLI); fence tests opt out to exercise escalation. */
@@ -188,6 +189,10 @@ function createHarness(options: HarnessOptions = {}) {
             user_message_uuid: frame.uuid,
             result: "LETAGENTS_CLAUDE_DAEMON_READY",
           });
+          if (options.exitAfterBootstrapResult) {
+            if (options.exitAfterBootstrapResult.type === "exit" && pid !== null) identities.set(pid, null);
+            child.resolveExit(options.exitAfterBootstrapResult);
+          }
         });
       };
       return child;
@@ -752,6 +757,32 @@ for (const phase of ["init", "bootstrap_turn"] as const) {
         assert.equal(harness.mcpConfigDisposals, 1);
         assert.equal(adapter.runtimeCustody("wa-claude-1"), reason === "transport_error" ? "unknown" : "absent");
         assert.deepEqual(harness.signals, reason === "deadline" ? [{ pid: 4100, signal: "SIGTERM" }] : []);
+      } finally {
+        harness.identities.set(4100, null);
+        await flush();
+      }
+    });
+  }
+}
+
+for (const failed of [false, true]) {
+  for (const exit of [{ type: "exit", code: 7, signal: null },
+    { type: "error", error: new Error("private transport payload") }] as const) {
+    test(`exact bootstrap ${failed ? "failure" : "success"} keeps precedence over same-batch ${exit.type}`, async () => {
+      const harness = createHarness({
+        ...(failed ? { bootstrapResultSubtype: "error_max_turns" } : {}),
+        exitAfterBootstrapResult: exit,
+      });
+      const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+      try {
+        if (failed) {
+          await assert.rejects(adapter.spawn(spawnRequest()), {
+            name: "ClaudeBootstrapError", phase: "bootstrap_turn", reason: "failed_response",
+          });
+        } else {
+          const handle = await adapter.spawn(spawnRequest());
+          assert.equal(handle.providerContinuationId, argValue(harness.launches[0]!.args, "--session-id"));
+        }
       } finally {
         harness.identities.set(4100, null);
         await flush();
