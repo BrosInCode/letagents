@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mapEntry } from "../../electron/main/supervisor-daemon.js";
+import { agentInspectorOverallState } from "../../renderer/src/domain/agent-inspector.js";
 
 import {
   bindingMatchesRoomAgentGeneration,
@@ -191,13 +193,16 @@ test("typed admission gates the room view without rewriting lifecycle or claimin
     const projected = projectRoomAgentManifestEntry(input);
     assert.equal(projected.room_agent_state?.connection.state,
       lifecycleAdmission === "pending" ? "reconnecting" : "disconnected");
-    assert.equal(projected.room_agent_state?.inbox.state, "blocked");
-    assert.equal(projected.room_agent_state?.ingress.state, "blocked",
+    assert.equal(projected.room_agent_state?.inbox.state, lifecycleAdmission === "pending" ? "queued" : "blocked");
+    assert.equal(projected.room_agent_state?.ingress.state, lifecycleAdmission === "pending" ? "starting" : "blocked",
       "persisted observation health cannot bypass the same admission gate");
     assert.match(projected.room_agent_state?.inbox.detail ?? "", /readiness evidence/i);
     assert.notEqual(projected.room_agent_state?.turn.state, "responding",
       "unadmitted physical activity is not an operational turn");
     assert.equal(projected.condition, lifecycleAdmission === "pending" ? "none" : "coordination_blocked");
+    assert.equal(agentInspectorOverallState(mapEntry(projected)),
+      lifecycleAdmission === "pending" ? "reconnecting" : "needs_attention",
+      "ordinary asynchronous admission must not flash Needs attention in the product");
     assert.equal(projected.observed_state, "recovering", "absence of evidence is not native process failure");
     assert.deepEqual(recovering, before, "projection never writes lifecycle or clears historical uncertainty");
   }
@@ -206,6 +211,12 @@ test("typed admission gates the room view without rewriting lifecycle or claimin
   assert.equal(ready.room_agent_state?.inbox.state, "queued");
   assert.equal(ready.condition, "none", "only actual admission removes the derived blocker");
   assert.equal(ready.room_agent_state?.ingress.state, "observing");
+  const noBindingYet = projectRoomAgentManifestEntry(facts({ entry: recovering, lifecycleAdmission: "pending",
+    binding: null, credentialAvailable: false, receipts: [],
+  }));
+  assert.equal(agentInspectorOverallState(mapEntry(noBindingYet)), "reconnecting",
+    "pending admission before binding is progress, not a credential intervention");
+  assert.equal(noBindingYet.room_agent_state?.inbox.state, "empty");
 
   const deliveryBlocked = projectRoomAgentManifestEntry(facts({ entry: recovering, lifecycleAdmission: "unavailable",
     receipts: [receipt({ state: "blocked", receipt_state: "blocked", last_error: "Existing uncertain effect." })],
