@@ -44,7 +44,7 @@
       :busy="lifecycleActionBusy"
       :busy-kind="lifecycleBusyKind"
       :compact="compact"
-      @action="emit('action', $event)"
+      @action="handleLifecycleAction"
     />
 
     <p
@@ -132,9 +132,9 @@
       />
       <AgentInspectorDiagnostics
         v-else id="agent-inspector-diagnostics-panel" role="tabpanel" aria-labelledby="agent-inspector-diagnostics-tab"
-        :projection="projection"
+        :projection="projection" :initial-recovery-options="recoveryOptionsRequested"
         :work-resource="workResource" :daemon-status="daemonStatus" :action-state="actionState" :busy="lifecycleActionBusy" :refresh-diagnostics="refreshDiagnostics"
-        @action="emit('action', $event)" @navigate="navigateFromDiagnostics"
+        @action="handleLifecycleAction" @navigate="navigateFromDiagnostics"
       />
     </div>
 
@@ -235,6 +235,16 @@ const visibleActionMessage = computed(() => {
 const retireAction = computed(() =>
   props.projection.actions.find((action) => action.available && action.kind === "retire_agent") ?? null);
 const confirmRetire = ref(false);
+const recoveryOptionsRequested = ref(false);
+
+function handleLifecycleAction(intent: AgentInspectorActionIntent): void {
+  if (intent.kind !== "recovery_options") { emit("action", intent); return; }
+  if (lifecycleActionBusy.value || props.projection.resourceFreshness !== "fresh"
+    || intent.entryId !== props.projection.entryId || intent.roomId !== props.projection.roomId
+    || !props.projection.actions.some(action => action.kind === intent.kind && action.available)) return;
+  recoveryOptionsRequested.value = true;
+  selectTab("diagnostics");
+}
 
 function openRetireConfirmation(): void {
   confirmRetire.value = true;
@@ -271,6 +281,7 @@ defineExpose({ focusInitial, containsFocus });
 watch([() => props.projection.entryId, () => props.requestVersion, () => props.initialTab], () => {
   selectedTab.value = props.initialTab ?? "overview";
   confirmRetire.value = false;
+  recoveryOptionsRequested.value = false;
 });
 
 function selectTab(tab: InspectorTab): void {
@@ -278,6 +289,7 @@ function selectTab(tab: InspectorTab): void {
   if (selectedTab.value === "live" && tab !== "live") emit("live-dismissed");
   if (tab !== "overview") confirmRetire.value = false;
   selectedTab.value = tab;
+  if (tab !== "diagnostics") recoveryOptionsRequested.value = false;
   if (tab === "live") emit("live-selected");
   if (tab === "work" || tab === "diagnostics") emit("work-selected");
   if (tab === "settings") emit("settings-selected");

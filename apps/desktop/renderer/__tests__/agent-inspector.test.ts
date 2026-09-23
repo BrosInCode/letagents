@@ -192,6 +192,7 @@ test("truthful online state requires the exact delivery connection and preserves
 
 test("a stopped provider with retained historical coordinates offers recovery instead of false reconnect or delivery retry", () => {
   const stoppedProvider = entry({
+    runtimeGenerationId: "stopped-runtime",
     observedState: "recovering",
     condition: "coordination_blocked",
     lastError: "convergence scheduler failure: The saved OpenCode process is no longer running.",
@@ -235,9 +236,31 @@ test("a stopped provider with retained historical coordinates offers recovery in
   assert.equal(projection?.overallState, "needs_attention");
   assert.match(projection?.now?.summary ?? "", /Recover the agent/);
   assert.equal(projection?.actions.find((action) => action.kind === "reconnect")?.available, false);
-  assert.equal(projection?.actions.find((action) => action.kind === "recover")?.available, true);
-  assert.equal(projection?.actions.find((action) => action.kind === "recover")?.label, "Recover agent");
+  assert.equal(projection?.actions.find((action) => action.kind === "recover")?.available, false);
+  assert.equal(projection?.actions.find((action) => action.kind === "recovery_options")?.available, true);
   assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
+});
+
+test("blocked delivery on an exact live runtime offers choices without implicit recovery", () => {
+  const live = entry({
+    provider: "claude-code", observedState: "recovering", condition: "coordination_blocked",
+    runtimeGenerationId: "runtime-current",
+    lastError: "The agent's readiness evidence is unavailable. Delivery is blocked until recovery is verified.",
+    roomAgentState: { ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: null, detail: "Readiness evidence is unavailable." },
+    },
+  });
+  for (const providerPid of [123, null]) {
+    const projection = projectAgentInspector({ ...live, providerPid }, { roomId: "focus_1" })!;
+    assert.equal(projection.overallState, "needs_attention");
+    assert.equal(projection.actions.find(action => action.kind === "recover")?.available, false,
+      "delivery admission and missing PID do not authorize implicit replacement");
+    assert.equal(projection.actions.find(action => action.kind === "recovery_options")?.available, true);
+    assert.equal(projection.actions.find(action => action.kind === "restart_runtime")?.available, true);
+  }
+  const stale = projectAgentInspector(live, { roomId: "focus_1", resourceFreshness: "stale" })!;
+  assert.ok(stale.actions.filter(action => ["recover", "recovery_options", "restart_runtime"].includes(action.kind))
+    .every(action => !action.available));
 });
 
 test("a reconnecting room keeps provider connectivity separate from delivery authority", () => {

@@ -8,6 +8,8 @@
       </button>
     </header>
 
+    <p v-if="initialRecoveryOptions && !daemonStatus?.capabilities.agentRuntimeRecoveryV2" class="diagnostics-footnote">Recovery options are unavailable from the background service. Refresh checks or update LetAgents.</p>
+
     <section class="diagnostics-path" aria-label="Agent health checks">
       <div class="diagnostics-path-caption"><span>Connection checks</span><span>{{ assessment.passedCount }} / {{ assessment.checks.length }} clear</span></div>
       <div class="diagnostics-path-nodes">
@@ -121,7 +123,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FileText, Inbox, Pause, Radio, RefreshCw, Route, Server, ShieldCheck, TriangleAlert, Wrench } from "@lucide/vue";
 import type { DesktopSupervisorDaemonStatus } from "../../../../../../electron/ipc-types";
 import { copyTextToClipboard } from "../../../../domain/clipboard";
@@ -134,6 +136,7 @@ import "./agent-inspector-diagnostics.css";
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
+  initialRecoveryOptions?: boolean;
   workResource: AgentInspectorWorkResource;
   daemonStatus?: DesktopSupervisorDaemonStatus | null;
   actionState?: AgentInspectorActionState | null;
@@ -146,7 +149,7 @@ const stateIcons = { passed: Check, attention: TriangleAlert, pending: Clock3, u
 const stateLabels = { passed: "Clear", attention: "Attention", pending: "In progress", unknown: "Unknown", paused: "On hold" };
 const assessment = computed(() => projectAgentTroubleshooting(props.projection, props.workResource, props.daemonStatus));
 const diagnostics = computed(() => projectAgentInspectorDiagnostics(props.projection));
-const selectedId = ref<DiagnosticCheckId | null>(null);
+const selectedId = ref<DiagnosticCheckId | null>(props.initialRecoveryOptions ? "provider" : null);
 const selectedCheck = computed(() => assessment.value.checks.find(check => check.id === selectedId.value) ?? null);
 const stage = ref<"resolve" | "verify">("resolve");
 const verification = ref<"idle" | "passed" | "unresolved">("idle");
@@ -243,6 +246,7 @@ function runRecovery(): void {
   if (!action || props.busy || checking.value || props.projection.resourceFreshness !== "fresh") return;
   const current = props.projection.actions.find(candidate => candidate.available && candidate.kind === action.kind && candidate.sourceMessageId === action.sourceMessageId);
   if (!current) return;
+  if (current.kind === "recovery_options") { openCheck("provider"); return; }
   refreshMessage.value = ""; refreshFailed.value = false;
   recoveryRequested.value = true; stage.value = "verify"; verification.value = "idle";
   void focusGuide();
@@ -286,6 +290,7 @@ watch([() => props.projection.entryId, () => props.projection.roomId], () => {
   requestVersion++; selectedId.value = null; checking.value = false; refreshMessage.value = "";
   verification.value = "idle"; recoveryRequested.value = false; copyState.value = "idle"; copying.value = false;
 });
+onMounted(() => { if (props.initialRecoveryOptions) void focusGuide(); });
 onBeforeUnmount(() => { requestVersion++; });
 
 const runtimeFacts = computed(() => [
