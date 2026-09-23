@@ -33,6 +33,7 @@ import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import type { SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
 import type { DaemonAgentConfiguration, DaemonManifestEntry, TaskWorkAttempt } from "./types.js";
 import type { WorkerBindingStore, WorkerSessionBinding } from "./worker-binding-store.js";
+import type { ConvergenceRequestKind } from "./provider-execution-coordinator.js";
 import {
   WORKER_BEARER_ROTATION_LEAD_MS,
   type BoundWorkerAuthorization,
@@ -203,7 +204,7 @@ export type WorkerAuthorityCoordinatorOptions = {
     start(entryId: string): Promise<void>;
   };
   convergence: {
-    request(entryId: string): void;
+    request(entryId: string, kind?: ConvergenceRequestKind): void;
     schedule(entryId: string, delayMs: number): void;
     clear(entryId: string): void;
     heartbeatIntervalMs: number;
@@ -1213,7 +1214,7 @@ export class WorkerAuthorityCoordinator {
       if (currentGrantIsAtLeastInput && currentGrant && !input.credential_only && !input.recovery_only) {
         if (!frozen && entry.desired_state === "running"
           && (entry.delivery_mode !== "daemon_inbox" || await this.options.inbox.cursor(entry.id))) {
-          this.options.convergence.request(entry.id);
+          this.options.convergence.request(entry.id, "rehydration");
         }
         return { status: "installed" };
       }
@@ -1289,7 +1290,7 @@ export class WorkerAuthorityCoordinator {
       }
       if (entry.desired_state === "running"
         && (entry.delivery_mode !== "daemon_inbox" || await this.options.inbox.cursor(entry.id))) {
-        this.options.convergence.request(entry.id);
+        this.options.convergence.request(entry.id, "rehydration");
       }
       return { status: "installed" };
     });
@@ -1328,7 +1329,7 @@ export class WorkerAuthorityCoordinator {
       }
       const existing = await this.options.inbox.cursor(entry.id);
       if (existing) {
-        await this.requestAdmittedRunningConvergence(entry.id, input.daemon_generation);
+        await this.requestAdmittedRunningConvergence(entry.id, input.daemon_generation, initialMessage ? "owned" : "rehydration");
         return { status: "existing", last_observed_message_id: existing.last_observed_message_id };
       }
       const grant = this.currentHostGrant(entry);
@@ -1366,12 +1367,12 @@ export class WorkerAuthorityCoordinator {
     });
   }
 
-  private async requestAdmittedRunningConvergence(entryId: string, daemonGeneration: number): Promise<void> {
+  private async requestAdmittedRunningConvergence(entryId: string, daemonGeneration: number, kind: ConvergenceRequestKind = "owned"): Promise<void> {
     if (!await this.ownsDaemonGeneration(daemonGeneration)) return;
     const entry = await this.options.store.getEntry(entryId);
     if (!entry || entry.delivery_mode !== "daemon_inbox" || entry.desired_state !== "running") return;
     if (!await this.options.inbox.cursor(entryId)) return;
-    this.options.convergence.request(entryId);
+    this.options.convergence.request(entryId, kind);
   }
 
   async verifyWorkerSession(input: VerifyWorkerSessionInput): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {
