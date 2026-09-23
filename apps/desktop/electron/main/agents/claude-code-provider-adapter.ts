@@ -320,6 +320,31 @@ const CLAUDE_DAEMON_BOOTSTRAP_PROMPT = [
 
 type ClaudeRoomTurnTerminal = ClaudeExactTurnResult | ClaudeExactTurnFailure;
 
+class ClaudeBootstrapError extends Error {
+  readonly name = "ClaudeBootstrapError";
+  readonly reason: "deadline" | "native_exit" | "transport_error" | "failed_response";
+  readonly exitCode?: number | null;
+  readonly signal?: string | null;
+
+  constructor(
+    readonly phase: "init" | "bootstrap_turn",
+    failure: ProviderProcessExit | { type: "deadline" | "failed_response" },
+  ) {
+    const reason = failure.type === "exit" ? "native_exit"
+      : failure.type === "error" ? "transport_error" : failure.type;
+    const prefix = phase === "init" ? "Claude CLI did not report its stream-json init message"
+      : "Claude CLI did not complete its daemon-safe bootstrap turn";
+    // Preserve the observed boundary without copying native error/result text
+    // into supervisor diagnostics. Transport loss is not a physical death proof.
+    super(`${prefix} (${reason}${failure.type === "exit" ? `; exit code ${failure.code ?? "unknown"}; signal ${failure.signal ?? "none"}` : ""}).`);
+    this.reason = reason;
+    if (failure.type === "exit") {
+      this.exitCode = failure.code;
+      this.signal = failure.signal;
+    }
+  }
+}
+
 class ClaudeRoomTurnRecoveryError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
 }
@@ -1261,8 +1286,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     // delay): startup must stay observable even when nothing else keeps the
     // supervising process's event loop alive. Cleared as soon as the race ends.
     let initTimer: ReturnType<typeof setTimeout> | null = null;
-    const initTimeout = new Promise<null>((resolve) => {
-      initTimer = setTimeout(() => resolve(null), this.initTimeoutMs);
+    const bootstrapFailure = Symbol("bootstrap-failure");
+    const initTimeout = new Promise<{ [bootstrapFailure]: { type: "deadline" } }>((resolve) => {
+      initTimer = setTimeout(() => resolve({ [bootstrapFailure]: { type: "deadline" } }), this.initTimeoutMs);
     });
     try {
       // Claude does not emit init until it receives one stdin user frame. This
@@ -1270,13 +1296,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       // work; every real message is claimed and dispatched by the daemon.
       child.writeLine(userStreamJsonLine(CLAUDE_DAEMON_BOOTSTRAP_PROMPT, bootstrapTurnId));
 
+      // Keep the raw observation promises and map only process exit, retaining
+      // the established precedence for exact results consumed in the same batch.
       const observedInit = await Promise.race([
         initPromise,
-        child.exited.then(() => null),
+        child.exited.then(exit => ({ [bootstrapFailure]: exit })),
         initTimeout,
       ]);
-      if (!observedInit) {
-        throw new Error("Claude CLI did not report its stream-json init message; refusing an unobservable worker.");
+      if (bootstrapFailure in observedInit) {
+        throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure]);
       }
       if (req.permissionProfileId === "ask_before_write"
         && (!Array.isArray(observedInit.capabilities) || !observedInit.capabilities.includes("msg_lifecycle_v1"))) {
@@ -1325,11 +1353,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       const bootstrapTerminal = await Promise.race([
         bootstrapResult,
-        child.exited.then(() => null),
+        child.exited.then(exit => ({ [bootstrapFailure]: exit })),
         initTimeout,
       ]);
-      if (!bootstrapTerminal || "error" in bootstrapTerminal) {
-        throw new Error("Claude CLI did not complete its daemon-safe bootstrap turn.");
+      if (bootstrapFailure in bootstrapTerminal) {
+        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure]);
+      }
+      if ("error" in bootstrapTerminal) {
+        throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" });
       }
       handle.roomTurnResults.delete(bootstrapTurnId);
       handle.state = "idle";
