@@ -6009,19 +6009,27 @@ for (const scenario of [
   { name: "unknown custody", desired: "stopped", custody: "unknown", installed: false, allowed: false },
   { name: "failed installation", desired: "stopped", custody: "owned", installed: false, allowed: false },
   { name: "mismatched custody", desired: "stopped", custody: "mismatched", installed: true, allowed: false },
+  { name: "recovering absent", desired: "running", observed: "recovering", custody: "absent", installed: false, allowed: true },
+  { name: "working absent", desired: "running", observed: "working", custody: "absent", installed: false, allowed: true },
+  { name: "recovering retired", desired: "running", observed: "recovering", custody: "retired", installed: false, allowed: true },
+  { name: "working retired handle", desired: "running", observed: "working", custody: "retired", installed: true, allowed: true },
+  { name: "working owned", desired: "running", observed: "working", custody: "owned", installed: true, allowed: false },
+  { name: "recovering unknown", desired: "running", observed: "recovering", custody: "unknown", installed: false, allowed: false },
+  { name: "recovering mismatched retired", desired: "running", observed: "recovering", custody: "mismatched_retired", installed: false, allowed: false },
+  { name: "working absent with installed handle", desired: "running", observed: "working", custody: "absent", installed: true, allowed: false },
 ] as const) test(`provider-aware handoff preserves historical Cursor ambiguity: ${scenario.name}`, async () => {
   const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "cursor", {
-    runtimeCustody: () => scenario.custody === "mismatched"
-      ? { state: "owned", handle: { ...env.handle, providerContinuationId: "another-continuation" } }
-      : scenario.custody === "owned" ? { state: "owned", handle: env.handle } : { state: scenario.custody },
+    runtimeCustody: () => scenario.custody === "mismatched" || scenario.custody === "mismatched_retired"
+      ? { state: scenario.custody === "mismatched" ? "owned" : "retired", handle: { ...env.handle, providerContinuationId: "another-continuation" } }
+      : scenario.custody === "owned" || scenario.custody === "retired" ? { state: scenario.custody, handle: env.handle } : { state: scenario.custody },
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
   });
   try {
     const current = (await env.internals.store.getEntry(env.id))!;
     assert.equal((await daemonRequest(env.paths.socketPath, "manifest.put", { entry: {
-      ...current, desired_state: scenario.desired, observed_state: scenario.desired,
+      ...current, desired_state: scenario.desired, observed_state: "observed" in scenario ? scenario.observed : scenario.desired,
     } })).ok, true);
-    env.handle.observedState = "idle";
+    env.handle.observedState = "observed" in scenario ? scenario.observed : "idle";
     if (scenario.installed) await env.internals.providerStreams.install(env.id, env.handle, env.generation);
     const [item] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: "room_1", last_observed_message_id: "31",
       messages: [{ source_message_id: "31", source_message: { text: "historical work" }, activation: {} }] });
@@ -6043,11 +6051,20 @@ for (const scenario of [
       finally { db.close(); }
     };
     const history = readHistory();
+    if ("observed" in scenario) {
+      await (env.daemon as unknown as { updateManifestEntry(id: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry): Promise<unknown> })
+        .updateManifestEntry(env.id, value => ({ ...value, observed_state: scenario.observed }));
+      assert.equal((await env.internals.store.getEntry(env.id))?.observed_state, scenario.observed);
+    }
     const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
     assert.equal(result.ok, scenario.allowed, result.error);
     if (scenario.allowed) await within(env.daemon.waitForHandoff(), "retirement with historical work preserved");
     else {
       assert.match(result.error ?? "", /Update deferred/);
+      assert.ok(result.error?.includes(env.id), "refusal identifies the exact entry");
+      assert.ok(result.error?.includes(current.display_name), "refusal names the agent");
+      if (scenario.custody === "unknown") assert.match(result.error ?? "", /custody: unknown/);
+      if (scenario.name === "working owned") assert.match(result.error ?? "", /state: working/);
       assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
       assert.equal((env.daemon as unknown as { handoffDraining: boolean }).handoffDraining, false);
     }
@@ -6108,9 +6125,10 @@ for (const stage of ["before_native_attach", "native_attach", "attach_error"] as
   } finally { release(); await attaching?.catch(() => undefined); await env.cleanup(); }
 });
 
-for (const kind of ["lifecycle", "turn_control"] as const) test(`provider-aware handoff preserves admitted ${kind} without a live handle`, async () => {
+for (const kind of ["lifecycle", "turn_control"] as const) for (const custody of ["absent", "retired"] as const) test(`provider-aware handoff preserves admitted ${kind} with ${custody} custody`, async () => {
+  let custodyReads = 0;
   const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "cursor", {
-    runtimeCustody: () => ({ state: "absent" }),
+    runtimeCustody: () => { custodyReads++; return custody === "absent" ? { state: "absent" } : { state: "retired", handle: env.handle }; },
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
   });
   const gate = (env.daemon as unknown as { entryConcurrency: { beginLifecycle(id: string): () => void; beginTurnControl(id: string): () => void } }).entryConcurrency;
@@ -6118,7 +6136,9 @@ for (const kind of ["lifecycle", "turn_control"] as const) test(`provider-aware 
   try {
     const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
     assert.equal(result.ok, false);
-    assert.match(result.error ?? "", /Update deferred/);
+    assert.match(result.error ?? "", /active native control operation/);
+    assert.ok(result.error?.includes(env.id));
+    assert.equal(custodyReads, 0, "admitted native control remains authoritative before a custody snapshot");
     release();
     assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true);
     await within(env.daemon.waitForHandoff(), "admitted control finishes");
