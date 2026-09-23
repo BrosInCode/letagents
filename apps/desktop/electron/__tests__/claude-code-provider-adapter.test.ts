@@ -106,6 +106,8 @@ interface HarnessOptions {
   mcpTools?: string[];
   noApprovalLifecycle?: boolean;
   bootstrapResultSubtype?: string;
+  omitBootstrapResult?: boolean;
+  exitAfterBootstrapResult?: ProviderProcessExit;
   /** Overrides per pid; undefined entries mean "cannot verify". */
   identities?: Map<number, string | null | undefined>;
   /** Defaults to true (a well-behaved CLI); fence tests opt out to exercise escalation. */
@@ -177,6 +179,7 @@ function createHarness(options: HarnessOptions = {}) {
             mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }],
             tools: options.mcpTools ?? ["mcp__letagents__get_board", "mcp__letagents__read_messages", "mcp__letagents__send_message"],
           });
+          if (options.omitBootstrapResult) return;
           const frame = JSON.parse(json) as { uuid?: string };
           child.emit({
             type: "result",
@@ -186,6 +189,10 @@ function createHarness(options: HarnessOptions = {}) {
             user_message_uuid: frame.uuid,
             result: "LETAGENTS_CLAUDE_DAEMON_READY",
           });
+          if (options.exitAfterBootstrapResult) {
+            if (options.exitAfterBootstrapResult.type === "exit" && pid !== null) identities.set(pid, null);
+            child.resolveExit(options.exitAfterBootstrapResult);
+          }
         });
       };
       return child;
@@ -699,11 +706,90 @@ test("a silent CLI that never reports init is refused as unobservable, with no o
 test("a turn-limit failure during Claude bootstrap still rejects startup and reaps the child", async () => {
   const harness = createHarness({ bootstrapResultSubtype: "error_max_turns" });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
-  await assert.rejects(adapter.spawn(spawnRequest()), /did not complete its daemon-safe bootstrap turn/);
+  await assert.rejects(adapter.spawn(spawnRequest()), {
+    name: "ClaudeBootstrapError", phase: "bootstrap_turn", reason: "failed_response",
+  });
   assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
   assert.equal(harness.children[0]!.alive, false);
   assert.equal(harness.mcpConfigDisposals, 1);
 });
+
+for (const phase of ["init", "bootstrap_turn"] as const) {
+  for (const reason of ["deadline", "native_exit", "transport_error"] as const) {
+    test(`Claude ${phase} preserves ${reason} without changing native custody`, async () => {
+      const harness = createHarness({ noInit: phase === "init", omitBootstrapResult: true });
+      const launch = harness.dependencies.launchChild;
+      if (reason !== "deadline") {
+        harness.dependencies.launchChild = input => {
+          const child = launch(input) as FakeClaudeChild;
+          const write = child.writeLine.bind(child);
+          child.writeLine = json => {
+            write(json);
+            setImmediate(() => {
+              if (reason === "native_exit") {
+                harness.identities.set(child.pid!, null);
+                child.resolveExit({ type: "exit", code: 7, signal: null });
+              } else {
+                child.resolveExit({ type: "error", error: new Error("private transport payload") });
+              }
+            });
+          };
+          return child;
+        };
+      }
+      const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+      try {
+        await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal(error.name, "ClaudeBootstrapError");
+          assert.equal((error as Error & { phase: string }).phase, phase);
+          assert.equal((error as Error & { reason: string }).reason, reason);
+          assert.match(error.message, new RegExp(reason));
+          assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`, /private transport payload/);
+          if (reason === "native_exit") {
+            assert.equal((error as Error & { exitCode: number }).exitCode, 7);
+            assert.equal((error as Error & { signal: unknown }).signal, null);
+          }
+          return true;
+        });
+        assert.equal(harness.launches.length, 1);
+        assert.equal(harness.children[0]!.written.length, 1);
+        assert.equal(harness.mcpConfigDisposals, 1);
+        assert.equal(adapter.runtimeCustody("wa-claude-1"), reason === "transport_error" ? "unknown" : "absent");
+        assert.deepEqual(harness.signals, reason === "deadline" ? [{ pid: 4100, signal: "SIGTERM" }] : []);
+      } finally {
+        harness.identities.set(4100, null);
+        await flush();
+      }
+    });
+  }
+}
+
+for (const failed of [false, true]) {
+  for (const exit of [{ type: "exit", code: 7, signal: null },
+    { type: "error", error: new Error("private transport payload") }] as const) {
+    test(`exact bootstrap ${failed ? "failure" : "success"} keeps precedence over same-batch ${exit.type}`, async () => {
+      const harness = createHarness({
+        ...(failed ? { bootstrapResultSubtype: "error_max_turns" } : {}),
+        exitAfterBootstrapResult: exit,
+      });
+      const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+      try {
+        if (failed) {
+          await assert.rejects(adapter.spawn(spawnRequest()), {
+            name: "ClaudeBootstrapError", phase: "bootstrap_turn", reason: "failed_response",
+          });
+        } else {
+          const handle = await adapter.spawn(spawnRequest());
+          assert.equal(handle.providerContinuationId, argValue(harness.launches[0]!.args, "--session-id"));
+        }
+      } finally {
+        harness.identities.set(4100, null);
+        await flush();
+      }
+    });
+  }
+}
 
 test("failed Claude bootstrap retains rejected native custody until exact physical retirement", async () => {
   const options: HarnessOptions = { noInit: true };
