@@ -1113,35 +1113,54 @@ test("desktop cloud publisher correction invalidates a large root without foregr
     raw.close();
   }
 
-  let timerFired = false;
-  setTimeout(() => { timerFired = true; }, 0);
-  const startedAt = performance.now();
-  await importLocalChatMessages(room, [{
-    ...base,
-    agent_identity: {
-      actor_label: "Historical label",
-      agent_key: "owner/new-key",
-      agent_session_id: "new-session",
-    },
-  }]);
-  const correctionMs = performance.now() - startedAt;
-  const afterCorrection = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
-  const retainedProjection = afterCorrection.prepare(`
-    SELECT
-      (SELECT COUNT(*) FROM local_chat_thread_routing_aliases_v2
-        WHERE room_id = ? AND thread_root_number = 1) AS alias_count,
-      (SELECT COUNT(*) FROM local_chat_thread_routing_agents_v2
-        WHERE room_id = ? AND thread_root_number = 1) AS agent_count,
-      (SELECT COUNT(*) FROM local_chat_thread_routing_invalidated_roots_v2
-        WHERE room_id = ? AND thread_root_number = 1) AS invalidated_count
-  `).get(room, room, room);
-  afterCorrection.close();
-  assert.equal(Number(retainedProjection?.alias_count), 2000);
-  assert.equal(Number(retainedProjection?.agent_count), 2000);
-  assert.equal(Number(retainedProjection?.invalidated_count), 1);
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  assert.equal(timerFired, true, "the correction leaves the event loop available for async repair");
-  assert.ok(correctionMs < 100, `publisher correction touched historical projection rows (${correctionMs.toFixed(1)}ms)`);
+  // Guard the actual foreground write boundary instead of inferring historical
+  // work from wall time, which also includes pauses on a loaded runner.
+  const foregroundGuard = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  const guardNames: string[] = [];
+  try {
+    for (const projection of ["aliases", "agents"]) {
+      for (const operation of ["INSERT", "UPDATE", "DELETE"]) {
+        const name = `publisher_correction_${projection}_${operation.toLowerCase()}`;
+        const affectedRows = operation === "UPDATE" ? ["OLD", "NEW"]
+          : [operation === "INSERT" ? "NEW" : "OLD"];
+        const affectsRoot = affectedRows.map((row) =>
+          `(${row}.room_id = '${room}' AND ${row}.thread_root_number = 1)`
+        ).join(" OR ");
+        foregroundGuard.exec(`
+          CREATE TRIGGER ${name}
+          BEFORE ${operation} ON local_chat_thread_routing_${projection}_v2
+          WHEN ${affectsRoot}
+          BEGIN
+            SELECT RAISE(ABORT, 'publisher correction rewrote foreground projection rows');
+          END
+        `);
+        guardNames.push(name);
+      }
+    }
+    await importLocalChatMessages(room, [{
+      ...base,
+      agent_identity: {
+        actor_label: "Historical label",
+        agent_key: "owner/new-key",
+        agent_session_id: "new-session",
+      },
+    }]);
+    const retainedProjection = foregroundGuard.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM local_chat_thread_routing_aliases_v2
+          WHERE room_id = ? AND thread_root_number = 1) AS alias_count,
+        (SELECT COUNT(*) FROM local_chat_thread_routing_agents_v2
+          WHERE room_id = ? AND thread_root_number = 1) AS agent_count,
+        (SELECT COUNT(*) FROM local_chat_thread_routing_invalidated_roots_v2
+          WHERE room_id = ? AND thread_root_number = 1) AS invalidated_count
+    `).get(room, room, room);
+    assert.equal(Number(retainedProjection?.alias_count), 2000);
+    assert.equal(Number(retainedProjection?.agent_count), 2000);
+    assert.equal(Number(retainedProjection?.invalidated_count), 1);
+  } finally {
+    for (const name of guardNames) foregroundGuard.exec(`DROP TRIGGER ${name}`);
+    foregroundGuard.close();
+  }
 
   let membership: Awaited<ReturnType<typeof getLocalChatThreadRoutingAgentKeysForRoots>> | null = null;
   for (let attempt = 0; attempt < 100 && !membership; attempt += 1) {
