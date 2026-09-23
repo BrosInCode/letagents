@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mapEntry } from "../../electron/main/supervisor-daemon.js";
-import { agentInspectorOverallState } from "../../renderer/src/domain/agent-inspector.js";
+import { agentInspectorOverallState, projectAgentInspector } from "../../renderer/src/domain/agent-inspector.js";
 
 import {
   bindingMatchesRoomAgentGeneration,
@@ -204,6 +204,11 @@ test("typed admission gates the room view without rewriting lifecycle or claimin
       lifecycleAdmission === "pending" ? "reconnecting" : "needs_attention",
       "ordinary asynchronous admission must not flash Needs attention in the product");
     assert.equal(projected.observed_state, "recovering", "absence of evidence is not native process failure");
+    const inspector = projectAgentInspector(mapEntry({ ...projected, runtime_generation_id: "exact-runtime" }), { roomId: entry.room_id })!;
+    assert.equal(inspector.actions.find(action => action.kind === "recover")?.available, false,
+      "a delivery admission blocker cannot authorize missing-runtime recovery");
+    assert.equal(inspector.actions.find(action => action.kind === "recovery_options")?.available, lifecycleAdmission === "unavailable",
+      "only blocked admission needs a choice; ordinary pending promotion remains progress");
     assert.deepEqual(recovering, before, "projection never writes lifecycle or clears historical uncertainty");
   }
   const ready = projectRoomAgentManifestEntry(facts({ entry: recovering, lifecycleAdmission: "ready" }));
@@ -211,6 +216,8 @@ test("typed admission gates the room view without rewriting lifecycle or claimin
   assert.equal(ready.room_agent_state?.inbox.state, "queued");
   assert.equal(ready.condition, "none", "only actual admission removes the derived blocker");
   assert.equal(ready.room_agent_state?.ingress.state, "observing");
+  const readyInspector = projectAgentInspector(mapEntry({ ...ready, runtime_generation_id: "exact-runtime" }), { roomId: entry.room_id })!;
+  assert.ok(readyInspector.actions.filter(action => ["recover", "recovery_options"].includes(action.kind)).every(action => !action.available));
   const noBindingYet = projectRoomAgentManifestEntry(facts({ entry: recovering, lifecycleAdmission: "pending",
     binding: null, credentialAvailable: false, receipts: [],
   }));

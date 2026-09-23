@@ -34,6 +34,7 @@ export function safeDiagnosticText(value: string | null | undefined): string {
 const actionImpacts: Partial<Record<AgentInspectorActionAvailability["kind"], string>> = {
   resume: "Resume this agent so it can receive room work again.",
   reconnect: "Restore this agent’s room connection while keeping its identity and workspace.",
+  recovery_options: "Review recovery options before changing the current runtime.",
   recover: "Ask LetAgents to recover the saved agent runtime, keeping its identity and workspace.",
   retry_delivery: "Retry the blocked message through its saved delivery record.",
   restore_conversation: "Create a replacement private conversation and retry the message that could not start. The missing conversation’s private context cannot be recovered.",
@@ -57,7 +58,8 @@ export function projectAgentTroubleshooting(
   ) ? describeAgentInspectorRuntimeControl(detail?.runtime_control) : null;
   const action = (...kinds: AgentInspectorActionAvailability["kind"][]) => fresh
     ? kinds.map(kind => projection.actions.find(candidate => candidate.kind === kind && candidate.available && !candidate.danger
-      && (kind !== "recover" || daemon?.capabilities.agentRuntimeRecovery === true)))
+      && (kind !== "recover" || daemon?.capabilities.agentRuntimeRecovery === true)
+      && (kind !== "recovery_options" || daemon?.capabilities.agentRuntimeRecoveryV2 === true)))
       .find(candidate => candidate !== undefined) ?? null
     : null;
   const check = (id: DiagnosticCheckId, label: string, state: DiagnosticCheckState, summary: string, explanation: string,
@@ -94,7 +96,7 @@ export function projectAgentTroubleshooting(
     } as const;
     const [summary, explanation] = reasons[entry.condition as keyof typeof reasons];
     provider = check("provider", "Agent runtime", "attention", summary, explanation,
-      "Review the latest error in Technical details. Resolve that cause, then use the available recovery action or refresh checks.", null, action("recover"));
+      "Review the latest error in Technical details. Resolve that cause, then use the available recovery action or refresh checks.", null, action("recovery_options", "recover"));
   } else if (control) {
     const state = control.state === "responsive" ? "passed" : ["lost", "exited"].includes(control.state) ? "attention"
       : ["connecting", "stopping"].includes(control.state) ? "pending" : "unknown";
@@ -103,11 +105,11 @@ export function projectAgentTroubleshooting(
         : state === "pending" ? "Let the current runtime transition finish, then refresh checks."
         : state === "passed" ? "The control connection responded. Use Work to inspect whether a particular message finished."
         : "Refresh checks or inspect Work. An inconclusive check alone does not justify restarting the agent.",
-      control.observedAt, state === "attention" ? action("recover") : null, "work");
+      control.observedAt, state === "attention" ? action("recovery_options", "recover") : null, "work");
   } else if (entry.observedState === "failed" || entry.nativeLiveness.state === "terminal") {
     provider = check("provider", "Agent runtime", "attention", "Provider runtime stopped",
       "The saved agent state records a stopped or failed runtime. Unfinished work is not assumed to have completed.",
-      "Review the latest error, recover the agent when available, then verify its connection.", entry.nativeLiveness.observedAt, action("recover"));
+      "Review the latest error, recover the agent when available, then verify its connection.", entry.nativeLiveness.observedAt, action("recovery_options", "recover"));
   } else if (entry.observedState === "starting" || entry.observedState === "recovering") {
     provider = check("provider", "Agent runtime", "pending", "Runtime is being prepared",
       projection.overallDetail || "LetAgents is starting or recovering this agent. A current provider check is still needed.",

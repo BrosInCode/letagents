@@ -6,7 +6,7 @@ import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
 import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
-import type { AgentInspectorProjection } from "../src/domain/agent-inspector";
+import { projectAgentInspector, type AgentInspectorProjection } from "../src/domain/agent-inspector";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../src/domain/agent-inspector-settings";
 
 interface HostNode {
@@ -1099,6 +1099,56 @@ function troubleshootingProps() {
     daemonStatus: { healthy: true, generation: 1, capabilities: {} },
   } as any;
 }
+
+test("primary and Diagnostics recovery choices never dispatch until a restart is confirmed", async () => {
+  for (const route of ["primary", "diagnostics", "unsupported"] as const) {
+    const state = troubleshootingProps();
+    Object.assign(state.projection.entry, {
+      displayName: "QuartzMeadow", createdBy: "owner", charter: "Notes", provider: "claude-code", deliveryMode: "daemon_inbox",
+      observedState: "recovering", condition: "coordination_blocked", runtimeGenerationId: "runtime_a",
+      providerContinuationId: "continuation_a", workAttemptId: "attempt_a", lastTerminal: null,
+      turnControl: null, lastTurnControlSequence: 0,
+    });
+    state.projection.entry.roomAgentState.task = { state: "none", taskId: null, title: null };
+    state.daemonStatus.capabilities = { agentRuntimeRecovery: true, agentRuntimeRecoveryV2: route !== "unsupported" };
+    state.projection = projectAgentInspector(state.projection.entry, { roomId: "room_a" });
+    const actions: unknown[] = [];
+    const mounted = mount(AgentInspectorSurface, {
+      ...state, compact: false, initialTab: route === "diagnostics" ? "diagnostics" : "overview",
+      actionState: null, requestVersion: 1, selectedWorkSourceMessageId: null, workArtifacts: [],
+      settingsResource: readyResource, roomMoveResource: noMove, roomMoveAvailable: false,
+      providers: [], destinations: [], settingsConflict: false, liveFeed: { events: [], ended: false, droppedEvents: 0 },
+      onAction: (intent: unknown) => actions.push(intent),
+    });
+    if (route !== "diagnostics") (buttonByText(mounted.root, "Recovery options").props.onClick as () => void)();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await nextTick();
+    if (route === "diagnostics") {
+      (buttonByText(mounted.root, "Troubleshoot this issue").props.onClick as () => void)();
+      await nextTick();
+    }
+    assert.deepEqual(actions, [], "entering choices must not prepare a grant or invoke recovery IPC");
+    if (route === "unsupported") {
+      assert.equal(descendants(mounted.root).some(node => node.props["aria-label"] === "Runtime recovery"), false);
+      assert.equal(descendants(mounted.root).some(node => node.props["data-action"] === "recover"), false);
+    } else {
+      assert.ok(nodeByProp(mounted.root, "aria-label", "Runtime recovery"));
+      const resume = descendants(mounted.root).find(node => node.type === "input" && node.props.value === "restart_runtime");
+      assert.ok(resume);
+      (resume.props["onUpdate:modelValue"] as (value: string) => void)("restart_runtime");
+      await nextTick();
+      await (buttonByText(mounted.root, "Review restart").props.onClick as () => Promise<void>)();
+      assert.deepEqual(actions, []);
+      (buttonByText(mounted.root, "Cancel").props.onClick as () => void)();
+      await nextTick();
+      assert.deepEqual(actions, [], "cancelling retains the current runtime");
+      await (buttonByText(mounted.root, "Review restart").props.onClick as () => Promise<void>)();
+      (buttonByText(mounted.root, "Restart and resume").props.onClick as () => void)();
+      assert.deepEqual(actions, [{ entryId: "diagnostic_a", roomId: "room_a", kind: "restart_runtime" }]);
+    }
+    mounted.app.unmount();
+  }
+});
 
 test("runtime restart confirmation survives unchanged observations and cancels when the runtime changes", async () => {
   const state = Vue.ref(troubleshootingProps());
