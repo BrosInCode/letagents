@@ -106,10 +106,9 @@ export class ProviderHandoffCoordinator {
       const current = await this.options.manifest.getEntry(entry.id);
       if (!current) continue;
       const handle = this.options.currentHandle(entry.id);
-      const state = handle?.observedState ?? current.observed_state;
-      if (this.options.isNativeControlActive(entry.id)
-        || !["idle", "stopped", "failed", "paused", "absent"].includes(state)) {
-        throw new Error("Update deferred: an agent still has work that cannot survive a background-service restart. Try again after it finishes.");
+      const agent = `${current.display_name} (${current.id})`;
+      if (this.options.isNativeControlActive(entry.id)) {
+        throw new Error(`Update deferred: ${agent} has an active native control operation. Its work has been preserved.`);
       }
       const custody = this.options.provider.runtimeCustody?.(current.work_attempt_id!, current.provider)
         ?? (handle ? { state: "owned" as const, handle } : { state: "unknown" as const });
@@ -129,22 +128,28 @@ export class ProviderHandoffCoordinator {
           || custody.handle.providerContinuationId !== handle.providerContinuationId
           || !sameProviderActionConnectionSnapshot(custody.handle.providerConnection, handle.providerConnection)))
         || (custody.state === "owned" && !handle)) {
-        throw new Error("Update deferred: an agent's native connection could not be confirmed. Its work has been preserved.");
+        throw new Error(`Update deferred: ${agent}'s native connection could not be confirmed (custody: ${custody.state}). Its work has been preserved.`);
       }
       if (custody.state === "retired") continue;
+      // Observation can outlive the native channel. Only a connection still
+      // owned by this daemon needs an idle state and exact turn completion.
+      const state = handle!.observedState;
+      if (!["idle", "stopped", "failed", "paused", "absent"].includes(state)) {
+        throw new Error(`Update deferred: ${agent} still has work that cannot survive a background-service restart (state: ${state}). Try again after it finishes.`);
+      }
       const head = await this.options.inbox.head(entry.id);
       if (!head) continue;
       if (!head.provider_turn_id) {
         if (head.state === "pending" || head.state === "retryable") continue;
         // A lost native acknowledgement can leave a blocked turn without an
         // ID or counted attempt. Neither is proof that dispatch never happened.
-        throw new Error("Update deferred: an agent's current turn has no confirmed completion. Resolve its blocked work before updating.");
+        throw new Error(`Update deferred: ${agent}'s current turn has no confirmed completion (no native turn ID). Resolve its blocked work before updating.`);
       }
       const binding = await this.options.inbox.providerTurnBinding(head.inbox_item_id);
       if (binding && binding.origin_execution_generation_id !== current.provider_ref?.execution_generation_id) continue;
       const detail = await this.options.inbox.detail(entry.id, current.room_id, head.source_message_id);
       if (!binding || !detail.terminal || detail.terminal.outcome === "unreadable" || detail.terminal.evidence_source === "none") {
-        throw new Error("Update deferred: an agent's current turn has no confirmed completion. Resolve its blocked work before updating.");
+        throw new Error(`Update deferred: ${agent}'s current turn has no confirmed completion (terminal evidence unavailable). Resolve its blocked work before updating.`);
       }
     }
   }
