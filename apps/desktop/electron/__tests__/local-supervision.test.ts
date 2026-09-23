@@ -653,7 +653,7 @@ test("routing captures names and membership at send time and retains receipt-bas
   assert.equal((await decision(oak, external.id)).reason, "explicit_mention");
 });
 
-test("a concurrent thread correction retries the entire send before persisting recipients", async () => {
+test("a concurrent thread correction retries the entire send before persisting recipients", { timeout: 10_000 }, async (t) => {
   const roomId = "local_concurrent_routing";
   await createLocalRoom({ roomIdentifier: roomId });
   const oak = await worker(roomId, "Oak", "concurrent_oak");
@@ -662,15 +662,16 @@ test("a concurrent thread correction retries the entire send before persisting r
   const thread = { sender: "You", source: "browser", text: "Continue in this thread", reply_to: root.id, thread_root_id: root.id };
   await addLocalChatMessage(roomId, thread);
   const rootNumber = Number(root.id.slice(4));
+  const { DatabaseSync } = await import("node:sqlite");
   const { spawn } = await import("node:child_process");
-  // The second writer invalidates the projection after the sender's repair,
-  // but before the sender can acquire its write transaction.
+  // Keep the projection complete until the sender has finished its preflight
+  // and actually encountered the second writer's lock.
   const child = spawn(process.execPath, ["--input-type=module", "-e", `
     import { DatabaseSync } from 'node:sqlite';
     const db = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB);
     db.exec('BEGIN IMMEDIATE');
     console.log('locked');
-    await new Promise(resolve => setTimeout(resolve, 180));
+    await new Promise(resolve => process.stdin.once('data', resolve));
     db.prepare('UPDATE local_chat_messages SET sender=?,publisher_agent_key=? WHERE room_id=? AND number=?')
       .run(${JSON.stringify(elm.session.actor_label)},${JSON.stringify(elm.grant.agentKey)},${JSON.stringify(roomId)},${rootNumber});
     db.prepare('INSERT INTO local_chat_thread_routing_invalidated_roots_v2(room_id,thread_root_number,cleanup_completed) VALUES(?,?,0)')
@@ -678,11 +679,31 @@ test("a concurrent thread correction retries the entire send before persisting r
     db.prepare('DELETE FROM local_chat_thread_routing_root_state_v2 WHERE room_id=? AND thread_root_number=?')
       .run(${JSON.stringify(roomId)},${rootNumber});
     db.exec('COMMIT'); db.close();
-  `], { stdio: ["ignore", "pipe", "pipe"] });
+  `], { stdio: ["pipe", "pipe", "pipe"] });
   const exited = new Promise<number | null>((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
+  t.after(async () => { if (child.exitCode === null) child.kill(); await exited; });
   await new Promise<void>((resolve, reject) => { child.stdout.once("data", () => resolve()); child.once("error", reject); });
+  let encounteredWriter = false;
+  let rollbacks = 0;
+  const execute = DatabaseSync.prototype.exec;
+  t.mock.method(DatabaseSync.prototype, "exec", function (this: InstanceType<typeof DatabaseSync>, sql: string) {
+    if (sql === "ROLLBACK") rollbacks += 1;
+    try { return execute.call(this, sql); } catch (error) {
+      if (sql === "BEGIN IMMEDIATE" && !encounteredWriter) {
+        assert.match(String(error), /database is locked/);
+        encounteredWriter = true;
+        child.stdin.end("correct\n");
+      }
+      throw error;
+    }
+  });
+  // This case tests transactional routing, not elapsed-time exhaustion. The
+  // separate lazy-routing tests require incomplete repairs to fail closed.
+  t.mock.method(performance, "now", () => 0);
   const sent = await addLocalChatMessage(roomId, thread);
   assert.equal(await exited, 0);
+  assert.equal(encounteredWriter, true, "the send must witness the competing write lock");
+  assert.equal(rollbacks, 1, "the invalidated send must roll back before retrying");
   const activation = async (actor: typeof oak) => (await actor.request("messages")).messages
     .find((message: any) => message.id === sent.id).activation.for_current_agent;
   assert.notEqual((await activation(oak)).decision, "activate");
