@@ -243,6 +243,7 @@ test("stale snapshots never display cached checks as healthy or offer recovery",
 
 test("daemon reachability does not mask a lost provider", () => {
   const fixture = diagnosticFixture();
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = true;
   fixture.resource.detail.runtime_control.control_state = "lost";
   fixture.entry.observedState = "failed";
   fixture.entry.nativeLiveness.state = "terminal";
@@ -250,7 +251,12 @@ test("daemon reachability does not mask a lost provider", () => {
   assert.equal(result.checks[0]!.state, "passed");
   assert.equal(result.checks[1]!.state, "attention");
   assert.equal(result.primaryCheckId, "provider");
-  assert.equal(result.checks[1]!.action?.kind, "recover");
+  assert.equal(result.checks[1]!.action?.kind, "recovery_options");
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = false;
+  assert.equal(fixture.assess().checks[1]!.action, null,
+    "an older service cannot turn an exact-runtime choice into implicit recovery");
+  fixture.entry.runtimeGenerationId = null;
+  assert.equal(fixture.assess().checks[1]!.action?.kind, "recover", "legacy terminal-runtime recovery remains available");
   fixture.daemon.capabilities.agentRuntimeRecovery = false;
   assert.equal(fixture.assess().checks[1]!.action, null);
 });

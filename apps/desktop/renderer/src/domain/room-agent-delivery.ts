@@ -167,24 +167,40 @@ export function canReconnectRoomAgent(
     && Boolean(agent.providerContinuationId);
 }
 
-/** Explicit recovery restarts the same durable agent entry, never a reconnect fallback. */
-export function canRecoverSavedRoomAgent(
-  agent: Pick<DesktopSupervisorManifestEntry,
-    "provider" | "providerPid" | "deliveryMode" | "desiredState" | "observedState" | "condition"
-    | "nativeLiveness" | "roomAgentState" | "executionGenerationId" | "providerContinuationId">,
-): boolean {
+type RoomAgentRecoveryEntry = Pick<DesktopSupervisorManifestEntry,
+  "provider" | "providerPid" | "deliveryMode" | "desiredState" | "observedState" | "condition"
+  | "nativeLiveness" | "roomAgentState" | "executionGenerationId" | "providerContinuationId"
+  | "runtimeGenerationId" | "runtimeRecovery">;
+
+/** An exact runtime requires a deliberate recovery choice, never implicit replacement. */
+export function roomAgentRecoveryAction(agent: RoomAgentRecoveryEntry): "recover" | "recovery_options" | null {
+  if (agent.deliveryMode !== "daemon_inbox" || agent.desiredState === "stopped") return null;
   const blockedIdleCursor = agent.provider === "cursor" && agent.providerPid === null
     && agent.observedState === "idle" && agent.roomAgentState?.inbox.state === "blocked";
   const recoveryState = ["absent", "paused", "failed", "recovering"].includes(agent.observedState)
     || agent.condition === "coordination_blocked"
     || agent.condition === "auth_blocked";
-  const runtimeAbsent = !agent.executionGenerationId
+  // A recorded recovery must continue its exact operation, even after a fresh
+  // start cleared the old provider reference. Never fall back to legacy recovery.
+  if (agent.runtimeRecovery) return "recovery_options";
+  // The daemon has a separately fenced repair for a processless blocked Cursor
+  // lane. Retain it; a missing PID on any other provider is not proof of absence.
+  if (blockedIdleCursor) return "recover";
+  if (!recoveryState) return null;
+  const legacyRecoveryCandidate = !agent.executionGenerationId
     || !agent.providerContinuationId
     || agent.observedState === "failed"
-    || agent.nativeLiveness?.state === "terminal"
-    || agent.roomAgentState?.connection?.state === "disconnected";
-  return agent.deliveryMode === "daemon_inbox"
-    && agent.desiredState !== "stopped"
-    && (recoveryState || blockedIdleCursor)
-    && (runtimeAbsent || blockedIdleCursor);
+    || agent.nativeLiveness?.state === "terminal";
+  if (agent.executionGenerationId && agent.runtimeGenerationId) {
+    const needsChoice = legacyRecoveryCandidate || agent.condition === "coordination_blocked"
+      || agent.condition === "auth_blocked" || agent.roomAgentState?.connection.state === "disconnected";
+    return needsChoice ? "recovery_options" : null;
+  }
+  // Room connection describes delivery admission, not native runtime custody.
+  return legacyRecoveryCandidate ? "recover" : null;
+}
+
+/** Legacy saved-agent recovery is available only outside the exact-runtime choice path. */
+export function canRecoverSavedRoomAgent(agent: RoomAgentRecoveryEntry): boolean {
+  return roomAgentRecoveryAction(agent) === "recover";
 }

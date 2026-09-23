@@ -92,6 +92,7 @@ const compactPriority: Record<AgentInspectorActionAvailability["kind"], number> 
   mention: 2,
   reconnect: 3,
   recover: 3,
+  recovery_options: 3,
   reconnect_runtime: 3,
   restart_runtime: 3,
   fresh_runtime: 3,
