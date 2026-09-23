@@ -141,6 +141,14 @@ export function projectRoomAgentManifestEntry(
           blocked_by_message_id: blocked?.source_message_id ?? null,
           detail: "Restoring the blocked message before any model turn starts.",
         }
+      : admissionHeld && !blocked
+        ? {
+            state: input.lifecycleAdmission === "unavailable" ? "blocked" as const
+              : nonfinal.length ? "queued" as const : "empty" as const,
+            pending_count: nonfinal.length,
+            blocked_by_message_id: null,
+            detail: admissionDetail,
+          }
       : !hasCurrentBinding || !credentialAvailable
         ? {
             state: "waiting_for_desktop_credentials" as const,
@@ -157,13 +165,6 @@ export function projectRoomAgentManifestEntry(
               blocked_by_message_id: blocked.source_message_id,
               detail: blocked.last_error ?? "An earlier delivery needs attention.",
             }
-          : admissionHeld
-            ? {
-                state: "blocked" as const,
-                pending_count: nonfinal.length,
-                blocked_by_message_id: null,
-                detail: admissionDetail,
-              }
           : nonfinal.length
             ? {
                 state: "queued" as const,
@@ -215,7 +216,7 @@ export function projectRoomAgentManifestEntry(
   const hasLiveIngressOwner = Boolean(hasCurrentBinding && credentialAvailable && ingressMatches);
   const ingress = admissionHeld
     ? {
-        state: "blocked" as const,
+        state: input.lifecycleAdmission === "unavailable" ? "blocked" as const : "starting" as const,
         observed_at: entry.native_liveness?.observed_at ?? null,
         detail: admissionDetail,
       }
