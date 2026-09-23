@@ -1131,14 +1131,14 @@ export class ProviderExecutionCoordinator {
     controlEpoch: number,
     configuration: ProviderExecutionConfiguration,
     grant = this.options.host.currentGrant(entry),
+    credential = entry.provider === "open-model"
+      ? this.options.host.currentOpenModelCredential(entry.id, this.options.authority.currentDaemonGeneration()) : null,
   ): Promise<string | null> {
     if (!entry.work_attempt_id || !Number.isSafeInteger(configuration.config_revision)) return null;
     const cursor = entry.delivery_mode === "daemon_inbox" ? await this.options.inbox.cursor(entry.id) : null;
     if (entry.delivery_mode === "daemon_inbox"
       && (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id)) return null;
     if (await this.options.host.requiresGrant(entry) && !grant) return null;
-    const credential = entry.provider === "open-model"
-      ? this.options.host.currentOpenModelCredential(entry.id, this.options.authority.currentDaemonGeneration()) : null;
     if (entry.provider === "open-model" && !credential) return null;
     // Process-local admission identity, never a persisted/logged credential or
     // a cache of healthy convergence. Failed-generation/projection progress and
@@ -1544,7 +1544,7 @@ export class ProviderExecutionCoordinator {
       // Capture consumed inputs before the final existing authority check. No
       // new await is inserted between that check and native dispatch.
       const admission = await this.launchAdmission(initialEntry, launchControlEpoch, launchConfiguration,
-        mintedAuthorization?.authority.grant ?? this.options.host.currentGrant(entry));
+        mintedAuthorization?.authority.grant ?? this.options.host.currentGrant(entry), openModelCredential);
       if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch) || this.options.authority.isDispatchPaused?.()) {
         if (!reusesActiveCursorExecution) {
           await this.terminalizeUnlaunchedGeneration(

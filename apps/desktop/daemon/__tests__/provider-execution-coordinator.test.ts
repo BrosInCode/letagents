@@ -470,6 +470,29 @@ test("reminders before inbox admission and grant refresh do not poison launch id
   assert.equal(launches, 1, "the actual renewed grant is the failure identity");
 });
 
+test("failed admission retains the Open Model credential actually consumed before a late replacement", async () => {
+  const consumed: Array<string | null | undefined> = [];
+  const runtime = harness({ entry: { ...baseEntry(), provider: "open-model" }, provider: provider({ spawn: async input => {
+    consumed.push(input.providerCredential?.apiKey); throw new Error("bootstrap failed");
+  } }) });
+  let credential = { entryId: "agent-1", apiKey: "old-key", baseUrl: "https://models.example.test/v1", model: "test-model", daemonGeneration: 7 };
+  runtime.options.host.currentOpenModelCredential = () => credential;
+  const startGeneration = runtime.options.durability.startGeneration;
+  runtime.options.durability.startGeneration = async (...args) => {
+    const execution = await startGeneration(...args);
+    credential = { ...credential, apiKey: "new-key" };
+    return execution;
+  };
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.deepEqual(consumed, ["old-key", "new-key"]);
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(consumed.length, 2);
+});
+
 test("failed admission uses the work attempt created inside convergence", async () => {
   let launches = 0, provisions = 0;
   const runtime = harness({ entry: { ...baseEntry(), workspace_path: null, work_attempt_id: null },
