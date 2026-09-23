@@ -196,6 +196,7 @@ function fixture(options: HarnessOptions = {}) {
   let deliveryStarts = 0;
   let deliveryStops = 0;
   let convergenceRequests = 0;
+  const convergenceKinds: Array<string | undefined> = [];
   const scheduled: number[] = [];
   const manifestUpdates: DaemonManifestEntry[] = [];
   const durableCheckpoints: Array<{ room_cursor: string | null; provider_continuation_id: string | null }> = [];
@@ -449,7 +450,7 @@ function fixture(options: HarnessOptions = {}) {
       start: async () => { deliveryStarts += 1; events.push("delivery:start"); },
     },
     convergence: {
-      request: () => { convergenceRequests += 1; events.push("convergence:request"); },
+      request: (_entryId, kind) => { convergenceRequests += 1; convergenceKinds.push(kind); events.push("convergence:request"); },
       schedule: (_entryId, delayMs) => { scheduled.push(delayMs); events.push(`convergence:schedule:${delayMs}`); },
       clear: () => { events.push("convergence:clear"); },
       heartbeatIntervalMs: 15_000,
@@ -492,6 +493,7 @@ function fixture(options: HarnessOptions = {}) {
     get deliveryStops() { return deliveryStops; },
     get handle() { return handle; },
     get convergenceRequests() { return convergenceRequests; },
+    convergenceKinds,
     scheduled,
     manifestUpdates,
     durableCheckpoints,
@@ -1389,6 +1391,9 @@ test("bootstrap is stale/idempotent before remote work and an aborted observatio
   );
   assert.equal(existing.events.includes("mint:begin-durable"), false);
   assert.equal(existing.convergenceRequests, 1);
+  assert.deepEqual(existing.convergenceKinds, ["rehydration"]);
+  await existing.subject.bootstrapRoomIngress({ entry_id: "agent-1", daemon_generation: 7, initial_message: "new work" }, existingOperation);
+  assert.deepEqual(existing.convergenceKinds, ["rehydration", "owned"], "new message admission remains owned work");
 
   const aborted = fixture({ cursor: null });
   aborted.custody.installHostGrant(hostGrant());
@@ -1453,12 +1458,19 @@ test("standard host install retains the current grant and converges only after d
   assert.equal(admitted.custody.hostGrant("agent-1")?.ownerAccountId, "account-1");
   assert.equal(admitted.custody.hostGrant("agent-1")?.scopeKey, "owner");
   assert.equal(admitted.convergenceRequests, 1);
+  assert.deepEqual(admitted.convergenceKinds, ["rehydration"]);
+  await admitted.subject.installHostGrant(input);
+  const operation: BootstrapOperation = { controller: new AbortController(), phase: "observing", operation: Promise.resolve() };
+  await admitted.subject.bootstrapRoomIngress({ entry_id: "agent-1", daemon_generation: 7 }, operation);
+  assert.deepEqual(admitted.convergenceKinds, ["rehydration", "rehydration", "rehydration"], "ordinary install/reinstall/existing ingress share reminder admission");
   assert.equal(admitted.events.includes("mint:begin-durable"), false);
 
   const cursorless = fixture({ handle: null, cursor: null });
   assert.deepEqual(await cursorless.subject.installHostGrant(input), { status: "installed" });
   assert.equal(cursorless.custody.hostGrant("agent-1")?.grantId, "grant-standard");
   assert.equal(cursorless.convergenceRequests, 0);
+  await cursorless.subject.bootstrapRoomIngress({ entry_id: "agent-1", daemon_generation: 7 }, operation);
+  assert.deepEqual(cursorless.convergenceKinds, ["owned"], "new durable cursor admission is not a reminder");
 });
 
 test("host grant authority provenance is atomic and grant-scoped", async () => {

@@ -15,29 +15,34 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForServer(
+export async function waitForServer(
   port: number,
   child: ChildProcessWithoutNullStreams,
   stderrBuffer: () => string,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (child.exitCode !== null) {
-      throw new Error(`coordination test server exited early: ${stderrBuffer()}`.trim());
-    }
-
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
-      if (response.ok) {
-        return;
+  try {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`coordination test server exited early: ${stderrBuffer()}`.trim());
       }
-    } catch {
-      // keep polling until ready
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+        if (response.ok) {
+          return;
+        }
+      } catch {
+        // keep polling until ready
+      }
+
+      await sleep(250);
     }
 
-    await sleep(250);
+    throw new Error(`coordination test server did not become ready: ${stderrBuffer()}`.trim());
+  } catch (error) {
+    await stopChildProcess(child);
+    throw error;
   }
-
-  throw new Error(`coordination test server did not become ready: ${stderrBuffer()}`.trim());
 }
 
 export async function startApiServer(): Promise<{
@@ -73,15 +78,27 @@ export async function startApiServer(): Promise<{
 export async function stopChildProcess(
   child: ChildProcessWithoutNullStreams,
 ): Promise<void> {
-  if (child.exitCode !== null) {
+  if (child.exitCode !== null || child.signalCode !== null) {
     return;
   }
 
-  child.kill("SIGTERM");
-  await Promise.race([once(child, "exit"), sleep(5000)]);
+  let observedExit = false;
+  const exited = once(child, "exit").then(() => { observedExit = true; });
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const grace = new Promise<void>((resolve) => {
+    graceTimer = setTimeout(resolve, 5000);
+  });
 
-  if (child.exitCode === null) {
+  try {
+    child.kill("SIGTERM");
+    await Promise.race([exited, grace]);
+    if (observedExit || child.exitCode !== null || child.signalCode !== null) {
+      return;
+    }
+
     child.kill("SIGKILL");
-    await once(child, "exit");
+    await exited;
+  } finally {
+    clearTimeout(graceTimer);
   }
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { supervisedProviderLabel } from "./cloud-http.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
@@ -58,6 +58,8 @@ import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
+
+export type ConvergenceRequestKind = "owned" | "rehydration";
 
 export type ProviderExecutionConfiguration = {
   polling_contract?: "custodial_polling_v1" | null;
@@ -256,6 +258,8 @@ type DispatchReservation = {
  */
 export class ProviderExecutionCoordinator {
   private readonly convergenceRequests = new Map<string, Promise<void>>();
+  private readonly pendingReminders = new Map<string, symbol>();
+  private readonly failedLaunchAdmissions = new Map<string, string>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly dispatchReservations = new Map<Promise<void>, string>();
   private readonly activeDispatches = new Map<symbol, DispatchReservation>();
@@ -289,14 +293,20 @@ export class ProviderExecutionCoordinator {
     return "state" in attachment && attachment.state === "terminal";
   }
 
-  request(entryId: string): void {
+  request(entryId: string, kind: ConvergenceRequestKind = "owned"): void {
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.() || !this.options.autoConverge) return;
+    if (kind === "rehydration" && this.pendingReminders.has(entryId)) return;
+    const reminder = kind === "rehydration" ? Symbol() : null;
+    if (reminder) this.pendingReminders.set(entryId, reminder);
     const previous = this.convergenceRequests.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
       .then(() => this.options.concurrency.serializeEntry(
         entryId,
-        () => this.converge(entryId),
+        () => {
+          if (reminder && this.pendingReminders.get(entryId) === reminder) this.pendingReminders.delete(entryId);
+          return this.converge(entryId, kind);
+        },
       ))
       .then(() => {
         if (!this.options.authority.isDispatchPaused?.()) return this.options.refreshManagedRuntime?.(entryId);
@@ -309,6 +319,7 @@ export class ProviderExecutionCoordinator {
         ).catch(() => undefined);
       })
       .finally(() => {
+        if (reminder && this.pendingReminders.get(entryId) === reminder) this.pendingReminders.delete(entryId);
         if (this.convergenceRequests.get(entryId) === next) {
           this.convergenceRequests.delete(entryId);
         }
@@ -340,6 +351,8 @@ export class ProviderExecutionCoordinator {
   /** In-flight convergence is authority-fenced; handoff never waits on its transport. */
   detachConvergence(): void {
     this.convergenceRequests.clear();
+    this.pendingReminders.clear();
+    this.failedLaunchAdmissions.clear();
   }
 
   clearRecoveryTimers(): void {
@@ -980,13 +993,18 @@ export class ProviderExecutionCoordinator {
     return handle;
   }
 
-  async converge(entryId: string): Promise<void> {
+  async converge(entryId: string, kind: ConvergenceRequestKind = "owned"): Promise<void> {
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return;
+    // Owned lifecycle/terminal/timer work can retry even identical launch inputs.
+    if (kind === "owned") this.failedLaunchAdmissions.delete(entryId);
     await this.options.settleRuntimeApprovals(entryId);
     if (await this.options.store.pendingRuntimeRecovery(entryId)) return;
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
     let entry = await this.options.store.getEntry(entryId);
-    if (!entry) return;
+    if (!entry) {
+      this.failedLaunchAdmissions.delete(entryId);
+      return;
+    }
     let launchControlEpoch = this.options.concurrency.currentControlEpoch(entryId);
 
     const historicalControl = entry.turn_control;
@@ -1003,15 +1021,17 @@ export class ProviderExecutionCoordinator {
     }
 
     if (entry.desired_state === "running") {
-      await this.convergeRunning(entry, launchControlEpoch);
+      await this.convergeRunning(entry, launchControlEpoch, kind);
       return;
     }
+    this.failedLaunchAdmissions.delete(entryId);
     await this.convergeStopped(entry);
   }
 
   private async convergeRunning(
     initialEntry: DaemonManifestEntry,
     initialControlEpoch: number,
+    kind: ConvergenceRequestKind,
   ): Promise<void> {
     let entry = initialEntry;
     const activation = await this.options.store.unresolvedPollingActivation(entry.id);
@@ -1098,7 +1118,41 @@ export class ProviderExecutionCoordinator {
       await this.convergeAttachedHandle(entry, handle);
       return;
     }
+    if (kind === "rehydration" && this.failedLaunchAdmissions.has(entry.id)) {
+      const configuration = await this.options.store.getAgentConfiguration(entry.id);
+      const admission = configuration && await this.launchAdmission(entry, launchControlEpoch, configuration);
+      if (admission && admission === this.failedLaunchAdmissions.get(entry.id)) return;
+    }
     await this.launchProvider(entry, launchControlEpoch);
+  }
+
+  private async launchAdmission(
+    entry: DaemonManifestEntry,
+    controlEpoch: number,
+    configuration: ProviderExecutionConfiguration,
+    grant = this.options.host.currentGrant(entry),
+    credential = entry.provider === "open-model"
+      ? this.options.host.currentOpenModelCredential(entry.id, this.options.authority.currentDaemonGeneration()) : null,
+  ): Promise<string | null> {
+    if (!entry.work_attempt_id || !Number.isSafeInteger(configuration.config_revision)) return null;
+    const cursor = entry.delivery_mode === "daemon_inbox" ? await this.options.inbox.cursor(entry.id) : null;
+    if (entry.delivery_mode === "daemon_inbox"
+      && (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id)) return null;
+    if (await this.options.host.requiresGrant(entry) && !grant) return null;
+    if (entry.provider === "open-model" && !credential) return null;
+    // Process-local admission identity, never a persisted/logged credential or
+    // a cache of healthy convergence. Failed-generation/projection progress and
+    // routine inbox advancement do not create new native launch authority.
+    const { supervisorGrant: _secret, ...grantIdentity } = grant ?? { supervisorGrant: null };
+    return createHash("sha256").update(JSON.stringify({
+      entryId: entry.id, roomId: entry.room_id, provider: entry.provider,
+      deliveryMode: entry.delivery_mode ?? "mcp_polling", desiredState: entry.desired_state,
+      daemonGeneration: this.options.authority.currentDaemonGeneration(), controlEpoch,
+      configurationRevision: configuration.config_revision,
+      workAttemptId: entry.work_attempt_id, workspace: entry.workspace_path,
+      providerRef: entry.provider_ref, grant: grant ? grantIdentity : null,
+      credential, cursor: cursor ? { agentId: cursor.agent_id, roomId: cursor.room_id } : null,
+    })).digest("hex");
   }
 
   private async convergeAttachedHandle(
@@ -1487,6 +1541,10 @@ export class ProviderExecutionCoordinator {
           },
         });
       }
+      // Capture consumed inputs before the final existing authority check. No
+      // new await is inserted between that check and native dispatch.
+      const admission = await this.launchAdmission(initialEntry, launchControlEpoch, launchConfiguration,
+        mintedAuthorization?.authority.grant ?? this.options.host.currentGrant(entry), openModelCredential);
       if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch) || this.options.authority.isDispatchPaused?.()) {
         if (!reusesActiveCursorExecution) {
           await this.terminalizeUnlaunchedGeneration(
@@ -1504,9 +1562,15 @@ export class ProviderExecutionCoordinator {
       let fatalReservationError: unknown;
       try {
         try {
-          handle = resumed
-            ? await this.options.provider.resume(ref!, { ...spawn, resumeFrom: ref })
-            : await this.options.provider.spawn(spawn);
+          try {
+            handle = resumed
+              ? await this.options.provider.resume(ref!, { ...spawn, resumeFrom: ref })
+              : await this.options.provider.spawn(spawn);
+          } catch (error) {
+            if (admission) this.failedLaunchAdmissions.set(entry.id, admission);
+            throw error;
+          }
+          this.failedLaunchAdmissions.delete(entry.id);
           providerDispatched = true;
           if (handle.appliedConfigurationRevision !== launchSnapshot.configurationRevision) {
             throw new Error(
