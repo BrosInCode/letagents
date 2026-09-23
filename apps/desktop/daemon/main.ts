@@ -626,6 +626,7 @@ export class SupervisorDaemon {
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
       ) : null;
     this.readModel = new DaemonReadModel({
+      deliveryAdmission: (entry) => this.providerStreams.deliveryAdmission(entry),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
       startedAt: this.startedAt,
