@@ -6,6 +6,7 @@ import type { WorkDurabilityStore } from "./durability-store.js";
 import { executionRuntimeStorageIdentity } from "./execution-shadow-store.js";
 import type { ProviderActionHandle } from "./provider-action-port.js";
 import type { ProviderRecoveryDiagnostics } from "./provider-stream-coordinator.js";
+import type { LifecycleCaptureAdmissionStatus } from "./lifecycle-projection-ledger.js";
 import {
   bindingMatchesRoomAgentGeneration,
   hasExactRoomAgentDeliveryOwner,
@@ -35,6 +36,7 @@ export type DaemonReadModelPorts = {
     supportsContinuationRepair(): boolean;
   };
   recoveryDiagnostics(): ProviderRecoveryDiagnostics;
+  deliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null;
   manifest: {
     pendingRuntimeRecovery(agentId: string): Promise<import("./runtime-recovery-journal.js").RuntimeRecoveryRecord | null>;
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
@@ -154,6 +156,7 @@ export class DaemonReadModel {
       binding,
       credentialAvailable: Boolean(credential),
       liveHandle: liveHandle ?? null,
+      lifecycleAdmission: this.ports.deliveryAdmission(entry),
     };
     const activeTurn = hasExactRoomAgentDeliveryOwner(authorityFacts)
       && binding
