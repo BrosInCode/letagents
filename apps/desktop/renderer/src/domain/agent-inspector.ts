@@ -9,6 +9,7 @@ import type {
 import {
   canReconnectRoomAgent,
   canRecoverSavedRoomAgent,
+  roomAgentRecoveryAction,
 } from "./room-agent-delivery";
 import {
   humanFacingSupervisorActivitySummary,
@@ -72,6 +73,7 @@ export type AgentInspectorActionKind =
   | "resume"
   | "reconnect"
   | "recover"
+  | "recovery_options"
   | "reconnect_runtime"
   | "restart_runtime"
   | "fresh_runtime"
@@ -920,6 +922,7 @@ function actionAvailability(
     { kind: "resume", label: "Resume", available: stateDependentActionsAvailable && entry.desiredState === "paused" && !entry.runtimeRecovery },
     { kind: "reconnect", label: "Reconnect", available: stateDependentActionsAvailable && canReconnectRoomAgent(entry) },
     { kind: "recover", label: "Recover agent", available: stateDependentActionsAvailable && canRecoverSavedRoomAgent(entry) },
+    { kind: "recovery_options", label: "Recovery options", available: stateDependentActionsAvailable && roomAgentRecoveryAction(entry) === "recovery_options" },
     { kind: "reconnect_runtime", label: "Reconnect", available: canRestartRuntime && entry.desiredState === "running" && !entry.runtimeRecovery },
     { kind: "restart_runtime", label: entry.runtimeRecovery?.mode === "resume" ? "Continue restart" : "Restart and resume", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "resume"), danger: true },
     { kind: "fresh_runtime", label: entry.runtimeRecovery?.mode === "fresh" ? "Continue fresh start" : "Start fresh", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "fresh"), danger: true },

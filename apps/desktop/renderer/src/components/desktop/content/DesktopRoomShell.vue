@@ -308,6 +308,7 @@
 </template>
 
 <script setup lang="ts">
+import { roomAgentRecoveryAction } from "../../../domain/room-agent-delivery";
 import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowReadonly, toRef, watch } from "vue";
 import type {
@@ -2527,10 +2528,13 @@ function currentAgentInspectorAction(
 }
 
 async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Promise<void> {
+  // Recovery options is local navigation; only a chosen runtime action may reach IPC.
+  if (intent.kind === "recovery_options") return;
   if (agentInspectorActionState.value?.status === "running" && agentInspectorActionState.value.entryId === intent.entryId) return;
   if (intent.roomId !== props.room.identifier) return;
   const projection = agentInspectorProjections.value.find((candidate) => candidate.entryId === intent.entryId);
   if (!projection) return;
+  if (intent.kind === "recover" && roomAgentRecoveryAction(projection.entry) !== "recover") return;
   const turnControlIntent = intent.kind === "stop_turn" || intent.kind === "steer_turn" || intent.kind === "retry_turn_control" || intent.kind === "resolve_turn_control";
   const actionAvailable = projection.actions.some((action) => action.kind === intent.kind && action.available);
   const turnControlAvailable = projection.resourceFreshness === "fresh" && (intent.kind === "stop_turn"
@@ -2865,7 +2869,7 @@ function agentInspectorActionErrorMessage(
   return detail || "The agent action could not be completed.";
 }
 
-function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string {
+function actionProgressMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {
   return ({
     mention: "Opening the room composer…",
     pause: "Pausing this agent…",
@@ -2890,7 +2894,7 @@ function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string
   } as const)[kind];
 }
 
-function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string {
+function actionSuccessMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {
   return ({
     mention: "Composer ready.",
     pause: "Agent paused.",
