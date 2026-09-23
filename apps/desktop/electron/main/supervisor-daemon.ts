@@ -485,7 +485,15 @@ export class SupervisorDaemonClient {
     identity: DaemonProcessIdentity;
     generation: number;
   } | null = null;
-  private ownedDaemonPid: number | null = null;
+  // Caller deadlines do not end child custody. Retain the launch and its
+  // readiness fences until process exit or a completed negotiated handoff.
+  private ownedDaemon: {
+    pid: number | null;
+    ready: boolean;
+    retiredGeneration: number | undefined;
+    runtimeEnvironmentFingerprint: string;
+    compatibilityFingerprint: string;
+  } | null = null;
   private readonly loadApprovalSigner: typeof loadHostApprovalSigner;
   private approvalSigner: { fingerprint: string; promise: Promise<HostApprovalSigner> } | null = null;
   private readonly approvalPresentations = new Map<string, {
@@ -1516,6 +1524,7 @@ export class SupervisorDaemonClient {
   }
 
   private async ensureRunningOnce(refreshRuntimeEnvironment = false): Promise<DesktopSupervisorDaemonStatus> {
+    await this.waitForOwnedDaemonReadiness();
     const spawnEnvironment = supervisorDaemonSpawnEnvironment();
     const expectedRuntimeEnvironmentFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT!;
     let retiredGeneration: number | undefined;
@@ -1541,9 +1550,13 @@ export class SupervisorDaemonClient {
       await this.drainCurrentDaemon(daemonVersion);
       this.stopAttachedDaemonObservation();
       await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
+      if (this.ownedDaemon?.pid === retired.pid) this.ownedDaemon = null;
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
       this.recordAttachedDaemonDisconnect();
+      // A previously ready child can also temporarily lose its socket. Only
+      // its exit/handoff, never a failed connection, permits another launch.
+      if (this.ownedDaemon) throw error;
     }
     await access(this.daemonScriptPath);
     this.stopAttachedDaemonObservation();
@@ -1551,9 +1564,19 @@ export class SupervisorDaemonClient {
     const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory, spawnEnvironment);
     const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs);
     const childPid = Number.isSafeInteger(child.pid) && (child.pid ?? 0) > 0 ? child.pid! : null;
-    this.ownedDaemonPid = childPid;
+    const owned = {
+      pid: childPid,
+      ready: false,
+      retiredGeneration,
+      runtimeEnvironmentFingerprint: expectedRuntimeEnvironmentFingerprint,
+      compatibilityFingerprint: spawnEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!,
+    };
+    this.ownedDaemon = owned;
     appendDaemonLifecycleEvent(this.lifecycleLogPath, { event: "daemon_spawned", pid: childPid });
     child.once("error", (error) => {
+      // An error after a successful spawn may be an IPC/signalling error,
+      // not process death. A failed spawn has no native PID to preserve.
+      if (childPid === null && this.ownedDaemon === owned) this.ownedDaemon = null;
       appendDaemonLifecycleEvent(this.lifecycleLogPath, {
         event: "daemon_spawn_error",
         pid: childPid,
@@ -1561,7 +1584,7 @@ export class SupervisorDaemonClient {
       });
     });
     child.once("exit", (exitCode, signal) => {
-      if (this.ownedDaemonPid === childPid) this.ownedDaemonPid = null;
+      if (this.ownedDaemon === owned) this.ownedDaemon = null;
       appendDaemonLifecycleEvent(this.lifecycleLogPath, {
         event: "daemon_exited",
         pid: childPid,
@@ -1572,8 +1595,18 @@ export class SupervisorDaemonClient {
     // Migration/OS-key custody has its own bootstrap protocol. The socket's
     // short startup deadline must not expire while a large backup is fsyncing.
     await statePreparation;
-    return this.waitForHealthy(retiredGeneration, expectedRuntimeEnvironmentFingerprint,
-      spawnEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!);
+    const status = await this.waitForHealthy(owned.retiredGeneration,
+      owned.runtimeEnvironmentFingerprint, owned.compatibilityFingerprint);
+    owned.ready = true;
+    return status;
+  }
+
+  private async waitForOwnedDaemonReadiness(): Promise<void> {
+    const owned = this.ownedDaemon;
+    if (!owned || owned.ready) return;
+    await this.waitForHealthy(owned.retiredGeneration,
+      owned.runtimeEnvironmentFingerprint, owned.compatibilityFingerprint);
+    owned.ready = true;
   }
 
   private async drainCurrentDaemon(daemonVersion: number): Promise<void> {
@@ -1590,6 +1623,7 @@ export class SupervisorDaemonClient {
 
   private async prepareForApplicationUpdateOnce(): Promise<void> {
     if (this.ensureOperation) await this.ensureOperation;
+    await this.waitForOwnedDaemonReadiness();
     let negotiated: Record<string, unknown>;
     try {
       negotiated = await this.request<Record<string, unknown>>(
@@ -1601,7 +1635,7 @@ export class SupervisorDaemonClient {
       // A failed or never-started supervisor has no owner-only socket to
       // relinquish. Keep the update fence active, but do not prevent Squirrel
       // from replacing the app that may contain the daemon recovery fix.
-      if (isConnectionUnavailable(error)) return;
+      if (isConnectionUnavailable(error) && !this.ownedDaemon) return;
       throw error;
     }
     const daemonVersion = Number(negotiated.protocol_version ?? 0);
@@ -1610,6 +1644,7 @@ export class SupervisorDaemonClient {
     await this.drainCurrentDaemon(daemonVersion);
     this.stopAttachedDaemonObservation();
     await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
+    if (this.ownedDaemon?.pid === retired.pid) this.ownedDaemon = null;
   }
 
   private async waitForHealthy(
@@ -1671,7 +1706,7 @@ export class SupervisorDaemonClient {
   }
 
   private observeAttachedDaemon(status: DesktopSupervisorDaemonStatus): void {
-    if (status.pid === this.ownedDaemonPid) {
+    if (status.pid === this.ownedDaemon?.pid) {
       this.stopAttachedDaemonObservation();
       return;
     }
