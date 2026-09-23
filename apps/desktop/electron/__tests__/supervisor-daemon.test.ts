@@ -692,6 +692,8 @@ test("a silent bootstrap retains child ownership across caller timeouts until la
 
 test("socket readiness timeout preserves the original child and releases it only on exit", async () => {
   const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
   let server: Server | null = null;
   const children: ChildProcess[] = [];
   const client = new SupervisorDaemonClient({
@@ -725,12 +727,16 @@ test("socket readiness timeout preserves the original child and releases it only
     assert.equal(children.length, 2, "losing a ready child's socket still does not prove process exit");
   } finally {
     await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
   }
 });
 
 test("a failed spawn without a PID releases startup ownership for a later retry", async () => {
   const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
   let spawns = 0;
   const client = new SupervisorDaemonClient({
     socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25,
@@ -745,7 +751,11 @@ test("a failed spawn without a PID releases startup ownership for a later retry"
     await assert.rejects(client.ensureRunning(), /Timed out waiting/);
     await assert.rejects(client.ensureRunning(), /Timed out waiting/);
     assert.equal(spawns, 2);
-  } finally { await env.cleanup(); }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
 });
 
 test("real child requests its recovery key over private IPC and disconnects after preparation", async () => {
