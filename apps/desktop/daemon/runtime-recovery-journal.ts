@@ -27,12 +27,22 @@ export function prepareRetiredRuntimePlan(database: DatabaseSync, request: Runti
     if (supplied.length) throw new Error("This provider does not support retired process evidence.");
     return { evidence: [], suppliedEvidence: supplied, observerJson: null };
   }
+  // Lease continuity also consumes legacy worker reservations, even when that
+  // generation has no unfinished message work. Retire those exact candidates
+  // through the same death checks; never manufacture a historical grant receipt.
   const rows = database.prepare(`SELECT r.*,e.work_attempt_id,e.terminal_json,e.started_at,e.actor,e.generation,
     (EXISTS(SELECT 1 FROM execution_observers o WHERE o.agent_id=r.agent_id AND o.observer_runtime_generation_id=r.runtime_generation_id)
       OR EXISTS(SELECT 1 FROM execution_turns t WHERE t.agent_id=r.agent_id AND t.runtime_generation_id=r.runtime_generation_id AND t.state IN ('none','active','lost'))
       OR EXISTS(SELECT 1 FROM supervised_agent_provider_turn_bindings b JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id
         WHERE b.agent_id=r.agent_id AND b.room_id=? AND b.work_attempt_id=e.work_attempt_id AND b.origin_execution_generation_id=r.execution_generation_id
-        AND i.state NOT IN ('publishing','acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user','cancelled_by_room_move'))) AS relevant
+        AND i.state NOT IN ('publishing','acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user','cancelled_by_room_move'))
+      OR EXISTS(SELECT 1 FROM (
+        SELECT entry_id,execution_generation_id,agent_session_id FROM worker_binding_publications WHERE entry_id=r.agent_id
+        UNION SELECT entry_id,from_execution_generation_id,agent_session_id FROM worker_generation_verifications WHERE entry_id=r.agent_id
+        UNION SELECT entry_id,to_execution_generation_id,agent_session_id FROM worker_generation_verifications WHERE entry_id=r.agent_id
+      ) p WHERE p.entry_id=r.agent_id AND p.execution_generation_id=r.execution_generation_id
+        AND NOT EXISTS(SELECT 1 FROM worker_execution_bindings b WHERE b.entry_id=p.entry_id
+          AND b.execution_generation_id=p.execution_generation_id AND b.agent_session_id=p.agent_session_id))) AS relevant
     FROM execution_runtime_generations r JOIN execution_generations g
       ON g.agent_id=r.agent_id AND g.execution_generation_id=r.execution_generation_id
     JOIN work_attempt_executions e ON e.execution_generation_id=r.execution_generation_id
