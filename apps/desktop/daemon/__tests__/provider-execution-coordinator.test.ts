@@ -349,6 +349,214 @@ function harness(input: {
   };
 }
 
+test("rehydration reminders share one failed native admission and retain its diagnostic", async () => {
+  let started!: () => void;
+  const launched = new Promise<void>(resolve => { started = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let launches = 0;
+  const runtime = harness({ provider: provider({ spawn: async () => {
+    launches++; started(); await gate; throw new Error("native bootstrap failed");
+  } }) });
+  runtime.options.recordSchedulerFailure = async () => {
+    runtime.setEntry({ ...runtime.entry(), observed_state: "failed", condition: "coordination_blocked", last_error: "native bootstrap failed" });
+  };
+  runtime.coordinator.request("agent-1", "rehydration");
+  await launched;
+  for (let i = 0; i < 5; i++) runtime.coordinator.request("agent-1", "rehydration");
+  const drained = runtime.coordinator.drainConvergence();
+  release();
+  await drained;
+  assert.equal(launches, 1);
+  assert.equal(runtime.executionGenerations.length, 1);
+  assert.equal(runtime.entry().last_error, "native bootstrap failed");
+  // Timestamp, projection and inbox progress are not new launch authority.
+  runtime.setEntry({ ...runtime.entry(), updated_at: "2099-01-01T00:00:00.000Z" });
+  runtime.options.inbox.cursor = async () => ({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "999" });
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(launches, 1);
+  assert.equal(runtime.entry().observed_state, "failed");
+});
+
+for (const change of ["configuration", "control", "grant", "expiry", "continuation", "daemon"] as const) {
+  test(`rehydration preserves ${change} changed during failure projection`, async () => {
+    let launches = 0;
+    const runtime = harness({ provider: provider({ spawn: async () => { launches++; throw new Error("bootstrap failed"); } }) });
+    let revision = 1;
+    const readConfiguration = runtime.options.store.getAgentConfiguration;
+    runtime.options.store.getAgentConfiguration = async id => ({ ...(await readConfiguration(id))!, config_revision: revision });
+    let grant: InstalledHostGrant = {
+      entryId: "agent-1", roomId: "room-1", agentKey: "agent-key", grantId: "grant-1", grantGeneration: 1,
+      supervisorGrant: "secret", apiUrl: "https://example.test", daemonGeneration: 7, hostId: "host-1",
+      installationId: "installation-1", ownerAccountId: "owner", scopeKey: "scope", expiresAt: "2099-01-01T00:00:00.000Z",
+    };
+    runtime.options.host.currentGrant = () => grant;
+    let projecting!: () => void;
+    const projected = new Promise<void>(resolve => { projecting = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    runtime.options.recordSchedulerFailure = async () => { projecting(); await gate; };
+    runtime.coordinator.request("agent-1", "rehydration");
+    await projected;
+    if (change === "configuration") revision++;
+    if (change === "control") runtime.bumpControlEpoch();
+    if (change === "grant") grant = { ...grant, grantId: "grant-2" };
+    if (change === "expiry") grant = { ...grant, expiresAt: "2099-02-01T00:00:00.000Z" };
+    if (change === "daemon") runtime.options.authority.currentDaemonGeneration = () => 8;
+    if (change === "continuation") runtime.setEntry({ ...runtime.entry(), provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: runtime.executionGenerations[0]!.execution_generation_id, provider_continuation_id: "saved-conversation",
+      provider_connection: returnedHandle.providerConnection,
+    } });
+    runtime.coordinator.request("agent-1", "rehydration");
+    runtime.coordinator.request("agent-1", "rehydration");
+    const drained = runtime.coordinator.drainConvergence();
+    release();
+    await drained;
+    assert.equal(launches, 2, "exactly one follow-up uses the changed inputs");
+    runtime.coordinator.request("agent-1", "rehydration");
+    await runtime.coordinator.drainConvergence();
+    assert.equal(launches, 2, "the new failed inputs are retained");
+  });
+}
+
+test("owned convergence and the existing single recovery timer bypass reminder suppression", async () => {
+  let launches = 0;
+  const runtime = harness({ provider: provider({ spawn: async () => { launches++; throw new Error("bootstrap failed"); } }) });
+  const timers: Array<() => void> = [];
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+    setTimeout: ((callback: () => void) => { timers.push(callback); return { unref() {} }; }) as unknown as typeof setTimeout,
+  });
+  coordinator.request("agent-1", "rehydration");
+  await coordinator.drainConvergence();
+  coordinator.request("agent-1");
+  await coordinator.drainConvergence();
+  assert.equal(launches, 2);
+  coordinator.scheduleRecovery("agent-1", 100);
+  coordinator.scheduleRecovery("agent-1", 100);
+  assert.equal(timers.length, 1);
+  timers[0]!();
+  await coordinator.drainConvergence();
+  assert.equal(launches, 3);
+});
+
+test("reminders before inbox admission and grant refresh do not poison launch identity", async () => {
+  let launches = 0;
+  const runtime = harness({ entry: { ...baseEntry(), delivery_mode: "daemon_inbox" },
+    provider: provider({ spawn: async () => { launches++; throw new Error("bootstrap failed"); } }),
+  });
+  runtime.options.inbox.cursor = async () => null;
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(launches, 0);
+  runtime.options.inbox.cursor = async () => ({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "5" });
+  runtime.options.host.requiresGrant = () => true;
+  let grant: InstalledHostGrant | null = null;
+  runtime.options.host.currentGrant = () => grant;
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(launches, 0);
+  grant = { entryId: "agent-1", roomId: "room-1", agentKey: "agent", grantId: "old", grantGeneration: 1,
+    supervisorGrant: "secret", apiUrl: "https://example.test", daemonGeneration: 7, hostId: "host", installationId: "installation",
+    ownerAccountId: "owner", scopeKey: "scope", expiresAt: "2099-01-01T00:00:00.000Z" };
+  runtime.options.host.ensureGrantFresh = async () => { grant = { ...grant!, grantId: "renewed" }; return grant; };
+  runtime.options.host.mintAuthorization = async () => ({ agentSessionId: "session-1", bearer: "secret", bearerId: "bearer-1",
+    expiresAt: grant!.expiresAt, apiUrl: grant!.apiUrl, authority: { entryId: "agent-1", roomId: "room-1", workAttemptId: "attempt-1", grant: grant! } });
+  runtime.options.host.recordMintedSession = async (_entry, id, minted) => ({ ...minted, executionGenerationId: id });
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(launches, 1, "the actual renewed grant is the failure identity");
+});
+
+test("failed admission retains the Open Model credential actually consumed before a late replacement", async () => {
+  const consumed: Array<string | null | undefined> = [];
+  const runtime = harness({ entry: { ...baseEntry(), provider: "open-model" }, provider: provider({ spawn: async input => {
+    consumed.push(input.providerCredential?.apiKey); throw new Error("bootstrap failed");
+  } }) });
+  let credential = { entryId: "agent-1", apiKey: "old-key", baseUrl: "https://models.example.test/v1", model: "test-model", daemonGeneration: 7 };
+  runtime.options.host.currentOpenModelCredential = () => credential;
+  const startGeneration = runtime.options.durability.startGeneration;
+  runtime.options.durability.startGeneration = async (...args) => {
+    const execution = await startGeneration(...args);
+    credential = { ...credential, apiKey: "new-key" };
+    return execution;
+  };
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.deepEqual(consumed, ["old-key", "new-key"]);
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(consumed.length, 2);
+});
+
+test("failed admission uses the work attempt created inside convergence", async () => {
+  let launches = 0, provisions = 0;
+  const runtime = harness({ entry: { ...baseEntry(), workspace_path: null, work_attempt_id: null },
+    provider: provider({ spawn: async () => { launches++; throw new Error("bootstrap failed"); } }),
+  });
+  runtime.options.workspace.ephemeral.provision = async () => { provisions++; return { path: "/tmp/work" } as never; };
+  runtime.options.durability.createAttempt = async () => runtime.options.durability.getAttempt("attempt-1");
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(runtime.entry().work_attempt_id, "attempt-1");
+  assert.equal(provisions, 1);
+  assert.equal(launches, 1);
+});
+
+test("rejected serialization releases pending reminder demand without caching a launch failure", async () => {
+  let launches = 0;
+  const runtime = harness({ provider: provider({ spawn: async () => { launches++; throw new Error("bootstrap failed"); } }) });
+  const serialize = runtime.options.concurrency.serializeEntry;
+  runtime.options.concurrency.serializeEntry = async () => { throw new Error("entry lane unavailable"); };
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(launches, 0);
+  runtime.options.concurrency.serializeEntry = serialize;
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(launches, 1);
+});
+
+test("healthy reminders still settle approvals, refresh runtime and start delivery", async () => {
+  const runtime = harness({ entry: { ...baseEntry(), delivery_mode: "daemon_inbox" } });
+  let settled = 0, refreshed = 0, deliveries = 0;
+  runtime.options.settleRuntimeApprovals = async () => { settled++; };
+  runtime.options.refreshManagedRuntime = async () => { refreshed++; };
+  runtime.options.delivery.start = async () => { deliveries++; };
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  const before = { settled, refreshed, deliveries };
+  runtime.coordinator.request("agent-1", "rehydration");
+  await runtime.coordinator.drainConvergence();
+  assert.equal(runtime.executionGenerations.length, 1);
+  assert.ok(settled > before.settled);
+  assert.ok(refreshed > before.refreshed);
+  assert.ok(deliveries > before.deliveries);
+});
+
+test("handoff drains queued reminders without a successor admission", async () => {
+  let launches = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let started!: () => void;
+  const launched = new Promise<void>(resolve => { started = resolve; });
+  const runtime = harness({ provider: provider({ spawn: async () => { launches++; started(); await gate; throw new Error("bootstrap failed"); } }) });
+  runtime.coordinator.request("agent-1", "rehydration");
+  await launched;
+  runtime.coordinator.request("agent-1", "rehydration");
+  runtime.setHandoff(true);
+  release();
+  await runtime.coordinator.drainConvergence();
+  assert.equal(launches, 1);
+  runtime.coordinator.detachConvergence();
+});
+
 test("delivery handoff freezes convergence and draining never creates a successor", async () => {
   for (const phase of ["draining", "dispatching", "uncertain"] as const) {
     let launches = 0;

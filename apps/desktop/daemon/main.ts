@@ -43,7 +43,7 @@ import { RoomWorkPublisher } from "./room-work-publisher.js";
 import { assertMacOS } from "./platform.js";
 import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
 import { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
-import { ProviderExecutionCoordinator } from "./provider-execution-coordinator.js";
+import { ProviderExecutionCoordinator, type ConvergenceRequestKind } from "./provider-execution-coordinator.js";
 import { ProviderHandoffCoordinator } from "./provider-handoff-coordinator.js";
 import {
   ProviderReconciliationCoordinator,
@@ -336,7 +336,7 @@ export class SupervisorDaemon {
         start: (entryId) => this.startSupervisedDelivery(entryId),
       },
       convergence: {
-        request: (entryId) => this.requestConvergence(entryId),
+        request: (entryId, kind) => this.requestConvergence(entryId, kind),
         schedule: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
         clear: (entryId) => this.clearRecoveryConvergence(entryId),
         heartbeatIntervalMs: this.nativeHeartbeatIntervalMs,
@@ -1021,7 +1021,7 @@ export class SupervisorDaemon {
       }
     }
     if (this.providerPort && this.autoConverge) {
-      for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id);
+      for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id, "rehydration");
     }
   }
 
@@ -1375,8 +1375,8 @@ export class SupervisorDaemon {
   }
 
   /** Queue convergence without making a control-socket caller wait for launch. */
-  private requestConvergence(entryId: string): void {
-    this.providerExecution?.request(entryId);
+  private requestConvergence(entryId: string, kind: ConvergenceRequestKind = "owned"): void {
+    this.providerExecution?.request(entryId, kind);
   }
 
   private bumpEntryControlEpoch(entryId: string): number {
