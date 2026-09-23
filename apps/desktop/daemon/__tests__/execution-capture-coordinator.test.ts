@@ -12,6 +12,7 @@ import { ProviderExecutionObserver } from "../../electron/main/agents/provider-e
 import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
+import { projectRoomAgentManifestEntry } from "../room-agent-state-projection.js";
 
 const now = "2026-08-31T00:00:00.000Z";
 const ready: NativeExecutionFact = { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" };
@@ -951,6 +952,63 @@ test("bounded replay and queue loss preserve the missing frontier across source 
       assert.equal(f.facts().length, 0);
       assert.equal(f.position()!.max_observed_sequence, 300);
     } finally { f.capture.close(); }
+  }
+});
+
+test("a bootstrap-ready replacement with a retired source gap stays visibly blocked without rewriting history", async () => {
+  const f = fixture("claude_cli", undefined, undefined, new DatabaseSync(":memory:"), "typed");
+  const close = f.db.close.bind(f.db);
+  let replacement: ExecutionCaptureCoordinator | undefined;
+  try {
+    f.install(); f.emit(ready); await flush();
+    for (let sequence = 2; sequence <= 8; sequence++) f.emit(ready);
+    f.db.close = () => {};
+    f.capture.close();
+    const oldObserver = f.db.prepare("SELECT * FROM execution_observers").get();
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 8 });
+
+    const current = { ...f.handle, providerConnection: { ...f.handle.providerConnection!, pid: 43, processIdentity: "replacement-birth" } };
+    f.handles.set("agent", current);
+    f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
+      .run(JSON.stringify({ ended_at: now, terminal_cause: "stopped", actor: "test", generation: 1,
+        provider_continuation_id: "continuation", native_runtime_death: { kind: "claude_cli", pid: 42, processIdentity: "birth-secret" } }));
+    f.db.prepare("INSERT INTO work_attempt_executions VALUES('replacement-generation','workspace',?,'test',2,NULL)").run(now);
+    f.db.exec("UPDATE runtime_deployments SET observed_state='recovering',provider_connection_pid=43,provider_process_identity='replacement-birth',provider_execution_generation_id='replacement-generation'");
+    new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "replacement-generation",
+      runtimeGenerationId: executionRuntimeStorageIdentity("agent", "replacement-generation", "claude_cli", 43, "replacement-birth"),
+      provider: "claude-code", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
+    const source = new ProviderExecutionObserver(() => now);
+    source.emit(ready, "replacement-birth", 43);
+    const diagnostics: string[] = [];
+    replacement = new ExecutionCaptureCoordinator(f.db, {
+      provider: { onExecution: (_handle, listener) => source.subscribe(listener) },
+      currentHandle: id => f.handles.get(id), daemonGeneration: () => 2,
+      diagnostic: (_id, code) => diagnostics.push(code),
+    });
+    const token = f.tokenFor(current, "replacement-generation");
+    replacement.install(token); await flush();
+    assert.equal(replacement.typedLifecycleAdmission(token), "unavailable");
+    assert.deepEqual(diagnostics, ["source_gap"]);
+    const projected = projectRoomAgentManifestEntry({
+      entry: { id: "agent", room_id: "room", display_name: "Agent", provider: "claude-code", model: null,
+        charter: "Help", permission_profile_id: null, created_by: "owner", created_at: now,
+        desired_state: "running", observed_state: "recovering", condition: "none", delivery_mode: "daemon_inbox",
+        work_attempt_id: "workspace", provider_ref: { work_attempt_id: "workspace", provider_continuation_id: "continuation",
+          execution_generation_id: "replacement-generation", provider_connection: current.providerConnection } },
+      lifecycleAdmission: replacement.typedLifecycleAdmission(token),
+      binding: null, credentialAvailable: false, currentHostGrantAvailable: true, liveHandle: current,
+      ingressHealth: null, continuationRepair: null, receipts: [], activeTurn: null,
+      nowMs: Date.parse(now), workplaceLivenessStaleAfterMs: 210_000, nativeLivenessStaleAfterMs: 90_000,
+    });
+    assert.equal(projected.condition, "coordination_blocked");
+    assert.match(projected.last_error ?? "", /readiness evidence is unavailable/);
+    for (let index = 0; index < 3; index++) { replacement.refresh(); await flush(); }
+    assert.deepEqual(diagnostics, ["source_gap"], "unchanged evidence does not repeat the diagnostic");
+    assert.deepEqual(f.db.prepare("SELECT * FROM execution_observers").get(), oldObserver);
+    assert.equal(f.facts().length, 1, "the replacement ready fact cannot cross the missing history");
+    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments").get()?.observed_state, "recovering");
+  } finally {
+    replacement?.close(); f.capture.close(); f.db.close = close; if (f.db.isOpen) close();
   }
 });
 

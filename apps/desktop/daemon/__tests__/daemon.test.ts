@@ -2889,7 +2889,8 @@ test("post-launch worker binding retries the exact provider and preserves the re
   }, grants);
   try {
     await daemon.start();
-    const internals = daemon as unknown as { workerBindings: WorkerBindingStore; publishNativeActivity: () => Promise<boolean> };
+    const internals = daemon as unknown as { workerBindings: WorkerBindingStore; store: ManifestStore;
+      providerStreams: ProviderStreamCoordinator; publishNativeActivity: () => Promise<boolean> };
     const originalBind = internals.workerBindings.bind.bind(internals.workerBindings);
     internals.publishNativeActivity = async () => true;
     let bindAttempts = 0;
@@ -2908,7 +2909,7 @@ test("post-launch worker binding retries the exact provider and preserves the re
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const install = { entry_id: "host_grant_bind_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-1", supervisor_grant: "host-grant-secret", grant_generation: 7, api_url: "http://127.0.0.1:3000", host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation };
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", install)).ok, true);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.condition === "coordination_blocked", "post-spawn binding failure");
+    await eventually(async () => (await internals.store.getEntry("host_grant_bind_retry"))?.condition === "coordination_blocked", "post-spawn binding failure");
     assert.equal(spawns, 1);
     assert.equal(stops, 0, "credential failure must never stop the spawned provider");
     const recoveringProjection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
@@ -2939,12 +2940,18 @@ test("post-launch worker binding retries the exact provider and preserves the re
     assert.equal(bindAttempts, 2);
     assert.equal(spawns, 1, "automatic retry rebinds the exact provider rather than spawning a replacement");
     await eventually(
-      async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.condition === "none",
-      "successful room binding clears the recovery projection",
+      async () => (await internals.store.getEntry("host_grant_bind_retry"))?.condition === "none",
+      "successful room binding clears its durable recovery condition",
     );
+    const recovered = (await internals.store.getEntry("host_grant_bind_retry"))!;
+    assert.equal(recovered.last_error, null);
     const recoveredProjection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-    assert.equal(recoveredProjection.condition, "none");
-    assert.equal(recoveredProjection.last_error, null);
+    // This fixture deliberately has no native execution observer. Restoring
+    // its exact worker binding cannot manufacture operational readiness.
+    assert.equal(recoveredProjection.condition, "coordination_blocked");
+    assert.match(recoveredProjection.last_error ?? "", /readiness evidence is unavailable/);
+    assert.equal(internals.providerStreams.deliveryAdmission(recovered), "unavailable");
+    assert.equal(internals.providerStreams.isDeliveryAdmitted("host_grant_bind_retry"), false);
     assert.equal(remoteLiveSessionId, "session-host", "lost-response recovery retains one remote live session id");
     assert.equal(mintCalls.every((call) => call.grantGeneration === 7 && call.agentInstanceId === "daemon:host_grant_bind_retry"), true);
     const raw = await readFile(paths.manifestPath);
