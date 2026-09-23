@@ -532,6 +532,21 @@ export class ProviderStreamCoordinator {
       || this.typedOperationalInstallations.has(installation);
   }
 
+  /** Read-model witness from the same exact-birth latch that owns delivery. */
+  deliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null {
+    const installation = this.latestInstallations.get(entry.id);
+    if (!installation || !this.typedDaemonInboxInstallations.has(installation)) return null;
+    if (!this.isCurrentInstallation(installation)
+      || !this.entryMatchesInstallation(entry, installation)) return "unavailable";
+    if (this.typedOperationalInstallations.has(installation)) return "ready";
+    const pending = this.pendingTypedOperationalActivations.get(entry.id);
+    if (pending?.installation !== installation) return "unavailable";
+    try {
+      const admission = this.options.typedLifecycleAdmission?.(installation) ?? "unavailable";
+      return admission === "unavailable" ? "unavailable" : "pending";
+    } catch { return "unavailable"; }
+  }
+
   private async promoteTypedOperationalInstallation(
     pending: PendingTypedOperationalActivation,
   ): Promise<void> {

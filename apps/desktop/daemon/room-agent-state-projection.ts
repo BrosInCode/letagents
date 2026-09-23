@@ -5,6 +5,7 @@ import type {
 } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry, DaemonManifestEntryView } from "./types.js";
 import type { WorkerSessionBinding } from "./worker-binding-store.js";
+import type { LifecycleCaptureAdmissionStatus } from "./lifecycle-projection-ledger.js";
 
 export type RoomAgentLiveHandle = {
   workAttemptId: string;
@@ -31,6 +32,7 @@ export type RoomAgentStateProjectionInput = {
   credentialAvailable: boolean;
   currentHostGrantAvailable: boolean;
   liveHandle: RoomAgentLiveHandle | null;
+  lifecycleAdmission?: LifecycleCaptureAdmissionStatus | null;
   ingressHealth: RoomAgentIngressHealth | null;
   continuationRepair: Pick<ProviderContinuationRepair, "inbox_item_id" | "phase"> | null;
   receipts: readonly SupervisedInboxReceiptWithTimeline[];
@@ -42,7 +44,7 @@ export type RoomAgentStateProjectionInput = {
 
 type DeliveryAuthorityFacts = Pick<
   RoomAgentStateProjectionInput,
-  "entry" | "binding" | "credentialAvailable" | "liveHandle"
+  "entry" | "binding" | "credentialAvailable" | "liveHandle" | "lifecycleAdmission"
 >;
 
 export function bindingMatchesRoomAgentGeneration(
@@ -64,6 +66,7 @@ export function hasExactRoomAgentDeliveryOwner(input: DeliveryAuthorityFacts): b
   const hasCurrentBinding = bindingMatchesRoomAgentGeneration(input.entry, input.binding);
   return Boolean(
     hasCurrentBinding
+    && (input.lifecycleAdmission == null || input.lifecycleAdmission === "ready")
     && input.credentialAvailable
     && input.liveHandle
     && input.liveHandle.workAttemptId === input.entry.work_attempt_id
@@ -118,6 +121,12 @@ export function projectRoomAgentManifestEntry(
   const cutoverNeedsAttention = entry.provider === "codex"
     && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
     && entry.delivery_cutover?.phase === "uncertain";
+  const admissionHeld = entry.delivery_mode === "daemon_inbox" && entry.desired_state === "running"
+    && ["starting", "recovering", "working", "idle"].includes(entry.observed_state)
+    && (input.lifecycleAdmission === "pending" || input.lifecycleAdmission === "unavailable");
+  const admissionDetail = input.lifecycleAdmission === "unavailable"
+    ? "The agent's readiness evidence is unavailable. Delivery is blocked until recovery is verified."
+    : "Waiting for verified agent readiness evidence before delivery can start.";
   const inbox = cutoverNeedsAttention
     ? {
         state: "blocked" as const,
@@ -148,6 +157,13 @@ export function projectRoomAgentManifestEntry(
               blocked_by_message_id: blocked.source_message_id,
               detail: blocked.last_error ?? "An earlier delivery needs attention.",
             }
+          : admissionHeld
+            ? {
+                state: "blocked" as const,
+                pending_count: nonfinal.length,
+                blocked_by_message_id: null,
+                detail: admissionDetail,
+              }
           : nonfinal.length
             ? {
                 state: "queued" as const,
@@ -162,8 +178,14 @@ export function projectRoomAgentManifestEntry(
                 detail: null,
               };
   const hasLiveDeliveryOwner = hasExactRoomAgentDeliveryOwner(input);
-  const connection = hasLiveDeliveryOwner
+  const connection = admissionHeld
     ? {
+        state: input.lifecycleAdmission === "pending" ? "reconnecting" as const : "disconnected" as const,
+        observed_at: entry.native_liveness?.observed_at ?? null,
+        detail: admissionDetail,
+      }
+    : hasLiveDeliveryOwner
+      ? {
         state: "connected" as const,
         observed_at: binding!.updated_at,
         detail: "Live provider and exact worker binding are available.",
@@ -191,7 +213,13 @@ export function projectRoomAgentManifestEntry(
     && ingressHealth.execution_generation_id === entry.provider_ref?.execution_generation_id,
   );
   const hasLiveIngressOwner = Boolean(hasCurrentBinding && credentialAvailable && ingressMatches);
-  const ingress = hasLiveIngressOwner
+  const ingress = admissionHeld
+    ? {
+        state: "blocked" as const,
+        observed_at: entry.native_liveness?.observed_at ?? null,
+        detail: admissionDetail,
+      }
+    : hasLiveIngressOwner
     ? {
         state: ingressHealth!.state,
         observed_at: ingressHealth!.state === "stopped" ? null : binding!.updated_at,
@@ -225,6 +253,9 @@ export function projectRoomAgentManifestEntry(
 
   return {
     ...entry,
+    ...(admissionHeld && input.lifecycleAdmission === "unavailable" && entry.condition === "none"
+      ? { condition: "coordination_blocked" as const, last_error: blocked?.last_error ?? admissionDetail }
+      : {}),
     // A replacement Cursor lane can be idle without a native process while
     // its predecessor's failed turn still blocks every later room delivery.
     // Project the durable blockage on the agent too; handle presence cannot

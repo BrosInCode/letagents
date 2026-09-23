@@ -353,6 +353,7 @@ test("typed daemon-inbox activation waits for exact durable readiness and latche
   assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false,
     "canonical worker binding cannot bypass the exact typed hold");
   assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission.codex, "pending");
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "pending");
 
   admission = "unavailable";
   harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
@@ -360,15 +361,27 @@ test("typed daemon-inbox activation waits for exact durable readiness and latche
   assert.equal(rawListeners.length, 0, "unavailable evidence cannot promote a typed birth");
   assert.equal(deliveryStarts, 0);
   assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false);
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "unavailable");
+  assert.equal(harness.coordinator.deliveryAdmission({ ...harness.getManifest(), provider_ref: {
+    ...harness.getManifest().provider_ref!, execution_generation_id: "stale-generation",
+  } }), "unavailable", "a stale same-continuation view cannot borrow the current installation's readiness");
 
   admission = "ready";
   harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "pending",
+    "capture readiness cannot outrun operational promotion");
   await harness.coordinator.drainCallbacks();
   assert.equal(rawListeners.length, 1);
   assert.equal(heartbeatRegistrations, 1);
   assert.equal(deliveryStarts, 1);
   assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true);
   assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission.codex, "ready");
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "ready");
+  assert.equal(harness.coordinator.deliveryAdmission({ ...harness.getManifest(), provider_ref: {
+    ...harness.getManifest().provider_ref!, provider_connection: {
+      ...harness.getManifest().provider_ref!.provider_connection!, processIdentity: "replacement-birth",
+    },
+  } }), "unavailable", "a different process cannot borrow the latched admission");
   harness.runtimeCustody.installLiveBinding("agent-1", {
     agentSessionId: "session-1", executionGenerationId: "generation-2",
     updatedAt: "2026-08-26T00:00:00.000Z",
@@ -379,6 +392,8 @@ test("typed daemon-inbox activation waits for exact durable readiness and latche
   await harness.coordinator.drainCallbacks();
   assert.equal(rawListeners.length, 1, "a ready exact birth never demotes or installs twice");
   assert.equal(deliveryStarts, 1);
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "ready",
+    "the view shares delivery's one-way exact-birth latch");
 
   rawListeners[0]!(streamEvent(1, "item/agentMessage/delta"));
   await harness.coordinator.drainCallbacks();
