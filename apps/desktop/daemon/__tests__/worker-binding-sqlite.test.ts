@@ -9,6 +9,10 @@ import test from "node:test";
 
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
+import { archiveRetiredRuntimes, prepareRetiredRuntimePlan } from "../runtime-recovery-journal.js";
+import type { DaemonManifestEntry } from "../types.js";
+import type { ProcessIdentity } from "../process-identity.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-binding-sqlite-"));
@@ -726,10 +730,11 @@ test("v4 validator rejects generated columns and NOCASE/DESC unique terms", asyn
   } finally { await env.cleanup(); }
 });
 
-function seedCustodyExecution(database: DatabaseSync, id = "run_1", generation = 1) {
+function seedCustodyExecution(database: DatabaseSync, id = "run_1", generation = 1, attempt = "attempt") {
+  const task = attempt === "attempt" ? "supervised-agent" : attempt;
   database.prepare(`INSERT OR IGNORE INTO work_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-    "attempt", "supervised-agent", "supervised-agent", 0, "/fixture/workspace", "repo", "remote", "revision", "/fixture/bare", "active", "2026-09-22T00:00:00Z", null, null, null);
-  database.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,?,?,?)").run(id, "attempt", "2026-09-22T00:00:00Z", "provider", generation, "{}");
+    attempt, task, task, 0, attempt === "attempt" ? "/fixture/workspace" : `/fixture/${attempt}`, "repo", "remote", "revision", "/fixture/bare", "active", "2026-09-22T00:00:00Z", null, null, null);
+  database.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,?,?,?)").run(id, attempt, "2026-09-22T00:00:00Z", "provider", generation, "{}");
 }
 const custodyBinding = { entry_id: "agent_a", room_id: "room", api_url: "https://letagents.test", grant_id: "grant-a",
   work_attempt_id: "attempt", execution_generation_id: "run_1", agent_session_id: "session_a", agent_key: "owner/agent-a" };
@@ -785,4 +790,77 @@ test("legacy custody retains unknown generations and only marks exact completed 
     assert.ok(history.every(record => record.authority === null), "legacy evidence never invents a launch grant/API receipt");
     assert.ok((await store.executionPredecessors("agent_a", "attempt", "different-room")).every(record => !record.legacy_recovery_complete));
   } finally { await store.close(); await env.cleanup(); }
+});
+
+test("explicit recovery covers publication-only and both verification predecessors before lease continuity", async () => {
+  const env = await fixture();
+  const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  let db: DatabaseSync | undefined;
+  try {
+    await store.list();
+    db = new DatabaseSync(env.database);
+    const shadow = new ExecutionShadowStore(db);
+    const birth = "Tue Sep 22 01:00:00 2026";
+    const runtimes = new Map<string, string>();
+    for (const [index, id] of ["published", "verified-from", "verified-to", "current", "other-entry", "other-attempt", "already-bound"].entries()) {
+      seedCustodyExecution(db, id, index + 1, id === "other-attempt" ? "other-attempt" : "attempt");
+      const pid = 44001 + index;
+      const runtime = executionRuntimeStorageIdentity("agent_a", id, "codex_app_server", pid, birth);
+      runtimes.set(id, runtime);
+      shadow.registerRuntime({ agentId: "agent_a", executionGenerationId: id, runtimeGenerationId: runtime,
+        provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
+      if (index < 3) db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id=?").run(JSON.stringify({
+        actor: "provider", generation: index + 1, ended_at: "2026-09-22T02:00:00Z", terminal_cause: "crashed",
+        provider_continuation_id: "saved-conversation", native_runtime_death: { kind: "codex_app_server", pid, processIdentity: birth },
+      }), id);
+    }
+    // These reservations have no observer, turn or pending inbox. They still
+    // belong to the previous session's native-death proof obligation.
+    const publish = (reservation: string, owner: string, execution: string, sequence: number) => db!.prepare(
+      "INSERT INTO worker_binding_publications VALUES(?,?,1,?,'old-session',?,'now',100,'failed','now',NULL)")
+      .run(reservation, owner, execution, sequence);
+    publish("publication", "agent_a", "published", 1);
+    publish("unrelated-entry", "agent_b", "other-entry", 1);
+    publish("unrelated-attempt", "agent_a", "other-attempt", 2);
+    publish("exact-custody", "agent_a", "already-bound", 3);
+    await store.recordExecutionBinding({ ...custodyBinding, execution_generation_id: "already-bound", agent_session_id: "old-session" });
+    db.prepare("INSERT INTO worker_generation_verifications VALUES('verification','agent_a',1,'verified-from','verified-to','old-session',1,'now',100,'lost_race','now',NULL)").run();
+    const entry = { id: "agent_a", room_id: "room", provider: "codex", work_attempt_id: "attempt", desired_state: "running",
+      provider_ref: { work_attempt_id: "attempt", execution_generation_id: "current", provider_continuation_id: "saved-conversation",
+        provider_connection: { kind: "codex_app_server", pid: 44004, processIdentity: birth } } } as DaemonManifestEntry;
+    const request = { operationId: "explicit-restart", entryId: "agent_a", roomId: "room", mode: "resume" as const,
+      executionGenerationId: "current", runtimeGenerationId: runtimes.get("current")! };
+    let predecessorState: "gone" | "live" | "unknown" = "gone";
+    const identity: ProcessIdentity = {
+      probe: () => { if (predecessorState !== "live") throw Object.assign(new Error(predecessorState), { code: predecessorState === "gone" ? "ESRCH" : "EPERM" }); },
+      readBirthIdentity: () => birth, sameBirthIdentity: (actual, expected) => actual === expected,
+    };
+    const plan = prepareRetiredRuntimePlan(db, request, entry, [], identity);
+    assert.deepEqual(plan.evidence.map(value => value.executionGenerationId).sort(), ["published", "verified-from", "verified-to"],
+      "worker history must be included even with no unresolved execution work; unrelated entry/attempt are excluded");
+    assert.equal(plan.observerJson, null, "no observation is fabricated for worker-only history");
+    for (const state of ["live", "unknown"] as const) {
+      predecessorState = state;
+      assert.throws(() => prepareRetiredRuntimePlan(db!, request, entry, [], identity), /not been proven gone/);
+    }
+    predecessorState = "gone";
+    const exactTerminal = db.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id='published'").get()!.terminal_json;
+    db.prepare("UPDATE work_attempt_executions SET terminal_json='{}' WHERE execution_generation_id='published'").run();
+    assert.throws(() => prepareRetiredRuntimePlan(db!, request, entry, [], identity), /no exact retired execution record/);
+    db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='published'").run(exactTerminal);
+    db.exec("BEGIN IMMEDIATE");
+    archiveRetiredRuntimes(db, request, { ...entry, desired_state: "paused" }, plan, identity);
+    db.exec("COMMIT");
+    const history = await store.executionPredecessors("agent_a", "attempt", "room");
+    assert.equal(history.length, 4);
+    const legacy = history.filter(record => record.execution_generation_id !== "already-bound");
+    assert.ok(legacy.every(record => record.legacy_recovery_complete && record.authority === null),
+      "completed exact retirement is consumable by lease continuity without inventing historical launch authority");
+    assert.equal(history.find(record => record.execution_generation_id === "already-bound")?.authority?.grant_id, "grant-a");
+    assert.ok((await store.executionPredecessors("agent_a", "attempt", "different-room")).every(record => !record.legacy_recovery_complete));
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM worker_execution_bindings").get()!.n, 1, "only the existing exact receipt remains");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries").get()!.n, 3);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n, 0);
+    assert.deepEqual(prepareRetiredRuntimePlan(db, request, entry, [], identity).evidence, [], "complete archives are immutable and not repeated");
+  } finally { db?.close(); await store.close(); await env.cleanup(); }
 });
