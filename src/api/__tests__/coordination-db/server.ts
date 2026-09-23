@@ -73,15 +73,27 @@ export async function startApiServer(): Promise<{
 export async function stopChildProcess(
   child: ChildProcessWithoutNullStreams,
 ): Promise<void> {
-  if (child.exitCode !== null) {
+  if (child.exitCode !== null || child.signalCode !== null) {
     return;
   }
 
-  child.kill("SIGTERM");
-  await Promise.race([once(child, "exit"), sleep(5000)]);
+  let observedExit = false;
+  const exited = once(child, "exit").then(() => { observedExit = true; });
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const grace = new Promise<void>((resolve) => {
+    graceTimer = setTimeout(resolve, 5000);
+  });
 
-  if (child.exitCode === null) {
+  try {
+    child.kill("SIGTERM");
+    await Promise.race([exited, grace]);
+    if (observedExit || child.exitCode !== null || child.signalCode !== null) {
+      return;
+    }
+
     child.kill("SIGKILL");
-    await once(child, "exit");
+    await exited;
+  } finally {
+    clearTimeout(graceTimer);
   }
 }
