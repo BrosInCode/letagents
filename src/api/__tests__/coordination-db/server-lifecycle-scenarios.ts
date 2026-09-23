@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import test from "node:test";
-import { stopChildProcess } from "./server.js";
+import { stopChildProcess, waitForServer } from "./server.js";
 
 class FakeChild extends EventEmitter {
   exitCode: number | null = null;
@@ -88,4 +88,34 @@ test("process teardown escalates after grace and still requires observed KILL ex
   await stopping;
   assert.equal(completed, true);
   assert.equal(child.listenerCount("exit"), 0, "one observation owns both TERM and KILL");
+});
+
+
+test("failed server readiness retires its child before publishing the startup failure", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 503 }));
+  const child = new FakeChild();
+  let failure: Error | null = null;
+  const ready = waitForServer(12345, child.asChild(), () => "fixture stderr").catch((error: Error) => { failure = error; });
+  for (let attempt = 0; attempt < 61; attempt += 1) {
+    await flushPromises();
+    t.mock.timers.tick(250);
+  }
+  await flushPromises();
+  assert.deepEqual(child.signals, ["SIGTERM"]);
+  assert.equal(failure, null, "startup failure must not abandon an unretired child");
+  child.exit(null, "SIGTERM");
+  await ready;
+  assert.match((failure as Error | null)?.message ?? "", /did not become ready: fixture stderr/);
+  assert.equal(child.listenerCount("exit"), 0);
+});
+
+test("a signal-exited server cannot become ready from a healthy port response", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const health = t.mock.method(globalThis, "fetch", async () => new Response("ok"));
+  const child = new FakeChild();
+  child.exit(null, "SIGTERM");
+  await assert.rejects(waitForServer(12345, child.asChild(), () => "fixture stderr"), /exited early: fixture stderr/);
+  assert.equal(health.mock.callCount(), 0);
+  assert.deepEqual(child.signals, []);
 });
