@@ -646,7 +646,7 @@ test("silent bootstrap bounds caller wait without killing work and ignores late 
   child.emit("message", { type: "state_recovery_ready" });
 });
 
-test("a silent bootstrap releases shared startup and update waits; later readiness attaches without respawn", async () => {
+test("a silent bootstrap retains child ownership across caller timeouts until later readiness", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -658,7 +658,7 @@ test("a silent bootstrap releases shared startup and update waits; later readine
   child.send = (() => true) as ChildProcess["send"];
   child.kill = () => { assert.fail("slow preparation must continue under its singleton"); };
   const client = new SupervisorDaemonClient({
-    socketPath: env.socketPath, daemonScriptPath, statePreparationWaitMs: 25,
+    socketPath: env.socketPath, daemonScriptPath, statePreparationWaitMs: 25, startTimeoutMs: 25,
     spawnDaemon: () => { spawns++; spawned(); return child; },
     signalDaemon: () => { assert.fail("slow preparation must not be signalled"); },
   });
@@ -668,6 +668,14 @@ test("a silent bootstrap releases shared startup and update waits; later readine
     await didSpawn;
     const updateCheck = assert.rejects(client.prepareForApplicationUpdate(), /has not confirmed database preparation/);
     await Promise.all([startCheck, updateCheck]);
+    // IPC disconnection is not process exit. Retrying before the socket opens
+    // must not launch a contender or let an update bypass the live child.
+    child.emit("disconnect");
+    const retry = client.ensureRunning();
+    assert.equal(client.ensureRunning(), retry, "concurrent callers share one bounded readiness wait");
+    await assert.rejects(retry, /Timed out waiting|has not confirmed database preparation/);
+    assert.equal(spawns, 1, "caller timeout must not release ownership of a living child");
+    await assert.rejects(client.prepareForApplicationUpdate(), /Timed out waiting/);
     // Simulate the original child's slow migration finishing after the UI wait.
     const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
     server = wire.server;
@@ -676,6 +684,74 @@ test("a silent bootstrap releases shared startup and update waits; later readine
     assert.equal(spawns, 1, "retry attaches to the original now-ready daemon");
   } finally {
     await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("socket readiness timeout preserves the original child and releases it only on exit", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  const children: ChildProcess[] = [];
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25,
+    spawnDaemon: () => {
+      const child = new EventEmitter() as ChildProcess;
+      children.push(child);
+      return child;
+    },
+    signalDaemon: () => { assert.fail("readiness timeout must not signal a daemon"); },
+  });
+  try {
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    assert.equal(children.length, 1, "socket delay is not permission to spawn another child");
+    children[0]!.emit("exit", 1, null);
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    assert.equal(children.length, 2, "an exited startup child permits one replacement");
+    // A late event from the predecessor cannot release its replacement.
+    children[0]!.emit("error", new Error("late predecessor error"));
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    assert.equal(children.length, 2);
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
+    server = wire.server;
+    assert.equal((await client.ensureRunning()).generation, 42);
+    assert.equal(children.length, 2);
+    await closeServer(server, env.socketPath);
+    server = null;
+    await assert.rejects(client.ensureRunning(), /ENOENT|ECONNREFUSED/);
+    await assert.rejects(client.prepareForApplicationUpdate(), /ENOENT|ECONNREFUSED/);
+    assert.equal(children.length, 2, "losing a ready child's socket still does not prove process exit");
+  } finally {
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a failed spawn without a PID releases startup ownership for a later retry", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let spawns = 0;
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25,
+    spawnDaemon: () => {
+      spawns += 1;
+      const child = new EventEmitter() as ChildProcess;
+      queueMicrotask(() => child.emit("error", new Error("spawn ENOENT")));
+      return child;
+    },
+  });
+  try {
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    assert.equal(spawns, 2);
+  } finally {
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
@@ -3121,6 +3197,8 @@ test("replacement cannot report healthy without acquiring a newer singleton gene
       },
     });
     await assert.rejects(client.ensureRunning(), /did not acquire a newer singleton generation/i);
+    await assert.rejects(client.ensureRunning(), /did not acquire a newer singleton generation/i,
+      "retry must retain the original launch's generation fence");
   } finally {
     await closeServer(replacementServer, env.socketPath);
     await closeServer(oldServer, env.socketPath);
