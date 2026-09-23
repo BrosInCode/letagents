@@ -822,32 +822,35 @@ export class WorkerBindingStore {
   }
 
   private async moveClaimedToQuarantine(claimed: string, quarantine: string, expectedChecksumPrefix?: string): Promise<void> {
-    if (expectedChecksumPrefix) {
-      const raw = await this.readOwnerOnly(claimed);
-      if (raw === undefined) return;
-      if (!checksumOf(raw).startsWith(expectedChecksumPrefix)) {
-        await this.moveToUnexpectedQuarantine(claimed, checksumOf(raw));
-        return;
-      }
+    const raw = await this.readOwnerOnly(claimed);
+    if (raw === undefined) {
+      throw new Error("Legacy worker binding import integrity error: claimed evidence disappeared before it could be inspected.");
+    }
+    if (expectedChecksumPrefix && !checksumOf(raw).startsWith(expectedChecksumPrefix)) {
+      await this.moveToUnexpectedQuarantine(claimed, checksumOf(raw));
+      return;
     }
     try {
       await link(claimed, quarantine);
-      await chmod(quarantine, 0o600);
-      await unlink(claimed);
-      await this.syncDirectory(dirname(quarantine));
     } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      await chmod(quarantine, 0o600);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST" && code !== "ENOENT") throw error;
+    }
+    // Once the failure verdict is durable, sibling openers may finish this
+    // same cleanup. Neither a missing claim nor an existing name proves that
+    // custody transferred: verify the retained bytes against our snapshot.
+    const quarantineRaw = await this.readOwnerOnly(quarantine);
+    if (quarantineRaw !== raw) {
       const claimedRaw = await this.readOwnerOnly(claimed);
-      const quarantineRaw = await this.readOwnerOnly(quarantine);
-      if (claimedRaw === undefined) return;
-      if (quarantineRaw === claimedRaw) {
-        await unlink(claimed).catch((unlinkError: unknown) => { if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError; });
-        await this.syncDirectory(dirname(claimed));
-        return;
+      if (claimedRaw === undefined || quarantineRaw === undefined) {
+        throw new Error("Legacy worker binding import integrity error: claimed evidence has no exact retained quarantine.");
       }
       await this.moveToUnexpectedQuarantine(claimed, checksumOf(claimedRaw));
+      return;
     }
+    await this.syncDirectory(dirname(quarantine));
+    await unlink(claimed).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+    await this.syncDirectory(dirname(claimed));
   }
 
   private async reconcileFailedEvidence(quarantine: string): Promise<void> {
