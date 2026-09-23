@@ -15,29 +15,34 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForServer(
+export async function waitForServer(
   port: number,
   child: ChildProcessWithoutNullStreams,
   stderrBuffer: () => string,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (child.exitCode !== null) {
-      throw new Error(`coordination test server exited early: ${stderrBuffer()}`.trim());
-    }
-
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
-      if (response.ok) {
-        return;
+  try {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`coordination test server exited early: ${stderrBuffer()}`.trim());
       }
-    } catch {
-      // keep polling until ready
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+        if (response.ok) {
+          return;
+        }
+      } catch {
+        // keep polling until ready
+      }
+
+      await sleep(250);
     }
 
-    await sleep(250);
+    throw new Error(`coordination test server did not become ready: ${stderrBuffer()}`.trim());
+  } catch (error) {
+    await stopChildProcess(child);
+    throw error;
   }
-
-  throw new Error(`coordination test server did not become ready: ${stderrBuffer()}`.trim());
 }
 
 export async function startApiServer(): Promise<{
