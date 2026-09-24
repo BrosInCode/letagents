@@ -92,6 +92,8 @@ type ClaudeStreamMessage = Record<string, unknown> & { type?: unknown; subtype?:
 export interface ClaudeCliChild {
   pid: number | null;
   exited: Promise<ProviderProcessExit>;
+  /** Output volume only; native stderr contents never leave the child owner. */
+  stderrBytesRead?(): number;
   /** Positive native spawn failure before any child process was acquired. */
   didNotSpawn?(): boolean;
   /** Ordered stdout stream-json lines (raw, one JSON document per line). */
@@ -321,6 +323,94 @@ const CLAUDE_DAEMON_BOOTSTRAP_PROMPT = [
 
 type ClaudeRoomTurnTerminal = ClaudeExactTurnResult | ClaudeExactTurnFailure;
 
+const CLAUDE_API_ERROR_CATEGORIES = new Set([
+  "authentication_failed", "oauth_org_not_allowed", "billing_error", "rate_limit",
+  "overloaded", "invalid_request", "model_not_found", "server_error", "unknown", "max_output_tokens",
+]);
+const CLAUDE_RESULT_CATEGORIES = new Set([
+  "success", "error_during_execution", "error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries",
+]);
+
+/** Bounded observations from this child's startup, never an inferred root cause. */
+class ClaudeBootstrapDiagnostics {
+  private readonly startedAt = performance.now();
+  private initializedAt: number | null = null;
+  private stdoutLines = 0;
+  private matchedSessionLines = 0;
+  private apiRetries = 0;
+  private assistantMessages = 0;
+  private resultMessages = 0;
+  private authMessages = 0;
+  private authenticating: boolean | null = null;
+  private lastApiRetry: string | null = null;
+  private assistantError: string | null = null;
+  private result: string | null = null;
+  private uncorrelatedResult: string | null = null;
+
+  constructor(private readonly sessionId: string, private readonly turnId: string, private readonly budgetMs: number) {}
+
+  initialized(): void { this.initializedAt = performance.now(); }
+
+  observe(line: string): void {
+    this.stdoutLines = Math.min(Number.MAX_SAFE_INTEGER, this.stdoutLines + 1);
+    const message = parseStreamLine(line);
+    if (!message || message.session_id !== this.sessionId) return;
+    this.matchedSessionLines = Math.min(Number.MAX_SAFE_INTEGER, this.matchedSessionLines + 1);
+    // Never include arbitrary error strings, keys, subtypes, IDs or message text.
+    const category = typeof message.error === "string" && CLAUDE_API_ERROR_CATEGORIES.has(message.error)
+      ? message.error : "unlisted";
+    if (message.type === "system" && message.subtype === "api_retry") {
+      this.apiRetries = Math.min(Number.MAX_SAFE_INTEGER, this.apiRetries + 1);
+      const status = message.error_status === null ? "none"
+        : typeof message.error_status === "number" && Number.isInteger(message.error_status)
+          && message.error_status >= 100 && message.error_status <= 599 ? message.error_status : "unlisted";
+      this.lastApiRetry = `${category} (HTTP ${status})`;
+    } else if (message.type === "assistant") {
+      this.assistantMessages = Math.min(Number.MAX_SAFE_INTEGER, this.assistantMessages + 1);
+      if (message.error !== undefined) this.assistantError = category;
+    } else if (message.type === "result") {
+      this.resultMessages = Math.min(Number.MAX_SAFE_INTEGER, this.resultMessages + 1);
+      const subtype = typeof message.subtype === "string" && CLAUDE_RESULT_CATEGORIES.has(message.subtype)
+        ? message.subtype : "unlisted";
+      if (message.user_message_uuid === this.turnId) {
+        this.result = subtype;
+      } else this.uncorrelatedResult = subtype;
+    } else if (message.type === "auth_status") {
+      this.authMessages = Math.min(Number.MAX_SAFE_INTEGER, this.authMessages + 1);
+      this.authenticating = typeof message.isAuthenticating === "boolean" ? message.isAuthenticating : null;
+    }
+  }
+
+  summary(child: ClaudeCliChild): string {
+    const failedAt = performance.now();
+    const elapsed = (start: number, end: number) => Math.max(0, Math.round(end - start));
+    let stderrBytes: number | null = null;
+    try {
+      const count = child.stderrBytesRead?.();
+      if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) stderrBytes = count;
+    } catch { /* An unavailable diagnostic must not replace the launch failure. */ }
+    const fields = [
+      ...(this.lastApiRetry === null ? [] : [`last_api_retry=${this.lastApiRetry}`]),
+      ...(this.assistantError === null ? [] : [`assistant_error=${this.assistantError}`]),
+      ...(this.result === null ? [] : [`result=${this.result}`]),
+      ...(this.uncorrelatedResult === null ? [] : [`uncorrelated_result=${this.uncorrelatedResult}`]),
+      ...(this.authMessages === 0 ? [] : [`auth_status_count=${this.authMessages}`, `authenticating=${this.authenticating ?? "unlisted"}`]),
+      `init_ms=${elapsed(this.startedAt, this.initializedAt ?? failedAt)}`,
+      `bootstrap_ms=${this.initializedAt === null ? "not_started" : elapsed(this.initializedAt, failedAt)}`,
+      `budget_ms=${this.budgetMs}`, `stdout_lines=${this.stdoutLines}`, `matched_session_lines=${this.matchedSessionLines}`,
+      `stderr_bytes=${stderrBytes ?? "unavailable"}`,
+      `api_retry_count=${this.apiRetries}`, `assistant_count=${this.assistantMessages}`, `result_count=${this.resultMessages}`,
+    ];
+    let omitted = 0;
+    for (;;) {
+      const summary = `Startup observations: ${fields.join("; ")}${omitted ? `; omitted_fields=${omitted}` : ""}.`;
+      if (summary.length <= 512) return summary;
+      fields.pop();
+      omitted += 1;
+    }
+  }
+}
+
 class ClaudeBootstrapError extends Error {
   readonly name = "ClaudeBootstrapError";
   readonly reason: "deadline" | "native_exit" | "transport_error" | "failed_response";
@@ -330,6 +420,7 @@ class ClaudeBootstrapError extends Error {
   constructor(
     readonly phase: "init" | "bootstrap_turn",
     failure: ProviderProcessExit | { type: "deadline" | "failed_response" },
+    observations: string,
   ) {
     const reason = failure.type === "exit" ? "native_exit"
       : failure.type === "error" ? "transport_error" : failure.type;
@@ -337,7 +428,7 @@ class ClaudeBootstrapError extends Error {
       : "Claude CLI did not complete its daemon-safe bootstrap turn";
     // Preserve the observed boundary without copying native error/result text
     // into supervisor diagnostics. Transport loss is not a physical death proof.
-    super(`${prefix} (${reason}${failure.type === "exit" ? `; exit code ${failure.code ?? "unknown"}; signal ${failure.signal ?? "none"}` : ""}).`);
+    super(`${prefix} (${reason}${failure.type === "exit" ? `; exit code ${failure.code ?? "unknown"}; signal ${failure.signal ?? "none"}` : ""}). ${observations}`);
     this.reason = reason;
     if (failure.type === "exit") {
       this.exitCode = failure.code;
@@ -409,7 +500,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
   let intentionalClose = false;
   let exitedSettled = false;
   let disconnectNotified = false;
-  const stderrTail: string[] = [];
+  let stderrBytes = 0;
 
   const notifyDisconnect = () => {
     if (intentionalClose || exitedSettled || disconnectNotified) return;
@@ -447,13 +538,13 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     });
   }
   child.stderr?.on("data", (chunk: Buffer) => {
-    stderrTail.push(chunk.toString("utf8"));
-    if (stderrTail.length > 20) stderrTail.shift();
+    stderrBytes = Math.min(Number.MAX_SAFE_INTEGER, stderrBytes + chunk.byteLength);
   });
 
   return {
     pid: child.pid ?? null,
     exited,
+    stderrBytesRead: () => stderrBytes,
     didNotSpawn: () => failedToSpawn && child.pid === undefined,
     onLine(listener) {
       lineListeners.add(listener);
@@ -1262,11 +1353,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
 
     let handle: ClaudeProviderHandle | null = null;
+    const diagnostics = new ClaudeBootstrapDiagnostics(expectedSessionId, bootstrapTurnId, this.initTimeoutMs);
+    let capturingBootstrap = true;
     const pendingLines: string[] = [];
     let init: ClaudeStreamMessage | null = null;
     let resolveInit: ((message: ClaudeStreamMessage) => void) | null = null;
     const initPromise = new Promise<ClaudeStreamMessage>((resolve) => { resolveInit = resolve; });
     const unsubscribeLines = child.onLine((line) => {
+      if (capturingBootstrap) diagnostics.observe(line);
       if (!init) {
         const parsed = parseStreamLine(line);
         if (parsed && parsed.type === "system" && parsed.subtype === "init") {
@@ -1306,7 +1400,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         initTimeout,
       ]);
       if (bootstrapFailure in observedInit) {
-        throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure]);
+        throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure], diagnostics.summary(child));
       }
       if (req.permissionProfileId === "ask_before_write"
         && (!Array.isArray(observedInit.capabilities) || !observedInit.capabilities.includes("msg_lifecycle_v1"))) {
@@ -1348,6 +1442,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       const exitPromise = handle.exitEvidence.then((exit) => this.observeExit(handle!, exit));
       this.exitPromises.set(handle, exitPromise);
 
+      diagnostics.initialized();
       this.publishStream(handle, streamMethod(observedInit), observedInit, "provider_event");
       const bootstrapResult = this.waitForExactRoomTurn(handle, bootstrapTurnId);
       for (const line of pendingLines.splice(0)) {
@@ -1359,10 +1454,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         initTimeout,
       ]);
       if (bootstrapFailure in bootstrapTerminal) {
-        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure]);
+        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure], diagnostics.summary(child));
       }
       if ("error" in bootstrapTerminal) {
-        throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" });
+        throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" }, diagnostics.summary(child));
       }
       handle.roomTurnResults.delete(bootstrapTurnId);
       handle.state = "idle";
@@ -1373,6 +1468,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       );
       return handle;
     } catch (error) {
+      capturingBootstrap = false;
       if (handle) {
         handle.protocolError = true;
       } else {
@@ -1387,6 +1483,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       throw error;
     } finally {
+      capturingBootstrap = false;
       if (initTimer) clearTimeout(initTimer);
       await managedMcpConfig.dispose();
     }
