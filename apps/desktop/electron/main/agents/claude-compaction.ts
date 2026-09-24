@@ -33,14 +33,15 @@ export class ClaudeCompaction {
 
   /** Called only after init has validated this exact continuation and workplace. */
   observe(message: Record<string, unknown>): void {
-    if (this.closed || message.session_id !== this.sessionId || message.parent_tool_use_id != null
+    if ((this.closed && !this.bootstrapping) || message.session_id !== this.sessionId || message.parent_tool_use_id != null
       || message.type !== "system") return;
     if (message.subtype === "status") {
       // Explicit outcome wins over status, including contradictory native frames.
       if (message.compact_result === "failed") {
         this.setActive(false);
         if (this.bootstrapping) this.fail("compaction_failed");
-      } else if (message.compact_result === "success") this.setActive(false);
+      } else if (this.closed) return;
+      else if (message.compact_result === "success") this.setActive(false);
       else if (message.status === "compacting") this.setActive(true);
       else if (message.status === null || message.status === "requesting") this.setActive(false);
     } else if (message.subtype === "compact_boundary") this.setActive(false);
@@ -62,9 +63,21 @@ export class ClaudeCompaction {
     this.setActive(false);
   }
 
+  /** Timer delivery can lag behind stdout; admission must also account elapsed time. */
+  checkDeadline(): void { if (!this.closed) this.account(); }
+
   close(): void {
-    this.finishBootstrap();
+    this.account();
+    this.cancelTimer();
+    const wasActive = this.activeSince !== null;
+    this.activeSince = null;
     this.closed = true;
+    // Native exit can precede replay of an already-buffered explicit compaction
+    // failure. Hide progress now, but retain that negative bootstrap evidence
+    // until finishBootstrap; a closed child can never regain positive progress.
+    if (wasActive) {
+      try { this.changed(); } catch { /* presentation cannot change provider custody */ }
+    }
   }
 
   private account(): void {

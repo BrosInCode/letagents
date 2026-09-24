@@ -66,6 +66,9 @@ export function useSupervisedRuntimePolling(options: {
         || options.conflict.value?.id !== entryId
       ) return;
       if (refreshed.error) {
+        // Retain the launch identity, but current native progress has lost its
+        // read authority. A subsequent successful read can restore it.
+        options.conflict.value = { ...options.conflict.value!, providerProgress: null };
         options.setLookupFeedback(`${contextualAddAgentError(
           "Couldn't refresh supervised status",
           refreshed.cause,

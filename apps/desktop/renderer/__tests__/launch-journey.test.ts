@@ -436,3 +436,23 @@ test("at most one step is in progress while launching", () => {
     assert.ok(activeCount(view) <= 1, `expected <=1 active phase, got ${activeCount(view)}`);
   }
 });
+
+
+test("actual Add Agent journey retains native compaction copy and clears it without advancing readiness", () => {
+  const compacting = entry({ provider: "claude-code", workspacePath: "/tmp/work",
+    providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+  const view = foldLaunchJourney({ entry: compacting });
+  assert.equal(view.headline, "Compacting conversation");
+  assert.equal(view.phases.find(phase => phase.state === "active")?.label, "Compacting conversation");
+  assert.match(view.joinHint!, /summarizing/);
+  assert.equal(view.ready, false);
+  assert.equal(view.currentPhaseId, "starting_provider");
+  assert.equal(view.status, "in_progress");
+  const cleared = foldLaunchJourney({ entry: { ...compacting, providerProgress: null } });
+  assert.equal(cleared.ready, false);
+  assert.notEqual(cleared.headline, view.headline);
+  assert.notEqual(cleared.phases.find(phase => phase.state === "active")?.label, "Compacting conversation");
+  for (const patch of [{ desiredState: "stopped", observedState: "stopped" }, { desiredState: "paused" }, { condition: "coordination_blocked", lastError: "bootstrap failed" }] as Partial<DesktopSupervisorManifestEntry>[]) {
+    assert.notEqual(foldLaunchJourney({ entry: { ...compacting, ...patch } }).headline, view.headline);
+  }
+});

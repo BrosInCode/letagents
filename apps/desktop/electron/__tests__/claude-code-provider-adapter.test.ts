@@ -2766,3 +2766,39 @@ test("router exposes exact child compaction before admission, then ordinary boot
   assert.equal(router.compactionProgress(req.workAttemptId, "claude-code"), null);
   assert.ok(wakes >= 4);
 });
+
+for (const elapsed of [299_999, 300_001]) test(`bootstrap admission accounts ${elapsed}ms compaction even before its timer runs`, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  t.mock.method(performance, "now", () => clock);
+  const harness = createHarness({ omitBootstrapResult: true,
+    bootstrapMessages: session_id => [{ type: "system", subtype: "status", status: "compacting", session_id }] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const launched = adapter.spawn(spawnRequest());
+  for (let n = 0; n < 40; n++) await Promise.resolve();
+  const child = harness.children[0]!;
+  clock = elapsed; // Intentionally leave the overdue timer undelivered.
+  child.emit({ type: "result", subtype: "success", is_error: false,
+    session_id: argValue(harness.launches[0]!.args, "--session-id"),
+    user_message_uuid: JSON.parse(child.written[0]!).uuid, result: "LETAGENTS_CLAUDE_DAEMON_READY" });
+  if (elapsed < 300_000) {
+    assert.equal((await launched).observedState(), "idle");
+    harness.identities.set(child.pid!, null);
+    child.resolveExit({ type: "exit", code: 0, signal: null });
+  } else {
+    await assert.rejects(launched, { reason: "compaction_deadline" });
+    assert.deepEqual(harness.signals, [{ pid: child.pid, signal: "SIGTERM" }]);
+  }
+  for (let n = 0; n < 40; n++) await Promise.resolve();
+  assert.equal(adapter.compactionProgress("wa-claude-1"), null);
+});
+
+for (const sameBatchExit of [false, true]) test(`buffered explicit compaction failure blocks a success result (same-batch exit=${sameBatchExit})`, async () => {
+  const harness = createHarness({
+    ...(sameBatchExit ? { exitAfterBootstrapResult: { type: "exit" as const, code: 0, signal: null } } : {}),
+    bootstrapMessages: session_id => [{ type: "system", subtype: "status", status: null, compact_result: "failed", session_id }],
+  });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest()), { reason: "compaction_failed" });
+  assert.equal(adapter.compactionProgress("wa-claude-1"), null);
+});

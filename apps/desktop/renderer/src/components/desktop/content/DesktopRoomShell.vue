@@ -914,7 +914,8 @@ const localAgentWork = computed(() =>
       roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
       props.room.identifier,
     ),
-    ...supervisedAgentWorkIndicators(supervisorEntries.value, roomPresence.value, props.room.identifier),
+    ...supervisedAgentWorkIndicators(supervisorEntries.value, roomPresence.value, props.room.identifier,
+      supervisorEntriesResourceFreshness(supervisorEntriesResource.value.state)),
   ]
 );
 const pendingPermissionApprovals = computed(() =>

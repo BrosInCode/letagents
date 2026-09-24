@@ -2184,6 +2184,7 @@ test("room work indicator reflects current compaction but cannot invent a room t
       turn: { state: "responding", inboxItemId: "inbox", sourceMessageId: "msg", providerTurnId: "turn", detail: null },
       task: { state: "none", taskId: null, title: null } } });
   assert.equal(supervisedAgentWorkIndicators([base], [], "room_1")[0]?.summary, "Compacting conversation");
+  assert.notEqual(supervisedAgentWorkIndicators([base], [], "room_1", "stale")[0]?.summary, "Compacting conversation");
   assert.notEqual(supervisedAgentWorkIndicators([{ ...base, providerProgress: null }], [], "room_1")[0]?.summary, "Compacting conversation");
   assert.deepEqual(supervisedAgentWorkIndicators([{ ...base, roomAgentState: { ...base.roomAgentState!, turn: { ...base.roomAgentState!.turn, state: "idle" } } }], [], "room_1"), []);
 });

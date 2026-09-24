@@ -1534,6 +1534,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       if (bootstrapFailure in bootstrapTerminal) {
         throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields()));
       }
+      compaction.checkDeadline();
       if (compaction.failure) {
         throw new ClaudeBootstrapError("bootstrap_turn", { type: compaction.failure }, diagnostics.summary(child, compaction.diagnosticFields()));
       }

@@ -2237,3 +2237,40 @@ test("switching away from Codex revokes the shared Add-another eligibility and h
   assert.equal(launch.view.value?.ready, true, "revoked handler must preserve the Codex card");
   launch.cleanup();
 });
+
+
+test("launch compaction clears on a failed refresh and returns only with fresh native progress", async () => {
+  const timers: Array<() => void> = [];
+  let reads = 0;
+  const compacting = entry({ provider: "claude-code", workspacePath: "/tmp/worktree",
+    providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+  Object.assign(globalThis, { window: {
+    crypto: { randomUUID: () => "launch-1" }, sessionStorage: memorySessionStorage(),
+    setTimeout: (callback: () => void) => { timers.push(callback); return timers.length; },
+    clearTimeout: () => undefined,
+    letagentsDesktop: { supervisor: {
+      listAgents: async () => { if (++reads === 2) throw new Error("daemon unavailable"); return [compacting]; },
+      onLaunchEvent: () => () => undefined, getLaunchEvents: async () => [],
+    } },
+  } });
+  const launch = useSupervisedAgentLaunch({
+    open: () => true, roomIdentifier: () => "room-1", roomLabel: () => "Room one",
+    providerId: () => "claude-code", authCommand: () => null, authCommandForProvider: () => null,
+    currentVersion: () => 0, isCurrentRequest: () => true, onChooseRepo: () => undefined,
+    onCopyAuthCommand: () => undefined, onRetry: () => { throw new Error("must not retry"); }, onMessage: () => undefined,
+  });
+  const pump = async () => { for (let n = 0; n < 10; n++) await Promise.resolve(); await nextTick(); };
+  try {
+    launch.begin(); launch.complete(compacting); await pump();
+    assert.equal(launch.view.value?.headline, "Compacting conversation");
+    timers.shift()!(); await pump();
+    assert.notEqual(launch.view.value?.headline, "Compacting conversation");
+    assert.equal(launch.conflict.value?.id, compacting.id);
+    assert.equal(launch.view.value?.ready, false);
+    assert.equal(launch.conflictLookupTone.value, "warning");
+    timers.shift()!(); await pump();
+    assert.equal(launch.view.value?.headline, "Compacting conversation");
+    assert.equal(launch.conflictLookupError.value, null);
+    assert.equal(launch.view.value?.ready, false);
+  } finally { launch.cleanup(); }
+});

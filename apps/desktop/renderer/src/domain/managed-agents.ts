@@ -365,6 +365,7 @@ export function supervisedAgentWorkIndicators(
   entries: readonly DesktopSupervisorManifestEntry[],
   presence: readonly Pick<DesktopAgentPresence, "agentSessionId" | "displayName" | "actorLabel">[],
   roomIdentifier: string | null | undefined,
+  resourceFreshness: "fresh" | "stale" = "fresh",
 ): ManagedAgentWorkIndicator[] {
   const room = normalizeManagedAgentRoomIdentifier(roomIdentifier);
   return entries
@@ -403,7 +404,7 @@ export function supervisedAgentWorkIndicators(
           boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
           entry.id,
         ),
-        summary: agentCompactionProgress(entry) ? "Compacting conversation" : latest
+        summary: resourceFreshness === "fresh" && agentCompactionProgress(entry) ? "Compacting conversation" : latest
           ? humanFacingSupervisorActivitySummary(latest)
           : roomTurnFallbackSummary(turn.state),
         startedAt: turnStartedAt

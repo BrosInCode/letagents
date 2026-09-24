@@ -44,6 +44,8 @@ export interface SupervisedLaunchPhase {
 }
 
 export interface SupervisedLaunchProgress {
+  /** Current compaction while the launch is still progressing. */
+  compacting: boolean;
   phases: SupervisedLaunchPhase[];
   /** The phase currently active, failed, or (once ready) the terminal phase. */
   currentPhaseId: SupervisedLaunchPhaseId;
@@ -264,6 +266,7 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
 
   return {
     phases,
+    compacting: Boolean(compacting) && !ready && !failed && !stopping && !stopped,
     currentPhaseId,
     ready,
     failed,
