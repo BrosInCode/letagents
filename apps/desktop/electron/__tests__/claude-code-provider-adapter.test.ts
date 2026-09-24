@@ -5,6 +5,7 @@ import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
 
 import {
   ClaudeCodeProviderAdapter,
@@ -712,6 +713,77 @@ test("a turn-limit failure during Claude bootstrap still rejects startup and rea
   assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
   assert.equal(harness.children[0]!.alive, false);
   assert.equal(harness.mcpConfigDisposals, 1);
+});
+
+for (const mode of ["deadline", "failed_response", "native_exit", "transport_error", "cleanup_error", "init_deadline"] as const) {
+  test(`failed acquisition retains only exact death evidence: ${mode}`, async () => {
+    const harness = createHarness({ noInit: mode === "init_deadline", omitBootstrapResult: mode !== "failed_response",
+      ...(mode === "failed_response" ? { bootstrapResultSubtype: "error_max_turns" } : {}) });
+    const request = spawnRequest({ supervisorEntryId: "entry-1", supervisorExecutionGenerationId: "generation-1" });
+    if (mode === "native_exit" || mode === "transport_error") {
+      const launch = harness.dependencies.launchChild;
+      harness.dependencies.launchChild = input => {
+        const child = launch(input) as FakeClaudeChild;
+        const write = child.writeLine.bind(child);
+        child.writeLine = line => {
+          write(line);
+          setImmediate(() => {
+            if (mode === "native_exit") {
+              harness.identities.set(child.pid!, null);
+              child.resolveExit({ type: "exit", code: 7, signal: null });
+            } else child.resolveExit({ type: "error", error: new Error("private transport payload") });
+          });
+        };
+        return child;
+      };
+    }
+    if (mode === "cleanup_error") harness.dependencies.signalProcess = () => { throw new Error("cleanup signal rejected"); };
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    try {
+      await assert.rejects(withLoopAlive(adapter.spawn(request)), error => {
+        const evidence = providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request));
+        if (["deadline", "failed_response", "native_exit"].includes(mode)) {
+          assert.ok(evidence, "adapter-confirmed death must survive the rejected acquisition");
+          assert.deepEqual(evidence.terminal.nativeRuntimeDeath, {
+            kind: "claude_cli", pid: 4100, processIdentity: "fake-claude-4100-birth-1",
+          });
+          assert.equal(evidence.terminal.providerContinuationId, argValue(harness.launches[0]!.args, "--session-id"));
+          assert.equal(evidence.terminal.exitCode, mode === "native_exit" ? 7 : null);
+          assert.equal(evidence.terminal.signal, mode === "native_exit" ? null : "SIGTERM");
+          assert.equal(adapter.runtimeCustody(request.workAttemptId), "absent");
+        } else {
+          assert.equal(evidence, undefined, "unknown custody or unverified init must not invent a receipt");
+          if (mode !== "init_deadline") assert.equal(adapter.runtimeCustody(request.workAttemptId), "unknown");
+        }
+        return true;
+      });
+      assert.equal(harness.launches.length, 1);
+      assert.equal(harness.children[0]!.written.length, 1);
+    } finally {
+      harness.identities.set(4100, null);
+      harness.children[0]!.resolveExit({ type: "exit", code: null, signal: "SIGTERM" });
+      await flush();
+    }
+  });
+}
+
+test("failed resumed acquisition binds death to the saved continuation and immutable request", async () => {
+  const harness = createHarness({ omitBootstrapResult: true });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+  const request = spawnRequest({ supervisorEntryId: "entry-1", supervisorExecutionGenerationId: "generation-1" });
+  const saved = "saved-claude-continuation";
+  const expected = providerAcquisitionIdentity("claude-code", request, saved);
+  await assert.rejects(withLoopAlive(adapter.resume({ workAttemptId: request.workAttemptId, providerContinuationId: saved }, request)), error => {
+    const evidence = providerAcquisitionEvidence(error, expected);
+    assert.ok(evidence?.terminal.nativeRuntimeDeath);
+    assert.equal(evidence.terminal.providerContinuationId, saved);
+    request.supervisorExecutionGenerationId = "later-generation";
+    assert.throws(() => providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request, saved)), /does not match/);
+    assert.throws(() => providerAcquisitionEvidence(error, { ...expected!, continuationId: "another-continuation" }), /does not match/);
+    assert.equal(providerAcquisitionEvidence({ ...error as Error }, expected), undefined, "structural error copies are not operational evidence");
+    assert.equal(providerAcquisitionEvidence(error, expected), evidence);
+    return true;
+  });
 });
 
 for (const phase of ["init", "bootstrap_turn"] as const) {
