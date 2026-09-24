@@ -325,7 +325,7 @@ test("delegation lifecycle eagerly starts, wakes, and fences approval publicatio
     },
     authority: {
       currentHostGrant: () => grant, installHostGrant: async () => ({ status: "installed" as const }),
-      syncExecutionDelegation: async () => {}, recordDelegatedApproval: async ({ intent: selected }) => approval(selected),
+      syncExecutionDelegation: async () => ({ changed: false }), recordDelegatedApproval: async ({ intent: selected }) => approval(selected),
       validateExecutionDelegation: async () => {},
     },
     approvals: { admitDelegatable: async () => [], applyRecordedDecision: async () => {} },
@@ -367,7 +367,7 @@ test("room wakes reconcile decisions even when grant inventory fails", async () 
     authority: {
       currentHostGrant: () => grant,
       installHostGrant: async () => ({ status: "installed" as const }),
-      syncExecutionDelegation: async () => { events.push("decision:delegation-refreshed"); },
+      syncExecutionDelegation: async () => { events.push("decision:delegation-refreshed"); return { changed: false }; },
       recordDelegatedApproval: async ({ intent: selected }) => approval(selected),
       validateExecutionDelegation: async () => {},
     },

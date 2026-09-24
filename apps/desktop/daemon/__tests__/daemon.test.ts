@@ -12892,3 +12892,129 @@ test("worker lease HTTP uses complete worker-scoped inventory and exact grant-fe
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 });
+
+test("unchanged delegation replays do not restart a failed provider, but committed changes remain eligible", { timeout: 15_000 }, async () => {
+  const env = await fixture();
+  const id = "unchanged-delegation";
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({
+    taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id,
+  });
+  await durability.close();
+  let spawns = 0;
+  let inventories = 0;
+  const wakes: string[] = [];
+  const createdAtMs = Date.now();
+  const remoteDelegation = {
+    delegationInstanceId: "inert-existing-delegation", revision: 1, ownerAccountId: "inert-owner",
+    roomId: "room-inert", agentKey: "owner/inert", approverAccountId: "inert-approver",
+    category: "file_change", riskCeiling: "low", scopeSha256: "a".repeat(64),
+    createdAtMs, expiresAtMs: createdAtMs + 60_000, revokedAtMs: null,
+  };
+  const unexpected = async () => { throw new Error("Unexpected native operation in inert fixture"); };
+  const port = {
+    capabilities: async () => ({ deliveryModes: ["daemon_inbox"], resume: false, midTurnInjection: false,
+      transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+    spawn: async () => { spawns++; throw new Error("inert bootstrap failure"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: unexpected, poke: unexpected, stop: unexpected,
+    onExit: async () => () => {}, onStream: async () => () => {}, runtimeCustody: () => ({ state: "absent" }),
+  };
+  const http = new Proxy({
+    createWorkerSession: async () => ({ sessionId: "inert-session", bearer: "inert-bearer",
+      bearerId: "inert-bearer-id", expiresAt: "2099-01-01T00:00:00.000Z" }),
+    listWorkLeases: async () => [], readWorkLease: async () => null,
+    listExecutionDelegationIds: async () => {
+      inventories++;
+      return { delegationInstanceIds: [remoteDelegation.delegationInstanceId], nextCursor: null };
+    },
+    getExecutionDelegation: async () => structuredClone(remoteDelegation),
+    listExecutionDelegationDecisionIds: async () => ({ decisionIds: [], nextCursor: null }),
+  }, { get: (target, key) => key in target ? (target as any)[key] : async () => {
+    throw new Error(`Unexpected HTTP boundary ${String(key)}`);
+  } });
+  const daemon = new ProductionSupervisorDaemon(paths, "darwin", port as any, true, 15_000, undefined, {},
+    { poll: async () => ({ messages: [] }), publish: async () => {} } as any, http as any);
+  try {
+    await daemon.start();
+    const internals = daemon as any;
+    internals.publishNativeActivity = async () => true;
+    const original = internals.requestConvergence.bind(daemon);
+    internals.requestConvergence = (entryId: string, kind?: string) => {
+      wakes.push(kind ?? "owned");
+      original(entryId, kind);
+    };
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      id, room_id: "room-inert", display_name: "Inert", provider: "codex", model: null, charter: "fixture",
+      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: "full_access",
+      created_by: "fixture", created_at: new Date().toISOString(), delivery_mode: "daemon_inbox",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    assert.equal(put.ok, true, put.error);
+    await admitDaemonInboxForProviderTest(daemon, id, "room-inert");
+    await internals.providerExecution.drainConvergence();
+    assert.equal(spawns, 0);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as any).generation;
+    const grant = {
+      entry_id: id, room_id: "room-inert", agent_key: "owner/inert", grant_id: "inert-grant", supervisor_grant: "inert-parent",
+      grant_generation: 1, api_url: "https://example.test", daemon_generation: generation, host_id: "inert-host",
+      installation_id: "inert-installation", owner_account_id: "inert-owner", scope_key: "owner",
+      grant_expires_at: "2099-01-01T00:00:00.000Z",
+    };
+    async function flush() {
+      for (let i = 0; i < 20; i++) await new Promise<void>(resolve => setImmediate(resolve));
+      const sync = internals.executionDelegations.grants;
+      await Promise.all([...sync.lanes.values(), ...sync.roomLanes.values()].map((lane: any) => lane.promise));
+      await internals.providerExecution.drainConvergence();
+    }
+    async function install(value = grant) {
+      const result = await daemonRequest(paths.socketPath, "supervisor.install_host_grant", value);
+      assert.equal(result.ok, true, result.error);
+      assert.equal((result.result as any).status, "installed");
+      await flush();
+    }
+    function snapshot() {
+      const db = new DatabaseSync(paths.manifestPath, { readOnly: true });
+      try {
+        return JSON.stringify(db.prepare("SELECT * FROM execution_local_delegations ORDER BY delegation_instance_id,revision").all());
+      } finally { db.close(); }
+    }
+    await install();
+    assert.ok(spawns >= 1);
+    assert.ok(inventories >= 1);
+    const firstSpawns = spawns;
+    const before = snapshot();
+    assert.equal(JSON.parse(before).length, 1);
+    const initialWakes = wakes.length;
+    await install();
+    await install();
+    internals.executionDelegations.requestRoom("room-inert");
+    await flush();
+    assert.equal(snapshot(), before, "every delegation authority column must remain unchanged on exact replay");
+    assert.ok(wakes.length > initialWakes);
+    assert.ok(wakes.slice(initialWakes).every(kind => kind === "rehydration"));
+    assert.equal(spawns, firstSpawns, "unchanged exact delegation replay must not restart failed native admission");
+
+    remoteDelegation.revision = 2;
+    remoteDelegation.scopeSha256 = "b".repeat(64);
+    remoteDelegation.createdAtMs = Date.now();
+    remoteDelegation.expiresAtMs = remoteDelegation.createdAtMs + 60_000;
+    await install();
+    assert.equal(spawns, firstSpawns + 1, "a committed new revision remains eligible");
+    await install();
+    assert.equal(spawns, firstSpawns + 1, "the new revision is then suppressed on replay");
+    await install({ ...grant, grant_generation: 2 });
+    assert.equal(spawns, firstSpawns + 2, "changed grant inputs remain eligible even when the delegation row is unchanged");
+    await install({ ...grant, grant_generation: 2 });
+    assert.equal(spawns, firstSpawns + 2);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
