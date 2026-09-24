@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../../shared/provider-acquisition-evidence.mjs";
 
 import { supervisedProviderLabel } from "./cloud-http.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
@@ -1519,6 +1520,7 @@ export class ProviderExecutionCoordinator {
         },
       } : {}),
     };
+    const acquisition = providerAcquisitionIdentity(launchSnapshot.provider, spawn, resumed ? ref!.providerContinuationId : null);
     let handle: ProviderActionHandle | null = null;
     let providerPersisted = false;
     let providerDispatched = false;
@@ -1720,13 +1722,14 @@ export class ProviderExecutionCoordinator {
         return;
       }
       if (providerDispatched || unpersistedReturnedProviderFenced) throw error;
-      const terminal = this.options.terminalPayload({
+      const acquired = providerAcquisitionEvidence(error, acquisition);
+      const terminal = this.options.terminalPayload(acquired?.terminal ?? {
         endedAt: new Date().toISOString(),
         exitCode: null,
         signal: null,
         terminalCause: "protocol_error",
         providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
-      }, "daemon-provider");
+      }, "daemon-provider", acquired?.connection);
       try {
         await this.options.durability.recordTerminal(
           attempt.work_attempt_id,

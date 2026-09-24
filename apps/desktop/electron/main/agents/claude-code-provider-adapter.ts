@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { claudeToolOperation } from "../../../../../shared/claude-tool-operation.mjs";
+import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../../shared/provider-acquisition-evidence.mjs";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -1174,6 +1175,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<ClaudeProviderHandle> {
+    const acquisition = providerAcquisitionIdentity("claude-code", req, resumeRef?.providerContinuationId ?? null);
     const current = this.handles.get(req.workAttemptId);
     if (current && !current.terminal) {
       throw new Error(`Claude work attempt '${req.workAttemptId}' already has a live process.`);
@@ -1378,6 +1380,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       child.markIntentionalClose();
       await terminateFreshLaunch(child, this.deps, this.stopGraceMs);
+      // Cleanup returning is not death. Retain only the existing exact exit
+      // observation from this rejected child, without admitting its handle.
+      if (handle?.terminal?.nativeRuntimeDeath && handle.providerConnection.kind === "claude_cli") {
+        retainProviderAcquisitionEvidence(error, acquisition, handle.providerConnection, handle.terminal);
+      }
       throw error;
     } finally {
       if (initTimer) clearTimeout(initTimer);
