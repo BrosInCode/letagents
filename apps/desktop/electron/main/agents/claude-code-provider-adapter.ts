@@ -345,6 +345,7 @@ class ClaudeBootstrapDiagnostics {
   private lastApiRetry: string | null = null;
   private assistantError: string | null = null;
   private result: string | null = null;
+  private uncorrelatedResult: string | null = null;
 
   constructor(private readonly sessionId: string, private readonly turnId: string, private readonly budgetMs: number) {}
 
@@ -369,10 +370,11 @@ class ClaudeBootstrapDiagnostics {
       if (message.error !== undefined) this.assistantError = category;
     } else if (message.type === "result") {
       this.resultMessages = Math.min(Number.MAX_SAFE_INTEGER, this.resultMessages + 1);
+      const subtype = typeof message.subtype === "string" && CLAUDE_RESULT_CATEGORIES.has(message.subtype)
+        ? message.subtype : "unlisted";
       if (message.user_message_uuid === this.turnId) {
-        this.result = typeof message.subtype === "string" && CLAUDE_RESULT_CATEGORIES.has(message.subtype)
-          ? message.subtype : "unlisted";
-      }
+        this.result = subtype;
+      } else this.uncorrelatedResult = subtype;
     } else if (message.type === "auth_status") {
       this.authMessages = Math.min(Number.MAX_SAFE_INTEGER, this.authMessages + 1);
       this.authenticating = typeof message.isAuthenticating === "boolean" ? message.isAuthenticating : null;
@@ -388,17 +390,16 @@ class ClaudeBootstrapDiagnostics {
       if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) stderrBytes = count;
     } catch { /* An unavailable diagnostic must not replace the launch failure. */ }
     const fields = [
+      ...(this.lastApiRetry === null ? [] : [`last_api_retry=${this.lastApiRetry}`]),
+      ...(this.assistantError === null ? [] : [`assistant_error=${this.assistantError}`]),
+      ...(this.result === null ? [] : [`result=${this.result}`]),
+      ...(this.uncorrelatedResult === null ? [] : [`uncorrelated_result=${this.uncorrelatedResult}`]),
+      ...(this.authMessages === 0 ? [] : [`auth_status_count=${this.authMessages}`, `authenticating=${this.authenticating ?? "unlisted"}`]),
       `init_ms=${elapsed(this.startedAt, this.initializedAt ?? failedAt)}`,
       `bootstrap_ms=${this.initializedAt === null ? "not_started" : elapsed(this.initializedAt, failedAt)}`,
       `budget_ms=${this.budgetMs}`, `stdout_lines=${this.stdoutLines}`, `matched_session_lines=${this.matchedSessionLines}`,
       `stderr_bytes=${stderrBytes ?? "unavailable"}`,
-      ...(this.initializedAt === null ? [] : [
-        `api_retry_count=${this.apiRetries}`, `assistant_count=${this.assistantMessages}`, `result_count=${this.resultMessages}`,
-        ...(this.lastApiRetry === null ? [] : [`last_api_retry=${this.lastApiRetry}`]),
-        ...(this.assistantError === null ? [] : [`assistant_error=${this.assistantError}`]),
-        ...(this.result === null ? [] : [`result=${this.result}`]),
-        ...(this.authMessages === 0 ? [] : [`auth_status_count=${this.authMessages}`, `authenticating=${this.authenticating ?? "unlisted"}`]),
-      ]),
+      `api_retry_count=${this.apiRetries}`, `assistant_count=${this.assistantMessages}`, `result_count=${this.resultMessages}`,
     ];
     let omitted = 0;
     for (;;) {

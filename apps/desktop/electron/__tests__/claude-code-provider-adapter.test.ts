@@ -169,11 +169,11 @@ function createHarness(options: HarnessOptions = {}) {
       let sawFirstWrite = false;
       child.writeLine = (json: string) => {
         originalWriteLine(json);
-        if (sawFirstWrite || options.noInit) return;
+        if (sawFirstWrite) return;
         sawFirstWrite = true;
         queueMicrotask(() => {
           if (!child.alive) return;
-          child.emit({
+          if (!options.noInit) child.emit({
             type: "system",
             subtype: "init",
             session_id: initSessionId,
@@ -186,7 +186,7 @@ function createHarness(options: HarnessOptions = {}) {
           });
           const frame = JSON.parse(json) as { uuid?: string };
           for (const message of options.bootstrapMessages?.(initSessionId, frame.uuid!) ?? []) child.emit(message);
-          if (options.omitBootstrapResult) return;
+          if (options.noInit || options.omitBootstrapResult) return;
           child.emit({
             type: "result",
             subtype: options.bootstrapResultSubtype ?? "success",
@@ -892,7 +892,8 @@ test("post-init bootstrap diagnostics count a retry storm without changing the d
   await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), error => {
     assert.ok(error instanceof Error);
     assert.equal(emittedAfterInit, true);
-    assert.match(error.message, /\(deadline\).*api_retry_count=3; assistant_count=0; result_count=0; last_api_retry=overloaded \(HTTP 529\)/);
+    assert.match(error.message, /\(deadline\).*last_api_retry=overloaded \(HTTP 529\)/);
+    assert.match(error.message, /api_retry_count=3; assistant_count=0; result_count=0/);
     assert.doesNotMatch(error.message, /billing_error|rate_limit|retry_delay_ms/);
     const safe = redactCredentialText(error.message);
     assert.equal(safe.value, error.message);
@@ -904,7 +905,7 @@ test("post-init bootstrap diagnostics count a retry storm without changing the d
   assert.equal(harness.mcpConfigDisposals, 1);
 });
 
-for (const scenario of ["foreign_session", "private_error", "foreign_turn", "assistant_error", "failed_result", "unlisted_result", "no_http_response", "auth_status"] as const) {
+for (const scenario of ["foreign_session", "private_error", "foreign_turn", "assistant_error", "failed_result", "unlisted_result", "no_http_response", "auth_status", "result_without_turn_id"] as const) {
   test(`bootstrap diagnostics retain only bounded correlated categories: ${scenario}`, async () => {
     const secret = "private-token-and-native-message";
     const harness = createHarness({ omitBootstrapResult: true, bootstrapMessages: (sessionId, turnId) => {
@@ -918,6 +919,7 @@ for (const scenario of ["foreign_session", "private_error", "foreign_turn", "ass
         case "unlisted_result": return [{ ...base, type: "result", subtype: secret, user_message_uuid: turnId, is_error: true, errors: [secret] }];
         case "no_http_response": return [{ ...base, type: "system", subtype: "api_retry", error: "unknown", error_status: null }];
         case "auth_status": return [{ ...base, type: "auth_status", isAuthenticating: true, error: secret, output: [secret] }];
+        case "result_without_turn_id": return [{ ...base, type: "result", subtype: "error_max_turns", is_error: true, errors: [secret] }];
       }
     } });
     const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
@@ -928,7 +930,11 @@ for (const scenario of ["foreign_session", "private_error", "foreign_turn", "ass
       assert.match(error.message, /init_ms=\d+; bootstrap_ms=\d+; budget_ms=40/);
       if (scenario === "foreign_session") assert.doesNotMatch(error.message, /billing_error|HTTP 402|last_api_retry=/);
       if (scenario === "private_error") assert.match(error.message, /last_api_retry=unlisted \(HTTP unlisted\)/);
-      if (scenario === "foreign_turn") assert.doesNotMatch(error.message, /result=|error_max_turns/);
+      if (scenario === "foreign_turn" || scenario === "result_without_turn_id") {
+        assert.match(error.message, /\(deadline\).*uncorrelated_result=error_max_turns/);
+        assert.match(error.message, /result_count=1/);
+        assert.doesNotMatch(error.message, /(?:^|; )result=/);
+      }
       if (scenario === "assistant_error") assert.match(error.message, /assistant_error=authentication_failed/);
       if (scenario === "failed_result") assert.match(error.message, /\(failed_response\).*result=error_max_turns/);
       if (scenario === "unlisted_result") assert.match(error.message, /result=unlisted/);
@@ -974,6 +980,28 @@ for (const stderr of [0, 123, "unavailable"] as const) {
   });
 }
 
+test("pre-init matching-session diagnostics survive without admitting native custody", async () => {
+  const harness = createHarness({ noInit: true, bootstrapMessages: sessionId => [
+    { type: "system", subtype: "api_retry", session_id: sessionId, error: "rate_limit", error_status: 429 },
+    { type: "auth_status", session_id: sessionId, isAuthenticating: false, error: "private native text" },
+  ] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+  const request = spawnRequest({ supervisorEntryId: "entry-preinit", supervisorExecutionGenerationId: "execution-preinit" });
+  await assert.rejects(withLoopAlive(adapter.spawn(request)), error => {
+    assert.ok(error instanceof Error);
+    assert.equal((error as Error & { phase: string }).phase, "init");
+    assert.match(error.message, /last_api_retry=rate_limit \(HTTP 429\)/);
+    assert.match(error.message, /auth_status_count=1; authenticating=false/);
+    assert.match(error.message, /bootstrap_ms=not_started/);
+    assert.match(error.message, /stdout_lines=2; matched_session_lines=2/);
+    assert.doesNotMatch(error.message, /private native text/);
+    assert.equal(providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request)), undefined);
+    return true;
+  });
+  assert.equal(harness.launches.length, 1);
+  assert.equal(harness.children[0]!.written.length, 1);
+});
+
 test("default child retains stderr byte count without its text", { skip: process.platform === "win32" }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "claude-startup-diagnostic-test-"));
   const executable = join(directory, "inert-cli.cjs");
@@ -981,7 +1009,7 @@ test("default child retains stderr byte count without its text", { skip: process
   await writeFile(executable, `#!${process.execPath}\n`
     + `process.stderr.write(${JSON.stringify(privateText)});\n`
     + "process.stdin.resume(); setInterval(() => {}, 1000);\n", { mode: 0o700 });
-  const adapter = new ClaudeCodeProviderAdapter({ claudeBin: executable, initTimeoutMs: 1000,
+  const adapter = new ClaudeCodeProviderAdapter({ claudeBin: executable, initTimeoutMs: 5000,
     dependencies: { readVersion: async () => "2.1.220 (Claude Code)",
       createLetAgentsMcpConfig: async () => ({ path: join(directory, "unused.json"), dispose: async () => {} }) },
   });
