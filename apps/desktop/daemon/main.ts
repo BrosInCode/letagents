@@ -856,7 +856,7 @@ export class SupervisorDaemon {
       approvalPublication: { path: this.stateDatabasePath, custody: this.workerRuntimeCustody,
         inbox: this.supervisedInbox, daemonGeneration: () => this.singleton.currentGeneration, isClosing: () => this.handoffScheduled,
         assertCurrent: () => this.singleton.assertCurrent(), now: () => this.nowMs() },
-      requestConvergence: entryId => this.requestConvergence(entryId),
+      requestConvergence: (entryId, kind) => this.requestConvergence(entryId, kind),
       diagnostic: (domain, entryId, error) => console.warn(`[execution_delegation_${domain}_sync]`,
         JSON.stringify({ entryId, error: String(error) })),
     });
