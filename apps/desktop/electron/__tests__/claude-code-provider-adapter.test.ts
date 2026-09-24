@@ -31,6 +31,8 @@ import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProce
 const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
 const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+const { ProviderSchedulerFailureCoordinator } = await import(new URL("../../daemon/provider-scheduler-failure-coordinator.ts", import.meta.url).href);
+const { redactCredentialText } = await import(new URL("../../daemon/credential-redaction.ts", import.meta.url).href);
 
 // Fake-child harness proving the P2a adapter honors every #765 liveness
 // invariant with no live `claude` binary: birth-identity fencing, control-loss
@@ -108,6 +110,7 @@ interface HarnessOptions {
   mcpTools?: string[];
   noApprovalLifecycle?: boolean;
   bootstrapResultSubtype?: string;
+  bootstrapMessages?: (sessionId: string, turnId: string) => Record<string, unknown>[];
   omitBootstrapResult?: boolean;
   exitAfterBootstrapResult?: ProviderProcessExit;
   /** Overrides per pid; undefined entries mean "cannot verify". */
@@ -181,8 +184,9 @@ function createHarness(options: HarnessOptions = {}) {
             mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }],
             tools: options.mcpTools ?? ["mcp__letagents__get_board", "mcp__letagents__read_messages", "mcp__letagents__send_message"],
           });
-          if (options.omitBootstrapResult) return;
           const frame = JSON.parse(json) as { uuid?: string };
+          for (const message of options.bootstrapMessages?.(initSessionId, frame.uuid!) ?? []) child.emit(message);
+          if (options.omitBootstrapResult) return;
           child.emit({
             type: "result",
             subtype: options.bootstrapResultSubtype ?? "success",
@@ -787,10 +791,10 @@ test("failed resumed acquisition binds death to the saved continuation and immut
   });
 });
 
-// Characterization of the missing startup diagnostics, not a claim about the
-// live NorthPoint failure. api_retry has the published SDKAPIRetryMessage shape.
+// api_retry has the published SDKAPIRetryMessage shape. This reproduces the
+// capture boundary, not the native cause of any historical live failure.
 for (const withOptionalSink of [false, true]) {
-  test(`bootstrap retry diagnostic is lost at rejected acquisition (optional sink: ${withOptionalSink})`, async () => {
+  test(`bootstrap retry diagnostic survives rejected acquisition (optional sink: ${withOptionalSink})`, async () => {
     const harness = createHarness({ omitBootstrapResult: true });
     const saved = "saved-bootstrap-diagnostic-session";
     const retry = {
@@ -819,19 +823,24 @@ for (const withOptionalSink of [false, true]) {
     const request = { ...spawnRequest({ supervisorEntryId: "entry-diagnostic",
       supervisorExecutionGenerationId: "execution-diagnostic" }), provider: "claude-code" };
     let admitted = false;
+    let rejected: Error | null = null;
     await assert.rejects(withLoopAlive(router.resume({ workAttemptId: request.workAttemptId,
       provider: "claude-code", providerContinuationId: saved }, request).then(() => {
       admitted = true;
     })), error => {
       assert.ok(error instanceof Error);
+      rejected = error;
       assert.equal(error.name, "ClaudeBootstrapError");
       assert.equal((error as Error & { phase: string }).phase, "bootstrap_turn");
       assert.equal((error as Error & { reason: string }).reason, "deadline");
       const evidence = providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request, saved));
       assert.ok(evidence?.terminal.nativeRuntimeDeath, "existing exact death evidence still survives");
       assert.equal(evidence.terminal.providerContinuationId, saved);
-      assert.doesNotMatch(`${error.message} ${JSON.stringify(error)} ${JSON.stringify(evidence)}`,
-        /api_retry|overloaded|529/, "the caller loses the structured retry diagnostic");
+      assert.match(error.message, /last_api_retry=overloaded \(HTTP 529\)/);
+      assert.doesNotMatch(error.message, /retry_delay_ms|uuid|saved-bootstrap-diagnostic-session/);
+      assert.match(error.message, /stdout_lines=2; matched_session_lines=2; stderr_bytes=unavailable/);
+      assert.doesNotMatch(JSON.stringify(evidence), /api_retry|overloaded|529/,
+        "diagnostics never change the operational death receipt");
       return true;
     });
     assert.equal(emitted, 1);
@@ -845,8 +854,150 @@ for (const withOptionalSink of [false, true]) {
     assert.equal(retryEvents.length, withOptionalSink ? 1 : 0,
       "positive control proves the adapter consumes the event before failure");
     if (withOptionalSink) assert.deepEqual(retryEvents[0]!.payload, retry);
+
+    const projected: string[] = [];
+    const entry = { id: "entry-diagnostic", desired_state: "running", observed_state: "recovering",
+      condition: "none", work_attempt_id: request.workAttemptId };
+    const scheduler = new ProviderSchedulerFailureCoordinator({
+      nativeHeartbeatIntervalMs: 1000, currentDaemonGeneration: () => 1, nowMs: () => 0,
+      serializeEntry: async (_id: string, operation: () => Promise<unknown>) => operation(),
+      serializeManifest: async (operation: () => Promise<unknown>) => operation(),
+      manifest: { load: async () => ({ entries: [entry] }), updateEntry: async () => { throw new Error("must not reset continuation"); } },
+      transitionOnce: async (_id: string, _state: string, condition: string, message: string) => {
+        assert.equal(condition, "coordination_blocked"); projected.push(message);
+      },
+      audit: { append: async () => {} },
+      scheduleRecovery: () => { throw new Error("diagnostics must not authorize a retry"); },
+    });
+    await scheduler.record(entry.id, rejected, "test");
+    assert.equal(projected.length, 1);
+    assert.match(projected[0]!, /last_api_retry=overloaded \(HTTP 529\)/,
+      "the existing saved-failure transition receives the useful diagnostic");
   });
 }
+
+test("post-init bootstrap diagnostics count a retry storm without changing the deadline", async () => {
+  const harness = createHarness({ omitBootstrapResult: true });
+  let emittedAfterInit = false;
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40,
+    streamSink: event => {
+      if (event.method !== "system/init") return;
+      emittedAfterInit = true;
+      for (const [index, category] of ["billing_error", "rate_limit", "overloaded"].entries()) {
+        harness.children[0]!.emit({ type: "system", subtype: "api_retry", session_id: event.providerContinuationId,
+          error: category, error_status: [402, 429, 529][index], attempt: index + 1, retry_delay_ms: 1000 });
+      }
+    },
+  });
+  await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), error => {
+    assert.ok(error instanceof Error);
+    assert.equal(emittedAfterInit, true);
+    assert.match(error.message, /\(deadline\).*api_retry_count=3; assistant_count=0; result_count=0; last_api_retry=overloaded \(HTTP 529\)/);
+    assert.doesNotMatch(error.message, /billing_error|rate_limit|retry_delay_ms/);
+    const safe = redactCredentialText(error.message);
+    assert.equal(safe.value, error.message);
+    assert.equal(safe.redacted, false);
+    assert.equal(safe.truncated, false);
+    return true;
+  });
+  assert.equal(harness.children[0]!.written.length, 1);
+  assert.equal(harness.mcpConfigDisposals, 1);
+});
+
+for (const scenario of ["foreign_session", "private_error", "foreign_turn", "assistant_error", "failed_result", "unlisted_result", "no_http_response", "auth_status"] as const) {
+  test(`bootstrap diagnostics retain only bounded correlated categories: ${scenario}`, async () => {
+    const secret = "private-token-and-native-message";
+    const harness = createHarness({ omitBootstrapResult: true, bootstrapMessages: (sessionId, turnId) => {
+      const base = { session_id: sessionId, private_field: secret };
+      switch (scenario) {
+        case "foreign_session": return [{ ...base, type: "system", subtype: "api_retry", session_id: "other-session", error: "billing_error", error_status: 402 }];
+        case "private_error": return [{ ...base, type: "system", subtype: "api_retry", error: secret, error_status: secret }];
+        case "foreign_turn": return [{ ...base, type: "result", subtype: "error_max_turns", user_message_uuid: "other-turn", is_error: true, errors: [secret] }];
+        case "assistant_error": return [{ ...base, type: "assistant", error: "authentication_failed", message: { content: [{ type: "text", text: secret }] } }];
+        case "failed_result": return [{ ...base, type: "result", subtype: "error_max_turns", user_message_uuid: turnId, is_error: true, errors: [secret] }];
+        case "unlisted_result": return [{ ...base, type: "result", subtype: secret, user_message_uuid: turnId, is_error: true, errors: [secret] }];
+        case "no_http_response": return [{ ...base, type: "system", subtype: "api_retry", error: "unknown", error_status: null }];
+        case "auth_status": return [{ ...base, type: "auth_status", isAuthenticating: true, error: secret, output: [secret] }];
+      }
+    } });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), error => {
+      assert.ok(error instanceof Error);
+      assert.doesNotMatch(`${error.message} ${JSON.stringify(error)}`, new RegExp(secret));
+      assert.ok(error.message.split("Startup observations: ")[1]!.length <= 512);
+      assert.match(error.message, /init_ms=\d+; bootstrap_ms=\d+; budget_ms=40/);
+      if (scenario === "foreign_session") assert.doesNotMatch(error.message, /billing_error|HTTP 402|last_api_retry=/);
+      if (scenario === "private_error") assert.match(error.message, /last_api_retry=unlisted \(HTTP unlisted\)/);
+      if (scenario === "foreign_turn") assert.doesNotMatch(error.message, /result=|error_max_turns/);
+      if (scenario === "assistant_error") assert.match(error.message, /assistant_error=authentication_failed/);
+      if (scenario === "failed_result") assert.match(error.message, /\(failed_response\).*result=error_max_turns/);
+      if (scenario === "unlisted_result") assert.match(error.message, /result=unlisted/);
+      if (scenario === "no_http_response") assert.match(error.message, /last_api_retry=unknown \(HTTP none\)/);
+      if (scenario === "auth_status") assert.match(error.message, /auth_status_count=1; authenticating=true/);
+      const safe = redactCredentialText(error.message);
+      assert.equal(safe.value, error.message);
+      assert.equal(safe.redacted, false);
+      assert.equal(safe.truncated, false);
+      return true;
+    });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  });
+}
+
+for (const stderr of [0, 123, "unavailable"] as const) {
+  test(`init deadline keeps stderr volume ${stderr} separate from native content and custody`, async () => {
+    const harness = createHarness({ noInit: true });
+    const launch = harness.dependencies.launchChild;
+    harness.dependencies.launchChild = input => {
+      const child = launch(input);
+      child.stderrBytesRead = () => {
+        if (stderr === "unavailable") throw new Error("private stderr read failure");
+        return stderr;
+      };
+      return child;
+    };
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    const request = spawnRequest({ supervisorEntryId: "entry-init", supervisorExecutionGenerationId: "execution-init" });
+    await assert.rejects(withLoopAlive(adapter.spawn(request)), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /\(deadline\).*bootstrap_ms=not_started.*stdout_lines=0; matched_session_lines=0/);
+      assert.ok(error.message.includes(`stderr_bytes=${stderr}`));
+      assert.doesNotMatch(error.message, /private stderr/);
+      assert.equal(providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request)), undefined,
+        "diagnostics on an uninitialized child must not invent operational evidence");
+      return true;
+    });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  });
+}
+
+test("default child retains stderr byte count without its text", { skip: process.platform === "win32" }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "claude-startup-diagnostic-test-"));
+  const executable = join(directory, "inert-cli.cjs");
+  const privateText = "private-stderr-token-12345\n";
+  await writeFile(executable, `#!${process.execPath}\n`
+    + `process.stderr.write(${JSON.stringify(privateText)});\n`
+    + "process.stdin.resume(); setInterval(() => {}, 1000);\n", { mode: 0o700 });
+  const adapter = new ClaudeCodeProviderAdapter({ claudeBin: executable, initTimeoutMs: 1000,
+    dependencies: { readVersion: async () => "2.1.220 (Claude Code)",
+      createLetAgentsMcpConfig: async () => ({ path: join(directory, "unused.json"), dispose: async () => {} }) },
+  });
+  try {
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest({ cwd: directory }))), error => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(`stderr_bytes=${Buffer.byteLength(privateText)}`));
+      assert.match(error.message, /bootstrap_ms=not_started/);
+      assert.doesNotMatch(error.message, /private-stderr-token/);
+      return true;
+    });
+    assert.equal(adapter.runtimeCustody("wa-claude-1"), "absent");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 for (const phase of ["init", "bootstrap_turn"] as const) {
   for (const reason of ["deadline", "native_exit", "transport_error"] as const) {
