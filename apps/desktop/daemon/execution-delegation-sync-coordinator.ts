@@ -1,6 +1,6 @@
 import type { SupervisorGrantHttp } from "./cloud-http.js";
 import { collectBoundedInventory } from "./bounded-inventory.js";
-import type { ExecutionDelegationInventoryScope } from "./execution-delegation-journal.js";
+import type { ExecutionDelegationInventoryScope, ExecutionDelegationReconciliation } from "./execution-delegation-journal.js";
 import type { DaemonManifestEntry } from "./types.js";
 import type { InstalledHostGrant } from "./worker-runtime-custody.js";
 import type { ConvergenceRequestKind } from "./provider-execution-coordinator.js";
@@ -26,7 +26,7 @@ export type ExecutionDelegationSyncOptions = {
       entryId: string;
       delegationInstanceId: string;
       signal: AbortSignal;
-    }): Promise<unknown>;
+    }): Promise<Pick<ExecutionDelegationReconciliation, "changed">>;
   };
   remote: Pick<SupervisorGrantHttp, "listExecutionDelegationIds">;
   entryObserved?(entryId: string): void;
@@ -145,21 +145,23 @@ export class ExecutionDelegationSyncCoordinator {
     }, "Execution delegation inventory", localIds);
 
     let reconciledAny = false;
+    let changedAny = false;
     try {
       for (const delegationInstanceId of ids) {
-        await this.options.authority.syncExecutionDelegation({ entryId, delegationInstanceId, signal });
+        const result = await this.options.authority.syncExecutionDelegation({ entryId, delegationInstanceId, signal });
         reconciledAny = true;
+        changedAny ||= result.changed;
       }
       const currentEntry = await this.options.entries.getEntry(entryId);
       if (!currentEntry || this.options.authority.currentHostGrant(currentEntry) !== grant) {
         throw new Error("Execution delegation authority changed during reconciliation.");
       }
     } catch (error) {
-      if (reconciledAny) this.options.requestConvergence(entryId, "owned");
+      if (reconciledAny) this.options.requestConvergence(entryId, changedAny ? "owned" : "rehydration");
       throw error;
     }
-    // An empty inventory did not reconcile authority. It may remind an agent
-    // with new launch inputs, but cannot replay an unchanged failed startup.
-    this.options.requestConvergence(entryId, reconciledAny ? "owned" : "rehydration");
+    // Reading unchanged authority may remind an agent with new launch inputs,
+    // but only a committed change can replay an unchanged failed startup.
+    this.options.requestConvergence(entryId, changedAny ? "owned" : "rehydration");
   }
 }

@@ -685,6 +685,7 @@ test("local delegation journal admits exact monotonic revisions and current gran
       other.reconcileExecutionDelegation(input, () => {}, async commit => commit()),
     ]);
     assert.deepEqual(competing.map(result => result.created).sort(), [false, true]);
+    assert.deepEqual(competing.map(result => result.changed).sort(), [false, true], "only the committed creation changes authority");
     assert.deepEqual(competing[0]!.delegation, competing[1]!.delegation);
 
     const secondAuthority = localDelegationAuthority({ grantId: "host-grant-2" });
@@ -700,6 +701,7 @@ test("local delegation journal admits exact monotonic revisions and current gran
       async commit => commit(),
     );
     assert.equal(revised.created, true);
+    assert.equal(revised.changed, true);
     assert.equal(revised.delegation.grantId, "host-grant-2");
     assert.equal(revised.delegation.scopeSha256, secondRevision.scopeSha256);
 
@@ -710,7 +712,14 @@ test("local delegation journal admits exact monotonic revisions and current gran
       async commit => commit(),
     );
     assert.equal(replayed.created, false);
+    assert.equal(replayed.changed, true, "same-revision rebinding remains a material change");
     assert.equal(replayed.delegation.grantId, "host-grant-3", "stable grant rotation updates no delegation scope");
+    const unchanged = await store.reconcileExecutionDelegation(
+      localDelegationInput(secondRevision, currentAuthority, 181), () => {}, async commit => commit(),
+    );
+    assert.equal(unchanged.created, false);
+    assert.equal(unchanged.changed, false, "an exact replay provides no new restart authority");
+    assert.deepEqual(unchanged.delegation, replayed.delegation);
     assert.deepEqual(await store.listExecutionDelegationInstanceIds({
       agentId: "agent",
       roomId: revision.roomId,
@@ -789,6 +798,7 @@ test("local delegation journal refreshes mutable server aliases without changing
     );
 
     assert.equal(replayed.created, false);
+    assert.equal(replayed.changed, true, "same-revision rebinding remains a material change");
     assert.equal(replayed.delegation.roomId, "renamed-room");
     assert.equal(replayed.delegation.agentKey, "EmmyMay/renamed-agent");
     assert.equal(replayed.delegation.scopeSha256, revision.scopeSha256);
@@ -950,6 +960,12 @@ test("local delegation journal makes revocation and chronological expiry termina
       ...localDelegationInput(revokedRevision, authority, 150),
     }, () => {}, async commit => commit());
     assert.equal(revoked.delegation.revokedAtMs, 140);
+    assert.equal(revoked.created, false);
+    assert.equal(revoked.changed, true, "revocation changes an existing revision");
+    const revokedReplay = await store.reconcileExecutionDelegation(
+      localDelegationInput(revokedRevision, authority, 151), () => {}, async commit => commit(),
+    );
+    assert.equal(revokedReplay.changed, false, "an already committed revocation is not a new change");
     await assert.rejects(store.validateExecutionDelegation(localDelegationValidation(authority, { atMs: 160 })), { code: "terminal" });
     const afterRevocation = { ...revision, revision: 2, createdAtMs: 160, expiresAtMs: 300, revokedAtMs: null };
     await assert.rejects(store.reconcileExecutionDelegation(

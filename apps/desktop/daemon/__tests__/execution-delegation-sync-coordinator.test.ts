@@ -60,7 +60,7 @@ function subject(overrides: SubjectOverrides = {}) {
     },
     authority: {
       currentHostGrant: () => currentGrant,
-      syncExecutionDelegation: async ({ delegationInstanceId }) => { events.push(`sync:${delegationInstanceId}`); },
+      syncExecutionDelegation: async ({ delegationInstanceId }) => { events.push(`sync:${delegationInstanceId}`); return { changed: true }; },
       ...authorityOverrides,
     },
     remote: {
@@ -212,6 +212,7 @@ test("fence drains a sync queued behind shared entry work without waiting for th
       syncExecutionDelegation: async ({ signal }) => {
         syncCalls += 1;
         await gate.run(entry.id, async () => { exactRan = true; }, signal);
+        return { changed: true };
       },
     },
   });
@@ -226,32 +227,36 @@ test("fence drains a sync queued behind shared entry work without waiting for th
 
 test("a replaced host grant rejects the pass after converging completed exact reads", async () => {
   const harness = subject({
-    authority: { syncExecutionDelegation: async () => { harness.replaceGrant(); } },
+    authority: { syncExecutionDelegation: async () => { harness.replaceGrant(); return { changed: true }; } },
   });
   await assert.rejects(harness.coordinator.request(entry.id), /authority changed/i);
   assert.deepEqual(harness.events, ["converge:agent-1"]);
 });
 
-test("a later exact-read failure still converges an earlier committed revision", async () => {
-  const harness = subject({
-    entries: { getEntry: async () => entry, listRoomEntries: async () => [entry], listExecutionDelegationInstanceIds: async () => ["delegation-a", "delegation-b"] },
-    remote: {
-      listExecutionDelegationIds: async () => ({ delegationInstanceIds: [], nextCursor: null }),
-    },
-    authority: {
-      syncExecutionDelegation: async ({ delegationInstanceId }) => {
-        harness.events.push(`sync:${delegationInstanceId}`);
-        if (delegationInstanceId === "delegation-b") throw new Error("exact read unavailable");
-      },
-    },
-  });
-  await assert.rejects(harness.coordinator.request(entry.id), /exact read unavailable/);
-  assert.deepEqual(harness.events, [
-    "sync:delegation-a",
-    "sync:delegation-b",
-    "converge:agent-1",
-  ]);
-});
+for (const changes of [[false, false], [true, false], [false, true]]) {
+  for (const failAfterReads of [false, true]) {
+    test(`delegation changes ${changes} retain their convergence kind${failAfterReads ? " before a later failure" : ""}`, async () => {
+      const ids = changes.map((_, index) => `delegation-${index}`);
+      if (failAfterReads) ids.push("failed-read");
+      const kinds: string[] = [];
+      const harness = subject({
+        entries: { getEntry: async () => entry, listRoomEntries: async () => [entry], listExecutionDelegationInstanceIds: async () => ids },
+        remote: { listExecutionDelegationIds: async () => ({ delegationInstanceIds: [], nextCursor: null }) },
+        authority: {
+          syncExecutionDelegation: async ({ delegationInstanceId }) => {
+            if (delegationInstanceId === "failed-read") throw new Error("exact read unavailable");
+            return { changed: changes[ids.indexOf(delegationInstanceId)]! };
+          },
+        },
+        requestConvergence: (_entryId, kind) => { kinds.push(kind); },
+      });
+      const pass = harness.coordinator.request(entry.id);
+      if (failAfterReads) await assert.rejects(pass, /exact read unavailable/);
+      else await pass;
+      assert.deepEqual(kinds, [changes.some(Boolean) ? "owned" : "rehydration"]);
+    });
+  }
+}
 
 test("a runaway inventory fails loudly at the per-pass page cap", async () => {
   let remoteCalls = 0;
