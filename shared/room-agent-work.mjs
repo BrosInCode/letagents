@@ -20,6 +20,17 @@ export function isClearedRoomAgentWorkSummary(value) {
   return exactKeys(value, ["version", "availability"]) && value.version === 1 && value.availability === "cleared";
 }
 
+/** Review eligibility is separate from capture/execution evidence. An unknown
+ * turn may offer a real cumulative review, but a known empty turn cannot claim
+ * earlier work. File metadata matters even when textual line totals are zero. */
+export function hasReviewableRoomContribution(summary) {
+  const changes = summary?.contribution?.changes;
+  if (!changes) return false;
+  const snapshot = changes.state === 'ready' ? changes : summary.workspace;
+  return snapshot?.state === 'ready' && (snapshot.files.length > 0 || snapshot.hidden_files > 0
+    || snapshot.additions > 0 || snapshot.deletions > 0 || snapshot.patch.length > 0 || snapshot.patch_truncated);
+}
+
 /** Return a canonical allowlisted copy, or reject without echoing private input. */
 export function parseRoomAgentWorkSummary(value) {
   const workspace = [2, 3].includes(value?.version) ? parseWorkspaceChangeSummary(value.workspace) : null;
