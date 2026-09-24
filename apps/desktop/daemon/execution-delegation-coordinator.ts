@@ -20,7 +20,7 @@ type Options = {
   approvals: ExecutionDelegationDecisionCoordinatorOptions["approvals"] & ExecutionApprovalPublisherOptions["approvals"];
   remote: ExecutionDelegationSyncOptions["remote"] & ExecutionDelegationDecisionCoordinatorOptions["remote"];
   approvalPublication?: ApprovalPublicationOptions;
-  requestConvergence(entryId: string): void;
+  requestConvergence: ExecutionDelegationSyncOptions["requestConvergence"];
   diagnostic(domain: "grant" | "decision", entryId: string, error: unknown): void;
 };
 
@@ -44,8 +44,8 @@ export class ExecutionDelegationCoordinator {
       authority: options.authority,
       remote: options.remote,
       entryObserved: (entryId) => this.requestDecisions(entryId),
-      requestConvergence: (entryId) => {
-        options.requestConvergence(entryId);
+      requestConvergence: (entryId, kind) => {
+        options.requestConvergence(entryId, kind);
         this.approvalPublicationChanged(entryId);
       },
       diagnostic: (entryId, error) => options.diagnostic("grant", entryId, error),

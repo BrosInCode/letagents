@@ -22,6 +22,7 @@ import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { PollingActivationRecord } from "../custodial-polling-activation.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
+import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -462,6 +463,72 @@ for (const change of ["configuration", "control", "grant", "expiry", "continuati
     await runtime.coordinator.drainConvergence();
     assert.equal(launches, 2, "the new failed inputs are retained");
   });
+}
+
+for (const trigger of ["grant_replay", "room_pointer"] as const) {
+  for (const hasDelegation of [false, true]) {
+    test(`${trigger} with ${hasDelegation ? "a reconciled" : "no"} delegation preserves failed-launch admission`, async () => {
+      let launches = 0;
+      const runtime = harness({ provider: provider({ spawn: async () => {
+        launches++;
+        throw new Error("native bootstrap failed");
+      } }) });
+      const grant: InstalledHostGrant = {
+        entryId: "agent-1", roomId: "room-1", agentKey: "agent-key", grantId: "grant-1", grantGeneration: 1,
+        supervisorGrant: "secret", apiUrl: "https://example.test", daemonGeneration: 7, hostId: "host-1",
+        installationId: "installation-1", ownerAccountId: "owner", scopeKey: "owner", expiresAt: "2099-01-01T00:00:00.000Z",
+      };
+      runtime.options.host.currentGrant = () => grant;
+      let revision = 1;
+      const readConfiguration = runtime.options.store.getAgentConfiguration;
+      runtime.options.store.getAgentConfiguration = async id => ({ ...(await readConfiguration(id))!, config_revision: revision });
+      let wakes = 0, reconciliations = 0;
+      const diagnostics: unknown[] = [];
+      const delegations = new ExecutionDelegationCoordinator({
+        entries: {
+          getEntry: async () => runtime.entry(), listRoomEntries: async () => [runtime.entry()],
+          listExecutionDelegationInstanceIds: async () => [], getExecutionApproval: async () => null,
+          listExecutionDelegationsForApprovalPublication: async () => [], readExecutionApprovalProjection: async () => null,
+        },
+        authority: {
+          currentHostGrant: () => grant, installHostGrant: async () => ({ status: "installed" as const }),
+          syncExecutionDelegation: async () => { reconciliations++; },
+          recordDelegatedApproval: async () => { throw new Error("unexpected approval"); },
+          validateExecutionDelegation: async () => { throw new Error("unexpected delegation validation"); },
+        },
+        approvals: { admitDelegatable: async () => [], applyRecordedDecision: async () => {} },
+        remote: { listExecutionDelegationIds: async () => ({ delegationInstanceIds: hasDelegation ? ["delegation-1"] : [], nextCursor: null }) },
+        requestConvergence: (id, kind) => { wakes++; runtime.coordinator.request(id, kind); },
+        diagnostic: (_domain, _id, error) => { diagnostics.push(error); },
+      });
+      async function reconcile() {
+        const previousWakes = wakes;
+        if (trigger === "grant_replay") await delegations.installHostGrant({ entry_id: "agent-1" } as never);
+        else delegations.requestRoom("room-1");
+        for (let i = 0; i < 20 && wakes === previousWakes; i++) await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(wakes, previousWakes + 1);
+        await runtime.coordinator.drainConvergence();
+      }
+      try {
+        runtime.coordinator.request("agent-1", "rehydration");
+        await runtime.coordinator.drainConvergence();
+        assert.equal(launches, 1);
+        await reconcile();
+        assert.deepEqual(diagnostics, []);
+        assert.equal(reconciliations, hasDelegation ? 1 : 0);
+        assert.equal(launches, hasDelegation ? 2 : 1, "an empty inventory is not new launch authority");
+        if (!hasDelegation) {
+          revision++;
+          await reconcile();
+          assert.equal(launches, 2, "changed launch inputs remain eligible through an empty inventory reminder");
+          await reconcile();
+          assert.equal(launches, 2, "unchanged failed inputs remain suppressed after that change");
+        }
+      } finally {
+        await delegations.fenceAndDrain();
+      }
+    });
+  }
 }
 
 test("owned convergence and the existing single recovery timer bypass reminder suppression", async () => {
