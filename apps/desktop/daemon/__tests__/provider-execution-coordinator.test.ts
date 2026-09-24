@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
+import { validatedNativeRuntimeDeath } from "../provider-action-port.js";
 
 import {
   ProviderExecutionCoordinator,
@@ -347,6 +349,48 @@ function harness(input: {
     setHandoff: (next: boolean) => { handoff = next; },
     bumpControlEpoch: () => { controlEpoch += 1; },
   };
+}
+
+for (const mismatch of [null, "workAttemptId", "roomId", "supervisorEntryId", "supervisorExecutionGenerationId", "provider", "death", "continuation"] as const) {
+  test(`failed acquisition terminal uses only its exact launch evidence: ${mismatch ?? "matching"}`, async () => {
+    const port = provider();
+    const original = new Error("Claude bootstrap_turn deadline");
+    const connection = { kind: "claude_cli" as const, pid: 4444, processIdentity: "new-birth-4444" };
+    port.spawn = async request => {
+      const supplied = { ...request, ...(mismatch && ["workAttemptId", "roomId", "supervisorEntryId", "supervisorExecutionGenerationId"].includes(mismatch)
+        ? { [mismatch]: "wrong-launch" } : {}) };
+      const identity = providerAcquisitionIdentity(mismatch === "provider" ? "codex" : "claude-code", supplied,
+        mismatch === "continuation" ? "wrong-continuation" : null);
+      const receipt = { endedAt: "2026-08-26T00:00:03.000Z", exitCode: null, signal: "SIGTERM",
+        terminalCause: "protocol_error" as const, providerContinuationId: "new-continuation",
+        nativeRuntimeDeath: { ...connection, processIdentity: mismatch === "death" ? "wrong-birth" : connection.processIdentity } };
+      retainProviderAcquisitionEvidence(original, identity, connection, receipt);
+      // The transfer must retain the acquired identity, not later mutable objects.
+      connection.pid = 5555;
+      receipt.providerContinuationId = "later-mutation";
+      throw original;
+    };
+    const runtime = harness({ provider: port, entry: { ...baseEntry(), provider: "claude-code", delivery_mode: "daemon_inbox" } });
+    const format = runtime.options.terminalPayload;
+    runtime.options.terminalPayload = (value, actor, expected) => {
+      validatedNativeRuntimeDeath(value, expected);
+      return format(value, actor, expected);
+    };
+    let releases = 0;
+    runtime.options.durability.releaseTerminalExecutionFence = async () => { releases += 1; };
+    await assert.rejects(runtime.coordinator.converge("agent-1"), mismatch ? /does not match/ : error => error === original);
+    assert.equal(runtime.installed.length, 0);
+    assert.equal(runtime.liveHandles.size, 0);
+    assert.equal(runtime.terminalWrites.length, mismatch ? 0 : 1);
+    assert.equal(releases, mismatch ? 0 : 1);
+    if (!mismatch) {
+      const saved = runtime.terminalWrites[0]!.terminal;
+      assert.deepEqual(saved.native_runtime_death, { kind: "claude_cli", pid: 4444, processIdentity: "new-birth-4444" });
+      assert.equal(saved.signal, "SIGTERM");
+      assert.equal(saved.provider_continuation_id, "new-continuation");
+      assert.equal(saved.terminal_cause, "protocol_error");
+    }
+  });
 }
 
 test("rehydration reminders share one failed native admission and retain its diagnostic", async () => {
