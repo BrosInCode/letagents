@@ -466,8 +466,8 @@ for (const change of ["configuration", "control", "grant", "expiry", "continuati
 }
 
 for (const trigger of ["grant_replay", "room_pointer"] as const) {
-  for (const hasDelegation of [false, true]) {
-    test(`${trigger} with ${hasDelegation ? "a reconciled" : "no"} delegation preserves failed-launch admission`, async () => {
+  for (const delegationState of ["empty", "unchanged", "changed"] as const) {
+    test(`${trigger} with ${delegationState} delegation inventory preserves failed-launch admission`, async () => {
       let launches = 0;
       const runtime = harness({ provider: provider({ spawn: async () => {
         launches++;
@@ -492,12 +492,12 @@ for (const trigger of ["grant_replay", "room_pointer"] as const) {
         },
         authority: {
           currentHostGrant: () => grant, installHostGrant: async () => ({ status: "installed" as const }),
-          syncExecutionDelegation: async () => { reconciliations++; },
+          syncExecutionDelegation: async () => { reconciliations++; return { changed: delegationState === "changed" }; },
           recordDelegatedApproval: async () => { throw new Error("unexpected approval"); },
           validateExecutionDelegation: async () => { throw new Error("unexpected delegation validation"); },
         },
         approvals: { admitDelegatable: async () => [], applyRecordedDecision: async () => {} },
-        remote: { listExecutionDelegationIds: async () => ({ delegationInstanceIds: hasDelegation ? ["delegation-1"] : [], nextCursor: null }) },
+        remote: { listExecutionDelegationIds: async () => ({ delegationInstanceIds: delegationState === "empty" ? [] : ["delegation-1"], nextCursor: null }) },
         requestConvergence: (id, kind) => { wakes++; runtime.coordinator.request(id, kind); },
         diagnostic: (_domain, _id, error) => { diagnostics.push(error); },
       });
@@ -515,12 +515,12 @@ for (const trigger of ["grant_replay", "room_pointer"] as const) {
         assert.equal(launches, 1);
         await reconcile();
         assert.deepEqual(diagnostics, []);
-        assert.equal(reconciliations, hasDelegation ? 1 : 0);
-        assert.equal(launches, hasDelegation ? 2 : 1, "an empty inventory is not new launch authority");
-        if (!hasDelegation) {
+        assert.equal(reconciliations, delegationState === "empty" ? 0 : 1);
+        assert.equal(launches, delegationState === "changed" ? 2 : 1, "an unchanged inventory is not new launch authority");
+        if (delegationState !== "changed") {
           revision++;
           await reconcile();
-          assert.equal(launches, 2, "changed launch inputs remain eligible through an empty inventory reminder");
+          assert.equal(launches, 2, "changed launch inputs remain eligible through an unchanged inventory reminder");
           await reconcile();
           assert.equal(launches, 2, "unchanged failed inputs remain suppressed after that change");
         }

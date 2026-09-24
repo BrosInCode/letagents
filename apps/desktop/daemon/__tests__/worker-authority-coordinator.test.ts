@@ -292,7 +292,7 @@ function fixture(options: HarnessOptions = {}) {
       reconcileExecutionDelegation: async (input, assertCurrent, fence) => {
         delegationAuthorities.push(input.authority);
         delegationClocks.push(input.atMs);
-        let result!: { created: boolean; delegation: LocalExecutionDelegation };
+        let result!: { created: boolean; changed: boolean; delegation: LocalExecutionDelegation };
         await fence(async () => {
           if (options.delegationCommitMutation === "generation") generation += 1;
           if (options.delegationCommitMutation === "control") controlEpoch += 1;
@@ -301,7 +301,7 @@ function fixture(options: HarnessOptions = {}) {
           }
           if (options.delegationCommitMutation === "clock") currentTime = now + 2 * 60 * 60 * 1_000;
           assertCurrent();
-          result = { created: true, delegation: {
+          result = { created: true, changed: true, delegation: {
             delegationInstanceId: input.delegation.delegationInstanceId,
             revision: input.delegation.revision,
             ownerAccountId: input.authority.ownerAccountId,
@@ -1540,6 +1540,7 @@ test("execution delegation sync fetches through the exact current installed host
     delegationInstanceId: "delegation-1",
   });
   assert.equal(result.created, true);
+  assert.equal(result.changed, true);
   assert.equal(harness.events.includes("http:delegation"), true);
   assert.deepEqual(harness.delegationAuthorities, [{
     agentId: "agent-1",

@@ -34,6 +34,7 @@ import {
   reconcileExecutionDelegation,
   validateExecutionDelegation,
   type ExecutionDelegationInventoryScope,
+  type ExecutionDelegationReconciliation,
   type ExecutionApprovalPublicationDelegationScope,
   type LocalExecutionDelegation,
   type ReconcileExecutionDelegation,
@@ -710,7 +711,7 @@ export class ManifestStore {
     input: ReconcileExecutionDelegation,
     assertCurrent: () => void,
     commitFence: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ created: boolean; delegation: LocalExecutionDelegation }> {
+  ): Promise<ExecutionDelegationReconciliation> {
     if (typeof assertCurrent !== "function" || typeof commitFence !== "function") {
       throw new Error("Execution delegation journal requires current host authority and a daemon ownership commit fence.");
     }
