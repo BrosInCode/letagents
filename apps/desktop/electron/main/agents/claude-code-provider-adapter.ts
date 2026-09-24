@@ -330,6 +330,48 @@ const CLAUDE_API_ERROR_CATEGORIES = new Set([
 const CLAUDE_RESULT_CATEGORIES = new Set([
   "success", "error_during_execution", "error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries",
 ]);
+const CLAUDE_STARTUP_SYSTEM_TYPES = new Set([
+  "init", "api_retry", "compact_boundary", "control_request_progress", "hook_started", "hook_progress",
+  "commands_changed", "background_tasks_changed", "files_persisted", "elicitation_complete", "informational",
+  "local_command_output", "memory_recall", "mirror_error", "model_refusal_fallback", "model_refusal_no_fallback",
+  "notification", "permission_denied", "plugin_install", "task_notification", "task_progress", "task_started",
+  "task_updated", "thinking_tokens", "worker_shutting_down",
+]);
+const CLAUDE_STARTUP_LINE_TYPES = new Set([
+  "assistant", "result", "user", "auth_status", "stream_event", "tool_progress", "tool_use_summary",
+  "control_request", "control_cancel_request",
+]);
+
+function claudeStartupLineType(message: ClaudeStreamMessage): string {
+  // Values outside these finite enums never enter the diagnostic, including
+  // unknown keys/subtypes, hook output, tool names, IDs and native error text.
+  if (message.type === "command_lifecycle") {
+    return `command_lifecycle.${message.state === "started" ? "started" : "unlisted"}`;
+  }
+  if (message.type !== "system") {
+    return typeof message.type === "string" && CLAUDE_STARTUP_LINE_TYPES.has(message.type) ? message.type : "unlisted";
+  }
+  if (message.subtype === "status") {
+    const status = message.status === null ? "cleared"
+      : message.status === "compacting" || message.status === "requesting" ? message.status : "unlisted";
+    const compact = message.compact_result === undefined ? ""
+      : message.compact_result === "success" || message.compact_result === "failed"
+        ? `.compact_${message.compact_result}` : ".compact_unlisted";
+    return `system.status.${status}${compact}`;
+  }
+  if (message.subtype === "hook_response") {
+    const outcome = message.outcome === "success" || message.outcome === "error" || message.outcome === "cancelled"
+      ? message.outcome : "unlisted";
+    return `system.hook_response.${outcome}`;
+  }
+  if (message.subtype === "session_state_changed") {
+    const state = message.state === "idle" || message.state === "running" || message.state === "requires_action"
+      ? message.state : "unlisted";
+    return `system.session_state_changed.${state}`;
+  }
+  return typeof message.subtype === "string" && CLAUDE_STARTUP_SYSTEM_TYPES.has(message.subtype)
+    ? `system.${message.subtype}` : "system.unlisted";
+}
 
 /** Bounded observations from this child's startup, never an inferred root cause. */
 class ClaudeBootstrapDiagnostics {
@@ -346,6 +388,9 @@ class ClaudeBootstrapDiagnostics {
   private assistantError: string | null = null;
   private result: string | null = null;
   private uncorrelatedResult: string | null = null;
+  private readonly lineTypes = new Map<string, number>();
+  private lastLineType: string | null = null;
+  private lastLineMs = 0;
 
   constructor(private readonly sessionId: string, private readonly turnId: string, private readonly budgetMs: number) {}
 
@@ -356,6 +401,11 @@ class ClaudeBootstrapDiagnostics {
     const message = parseStreamLine(line);
     if (!message || message.session_id !== this.sessionId) return;
     this.matchedSessionLines = Math.min(Number.MAX_SAFE_INTEGER, this.matchedSessionLines + 1);
+    const lineType = claudeStartupLineType(message);
+    this.lineTypes.set(lineType, Math.min(Number.MAX_SAFE_INTEGER, (this.lineTypes.get(lineType) ?? 0) + 1));
+    this.lastLineType = lineType;
+    // Subscription/diagnostics start is the origin, including pre-init lines.
+    this.lastLineMs = Math.max(0, Math.round(performance.now() - this.startedAt));
     // Never include arbitrary error strings, keys, subtypes, IDs or message text.
     const category = typeof message.error === "string" && CLAUDE_API_ERROR_CATEGORIES.has(message.error)
       ? message.error : "unlisted";
@@ -389,17 +439,29 @@ class ClaudeBootstrapDiagnostics {
       const count = child.stderrBytesRead?.();
       if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) stderrBytes = count;
     } catch { /* An unavailable diagnostic must not replace the launch failure. */ }
+    const lineTypes: string[] = [];
+    for (const [type, count] of this.lineTypes) {
+      const item = `${type}:${count}`;
+      if (lineTypes.length === 8 || [...lineTypes, item].join(",").length > 180) break;
+      lineTypes.push(item);
+    }
+    // Keep the histogram and its omission count in one field so the outer
+    // 512-character cap cannot retain a partial histogram without its marker.
+    const omittedTypes = this.lineTypes.size - lineTypes.length;
+    if (omittedTypes) lineTypes.push(`omitted_types:${omittedTypes}`);
     const fields = [
       ...(this.lastApiRetry === null ? [] : [`last_api_retry=${this.lastApiRetry}`]),
       ...(this.assistantError === null ? [] : [`assistant_error=${this.assistantError}`]),
       ...(this.result === null ? [] : [`result=${this.result}`]),
       ...(this.uncorrelatedResult === null ? [] : [`uncorrelated_result=${this.uncorrelatedResult}`]),
       ...(this.authMessages === 0 ? [] : [`auth_status_count=${this.authMessages}`, `authenticating=${this.authenticating ?? "unlisted"}`]),
+      ...(this.lastLineType === null ? [] : [`last_line_type=${this.lastLineType}`, `last_line_ms=${this.lastLineMs}`]),
       `init_ms=${elapsed(this.startedAt, this.initializedAt ?? failedAt)}`,
       `bootstrap_ms=${this.initializedAt === null ? "not_started" : elapsed(this.initializedAt, failedAt)}`,
       `budget_ms=${this.budgetMs}`, `stdout_lines=${this.stdoutLines}`, `matched_session_lines=${this.matchedSessionLines}`,
       `stderr_bytes=${stderrBytes ?? "unavailable"}`,
       `api_retry_count=${this.apiRetries}`, `assistant_count=${this.assistantMessages}`, `result_count=${this.resultMessages}`,
+      ...(lineTypes.length ? [`line_types=${lineTypes.join(",")}`] : []),
     ];
     let omitted = 0;
     for (;;) {
