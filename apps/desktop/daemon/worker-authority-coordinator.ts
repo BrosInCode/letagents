@@ -12,6 +12,7 @@ import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery
 import {
   ExecutionDelegationJournalError,
   type ExecutionDelegationHostAuthority,
+  type ExecutionDelegationReconciliation,
   type LocalExecutionDelegation,
   type RemoteExecutionDelegationRevision,
   type ValidateExecutionDelegation,
@@ -109,7 +110,7 @@ type WorkerAuthorityStore = Pick<ManifestStore, "acknowledgePollingOffer" | "rec
     input: { delegation: RemoteExecutionDelegationRevision; authority: ExecutionDelegationHostAuthority; atMs: number },
     assertCurrent: () => void,
     commitFence: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ created: boolean; delegation: LocalExecutionDelegation }>;
+  ): Promise<ExecutionDelegationReconciliation>;
   validateExecutionDelegation(input: ValidateExecutionDelegation): Promise<LocalExecutionDelegation>;
   selectDelegatedApproval(
     input: Omit<SelectDelegatedApproval, "atMs">,
@@ -358,10 +359,7 @@ export class WorkerAuthorityCoordinator {
    * assertCurrent synchronously after BEGIN IMMEDIATE, so a grant replacement
    * or control edge cannot race the journal mutation.
    */
-  async syncExecutionDelegation(input: SyncInstalledExecutionDelegationInput): Promise<{
-    created: boolean;
-    delegation: LocalExecutionDelegation;
-  }> {
+  async syncExecutionDelegation(input: SyncInstalledExecutionDelegationInput): Promise<ExecutionDelegationReconciliation> {
     const source = await this.options.serializeEntry(input.entryId, async () => {
       input.signal?.throwIfAborted();
       const entry = await this.options.store.getEntry(input.entryId);

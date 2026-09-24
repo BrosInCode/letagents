@@ -90,6 +90,13 @@ export type LocalExecutionDelegation = {
   revokedAtMs: number | null;
 };
 
+export type ExecutionDelegationReconciliation = {
+  created: boolean;
+  /** Whether reconciliation changed persisted delegation data. */
+  changed: boolean;
+  delegation: LocalExecutionDelegation;
+};
+
 type Row = Record<string, unknown>;
 
 export class ExecutionDelegationJournalError extends Error {
@@ -265,7 +272,7 @@ export function reconcileExecutionDelegation(
   db: DatabaseSync,
   input: ReconcileExecutionDelegation,
   entry: DaemonManifestEntry | undefined,
-): { created: boolean; delegation: LocalExecutionDelegation } {
+): ExecutionDelegationReconciliation {
   const value = parse(reconciliation, input);
   if (value.atMs < value.delegation.createdAtMs
     || (value.delegation.revokedAtMs !== null && value.delegation.revokedAtMs > value.atMs)) reject("invalid_input");
@@ -279,6 +286,7 @@ export function reconcileExecutionDelegation(
   if (prior && value.delegation.revision < prior.revision) reject("revision_conflict");
   const priorExact = exact(db, value.delegation.delegationInstanceId, value.delegation.revision);
   if (priorExact) {
+    let changed = false;
     if (!sameStableAuthority(priorExact, value.delegation, value.authority)
       || priorExact.scopeSha256 !== value.delegation.scopeSha256
       || priorExact.createdAtMs !== value.delegation.createdAtMs
@@ -297,6 +305,7 @@ export function reconcileExecutionDelegation(
         value.delegation.delegationInstanceId,
         value.delegation.revision,
       );
+      changed = true;
     } else if (priorExact.roomId !== value.delegation.roomId
       || priorExact.agentKey !== value.delegation.agentKey
       || priorExact.grantId !== value.authority.grantId) {
@@ -308,8 +317,9 @@ export function reconcileExecutionDelegation(
         value.delegation.delegationInstanceId,
         value.delegation.revision,
       );
+      changed = true;
     }
-    return { created: false, delegation: exact(db, value.delegation.delegationInstanceId, value.delegation.revision)! };
+    return { created: false, changed, delegation: exact(db, value.delegation.delegationInstanceId, value.delegation.revision)! };
   }
 
   if (!prior) {
@@ -349,7 +359,7 @@ export function reconcileExecutionDelegation(
     value.delegation.expiresAtMs,
     value.delegation.revokedAtMs,
   );
-  return { created: true, delegation: exact(db, value.delegation.delegationInstanceId, value.delegation.revision)! };
+  return { created: true, changed: true, delegation: exact(db, value.delegation.delegationInstanceId, value.delegation.revision)! };
 }
 
 /**
