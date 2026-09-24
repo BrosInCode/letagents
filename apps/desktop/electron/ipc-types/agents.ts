@@ -683,6 +683,8 @@ export interface DesktopSupervisorManifestEntry {
   providerPid: number | null;
   workplaceLiveness: DesktopSupervisorLivenessAxis;
   nativeLiveness: DesktopSupervisorLivenessAxis;
+  /** Ephemeral native compaction; not a readiness or room-turn claim. */
+  providerProgress?: { state: "compacting"; startedAt: string } | null;
   /** First time this entry reached ready (bound + reachable + running +
    * unblocked); set once, never cleared. Null/absent if it never reached ready. */
   readyReachedAt?: string | null;

@@ -290,6 +290,10 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       },
       ctx,
     );
+    if (manifest.compacting) {
+      phases[activeIndex] = { ...phases[activeIndex]!, label: manifest.headline,
+        detail: manifest.joinHint ?? phases[activeIndex]!.detail };
+    }
     const status: LaunchJourneyStatus = manifest.ready
       ? "ready"
       : manifest.stopping
@@ -312,7 +316,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       stopFailed: manifest.stopFailed,
       agentName,
       providerLabel,
-      headline: manifest.stopFailed
+      headline: manifest.stopFailed || manifest.compacting
         ? manifest.headline
         : headlineFor(status, ctx, { stoppedAfterReady: everReady }),
       failureDetail: manifest.failed ? manifest.failureDetail : null,
@@ -325,7 +329,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       recovery: manifest.failed && !manifest.recoverableBlocked && !manifest.stopFailed && !manifest.ownershipPaused
         ? manifestRecovery(entry, input.hasSignInCommand ?? false)
         : null,
-      joinHint: status === "in_progress" ? JOIN_HINT : null,
+      joinHint: status === "in_progress" ? manifest.compacting ? manifest.joinHint : JOIN_HINT : null,
     };
   }
 

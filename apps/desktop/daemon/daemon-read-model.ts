@@ -27,6 +27,7 @@ import type {
 } from "./worker-binding-store.js";
 
 export type DaemonReadModelPorts = {
+  compactionProgress?(entry: DaemonManifestEntry): DaemonManifestEntryView["provider_progress"];
   currentDaemonGeneration(): number;
   nowMs(): number;
   startedAt: string;
@@ -191,7 +192,11 @@ export class DaemonReadModel {
     });
     const pollingContract = await this.ports.workerAuthority.pollingContract(entry);
     const recovery = await this.ports.manifest.pendingRuntimeRecovery(entry.id);
-    return { ...projected, runtime_generation_id: this.runtimeGenerationId(entry),
+    return { ...projected,
+      provider_progress: entry.desired_state === "running" && entry.condition === "none"
+        && !["stopped", "failed", "stopping"].includes(entry.observed_state)
+        ? this.ports.compactionProgress?.(entry) ?? null : null,
+      runtime_generation_id: this.runtimeGenerationId(entry),
       runtime_recovery: recovery ? { operationId: recovery.operation_id, roomId: recovery.room_id,
         executionGenerationId: recovery.execution_generation_id, runtimeGenerationId: recovery.runtime_generation_id,
         mode: recovery.mode, phase: recovery.phase as "prepared" | "stopped" } : null,

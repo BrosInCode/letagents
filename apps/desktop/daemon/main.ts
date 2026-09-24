@@ -421,6 +421,7 @@ export class SupervisorDaemon {
     });
     this.providerExecution = providerPort
       ? new ProviderExecutionCoordinator({
+        notifyProgressChanged: () => this.notifyStateChanged(),
         refreshManagedRuntime: (entryId) => this.runtimeConfigurationApply.refreshManaged(entryId),
         settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
         provider: providerPort,
@@ -626,6 +627,8 @@ export class SupervisorDaemon {
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
       ) : null;
     this.readModel = new DaemonReadModel({
+      compactionProgress: (entry) => entry.work_attempt_id
+        ? this.providerPort?.compactionProgress?.(entry.work_attempt_id, entry.provider) ?? null : null,
       deliveryAdmission: (entry) => this.providerStreams.deliveryAdmission(entry),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),

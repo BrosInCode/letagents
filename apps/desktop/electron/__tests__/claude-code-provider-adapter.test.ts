@@ -1,3 +1,4 @@
+import { ClaudeCompaction } from "../main/agents/claude-compaction.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -878,7 +879,7 @@ for (const withOptionalSink of [false, true]) {
 
 // SDKStatusMessage and SDKHookResponseMessage carry these fixed enums.
 // Retain the observed distinction, not the cause of a historical native stall.
-test("bootstrap diagnostics distinguish observed progress without changing acquisition", async () => {
+test("bootstrap diagnostics distinguish observed progress at the appropriate bounded deadline", async () => {
   const diagnostics: string[] = [];
   for (const category of ["compacting", "requesting", "hook_error"] as const) {
     const privateText = "private-hook-output-token";
@@ -890,7 +891,7 @@ test("bootstrap diagnostics distinguish observed progress without changing acqui
         : { type: "system", subtype: "status", status: category, session_id: sessionId }),
     });
     const streams: ProviderStreamEvent[] = [];
-    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40,
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40, compactionTimeoutMs: 40,
       streamSink: event => streams.push(event),
     });
     const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
@@ -901,7 +902,7 @@ test("bootstrap diagnostics distinguish observed progress without changing acqui
       provider: "claude-code", providerContinuationId: saved }, request)), error => {
       assert.ok(error instanceof Error);
       assert.equal(error.name, "ClaudeBootstrapError");
-      assert.match(error.message, /bootstrap turn \(deadline\)/);
+      assert.match(error.message, category === "compacting" ? /bootstrap turn \(compaction_deadline\)/ : /bootstrap turn \(deadline\)/);
       assert.match(error.message, /stdout_lines=4; matched_session_lines=4/);
       assert.match(error.message, /api_retry_count=0; assistant_count=0; result_count=0/);
       const expected = category === "hook_error" ? "system.hook_response.error" : `system.status.${category}`;
@@ -2659,4 +2660,145 @@ for (const cause of ["cancel", "result"] as const) test(`Claude retires an evict
     assert.equal(h.closures.length, 1);
     await assert.rejects(h.adapter.replyPermission(h.handle, original, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
   } finally { await h.close(); }
+});
+
+
+test("compaction uses cumulative separate budgets; repeated starts and cleared statuses never refill them", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  let wakes = 0;
+  const tracker = new ClaudeCompaction("session", 30_000, 300_000,
+    () => new Date(clock).toISOString(), () => { wakes++; }, () => clock);
+  const tick = (ms: number) => { clock += ms; t.mock.timers.tick(ms); };
+  const status = (value: unknown, extra = {}) => tracker.observe({ type: "system", subtype: "status", session_id: "session", status: value, ...extra });
+  tick(10_000);
+  status("compacting");
+  const first = tracker.progress();
+  tick(100_000);
+  status("compacting");
+  assert.deepEqual(tracker.progress(), first);
+  assert.equal(wakes, 1);
+  status(null); // Ends busy status, but is never a bootstrap result.
+  tick(10_000);
+  status("compacting");
+  tick(199_999);
+  assert.equal(tracker.failure, null);
+  tick(1);
+  assert.equal(await tracker.deadline, "compaction_deadline");
+  assert.equal(tracker.progress(), null);
+  tracker.close();
+});
+
+for (const completion of ["boundary", "success", "cleared", "requesting"] as const) {
+  test(`compaction ${completion} resumes only the unused normal startup budget`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let clock = 0;
+    const tracker = new ClaudeCompaction("session", 30_000, 300_000, () => "2026-09-24T00:00:00Z", undefined, () => clock);
+    const tick = (ms: number) => { clock += ms; t.mock.timers.tick(ms); };
+    tick(20_000);
+    tracker.observe({ type: "system", subtype: "status", session_id: "session", status: "compacting" });
+    tick(60_000);
+    tracker.observe({ type: "system", session_id: "session", subtype: completion === "boundary" ? "compact_boundary" : "status",
+      status: completion === "requesting" ? "requesting" : null, ...(completion === "success" ? { compact_result: "success" } : {}) });
+    assert.equal(tracker.progress(), null);
+    tick(9_999);
+    assert.equal(tracker.failure, null);
+    tick(1);
+    assert.equal(await tracker.deadline, "deadline");
+    tracker.close();
+  });
+}
+
+test("foreign, missing-session and subagent compaction cannot extend startup; explicit failure wins", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  const tracker = new ClaudeCompaction("session", 30_000, 300_000, () => "now", undefined, () => clock);
+  for (const extra of [{ session_id: "other" }, {}, { session_id: "session", parent_tool_use_id: "subagent" }]) {
+    tracker.observe({ type: "system", subtype: "status", status: "compacting", ...extra });
+    assert.equal(tracker.progress(), null);
+  }
+  tracker.observe({ type: "system", subtype: "status", session_id: "session", status: "compacting", compact_result: "failed", compact_error: "PRIVATE" });
+  assert.equal(await tracker.deadline, "compaction_failed");
+  assert.equal(tracker.progress(), null);
+  tracker.close();
+  tracker.observe({ type: "system", subtype: "status", session_id: "session", status: "compacting" });
+  assert.equal(tracker.progress(), null);
+});
+
+test("router exposes exact child compaction before admission, then ordinary bootstrap proof is still required", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  t.mock.method(performance, "now", () => clock);
+  const pump = async () => { for (let n = 0; n < 40; n++) await Promise.resolve(); };
+  const harness = createHarness({ omitBootstrapResult: true,
+    bootstrapMessages: session_id => [{ type: "system", subtype: "status", status: "compacting", session_id }] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  let wakes = 0;
+  const req = { ...spawnRequest({ onProgress: () => wakes++ }), provider: "claude-code" };
+  let admitted = false;
+  const launched = router.spawn(req).then((handle: { observedState: string }) => { admitted = true; return handle; });
+  await pump();
+  assert.equal(router.compactionProgress(req.workAttemptId, "claude-code")?.state, "compacting");
+  assert.equal(router.compactionProgress(req.workAttemptId, "codex"), null);
+  assert.equal(router.compactionProgress("another-attempt", "claude-code"), null);
+  clock = 60_000; t.mock.timers.tick(60_000); await pump();
+  assert.equal(admitted, false);
+  assert.deepEqual(harness.signals, []);
+  const child = harness.children[0]!;
+  const session = argValue(harness.launches[0]!.args, "--session-id")!;
+  child.emit({ type: "system", subtype: "compact_boundary", session_id: session });
+  await pump();
+  assert.equal(admitted, false, "compaction completion is not readiness");
+  assert.equal(router.compactionProgress(req.workAttemptId, "claude-code"), null);
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id: session,
+    user_message_uuid: JSON.parse(child.written[0]!).uuid, result: "LETAGENTS_CLAUDE_DAEMON_READY" });
+  const handle = await launched;
+  assert.equal(handle.observedState, "idle");
+  child.emit({ type: "system", subtype: "status", session_id: session, status: "compacting" });
+  assert.equal(router.compactionProgress(req.workAttemptId, "claude-code")?.state, "compacting",
+    "the same owner supplies progress for later native turns");
+  child.emit({ type: "system", subtype: "status", session_id: "other", status: null });
+  assert.ok(router.compactionProgress(req.workAttemptId, "claude-code"));
+  harness.identities.set(child.pid!, null);
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await pump();
+  assert.equal(router.compactionProgress(req.workAttemptId, "claude-code"), null);
+  assert.ok(wakes >= 4);
+});
+
+for (const elapsed of [299_999, 300_001]) test(`bootstrap admission accounts ${elapsed}ms compaction even before its timer runs`, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  t.mock.method(performance, "now", () => clock);
+  const harness = createHarness({ omitBootstrapResult: true,
+    bootstrapMessages: session_id => [{ type: "system", subtype: "status", status: "compacting", session_id }] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const launched = adapter.spawn(spawnRequest());
+  for (let n = 0; n < 40; n++) await Promise.resolve();
+  const child = harness.children[0]!;
+  clock = elapsed; // Intentionally leave the overdue timer undelivered.
+  child.emit({ type: "result", subtype: "success", is_error: false,
+    session_id: argValue(harness.launches[0]!.args, "--session-id"),
+    user_message_uuid: JSON.parse(child.written[0]!).uuid, result: "LETAGENTS_CLAUDE_DAEMON_READY" });
+  if (elapsed < 300_000) {
+    assert.equal((await launched).observedState(), "idle");
+    harness.identities.set(child.pid!, null);
+    child.resolveExit({ type: "exit", code: 0, signal: null });
+  } else {
+    await assert.rejects(launched, { reason: "compaction_deadline" });
+    assert.deepEqual(harness.signals, [{ pid: child.pid, signal: "SIGTERM" }]);
+  }
+  for (let n = 0; n < 40; n++) await Promise.resolve();
+  assert.equal(adapter.compactionProgress("wa-claude-1"), null);
+});
+
+for (const sameBatchExit of [false, true]) test(`buffered explicit compaction failure blocks a success result (same-batch exit=${sameBatchExit})`, async () => {
+  const harness = createHarness({
+    ...(sameBatchExit ? { exitAfterBootstrapResult: { type: "exit" as const, code: 0, signal: null } } : {}),
+    bootstrapMessages: session_id => [{ type: "system", subtype: "status", status: null, compact_result: "failed", session_id }],
+  });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest()), { reason: "compaction_failed" });
+  assert.equal(adapter.compactionProgress("wa-claude-1"), null);
 });
