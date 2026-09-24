@@ -30,6 +30,7 @@ import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProce
 // separately compiled source tree into Electron's production rootDir.
 const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
 const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
+const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
 
 // Fake-child harness proving the P2a adapter honors every #765 liveness
 // invariant with no live `claude` binary: birth-identity fencing, control-loss
@@ -785,6 +786,67 @@ test("failed resumed acquisition binds death to the saved continuation and immut
     return true;
   });
 });
+
+// Characterization of the missing startup diagnostics, not a claim about the
+// live NorthPoint failure. api_retry has the published SDKAPIRetryMessage shape.
+for (const withOptionalSink of [false, true]) {
+  test(`bootstrap retry diagnostic is lost at rejected acquisition (optional sink: ${withOptionalSink})`, async () => {
+    const harness = createHarness({ omitBootstrapResult: true });
+    const saved = "saved-bootstrap-diagnostic-session";
+    const retry = {
+      type: "system", subtype: "api_retry", session_id: saved,
+      uuid: "00000000-0000-4000-8000-000000000001",
+      attempt: 1, max_retries: 10, retry_delay_ms: 1000,
+      error_status: 529, error: "overloaded",
+    };
+    let emitted = 0;
+    const launch = harness.dependencies.launchChild;
+    harness.dependencies.launchChild = input => {
+      const child = launch(input) as FakeClaudeChild;
+      const write = child.writeLine.bind(child);
+      child.writeLine = line => {
+        write(line);
+        queueMicrotask(() => { emitted += 1; child.emit(retry); });
+      };
+      return child;
+    };
+    const streams: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({
+      dependencies: harness.dependencies, initTimeoutMs: 40,
+      ...(withOptionalSink ? { streamSink: (event: ProviderStreamEvent) => streams.push(event) } : {}),
+    });
+    const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+    const request = { ...spawnRequest({ supervisorEntryId: "entry-diagnostic",
+      supervisorExecutionGenerationId: "execution-diagnostic" }), provider: "claude-code" };
+    let admitted = false;
+    await assert.rejects(withLoopAlive(router.resume({ workAttemptId: request.workAttemptId,
+      provider: "claude-code", providerContinuationId: saved }, request).then(() => {
+      admitted = true;
+    })), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ClaudeBootstrapError");
+      assert.equal((error as Error & { phase: string }).phase, "bootstrap_turn");
+      assert.equal((error as Error & { reason: string }).reason, "deadline");
+      const evidence = providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request, saved));
+      assert.ok(evidence?.terminal.nativeRuntimeDeath, "existing exact death evidence still survives");
+      assert.equal(evidence.terminal.providerContinuationId, saved);
+      assert.doesNotMatch(`${error.message} ${JSON.stringify(error)} ${JSON.stringify(evidence)}`,
+        /api_retry|overloaded|529/, "the caller loses the structured retry diagnostic");
+      return true;
+    });
+    assert.equal(emitted, 1);
+    assert.equal(admitted, false, "failed startup must not admit a handle");
+    assert.deepEqual(router.runtimeCustody(request.workAttemptId, "claude-code"), { state: "absent" });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+    assert.equal(harness.mcpConfigDisposals, 1);
+    const retryEvents = streams.filter(event => event.method === "system/api_retry");
+    assert.equal(retryEvents.length, withOptionalSink ? 1 : 0,
+      "positive control proves the adapter consumes the event before failure");
+    if (withOptionalSink) assert.deepEqual(retryEvents[0]!.payload, retry);
+  });
+}
 
 for (const phase of ["init", "bootstrap_turn"] as const) {
   for (const reason of ["deadline", "native_exit", "transport_error"] as const) {
