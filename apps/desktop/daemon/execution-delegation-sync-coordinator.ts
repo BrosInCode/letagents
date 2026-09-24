@@ -3,6 +3,7 @@ import { collectBoundedInventory } from "./bounded-inventory.js";
 import type { ExecutionDelegationInventoryScope } from "./execution-delegation-journal.js";
 import type { DaemonManifestEntry } from "./types.js";
 import type { InstalledHostGrant } from "./worker-runtime-custody.js";
+import type { ConvergenceRequestKind } from "./provider-execution-coordinator.js";
 
 type SyncLane = {
   controller: AbortController;
@@ -29,7 +30,7 @@ export type ExecutionDelegationSyncOptions = {
   };
   remote: Pick<SupervisorGrantHttp, "listExecutionDelegationIds">;
   entryObserved?(entryId: string): void;
-  requestConvergence(entryId: string): void;
+  requestConvergence(entryId: string, kind: ConvergenceRequestKind): void;
   diagnostic(entryId: string, error: unknown): void;
 };
 
@@ -154,9 +155,11 @@ export class ExecutionDelegationSyncCoordinator {
         throw new Error("Execution delegation authority changed during reconciliation.");
       }
     } catch (error) {
-      if (reconciledAny) this.options.requestConvergence(entryId);
+      if (reconciledAny) this.options.requestConvergence(entryId, "owned");
       throw error;
     }
-    this.options.requestConvergence(entryId);
+    // An empty inventory did not reconcile authority. It may remind an agent
+    // with new launch inputs, but cannot replay an unchanged failed startup.
+    this.options.requestConvergence(entryId, reconciledAny ? "owned" : "rehydration");
   }
 }
