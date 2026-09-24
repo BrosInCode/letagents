@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -322,6 +322,35 @@ test("HTTP publication validates exact receipts, both clear responses, and never
 });
 
 for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
+  test(`${provider} settles unchanged work without a workspace publication across restart`, async t => {
+    const f = await fixture(t, provider);
+    f.options.workspaceLocation = async () => f.location;
+    // Earlier work must not be attributed to this read-only turn.
+    await writeFile(join(f.location.path, 'app.ts'), 'previous turn\n');
+    f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+    const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+    assert.ok(baseline);
+    const attemptId = f.captureMessage();
+    f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+    f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attemptId);
+    await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
+    await f.publisher.flush();
+    const settled = JSON.parse(String(f.db.prepare('SELECT settled_json FROM room_workspace_captures').get()!.settled_json));
+    assert.equal(settled.contribution.changes.state, 'ready');
+    assert.deepEqual(settled.contribution.changes.files, []);
+    assert.equal(settled.workspace.files.length, 1, 'cumulative prior work is retained locally');
+    assert.equal(f.row().summary?.recorded_state, 'completed_no_reply');
+    assert.equal(f.row().summary?.version, 1, 'execution receipt has no workspace artifact');
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM room_workspace_reviews').get()!.n, 0);
+    const sent = f.sent.length;
+    f.options.workspaceLocation = async () => { throw new Error('No recapture for a settled no-op'); };
+    f.restart();
+    await f.publisher.flush(); await f.publisher.flush();
+    await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
+    assert.equal(f.sent.length, sent, 'no retry publication or workspace upload after restart');
+    assert.equal(f.row().revision, f.row().acknowledgedRevision);
+  });
+
   test(`${provider} publishes workspace review after a no-reply turn through the shared path`, async t => {
     const f = await fixture(t, provider);
     const reads: string[] = [];
@@ -347,6 +376,102 @@ for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const
     assert.deepEqual(f.row().summary?.workspace, saved.workspace, "the review snapshot survives daemon restart");
   });
 }
+
+test('unavailable capture retains uncertainty without publishing an empty workspace review', async t => {
+  const f = await fixture(t);
+  f.options.workspaceLocation = async () => ({ path: join(f.location.path, 'absent'), revision: null });
+  f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+  const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.equal(baseline, null);
+  f.captureMessage();
+  f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
+  await f.publisher.flush();
+  const settled = JSON.parse(String(f.db.prepare('SELECT settled_json FROM room_workspace_captures').get()!.settled_json));
+  assert.equal(settled.workspace.state, 'unavailable');
+  assert.equal(settled.contribution.changes.state, 'unavailable', 'unavailable is not an unchanged snapshot');
+  assert.equal(f.row().summary?.version, 1);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM room_workspace_reviews').get()!.n, 0);
+  const sent = f.sent.length;
+  f.restart(); await f.publisher.flush(); await f.publisher.flush();
+  assert.equal(f.sent.length, sent);
+});
+
+for (const change of ['binary', 'rename', 'mode', 'empty deletion'] as const) {
+  test(`${change} with zero textual line totals still publishes a review`, async t => {
+    const f = await fixture(t);
+    f.options.workspaceLocation = async () => f.location;
+    if (change === 'empty deletion') await writeFile(join(f.location.path, 'empty.txt'), '');
+    f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+    const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+    assert.ok(baseline);
+    if (change === 'binary') await writeFile(join(f.location.path, 'image.bin'), Buffer.from([0, 1, 2]));
+    if (change === 'rename') await rename(join(f.location.path, 'app.ts'), join(f.location.path, 'renamed.ts'));
+    if (change === 'mode') await chmod(join(f.location.path, 'app.ts'), 0o755);
+    if (change === 'empty deletion') await rm(join(f.location.path, 'empty.txt'));
+    f.captureMessage(); f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+    await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
+    await f.publisher.flush();
+    assert.equal(f.row().summary?.version, 3);
+    const changes = f.row().summary!.contribution!.changes;
+    assert.equal(changes.state, 'ready');
+    assert.equal(changes.additions + changes.deletions, 0);
+    assert.equal(changes.files.length, 1);
+    assert.ok(f.sent.at(-1)?.reviewPage);
+  });
+}
+
+test('unavailable baseline still offers meaningful cumulative work without inventing turn attribution', async t => {
+  const f = await fixture(t);
+  f.options.workspaceLocation = async () => f.location;
+  f.captureMessage();
+  await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  await writeFile(join(f.location.path, 'app.ts'), 'existing work\n');
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, null);
+  await f.publisher.flush();
+  assert.equal(f.row().summary?.version, 3);
+  assert.equal(f.row().summary?.contribution?.changes.state, 'unavailable');
+  assert.match(f.row().summary!.workspace!.patch, /\+existing work/);
+  assert.ok(f.sent.at(-1)?.reviewPage);
+});
+
+test('no-review settlement before execution evidence stays settled after restart', async t => {
+  const f = await fixture(t);
+  f.options.workspaceLocation = async () => f.location;
+  f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+  const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
+  assert.equal(f.row().summary, null);
+  f.restart();
+  await writeFile(join(f.location.path, 'app.ts'), 'later unrelated change\n');
+  f.captureMessage(1, false);
+  await f.publisher.flush();
+  assert.equal(f.row().summary?.version, 1);
+  assert.ok(f.sent.every(sent => !sent.reviewPage && !sent.summary.workspace));
+});
+
+test('legacy empty archive stays preserved without upload retries or payload rewriting', async t => {
+  const { RoomWorkspaceStore } = await import('../room-workspace-store.js');
+  const { unavailableWorkspace } = await import('../../../../shared/workspace-turn-capture.mjs');
+  const f = await fixture(t);
+  f.captureMessage(); f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+  const captured = f.summary();
+  const snapshot = unavailableWorkspace();
+  const summary = { ...captured.summary, version: 3 as const, workspace: snapshot, contribution: { changes: snapshot, summary: null } };
+  const store = new RoomWorkspaceStore(f.db);
+  const identity = { agentId: 'agent', roomId: 'room', sourceMessageId: 'msg_1', workAttemptId: 'workspace', inboxItemId: 'inbox-1' };
+  store.begin(identity);
+  store.settle(identity, summary, { version: 1, workspace: snapshot, contribution: snapshot });
+  f.receipts.stage(f.row(), { ...captured, summary });
+  f.receipts.acknowledge(f.row());
+  const oldPage = store.pendingPage('agent', 'room', 'msg_1');
+  assert.ok(oldPage, 'old releases stored an empty archive');
+  await f.publisher.flush();
+  f.restart(); await f.publisher.flush(); await f.publisher.flush();
+  assert.equal(f.sent.length, 0, 'no useless page upload or retry from old pending pages');
+  assert.deepEqual(f.row().summary, summary);
+  assert.deepEqual(store.pendingPage('agent', 'room', 'msg_1'), oldPage, 'old evidence is retained, not falsely acknowledged or deleted');
+});
 
 test('v36 upgrades existing publication receipts to store real diffs without losing history', async t => {
   const f = await fixture(t);
@@ -375,6 +500,7 @@ test('a background staging pass preserves a workspace captured while its authori
   f.captureMessage();
   f.options.workspaceLocation = async () => f.location;
   await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  await writeFile(join(f.location.path, 'app.ts'), 'real captured work\n');
   let checks = 0;
   f.options.assertCurrent = async () => {
     // First check enters flush; second occurs after stageChanged loaded its v1 row.

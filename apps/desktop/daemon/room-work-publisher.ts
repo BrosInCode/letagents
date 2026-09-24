@@ -1,4 +1,5 @@
 import { readableContributionText } from "../../../shared/contribution-text.mjs";
+import { hasReviewableRoomContribution } from "../../../shared/room-agent-work.mjs";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
 import { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
 import type { DatabaseSync } from "node:sqlite";
@@ -124,8 +125,12 @@ export class RoomWorkPublisher {
       };
       const { review, ...preview } = pair;
       const summary = { ...execution, version: 3 as const, ...preview };
-      this.workspaces.settle(identity, summary, review);
-      if (captured.availability === "available") this.store.stage(current.record, { ...captured, summary });
+      const reviewable = hasReviewableRoomContribution(summary);
+      // Settlement is also the durable no-review decision. Preserve unavailable
+      // evidence instead of treating it as no change or recapturing on restart.
+      this.workspaces.settle(identity, summary, reviewable ? review : undefined);
+      if (captured.availability === "available") this.store.stage(current.record,
+        reviewable ? { ...captured, summary } : captured);
       this.changed(agent.agentId);
       await releaseWorkspaceTree(location.path, ref);
     } catch { this.report("storage_unavailable"); }
@@ -193,6 +198,11 @@ export class RoomWorkPublisher {
     return sameWorkerPublicationOrigin(left, right, requireOriginalSession);
   }
 
+  private pendingReviewPage(record: RoomWorkPublication) {
+    return hasReviewableRoomContribution(record.summary)
+      ? this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId) : null;
+  }
+
   /** Cheap, bounded change stamps avoid replaying every historical message on every output chunk. */
   private async stageChanged(agentId: string): Promise<boolean> {
     const records = this.store.list(agentId).filter(record => record.state === "open");
@@ -252,7 +262,9 @@ export class RoomWorkPublisher {
         const current = this.store.get(record.agentId, record.roomId, record.sourceMessageId);
         if (!current || current.state !== "open") continue;
         const settled = this.workspaces.settled(record.agentId, record.roomId, record.sourceMessageId) ?? current.summary;
-        if (settled?.workspace) captured.summary = { ...captured.summary, version: settled.contribution ? 3 : 2,
+        // Retain already-staged legacy payloads; do not rewrite shared history.
+        // New no-review settlements contribute execution evidence only.
+        if (settled?.workspace && (current.summary?.workspace || hasReviewableRoomContribution(settled))) captured.summary = { ...captured.summary, version: settled.contribution ? 3 : 2,
           workspace: settled.workspace, ...(settled.contribution ? { contribution: settled.contribution } : {}) };
         this.store.stage(current, captured);
         previous.set(recordKey, stamp);
@@ -286,7 +298,7 @@ export class RoomWorkPublisher {
       catch { this.report("storage_unavailable"); }
       if (this.unavailable()) return;
       const pending = this.store.list(agentId)
-        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId)))
+        .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.pendingReviewPage(record)))
         .sort((a, b) => (this.attemptedAt.get(key(a)) ?? -Infinity) - (this.attemptedAt.get(key(b)) ?? -Infinity));
       const eligible: Array<{ record: RoomWorkPublication; authority: NonNullable<ReturnType<RoomWorkPublisher["authority"]>> }> = [];
       for (const record of pending) {
@@ -302,7 +314,7 @@ export class RoomWorkPublisher {
         if (this.unavailable() || current?.grant !== authority.grant || current?.worker !== authority.worker) continue;
         this.attemptedAt.set(key(record), this.now());
         try {
-          const reviewPage = this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId);
+          const reviewPage = this.pendingReviewPage(record);
           const result = await (this.options.publish ?? publishRoomWork)({ apiOrigin: record.apiOrigin,
             grantId: authority.grant.grantId, supervisorGrant: authority.grant.supervisorGrant,
             grantGeneration: authority.grant.grantGeneration, sessionId: authority.worker.agentSessionId,
@@ -314,7 +326,7 @@ export class RoomWorkPublisher {
             this.store.acknowledge(record);
             if (reviewPage) {
               this.workspaces.acknowledgePage(record.agentId, record.roomId, record.sourceMessageId, reviewPage);
-              more = more || !!this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId);
+              more = more || !!this.pendingReviewPage(record);
             }
             this.attemptedAt.delete(key(record));
           }
