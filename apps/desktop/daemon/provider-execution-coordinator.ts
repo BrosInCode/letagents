@@ -1520,7 +1520,7 @@ export class ProviderExecutionCoordinator {
         },
       } : {}),
     };
-    const acquisition = providerAcquisitionIdentity(entry.provider, spawn, resumed ? ref!.providerContinuationId : null);
+    const acquisition = providerAcquisitionIdentity(launchSnapshot.provider, spawn, resumed ? ref!.providerContinuationId : null);
     let handle: ProviderActionHandle | null = null;
     let providerPersisted = false;
     let providerDispatched = false;
