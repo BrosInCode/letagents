@@ -1,3 +1,4 @@
+import { ClaudeCompaction, type ClaudeStartupDeadline } from "./claude-compaction.js";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -125,8 +126,10 @@ export interface ClaudeCodeProviderAdapterOptions {
   dependencies?: Partial<ClaudeCodeProviderAdapterDependencies>;
   activitySink?: (event: ProviderActivityEvent) => void;
   streamSink?: (event: ProviderStreamEvent) => void;
-  /** Startup-only bound on waiting for the stream-json init message. */
+  /** Cumulative startup time outside positively observed compaction. */
   initTimeoutMs?: number;
+  /** Cumulative time spent compacting during one startup; defaults to five minutes. */
+  compactionTimeoutMs?: number;
   /** SIGTERM → SIGKILL escalation window for stop() and the attach-path fence. */
   stopGraceMs?: number;
 }
@@ -431,7 +434,7 @@ class ClaudeBootstrapDiagnostics {
     }
   }
 
-  summary(child: ClaudeCliChild): string {
+  summary(child: ClaudeCliChild, compactionFields: string[] = []): string {
     const failedAt = performance.now();
     const elapsed = (start: number, end: number) => Math.max(0, Math.round(end - start));
     let stderrBytes: number | null = null;
@@ -450,6 +453,7 @@ class ClaudeBootstrapDiagnostics {
     const omittedTypes = this.lineTypes.size - lineTypes.length;
     if (omittedTypes) lineTypes.push(`omitted_types:${omittedTypes}`);
     const fields = [
+      ...compactionFields,
       ...(this.lastApiRetry === null ? [] : [`last_api_retry=${this.lastApiRetry}`]),
       ...(this.assistantError === null ? [] : [`assistant_error=${this.assistantError}`]),
       ...(this.result === null ? [] : [`result=${this.result}`]),
@@ -475,13 +479,13 @@ class ClaudeBootstrapDiagnostics {
 
 class ClaudeBootstrapError extends Error {
   readonly name = "ClaudeBootstrapError";
-  readonly reason: "deadline" | "native_exit" | "transport_error" | "failed_response";
+  readonly reason: ClaudeStartupDeadline | "native_exit" | "transport_error" | "failed_response";
   readonly exitCode?: number | null;
   readonly signal?: string | null;
 
   constructor(
     readonly phase: "init" | "bootstrap_turn",
-    failure: ProviderProcessExit | { type: "deadline" | "failed_response" },
+    failure: ProviderProcessExit | { type: ClaudeStartupDeadline | "failed_response" },
     observations: string,
   ) {
     const reason = failure.type === "exit" ? "native_exit"
@@ -813,6 +817,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly initTimeoutMs: number;
+  private readonly compactionTimeoutMs: number;
+  private readonly compactions = new Map<string, ClaudeCompaction>();
+  private readonly handleCompactions = new WeakMap<ClaudeProviderHandle, ClaudeCompaction>();
   private readonly stopGraceMs: number;
   private readonly handles = new Map<string, ClaudeProviderHandle>();
   private readonly processCustody: ProviderProcessCustody;
@@ -829,12 +836,17 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
     this.initTimeoutMs = options.initTimeoutMs ?? INIT_TIMEOUT_MS;
+    this.compactionTimeoutMs = options.compactionTimeoutMs ?? 300_000;
     this.stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   }
 
   runtimeCustody(workAttemptId: string, providerHandle?: ProviderHandle): "absent" | "owned" | "unknown" {
     const handle = this.handles.get(workAttemptId);
     return this.processCustody.state(workAttemptId, handle === providerHandle ? handle?.child : undefined);
+  }
+
+  compactionProgress(workAttemptId: string): { state: "compacting"; startedAt: string } | null {
+    return this.compactions.get(workAttemptId)?.progress() ?? null;
   }
 
   capabilities(): ProviderAdapterCapabilities {
@@ -1416,6 +1428,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
 
     let handle: ClaudeProviderHandle | null = null;
     const diagnostics = new ClaudeBootstrapDiagnostics(expectedSessionId, bootstrapTurnId, this.initTimeoutMs);
+    const compaction = new ClaudeCompaction(expectedSessionId, this.initTimeoutMs,
+      this.compactionTimeoutMs, this.deps.now, req.onProgress);
+    this.compactions.set(req.workAttemptId, compaction);
+    const closeCompaction = () => {
+      compaction.close();
+      if (this.compactions.get(req.workAttemptId) === compaction) this.compactions.delete(req.workAttemptId);
+    };
+    void child.exited.then(closeCompaction);
+    const unsubscribeCompactionDisconnect = child.onDisconnect(() => compaction.clear());
     let capturingBootstrap = true;
     const pendingLines: string[] = [];
     let init: ClaudeStreamMessage | null = null;
@@ -1440,14 +1461,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.consumeLine(handle, line);
     });
 
-    // The init wait is a REF'D timer (unlike the evidence module's unref'd
-    // delay): startup must stay observable even when nothing else keeps the
-    // supervising process's event loop alive. Cleared as soon as the race ends.
-    let initTimer: ReturnType<typeof setTimeout> | null = null;
     const bootstrapFailure = Symbol("bootstrap-failure");
-    const initTimeout = new Promise<{ [bootstrapFailure]: { type: "deadline" } }>((resolve) => {
-      initTimer = setTimeout(() => resolve({ [bootstrapFailure]: { type: "deadline" } }), this.initTimeoutMs);
-    });
+    const initTimeout = compaction.deadline.then(type => ({ [bootstrapFailure]: { type } }));
     try {
       // Claude does not emit init until it receives one stdin user frame. This
       // bootstrap establishes the continuation but deliberately does no room
@@ -1462,7 +1477,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         initTimeout,
       ]);
       if (bootstrapFailure in observedInit) {
-        throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure], diagnostics.summary(child));
+        throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields()));
       }
       if (req.permissionProfileId === "ask_before_write"
         && (!Array.isArray(observedInit.capabilities) || !observedInit.capabilities.includes("msg_lifecycle_v1"))) {
@@ -1501,6 +1516,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         this.deps.now,
       );
       this.handles.set(req.workAttemptId, handle);
+      this.handleCompactions.set(handle, compaction);
       const exitPromise = handle.exitEvidence.then((exit) => this.observeExit(handle!, exit));
       this.exitPromises.set(handle, exitPromise);
 
@@ -1516,10 +1532,13 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         initTimeout,
       ]);
       if (bootstrapFailure in bootstrapTerminal) {
-        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure], diagnostics.summary(child));
+        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields()));
+      }
+      if (compaction.failure) {
+        throw new ClaudeBootstrapError("bootstrap_turn", { type: compaction.failure }, diagnostics.summary(child, compaction.diagnosticFields()));
       }
       if ("error" in bootstrapTerminal) {
-        throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" }, diagnostics.summary(child));
+        throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" }, diagnostics.summary(child, compaction.diagnosticFields()));
       }
       handle.roomTurnResults.delete(bootstrapTurnId);
       handle.state = "idle";
@@ -1531,6 +1550,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       return handle;
     } catch (error) {
       capturingBootstrap = false;
+      closeCompaction();
+      unsubscribeCompactionDisconnect();
       if (handle) {
         handle.protocolError = true;
       } else {
@@ -1546,7 +1567,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       throw error;
     } finally {
       capturingBootstrap = false;
-      if (initTimer) clearTimeout(initTimer);
+      compaction.finishBootstrap();
       await managedMcpConfig.dispose();
     }
   }
@@ -1654,6 +1675,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.publishStream(handle, "stdout/raw", { line }, "provider_event");
       return;
     }
+    this.handleCompactions.get(handle)?.observe(message);
     // Native approval payloads stay host-ephemeral; do not publish them to room activity.
     if (message.type === "control_request" || message.type === "control_cancel_request") {
       this.consumePermission(handle, message);
@@ -1672,6 +1694,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     );
     this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message),
       nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
+    if (nativeLifecycle?.phase === "turn_terminal") this.handleCompactions.get(handle)?.clear();
     const typedAuthority = handle.lifecycleAuthorityMode === "typed";
     if (typedAuthority && nativeLifecycle?.phase === "turn_active") handle.state = "working";
     if (typedAuthority && nativeLifecycle?.phase === "turn_terminal") handle.state = "idle";

@@ -168,6 +168,7 @@ export type ProviderExecutionCoordinatorOptions = {
     currentControlEpoch(entryId: string): number;
     serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   };
+  notifyProgressChanged?(): void;
   updateManifestEntry(
     entryId: string,
     update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
@@ -1486,6 +1487,7 @@ export class ProviderExecutionCoordinator {
     const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
     let mintedHostSession: BoundWorkerAuthorization | null = null;
     const spawn: ProviderActionSpawn = {
+      onProgress: () => this.options.notifyProgressChanged?.(),
       workAttemptId: attempt.work_attempt_id,
       roomId: entry.room_id,
       cwd: attempt.workspace_path,

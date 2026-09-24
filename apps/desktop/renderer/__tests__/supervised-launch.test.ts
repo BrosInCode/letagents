@@ -449,3 +449,19 @@ test("the agent name is withheld until the launch is actually ready", () => {
   }));
   assert.equal(progress.agentName, null);
 });
+
+
+test("native compaction is visible during startup without completing any readiness gate", () => {
+  const starting = entry({ provider: "claude-code", workspacePath: "/tmp/wt",
+    providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+  const progress = supervisedLaunchProgress(starting);
+  assert.equal(progress.headline, "Compacting conversation");
+  assert.equal(progress.phases.find(phase => phase.state === "active")?.label, "Compacting conversation");
+  assert.equal(progress.ready, false);
+  assert.equal(progress.failed, false);
+  assert.match(progress.joinHint!, /summarizing/);
+  assert.equal(supervisedLaunchProgress({ ...starting, providerProgress: null }).headline, "Starting Claude Code agent");
+  for (const override of [{ desiredState: "paused" }, { desiredState: "stopped" }, { condition: "coordination_blocked", lastError: "Failed" }, { observedState: "failed" }, { provider: "codex" }] as Partial<DesktopSupervisorManifestEntry>[]) {
+    assert.notEqual(supervisedLaunchProgress({ ...starting, ...override }).headline, "Compacting conversation");
+  }
+});

@@ -24,6 +24,14 @@ import { safeUserVisibleErrorDetail } from "./user-visible-error";
 import { normalizeAgentKey } from "./agents";
 import { supervisedAgentDisplayLabel } from "./codenames";
 
+/** Current native-owner progress, never inferred from saved activity or a timer. */
+export function agentCompactionProgress(entry: Pick<DesktopSupervisorManifestEntry,
+  "provider" | "providerProgress" | "desiredState" | "observedState" | "condition">) {
+  return entry.provider === "claude-code" && entry.desiredState === "running"
+    && entry.condition === "none" && !["stopped", "stopping", "failed"].includes(entry.observedState)
+    && entry.providerProgress?.state === "compacting" ? entry.providerProgress : null;
+}
+
 export interface AgentSetupConfirmation {
   providerId: DesktopAgentProviderId;
   action: DesktopAgentProviderSetupAction;
@@ -395,7 +403,7 @@ export function supervisedAgentWorkIndicators(
           boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
           entry.id,
         ),
-        summary: latest
+        summary: agentCompactionProgress(entry) ? "Compacting conversation" : latest
           ? humanFacingSupervisorActivitySummary(latest)
           : roomTurnFallbackSummary(turn.state),
         startedAt: turnStartedAt

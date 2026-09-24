@@ -151,6 +151,7 @@ export function onSupervisorDaemonGeneration(
 
 type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
 type WireEntry = {
+  provider_progress?: DesktopSupervisorManifestEntry["providerProgress"];
   runtime_recovery?: DesktopSupervisorManifestEntry["runtimeRecovery"];
   local_room_id?: string;
   runtime_generation_id?: string | null;
@@ -2309,6 +2310,10 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     providerPid: entry.provider_ref?.provider_connection?.pid ?? null,
     runtimeGenerationId: nonEmptyString(entry.runtime_generation_id) ?? null,
     runtimeRecovery: entry.runtime_recovery ?? null,
+    providerProgress: entry.provider_progress?.state === "compacting"
+      && typeof entry.provider_progress.startedAt === "string"
+      && Number.isFinite(Date.parse(entry.provider_progress.startedAt))
+      ? { state: "compacting", startedAt: entry.provider_progress.startedAt } : null,
     workplaceLiveness: {
       state: entry.workplace_liveness?.state ?? "unknown",
       observedAt: entry.workplace_liveness?.observed_at ?? null,

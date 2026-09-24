@@ -3451,3 +3451,12 @@ for (const takeover of [false, true]) test(`provider-aware ${takeover ? "startup
     if (!takeover) assert.equal((await client.ensureRunning()).generation, 7, "deferral restores the original daemon's admission");
   } finally { defer(); await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
+
+
+test("compaction projection is optional and accepts only finite structured progress", () => {
+  const wire = wireEntryWithCausalProjection();
+  assert.equal(mapEntry(wire).providerProgress, null);
+  const progress = { state: "compacting" as const, startedAt: "2026-09-24T00:00:00Z" };
+  assert.deepEqual(mapEntry({ ...wire, provider_progress: progress }).providerProgress, progress);
+  assert.equal(mapEntry({ ...wire, provider_progress: { ...progress, startedAt: "invalid" } }).providerProgress, null);
+});

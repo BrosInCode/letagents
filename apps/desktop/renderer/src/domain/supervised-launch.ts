@@ -1,6 +1,7 @@
 import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
+import { agentCompactionProgress } from "./managed-agents";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
@@ -88,6 +89,7 @@ type LaunchFields = Pick<
   | "id"
   | "displayName"
   | "provider"
+  | "providerProgress"
   | "desiredState"
   | "observedState"
   | "condition"
@@ -178,6 +180,7 @@ function reachedIndex(entry: LaunchFields): number {
 
 export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchProgress {
   const providerLabel = supervisedLaunchProviderLabel(entry.provider);
+  const compacting = agentCompactionProgress(entry);
   const missingRuntimeDetail = missingProviderRuntimeDetail(entry, providerLabel);
   const agentDisplayName = supervisedAgentDisplayLabel(entry.displayName, entry.id);
   const reached = reachedIndex(entry);
@@ -216,7 +219,7 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
       return { id: phase.id, label: phase.label, state: "done" };
     }
     if (index === activeIndex) {
-      return { id: phase.id, label: phase.label, state: failed ? "failed" : "active" };
+      return { id: phase.id, label: compacting && !failed ? "Compacting conversation" : phase.label, state: failed ? "failed" : "active" };
     }
     return { id: phase.id, label: phase.label, state: "pending" };
   });
@@ -253,6 +256,8 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     headline = `${providerLabel} needs help reconnecting`;
   } else if (failed) {
     headline = `${providerLabel} agent needs attention`;
+  } else if (compacting) {
+    headline = "Compacting conversation";
   } else {
     headline = `Starting ${providerLabel} agent`;
   }
@@ -271,7 +276,8 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     providerLabel,
     headline,
     failureDetail,
-    joinHint: ready || failed || stopping || stopped ? null : JOIN_HINT,
+    joinHint: ready || failed || stopping || stopped ? null : compacting
+      ? "Claude is summarizing the conversation so it can continue." : JOIN_HINT,
   };
 }
 

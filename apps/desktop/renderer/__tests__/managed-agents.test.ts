@@ -2173,3 +2173,17 @@ test("repo-less Cursor setup offers read-only and reserves write profiles for a 
     assert.equal(supervisedPermissionProfilePresentation("claude-code", profile, { hasProject: false }).status, "available");
   }
 });
+
+
+test("room work indicator reflects current compaction but cannot invent a room turn", () => {
+  const base = supervisorEntry({ provider: "claude-code", desiredState: "running", observedState: "working", condition: "none",
+    agentSessionBindingState: "active", providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" },
+    roomAgentState: { connection: { state: "connected", observedAt: null, detail: null },
+      ingress: { state: "observing", observedAt: null, detail: null },
+      inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "responding", inboxItemId: "inbox", sourceMessageId: "msg", providerTurnId: "turn", detail: null },
+      task: { state: "none", taskId: null, title: null } } });
+  assert.equal(supervisedAgentWorkIndicators([base], [], "room_1")[0]?.summary, "Compacting conversation");
+  assert.notEqual(supervisedAgentWorkIndicators([{ ...base, providerProgress: null }], [], "room_1")[0]?.summary, "Compacting conversation");
+  assert.deepEqual(supervisedAgentWorkIndicators([{ ...base, roomAgentState: { ...base.roomAgentState!, turn: { ...base.roomAgentState!.turn, state: "idle" } } }], [], "room_1"), []);
+});

@@ -1,3 +1,4 @@
+import { DaemonReadModel } from "../daemon-read-model.js";
 import { prepareRetiredRuntimePlan, archiveRetiredRuntimes } from "../runtime-recovery-journal.js";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -13017,4 +13018,36 @@ test("unchanged delegation replays do not restart a failed provider, but committ
     await daemon.stop();
     await env.cleanup();
   }
+});
+
+
+test("read model projects child compaction before admission without changing durable lifecycle", async () => {
+  let progress: { state: "compacting"; startedAt: string } | null = { state: "compacting", startedAt: "2026-09-24T00:00:00Z" };
+  const model = new DaemonReadModel({
+    currentDaemonGeneration: () => 1, nowMs: () => Date.parse("2026-09-24T00:00:01Z"), startedAt: "2026-09-24T00:00:00Z",
+    capabilities: { hasDelivery: () => false, supportsRoomTurns: () => true, supportsContinuationRepair: () => false },
+    recoveryDiagnostics: () => { throw new Error("not part of progress projection"); }, deliveryAdmission: () => null,
+    compactionProgress: candidate => { assert.equal(candidate.work_attempt_id, "compaction-attempt"); return progress; },
+    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null },
+    bindings: { credentialFor: async () => null, get: async () => null, list: async () => [] },
+    inbox: { detail: async () => { throw new Error("unused"); }, ingressHealth: async () => null,
+      latestContinuationRepair: async () => null, receipts: async () => [] },
+    durability: { getAttempt: async () => null },
+    workerAuthority: { currentHostGrant: () => null, pollingContract: async () => null },
+    liveHandles: new Map(), delivery: null,
+  });
+  const starting: DaemonManifestEntry = { ...entry, provider: "claude-code", desired_state: "running",
+    observed_state: "starting", condition: "none", work_attempt_id: "compaction-attempt", provider_ref: undefined };
+  const before = structuredClone(starting);
+  const projected = await model.entryWithDerivedLiveness(starting);
+  assert.deepEqual(projected.provider_progress, progress);
+  assert.equal(projected.observed_state, "starting");
+  assert.equal(projected.provider_ref, undefined);
+  assert.equal(projected.ready_reached_at, undefined);
+  assert.deepEqual(starting, before);
+  for (const patch of [{ desired_state: "paused" }, { observed_state: "failed" }, { condition: "coordination_blocked" }] as Partial<DaemonManifestEntry>[]) {
+    assert.equal((await model.entryWithDerivedLiveness({ ...starting, ...patch })).provider_progress, null);
+  }
+  progress = null;
+  assert.equal((await model.entryWithDerivedLiveness(starting)).provider_progress, null);
 });
