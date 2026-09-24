@@ -876,6 +876,65 @@ for (const withOptionalSink of [false, true]) {
   });
 }
 
+// SDKStatusMessage and SDKHookResponseMessage carry these fixed enums.
+// Retain the observed distinction, not the cause of a historical native stall.
+test("bootstrap diagnostics distinguish observed progress without changing acquisition", async () => {
+  const diagnostics: string[] = [];
+  for (const category of ["compacting", "requesting", "hook_error"] as const) {
+    const privateText = "private-hook-output-token";
+    const harness = createHarness({ omitBootstrapResult: true, bootstrapMessages: sessionId =>
+      Array.from({ length: 3 }, () => category === "hook_error"
+        ? { type: "system", subtype: "hook_response", outcome: "error", session_id: sessionId,
+          hook_id: privateText, hook_name: privateText, hook_event: privateText,
+          output: privateText, stdout: privateText, stderr: privateText, exit_code: 1 }
+        : { type: "system", subtype: "status", status: category, session_id: sessionId }),
+    });
+    const streams: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40,
+      streamSink: event => streams.push(event),
+    });
+    const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+    const request = { ...spawnRequest({ supervisorEntryId: "entry-progress",
+      supervisorExecutionGenerationId: "execution-progress" }), provider: "claude-code" };
+    const saved = "saved-progress-session";
+    await assert.rejects(withLoopAlive(router.resume({ workAttemptId: request.workAttemptId,
+      provider: "claude-code", providerContinuationId: saved }, request)), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ClaudeBootstrapError");
+      assert.match(error.message, /bootstrap turn \(deadline\)/);
+      assert.match(error.message, /stdout_lines=4; matched_session_lines=4/);
+      assert.match(error.message, /api_retry_count=0; assistant_count=0; result_count=0/);
+      const expected = category === "hook_error" ? "system.hook_response.error" : `system.status.${category}`;
+      assert.ok(error.message.includes(`last_line_type=${expected}`));
+      assert.ok(error.message.includes(`line_types=system.init:1,${expected}:3`));
+      assert.match(error.message, /last_line_ms=\d+/);
+      assert.doesNotMatch(error.message, /private-hook-output-token|saved-progress-session/);
+      diagnostics.push(error.message.replace(/(?:init_ms|bootstrap_ms|last_line_ms)=\d+/g, "elapsed_ms=<measured>"));
+      const safe = redactCredentialText(error.message);
+      assert.equal(safe.value, error.message);
+      assert.equal(safe.redacted, false);
+      assert.equal(safe.truncated, false);
+      const evidence = providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request, saved));
+      assert.ok(evidence?.terminal.nativeRuntimeDeath);
+      return true;
+    });
+    const observed = streams.filter(event => event.method !== "system/init");
+    assert.equal(observed.length, 3, "positive control: the adapter consumed all three progress events");
+    for (const event of observed) {
+      const payload = event.payload as Record<string, unknown>;
+      assert.equal(event.method, category === "hook_error" ? "system/hook_response" : "system/status");
+      assert.equal(category === "hook_error" ? payload.outcome : payload.status,
+        category === "hook_error" ? "error" : category);
+    }
+    assert.deepEqual(router.runtimeCustody(request.workAttemptId, "claude-code"), { state: "absent" });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  }
+  assert.equal(new Set(diagnostics).size, 3, "progress categories survive without relying on elapsed-time differences");
+});
+
 test("post-init bootstrap diagnostics count a retry storm without changing the deadline", async () => {
   const harness = createHarness({ omitBootstrapResult: true });
   let emittedAfterInit = false;
@@ -904,6 +963,112 @@ test("post-init bootstrap diagnostics count a retry storm without changing the d
   assert.equal(harness.children[0]!.written.length, 1);
   assert.equal(harness.mcpConfigDisposals, 1);
 });
+
+for (const scenario of ["preinit", "foreign", "private_fields", "compact_result", "histogram_cap", "total_cap", "cleanup"] as const) {
+  test(`bootstrap progress observations remain bounded and passive: ${scenario}`, async () => {
+    const privateText = "private-progress-token";
+    const harness = createHarness({ noInit: scenario === "preinit", omitBootstrapResult: true,
+      bootstrapMessages: (sessionId, turnId) => {
+        const base = { session_id: sessionId, uuid: privateText };
+        if (scenario === "preinit") return [{ ...base, type: "system", subtype: "status", status: "requesting" }];
+        if (scenario === "foreign") return [
+          { ...base, type: "command_lifecycle", command_uuid: turnId, state: "started" },
+          { type: "system", subtype: "status", status: "compacting", session_id: "other-session" },
+          { type: "control_request", request: { subtype: "can_use_tool", input: privateText } },
+        ];
+        if (scenario === "private_fields") return [
+          { ...base, type: privateText, subtype: privateText },
+          { ...base, type: "system", subtype: privateText },
+          { ...base, type: "system", subtype: "status", status: privateText, compact_result: privateText, compact_error: privateText },
+          { ...base, type: "system", subtype: "hook_response", outcome: privateText, output: privateText, stderr: privateText },
+          { ...base, type: "system", subtype: "session_state_changed", state: privateText },
+          { ...base, type: "command_lifecycle", state: privateText, command_uuid: privateText },
+        ];
+        if (scenario === "compact_result") return [
+          { ...base, type: "system", subtype: "status", status: "compacting" },
+          { ...base, type: "system", subtype: "status", status: null, compact_result: "failed", compact_error: privateText },
+        ];
+        if (scenario === "histogram_cap") return ["hook_started", "hook_progress", "compact_boundary", "commands_changed",
+          "background_tasks_changed", "files_persisted", "notification", "informational", "thinking_tokens", "worker_shutting_down"]
+          .map(subtype => ({ ...base, type: "system", subtype, output: privateText, reason: privateText }));
+        if (scenario === "total_cap") return [
+          { ...base, type: "system", subtype: "api_retry", error: "authentication_failed", error_status: 401 },
+          { ...base, type: "assistant", error: "oauth_org_not_allowed" },
+          { ...base, type: "result", subtype: "error_max_structured_output_retries", user_message_uuid: "other-turn", is_error: true },
+          { ...base, type: "auth_status", isAuthenticating: true },
+          { ...base, type: "system", subtype: "status", status: "requesting", compact_result: "failed" },
+        ];
+        return [];
+      },
+    });
+    if (scenario === "cleanup") {
+      const signal = harness.dependencies.signalProcess;
+      harness.dependencies.signalProcess = (pid, kind) => {
+        const session = argValue(harness.launches[0]!.args, "--session-id")!;
+        harness.children[0]!.emit({ type: "system", subtype: "hook_response", outcome: "error", session_id: session });
+        return signal(pid, kind);
+      };
+    }
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), error => {
+      assert.ok(error instanceof Error);
+      const suffix = `Startup observations: ${error.message.split("Startup observations: ")[1]}`;
+      assert.ok(suffix.length <= 512, suffix);
+      assert.doesNotMatch(error.message, new RegExp(privateText));
+      const safe = redactCredentialText(error.message);
+      assert.equal(safe.value, error.message);
+      assert.equal(safe.redacted, false);
+      assert.equal(safe.truncated, false);
+      if (scenario === "preinit") {
+        assert.match(error.message, /bootstrap_ms=not_started/);
+        assert.match(error.message, /last_line_type=system.status.requesting; last_line_ms=\d+/);
+        assert.match(error.message, /line_types=system.status.requesting:1/);
+      }
+      if (scenario === "foreign") {
+        assert.match(error.message, /stdout_lines=4; matched_session_lines=2/);
+        assert.match(error.message, /last_line_type=command_lifecycle.started/);
+        assert.match(error.message, /line_types=system.init:1,command_lifecycle.started:1/);
+        assert.doesNotMatch(error.message, /compacting|control_request/);
+      }
+      if (scenario === "private_fields") {
+        assert.match(error.message, /last_line_type=command_lifecycle.unlisted/);
+        assert.match(error.message, /line_types=system.init:1,unlisted:1,system.unlisted:1/);
+        assert.match(error.message, /system.status.unlisted.compact_unlisted:1/);
+      }
+      if (scenario === "compact_result") {
+        assert.match(error.message, /last_line_type=system.status.cleared.compact_failed/);
+        assert.match(error.message, /line_types=system.init:1,system.status.compacting:1,system.status.cleared.compact_failed:1/);
+      }
+      if (scenario === "histogram_cap") {
+        assert.match(error.message, /last_line_type=system.worker_shutting_down/);
+        const histogram = suffix.match(/line_types=([^;]+)\./)![1]!;
+        const parts = histogram.split(",");
+        const omitted = Number(parts.pop()!.split(":")[1]);
+        assert.ok(omitted > 0);
+        assert.ok(parts.length <= 8);
+        assert.equal(parts.length + omitted, 11, "all omitted distinct types are disclosed");
+        assert.ok(histogram.length <= 210);
+      }
+      if (scenario === "total_cap") {
+        assert.match(error.message, /last_api_retry=authentication_failed \(HTTP 401\)/);
+        assert.match(error.message, /assistant_error=oauth_org_not_allowed/);
+        assert.match(error.message, /uncorrelated_result=error_max_structured_output_retries/);
+        assert.match(error.message, /last_line_type=system.status.requesting.compact_failed; last_line_ms=\d+/);
+        assert.match(error.message, /omitted_fields=\d+/);
+        assert.doesNotMatch(error.message, /line_types=/, "the histogram yields to existing error categories and last observed progress");
+      }
+      if (scenario === "cleanup") {
+        assert.match(error.message, /last_line_type=system.init/);
+        assert.doesNotMatch(error.message, /hook_response/);
+      }
+      return true;
+    });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.equal(harness.mcpConfigDisposals, 1);
+    assert.equal(adapter.runtimeCustody("wa-claude-1"), "absent");
+  });
+}
 
 for (const scenario of ["foreign_session", "private_error", "foreign_turn", "assistant_error", "failed_result", "unlisted_result", "no_http_response", "auth_status", "result_without_turn_id"] as const) {
   test(`bootstrap diagnostics retain only bounded correlated categories: ${scenario}`, async () => {
