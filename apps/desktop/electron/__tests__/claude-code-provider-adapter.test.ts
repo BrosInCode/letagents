@@ -876,6 +876,57 @@ for (const withOptionalSink of [false, true]) {
   });
 }
 
+// SDKStatusMessage and SDKHookResponseMessage carry these fixed enums.
+// Characterize the lost distinction, not the cause of a historical native stall.
+test("bootstrap diagnostic counts collapse different observed progress categories", async () => {
+  const diagnostics: string[] = [];
+  for (const category of ["compacting", "requesting", "hook_error"] as const) {
+    const privateText = "private-hook-output-token";
+    const harness = createHarness({ omitBootstrapResult: true, bootstrapMessages: sessionId =>
+      Array.from({ length: 3 }, () => category === "hook_error"
+        ? { type: "system", subtype: "hook_response", outcome: "error", session_id: sessionId,
+          hook_id: privateText, hook_name: privateText, hook_event: privateText,
+          output: privateText, stdout: privateText, stderr: privateText, exit_code: 1 }
+        : { type: "system", subtype: "status", status: category, session_id: sessionId }),
+    });
+    const streams: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40,
+      streamSink: event => streams.push(event),
+    });
+    const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+    const request = { ...spawnRequest({ supervisorEntryId: "entry-progress",
+      supervisorExecutionGenerationId: "execution-progress" }), provider: "claude-code" };
+    const saved = "saved-progress-session";
+    await assert.rejects(withLoopAlive(router.resume({ workAttemptId: request.workAttemptId,
+      provider: "claude-code", providerContinuationId: saved }, request)), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ClaudeBootstrapError");
+      assert.match(error.message, /bootstrap turn \(deadline\)/);
+      assert.match(error.message, /stdout_lines=4; matched_session_lines=4/);
+      assert.match(error.message, /api_retry_count=0; assistant_count=0; result_count=0/);
+      assert.doesNotMatch(error.message, /compacting|requesting|hook_response|hook_error|private-hook-output-token/);
+      diagnostics.push(error.message.replace(/(?:init_ms|bootstrap_ms)=\d+/g, "elapsed_ms=<measured>"));
+      const evidence = providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request, saved));
+      assert.ok(evidence?.terminal.nativeRuntimeDeath);
+      return true;
+    });
+    const observed = streams.filter(event => event.method !== "system/init");
+    assert.equal(observed.length, 3, "positive control: the adapter consumed all three progress events");
+    for (const event of observed) {
+      const payload = event.payload as Record<string, unknown>;
+      assert.equal(event.method, category === "hook_error" ? "system/hook_response" : "system/status");
+      assert.equal(category === "hook_error" ? payload.outcome : payload.status,
+        category === "hook_error" ? "error" : category);
+    }
+    assert.deepEqual(router.runtimeCustody(request.workAttemptId, "claude-code"), { state: "absent" });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  }
+  assert.equal(new Set(diagnostics).size, 1, "only elapsed timings distinguish the saved failures today");
+});
+
 test("post-init bootstrap diagnostics count a retry storm without changing the deadline", async () => {
   const harness = createHarness({ omitBootstrapResult: true });
   let emittedAfterInit = false;
