@@ -218,6 +218,8 @@ export function sameProviderConnectionIdentity(
 }
 
 export interface ProviderSpawnRequest {
+  /** Host-only wake hint for a changed read-only progress projection. */
+  onProgress?: () => void;
   workAttemptId: string;
   roomId: string;
   /** Durable ingress owner selected by the daemon, never inferred from policy. */
@@ -464,6 +466,7 @@ export interface ProviderRoomTurnOptions {
 }
 
 export interface ProviderAdapter {
+  compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   readonly id: ProviderAdapterId;
 
   /** The negotiated capability set (each `true` backed by a P0 spike cell). */

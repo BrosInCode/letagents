@@ -12,6 +12,7 @@ import {
   roomAgentRecoveryAction,
 } from "./room-agent-delivery";
 import {
+  agentCompactionProgress,
   humanFacingSupervisorActivitySummary,
   isHumanVisibleSupervisorActivity,
 } from "./managed-agents";
@@ -521,6 +522,11 @@ function nowProjection(
   entry: DesktopSupervisorManifestEntry,
   overallState: AgentInspectorOverallState,
 ): AgentInspectorNowProjection | null {
+  const compaction = agentCompactionProgress(entry);
+  if (compaction) return {
+    kind: "progress", label: "Now", summary: "Compacting conversation",
+    observedAt: compaction.startedAt,
+  };
   if (overallState === "responding") {
     const startedAt = Date.parse(turnStartedAt(entry) ?? "");
     if (!Number.isFinite(startedAt)) return null;
@@ -994,8 +1000,8 @@ export function projectAgentInspector(
   if (!options.roomId || entry.roomId !== options.roomId) return null;
   const overallState = agentInspectorOverallState(entry);
   const presentation = overallPresentation(overallState);
-  const now = nowProjection(entry, overallState);
   const resourceFreshness = options.resourceFreshness ?? "fresh";
+  const now = nowProjection(resourceFreshness === "fresh" ? entry : { ...entry, providerProgress: null }, overallState);
   const mentionInsertText = options.mentionInsertTextByEntryId?.get(entry.id) ?? null;
   const rawTurnControl = projectAgentInspectorTurnControl(entry);
   // A stale Inspector keeps its last meaningful explanation but never offers a
@@ -1030,7 +1036,8 @@ export function projectAgentInspector(
     charter: entry.charter,
     overallState,
     overallLabel: presentation.label,
-    overallDetail: presentation.detail,
+    overallDetail: resourceFreshness === "fresh" && agentCompactionProgress(entry)
+      ? "Compacting conversation" : presentation.detail,
     deliveryProgress: deliveryProgress(
       entry,
       options.deliveryRetryingKeys ?? new Set(),

@@ -37,6 +37,7 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
+  compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   runtimeCustody?(workAttemptId: string, handle?: NativeHandle): "absent" | "owned" | "unknown";
   observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; connectionId?: string; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
   replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
@@ -99,6 +100,12 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   private readonly actions = new Map<string, string>();
 
   constructor(private readonly adapterLoaders: Readonly<Record<string, ProviderAdapterLoader>> = {}) {}
+
+  compactionProgress(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null {
+    const current = this.handles.get(workAttemptId);
+    if (!current || current.provider !== provider) return null;
+    return current.adapter.compactionProgress?.(workAttemptId) ?? null;
+  }
 
   runtimeCustody(workAttemptId: string, provider: string): ProviderRuntimeCustody {
     const remembered = this.handles.get(workAttemptId);

@@ -181,7 +181,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // retry policy stay in execution-approval-journal.ts.
   // 1620 -> 1630: managed-launch reconciliation and approval-idle composition;
   // fingerprint, reservation, replacement, and deferral policy stay extracted.
-  assert.ok(mainSource.split("\n").length < 1_630, "main.ts must remain a thin composition root");
+  // 1630 -> 1633: compaction progress getter and state-watch notification ports;
+  // timing and signal interpretation stay in the provider-owned tracker.
+  assert.ok(mainSource.split("\n").length < 1_633, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

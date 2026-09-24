@@ -1347,3 +1347,16 @@ test("duplicate supervised names resolve to exact canonical agent mentions", () 
     "agent:another/gardensignal",
   ]);
 });
+
+
+test("inspector shows current compaction during startup and work, hiding it after failure or stale reads", () => {
+  const compacting = entry({ provider: "claude-code", providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+  for (const observedState of ["starting", "working"] as const) {
+    const result = projectAgentInspector({ ...compacting, observedState }, { roomId: "focus_1" });
+    assert.equal(result?.now?.summary, "Compacting conversation");
+    assert.equal(result?.overallDetail, "Compacting conversation", "agent list shows the same current progress");
+  }
+  assert.notEqual(projectAgentInspector(compacting, { roomId: "focus_1", resourceFreshness: "stale" })?.now?.summary, "Compacting conversation");
+  assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
+  assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
+});
