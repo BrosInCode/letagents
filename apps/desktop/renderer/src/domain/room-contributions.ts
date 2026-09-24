@@ -1,9 +1,10 @@
 import { readableContributionText } from "../../../../../shared/contribution-text.mjs";
+import { hasReviewableRoomContribution } from "../../../../../shared/room-agent-work.mjs";
 import type { DesktopParticipantSummary, DesktopRoomAgentWork } from '../../../electron/ipc-types';
 import type { AgentModalTarget } from '../components/desktop/content/desktop-chat-message/types';
 import { resolveOwnerAttribution } from '../components/desktop/content/desktop-chat-message/identity';
 export function contributionChanges(work: DesktopRoomAgentWork) {
-  return 'contribution' in work.summary ? work.summary.contribution?.changes : undefined;
+  return 'contribution' in work.summary && hasReviewableRoomContribution(work.summary) ? work.summary.contribution?.changes : undefined;
 }
 export function workspaceAgentTarget(work: DesktopRoomAgentWork, participants: readonly DesktopParticipantSummary[]): AgentModalTarget {
   const participant = participants.find(item => item.agentKey === work.agentKey);

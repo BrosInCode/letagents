@@ -1137,6 +1137,29 @@ it('places only turn contributions beside their visible conversation and never p
   const skewed = { ...work, summary: { ...work.summary, contribution: { ...work.summary.contribution, changes: { ...snapshot, captured_at: '2026-05-27T12:00:00Z' } } } };
   assert.deepEqual(buildMessageTimelineEntries([message], [skewed]).map(entry => entry.type), ['date', 'message', 'contribution']);
   assert.equal(buildMessageTimelineEntries([], [work]).length, 0, 'hidden/absent sources cannot leave receipts in the conversation');
+  const empty = { ...snapshot, files: [], additions: 0, deletions: 0, patch: '' };
+  const unavailable = { ...empty, state: 'unavailable' as const };
+  for (const changes of [empty, unavailable]) {
+    const noReview = { ...work, summary: { ...work.summary, workspace: unavailable, contribution: { changes, summary: null } } };
+    assert.equal(buildMessageTimelineEntries([message], [noReview]).some(entry => entry.type === 'contribution'), false,
+      'empty and unavailable legacy captures are evidence, not review cards');
+  }
+  const readyEmpty = { ...work, summary: { ...work.summary, contribution: { changes: empty, summary: null } } };
+  assert.equal(buildMessageTimelineEntries([message], [readyEmpty]).some(entry => entry.type === 'contribution'), false,
+    'known empty turn cannot claim earlier cumulative edits');
+  const unknownTurn = { ...work, summary: { ...work.summary, contribution: { changes: unavailable, summary: null } } };
+  assert.equal(buildMessageTimelineEntries([message], [unknownTurn]).some(entry => entry.type === 'contribution'), true,
+    'unknown turn can still offer an actual cumulative workspace review');
+  for (const changes of [
+    { ...empty, files: [{ ...snapshot.files[0], additions: 0, deletions: 0, binary: true }] },
+    { ...empty, hidden_files: 1 },
+    { ...empty, patch: 'old mode 100644\nnew mode 100755' },
+    { ...empty, patch_truncated: true },
+  ]) {
+    const review = { ...work, summary: { ...work.summary, contribution: { changes, summary: null } } };
+    assert.equal(buildMessageTimelineEntries([message], [review]).some(entry => entry.type === 'contribution'), true,
+      'zero textual counts and incomplete previews do not prove no change');
+  }
   const { contribution: _turn, ...legacy } = work.summary;
   assert.equal(buildMessageTimelineEntries([message], [{ ...work, summary: { ...legacy, version: 2 } }]).some(entry => entry.type === 'contribution'), false);
 });

@@ -26,7 +26,7 @@ export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessag
   const sources = new Map(messages.map(message => [message.id, message.timestamp]));
   const contributions = work.filter(entry => {
     const changes = contributionChanges(entry);
-    return sources.has(entry.sourceMessageId) && changes && (changes.state !== 'ready' || changes.files.length + changes.hidden_files > 0);
+    return sources.has(entry.sourceMessageId) && changes;
   });
   const ordered = [...messages.map(message => ({ timestamp: message.timestamp, id: message.id, message })),
     ...contributions.map(work => {

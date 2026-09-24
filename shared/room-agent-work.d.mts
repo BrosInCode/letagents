@@ -30,5 +30,6 @@ export type RoomAgentWorkPollResponse = { room_id: string; cursor: string } & (
   | { changed: false; snapshot: null }
 );
 export function isClearedRoomAgentWorkSummary(value: unknown): value is ClearedRoomAgentWorkSummary;
+export function hasReviewableRoomContribution(summary: RoomAgentWorkSummary | ClearedRoomAgentWorkSummary | null | undefined): boolean;
 /** Return a canonical allowlisted copy, or reject without echoing private input. */
 export function parseRoomAgentWorkSummary(value: unknown): RoomAgentWorkSummary | null;
