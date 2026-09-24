@@ -251,7 +251,7 @@ import type { ThreadIndicatorSummary } from "./thread-utils";
 function contributionsFor(source: string) {
   return (props.roomAgentWork ?? []).filter(work => {
     const changes = contributionChanges(work);
-    return work.sourceMessageId === source && changes && (changes.state !== 'ready' || changes.files.length + changes.hidden_files > 0);
+    return work.sourceMessageId === source && changes;
   });
 }
 const props = defineProps<{
