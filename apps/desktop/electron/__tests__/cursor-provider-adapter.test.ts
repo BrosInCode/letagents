@@ -7066,6 +7066,8 @@ test("Cursor Stop and turn control retain the exact child when bounded settlemen
     const harness = createHarness();
     const adapter = supervisedAdapter(harness);
     const handle = await spawnDaemonLane(adapter, harness);
+    const execution: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, event => execution.push(event));
     let enterSettlement!: () => void;
     const settlementEntered = new Promise<void>((resolve) => { enterSettlement = resolve; });
     let releaseSettlement!: () => void;
@@ -7096,6 +7098,10 @@ test("Cursor Stop and turn control retain the exact child when bounded settlemen
     await assert.rejects(control, /recover/);
     assert.equal(handle.providerConnection?.processIdentity, birthIdentity(child.pid!));
     assert.equal(terminals.length, 0, `${operation} cannot emit attempt exit after settlement failure`);
+    const settledPosition = execution.length;
+    assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+    assert.equal(execution.length, settledPosition,
+      "failed settlement retains identity for recovery, not renewed control observations");
   }
 });
 
@@ -7772,6 +7778,10 @@ test("Cursor typed observations fence each native child and exclude synthetic di
       && fact.domain === "turn" && fact.state === "terminal"), "validated turn evidence precedes settlement");
     assert.ok(events.some(({ nativeProcessIdentity, fact }) => nativeProcessIdentity === birth
       && fact.domain === "runtime" && fact.state === "exited"), "historical child exit precedes settlement");
+    const settledPosition = events.length;
+    assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+    assert.equal(events.length, settledPosition,
+      "a heartbeat during durable settlement cannot revive control on an exited child");
     settledBirths.push(birth);
   };
   const first = adapter.runRoomTurn(handle, roomTurnRequest(), { settleLifecycleBeforeIdle: settleExactBirth });

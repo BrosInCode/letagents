@@ -1547,14 +1547,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
     const handle = this.requireHandle(providerHandle);
     // The wrapper IPC is not Cursor's control loop; an idle lane has no child.
     const result: ControlProbeResult = { state: "unprobeable" };
-    const processIdentity = handle.providerConnection.processIdentity;
-    // Capture is runtime-birth keyed. An idle Cursor lane is not a runtime and
-    // must not publish a processless fact that would fence later child facts.
-    if (processIdentity) {
+    const turn = handle.liveTurn;
+    // Idle lanes lack a child; settlement can retain an exited child's birth.
+    // Neither can authorize a new control fact in runtime-birth keyed capture.
+    if (turn && !turn.executionRuntimeFinished) {
       handle.execution.emit(
         { domain: "control", kind: "state_changed", sideEffects: "none", ...result },
-        processIdentity,
-        handle.providerConnection.pid ?? undefined,
+        turn.processIdentity,
+        turn.pid,
       );
     }
     return result;
