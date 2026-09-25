@@ -7061,6 +7061,112 @@ test("Cursor Stop joins the bounded turn settlement barrier before retiring its 
   assert.equal(handle.pid, null);
 });
 
+test("Cursor releases native custody after failed checkpoint only when exact workspace retirement is saved", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-retired-custody-"));
+  const harness = createHarness({ ownsDescendantReaping: true });
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const adapter = new CursorProviderAdapter({
+      dependencies: {
+        ...harness.dependencies,
+        prepareTurnState(path) { writeFileSync(path, "", { flag: "wx", mode: 0o600 }); },
+        launchTurn(input) {
+          const child = harness.dependencies.launchTurn(input);
+          Object.defineProperty(child, "requiresDurableTerminalEvidence", { value: true });
+          return child;
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      cwd: root, permissionProfileId: "sandboxed_write", launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    let turnId = "";
+    let checkpoints = 0;
+    let resultCheckpoints = 0;
+    let releaseCheckpoint!: () => void;
+    const checkpointGate = new Promise<void>(resolve => { releaseCheckpoint = resolve; });
+    let enteredCheckpoint!: () => void;
+    const checkpointEntered = new Promise<void>(resolve => { enteredCheckpoint = resolve; });
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, terminal => terminals.push(terminal));
+    const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async id => { turnId = id; },
+      checkpointProviderState: async state => {
+        if (state.providerContinuationId !== "sess-cursor-1") return;
+        checkpoints++;
+        if (checkpoints === 1) {
+          const launch = harness.launches[0]!;
+          const init = { type: "system", subtype: "init", session_id: "sess-cursor-1" };
+          const result = { type: "result", subtype: "success", is_error: false, session_id: "sess-cursor-1", result: "saved reply" };
+          writeFileSync(launch.statePath!, [JSON.stringify(init), JSON.stringify(result), ""].join("\n"));
+          writeFileSync(`${launch.statePath}.terminal.json`, JSON.stringify({
+            type: "exit", code: 0, signal: null, init, result,
+            native_process_group_reaped: true, reap_scope: "native_process_group", remote_authority_revoked: true,
+            turn_contract_version: 1, session_contract_valid: true, stream_contract_complete: true,
+            workspace_generation_manifest_path: launch.workspaceGenerationManifestPath,
+          }));
+          harness.children[0]!.emit(result);
+          harness.identities.set(harness.children[0]!.pid!, null);
+          harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+        } else {
+          // Recovery has retired native/filesystem authority, but still owns
+          // this checkpoint until the callback settles.
+          assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown");
+          enteredCheckpoint();
+          await checkpointGate;
+        }
+        throw new Error("Execution evidence rejected: identity_mismatch.");
+      },
+      settleLifecycleBeforeIdle: async () => {},
+      checkpointTerminalResult: async () => { resultCheckpoints++; },
+    });
+    const rejected = assert.rejects(withLoopAlive(pending), /terminal recovery.*identity_mismatch/);
+    await checkpointEntered;
+    assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown", "in-flight settlement still fences update");
+    releaseCheckpoint();
+    await rejected;
+    const retainedConnection = { ...handle.providerConnection };
+    assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent", "retained failed evidence owns no native work");
+    assert.deepEqual(handle.providerConnection, retainedConnection, "custody observation must not clear failed identity");
+    assert.ok("pid" in retainedConnection);
+    assert.equal(retainedConnection.pid, harness.children[0]!.pid);
+    assert.equal(resultCheckpoints, 0, "failed turn is not promoted to successful delivery");
+    assert.equal(terminals.length, 0, "failed attempt is not falsely closed");
+    const terminalPath = `${harness.launches[0]!.statePath}.terminal.json`;
+    const terminal = JSON.parse(readFileSync(terminalPath, "utf8"));
+    assert.equal(terminal.workspace_generation_settlement.phase, "cleaned");
+    assert.equal(terminal.workspace_generation_settlement.provider_continuation_id, "sess-cursor-1");
+    assert.equal(existsSync(harness.launches[0]!.statePath!), true, "exact turn stream stays recoverable");
+    assert.equal(harness.launches.length, 1);
+    assert.deepEqual(harness.signals, [], "no live or repeated turn is needed to retire custody");
+    assert.match(turnId, /^cursor:/);
+    let finishRecovery!: () => void;
+    const recoveryGate = new Promise<void>(resolve => { finishRecovery = resolve; });
+    const recovering = adapter.recoverRoomTurn(handle, { inboxItemId: "retry-checkpoint-only", providerTurnId: turnId }, {
+      checkpointProviderState: async () => {
+        await recoveryGate;
+        throw new Error("still blocked");
+      },
+    });
+    const rejectedRecovery = assert.rejects(recovering, /still blocked/);
+    assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown", "direct recovery owns settlement before its first await");
+    finishRecovery();
+    await rejectedRecovery;
+    assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent", "failed direct recovery releases only its operation hold");
+    assert.deepEqual(handle.providerConnection, retainedConnection);
+    assert.equal(harness.launches.length, 1, "recovery does not redispatch the native turn");
+    assert.equal(readFileSync(terminalPath, "utf8"), JSON.stringify(terminal));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Cursor Stop and turn control retain the exact child when bounded settlement fails", async () => {
   for (const operation of ["stop", "control"] as const) {
     const harness = createHarness();
