@@ -73,7 +73,11 @@ const RECOVERY_REQUEST_TIMEOUT_MS = 30_000;
 // would abandon a healthy long operation halfway through that protocol.
 const HANDOFF_DRAIN_REQUEST_TIMEOUT_MS = 0;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
-const START_TIMEOUT_MS = 8_000;
+// Database readiness precedes interrupted-work and workspace recovery. That
+// recovery must finish before the socket opens, and can exceed eight seconds.
+// Updates join this wait before handing off the same child, so allow a bounded
+// recovery window without treating a slow daemon as absent or spawning another.
+const START_TIMEOUT_MS = 60_000;
 const NATURAL_EXIT_TIMEOUT_MS = 2_000;
 const TERMINATE_EXIT_TIMEOUT_MS = 2_000;
 const KILL_EXIT_TIMEOUT_MS = 1_000;

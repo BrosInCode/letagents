@@ -690,6 +690,56 @@ test("a silent bootstrap retains child ownership across caller timeouts until la
   }
 });
 
+test("application update waits for post-database recovery beyond the old socket startup deadline", { timeout: 15_000 }, async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let spawns = 0;
+  let retiredAlive = true;
+  let spawned!: () => void;
+  const didSpawn = new Promise<void>((resolve) => { spawned = resolve; });
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { spawns++; spawned(); return child; },
+    inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+    signalDaemon: () => { assert.fail("slow recovery must finish without signalling the daemon"); },
+  });
+  const start = client.ensureRunning();
+  void start.catch(() => undefined);
+  let update: Promise<void> | undefined;
+  try {
+    await didSpawn;
+    // Database preparation finishes before interrupted-work recovery opens the
+    // socket. The update must wait for that recovery, then retire this child.
+    child.emit("message", { type: "state_recovery_ready" });
+    child.emit("disconnect");
+    update = client.prepareForApplicationUpdate();
+    void update.catch(() => undefined);
+    await assert.rejects(client.ensureRunning(), /startup is paused/);
+    await new Promise(resolve => setTimeout(resolve, 9_000));
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42, () => {
+      retiredAlive = false;
+      void closeServer(server, env.socketPath);
+    });
+    server = wire.server;
+    assert.equal((await start).generation, 42);
+    await update;
+    assert.equal(spawns, 1, "one child completes recovery and is handed off without a replacement");
+    assert.equal(retiredAlive, false, "installation waits for the serving daemon to retire");
+    assert.equal(wire.requests.filter(request => request.method === "daemon.prepare_handoff").length, 1);
+    await assert.rejects(client.ensureRunning(), /startup is paused/);
+  } finally {
+    await Promise.allSettled([start, update]);
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("socket readiness timeout preserves the original child and releases it only on exit", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
