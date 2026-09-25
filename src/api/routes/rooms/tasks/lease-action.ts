@@ -100,8 +100,12 @@ export function registerTaskLeaseActionRoute(
       res.status(400).json({ error: "action must be 'release' or 'handoff'" });
       return;
     }
-    if (req.authKind === "agent_session" && action !== "release") {
-      res.status(403).json({ error: "Worker bearers may only release their own work lease." });
+    // A worker can execute only its exact approved handoff, not a general
+    // administrator override. Verify and consume that approval below even when
+    // the room has no active Board Manager.
+    const workerHandoff = req.authKind === "agent_session" && action === "handoff";
+    if (workerHandoff && !deps.normalizeOptionalString(requestBody.board_intent_id)) {
+      res.status(403).json({ error: "Workers need an exact approved board intent to hand off a work lease." });
       return;
     }
 
@@ -154,7 +158,7 @@ export function registerTaskLeaseActionRoute(
       agentInstanceId: actorInstanceId,
       agentSessionId: actorSessionId,
     });
-    if (!requesterIsLeaseHolder) {
+    if (!requesterIsLeaseHolder && !workerHandoff) {
       if (!(await deps.requireAdmin(req, res, project))) return;
     }
 
@@ -268,7 +272,7 @@ export function registerTaskLeaseActionRoute(
         }
       }
 
-      if ((actorKey || actorSessionId) && await shouldRequireBoardIntent({ room_id: project.id })) {
+      if (workerHandoff || ((actorKey || actorSessionId) && await shouldRequireBoardIntent({ room_id: project.id }))) {
         const payload = boardIntentPayloadForLeaseAction({
           taskId: task.id,
           action,
@@ -279,12 +283,15 @@ export function registerTaskLeaseActionRoute(
         const trustedWorker = req.authKind === "agent_session" && req.agentSession
           ? { agent_session_id: req.agentSession.agent_session_id, agent_key: req.agentSession.agent_key }
           : undefined;
+        // A copied approval token must not substitute for the authenticated
+        // proposing worker when authorizing a handoff of someone else's work.
+        const approvalToken = workerHandoff ? null : deps.normalizeOptionalString(requestBody.board_approval_token);
         const approval = await verifyBoardIntentApproval({
           room_id: project.id,
           action_type: "task_override",
           payload,
           intent_id: deps.normalizeOptionalString(requestBody.board_intent_id),
-          approval_token: deps.normalizeOptionalString(requestBody.board_approval_token),
+          approval_token: approvalToken,
           ...(trustedWorker ? { trusted_worker: trustedWorker } : {}),
         });
         if (approval.kind === "deny") {
@@ -307,10 +314,15 @@ export function registerTaskLeaseActionRoute(
             action_type: "task_override",
             payload,
             intent_id: approval.intent.id,
-            approval_token: deps.normalizeOptionalString(requestBody.board_approval_token),
+            approval_token: approvalToken,
             ...(trustedWorker ? { trusted_worker: trustedWorker } : {}),
           };
         }
+      }
+
+      if (workerHandoff && !boardIntentApproval) {
+        res.status(409).json({ error: "An exact approved handoff is required.", code: "board_intent_required" });
+        return;
       }
 
       const dispositionReason =
