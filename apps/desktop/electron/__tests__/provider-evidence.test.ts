@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createCursorRuntimeCustodyReader } from "../main/agents/cursor-provider-evidence.js";
 import { ProviderProcessCustody, safeStreamPayload, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
 test("provider evidence recursively redacts credential-shaped keys and embedded tool output", () => {
@@ -101,4 +102,47 @@ test("native custody records uninspectable births and accepts actual exit withou
   exit({ type: "exit", code: 1, signal: null });
   await Promise.resolve();
   assert.equal(custody.state("no-pid"), "absent");
+});
+
+
+test("Cursor custody separates proven inactive retirement from active or unproven ownership", async () => {
+  type Handle = Parameters<typeof createCursorRuntimeCustodyReader>[1] extends ReadonlyMap<string, infer H> ? H : never;
+  const settled = (): Handle => ({
+    providerContinuationId: "session", activeRoomTurnId: null, roomTurnOperationId: null,
+    roomTurnAbortController: null, roomTurnOperationSettled: null,
+    liveTurn: { roomTurnId: "turn", workspaceGeneration: null,
+      workspaceGenerationSettlement: { version: 1, phase: "cleaned", provider_continuation_id: "session" } },
+  });
+  const custody = new ProviderProcessCustody({ getProcessIdentity: () => "birth" });
+  const handles = new Map<string, Handle>();
+  const read = createCursorRuntimeCustodyReader(custody, handles);
+  handles.set("attempt", settled());
+  assert.equal(read("attempt"), "absent");
+  const mutations: Array<(h: Handle) => void> = [
+    h => { h.activeRoomTurnId = "turn"; },
+    h => { h.roomTurnOperationId = "turn"; },
+    h => { h.roomTurnAbortController = new AbortController(); },
+    h => { h.roomTurnOperationSettled = Promise.resolve(); },
+    h => { h.providerContinuationId = "other-session"; },
+    h => { h.providerContinuationId = null; },
+    h => { h.liveTurn!.roomTurnId = null; },
+    h => { h.liveTurn!.workspaceGeneration = {}; },
+    h => { h.liveTurn!.workspaceGenerationSettlement = undefined; },
+    h => { h.liveTurn!.workspaceGenerationSettlement!.phase = "aborted"; },
+  ];
+  for (const mutate of mutations) {
+    const h = settled(); mutate(h); handles.set("attempt", h);
+    assert.equal(read("attempt"), "unknown", "partial evidence or an active owner is not retirement");
+  }
+  handles.set("attempt", settled());
+  let finishPreparation!: () => void;
+  const preparing = custody.acquire("attempt", () => new Promise<void>(resolve => { finishPreparation = resolve; }));
+  assert.equal(read("attempt"), "unknown", "a concurrent preparation keeps its hold");
+  finishPreparation(); await preparing;
+  let exit!: (value: ProviderProcessExit) => void;
+  const child = { pid: 52, exited: new Promise<ProviderProcessExit>(resolve => { exit = resolve; }) };
+  custody.record("attempt", child)();
+  assert.equal(read("attempt"), "unknown", "another live birth is not hidden by a cleaned receipt");
+  exit({ type: "error", error: new Error("transport lost") }); await Promise.resolve();
+  assert.equal(read("attempt"), "unknown", "transport error is not physical retirement");
 });

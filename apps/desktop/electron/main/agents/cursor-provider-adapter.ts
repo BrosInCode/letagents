@@ -1049,6 +1049,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
       checkpointTerminalResult?: ProviderRoomTurnOptions["checkpointTerminalResult"];
     } = {},
   ): Promise<ProviderRoomTurnResult> {
+    return this.processCustody.acquire(providerHandle.workAttemptId,
+      () => this.recoverOwnedRoomTurn(providerHandle, request, options));
+  }
+
+  private async recoverOwnedRoomTurn(providerHandle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest,
+    options: Parameters<CursorProviderAdapter["recoverRoomTurn"]>[2] = {}): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
     const turnId = request.providerTurnId.trim();
     if (!turnId) {
@@ -1057,10 +1063,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
     const retainedTurn = handle.liveTurn?.roomTurnId === turnId ? handle.liveTurn : null;
     let terminal: CursorTurnTerminal | null;
     try {
-      // The wrapper journal keeps consuming native stdout during a TERM fence,
-      // after live listeners have detached. Prefer that exact durable terminal
-      // over an earlier in-memory teardown snapshot so a late successful result
-      // cannot be hidden until the next daemon restart.
+      // Prefer the exact durable wrapper terminal, including late TERM output,
+      // over the earlier in-memory teardown snapshot.
       terminal = this.readDurableTurnTerminal(handle, turnId) ?? handle.roomTurnResults.get(turnId) ?? null;
     } catch (error) {
       if (error instanceof CursorRoomTurnNotDispatchedError && error.workspaceGenerationManifestPath) {
@@ -1098,17 +1102,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
       terminal = await this.awaitRoomTurnTerminal(handle.liveTurn.completion, options.detachSignal);
     }
     if (!terminal) {
-      // Cursor's CLI exposes no exact-turn read endpoint. A successor may
-      // resume the continuation, but it must never rerun an ambiguous inbox
-      // item after losing the original per-turn stream.
+      // With no exact-turn API, a missing stream never authorizes redispatch.
       throw new CursorRoomTurnRecoveryError(
         "Cursor room-turn recovery cannot prove the persisted exact turn reached a terminal boundary; refusing to rerun it.",
       );
     }
     if (terminal.workspaceGenerationSettlement) {
       this.verifyRestingConversation(handle, terminal.workspaceGenerationSettlement);
-      // A prior rename may have succeeded before its parent sync failed.
-      // Recommit the marker before it can authorize receipt deletion.
+      // Recommit a possibly unsynced marker before receipt deletion.
       this.recordGenerationSettlement(handle, turnId, terminal.workspaceGenerationManifestPath!, "cleaned");
     } else if (terminal.workspaceGenerationManifestPath) {
       let receipt;
@@ -1148,9 +1149,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
     try {
       if (retainedTurn?.lifecycleSettlementDeferred) {
-        // A first Cursor init replaces the prepared cursor-pending identity.
-        // Commit that exact real continuation while the child birth is still
-        // installed, so typed capture can map its terminal facts.
+        // Commit the real continuation with its retained birth before typed settlement.
         await options.checkpointProviderState?.({
           providerContinuationId: handle.providerContinuationId!,
           providerConnection: handle.providerConnection,
