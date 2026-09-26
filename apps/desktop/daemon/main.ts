@@ -21,7 +21,7 @@ import { DaemonReadModel } from "./daemon-read-model.js";
 import { DeliveryCutoverCoordinator } from "./delivery-cutover-coordinator.js";
 import { DeliveryCutoverExecutionCoordinator } from "./delivery-cutover-execution-coordinator.js";
 import { schedulerErrorDetail } from "./daemon-error-policy.js";
-import { DaemonStateWatch } from "./daemon-state-watch.js";
+import { DaemonStateWatch, STATE_WATCH_NOTIFICATION_COALESCE_MS } from "./daemon-state-watch.js";
 import { ExecutionCaptureCoordinator } from "./execution-capture-coordinator.js";
 import { ExecutionDelegationCoordinator } from "./execution-delegation-coordinator.js";
 import { TypedLifecycleEffectCoordinator } from "./typed-lifecycle-effect-coordinator.js";
@@ -275,7 +275,7 @@ export class SupervisorDaemon {
       startDelivery: (entryId) => this.startSupervisedDelivery(entryId),
     });
     this.stateWatch = new DaemonStateWatch({
-      ...daemonAuthority,
+      ...daemonAuthority, coalesceMs: STATE_WATCH_NOTIFICATION_COALESCE_MS,
       entries: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
     });
     this.agentStreamRegistry = new AgentStreamRegistry({
@@ -906,7 +906,7 @@ export class SupervisorDaemon {
       installHostGrant: this.executionDelegations.installHostGrant.bind(this.executionDelegations),
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
-      listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
+      listManifest: async (roomId) => this.entriesWithDerivedLiveness((await this.store.load()).entries.filter((entry) => !roomId || entry.room_id === roomId)),
       prepareBoundedEffect: this.boundedEffects.prepare.bind(this.boundedEffects),
       prepareHandoff: () => this.handoff.prepare(),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
@@ -1026,6 +1026,7 @@ export class SupervisorDaemon {
     if (this.providerPort && this.autoConverge) {
       for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id, "rehydration");
     }
+    void this.workerBindings.compactRetainedPublications().catch(() => undefined);
   }
 
   async stop(): Promise<void> {

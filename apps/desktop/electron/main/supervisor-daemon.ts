@@ -42,7 +42,14 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.190";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.191";
+/**
+ * The room-level state channel carries activity summaries, not history. Keep in
+ * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
+ * enforcing it here as well keeps the renderer payload bounded even if a daemon
+ * ever answers with more than it promised.
+ */
+export const SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT = 16;
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -863,13 +870,18 @@ export class SupervisorDaemonClient {
     // Rich manifest projections open several durable stores and can be slower
     // on their first read. This must not share the tight timeout used by small
     // control requests or a healthy cold daemon is misreported as unavailable.
+    // manifest.list stays the full-history read: it backs first load, the
+    // stale-subscription repair, and the Inspector's payload detail. It is also
+    // the expensive one, so ask the daemon to project and serialize only the
+    // room this caller will keep. The client-side filter stays as well: a
+    // daemon that ignored the scope still yields a correct answer.
     const entries = await this.request<WireEntry[]>(
       "manifest.list",
-      undefined,
+      roomIdentifier ? { room_id: roomIdentifier } : undefined,
       SUPERVISOR_DAEMON_PROTOCOL_VERSION,
       MANIFEST_LIST_REQUEST_TIMEOUT_MS,
     );
-    return entries.map(mapEntry).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
+    return entries.map((entry) => mapEntry(entry)).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
   }
 
   async watchState(input: {
@@ -899,7 +911,7 @@ export class SupervisorDaemonClient {
     return {
       daemonGeneration: value.daemon_generation,
       sequence: value.sequence,
-      entries: value.entries.map(mapEntry),
+      entries: value.entries.map((entry) => mapEntry(entry, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT)),
     };
   }
 
@@ -2283,7 +2295,7 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
  * so a malformed row must never make the desktop accept a partly-coerced
  * delivery identity (or crash while rendering the manifest).
  */
-export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
+export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSupervisorManifestEntry {
   const activeWorkerBinding = entry.worker_binding ?? null;
   const workerBinding = activeWorkerBinding ?? entry.last_worker_binding ?? null;
   return {
@@ -2331,7 +2343,7 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     readyReachedAt: entry.ready_reached_at ?? null,
     restartCount: entry.reconciliation?.exit_timestamps_ms?.length ?? 0,
     lastTerminal: entry.reconciliation?.last_terminal ?? null,
-    activity: (entry.activity ?? []).map(mapActivity),
+    activity: boundedWireActivity(entry.activity, activityLimit).map(mapActivity),
     lastTurnControlSequence: entry.last_turn_control_sequence ?? 0,
     roomAgentState: projectRoomAgentState(entry.room_agent_state),
     deliveryReceipts: projectDeliveryReceipts(entry.delivery_receipts),
@@ -2472,6 +2484,24 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
     }
     return [{ inboxItemId, sourceMessageId, fifoSequence, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt, timeline }];
   });
+}
+
+/**
+ * `manifest.list` carries full history; the pushed state channel carries a
+ * bounded, payload-free summary tail. Keep the newest events by sequence and
+ * strip payloads so one oversized wire answer cannot reintroduce a
+ * multi-megabyte IPC frame per sequence change.
+ */
+function boundedWireActivity(
+  activity: WireActivityEvent[] | undefined,
+  limit?: number,
+): WireActivityEvent[] {
+  const events = activity ?? [];
+  if (limit === undefined || events.length === 0) return events;
+  const bounded = limit <= 0
+    ? []
+    : [...events].sort((left, right) => left.sequence - right.sequence).slice(-limit);
+  return bounded.map((event) => (event.payload === null ? event : { ...event, payload: null }));
 }
 
 function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {

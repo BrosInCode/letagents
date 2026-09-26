@@ -13,6 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+  SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT,
   type DaemonHandoffDiagnostic,
   type DaemonProcessIdentity,
   mapAgentInspectorDetail,
@@ -2535,6 +2536,94 @@ test("desktop and daemon implementation identities stay in lockstep", async () =
   assert.equal(daemonIdentity, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
 });
 
+test("a room-scoped list asks the daemon to scope and still filters what it gets back", async () => {
+  const env = await fixture();
+  // list() goes through ensureRunning(), which fences non-macOS hosts. Scope the
+  // established override to this test rather than the whole module.
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+  wire.entries.push(
+    { ...wireEntryWithCausalProjection(), id: "agent_here", room_id: "room_1" },
+    { ...wireEntryWithCausalProjection(), id: "agent_elsewhere", room_id: "room_2" },
+  );
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath });
+
+    const scoped = await client.list("room_1");
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: { room_id: "room_1" } });
+    // This wire daemon deliberately ignores the scope, so a correct answer here
+    // proves the client-side filter is still doing its job.
+    assert.deepEqual(scoped.map((entry) => entry.id), ["agent_here"]);
+
+    const everything = await client.list();
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: undefined });
+    assert.deepEqual(everything.map((entry) => entry.id).sort(), ["agent_elsewhere", "agent_here"]);
+
+    await client.list(null);
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: undefined });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("desktop and daemon agree on the state channel's activity summary limit", async () => {
+  const projection = await readFile(
+    join(dirname(fileURLToPath(import.meta.url)), "../../daemon/state-watch-projection.ts"),
+    "utf8",
+  );
+  const daemonLimit = projection.match(/STATE_WATCH_ACTIVITY_SUMMARY_LIMIT\s*=\s*(\d+)/)?.[1];
+  assert.equal(Number(daemonLimit), SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT);
+});
+
+test("the state subscription bounds activity even if a daemon answers with history", async () => {
+  const env = await fixture();
+  // The manifest.list comparison below goes through ensureRunning(), which
+  // fences non-macOS hosts. Scope the established override to this test.
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+  wire.entries.push({
+    ...wireEntryWithCausalProjection(),
+    activity: Array.from({ length: 200 }, (_unused, index) => ({
+      observed_at: `2026-01-01T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      sequence: 200 - index, // deliberately newest-first on the wire
+      provider: "codex",
+      kind: "notification",
+      method: "item/tool_call",
+      summary: `step ${200 - index}`,
+      status: "working" as const,
+      payload: { text: "x".repeat(2_000) },
+      payload_truncated: false,
+      payload_redacted: false,
+      durable_payload_ref: null,
+    })),
+  });
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath });
+    const snapshot = await client.watchState({ afterDaemonGeneration: 19, afterSequence: 6, waitMs: 10 });
+    const activity = snapshot.entries[0]!.activity;
+    assert.equal(activity.length, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT);
+    assert.equal(activity.at(-1)?.sequence, 200);
+    assert.ok(activity.every((event) => event.payload === null));
+    // Non-activity projection is untouched by the bound.
+    assert.equal(snapshot.entries[0]?.roomAgentState?.ingress.state, "observing");
+
+    // manifest.list stays the full-history read.
+    const listed = await client.list();
+    assert.equal(listed[0]?.activity.length, 200);
+    assert.notEqual(listed[0]?.activity.at(-1)?.payload, null);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches ignore inherited overrides", () => {
   const sourceRoot = '/tmp/LetAgents source "quoted"';
   const inherited = {
@@ -3005,7 +3094,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.190");
+    assert.equal(status.implementationVersion, "2.0.191");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

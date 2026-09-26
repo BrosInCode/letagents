@@ -21,6 +21,7 @@ import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-ins
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
+  mergeSupervisorStateSnapshotEntries,
   supervisorEntriesResourceFreshness,
   supervisorStateRepairDelayMs,
   supervisorStateSubscriptionNeedsRepair,
@@ -1173,6 +1174,80 @@ test("an activity push arriving during a poll survives the authoritative poll sn
   );
   assert.equal(afterPoll[0]?.providerPid, 456, "poll remains authoritative for non-activity fields");
   assert.deepEqual(afterPoll[0]?.activity.map((event) => event.sequence), [10, 11, 12]);
+});
+
+test("a pushed state snapshot that changes nothing renderable keeps the retained entries", () => {
+  const retained = [
+    entry({ activity: [activity(10), activity(11)] }),
+    entry({ id: "supervised_2", activity: [activity(4)] }),
+  ];
+  // The state channel carries only a summary tail, so an unchanged agent's
+  // snapshot entry is not byte-identical to what the renderer holds.
+  const snapshot = [
+    entry({ activity: [activity(11)] }),
+    entry({ id: "supervised_2", activity: [activity(4)] }),
+  ];
+
+  assert.equal(
+    mergeSupervisorStateSnapshotEntries(retained, snapshot, "focus_1"),
+    retained,
+    "an unchanged snapshot must not reassign the reactive list",
+  );
+});
+
+test("a state snapshot updates only the entries that changed and never downgrades activity detail", () => {
+  const detailed = activity(10, { payload: { tool: "bash" }, payloadTruncated: true });
+  const retained = [
+    entry({ activity: [activity(9), detailed] }),
+    entry({ id: "supervised_2", providerPid: 1, activity: [] }),
+  ];
+  const merged = mergeSupervisorStateSnapshotEntries(retained, [
+    // Same entry, but the summary tail lost the payload and the older event.
+    entry({ activity: [{ ...detailed, payload: null, payloadTruncated: false }, activity(11)] }),
+    entry({ id: "supervised_2", providerPid: 2, activity: [] }),
+  ], "focus_1");
+
+  assert.notEqual(merged, retained);
+  assert.equal(merged[1]?.providerPid, 2, "the snapshot stays authoritative for entry fields");
+  assert.deepEqual(merged[0]?.activity.map((event) => event.sequence), [9, 10, 11]);
+  assert.deepEqual(merged[0]?.activity[1], detailed, "the richer retained copy of an event wins");
+});
+
+test("a state snapshot adopts new entries, drops removed ones, and reuses unchanged objects", () => {
+  const retained = [entry({ activity: [activity(1)] })];
+  const added = mergeSupervisorStateSnapshotEntries(retained, [
+    entry({ activity: [activity(1)] }),
+    entry({ id: "supervised_3", activity: [activity(7)] }),
+  ], "focus_1");
+  assert.equal(added.length, 2);
+  assert.equal(added[0], retained[0], "the unchanged entry keeps its identity");
+  assert.deepEqual(added[1]?.activity.map((event) => event.sequence), [7]);
+
+  const removed = mergeSupervisorStateSnapshotEntries(added, [entry({ activity: [activity(1)] })], "focus_1");
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0], retained[0]);
+});
+
+test("a state snapshot caps retained activity and ignores entries from other rooms", () => {
+  const retained = [entry({
+    activity: Array.from({ length: SUPERVISOR_ACTIVITY_CAP }, (_unused, index) => activity(index + 1)),
+  })];
+  const merged = mergeSupervisorStateSnapshotEntries(
+    retained,
+    [entry({ activity: [activity(SUPERVISOR_ACTIVITY_CAP + 1)] })],
+    "focus_1",
+  );
+  assert.equal(merged[0]?.activity.length, SUPERVISOR_ACTIVITY_CAP);
+  assert.equal(merged[0]?.activity.at(-1)?.sequence, SUPERVISOR_ACTIVITY_CAP + 1);
+  assert.equal(merged[0]?.activity[0]?.sequence, 2);
+
+  const otherRoom = mergeSupervisorStateSnapshotEntries(
+    retained,
+    [entry({ roomId: "focus_2", activity: [] })],
+    "focus_1",
+  );
+  assert.equal(otherRoom[0]?.roomId, "focus_2");
+  assert.deepEqual(otherRoom[0]?.activity, [], "a foreign-room entry is not merged with this room's history");
 });
 
 test("retained supervisor data stays fresh during reconciliation", () => {
