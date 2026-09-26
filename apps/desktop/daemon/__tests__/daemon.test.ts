@@ -900,6 +900,55 @@ test("manifest state subscription returns an initial snapshot and wakes on a com
   }
 });
 
+test("manifest.list scopes to one room on request and still lists everything without a scope", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"),
+    attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const list = async (params?: unknown) => daemonRequest(paths.socketPath, "manifest.list", params);
+  try {
+    await daemon.start();
+    for (const put of [
+      { ...entry, id: "scoped_a", room_id: "room_a" },
+      { ...entry, id: "scoped_b", room_id: "room_b" },
+      // A stopped historical peer: the shape that dominates a long-lived manifest.
+      { ...entry, id: "scoped_a2", room_id: "room_a", desired_state: "stopped" as const, observed_state: "stopped" as const },
+    ]) assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: put })).ok, true, put.id);
+
+    const ids = (result: unknown) => (result as DaemonManifestEntryView[]).map((row) => row.id).sort();
+    // Absent params, and explicit null, keep today's whole-manifest answer.
+    assert.deepEqual(ids((await list()).result), ["scoped_a", "scoped_a2", "scoped_b"]);
+    assert.deepEqual(ids((await list({})).result), ["scoped_a", "scoped_a2", "scoped_b"]);
+    assert.deepEqual(ids((await list({ room_id: null })).result), ["scoped_a", "scoped_a2", "scoped_b"]);
+
+    // A scope is applied by the daemon, before projection and serialization.
+    assert.deepEqual(ids((await list({ room_id: "room_a" })).result), ["scoped_a", "scoped_a2"]);
+    assert.deepEqual(ids((await list({ room_id: "room_b" })).result), ["scoped_b"]);
+    assert.deepEqual(ids((await list({ room_id: "room_absent" })).result), []);
+    // The scoped read is a full projection, not the summary shape the pushed
+    // state channel uses.
+    const scoped = ((await list({ room_id: "room_a" })).result as DaemonManifestEntryView[])
+      .find((row) => row.id === "scoped_a")!;
+    assert.equal(scoped.room_id, "room_a");
+    assert.equal(scoped.condition, "none");
+    assert.ok(scoped.workplace_liveness);
+
+    for (const invalid of ["", "  ", " room_a", 7, true]) {
+      assert.match(String((await list({ room_id: invalid })).error), /exact non-empty room identifier/);
+    }
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("watch_agent_stream long-polls one agent's ephemeral live feed", async () => {
   const env = await fixture();
   const paths = {

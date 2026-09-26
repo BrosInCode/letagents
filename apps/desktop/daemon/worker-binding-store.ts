@@ -5,6 +5,12 @@ import { basename, dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
+import {
+  entriesOverPublicationRetention,
+  prunePublicationsForEntry,
+  RETAINED_WORKER_BINDING_PUBLICATIONS_PER_ENTRY,
+  WORKER_BINDING_PUBLICATIONS_PRUNE_INTERVAL,
+} from "./worker-binding-retention.js";
 
 export interface WorkerSessionBinding {
   entry_id: string;
@@ -70,6 +76,8 @@ export class WorkerBindingStore {
   private initializing: Promise<DatabaseSync> | null = null;
   private mutations: Promise<void> = Promise.resolve();
   private closed = false;
+  /** Publications finalized for an entry since its journal was last compacted. */
+  private readonly publicationsSinceCompaction = new Map<string, number>();
   /** Deliberately instance-local: reopening a daemon cannot recover a secret. */
   private readonly credentials = new Map<string, {
     entry_id: string;
@@ -361,7 +369,48 @@ export class WorkerBindingStore {
     try { result = await operation({ binding: reservation.binding, sequence: reservation.sequence, observed_at: reservation.observedAt }); }
     catch (error) { await this.finalizePublication(reservation, "transport_error"); throw error; }
     await this.finalizePublication(reservation, result.accepted ? "accepted" : "rejected");
+    await this.compactPublicationsAfterFinalize(entryId);
     return { ...result, sequence: reservation.sequence, observed_at: reservation.observedAt };
+  }
+
+  /**
+   * Compact every over-retention publication journal once, at open. A daemon
+   * that has been running for months can hold hundreds of thousands of
+   * republication rows, and their page-cache misses are what make the
+   * synchronous reads on this database expensive.
+   */
+  async compactRetainedPublications(retained = RETAINED_WORKER_BINDING_PUBLICATIONS_PER_ENTRY): Promise<{ entries: number; deleted: number }> {
+    const entries = await this.withMutation(async (database) => entriesOverPublicationRetention(database, retained));
+    let deleted = 0;
+    for (const entryId of entries) {
+      for (let pass = 0; pass < 32; pass += 1) {
+        // One mutation (and one transaction) per pass. Retention must never
+        // hold the store's mutation queue, or a real publication or cursor
+        // checkpoint would wait behind a bulk delete on first launch.
+        const result = await this.withMutation(async (database) =>
+          this.transaction(database, () => prunePublicationsForEntry(database, entryId, retained)));
+        deleted += result.deleted;
+        if (!result.truncated || result.deleted === 0) break;
+      }
+    }
+    return { entries: entries.length, deleted };
+  }
+
+  /**
+   * Compaction is driven by the writes that cause the growth, so an idle daemon
+   * performs no retention work and no timer polls this table. A failure here is
+   * never authority: the reservation has already been finalized durably.
+   */
+  private async compactPublicationsAfterFinalize(entryId: string): Promise<void> {
+    const since = (this.publicationsSinceCompaction.get(entryId) ?? 0) + 1;
+    if (since < WORKER_BINDING_PUBLICATIONS_PRUNE_INTERVAL) {
+      this.publicationsSinceCompaction.set(entryId, since);
+      return;
+    }
+    this.publicationsSinceCompaction.set(entryId, 0);
+    try {
+      await this.withMutation(async (database) => this.transaction(database, () => prunePublicationsForEntry(database, entryId)));
+    } catch { /* Retention is opportunistic; the next publication retries it. */ }
   }
 
   async verifyAndAdvanceExecutionGeneration<T extends { accepted: boolean }>(input: { entryId: string; roomId: string; workAttemptId: string; fromExecutionGenerationId: string; toExecutionGenerationId: string; agentSessionId: string }, operation: (publication: { binding: Readonly<WorkerSessionBinding>; sequence: number; observed_at: string }) => Promise<T>): Promise<{ binding: WorkerSessionBinding; advanced: boolean; accepted: boolean }> {
