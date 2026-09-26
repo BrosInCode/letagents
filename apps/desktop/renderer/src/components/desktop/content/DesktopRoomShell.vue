@@ -423,6 +423,7 @@ import {
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
+  mergeSupervisorStateSnapshotEntries,
   supervisorEntriesResourceFreshness,
   supervisorStateRepairDelayMs,
   supervisorStateSubscriptionNeedsRepair,
@@ -1150,13 +1151,15 @@ function acceptSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot)
   supervisorStateSequence = snapshot.sequence;
   supervisorEntriesMutationVersion += 1;
   const roomEntries = snapshot.entries.filter((entry) => entry.roomId === props.room.identifier);
-  if (JSON.stringify(roomEntries) !== JSON.stringify(supervisorEntries.value)) {
-    supervisorEntries.value = mergeSupervisorEntriesPoll(
-      supervisorEntries.value,
-      roomEntries,
-      props.room.identifier,
-    );
-  }
+  // The merge is identity-stable: it returns the retained array when nothing a
+  // view renders changed, so a periodic worker-binding republication no longer
+  // costs a whole-list reactivity pass (or a whole-snapshot JSON comparison).
+  const mergedEntries = mergeSupervisorStateSnapshotEntries(
+    supervisorEntries.value,
+    roomEntries,
+    props.room.identifier,
+  );
+  if (mergedEntries !== supervisorEntries.value) supervisorEntries.value = mergedEntries;
   supervisorEntriesHaveLoaded.value = true;
   supervisorEntriesUpdatedAt.value = new Date().toISOString();
   supervisorEntriesState.value = "ready";

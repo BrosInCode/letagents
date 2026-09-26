@@ -99,6 +99,69 @@ export function foldSupervisorActivityPush(
 }
 
 /**
+ * Activity events are immutable facts keyed by sequence, and the room-level
+ * state channel carries only a bounded, payload-free summary tail of them. So
+ * a state snapshot must never replace an event this renderer already holds:
+ * the richer copy (from `manifest.list` or the activity bridge) wins, and
+ * older events outside the snapshot's tail are retained rather than dropped.
+ */
+function mergeActivityRetainingDetail(
+  held: readonly DesktopSupervisorActivityEvent[],
+  snapshot: readonly DesktopSupervisorActivityEvent[],
+  cap: number,
+): DesktopSupervisorActivityEvent[] {
+  const bySequence = new Map<number, DesktopSupervisorActivityEvent>();
+  for (const event of snapshot) bySequence.set(event.sequence, event);
+  for (const event of held) bySequence.set(event.sequence, event);
+  return [...bySequence.values()]
+    .sort((a, b) => a.sequence - b.sequence)
+    .slice(-cap);
+}
+
+/**
+ * A change signature that ignores activity payloads. Everything a room-level
+ * view renders is either a non-activity entry field or an activity event
+ * identified by its sequence, so two entries with the same signature are
+ * interchangeable for rendering.
+ */
+function supervisorEntrySignature(entry: DesktopSupervisorManifestEntry): string {
+  const { activity, ...rest } = entry;
+  return `${JSON.stringify(rest)}|${activity.map((event) => event.sequence).join(",")}`;
+}
+
+/**
+ * Fold a pushed state snapshot into the retained entries.
+ *
+ * Returns the *same array* when nothing a view renders changed, and reuses the
+ * retained object for every unchanged entry. A binding republication from one
+ * agent must not invalidate the whole supervised list; the snapshot arrives
+ * several times a minute per running agent, so an unconditional reassignment
+ * is a full reactivity pass each time.
+ */
+export function mergeSupervisorStateSnapshotEntries(
+  current: readonly DesktopSupervisorManifestEntry[],
+  snapshot: readonly DesktopSupervisorManifestEntry[],
+  roomId: string,
+  cap = SUPERVISOR_ACTIVITY_CAP,
+): DesktopSupervisorManifestEntry[] {
+  const retainedById = new Map(
+    current.filter((entry) => entry.roomId === roomId).map((entry) => [entry.id, entry]),
+  );
+  const next = snapshot.map((entry) => {
+    const retained = entry.roomId === roomId ? retainedById.get(entry.id) : undefined;
+    if (!retained) return { ...entry, activity: mergeActivityRetainingDetail([], entry.activity, cap) };
+    const candidate = {
+      ...entry,
+      activity: mergeActivityRetainingDetail(retained.activity, entry.activity, cap),
+    };
+    return supervisorEntrySignature(candidate) === supervisorEntrySignature(retained) ? retained : candidate;
+  });
+  const unchanged = next.length === current.length
+    && next.every((entry, index) => entry === current[index]);
+  return unchanged ? (current as DesktopSupervisorManifestEntry[]) : next;
+}
+
+/**
  * State snapshots are normally push-maintained; this merge also fences the
  * exceptional repair read so a response that began before a newer activity
  * push cannot erase human-readable progress.

@@ -20,7 +20,8 @@ export interface DaemonControlOperations {
   cancelDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   status(): unknown;
   prepareHandoff(): unknown;
-  listManifest(): unknown;
+  /** Null lists every entry; a room identifier scopes the read to that room. */
+  listManifest(roomId: string | null): unknown;
   watchState(input: { afterDaemonGeneration: number; afterSequence: number; waitMs: number }): unknown;
   watchAgentStream(input: { entryId: string; afterSequence: number; waitMs: number }): unknown;
   retryRoomDelivery(input: RoomDeliveryControl): unknown;
@@ -161,6 +162,20 @@ function runtimeRecoveryMode(params: Record<string, unknown>, error: string): "r
   return mode;
 }
 
+/**
+ * `manifest.list` is the full-history read, so it is also the expensive one.
+ * An optional room scope lets the daemon project and serialize only the room
+ * the caller will keep. Absent or null params preserve the whole-manifest
+ * answer every existing caller depends on.
+ */
+function optionalRoomScopeParam(value: unknown, error: string): string | null {
+  if (value === undefined || value === null) return null;
+  const roomId = paramsRecord(value).room_id;
+  if (roomId === undefined || roomId === null) return null;
+  if (typeof roomId !== "string" || !roomId.trim() || roomId !== roomId.trim()) throw new Error(error);
+  return roomId;
+}
+
 function paramsEntry(value: unknown): DaemonManifestEntry {
   const params = paramsRecord(value);
   const entry = params.entry;
@@ -201,7 +216,12 @@ export function createDaemonControlRequestHandler(
       await operations.prepareHandoff();
       return { accepted: true, generation: context.currentGeneration() };
     }
-    if (request.method === "manifest.list") return operations.listManifest();
+    if (request.method === "manifest.list") {
+      return operations.listManifest(optionalRoomScopeParam(
+        request.params,
+        "manifest.list room_id must be an exact non-empty room identifier.",
+      ));
+    }
     if (request.method === "local_board.mutate") return operations.mutateLocalBoard(request.params);
     if (request.method === "local_board.watch") {
       if (!disconnected) throw new Error("A board subscription requires a live connection.");
