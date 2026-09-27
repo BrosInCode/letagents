@@ -25,14 +25,23 @@ function journalPath(): string {
 }
 
 async function read(): Promise<RentalLaunchJournal> {
+  let contents: string;
   try {
-    const parsed = JSON.parse(await readFile(journalPath(), "utf8")) as Partial<RentalLaunchJournal>;
-    return parsed.version === 1 && parsed.entries && typeof parsed.entries === "object"
-      ? { version: 1, entries: parsed.entries }
-      : { version: 1, entries: {} };
-  } catch {
-    return { version: 1, entries: {} };
+    contents = await readFile(journalPath(), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, entries: {} };
+    throw error;
   }
+  let parsed: Partial<RentalLaunchJournal> | null;
+  try {
+    parsed = JSON.parse(contents) as Partial<RentalLaunchJournal> | null;
+  } catch {
+    throw new Error("Rental launch journal contains invalid JSON. Its saved state has been preserved.");
+  }
+  if (parsed?.version !== 1 || !parsed.entries || typeof parsed.entries !== "object" || Array.isArray(parsed.entries)) {
+    throw new Error("Rental launch journal has an unsupported format. Its saved state has been preserved.");
+  }
+  return { version: 1, entries: parsed.entries };
 }
 
 async function mutate<T>(operation: (journal: RentalLaunchJournal) => T): Promise<T> {
