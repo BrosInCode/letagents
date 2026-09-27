@@ -54,6 +54,26 @@
       </div>
     </article>
 
+    <article v-if="appInfo?.platform === 'darwin'" class="settings-update-card" :data-tone="maintenanceHeld ? 'warning' : 'neutral'">
+      <div class="settings-update-copy">
+        <p>Background service</p>
+        <h2>{{ maintenanceReady ? 'Supervision paused for maintenance' : maintenanceHeld ? 'Service maintenance requested' : 'Service recovery' }}</h2>
+        <span>{{ maintenanceReady
+          ? 'Saved work is preserved. You can install an update now, or resume supervision. Detached provider processes may still be running.'
+          : maintenanceHeld ? 'Waiting for the restarted service. Refresh its status to check whether supervision can resume. Saved work is preserved.'
+          : 'If an agent prevents the service from restarting, force restart LetAgents with supervision paused.' }}</span>
+        <span v-if="maintenanceError" role="alert">{{ maintenanceError }}</span>
+      </div>
+      <div class="settings-update-actions">
+        <button v-if="maintenanceHeld && !maintenanceReady" type="button" class="ghost-button settings-action-button"
+          :disabled="maintenanceBusy" data-testid="refresh-service-status" @click="refreshMaintenance">Refresh service status</button>
+        <button v-if="maintenanceReady" type="button" class="primary-button settings-action-button"
+          :disabled="maintenanceBusy" data-testid="resume-supervision" @click="restartService(true)">Resume supervision</button>
+        <button type="button" class="ghost-button settings-action-button" :disabled="maintenanceBusy"
+          data-testid="force-restart-service" @click="restartService(false)">{{ maintenanceBusy ? 'Please wait…' : 'Force restart service' }}</button>
+      </div>
+    </article>
+
     <div class="settings-control-list">
       <SettingsRow
         title="Installed version"
@@ -86,7 +106,8 @@
 
 <script setup lang="ts">
 import { CircleCheck, Download, RefreshCw, Sparkles, TriangleAlert } from "@lucide/vue";
-import { computed } from "vue";
+import { computed, onMounted, ref } from "vue";
+import { desktopIpc } from "../../../../ipc/index.js";
 import type { DesktopAppInfo, DesktopUpdateStatus } from "../../../../../../electron/ipc-types";
 import { desktopUpdatePresentation } from "../../../../domain/desktop-update-status";
 import SettingsRow from "../SettingsRow.vue";
@@ -102,6 +123,28 @@ defineEmits<{
 }>();
 
 const presentation = computed(() => desktopUpdatePresentation(props.updateStatus));
+const maintenanceHeld = ref(false);
+const maintenanceReady = ref(false);
+const maintenanceBusy = ref(false);
+const maintenanceError = ref<string | null>(null);
+async function refreshMaintenance(): Promise<void> {
+  try {
+    const status = await desktopIpc.maintenance?.getStatus();
+    maintenanceHeld.value = status?.held ?? false; maintenanceReady.value = status?.ready ?? false;
+  }
+  catch { maintenanceError.value = 'Could not read service maintenance status. Saved work has not been changed.'; }
+}
+async function restartService(resume: boolean): Promise<void> {
+  if (maintenanceBusy.value) return;
+  maintenanceBusy.value = true;
+  maintenanceError.value = null;
+  try {
+    if (!desktopIpc.maintenance) throw new Error('Restart LetAgents Desktop to load service recovery controls.');
+    await desktopIpc.maintenance.restart(resume);
+  } catch (error) { maintenanceError.value = error instanceof Error ? error.message : 'Could not restart the service.'; }
+  finally { maintenanceBusy.value = false; await refreshMaintenance(); }
+}
+onMounted(refreshMaintenance);
 const lastCheckedLabel = computed(() => {
   if (!props.updateStatus?.lastCheckedAt) return null;
   const checkedAt = new Date(props.updateStatus.lastCheckedAt);

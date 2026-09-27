@@ -1,3 +1,4 @@
+import { createDaemonMaintenance, readDaemonMaintenance, daemonMaintenancePath } from "../../../../shared/daemon-maintenance.mjs";
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, randomBytes, sign as nativeSign } from "node:crypto";
@@ -1351,6 +1352,7 @@ async function startWireDaemon(
   const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
   const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
   const runtimeRecoveryCapability = { v2: true };
+  const maintenance = { unresponsive: false, id: null as string | null };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
   const capturedEnvironment = supervisorDaemonSpawnEnvironment();
   const compatibilityFingerprint: { value: string | null } = {
@@ -1370,7 +1372,8 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
+        if (maintenance.unresponsive) return;
+        result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
         if (handoff.prepare) {
@@ -1508,7 +1511,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint };
+  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -3598,4 +3601,79 @@ test("compaction projection is optional and accepts only finite structured progr
   const progress = { state: "compacting" as const, startedAt: "2026-09-24T00:00:00Z" };
   assert.deepEqual(mapEntry({ ...wire, provider_progress: progress }).providerProgress, progress);
   assert.equal(mapEntry({ ...wire, provider_progress: { ...progress, startedAt: "invalid" } }).providerProgress, null);
+});
+
+for (const scenario of ["refused", "unresponsive", "pending_handoff"] as const) test(`force maintenance restart handles ${scenario} without replay or duplicate spawn`, async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture(); const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+  let dead = false; const signals: string[] = [];
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    inspectDaemonProcess: () => dead ? null : fakeDaemonProcessIdentity(),
+    signalDaemon: (pid, signal) => { assert.equal(pid, 77); signals.push(signal);
+      void closeServer(wire.server, env.socketPath).then(() => { dead = true; }); },
+    spawnDaemon: () => { throw new Error("force-stop must relaunch Electron, not spawn under old producers"); },
+    requestTimeoutMs: 30, terminateTimeoutMs: 100, killTimeoutMs: 100, processPollIntervalMs: 1 });
+  try {
+    await client.connectIfRunning();
+    if (scenario === "refused") {
+      wire.handoff.prepare = async () => { throw new Error("custody retired"); };
+      await assert.rejects(client.prepareForApplicationUpdate(), /custody retired/);
+    }
+    let old: Promise<unknown> | undefined;
+    if (scenario === "pending_handoff") {
+      wire.handoff.prepare = () => new Promise(() => {});
+      old = client.prepareForApplicationUpdate(); void old.catch(() => undefined);
+      while (!wire.requests.some(r => r.method === "daemon.prepare_handoff")) await new Promise(r => setTimeout(r, 1));
+    }
+    if (scenario === "unresponsive") wire.maintenance.unresponsive = true;
+    const one = client.stopForMaintenance(); const two = client.stopForMaintenance(); assert.equal(one, two);
+    await assert.rejects(client.ensureRunning(), /maintenance/);
+    await one; if (old) await assert.rejects(old, /maintenance/);
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.ok(await readDaemonMaintenance(daemonMaintenancePath(env.root)));
+    assert.equal(wire.requests.filter(r => r.method === "daemon.prepare_handoff").length, scenario === "unresponsive" ? 0 : 1);
+  } finally { if (!dead) await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("force maintenance resume requires the exact held service and preserves a mismatched hold", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture(); const hold = await createDaemonMaintenance(daemonMaintenancePath(env.root));
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 20);
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    inspectDaemonProcess: () => fakeDaemonProcessIdentity(), signalDaemon: () => assert.fail("must not signal for resume"),
+    spawnDaemon: () => assert.fail("must not spawn for resume") });
+  try {
+    assert.deepEqual(await client.getMaintenanceStatus(), { held: true, ready: false });
+    await assert.rejects(client.stopForMaintenance(true), /Force restart/);
+    assert.deepEqual(await readDaemonMaintenance(daemonMaintenancePath(env.root)), hold);
+    assert.equal(wire.requests.some(r => r.method === "daemon.prepare_handoff"), false);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("force maintenance held service suppresses ordinary generation wakes and resumes only after exit", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture(); const hold = await createDaemonMaintenance(daemonMaintenancePath(env.root));
+  let dead = false; let generationWakes = 0;
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 20,
+    () => { void closeServer(wire.server, env.socketPath).then(() => { dead = true; }); });
+  wire.maintenance.id = hold.id;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    inspectDaemonProcess: () => dead ? null : fakeDaemonProcessIdentity(),
+    signalDaemon: () => assert.fail("held service shutdown must not signal"), terminateTimeoutMs: 100,
+    spawnDaemon: () => assert.fail("held service is already running") });
+  client.onGeneration(() => { generationWakes++; });
+  try {
+    assert.equal((await client.ensureRunning()).maintenanceHoldId, hold.id);
+    await Promise.resolve(); assert.equal(generationWakes, 0);
+    assert.deepEqual(await client.getMaintenanceStatus(), { held: true, ready: true });
+    await client.stopForMaintenance(true);
+    assert.equal(dead, true); assert.equal(await readDaemonMaintenance(daemonMaintenancePath(env.root)), null);
+    await assert.rejects(client.ensureRunning(), /maintenance/, "old Electron stays fenced until relaunch");
+  } finally { if (!dead) await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
