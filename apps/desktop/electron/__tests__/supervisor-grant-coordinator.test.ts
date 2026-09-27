@@ -905,6 +905,81 @@ test("persistent same-generation reconciliation failure does not retry-storm", a
   }
 });
 
+test("reconciliation observation retains failure without retrying and follows an existing credential wake", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  let calls = 0;
+  let failed = true;
+  const failure = new Error("grant unavailable");
+  const c = new SupervisorGrantCoordinator({
+    async ensureRunning() { return { generation: 7 }; },
+    async list() { calls++; if (failed) throw failure; return []; },
+  } as never);
+  assert.equal(c.getReconciliationObservation(), null);
+  const operation = c.reconcileDesiredRunning();
+  const pending = c.getReconciliationObservation()!;
+  assert.equal(pending.status, "pending");
+  await assert.rejects(operation, failure);
+  for (let i = 0; i < 3; i++) {
+    const observation = c.getReconciliationObservation()!;
+    assert.equal(observation.attempt, pending.attempt);
+    assert.equal(observation.status, "failed");
+    assert.equal(observation.error, failure);
+  }
+  assert.equal(calls, 1);
+  failed = false;
+  c.scheduleCredentialRecovery();
+  const recovery = c.getReconciliationObservation()!;
+  assert.notEqual(recovery.attempt, pending.attempt);
+  await recovery.attempt;
+  assert.equal(c.getReconciliationObservation()?.status, "succeeded");
+  assert.equal(calls, 2);
+});
+
+test("reconciliation observation invalidates prior success while a credential follow-up is only queued", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const c = new SupervisorGrantCoordinator({
+    async ensureRunning() { return { generation: 7 }; },
+    async list() { await held; return []; },
+  } as never);
+  const running = c.reconcileDesiredRunning();
+  const first = c.getReconciliationObservation()!;
+  c.scheduleCredentialRecovery();
+  assert.equal(c.getReconciliationObservation()?.current, false);
+  const atSettlement = first.attempt.then(() => c.getReconciliationObservation()!);
+  release();
+  const gap = await atSettlement;
+  assert.equal(gap.attempt, first.attempt, "the observation runs before the queued follow-up starts");
+  assert.equal(gap.status, "succeeded");
+  assert.equal(gap.current, false, "an already recorded wake invalidates old success");
+  await running;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.notEqual(c.getReconciliationObservation()?.attempt, first.attempt);
+  assert.equal(c.getReconciliationObservation()?.current, true);
+});
+
+test("reconciliation observation recognizes a generation wake already covered by the successful attempt", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let calls = 0;
+  const c = new SupervisorGrantCoordinator({
+    async ensureRunning() { calls++; await held; return { generation: 7 }; },
+    async list() { return []; },
+  } as never);
+  const running = c.reconcileDesiredRunning();
+  const first = c.getReconciliationObservation()!;
+  c.scheduleReconciliation({ generation: 7 });
+  assert.equal(c.getReconciliationObservation()?.current, false);
+  release();
+  await running;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1, "the owner deliberately suppresses the redundant follow-up");
+  assert.equal(c.getReconciliationObservation()?.attempt, first.attempt);
+  assert.equal(c.getReconciliationObservation()?.status, "succeeded");
+  assert.equal(c.getReconciliationObservation()?.current, true);
+});
+
 test("a successful login retries the exact grant after same-generation credential failure", async (t) => {
   t.mock.method(console, "warn", () => {});
   let authenticated = false;
