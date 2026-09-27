@@ -20,7 +20,7 @@ function all(root: Host): Host[] { return [root, ...root.children.flatMap(all)];
 const find = (root: Host, id: string) => all(root).find(n => n.props["data-testid"] === id);
 async function flush() { for (let i = 0; i < 4; i++) { await Promise.resolve(); await Vue.nextTick(); } }
 
-async function component(maintenance: { getStatus(): Promise<{ held: boolean; ready: boolean }>; restart(resume: boolean): Promise<void> }) {
+async function component(maintenance: { getStatus(): Promise<{ held: boolean; ready: boolean }>; restart(resume: boolean): Promise<void> } | undefined) {
   const path = new URL("../src/components/desktop/settings/panes/SettingsUpdatesPane.vue", import.meta.url);
   const source = await readFile(path, "utf8");
   const descriptor = parse(source, { filename: path.pathname }).descriptor;
@@ -72,4 +72,27 @@ test("maintenance Settings keeps force restart available and reports refusal wit
     assert.equal(find(root, "force-restart-service")!.props.disabled, false);
     assert.equal(find(root, "resume-supervision"), undefined);
   } finally { app.unmount(); }
+});
+
+
+test("maintenance recovery remains reachable without room app info or daemon status", async () => {
+  const actions: boolean[] = [];
+  const root = node();
+  const pane = await component({ getStatus: async () => { throw new Error("Service unavailable"); }, restart: async resume => { actions.push(resume); } });
+  const app = renderer.createApp(pane, { appInfo: null, updateStatus: null }); app.mount(root);
+  try {
+    await flush();
+    const force = find(root, "force-restart-service"); assert.ok(force);
+    assert.equal(force.props.disabled, false);
+    await force.props.onClick(); await flush();
+    assert.deepEqual(actions, [false]);
+    assert.equal(find(root, "resume-supervision"), undefined);
+  } finally { app.unmount(); }
+});
+
+test("maintenance controls are absent when this desktop has no native capability", async () => {
+  const root = node(); const pane = await component(undefined);
+  const app = renderer.createApp(pane, { appInfo: null, updateStatus: null }); app.mount(root);
+  try { await flush(); assert.equal(find(root, "force-restart-service"), undefined); }
+  finally { app.unmount(); }
 });

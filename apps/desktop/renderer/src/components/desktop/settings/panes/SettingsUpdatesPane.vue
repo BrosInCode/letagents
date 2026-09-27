@@ -54,7 +54,7 @@
       </div>
     </article>
 
-    <article v-if="appInfo?.platform === 'darwin'" class="settings-update-card" :data-tone="maintenanceHeld ? 'warning' : 'neutral'">
+    <article v-if="desktopIpc.maintenance" class="settings-update-card" :data-tone="maintenanceHeld ? 'warning' : 'neutral'">
       <div class="settings-update-copy">
         <p>Background service</p>
         <h2>{{ maintenanceReady ? 'Supervision paused for maintenance' : maintenanceHeld ? 'Service maintenance requested' : 'Service recovery' }}</h2>

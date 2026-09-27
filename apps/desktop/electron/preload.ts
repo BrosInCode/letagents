@@ -326,10 +326,10 @@ const api: DesktopApi = {
     runAgentProviderSetup: (providerId, input) =>
       ipcRenderer.invoke("desktop:workers:run-agent-provider-setup", providerId, input),
   },
-  maintenance: {
+  maintenance: process.platform === "darwin" ? {
     getStatus: () => ipcRenderer.invoke("desktop:maintenance:status"),
     restart: resume => ipcRenderer.invoke("desktop:maintenance:restart", resume),
-  },
+  } : undefined,
   supervisor: {
     listHostToolRules: agentId => ipcRenderer.invoke("desktop:supervisor:list-host-tool-rules", agentId),
     revokeHostToolRule: input => ipcRenderer.invoke("desktop:supervisor:revoke-host-tool-rule", input),
