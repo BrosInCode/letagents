@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { SupervisorGrantRequestError } from "../cloud-http.js";
+import { cursorLaneRetirementSchema } from "../runtime-recovery-journal.js";
 import { WorkerCredentialMintError } from "../daemon-error-policy.js";
 import {
   WorkerAuthorityCoordinator,
@@ -1871,6 +1872,66 @@ for (const invalid of ["missing-history", "unknown-native", "wrong-birth-kind", 
         attestWorkLease: async () => { calls++; return "bad"; }, rebindWorkLease: async () => seed.lease } });
     await assert.rejects(f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
     assert.equal(calls, 0);
+    assert.equal(f.harness.custody.workerAuthorization("agent-1"), undefined);
+  });
+}
+
+function cursorRetiredLeaseFixture(overrides: HarnessOptions = {}) {
+  const seed = retiredLeaseFixture();
+  const lane = { kind: "cursor_idle_lane_retired_v1" as const, ...seed.authority,
+    provider_continuation_id: "continuation-1", retired_at: "2026-08-26T02:00:00.000Z" };
+  return retiredLeaseFixture({ entry: manifestEntry({ provider: "cursor" }),
+    executions: [execution({ ...terminalExecution(), terminal_cause: "stopped" })],
+    predecessors: [{ execution_generation_id: "execution-1", agent_session_id: "session-old",
+      authority: seed.authority, cursor_lane_retirement: lane }], ...overrides });
+}
+
+test("Cursor lane retirement accepts canonical supported API origins without changing their authority", () => {
+  const seed = retiredLeaseFixture();
+  const lane = { kind: "cursor_idle_lane_retired_v1", ...seed.authority,
+    provider_continuation_id: "continuation-1", retired_at: "2026-08-26T02:00:00.000Z" };
+  for (const api_url of ["https://letagents.test", "http://127.0.0.1:3000", "http://[::1]:3000",
+    "https://[2001:db8::1]:444", "letagents-local://rooms"]) {
+    assert.equal(cursorLaneRetirementSchema.parse({ ...lane, api_url }).api_url, api_url);
+  }
+  for (const api_url of ["http://letagents.test", "https://letagents.test/path", "https://letagents.test/",
+    "https://user:secret@letagents.test", "https://letagents.test?query", "https://letagents.test#fragment",
+    "https://[::1", " https://letagents.test", "https://" + "a".repeat(512)]) {
+    assert.equal(cursorLaneRetirementSchema.safeParse({ ...lane, api_url }).success, false, api_url);
+  }
+});
+
+test("an exactly retired Cursor lane restores its lease without inventing native death", async () => {
+  const f = cursorRetiredLeaseFixture();
+  assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+  assert.deepEqual(f.mutations, ["attest:execution-1:4", "rebind:proof-1"]);
+  assert.equal(f.current.epoch, 5);
+});
+
+for (const mismatch of ["kind", "extra", "entry_id", "room_id", "work_attempt_id", "execution_generation_id",
+  "agent_session_id", "api_url", "grant_id", "agent_key", "provider_continuation_id", "retired_at",
+  "earlier-unmarked", "legacy", "terminal-cause"] as const) {
+  test(`Cursor lane retirement rejects ${mismatch} without moving the lease`, async () => {
+    const seed = retiredLeaseFixture();
+    const lane = { kind: "cursor_idle_lane_retired_v1", ...seed.authority,
+      provider_continuation_id: "continuation-1", retired_at: "2026-08-26T02:00:00.000Z" };
+    if (mismatch === "extra") Object.assign(lane, { extra: "unrecognized" });
+    else if (mismatch === "retired_at") lane.retired_at = "2026-08-26T00:00:00.000Z";
+    else if (mismatch in lane) Object.assign(lane, { [mismatch]: "wrong" });
+    const records: NonNullable<HarnessOptions["predecessors"]> = [{ execution_generation_id: "execution-1",
+      agent_session_id: "session-old", authority: seed.authority,
+      cursor_lane_retirement: lane as NonNullable<HarnessOptions["predecessors"]>[number]["cursor_lane_retirement"] }];
+    const executions = [execution({ ...terminalExecution(), terminal_cause: mismatch === "terminal-cause" ? "crashed" : "stopped" })];
+    if (mismatch === "earlier-unmarked") {
+      records.push({ execution_generation_id: "older-execution", agent_session_id: "session-old",
+        authority: { ...seed.authority, execution_generation_id: "older-execution" } });
+      executions.push({ ...execution({ ...terminalExecution(), terminal_cause: "stopped" }), execution_generation_id: "older-execution", generation: 6 });
+    }
+    if (mismatch === "legacy") { records[0]!.authority = null; records[0]!.legacy_recovery_complete = true; }
+    const f = cursorRetiredLeaseFixture({ predecessors: records, executions });
+    await assert.rejects(f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+    assert.deepEqual(f.mutations, []);
+    assert.equal(f.current.epoch, 4);
     assert.equal(f.harness.custody.workerAuthorization("agent-1"), undefined);
   });
 }
