@@ -44,6 +44,7 @@ export class RentalProviderHostManager {
 
   start(): void {
     void readRentalProviderSettings().then(async (settings) => {
+      if (await this.daemon.isMaintenanceHeld()) { await this.pauseAvailability(); return; }
       this.setHeartbeatEnabled(settings.enabled);
       await this.availabilityChanged(settings.enabled);
       if (settings.enabled) await this.sync(settings);
@@ -62,11 +63,18 @@ export class RentalProviderHostManager {
   }
 
   async updateSettings(input: DesktopRentalProviderSettingsInput): Promise<DesktopRentalProviderSettings> {
+    if (await this.daemon.isMaintenanceHeld()) throw new Error("Rental hosting is paused for service maintenance.");
     const settings = await updateRentalProviderSettings(input);
     await this.sync(settings);
+    if (await this.daemon.isMaintenanceHeld()) { await this.pauseAvailability(); return this.project(settings); }
     this.setHeartbeatEnabled(settings.enabled);
     await this.availabilityChanged(settings.enabled);
     return this.project(settings);
+  }
+
+  private async pauseAvailability(): Promise<void> {
+    this.setHeartbeatEnabled(false);
+    await this.availabilityChanged(false);
   }
 
   private setHeartbeatEnabled(enabled: boolean): void {
@@ -82,7 +90,10 @@ export class RentalProviderHostManager {
 
   sync(settings?: StoredRentalProviderSettings): Promise<void> {
     if (this.syncOperation) return this.syncOperation;
-    const operation = (async () => this.publish(settings ?? await readRentalProviderSettings()))();
+    const operation = (async () => {
+      if (await this.daemon.isMaintenanceHeld()) { await this.pauseAvailability(); return; }
+      await this.publish(settings ?? await readRentalProviderSettings());
+    })();
     const tracked = operation.finally(() => {
       if (this.syncOperation === tracked) this.syncOperation = null;
     });
@@ -117,20 +128,23 @@ export class RentalProviderHostManager {
       generation: status?.generation,
       activeSessionIds,
     };
+    if (await this.daemon.isMaintenanceHeld()) { await this.pauseAvailability(); return; }
     const heartbeat = await this.api.heartbeatProviderHost(projection.hostId, body);
     if (heartbeat.ok) return;
     if (heartbeat.status !== 404) throw new Error(`Rental host heartbeat failed: ${heartbeat.error}`);
+    if (await this.daemon.isMaintenanceHeld()) { await this.pauseAvailability(); return; }
     const registered = await this.api.registerProviderHost({ hostId: projection.hostId, ...body });
     if (!registered.ok) throw new Error(`Rental host registration failed: ${registered.error}`);
   }
 
   private async project(settings: StoredRentalProviderSettings): Promise<DesktopRentalProviderSettings> {
-    const daemonStatus = await this.daemon.connectIfRunning().catch(() => null);
+    const maintenance = await this.daemon.isMaintenanceHeld();
+    const daemonStatus = maintenance ? null : await this.daemon.connectIfRunning().catch(() => null);
     const providers = listDesktopAgentProviders().filter((provider) => supported.has(provider.id as DesktopRentalRuntimeId));
     const runtimes = await Promise.all(providers.map(async (provider): Promise<DesktopRentalProviderRuntime> => {
       const providerId = provider.id as DesktopRentalRuntimeId;
       const enabled = settings.enabledRuntimes.includes(providerId);
-      const check = await this.runtimePreflight(provider.id);
+      const check = maintenance ? null : await this.runtimePreflight(provider.id);
       const authenticated = Boolean(check && !["auth_required", "missing_runtime", "error", "config_required"].includes(check.status));
       const rentalProfiles = listRentalSafePermissionProfiles(provider.id);
       const rentalReady = Boolean(check?.canStart && rentalProfiles.length);
@@ -147,7 +161,8 @@ export class RentalProviderHostManager {
       };
     }));
     const blockers: string[] = [];
-    if (!daemonStatus) blockers.push("Background agent management is offline.");
+    if (maintenance) blockers.push("Rental hosting is paused for service maintenance.");
+    else if (!daemonStatus) blockers.push("Background agent management is offline.");
     if (!runtimes.some((runtime) => runtime.enabled && runtime.status === "ready")) {
       blockers.push("Sign in to an agent app that supports rentals, then enable it here.");
     }

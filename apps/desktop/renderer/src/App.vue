@@ -2486,6 +2486,7 @@ onMounted(() => {
   unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
   unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
   unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
+  void desktopIpc.maintenance?.getStatus().then(status => { if (status.held) openUpdatesSurface(); }).catch(() => undefined);
   unsubscribeUpdateStatus = desktopIpc.updates?.onStatusChanged?.((status) => {
     updateStatus.value = status;
   }) || null;

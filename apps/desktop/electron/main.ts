@@ -50,7 +50,7 @@ app.once("ready", async (_event, launchInfo) => {
     await startDesktopShellEnvironmentHydration().catch((error) => {
       console.warn(`Desktop shell environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
     });
-    await retireLegacyCodexBackedOpenModelSessions().catch((error) => {
+    if (!await supervisorDaemonClient.isMaintenanceHeld()) await retireLegacyCodexBackedOpenModelSessions().catch((error) => {
       console.warn(
         `Legacy Open Model retirement failed: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -66,7 +66,7 @@ app.once("ready", async (_event, launchInfo) => {
       // Rehydrate only desired-running daemon-inbox Codex entries. A failure is
       // intentionally non-fatal to Electron: the paused/blocked daemon entry is
       // truthful and recovery remains available after sign-in/host authority.
-      await supervisorGrantCoordinator.reconcileDesiredRunning().catch((error) => {
+      if (!await supervisorDaemonClient.isMaintenanceHeld()) await supervisorGrantCoordinator.reconcileDesiredRunning().catch((error) => {
         console.warn(`Supervisor grant reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`);
       });
     } else {

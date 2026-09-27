@@ -80,6 +80,7 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
   const bootstrapMessages: Array<string | undefined> = [];
   const grants = new Map<string, { metadata: ReturnType<typeof metadata>; authority?: typeof authority | null; token: string; entryId: string; lastInstalledDaemonGeneration: number | null }>();
   const daemon = {
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { events.push("ensure"); return { generation: 7 }; },
     async create(input: { roomIdentifier: string; charter?: string }) { events.push(`create:${input.roomIdentifier}`); return { ...entry(), roomId: input.roomIdentifier, charter: input.charter ?? entry().charter, desiredState: "paused" as const }; },
     async list() { events.push("list"); return [entry()]; },
@@ -698,6 +699,7 @@ test("exact retirement remains idempotent when restart reconciliation later obse
     let exactRetired = false;
     const daemonCalls: string[] = [];
     const daemon = {
+      async isMaintenanceHeld() { return false; },
       async list() { return [entry(entryId)]; },
       async retireAgent(_id: string, _generation: number, sessionId: string | null = null, grantOnly = false) {
         daemonCalls.push(sessionId ?? (grantOnly ? "grant" : "prepare"));
@@ -870,6 +872,7 @@ test("daemon generation notifications reconcile once per generation without recu
   let ensures = 0;
   let lists = 0;
   const daemon = {
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { ensures += 1; return { generation }; },
     async list() { lists += 1; return []; },
   };
@@ -889,6 +892,7 @@ test("daemon generation notifications reconcile once per generation without recu
 test("persistent same-generation reconciliation failure does not retry-storm", async () => {
   let attempts = 0;
   const daemon = {
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation: 7 }; },
     async list() { attempts += 1; throw new Error("owner auth unavailable"); },
   };
@@ -911,6 +915,7 @@ test("reconciliation observation retains failure without retrying and follows an
   let failed = true;
   const failure = new Error("grant unavailable");
   const c = new SupervisorGrantCoordinator({
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation: 7 }; },
     async list() { calls++; if (failed) throw failure; return []; },
   } as never);
@@ -940,6 +945,7 @@ test("reconciliation observation invalidates prior success while a credential fo
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
   const c = new SupervisorGrantCoordinator({
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation: 7 }; },
     async list() { await held; return []; },
   } as never);
@@ -964,6 +970,7 @@ test("reconciliation observation recognizes a generation wake already covered by
   const held = new Promise<void>((resolve) => { release = resolve; });
   let calls = 0;
   const c = new SupervisorGrantCoordinator({
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { calls++; await held; return { generation: 7 }; },
     async list() { return []; },
   } as never);
@@ -1012,6 +1019,7 @@ test("credential recovery during an in-flight pass retains one follow-up even if
     const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
     const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const c = new SupervisorGrantCoordinator({
+      async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 7 }; },
       async list() {
         lists += 1;
@@ -1097,6 +1105,7 @@ test("storage probes do not start recovery without a transition or loop after an
   let lists = 0;
   let generation = 7;
   const c = new SupervisorGrantCoordinator({
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation }; },
     async list() { lists += 1; throw new Error("owner auth still unavailable"); },
   } as never);
@@ -1142,6 +1151,7 @@ test("a generation change during reconciliation schedules exactly one follow-up"
   const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
   const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const daemon = {
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation }; },
     async list() {
       lists += 1;
@@ -1533,6 +1543,7 @@ test("generation reconciliation recovers a pending move before ordinary grant sc
       error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
     });
     const daemon = {
+      async isMaintenanceHeld() { return false; },
       async ensureRunning() {
         return { generation: 8, capabilities: { agentRoomMove: true } };
       },
@@ -1690,6 +1701,7 @@ test("destination-save followed by acknowledgement failure rolls back through gr
     let acknowledgements = 0;
     const installs: string[] = [];
     const daemon = {
+      async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 7 }; },
       async list() { return [manifestEntry]; },
       async acknowledgeRoomMoveSourceRevocation() {
@@ -1840,6 +1852,7 @@ test("v4 destination grants remain revocation-unknown and cannot ACK a move acro
     let requests = 0;
     let acknowledgements = 0;
     const daemon = {
+      async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 7 }; },
       async list() { return [moved]; },
       async acknowledgeRoomMoveSourceRevocation() { acknowledgements += 1; return {}; },
@@ -1876,4 +1889,26 @@ test("v4 destination grants remain revocation-unknown and cannot ACK a move acro
     assert.equal(requests, 0);
     assert.equal(acknowledgements, 0, "scope equality alone never attests source revocation");
   });
+});
+
+
+test("maintenance rejects grant creation, activation, recovery and reconnect before hosted effects", async () => {
+  const h = harness(); h.daemon.isMaintenanceHeld = async () => true;
+  await assert.rejects(h.coordinator.createPausedAndInstall({ creationRequestId: "launch_1234567", roomIdentifier: "room_1", displayName: "Test", providerId: "codex", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo" }), /maintenance/);
+  await assert.rejects(h.coordinator.activateEntry(entry(), async () => assert.fail("activation")), /maintenance/);
+  await assert.rejects(h.coordinator.reconnectEntry(entry()), /maintenance/);
+  await assert.rejects(h.coordinator.prepareEntryForRuntimeRecovery(entry()), /maintenance/);
+  await assert.rejects(h.coordinator.reconcileDesiredRunning(), /maintenance/);
+  assert.deepEqual(h.events, []);
+});
+
+
+test("maintenance fences a grant operation that passed admission before its stored-grant read finished", async () => {
+  const h = harness(); let held = false; let finish!: () => void; let started!: () => void;
+  const gate = new Promise<void>(r => { finish = r; }); const entered = new Promise<void>(r => { started = r; });
+  h.daemon.isMaintenanceHeld = async () => held;
+  h.operations.readGrant = async () => { started(); await gate; return null; };
+  const operation = h.coordinator.reconcileDesiredRunning();
+  await entered; held = true; finish(); await assert.rejects(operation, /maintenance/);
+  assert.equal(h.events.some(event => event.startsWith("provision:") || event.startsWith("identity:") || event.startsWith("install:")), false);
 });

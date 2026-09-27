@@ -390,6 +390,7 @@ export interface DesktopLifecycleProjectionDiagnostics {
 }
 
 export interface DesktopSupervisorDaemonStatus {
+  maintenanceHoldId?: string | null;
   healthy: boolean;
   protocolVersion: number;
   implementationVersion: string;

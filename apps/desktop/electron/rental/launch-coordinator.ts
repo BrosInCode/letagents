@@ -146,7 +146,7 @@ export class RentalLaunchCoordinator {
   /** Restore rental obligations while the grant owner restores authority.
    * A completed pass is not a claim that permission restoration succeeded. */
   async recover(): Promise<void> {
-    await pruneRentalLaunches().catch(() => undefined);
+    if (!await this.daemon.isMaintenanceHeld()) await pruneRentalLaunches().catch(() => undefined);
     return this.reconcileActiveSessions(true);
   }
 
@@ -165,7 +165,12 @@ export class RentalLaunchCoordinator {
     await this.record({ ...launch, state: "stopped" });
   }
 
+  private async assertAdmission(): Promise<void> {
+    if (await this.daemon.isMaintenanceHeld()) throw new RentalLaunchError("daemon_unavailable", "Agent supervision is paused for service maintenance.");
+  }
+
   private async acceptAndLaunchOnce(sessionId: string, configuration: DesktopRentalLaunchConfiguration): Promise<DesktopRentalSession> {
+    await this.assertAdmission();
     const id = sessionId.trim();
     if (!id || !["codex", "claude-code", "cursor", "open-model"].includes(configuration.providerId)) {
       throw new RentalLaunchError("invalid_configuration", "Choose an available local runtime.", false);
@@ -205,6 +210,7 @@ export class RentalLaunchCoordinator {
       model: configuration.model?.trim() || null,
       permissionProfileId,
     };
+    await this.assertAdmission();
     await this.record({
       sessionId: id,
       launchAttempt: 0,
@@ -216,6 +222,7 @@ export class RentalLaunchCoordinator {
     });
     let acceptedBody: unknown;
     try {
+      await this.assertAdmission();
       acceptedBody = requireOk(await this.api.acceptRequest(id, {
         hostId,
         installationId: rentalProviderInstallationId(hostId),
@@ -251,11 +258,13 @@ export class RentalLaunchCoordinator {
     let activationMayHaveCommitted = false;
     try {
       await this.daemon.ensureRunning().catch(() => { throw new RentalLaunchError("daemon_unavailable", "Background agent management is unavailable."); });
+      await this.assertAdmission();
       const agentKey = await this.resolveIdentity({
         entryId,
         displayName: `Rented ${configuration.providerId}`,
         providerId: configuration.providerId,
       });
+      await this.assertAdmission();
       const authorityBody = requireOk(await this.api.requestLaunchAuthority(id, {
         agentKey,
         agentInstanceId: entryId,
@@ -296,6 +305,7 @@ export class RentalLaunchCoordinator {
         },
       });
       prepared = entry;
+      await this.assertAdmission();
       requireOk(await this.api.acknowledgeLaunch(id, {
         launchAttempt: attempt,
         state: "provisioning",
@@ -307,6 +317,7 @@ export class RentalLaunchCoordinator {
       const roomAgentSessionId = ready.agentSessionId;
       if (!roomAgentSessionId) throw new RentalLaunchError("launch_failed", "The rental worker lost its room binding before activation.");
       activationMayHaveCommitted = true;
+      await this.assertAdmission();
       const activeResult = await this.api.acknowledgeLaunch(id, {
         launchAttempt: attempt,
         state: "active",
@@ -348,6 +359,7 @@ export class RentalLaunchCoordinator {
         redactCredentialText(rawFailure.message).value,
         rawFailure.retryable,
       );
+      if (await this.daemon.isMaintenanceHeld()) throw failure;
       if (activationMayHaveCommitted) {
         throw new RentalLaunchError(
           failure.code,
@@ -491,6 +503,7 @@ export class RentalLaunchCoordinator {
       }
     }
     if (initial) this.startReconciliation();
+    if (await this.daemon.isMaintenanceHeld()) return;
     let grants = this.grants.getReconciliationObservation();
     if (initial && !grants) {
       // Startup may join/register the owner's first attempt. Periodic rental
@@ -584,7 +597,7 @@ export class RentalLaunchCoordinator {
     // Deadline completion may be waiting on its API response while the row is
     // still launching. That obligation cannot authorize a fresh active ACK.
     if (launch.deadlineAt && Date.parse(launch.deadlineAt) <= Date.now()) return;
-    if (!entry.agentSessionId) return;
+    if (!entry.agentSessionId || await this.daemon.isMaintenanceHeld()) return;
     const result = await this.api.acknowledgeLaunch(launch.sessionId, {
       launchAttempt: launch.launchAttempt,
       state: "active",
@@ -615,6 +628,7 @@ export class RentalLaunchCoordinator {
     entry: DesktopSupervisorManifestEntry | undefined,
     reason: string,
   ): Promise<void> {
+    if (await this.daemon.isMaintenanceHeld()) return;
     const timer = this.deadlineTimers.get(launch.sessionId);
     if (timer) clearTimeout(timer);
     this.deadlineTimers.delete(launch.sessionId);
