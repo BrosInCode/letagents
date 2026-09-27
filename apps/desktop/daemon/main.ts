@@ -276,7 +276,7 @@ export class SupervisorDaemon {
     });
     this.stateWatch = new DaemonStateWatch({
       ...daemonAuthority, coalesceMs: STATE_WATCH_NOTIFICATION_COALESCE_MS,
-      entries: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
+      entries: async () => this.entriesWithDerivedLiveness((await this.store.load("summary")).entries),
     });
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,
@@ -972,7 +972,7 @@ export class SupervisorDaemon {
       this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
         this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
         return (await this.store.load()).generation;
-      }, storage);
+      }, storage, () => this.singleton.assertCurrent());
     } catch (error) {
       this.boardOwnershipActive = false;
       await this.store.close();

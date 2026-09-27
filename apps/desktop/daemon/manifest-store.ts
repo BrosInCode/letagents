@@ -60,6 +60,7 @@ import {
   type DeliveryDrainReadiness, type DeliveryDrainRecord, type DispatchDeliveryDrain, type PrepareCustodialForward, type PrepareDeliveryDrain,
 } from "./delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
+import { STATE_WATCH_ACTIVITY_SUMMARY_LIMIT } from "./state-watch-projection.js";
 import {
   cancelInterruptedSupervisedTurn,
   pruneSupervisedAgentHistory,
@@ -212,7 +213,7 @@ export class ManifestStore {
     try { await store.load(); } finally { await store.close(); }
   }
 
-  async load(): Promise<DaemonManifest> {
+  async load(activityMode: "full" | "summary" = "full"): Promise<DaemonManifest> {
     const database = await this.getDatabase();
     const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
     const entries = (database.prepare(`
@@ -267,7 +268,7 @@ export class ManifestStore {
       JOIN retained_worker_bindings b USING (agent_id)
       JOIN reconciliation_records q USING (agent_id)
       ORDER BY i.sort_order
-    `).all() as Row[]).map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row)));
+    `).all() as Row[]).map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)));
 
     const legacyLaneOwners = (database.prepare(`
       SELECT reservation_id, room_id, provider, owner_pid, owner_process_identity,
@@ -3122,7 +3123,7 @@ export class ManifestStore {
     });
   }
 
-  private projectionFromRow(database: DatabaseSync, row: Row): DaemonManifestDomainProjection {
+  private projectionFromRow(database: DatabaseSync, row: Row, activityMode: "full" | "summary" = "full"): DaemonManifestDomainProjection {
     const agentId = String(row.agent_id);
     let providerRef: DaemonProviderRuntimeReference | null | undefined;
     if (bool(row.provider_ref_present)) {
@@ -3151,7 +3152,16 @@ export class ManifestStore {
         };
       }
     }
-    const activity = (database.prepare("SELECT * FROM activity_events WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[]).map((event): DaemonActivityEvent => ({
+    // Bound the database read itself: state watchers never need raw payloads.
+    // sort_order breaks sequence ties exactly as the stable wire projection does.
+    const activityRows = activityMode === "summary"
+      ? (database.prepare(`SELECT observed_at, sequence, provider, kind, method, summary, status,
+          NULL AS payload_json, payload_truncated, payload_redacted, durable_payload_ref
+          FROM activity_events WHERE agent_id = ?
+          ORDER BY sequence DESC, sort_order DESC LIMIT ?`)
+        .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
+      : database.prepare("SELECT * FROM activity_events WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[];
+    const activity = activityRows.map((event): DaemonActivityEvent => ({
       observed_at: String(event.observed_at), sequence: Number(event.sequence), provider: String(event.provider),
       kind: String(event.kind), method: String(event.method), summary: String(event.summary),
       status: String(event.status) as DaemonActivityEvent["status"], payload: parseJson(event.payload_json),

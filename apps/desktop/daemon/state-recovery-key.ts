@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning, StateRecoveryError } from "./state-recovery-backup.js";
+import { compactDaemonStateDatabase } from "./daemon-state-maintenance.js";
 
 export type StateRecoveryBootstrap = {
   getBackupKey?: typeof requestStateRecoveryKey;
@@ -44,11 +45,23 @@ export function requestHostApprovalVerifier(): Promise<string | null> {
 /** Caller holds the daemon singleton; initialize is the existing schema owner. */
 export async function withProtectedStateUpgrade<T>(
   path: string, initialize: () => Promise<T>, bootstrap: StateRecoveryBootstrap,
+  assertCurrent?: () => Promise<void>,
 ): Promise<T> {
   let database: DatabaseSync | null = null;
   try {
     const freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_SCHEMA_VERSION, bootstrap.getBackupKey ?? requestStateRecoveryKey);
     database = await openDaemonStateDatabase(path, (opened) => new DaemonStateSchema().createSchema(opened));
+    if (assertCurrent) {
+      const maintenance = await compactDaemonStateDatabase(path, database, assertCurrent);
+      if (maintenance !== "not_needed" && maintenance !== "compacted") {
+        database.prepare(`INSERT INTO migration_failures(migration_key,reason,failed_at,quarantined_path)
+          VALUES ('state-space-maintenance',?,?, '') ON CONFLICT(migration_key)
+          DO UPDATE SET reason=excluded.reason,failed_at=excluded.failed_at`)
+          .run(maintenance, new Date().toISOString());
+      } else {
+        database.exec("DELETE FROM migration_failures WHERE migration_key='state-space-maintenance'");
+      }
+    }
     const result = await initialize();
     new DaemonStateSchema().validateCurrentShape(database);
     const validation = await markStateRecoveryBackupValidated(path, database, { freshBackup });

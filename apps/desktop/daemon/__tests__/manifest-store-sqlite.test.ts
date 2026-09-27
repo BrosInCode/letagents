@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
+import { projectStateWatchActivity } from "../state-watch-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
@@ -6709,4 +6710,62 @@ test("managed launch receipts survive reopening, reject relabeling, and legacy m
     store = new ManifestStore(env.databasePath);
     assert.equal(await store.readManagedLaunchContract(scope), null, "upgrade must not label a surviving process as newly configured");
   } finally { await bindings.close(); await store.close(); await env.cleanup(); }
+});
+
+
+test("state summary loads only the newest payload-free activity without changing full reads", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const activity = Array.from({ length: 200 }, (_, index) => ({ ...entry.activity![0]!,
+      // Deliberately unsorted with ties: SQL must match the stable wire projection.
+      sequence: (index * 31) % 47, summary: `event-${index}`, payload: { text: "x".repeat(8192) },
+    }));
+    await store.write(0, [{ ...entry, activity }]);
+    const full = await store.load();
+    const summary = await store.load("summary");
+    assert.deepEqual(summary, { ...full, entries: full.entries.map(value => ({ ...value, activity: projectStateWatchActivity(value.activity) })) });
+    assert.equal(summary.entries[0]!.activity!.length, 16);
+    assert.equal(full.entries[0]!.activity!.length, 200);
+    assert.deepEqual(await store.getEntry(entry.id), full.entries[0]);
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      // Invalid raw JSON proves the summary path never parses discarded payloads.
+      database.exec("UPDATE activity_events SET payload_json='invalid-json'");
+      assert.deepEqual(await store.load("summary"), summary);
+      await assert.rejects(store.load(), /JSON/);
+      const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT sequence,summary FROM activity_events
+        WHERE agent_id=? ORDER BY sequence DESC,sort_order DESC LIMIT 16`).all(entry.id);
+      assert.match(JSON.stringify(plan), /activity_events_summary/);
+      assert.doesNotMatch(JSON.stringify(plan), /TEMP B-TREE/);
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("v47 efficiency migration installs exact read indexes atomically and rejects damaged current indexes", () => {
+  const database = new DatabaseSync(":memory:");
+  const schema = new DaemonStateSchema();
+  const names = ["provider_continuation_repairs_agent_created", "provider_continuation_repairs_inbox_created", "activity_events_summary"];
+  try {
+    schema.createSchema(database);
+    for (const name of names) database.exec(`DROP INDEX ${name}`);
+    database.exec("UPDATE manifest_metadata SET schema_version=47; PRAGMA user_version=47");
+    new DaemonStateSchema().validateV2Shape(database);
+    const interrupted = new DaemonStateSchema(() => { throw new Error("efficiency migration interrupted"); });
+    assert.throws(() => interrupted.createSchema(database), /efficiency migration interrupted/);
+    assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 47);
+    assert.equal(database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 47);
+    for (const name of names) assert.equal(database.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(name), undefined);
+    schema.createSchema(database);
+    schema.createSchema(database);
+    schema.validateCurrentShape(database);
+    for (const [column, index] of [["agent_id", names[0]], ["inbox_item_id", names[1]]]) {
+      const plan = JSON.stringify(database.prepare(`EXPLAIN QUERY PLAN SELECT * FROM provider_continuation_repairs
+        WHERE ${column}=? ORDER BY created_at DESC,rowid DESC LIMIT 1`).all("missing"));
+      assert.ok(plan.includes(index!));
+      assert.doesNotMatch(plan, /SCAN|TEMP B-TREE/);
+    }
+    database.exec(`DROP INDEX ${names[0]}; CREATE INDEX ${names[0]} ON provider_continuation_repairs(updated_at)`);
+    assert.throws(() => schema.createSchema(database), /read index .* is missing or invalid/);
+  } finally { database.close(); }
 });

@@ -6,6 +6,8 @@ type Row = Record<string, unknown>;
 export const RETAINED_TERMINAL_RECEIPTS_PER_AGENT = 200;
 /** Ambiguous mutating tool outcomes remain visible without pinning live work forever. */
 export const RETAINED_UNCERTAIN_EFFECTS_PER_AGENT = 32;
+export const RETAINED_TERMINAL_TIMELINE_EVENTS = 64;
+export const RETAINED_TERMINAL_CONTINUATION_REPAIRS = 4;
 const RETAINED_OBSERVED_MESSAGES_PER_AGENT = 500;
 const RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT = 2_000;
 
@@ -353,6 +355,7 @@ export function pruneSupervisedAgentHistory(
     settleCapturedExecutionAttempts(database, agentId, { inboxItemId: String(row.inbox_item_id) });
     run(deleteInbox, String(row.inbox_item_id));
   }
+  compactSupervisedTerminalHistory(database, agentId);
   // Active turns retain their observed-message provenance even when newer
   // silent messages fill the rolling window. Synthetic inbox rows have none.
   const observedStale = database.prepare(`SELECT room_id,source_message_id
@@ -396,6 +399,62 @@ export function pruneSupervisedAgentHistory(
       SELECT rowid FROM supervised_agent_pruned_sources
       WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
     )`), agentId, agentId, RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT);
+}
+
+/** Caller owns the transaction. Active events are retry/replay authority, and
+ * room-move cancellations remain revivable until their exact move settles.
+ * Compact only diagnostic children; receipt, binding, outcome and effect
+ * authority stay under their existing retention policy. */
+export function compactSupervisedTerminalHistory(database: DatabaseSync, agentId: string): void {
+  const items = database.prepare(`SELECT i.inbox_item_id,
+      (SELECT ev.idempotency_key FROM agent_room_moves m JOIN supervised_agent_inbox_events ev
+        ON ev.inbox_item_id=i.inbox_item_id
+        AND ev.idempotency_key=('room_move_cancelled:' || m.operation_id || ':' || i.fifo_sequence)
+        WHERE m.agent_id=i.agent_id AND m.source_room_id=i.room_id AND m.phase IN ('active','failed')
+        ORDER BY ev.event_sequence DESC LIMIT 1) AS retained_move_key
+    FROM supervised_agent_inbox i
+    LEFT JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+    WHERE i.agent_id=? AND (
+      i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user')
+      OR (i.state='cancelled_by_room_move' AND EXISTS (
+        SELECT 1 FROM agent_room_moves m JOIN supervised_agent_inbox_events ev
+          ON ev.inbox_item_id=i.inbox_item_id
+          AND ev.idempotency_key=('room_move_cancelled:' || m.operation_id || ':' || i.fifo_sequence)
+        WHERE m.agent_id=i.agent_id AND m.source_room_id=i.room_id AND m.phase IN ('active','failed')
+      )))
+      AND NOT EXISTS (SELECT 1 FROM agent_room_moves m JOIN supervised_agent_inbox_events ev
+        ON ev.inbox_item_id=i.inbox_item_id
+        AND ev.idempotency_key=('room_move_cancelled:' || m.operation_id || ':' || i.fifo_sequence)
+        WHERE m.agent_id=i.agent_id AND m.source_room_id=i.room_id AND m.phase NOT IN ('active','failed'))
+      AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.agent_id=i.agent_id
+        AND j.inbox_item_id=i.inbox_item_id AND j.turn_control_present=1
+        AND j.status NOT IN ('completed','failed'))
+      AND NOT EXISTS (SELECT 1 FROM execution_cutover_v2 c WHERE c.agent_id=i.agent_id
+        AND c.admitted_inbox_item_id=i.inbox_item_id AND c.phase NOT IN ('complete','cancelled','failed'))
+      AND NOT EXISTS (SELECT 1 FROM supervised_agent_effects e WHERE e.agent_id=i.agent_id
+        AND e.provider_turn_id=i.provider_turn_id
+        AND (b.origin_execution_generation_id IS NULL OR e.execution_generation_id=b.origin_execution_generation_id)
+        AND e.state IN ('prepared','executing'))
+      AND NOT EXISTS (SELECT 1 FROM provider_continuation_repairs r WHERE r.inbox_item_id=i.inbox_item_id
+        AND r.phase NOT IN ('committed','failed'))`).all(agentId) as Row[];
+  // Keep ingress context and the latest ordinal as well as the visible tail.
+  // Range deletion avoids revisiting a large journal on every later prune.
+  const trimEvents = database.prepare(`DELETE FROM supervised_agent_inbox_events
+    WHERE inbox_item_id=? AND event_sequence < (
+      SELECT event_sequence FROM supervised_agent_inbox_events WHERE inbox_item_id=?
+      ORDER BY event_sequence DESC LIMIT 1 OFFSET ?)
+    AND event_sequence > (SELECT event_sequence FROM supervised_agent_inbox_events WHERE inbox_item_id=?
+      ORDER BY event_sequence LIMIT 1 OFFSET 1)
+    AND (? IS NULL OR idempotency_key<>?)`);
+  const trimRepairs = database.prepare(`DELETE FROM provider_continuation_repairs
+    WHERE inbox_item_id=? AND phase IN ('committed','failed') AND rowid NOT IN (
+      SELECT rowid FROM provider_continuation_repairs WHERE inbox_item_id=?
+      ORDER BY created_at DESC,rowid DESC LIMIT ?)`);
+  for (const item of items) {
+    const id = String(item.inbox_item_id);
+    trimEvents.run(id, id, RETAINED_TERMINAL_TIMELINE_EVENTS - 1, id, item.retained_move_key as string | null, item.retained_move_key as string | null);
+    trimRepairs.run(id, id, RETAINED_TERMINAL_CONTINUATION_REPAIRS);
+  }
 }
 
 function updateHistoryBoundary(

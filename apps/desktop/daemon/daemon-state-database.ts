@@ -9,7 +9,7 @@ import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateEx
   migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25,
   validateExecutionStorageSchema, validateRuntimeFailureEffectMigrationSource,
   type ExecutionStorageSchemaVersion } from "./execution-storage-schema.js";
-import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
+import { compactSupervisedTerminalHistory, readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "./room-work-publication-store.js";
 import { applyExecutionApprovalPublicationSchema, validateExecutionApprovalPublicationSchema } from "./execution-approval-publication-store.js";
@@ -20,7 +20,7 @@ import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js
 import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
 import { applyApprovalRequestClosureSchema, validateApprovalRequestClosureSchema } from "./execution-approval-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 47;
+export const DAEMON_STATE_SCHEMA_VERSION = 48;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const workerExecutionBindingsSql = `CREATE TABLE worker_execution_bindings (
   entry_id TEXT NOT NULL, room_id TEXT NOT NULL, api_url TEXT NOT NULL,
@@ -42,6 +42,34 @@ function applyWorkerExecutionBindings(database: DatabaseSync): void {
     database.exec(workerExecutionBindingsSql);
   }
   validateWorkerExecutionBindings(database);
+}
+
+// SQLite appends rowid to ordinary index keys, so reverse traversal also
+// preserves the latest-repair tie breaker without a temporary sort.
+const daemonReadIndexes = {
+  provider_continuation_repairs_agent_created: "CREATE INDEX provider_continuation_repairs_agent_created ON provider_continuation_repairs(agent_id,created_at)",
+  provider_continuation_repairs_inbox_created: "CREATE INDEX provider_continuation_repairs_inbox_created ON provider_continuation_repairs(inbox_item_id,created_at)",
+  activity_events_summary: "CREATE INDEX activity_events_summary ON activity_events(agent_id,sequence,sort_order)",
+};
+function validateDaemonReadIndexes(database: DatabaseSync): void {
+  for (const [name, sql] of Object.entries(daemonReadIndexes)) {
+    const actual = database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(name);
+    if (!actual || normalizedTerminalSql(String(actual.sql)) !== normalizedTerminalSql(sql)) {
+      throw new Error(`Daemon read index ${name} is missing or invalid.`);
+    }
+  }
+}
+function applyDaemonReadIndexes(database: DatabaseSync): void {
+  for (const [name, sql] of Object.entries(daemonReadIndexes)) {
+    if (!database.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(name)) database.exec(sql);
+  }
+  validateDaemonReadIndexes(database);
+}
+function applyDaemonEfficiencyMigration(database: DatabaseSync): void {
+  applyDaemonReadIndexes(database);
+  for (const row of database.prepare("SELECT DISTINCT agent_id FROM supervised_agent_inbox").all()) {
+    compactSupervisedTerminalHistory(database, String(row.agent_id));
+  }
 }
 
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
@@ -339,7 +367,7 @@ createSchema(database: DatabaseSync): void {
     this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
-  if (existingVersion === 43 || existingVersion === 44 || existingVersion === 45 || existingVersion === 46) {
+  if (existingVersion === 43 || existingVersion === 44 || existingVersion === 45 || existingVersion === 46 || existingVersion === 47) {
     this.migrateHostToolRules(database);
     return;
   }
@@ -647,6 +675,7 @@ createSchema(database: DatabaseSync): void {
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
     this.applyCurrentConfigurationShape(database);
+    applyDaemonEfficiencyMigration(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -664,6 +693,7 @@ private migrateHostToolRules(database: DatabaseSync): void {
     validateHostToolRuleSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
@@ -682,6 +712,7 @@ private migratePreparedRoomContext(database: DatabaseSync): void {
     validatePreparedRoomContextSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
@@ -713,6 +744,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -743,6 +775,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -773,6 +806,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -842,6 +876,7 @@ migrateV4ToV5(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -898,6 +933,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
     this.applyLocalRoomMembershipShape(database);
@@ -926,6 +962,7 @@ migrateV6ToV7(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -950,6 +987,7 @@ migrateV7ToV8(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -972,6 +1010,7 @@ migrateV8ToV9(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -993,6 +1032,7 @@ migrateV9ToV10(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1014,6 +1054,7 @@ migrateV10ToV11(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1035,6 +1076,7 @@ migrateV11ToV12(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1068,6 +1110,7 @@ migrateV12ToV13(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1099,6 +1142,7 @@ migrateV13ToV14(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1128,6 +1172,7 @@ migrateV14ToV15(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1155,6 +1200,7 @@ migrateV15ToV16(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1180,6 +1226,7 @@ migrateV16ToV17(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1203,6 +1250,7 @@ migrateV17ToV18(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1232,6 +1280,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1260,6 +1309,7 @@ migrateV19ToV20(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1289,6 +1339,7 @@ migrateV20ToV21(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1317,6 +1368,7 @@ migrateV21ToV22(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1341,6 +1393,7 @@ migrateV22ToV23(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1365,6 +1418,7 @@ migrateV23ToV24(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1389,6 +1443,7 @@ migratePollingOfferStorage(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1418,6 +1473,7 @@ private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1445,6 +1501,7 @@ private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1471,6 +1528,7 @@ private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1496,6 +1554,7 @@ private migrateLifecycleEffectStorage(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1520,6 +1579,7 @@ private migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1542,6 +1602,7 @@ private migrateIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1566,6 +1627,7 @@ private migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1587,6 +1649,7 @@ private migrateExecutionDelegationAuthorityStorage(database: DatabaseSync): void
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1607,6 +1670,7 @@ private migrateExecutionApprovalProjectionStorage(database: DatabaseSync): void 
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1628,6 +1692,7 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
     applyRoomWorkPublicationSchema(database);
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -3232,6 +3297,7 @@ repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 
     this.applyV18Shape(database, storageVersion);
     this.validateV18Shape(database, storageVersion);
     validateTerminalResults(database, 20);
+    if (version >= 48) applyDaemonReadIndexes(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
@@ -3245,6 +3311,7 @@ validateCurrentShape(database: DatabaseSync): void {
     throw new Error("Daemon observation storage requires the already-current schema.");
   }
   this.validateLocalRoomMembershipShape(database);
+  validateDaemonReadIndexes(database);
   validatePreparedRoomContextSchema(database);
   if (this.hasPendingV6SecretScrub(database)) {
     throw new Error("Daemon observation storage requires completed credential cleanup.");
