@@ -35,6 +35,8 @@ type Lane = {
   expectedAuthorityMode: LifecycleAuthorityMode | null;
   pendingChange: boolean;
   notifiedAdmission: string | null;
+  storageRetry: NodeJS.Timeout | null;
+  storageRetryAttempts: number;
 };
 export type PreparedRuntime = {
   agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
@@ -45,6 +47,7 @@ const QUEUE_FACTS = 256;
 const QUEUE_BYTES = 256 * 1024;
 const BATCH_FACTS = 32;
 const LIFECYCLE_PROJECTION_RETRY_MS = 25;
+const CAPTURE_RETRY_MAX_MS = 30_000;
 function lifecycleProvider(connection: ProviderActionConnectionRef | null | undefined): LifecycleProjectionProvider | null {
   if (connection?.kind === "codex_app_server") return "codex";
   if (connection?.kind === "claude_cli") return "claude-code";
@@ -54,8 +57,8 @@ function lifecycleProvider(connection: ProviderActionConnectionRef | null | unde
 }
 
 /**
- * Optional structural capture. Provider callbacks only enqueue bounded data;
- * scheduled, fail-fast SQLite work cannot reject an operational checkpoint.
+ * Structural capture, authoritative for typed lifecycle admission. Provider
+ * callbacks only enqueue bounded data; SQLite work runs on the capture owner.
  * Neither raw streams nor provider/delivery control handles are consumed here.
  */
 export class ExecutionCaptureCoordinator {
@@ -70,6 +73,7 @@ export class ExecutionCaptureCoordinator {
   private lifecycleProjectionTimer: NodeJS.Timeout | null = null;
   private scheduled: NodeJS.Immediate | null = null;
   private closed = false;
+  private handoffSealed = false;
 
   /** Production capture is optional; opening failure cannot prevent daemon startup. */
   static open(path: string, provider: CaptureOptions["provider"] | undefined,
@@ -105,16 +109,17 @@ export class ExecutionCaptureCoordinator {
     this.suspendedAgents.delete(agentId);
   }
 
-  /** Start subscribing before raw listeners without letting optional capture block delivery. */
+  /** Subscribe before raw listeners; typed admission remains gated on exact capture. */
   install(installation: ProviderInstallationToken): () => void {
     const { entryId: agentId, handle, executionGenerationId: generation } = installation;
     const prior = this.lanes.get(agentId);
     if (prior) this.detach(prior);
-    if (this.closed || this.suspendedAgents.has(agentId) || !this.options.provider.onExecution) return () => {};
+    if (this.closed || this.handoffSealed || this.suspendedAgents.has(agentId) || !this.options.provider.onExecution) return () => {};
     const lane: Lane = { agentId, generation, handle, installation, subscription: null, observer: null,
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
       detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
-      expectedAuthorityMode: installation.authorityMode, pendingChange: true, notifiedAdmission: null };
+      expectedAuthorityMode: installation.authorityMode, pendingChange: true, notifiedAdmission: null,
+      storageRetry: null, storageRetryAttempts: 0 };
     this.lanes.set(agentId, lane);
     let pending: Promise<NativeExecutionSubscription>;
     try {
@@ -213,15 +218,18 @@ export class ExecutionCaptureCoordinator {
       let retire = false;
       if (this.current(next) && next.subscription && (!next.suspended || next.detached)
         && (next.detached || !this.retiring.has(next.agentId))) {
+        this.cancelStorageRetry(next);
         try {
           if (this.drain(next)) this.dirty.add(next);
           else if (next.detached && next.frontierStored) retire = true;
+          next.storageRetryAttempts = 0;
         }
         catch (error) {
           if (error instanceof ExecutionProtocolError) next.suspended = true;
           this.report(next, error instanceof ExecutionProtocolError && error.code === "retention_limit"
             ? "retention_limit" : error instanceof ExecutionProtocolError && error.code === "source_gap"
               ? "source_gap" : error instanceof ExecutionProtocolError ? "invalid_observation" : "storage_unavailable");
+          this.retryStorage(next, error);
         }
       }
       // Operational settlement is independent of native capture continuity.
@@ -259,6 +267,26 @@ export class ExecutionCaptureCoordinator {
     this.scheduled.unref();
   }
 
+  private retryStorage(lane: Lane, error: unknown): void {
+    // Only SQLite BUSY/LOCKED (including extended codes) are transient. Never
+    // timer-retry a rejected identity, sequence, fact, or unknown storage error.
+    const code = error && typeof error === "object" && "code" in error && error.code === "ERR_SQLITE_ERROR"
+      && "errcode" in error ? error.errcode : null;
+    if (!Number.isInteger(code) || ![5, 6].includes(Number(code) & 0xff)
+      || !this.current(lane) || lane.suspended || lane.storageRetry) return;
+    const delay = Math.min(CAPTURE_RETRY_MAX_MS, 25 * 2 ** Math.min(lane.storageRetryAttempts++, 11));
+    lane.storageRetry = setTimeout(() => {
+      lane.storageRetry = null;
+      if (this.current(lane) && !lane.suspended) this.schedule(lane);
+    }, delay);
+    lane.storageRetry.unref();
+  }
+
+  private cancelStorageRetry(lane: Lane): void {
+    if (lane.storageRetry) clearTimeout(lane.storageRetry);
+    lane.storageRetry = null;
+  }
+
   /** Retains the verified birth even if Cursor advances to idle before capture runs. */
   prepared(checkpoint: PreparedRuntime): void {
     const lane = this.lanes.get(checkpoint.agentId);
@@ -270,6 +298,60 @@ export class ExecutionCaptureCoordinator {
     if (lane.checkpoints.size >= QUEUE_FACTS && !lane.checkpoints.has(runtime)) lane.overflow = true;
     else lane.checkpoints.set(runtime, { ...checkpoint, connection: { ...checkpoint.connection } });
     this.schedule(lane);
+  }
+
+  /** Planned retirement seals a fixed source boundary; emergency close cannot drain. */
+  sealForPlannedHandoff(): void {
+    if (this.handoffSealed) return;
+    if (this.closed) throw new Error("Update deferred: lifecycle capture is already closed.");
+    const frozen = new Map<Lane, { sourceId: string; position: ReturnType<NativeExecutionSubscription["position"]> } | null>();
+    const unresolvedPredecessors = new Set<string>();
+    try {
+      // Retiring sources must finish before their successors can bind. A
+      // committed retired tail may be released even if another lane defers.
+      for (const lane of [...this.retiring.values(), ...this.lanes.values()]) {
+        const unavailable = !this.current(lane) || lane.suspended || lane.overflow || lane.subscriptionFailed
+          || (lane.diagnostic !== null && !["storage_unavailable", "settlement_unavailable"].includes(lane.diagnostic))
+          || unresolvedPredecessors.has(lane.agentId);
+        if (!lane.subscription) {
+          if (!unavailable) throw new Error("An execution subscription is still attaching.");
+          frozen.set(lane, null);
+          continue;
+        }
+        if (!unavailable) {
+          while (this.drain(lane)) { /* existing bounded queue, no native calls or awaits */ }
+          const position = lane.subscription.position();
+          const row = this.row("SELECT source_id,observer_epoch,daemon_generation_id,last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?", lane.agentId);
+          const exact = row && lane.observer && row.source_id === lane.subscription.sourceId
+            && Number(row.observer_epoch) === lane.observer.epoch
+            && row.daemon_generation_id === String(this.options.daemonGeneration())
+            && Number(row.last_source_sequence) === position.latestSequence
+            && Number(row.max_observed_sequence) === position.latestSequence;
+          const empty = position.latestSequence === 0 && !lane.observer && !lane.pending.size;
+          if (lane.pending.size || lane.checkpoints.size || lane.suspended || lane.overflow || (!exact && !empty)) {
+            throw new Error("An execution source has no confirmed final capture boundary.");
+          }
+          if (lane.detached) { this.remove(lane); continue; }
+          frozen.set(lane, { sourceId: lane.subscription.sourceId, position: { ...position } });
+        } else {
+          // Existing damage remains honest; it is not a global update veto.
+          if (lane.detached) unresolvedPredecessors.add(lane.agentId);
+          try { frozen.set(lane, { sourceId: lane.subscription.sourceId, position: { ...lane.subscription.position() } }); }
+          catch { frozen.set(lane, null); }
+        }
+      }
+    } catch (cause) {
+      throw new Error("Update deferred: pending agent lifecycle evidence could not be preserved. Current connections and work remain available.", { cause });
+    }
+    // No reads or writes that can fail after ownership starts retiring. Abort
+    // and cleanup callbacks may emit synchronously before the later close().
+    this.handoffSealed = true;
+    for (const [lane, snapshot] of frozen) {
+      const subscription = lane.subscription;
+      this.cancelStorageRetry(lane);
+      lane.subscription = snapshot ? { sourceId: snapshot.sourceId, position: () => snapshot.position, dispose() {} } : null;
+      try { subscription?.dispose(); } catch { /* the sealed lane rejects callbacks */ }
+    }
   }
 
   close(): void {
@@ -537,7 +619,7 @@ export class ExecutionCaptureCoordinator {
     return this.owns(lane) && (lane.detached || this.options.currentHandle(lane.agentId) === lane.handle);
   }
   private owns(lane: Lane): boolean {
-    return !this.closed && (this.lanes.get(lane.agentId) === lane || this.retiring.get(lane.agentId) === lane);
+    return !this.closed && !this.handoffSealed && (this.lanes.get(lane.agentId) === lane || this.retiring.get(lane.agentId) === lane);
   }
   private freezeSubscription(subscription: NativeExecutionSubscription): NativeExecutionSubscription {
     const position = subscription.position();
@@ -564,6 +646,7 @@ export class ExecutionCaptureCoordinator {
     this.schedule(lane);
   }
   private remove(lane: Lane): void {
+    this.cancelStorageRetry(lane);
     this.dirty.delete(lane);
     if (this.lanes.get(lane.agentId) === lane) this.lanes.delete(lane.agentId);
     if (this.retiring.get(lane.agentId) === lane) this.retiring.delete(lane.agentId);
@@ -768,6 +851,10 @@ export class ExecutionCaptureCoordinator {
       cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
     }
     if (cursor < position.latestSequence) { lane.suspended = true; this.report(lane, "source_gap"); }
+    else if (lane.diagnostic === "storage_unavailable") {
+      // A successful exact source/epoch check also revalidates an empty source.
+      lane.diagnostic = null; lane.pendingChange = true;
+    }
     return false;
   }
 
