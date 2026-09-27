@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { cursorLaneRetirementSchema, type CursorLaneRetirement } from "./runtime-recovery-journal.js";
 import { PreparedReadStatements } from "./prepared-reads.js";
 import type { DaemonCommitNotification } from "./daemon-authority.js";
 
@@ -60,6 +61,7 @@ export type WorkerExecutionPredecessor = {
   execution_generation_id: string; agent_session_id: string;
   authority: WorkerExecutionBinding | null;
   legacy_recovery_complete?: boolean;
+  cursor_lane_retirement?: CursorLaneRetirement;
 };
 type Row = Record<string, unknown>;
 type Reservation = { reservationId: string; binding: WorkerSessionBinding; bindingEpoch: number; sequence: number; observedAt: string; observedAtMs: number };
@@ -252,6 +254,24 @@ export class WorkerBindingStore {
         if (!records.some(record => record.execution_generation_id === row.execution_generation_id && record.agent_session_id === row.agent_session_id)) {
           records.push({ execution_generation_id: String(row.execution_generation_id), agent_session_id: String(row.agent_session_id), authority: null, legacy_recovery_complete: Boolean(row.recovered) });
         }
+      }
+      const recoveries = database.prepare(`SELECT provider_ref_json FROM agent_runtime_recoveries
+        WHERE agent_id=? AND room_id=? AND mode='fresh' AND phase='complete'
+          AND json_extract(provider_ref_json,'$.work_attempt_id')=?`).all(entryId, roomId, workAttemptId);
+      for (const row of recoveries) {
+        const ref = JSON.parse(String(row.provider_ref_json));
+        const parsed = cursorLaneRetirementSchema.safeParse(ref.cursor_lane_retirement);
+        if (!parsed.success) continue;
+        const receipt = parsed.data;
+        if (receipt.provider_continuation_id !== ref.provider_continuation_id) continue;
+        const matching = records.filter(record => record.execution_generation_id === receipt.execution_generation_id
+          && record.agent_session_id === receipt.agent_session_id);
+        if (receipt.entry_id !== entryId || receipt.room_id !== roomId || receipt.work_attempt_id !== workAttemptId
+          || !matching.some(record => record.authority?.api_url === receipt.api_url
+            && record.authority.grant_id === receipt.grant_id && record.authority.agent_key === receipt.agent_key)) continue;
+        // Grant rotation retains multiple receipts for one execution/session.
+        // The exact acknowledged grant proves that lane, never another execution.
+        for (const record of matching) if (record.authority) record.cursor_lane_retirement = receipt;
       }
       return records;
     });

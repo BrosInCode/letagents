@@ -7,6 +7,16 @@ import { executionRuntimeStorageIdentity, executionStorageIdentity } from "./exe
 import type { DaemonManifestEntry, DaemonProviderRuntimeReference } from "./types.js";
 import type { SupervisedProviderTurnBinding } from "./supervised-agent-inbox-store.js";
 
+/** Positive lane-stop and exact worker-retirement acknowledgement; not native process death. */
+export const cursorLaneRetirementSchema = z.strictObject({
+  kind: z.literal("cursor_idle_lane_retired_v1"),
+  entry_id: executionIdentity, room_id: executionIdentity, work_attempt_id: executionIdentity,
+  execution_generation_id: executionIdentity, provider_continuation_id: executionIdentity,
+  agent_session_id: executionIdentity, api_url: executionIdentity, grant_id: executionIdentity,
+  agent_key: executionIdentity, retired_at: z.iso.datetime(),
+});
+export type CursorLaneRetirement = z.infer<typeof cursorLaneRetirementSchema>;
+
 const retiredRuntimeEvidenceSchema = z.strictObject({
   executionGenerationId: executionIdentity, runtimeGenerationId: executionIdentity,
   death: nativeRuntimeDeathSchema,
@@ -263,7 +273,7 @@ export function recoveredRuntime(database: DatabaseSync, agentId: string, runtim
 }
 
 /** The caller proved the exact Cursor turn's origin execution terminal and owns the reset transaction. */
-export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: SupervisedProviderTurnBinding, at: string): string | null {
+export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: SupervisedProviderTurnBinding, at: string, laneRetirement?: CursorLaneRetirement): string | null {
   if (!database.isTransaction) throw new Error("Runtime recovery requires a fenced transaction.");
   let runtime = database.prepare(`SELECT r.runtime_generation_id FROM execution_turns t
     JOIN execution_runtime_generations r ON r.agent_id=t.agent_id
@@ -293,10 +303,29 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
       throw new Error("Runtime recovery cannot archive an unrelated or unretired Cursor observer.");
     }
   }
-  if (!runtime) return null; // Older deliveries may have no captured native runtime.
+  if (!runtime) {
+    if (laneRetirement) throw new Error("Cursor lane retirement requires a new captured recovery boundary.");
+    return null; // Older deliveries may have no captured native runtime.
+  }
+  if (laneRetirement) {
+    laneRetirement = cursorLaneRetirementSchema.parse(laneRetirement);
+    if (laneRetirement.entry_id !== turn.agent_id || laneRetirement.room_id !== turn.room_id
+      || laneRetirement.work_attempt_id !== turn.work_attempt_id
+      || laneRetirement.provider_continuation_id !== turn.provider_continuation_id
+      || !database.prepare(`SELECT 1 FROM worker_execution_bindings WHERE entry_id=? AND room_id=?
+        AND work_attempt_id=? AND execution_generation_id=? AND agent_session_id=? AND api_url=? AND grant_id=? AND agent_key=?`)
+        .get(laneRetirement.entry_id, laneRetirement.room_id, laneRetirement.work_attempt_id,
+          laneRetirement.execution_generation_id, laneRetirement.agent_session_id, laneRetirement.api_url,
+          laneRetirement.grant_id, laneRetirement.agent_key)) {
+      throw new Error("Cursor lane retirement lost its exact worker authority.");
+    }
+  }
   const runtimeId = runtime.runtime_generation_id;
   if (pendingRuntimeRecovery(database, turn.agent_id)) throw new Error("A different runtime recovery is already recorded.");
-  if (recoveredRuntime(database, turn.agent_id, runtimeId)) return runtimeId;
+  if (recoveredRuntime(database, turn.agent_id, runtimeId)) {
+    if (laneRetirement) throw new Error("Cursor lane retirement cannot rewrite an archived recovery boundary.");
+    return runtimeId;
+  }
   const observer = database.prepare(`SELECT * FROM execution_observers
     WHERE agent_id=? AND observer_runtime_generation_id=?`).get(turn.agent_id, runtimeId);
   // Retain the old cursor, including missing events. Recovery permits a new
@@ -306,7 +335,7 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
     provider_continuation_id: turn.provider_continuation_id, provider_connection: null };
   database.prepare(`INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,?,'complete',?,?,?,?)`)
     .run(executionStorageIdentity("cursor-recovery", turn.agent_id, runtimeId), turn.agent_id, turn.room_id,
-      turn.origin_execution_generation_id, runtimeId, "fresh", JSON.stringify(ref), observer ? JSON.stringify(observer) : null, at, at);
+      turn.origin_execution_generation_id, runtimeId, "fresh", JSON.stringify({ ...ref, ...(laneRetirement ? { cursor_lane_retirement: laneRetirement } : {}) }), observer ? JSON.stringify(observer) : null, at, at);
   database.prepare(`UPDATE execution_observers SET observer_epoch=observer_epoch+1
     WHERE agent_id=? AND observer_runtime_generation_id=?`).run(turn.agent_id, runtimeId);
   database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
