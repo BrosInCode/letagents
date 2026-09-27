@@ -135,6 +135,11 @@ export class ProviderHandoffCoordinator {
         continue;
       }
       const ref = current.provider_ref;
+      // Supported recovery clears the reference after the adapter retires.
+      // Retained evidence is not a channel that this handoff can interrupt.
+      if (custody.state === "retired" && !ref && !handle
+        && this.options.currentExecutionGeneration(entry.id) === undefined
+        && custody.handle.workAttemptId === current.work_attempt_id) continue;
       if (custody.state === "unknown" || custody.state === "absent" || !ref
         || ref.work_attempt_id !== current.work_attempt_id
         || custody.handle.workAttemptId !== ref.work_attempt_id
