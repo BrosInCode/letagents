@@ -1,5 +1,5 @@
 import { DaemonReadModel } from "../daemon-read-model.js";
-import { prepareRetiredRuntimePlan, archiveRetiredRuntimes } from "../runtime-recovery-journal.js";
+import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, recordInterruptedCursorRecovery } from "../runtime-recovery-journal.js";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
@@ -6996,7 +6996,11 @@ test(`explicit runtime recovery retires proven-dead ${providerId} without replac
 
 for (const cachedLane of [false, true]) {
 for (const missingTurn of [false, true]) {
-  test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"}; ${missingTurn ? "missing native turn" : "captured native turn"})`, async () => {
+for (const recoveryFailure of ["none", "stop", "end", "commit"] as const) {
+  if (recoveryFailure !== "none" && (!cachedLane || !missingTurn)) continue;
+for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
+  if (apiUrl !== "https://letagents.test" && (!cachedLane || missingTurn || recoveryFailure !== "none")) continue;
+  test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"}; ${missingTurn ? "missing native turn" : "captured native turn"}; ${recoveryFailure}; ${apiUrl})`, async () => {
     const env = await fixture();
     const paths = {
       lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -7010,12 +7014,12 @@ for (const missingTurn of [false, true]) {
     const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0,
       workspacePath: workspace.path, workAttemptId: workspace.id });
     const failedExecution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
-    await durability.recordTerminal(attempt.work_attempt_id, failedExecution.execution_generation_id, {
+    if (!cachedLane || missingTurn) await durability.recordTerminal(attempt.work_attempt_id, failedExecution.execution_generation_id, {
       ended_at: new Date().toISOString(), exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "",
       terminal_cause: "crashed", actor: "daemon-provider", generation: 1,
       provider_continuation_id: "cursor_crashed_continuation",
     });
-    const execution = cachedLane
+    const execution = cachedLane && missingTurn
       ? await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 2)
       : failedExecution;
     await durability.close();
@@ -7038,6 +7042,7 @@ for (const missingTurn of [false, true]) {
       stop: async (current) => {
         assert.equal(current, handle);
         calls.stop++;
+        if (recoveryFailure === "stop") throw new Error("injected lane stop failure");
         const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: null,
           terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
         handle.observedState = "stopped";
@@ -7051,7 +7056,36 @@ for (const missingTurn of [false, true]) {
         return { sourceId: "recovery-successor-source", position: () => ({ firstRetainedSequence: 1, latestSequence: sourceSequence }), dispose() {} };
       },
     };
-    const daemon = new SupervisorDaemon(paths, "darwin", port, false);
+    const leaseEvents: string[] = [];
+    let lease = { id: "cursor-lease", task_id: "cursor-task", room_id: entry.room_id,
+      agent_session_id: "retired-worker", agent_key: "owner/cursor", agent_instance_id: `daemon:${id}`, epoch: 4 };
+    const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, {
+      poll: async () => ({ messages: [] }), publish: async () => {},
+    }, {
+      endWorkerSession: async input => {
+        assert.equal(input.sessionId, "retired-worker");
+        if (recoveryFailure === "end") throw new Error("injected worker retirement failure");
+        leaseEvents.push("retire");
+      },
+      createWorkerSession: async () => {
+        assert.equal(leaseEvents[0], "retire", "the predecessor must retire before its successor is minted");
+        leaseEvents.push("mint");
+        return { sessionId: "successor-worker", bearer: "inert-secret", bearerId: "inert-bearer", expiresAt: null };
+      },
+      getExecutionDelegation: async () => { throw new Error("unexpected delegation HTTP"); },
+      listWorkLeases: async () => [lease], readWorkLease: async () => lease,
+      attestWorkLease: async input => {
+        assert.equal(input.executionGenerationId, execution.execution_generation_id);
+        assert.equal(input.cause, "stopped");
+        leaseEvents.push("attest");
+        return "inert-attestation";
+      },
+      rebindWorkLease: async input => {
+        leaseEvents.push("rebind");
+        lease = { ...lease, agent_session_id: input.toSessionId, epoch: lease.epoch + 1 };
+        return lease;
+      },
+    });
     try {
       await daemon.start();
       const internals = daemon as unknown as {
@@ -7062,6 +7096,9 @@ for (const missingTurn of [false, true]) {
         store: ManifestStore;
         durability: WorkDurabilityStore;
         manifestGeneration: number;
+        workerBindings: WorkerBindingStore;
+        workerRuntimeCustody: WorkerRuntimeCustody;
+        workerAuthority: import("../worker-authority-coordinator.js").WorkerAuthorityCoordinator;
       };
       internals.requestConvergence = () => { calls.converge++; };
       const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
@@ -7179,7 +7216,31 @@ for (const missingTurn of [false, true]) {
           capture.prepare(`UPDATE ${table} SET ${column}=? WHERE ${key}=?`).run(original, value);
         }
       }
+      internals.workerRuntimeCustody.installHostGrant({
+        entryId: id, roomId: entry.room_id, agentKey: lease.agent_key, grantId: "cursor-grant",
+        supervisorGrant: "inert-grant", grantGeneration: 1, apiUrl,
+        daemonGeneration: generation, hostId: "host", installationId: "installation", expiresAt: "2099-01-01T00:00:00.000Z",
+      });
+      await internals.workerBindings.bind({ entry_id: id, room_id: entry.room_id,
+        work_attempt_id: attempt.work_attempt_id, execution_generation_id: execution.execution_generation_id,
+        agent_session_id: lease.agent_session_id, agent_session_token: "inert-old-secret", api_url: apiUrl });
+      await internals.workerBindings.recordExecutionBinding({ entry_id: id, room_id: entry.room_id,
+        work_attempt_id: attempt.work_attempt_id, execution_generation_id: execution.execution_generation_id,
+        agent_session_id: lease.agent_session_id, api_url: apiUrl, grant_id: "cursor-grant", agent_key: lease.agent_key });
+      if (recoveryFailure === "commit") capture.exec(`CREATE TRIGGER reject_retirement BEFORE INSERT ON agent_runtime_recoveries
+        BEGIN SELECT RAISE(ABORT, 'injected retirement commit failure'); END`);
       const result = await recover();
+      if (recoveryFailure !== "none") {
+        assert.equal(result.ok, false);
+        assert.match(result.error!, /injected .* failure/);
+        assert.deepEqual(await internals.supervisedInbox.get(head.inbox_item_id), before);
+        assert.equal((await internals.supervisedInbox.get(later.inbox_item_id))?.attempt_count, 0);
+        assert.equal(capture.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=?").get(id)!.n, 0);
+        assert.deepEqual(capture.prepare("SELECT * FROM execution_facts WHERE runtime_generation_id=?").all(oldRuntime), oldFacts);
+        assert.ok(leaseEvents.every(event => !["mint", "attest", "rebind"].includes(event)));
+        capture.close();
+        return;
+      }
       assert.equal(result.ok, true, result.error);
       const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
       assert.equal(recovered.provider_ref, null);
@@ -7199,8 +7260,8 @@ for (const missingTurn of [false, true]) {
         "explicit recovery releases the FIFO without replaying the failed turn");
       assert.equal((await internals.supervisedInbox.get(later.inbox_item_id))?.attempt_count, 0);
       const durable = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as TaskWorkAttempt;
-      assert.equal(durable.execution_generations.length, cachedLane ? 2 : 1);
-      assert.equal(durable.execution_generations[0]?.terminal?.terminal_cause, "crashed");
+      assert.equal(durable.execution_generations.length, cachedLane && missingTurn ? 2 : 1);
+      assert.equal(durable.execution_generations[0]?.terminal?.terminal_cause, cachedLane && !missingTurn ? "stopped" : "crashed");
       assert.equal(durable.execution_generations.at(-1)?.terminal?.terminal_cause, cachedLane ? "stopped" : "crashed");
       const boundary = capture.prepare("SELECT phase,observer_json FROM agent_runtime_recoveries WHERE agent_id=? AND runtime_generation_id=?").get(id, oldRuntime)!;
       assert.ok(boundary, "recovery must archive the exact prior observer even when the failed native turn was not captured");
@@ -7214,6 +7275,56 @@ for (const missingTurn of [false, true]) {
         assert.equal(capture.prepare("SELECT runtime_state FROM execution_runtime_generations WHERE runtime_generation_id='uncaptured-next-child'").get()!.runtime_state, "starting", "uncaptured native history stays unknown");
       }
       assert.throws(() => shadow.observeSourcePosition(oldObserver.sourceId, oldObserver, 10), /stale_observer/);
+
+      const archivedRef = JSON.parse(String(capture.prepare("SELECT provider_ref_json FROM agent_runtime_recoveries WHERE agent_id=?").get(id)!.provider_ref_json));
+      assert.equal(archivedRef.execution_generation_id, failedExecution.execution_generation_id);
+      if (cachedLane) {
+        assert.equal(archivedRef.cursor_lane_retirement.execution_generation_id, execution.execution_generation_id);
+        assert.equal(execution.execution_generation_id === failedExecution.execution_generation_id, !missingTurn,
+          "receipt identifies the stopped lane for both same-generation and older archived turns");
+        capture.exec("BEGIN");
+        try {
+          assert.throws(() => recordInterruptedCursorRecovery(capture, bindingBefore!, new Date().toISOString(),
+            archivedRef.cursor_lane_retirement), /cannot rewrite an archived/);
+        } finally { capture.exec("ROLLBACK"); }
+        capture.exec("BEGIN");
+        try {
+          assert.throws(() => recordInterruptedCursorRecovery(capture, { ...bindingBefore!, agent_id: "uncaptured-agent", origin_execution_generation_id: "uncaptured" },
+            new Date().toISOString(), archivedRef.cursor_lane_retirement), /requires a new captured/);
+        } finally { capture.exec("ROLLBACK"); }
+        // Same-session grant rotation keeps both launch receipts for one lane.
+        await internals.workerBindings.recordExecutionBinding({ entry_id: id, room_id: entry.room_id,
+          work_attempt_id: attempt.work_attempt_id, execution_generation_id: execution.execution_generation_id,
+          agent_session_id: "retired-worker", api_url: apiUrl, grant_id: "older-grant", agent_key: lease.agent_key });
+        const reopened = new WorkerBindingStore(join(env.root, "reopened-bindings.json"), undefined, paths.manifestPath);
+        try {
+          const predecessors = await reopened.executionPredecessors(id, attempt.work_attempt_id, entry.room_id);
+          assert.equal(predecessors.length, 2);
+          assert.ok(predecessors.every(record => record.cursor_lane_retirement?.execution_generation_id === execution.execution_generation_id),
+            "a new store reconstructs proof for rotated-grant receipts from committed bytes");
+          for (const field of ["kind", "entry_id", "room_id", "work_attempt_id", "execution_generation_id",
+            "agent_session_id", "api_url", "grant_id", "agent_key", "provider_continuation_id"]) {
+            const altered = { ...archivedRef, cursor_lane_retirement: { ...archivedRef.cursor_lane_retirement, [field]: "wrong" } };
+            try {
+              capture.prepare("UPDATE agent_runtime_recoveries SET provider_ref_json=? WHERE agent_id=?").run(JSON.stringify(altered), id);
+              assert.ok((await reopened.executionPredecessors(id, attempt.work_attempt_id, entry.room_id)).every(record => !record.cursor_lane_retirement), field);
+            } finally { capture.prepare("UPDATE agent_runtime_recoveries SET provider_ref_json=? WHERE agent_id=?").run(JSON.stringify(archivedRef), id); }
+          }
+        } finally { await reopened.close(); }
+      } else assert.equal(archivedRef.cursor_lane_retirement, undefined);
+
+      // Recovery must cross real durable predecessor lookup and lease admission,
+      // not manually create a successor that bypasses the failed cloud boundary.
+      if (cachedLane) {
+        assert.ok(await internals.workerAuthority.mintHostWorkerAuthorization(recovered));
+        assert.deepEqual(leaseEvents, ["retire", "mint", "attest", "rebind"]);
+        assert.equal(lease.agent_session_id, "successor-worker");
+        assert.equal(lease.epoch, 5);
+      } else {
+        await assert.rejects(internals.workerAuthority.mintHostWorkerAuthorization(recovered), /not been proven stopped/);
+        assert.deepEqual(leaseEvents, ["retire", "mint"]);
+        assert.equal(lease.epoch, 4, "an old terminal/archive alone does not prove lane retirement");
+      }
 
       // Drive the next FIFO message through the real native observation path.
       const nextExecution = await internals.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 3);
@@ -7249,6 +7360,8 @@ for (const missingTurn of [false, true]) {
       await env.cleanup();
     }
   });
+}
+}
 }
 }
 

@@ -1413,7 +1413,7 @@ export class ManifestStore {
     entry: DaemonManifestEntry,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
     roomMoveCancellation?: PreMembershipRoomMoveCancellation,
-    interruptedDelivery?: { turn: SupervisedProviderTurnBinding; detail: string; observedAt: string },
+    interruptedDelivery?: { turn: SupervisedProviderTurnBinding; detail: string; observedAt: string; cursorLaneRetirement?: import("./runtime-recovery-journal.js").CursorLaneRetirement },
   ): Promise<{ generation: number; entry: DaemonManifestEntry; recoveredRuntimeId?: string }> {
     const normalized = canonicalManifestEntry(entry);
     let recoveredRuntimeId: string | undefined;
@@ -1430,7 +1430,7 @@ export class ManifestStore {
           || !binding || Object.entries(turn).some(([key, value]) => binding[key] !== value)) {
           throw new ManifestConflictError("Runtime recovery lost the exact blocked provider turn before settlement.");
         }
-        recoveredRuntimeId = recordInterruptedCursorRecovery(database, turn, observedAt) ?? undefined;
+        recoveredRuntimeId = recordInterruptedCursorRecovery(database, turn, observedAt, interruptedDelivery.cursorLaneRetirement) ?? undefined;
         cancelInterruptedSupervisedTurn(database, turn.inbox_item_id, detail, observedAt,
           { agent_id: normalized.id, room_id: normalized.room_id });
       }

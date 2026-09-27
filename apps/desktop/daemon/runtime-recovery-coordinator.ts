@@ -532,6 +532,8 @@ export class RuntimeRecoveryCoordinator {
 
       const ref = entry.provider_ref ?? null;
       let interruptedDelivery: Parameters<ManifestStore["replaceEntry"]>[4];
+      let stoppedCursorLane = false;
+      let retirementGrant: ReturnType<WorkerAuthorityCoordinator["currentHostGrant"]> = null;
       if (ref) {
         if (!entry.work_attempt_id || ref.work_attempt_id !== entry.work_attempt_id) {
           throw new Error("The saved provider runtime no longer matches this agent’s durable work attempt.");
@@ -572,6 +574,10 @@ export class RuntimeRecoveryCoordinator {
             await this.durability.recordTerminal(ref.work_attempt_id, ref.execution_generation_id,
               terminalPayload(terminal, execution.actor, execution.generation));
           }
+          const canonical = (await this.durability.getAttempt(ref.work_attempt_id)).execution_generations
+            .find(value => value.execution_generation_id === ref.execution_generation_id)?.terminal;
+          stoppedCursorLane = canonical?.terminal_cause === "stopped"
+            && canonical.provider_continuation_id === ref.provider_continuation_id;
           await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
           if (installation) this.streams.remove(installation);
         }
@@ -621,6 +627,20 @@ export class RuntimeRecoveryCoordinator {
           grantGeneration: grant.grantGeneration,
           sessionId: retainedSessionId,
         });
+        if (stoppedCursorLane && interruptedDelivery && ref && binding
+          && binding.entry_id === entryId && binding.room_id === entry.room_id
+          && binding.work_attempt_id === ref.work_attempt_id
+          && binding.execution_generation_id === ref.execution_generation_id
+          && binding.api_url === grant.apiUrl) {
+          retirementGrant = grant;
+          interruptedDelivery.cursorLaneRetirement = {
+            kind: "cursor_idle_lane_retired_v1", entry_id: entryId, room_id: entry.room_id,
+            work_attempt_id: ref.work_attempt_id, execution_generation_id: ref.execution_generation_id,
+            provider_continuation_id: ref.provider_continuation_id, agent_session_id: retainedSessionId,
+            api_url: grant.apiUrl, grant_id: grant.grantId, agent_key: grant.agentKey,
+            retired_at: new Date(this.nowMs()).toISOString(),
+          };
+        }
       }
       if (binding) {
         await this.bindings.unbind(entryId, binding.agent_session_id, binding.execution_generation_id);
@@ -635,7 +655,8 @@ export class RuntimeRecoveryCoordinator {
       entry = await this.authority.serializeManifest(async () => {
         await this.authority.assertCurrent();
         const current = await this.store.getEntry(entryId);
-        if (!current || current.provider_ref?.execution_generation_id !== ref?.execution_generation_id
+        if (!current || (retirementGrant && this.workerAuthority.currentHostGrant(current) !== retirementGrant)
+          || current.provider_ref?.execution_generation_id !== ref?.execution_generation_id
           || current.provider_ref?.provider_continuation_id !== ref?.provider_continuation_id) {
           throw new Error("Runtime recovery lost the exact provider reference before replacement.");
         }
