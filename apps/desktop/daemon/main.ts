@@ -870,7 +870,7 @@ export class SupervisorDaemon {
       isNativeControlActive: (entryId) => this.entryConcurrency.isNativeControlActive(entryId),
       isRetiring: () => this.handoffScheduled,
       setDraining: (draining) => { this.handoffDraining = draining; },
-      beginRetirement: () => { this.handoffScheduled = true; },
+      beginRetirement: () => { this.executionCapture?.sealForPlannedHandoff(); this.handoffScheduled = true; },
       retire: () => this.retireForHandoff(),
       finish: () => this.stopForHandoff(),
       requestConvergence: (entryId) => this.requestConvergence(entryId),
