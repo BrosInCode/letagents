@@ -130,6 +130,12 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
       events.push(`store:get-entry:${entryId}`);
       return manifest.entries.find((candidate) => candidate.id === entryId);
     },
+    async getActivityState(entryId) {
+      events.push(`store:activity-state:${entryId}`);
+      const current = manifest.entries.find((candidate) => candidate.id === entryId);
+      return current ? { observed_state: current.observed_state,
+        last_sequence: current.activity?.at(-1)?.sequence ?? -1 } : undefined;
+    },
     async getPurge(operationId) {
       events.push(`store:get-purge:${operationId}`);
       return purgeComplete ? { phase: "complete" } as never : null;
@@ -217,6 +223,14 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
         };
       });
       return { generation: durableManifestGeneration, entry: updated };
+    },
+    async recordActivity(expectedGeneration, entryId, event, runtimeUpdate, limit, commitFence) {
+      events.push(`store:record:${event.sequence}:${limit}`);
+      const next = runtimeUpdate
+        ? await store.appendActivity(expectedGeneration, entryId, event,
+          runtimeUpdate.observedState, runtimeUpdate.nativeLiveness, limit, commitFence)
+        : await store.appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence);
+      return { generation: next.generation };
     },
     async updateWorkplaceLiveness(expectedGeneration, entryId, liveness, commitFence) {
       events.push(`store:liveness:${liveness.state}`);
@@ -463,6 +477,34 @@ test("activity-only persistence sanitizes presentation without acquiring lifecyc
   assert.equal(state.events.includes("store:commit-activity"), false,
     "presentation-only persistence cannot enter the lifecycle-bearing store path");
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
+});
+
+test("native activity keeps scalar admission, redaction, lifecycle ownership, and fencing without entry reads", async () => {
+  for (const activityOnly of [false, true]) {
+    const nativeLiveness = { state: "idle" as const, detail: "prior native evidence" };
+    const state = harness([entry({ observed_state: "recovering", native_liveness: nativeLiveness,
+      activity: Array.from({ length: 200 }, (_, sequence) => activity({ sequence })),
+    })]);
+    await assert.rejects(state.subject.appendNativeActivity("agent-1", activity({ sequence: 199 }), activityOnly), /not newer/);
+    const result = await state.subject.appendNativeActivity("agent-1", activity({ sequence: 200, status: "working",
+      payload: { api_key: "secret-value" },
+    }), activityOnly);
+    assert.equal(result, undefined);
+    const saved = state.manifest.entries[0]!;
+    assert.equal(saved.activity?.length, 200);
+    assert.equal(saved.activity?.at(-1)?.payload_redacted, true);
+    assert.equal(JSON.stringify(saved.activity?.at(-1)).includes("secret-value"), false);
+    assert.equal(saved.observed_state, activityOnly ? "recovering" : "working");
+    if (activityOnly) assert.deepEqual(saved.native_liveness, nativeLiveness);
+    else assert.equal(saved.native_liveness?.state, "active");
+    assert.equal(state.events.some(value => value.startsWith("store:get-entry")), false);
+    assert.equal(state.events.includes("store:record:200:200"), true);
+    assert.equal(state.events.filter(value => value === "state:notify").length, 1);
+    state.setHandoffScheduled(true);
+    await assert.rejects(state.subject.appendNativeActivity("agent-1", activity({ sequence: 201 }), activityOnly), /handoff fenced/);
+    assert.equal(state.events.filter(value => value === "state:notify").length, 1);
+    assert.equal(state.manifest.entries[0]?.activity?.at(-1)?.sequence, 200);
+  }
 });
 
 test("workplace liveness preserves validation order, CAS adoption, and the exact persisted axis", async () => {

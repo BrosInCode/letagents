@@ -243,8 +243,8 @@ function coordinatorHarness(input: {
     transition: async (_entryId, observed_state, condition) => {
       manifest = { ...manifest, observed_state, condition };
     },
-    appendActivity: async (_entryId, event) => input.appendActivity?.(event.method),
-    appendActivityOnly: async (_entryId, event) => input.appendActivityOnly?.(event.method),
+    appendNativeActivity: async (_entryId, event, activityOnly) => activityOnly
+      ? input.appendActivityOnly?.(event.method) : input.appendActivity?.(event.method),
     publishNativeActivity: async () => input.publishNativeActivity?.(),
     handleTerminal: async () => {},
     streams: { reset: () => {}, push: (_entryId, event) => input.pushStream?.(event), end: (entryId) => input.endStream?.(entryId) },

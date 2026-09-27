@@ -27,6 +27,9 @@ export type StoredAgentConfiguration = {
 export type ManifestAdministrationStore = {
   load(): Promise<DaemonManifest>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  getActivityState(entryId: string): Promise<{
+    observed_state: DaemonManifestEntry["observed_state"]; last_sequence: number;
+  } | undefined>;
   getPurge(operationId: string): Promise<DaemonPurgeRecord | null | undefined>;
   write(
     expectedGeneration: number,
@@ -68,6 +71,15 @@ export type ManifestAdministrationStore = {
     limit: number,
     commitFence: CommitFence,
   ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
+  recordActivity(
+    expectedGeneration: number,
+    entryId: string,
+    event: DaemonActivityEvent,
+    runtimeUpdate: { observedState: DaemonManifestEntry["observed_state"];
+      nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]> } | null,
+    limit: number,
+    commitFence: CommitFence,
+  ): Promise<{ generation: number }>;
   updateWorkplaceLiveness(
     expectedGeneration: number,
     entryId: string,
@@ -273,9 +285,9 @@ export class ManifestAdministrationCoordinator {
     const sanitizedEvent = this.options.policies.sanitizeActivity(event);
     return this.options.authority.serialize(async () => {
       await this.options.authority.assertCurrent();
-      const entry = await this.options.store.getEntry(id);
+      const entry = await this.options.store.getActivityState(id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      const lastSequence = entry.activity?.at(-1)?.sequence ?? -1;
+      const lastSequence = entry.last_sequence;
       if (sanitizedEvent.sequence <= lastSequence) {
         throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
       }
@@ -308,9 +320,9 @@ export class ManifestAdministrationCoordinator {
     const sanitizedEvent = this.options.policies.sanitizeActivity(event);
     return this.options.authority.serialize(async () => {
       await this.options.authority.assertCurrent();
-      const entry = await this.options.store.getEntry(id);
+      const entry = await this.options.store.getActivityState(id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      const lastSequence = entry.activity?.at(-1)?.sequence ?? -1;
+      const lastSequence = entry.last_sequence;
       if (sanitizedEvent.sequence <= lastSequence) {
         throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
       }
@@ -323,6 +335,32 @@ export class ManifestAdministrationCoordinator {
       );
       this.options.authority.acceptManifestGeneration(next.generation);
       return next.entry;
+    });
+  }
+
+  /** Preserve native event admission without hydrating an unused history result. */
+  async appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> {
+    if (!event || typeof event !== "object" || !event.observed_at) {
+      throw new Error("A bounded activity event is required.");
+    }
+    const sanitizedEvent = this.options.policies.sanitizeActivity(event);
+    return this.options.authority.serialize(async () => {
+      await this.options.authority.assertCurrent();
+      const state = await this.options.store.getActivityState(id);
+      if (!state) throw new Error(`Unknown daemon manifest entry: ${id}`);
+      if (sanitizedEvent.sequence <= state.last_sequence) {
+        throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${state.last_sequence}.`);
+      }
+      const observedState = sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing"
+        ? "working" : sanitizedEvent.status === "blocked" ? state.observed_state : "idle";
+      const next = await this.options.store.recordActivity(
+        this.options.authority.currentManifestGeneration(), id, sanitizedEvent,
+        activityOnly ? null : { observedState, nativeLiveness: {
+          state: sanitizedEvent.status === "idle" ? "idle" : "active",
+          observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary,
+        } }, 200, this.options.authority.fenceCommit,
+      );
+      this.options.authority.acceptManifestGeneration(next.generation);
     });
   }
 

@@ -1,9 +1,12 @@
 import { DaemonFenceLostError } from "./singleton.js";
 
+/** Unknown mutations retain the conservative all-agent capture refresh. */
+export type DaemonCommitNotification = { captureAgentId?: string | false };
+
 export type DaemonAuthorityDependencies = {
   assertCurrent: () => Promise<void>;
   isHandoffScheduled: () => boolean;
-  notifyStateChanged: () => void;
+  notifyStateChanged: (captureAgentId?: string | false) => void;
 };
 
 /**
@@ -48,7 +51,7 @@ export class DaemonAuthority {
     return this.runSerializedManifestCommit(operation);
   }
 
-  fenceDaemonCommit(commit: () => Promise<void>): Promise<void> {
+  fenceDaemonCommit(commit: () => Promise<void>, notification?: DaemonCommitNotification): Promise<void> {
     return this.runSerializedManifestCommit(async () => {
       if (this.dependencies.isHandoffScheduled()) {
         throw new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.");
@@ -61,7 +64,7 @@ export class DaemonAuthority {
         throw new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.");
       }
       await commit();
-      this.dependencies.notifyStateChanged();
+      this.dependencies.notifyStateChanged(notification?.captureAgentId);
     });
   }
 

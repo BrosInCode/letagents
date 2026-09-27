@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { PreparedReadStatements } from "./prepared-reads.js";
+import type { DaemonCommitNotification } from "./daemon-authority.js";
 
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import {
@@ -76,6 +78,11 @@ export class WorkerBindingStore {
   private initializing: Promise<DatabaseSync> | null = null;
   private mutations: Promise<void> = Promise.resolve();
   private closed = false;
+  private readonly reads = new PreparedReadStatements({
+    list: "SELECT * FROM worker_session_bindings ORDER BY entry_id",
+    binding: "SELECT * FROM worker_session_bindings WHERE entry_id=?",
+    epoch: "SELECT binding_epoch FROM worker_session_bindings WHERE entry_id=?",
+  });
   /** Publications finalized for an entry since its journal was last compacted. */
   private readonly publicationsSinceCompaction = new Map<string, number>();
   /** Deliberately instance-local: reopening a daemon cannot recover a secret. */
@@ -89,7 +96,7 @@ export class WorkerBindingStore {
 
   constructor(
     readonly legacyJsonPath: string,
-    private readonly commitFence?: (commit: () => Promise<void>) => Promise<void>,
+    private readonly commitFence?: (commit: () => Promise<void>, notification?: DaemonCommitNotification) => Promise<void>,
     private readonly databasePath = defaultDatabasePath(legacyJsonPath),
     /** Test-only seam for the narrow committed-record / backup-finalization window. */
     private readonly legacyBackupFinalizationHook?: () => Promise<void>,
@@ -102,6 +109,7 @@ export class WorkerBindingStore {
     // part of this queue, so handoff does not wait on HTTP.
     await this.initializing?.catch(() => undefined);
     await this.mutations.catch(() => undefined);
+    this.reads.clear();
     this.database?.close();
     this.database = null;
     this.credentials.clear();
@@ -111,7 +119,7 @@ export class WorkerBindingStore {
     return this.withMutation(async (database) => this.read(database, entryId));
   }
   async list(): Promise<WorkerSessionBinding[]> {
-    return this.withMutation(async (database) => (database.prepare("SELECT * FROM worker_session_bindings ORDER BY entry_id").all() as Row[]).map(rowToBinding));
+    return this.withMutation(async (database) => (this.reads.get(database, "list").all() as Row[]).map(rowToBinding));
   }
 
   /** Commit the uncertainty boundary before any remote mint request is sent. */
@@ -324,7 +332,7 @@ export class WorkerBindingStore {
         nextEpoch, binding.updated_at);
       this.upsertWatermark(database, input.entry_id, nextEpoch, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
       return { binding, bindingEpoch: nextEpoch, priorCredentialRef: prior?.credential_ref ?? null };
-      });
+      }, { captureAgentId: input.entry_id });
       // SQLite is committed but this entry remains inside the same mutation
       // queue, so a concurrent credential install cannot be overwritten by a
       // stale formal bind's delayed vault write.
@@ -347,7 +355,7 @@ export class WorkerBindingStore {
       if (prior.room_cursor === roomCursor) return prior;
       run(database.prepare("UPDATE worker_session_bindings SET room_cursor = ?, updated_at = ? WHERE entry_id = ? AND agent_session_id = ? AND execution_generation_id = ?"), roomCursor, new Date().toISOString(), entryId, agentSessionId, executionGenerationId);
       return this.read(database, entryId)!;
-    }));
+    }, { captureAgentId: entryId }));
   }
 
   async checkpointCursorMonotonic(entryId: string, agentSessionId: string, executionGenerationId: string, roomCursor: string): Promise<{ binding: WorkerSessionBinding; advanced: boolean }> {
@@ -359,7 +367,7 @@ export class WorkerBindingStore {
       if (prior.room_cursor !== null && (existing === null || candidate <= existing)) return { binding: prior, advanced: false };
       run(database.prepare("UPDATE worker_session_bindings SET room_cursor = ?, updated_at = ? WHERE entry_id = ? AND agent_session_id = ? AND execution_generation_id = ?"), roomCursor, new Date().toISOString(), entryId, agentSessionId, executionGenerationId);
       return { binding: this.read(database, entryId)!, advanced: true };
-    }));
+    }, { captureAgentId: entryId }));
   }
 
   async publish<T extends { accepted: boolean }>(entryId: string, observedAtMs: number, operation: (publication: { binding: WorkerSessionBinding; sequence: number; observed_at: string }) => Promise<T>): Promise<(T & { sequence: number; observed_at: string }) | null> {
@@ -388,7 +396,7 @@ export class WorkerBindingStore {
         // hold the store's mutation queue, or a real publication or cursor
         // checkpoint would wait behind a bulk delete on first launch.
         const result = await this.withMutation(async (database) =>
-          this.transaction(database, () => prunePublicationsForEntry(database, entryId, retained)));
+          this.transaction(database, () => prunePublicationsForEntry(database, entryId, retained), { captureAgentId: false }));
         deleted += result.deleted;
         if (!result.truncated || result.deleted === 0) break;
       }
@@ -409,7 +417,7 @@ export class WorkerBindingStore {
     }
     this.publicationsSinceCompaction.set(entryId, 0);
     try {
-      await this.withMutation(async (database) => this.transaction(database, () => prunePublicationsForEntry(database, entryId)));
+      await this.withMutation(async (database) => this.transaction(database, () => prunePublicationsForEntry(database, entryId), { captureAgentId: false }));
     } catch { /* Retention is opportunistic; the next publication retries it. */ }
   }
 
@@ -430,7 +438,7 @@ export class WorkerBindingStore {
       if (!current || (expectedSessionId && current.agent_session_id !== expectedSessionId) || (expectedExecutionGenerationId && current.execution_generation_id !== expectedExecutionGenerationId)) return { removed: false, credentialRef: null as string | null };
       run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id = ?"), entryId);
       return { removed: true, credentialRef: current.credential_ref };
-    }));
+    }, { captureAgentId: entryId }));
     if (result.credentialRef) this.credentials.delete(result.credentialRef);
     return result.removed;
   }
@@ -490,7 +498,7 @@ export class WorkerBindingStore {
       this.upsertWatermark(database, entryId, epoch, sequence, effective, observedAt);
       run(database.prepare("INSERT INTO worker_binding_publications (reservation_id, entry_id, binding_epoch, execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)"), id, entryId, epoch, prior.execution_generation_id, prior.agent_session_id, sequence, observedAt, effective, observedAt);
       return { reservationId: id, binding: { ...prior, last_sequence: sequence, last_observed_at_ms: effective, updated_at: observedAt }, bindingEpoch: epoch, sequence, observedAt, observedAtMs: effective };
-    }));
+    }, { captureAgentId: false }));
   }
 
   private async finalizePublication(reservation: Reservation, outcome: "accepted" | "rejected" | "transport_error"): Promise<void> {
@@ -513,7 +521,7 @@ export class WorkerBindingStore {
         }
       }
       return null;
-    }));
+    }, { captureAgentId: outcome === "rejected" ? reservation.binding.entry_id : false }));
     if (revoked) this.credentials.delete(revoked);
   }
 
@@ -529,7 +537,7 @@ export class WorkerBindingStore {
       this.upsertWatermark(database, input.entryId, epoch, sequence, effective, observedAt);
       run(database.prepare("INSERT INTO worker_generation_verifications (reservation_id, entry_id, binding_epoch, from_execution_generation_id, to_execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)"), id, input.entryId, epoch, input.fromExecutionGenerationId, input.toExecutionGenerationId, input.agentSessionId, sequence, observedAt, effective, observedAt);
       return { kind: "reserved", reservation: { reservationId: id, binding: { ...prior, last_sequence: sequence, last_observed_at_ms: effective, updated_at: observedAt }, bindingEpoch: epoch, sequence, observedAt, observedAtMs: effective } };
-    }));
+    }, { captureAgentId: input.entryId }));
   }
 
   private async finalizeVerification(reservation: Reservation, input: { entryId: string; fromExecutionGenerationId: string; toExecutionGenerationId: string; agentSessionId: string }, accepted: boolean): Promise<{ binding: WorkerSessionBinding; advanced: boolean; accepted: boolean }> {
@@ -550,7 +558,7 @@ export class WorkerBindingStore {
         && current.room_id === reservation.binding.room_id
         && current.work_attempt_id === reservation.binding.work_attempt_id) return { binding: current, advanced: false, accepted: true };
       return { binding: current ?? reservation.binding, advanced: false, accepted: false };
-      });
+      }, { captureAgentId: input.entryId });
       // Commit happened, but the mutation mutex is still held. Move the vault
       // authority before another operation can unbind/rebind the same entry.
       if (result.advanced) {
@@ -572,8 +580,8 @@ export class WorkerBindingStore {
     return binding;
   }
   private async write(_value: unknown): Promise<void> {}
-  private read(database: DatabaseSync, entryId: string): WorkerSessionBinding | null { const row = database.prepare("SELECT * FROM worker_session_bindings WHERE entry_id=?").get(entryId) as Row | undefined; return row ? rowToBinding(row) : null; }
-  private readBindingEpoch(database: DatabaseSync, entryId: string): number { return Number((database.prepare("SELECT binding_epoch FROM worker_session_bindings WHERE entry_id=?").get(entryId) as Row).binding_epoch); }
+  private read(database: DatabaseSync, entryId: string): WorkerSessionBinding | null { const row = this.reads.get(database, "binding").get(entryId) as Row | undefined; return row ? rowToBinding(row) : null; }
+  private readBindingEpoch(database: DatabaseSync, entryId: string): number { return Number((this.reads.get(database, "epoch").get(entryId) as Row).binding_epoch); }
   private readWatermark(database: DatabaseSync, entryId: string): { binding_epoch: number; last_sequence: number; last_observed_at_ms: number } | null {
     const row = database.prepare("SELECT binding_epoch, last_sequence, last_observed_at_ms FROM worker_binding_watermarks WHERE entry_id=?").get(entryId) as Row | undefined;
     return row ? { binding_epoch: Number(row.binding_epoch), last_sequence: Number(row.last_sequence), last_observed_at_ms: Number(row.last_observed_at_ms) } : null;
@@ -597,7 +605,7 @@ export class WorkerBindingStore {
   }
   private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); if (input.credential_ref !== undefined && !input.credential_ref.trim()) throw new Error("Worker binding credential_ref is required when supplied."); const url = new URL(input.api_url); if (!isLocalRoomApi(input.api_url) && url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
   private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }
-  private async transaction<T>(database: DatabaseSync, operation: () => T): Promise<T> {
+  private async transaction<T>(database: DatabaseSync, operation: () => T, notification?: DaemonCommitNotification): Promise<T> {
     let open = false; let committed = false; let result!: T;
     const commit = async () => {
       if (committed || open) throw new Error("Worker binding transaction commit was invoked more than once.");
@@ -611,7 +619,7 @@ export class WorkerBindingStore {
       }
     };
     try {
-      if (this.commitFence) await this.commitFence(commit); else await commit();
+      if (this.commitFence) await this.commitFence(commit, notification); else await commit();
       if (!committed) throw new Error("Worker binding commit fence returned without committing.");
       return result;
     } catch (error) {
