@@ -21,13 +21,14 @@ const { ipcMain } = electron as typeof import("electron");
  */
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
-): void {
+): () => void {
   registerDesktopAuthAndSetupIpcHandlers(targetIpcMain);
   registerConversationIpcHandlers(targetIpcMain);
   registerDesktopAppIpcHandlers(targetIpcMain);
   registerDesktopRoomIpcHandlers(targetIpcMain);
-  registerDesktopRentalDomainIpcHandlers(targetIpcMain);
+  const startRentalServices = registerDesktopRentalDomainIpcHandlers(targetIpcMain);
   registerDesktopRepoIpcHandlers(targetIpcMain);
   registerDesktopSupervisorIpcHandlers(targetIpcMain);
   registerDesktopWorkerIpcHandlers(targetIpcMain);
+  return startRentalServices;
 }
