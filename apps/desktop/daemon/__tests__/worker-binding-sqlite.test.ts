@@ -36,6 +36,64 @@ function assertRedactedBackup(value: string, source: string) {
   assert.doesNotMatch(value, /agent_session_token|token-session_a/);
 }
 
+test("reused binding reads observe cursor, epoch and credential replacement across independent writes", async () => {
+  const env = await fixture();
+  const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  let raw: DatabaseSync | undefined;
+  try {
+    const first = await store.bind(input());
+    assert.deepEqual(await store.get("agent_a"), first);
+    assert.deepEqual(await store.list(), [first]);
+    assert.equal(await store.credentialFor(first), "token-session_a");
+    raw = new DatabaseSync(env.database);
+    raw.prepare("UPDATE worker_session_bindings SET room_cursor='msg_42',binding_epoch=binding_epoch+1 WHERE entry_id='agent_a'").run();
+    assert.equal((await store.get("agent_a"))?.room_cursor, "msg_42");
+    assert.equal((await store.list())[0]?.room_cursor, "msg_42");
+    assert.equal(await store.credentialFor(first), null, "prepared epoch reads must not cache credential authority");
+    const second = await store.bind(input("agent_a", "run_2", "replacement"));
+    assert.deepEqual(await store.list(), [second]);
+    assert.equal(await store.credentialFor(first), null);
+    assert.equal(await store.credentialFor(second), "token-replacement");
+    await store.close();
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    try {
+      assert.deepEqual(await reopened.get("agent_a"), second);
+      assert.equal(await reopened.credentialFor(second), null, "connection reuse never persists an in-memory credential");
+    } finally { await reopened.close(); }
+    await assert.rejects(store.get("agent_a"), /closed/);
+  } finally { raw?.close(); await store.close(); await env.cleanup(); }
+});
+
+test("publication fences keep presentation hints separate from exact rejected-binding invalidation", async () => {
+  const env = await fixture();
+  const hints: Array<string | false | undefined> = [];
+  const store = new WorkerBindingStore(env.legacy, async (commit, notification) => {
+    await commit();
+    hints.push(notification?.captureAgentId);
+  }, env.database);
+  try {
+    const first = await store.bind(input());
+    assert.deepEqual(hints, ["agent_a"]);
+    hints.length = 0;
+    await store.publish("agent_a", Date.now(), async () => ({ accepted: true }));
+    assert.deepEqual(hints, [false, false], "reservation and acceptance still cross their commit fences");
+    assert.equal(await store.credentialFor(first), "token-session_a");
+    hints.length = 0;
+    await assert.rejects(store.publish("agent_a", Date.now(), async () => { throw new Error("offline"); }), /offline/);
+    assert.deepEqual(hints, [false, false]);
+    assert.ok(await store.get("agent_a"), "transport failure preserves exact binding authority");
+    hints.length = 0;
+    await store.publish("agent_a", Date.now(), async () => ({ accepted: false }));
+    assert.deepEqual(hints, [false, "agent_a"], "explicit rejection refreshes capture for the potentially revoked agent");
+    assert.equal(await store.get("agent_a"), null);
+    assert.equal(await store.credentialFor(first), null);
+    hints.length = 0;
+    await store.compactRetainedPublications(1);
+    assert.ok(hints.length > 0);
+    assert.ok(hints.every((hint) => hint === false), "publication retention still crosses a presentation-only fence");
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("slow native publication does not block another binding checkpoint or publication", async () => {
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database);

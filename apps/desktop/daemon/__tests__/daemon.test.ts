@@ -13115,7 +13115,7 @@ test("read model projects child compaction before admission without changing dur
     manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null },
     bindings: { credentialFor: async () => null, get: async () => null, list: async () => [] },
     inbox: { detail: async () => { throw new Error("unused"); }, ingressHealth: async () => null,
-      latestContinuationRepair: async () => null, receipts: async () => [] },
+      latestContinuationRepair: async () => null, receiptProjection: async () => [] },
     durability: { getAttempt: async () => null },
     workerAuthority: { currentHostGrant: () => null, pollingContract: async () => null },
     liveHandles: new Map(), delivery: null,

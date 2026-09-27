@@ -130,6 +130,27 @@ test("ordinary commit fencing rechecks handoff after asynchronous authority asse
   assert.equal(notified, false);
 });
 
+test("commit notification scopes preserve presentation updates and fencing", async () => {
+  const events: Array<string | false | undefined> = [];
+  let handoff = false;
+  const authority = new DaemonAuthority({
+    assertCurrent: async () => { events.push("assert"); },
+    isHandoffScheduled: () => handoff,
+    notifyStateChanged: scope => { events.push(scope); },
+  });
+  await authority.fenceDaemonCommit(async () => { events.push("heartbeat"); }, { captureAgentId: false });
+  await authority.fenceDaemonCommit(async () => { events.push("revoke"); }, { captureAgentId: "agent-1" });
+  await authority.fenceDaemonCommit(async () => { events.push("unknown"); });
+  assert.deepEqual(events, ["assert", "heartbeat", false, "assert", "revoke", "agent-1", "assert", "unknown", undefined]);
+
+  events.length = 0;
+  await assert.rejects(authority.fenceDaemonCommit(async () => { throw new Error("write failed"); }, { captureAgentId: false }), /write failed/);
+  assert.deepEqual(events, ["assert"]);
+  handoff = true;
+  await assert.rejects(authority.fenceDaemonCommit(async () => { events.push("stale commit"); }, { captureAgentId: false }), DaemonFenceLostError);
+  assert.deepEqual(events, ["assert"]);
+});
+
 test("admitted transition commits during handoff and asserts authority on both sides", async () => {
   const events: string[] = [];
   const authority = new DaemonAuthority({

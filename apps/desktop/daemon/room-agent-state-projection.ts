@@ -1,7 +1,7 @@
 import { projectDeliveryReceipts, projectDeliveryTurn } from "./manifest-view-projection.js";
 import type {
   ProviderContinuationRepair,
-  SupervisedInboxReceiptWithTimeline,
+  SupervisedInboxReceiptProjection,
 } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry, DaemonManifestEntryView } from "./types.js";
 import type { WorkerSessionBinding } from "./worker-binding-store.js";
@@ -35,7 +35,7 @@ export type RoomAgentStateProjectionInput = {
   lifecycleAdmission?: LifecycleCaptureAdmissionStatus | null;
   ingressHealth: RoomAgentIngressHealth | null;
   continuationRepair: Pick<ProviderContinuationRepair, "inbox_item_id" | "phase"> | null;
-  receipts: readonly SupervisedInboxReceiptWithTimeline[];
+  receipts: readonly SupervisedInboxReceiptProjection[];
   activeTurn: RoomAgentActiveTurn;
   nowMs: number;
   workplaceLivenessStaleAfterMs: number;

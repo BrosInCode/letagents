@@ -438,9 +438,19 @@ export class ExecutionShadowStore {
   /** Remember observed-but-not-yet-admitted positions without inventing a fact. */
   observeSourcePosition(sourceId: string, token: ShadowObserver, latestSequence: number): void {
     validated(time, latestSequence);
+    // Most post-commit refreshes see the same retained source position. Still
+    // validate the live observer and admission; the token alone is no cache of
+    // authority. A no-op need not acquire SQLite's writer lock or change its
+    // page/cache stamps.
+    const observed = this.currentObserver(sourceId, token);
+    if (latestSequence < Number(observed.last_source_sequence)) throw new ExecutionProtocolError("source_gap");
+    if (latestSequence <= Number(observed.max_observed_sequence)) return;
     this.transaction(() => {
+      // Another connection can replace the observer or advance its cursor
+      // between the read above and BEGIN IMMEDIATE. Revalidate under the lock.
       const current = this.currentObserver(sourceId, token);
       if (latestSequence < Number(current.last_source_sequence)) throw new ExecutionProtocolError("source_gap");
+      if (latestSequence <= Number(current.max_observed_sequence)) return;
       this.database.prepare("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
         .run(latestSequence, token.agentId);
     });
