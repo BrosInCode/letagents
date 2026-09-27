@@ -364,10 +364,22 @@ const api: DesktopApi = {
       ipcRenderer.on("desktop:supervisor:activity", listener);
       return () => ipcRenderer.off("desktop:supervisor:activity", listener);
     },
-    onState: (callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+    onState: (callback, roomIdentifier) => {
+      let active = true;
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+        if (!active) return;
+        // Filter before contextBridge copies the callback argument. Empty room
+        // snapshots still carry removals and the subscription heartbeat.
+        callback(roomIdentifier === undefined ? payload : {
+          ...payload,
+          entries: payload.entries.filter((entry) => entry.roomId === roomIdentifier),
+        });
+      };
       ipcRenderer.on("desktop:supervisor:state", listener);
-      return () => ipcRenderer.off("desktop:supervisor:state", listener);
+      return () => {
+        active = false;
+        ipcRenderer.off("desktop:supervisor:state", listener);
+      };
     },
     onRetirement: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

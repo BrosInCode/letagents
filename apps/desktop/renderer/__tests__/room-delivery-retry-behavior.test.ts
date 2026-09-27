@@ -600,6 +600,56 @@ test("history failure offers explicit retry without viewport or scroll retries",
   } finally { viewport.app.unmount(); }
 });
 
+test("an idle viewport skips work history tracking and resumes causal reply suppression when work starts", async () => {
+  const props = Vue.reactive({
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
+    loadingOlderMessages: false, messages: [message("msg_1")], threadMessages: [message("msg_1")],
+    messageNamespace: "work-activity", localAgentWork: [] as Array<{
+      id: string; displayName: string; summary: string; startedAt: string;
+      agentSessionId: string; sourceMessageId: string;
+    }>,
+    deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
+    roomIdentifier: "room", githubActivityAvailable: false, roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
+  });
+  const viewport = mount({ setup: () => () => Vue.h(RoomMessageViewport, { ...props }) }, {});
+  const instance = viewport.app._instance!.subTree.component!;
+  const setup = (instance as unknown as {
+    devtoolsRawSetupState: { currentLocalAgentWork: Vue.ComputedRef & { onTrack?: (event: Vue.DebuggerEvent) => void } };
+  }).devtoolsRawSetupState;
+  let historyReads = 0;
+  setup.currentLocalAgentWork.onTrack = (event) => {
+    if (event.key === "messages" || event.key === "threadMessages") historyReads += 1;
+  };
+  const echoes = () => descendants(viewport.root).filter(node => node.props["data-testid"] === "room-local-agent-work-echo");
+  try {
+    props.localAgentWork = [];
+    await nextTick();
+    props.messages = [message("msg_1"), message("msg_2")];
+    props.threadMessages = [...props.messages];
+    await nextTick();
+    assert.equal(historyReads, 0, "no work means the suppression computed does not read either message history");
+    assert.equal(echoes().length, 0);
+
+    props.localAgentWork = [{ id: "agent-a", displayName: "Agent A", summary: "Working", startedAt: "2026-07-20T12:00:00Z",
+      agentSessionId: "session-a", sourceMessageId: "msg_2" }];
+    await nextTick();
+    assert.equal(echoes().length, 1, "new work is visible even after idle history updates");
+    assert.ok(historyReads > 0, "active work resumes observing causal room history");
+
+    const reply = { ...message("msg_3"), agentIdentity: { agentSessionId: "session-a" } };
+    props.threadMessages = [reply, message("msg_2"), message("msg_1")] as typeof props.threadMessages;
+    await nextTick();
+    assert.equal(echoes().length, 0, "a later exact-agent reply clears work even when input history is unordered");
+
+    props.localAgentWork = [];
+    await nextTick();
+    historyReads = 0;
+    props.threadMessages = [message("msg_4")];
+    await nextTick();
+    assert.equal(historyReads, 0, "returning to idle drops history dependencies again");
+  } finally { viewport.app.unmount(); }
+});
+
 test("mounted main viewport and thread panel forward the same retry event contract", async () => {
   const mainCalls: Array<[string, string]> = [];
   const viewport = mount(RoomMessageViewport, {

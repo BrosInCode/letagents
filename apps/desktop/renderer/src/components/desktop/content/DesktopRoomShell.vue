@@ -633,7 +633,7 @@ const agentInspectorProjections = computed(() => {
     deliveryRetryAvailable: deliveryRetryAvailable.value,
     continuationRepairAvailable: continuationRepairAvailable.value,
     roomDeliverySkipAvailable: roomDeliverySkipAvailable.value,
-    resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesResource.value.state),
+    resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesState.value),
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
     deliveryRetryingKeys: deliveryRetryingKeys.value,
   });
@@ -713,6 +713,8 @@ let unsubscribeSupervisorAgentStream: (() => void) | null = null;
 let unsubscribeSupervisorState: (() => void) | null = null;
 let unsubscribeSupervisorRetirement: (() => void) | null = null;
 let retirementStatusCheckOperationId: string | null = null;
+let supervisorStateSubscriptionMounted = false;
+let supervisorStateSubscriptionEpoch = 0;
 let supervisorStateSubscriptionActive = false;
 let supervisorStateLastSnapshotAtMs: number | null = null;
 let supervisorStateLastRepairAtMs: number | null = null;
@@ -916,7 +918,7 @@ const localAgentWork = computed(() =>
       props.room.identifier,
     ),
     ...supervisedAgentWorkIndicators(supervisorEntries.value, roomPresence.value, props.room.identifier,
-      supervisorEntriesResourceFreshness(supervisorEntriesResource.value.state)),
+      supervisorEntriesResourceFreshness(supervisorEntriesState.value)),
   ]
 );
 const pendingPermissionApprovals = computed(() =>
@@ -953,6 +955,8 @@ watch(() => props.room.identifier, () => {
   void refreshManagedAgentSessions();
   scheduleManagedAgentSessionsRepair();
 }, { immediate: true });
+
+watch(() => props.room.identifier, syncSupervisorStateSubscription, { flush: "sync" });
 
 watch(() => props.repoStatus, () => {
   refreshedEnvironmentRepoStatus.value = null;
@@ -1050,18 +1054,11 @@ onBeforeUnmount(() => {
   unsubscribeSupervisorAgentStream?.();
   unsubscribeSupervisorAgentStream = null;
   void desktopIpc.supervisor?.watchAgentStream?.(null);
-  unsubscribeSupervisorState?.();
-  unsubscribeSupervisorState = null;
+  supervisorStateSubscriptionMounted = false;
+  stopSupervisorStateSubscription();
   unsubscribeSupervisorRetirement?.();
   unsubscribeSupervisorRetirement = null;
   retirementStatusCheckOperationId = null;
-  supervisorStateSubscriptionActive = false;
-  supervisorStateLastSnapshotAtMs = null;
-  pendingSupervisorStateSnapshot = null;
-  if (supervisorStateFrame !== null) {
-    window.cancelAnimationFrame(supervisorStateFrame);
-    supervisorStateFrame = null;
-  }
 });
 
 onMounted(() => {
@@ -1089,14 +1086,11 @@ onMounted(() => {
     supervisorEntries.value = next;
     supervisorEntriesUpdatedAt.value = new Date().toISOString();
   }) || null;
-  unsubscribeSupervisorState = desktopIpc.supervisor?.onState?.((snapshot) => {
-    supervisorStateLastSnapshotAtMs = Date.now();
-    queueSupervisorStateSnapshot(snapshot);
-  }) || null;
+  supervisorStateSubscriptionMounted = true;
+  syncSupervisorStateSubscription();
   unsubscribeSupervisorRetirement = desktopIpc.supervisor?.onRetirement?.((event) => {
     acceptSupervisorRetirementEvent(event);
   }) || null;
-  supervisorStateSubscriptionActive = Boolean(unsubscribeSupervisorState);
   unsubscribeSupervisorAgentStream = desktopIpc.supervisor?.onAgentStream?.((batch) => {
     // Only accumulate for the agent whose inspector is focused; a batch for a
     // stale focus (raced focus change) is ignored.
@@ -1116,6 +1110,32 @@ onMounted(() => {
   }) || null;
 });
 
+function stopSupervisorStateSubscription(): void {
+  supervisorStateSubscriptionEpoch += 1;
+  unsubscribeSupervisorState?.();
+  unsubscribeSupervisorState = null;
+  supervisorStateSubscriptionActive = false;
+  supervisorStateLastSnapshotAtMs = null;
+  pendingSupervisorStateSnapshot = null;
+  if (supervisorStateFrame !== null) {
+    window.cancelAnimationFrame(supervisorStateFrame);
+    supervisorStateFrame = null;
+  }
+}
+
+function syncSupervisorStateSubscription(): void {
+  stopSupervisorStateSubscription();
+  if (!supervisorStateSubscriptionMounted) return;
+  const roomIdentifier = props.room.identifier;
+  const epoch = supervisorStateSubscriptionEpoch;
+  unsubscribeSupervisorState = desktopIpc.supervisor?.onState?.((snapshot) => {
+    if (epoch !== supervisorStateSubscriptionEpoch || props.room.identifier !== roomIdentifier) return;
+    supervisorStateLastSnapshotAtMs = Date.now();
+    queueSupervisorStateSnapshot(snapshot);
+  }, roomIdentifier) || null;
+  supervisorStateSubscriptionActive = Boolean(unsubscribeSupervisorState);
+}
+
 function queueSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot): void {
   const pending = pendingSupervisorStateSnapshot;
   if (
@@ -1130,7 +1150,9 @@ function queueSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot):
   ) return;
   pendingSupervisorStateSnapshot = snapshot;
   if (supervisorStateFrame !== null) return;
+  const epoch = supervisorStateSubscriptionEpoch;
   supervisorStateFrame = window.requestAnimationFrame(() => {
+    if (epoch !== supervisorStateSubscriptionEpoch) return;
     supervisorStateFrame = null;
     const next = pendingSupervisorStateSnapshot;
     pendingSupervisorStateSnapshot = null;
