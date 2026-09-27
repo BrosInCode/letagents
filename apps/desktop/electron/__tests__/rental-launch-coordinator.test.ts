@@ -35,6 +35,7 @@ async function recoveryFixture(t: TestContext) {
   const daemon = {
     async list() { calls.list++; return [entry]; },
     async setDesiredState() { calls.stop++; entry.desiredState = "stopped"; entry.observedState = "stopped"; },
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation: 1 }; },
     async purgeAgent() { calls.purge++; return { outcome: "purged" }; },
   };
@@ -293,6 +294,7 @@ for (const [name, input] of [
   await writeFile(path, input!, { mode: 0o600 });
   let daemonCalls = 0;
   const coordinator = new RentalLaunchCoordinator({} as never, {
+    async isMaintenanceHeld() { return false; },
     async list() { daemonCalls++; return []; },
   } as never, {} as never);
   try {
@@ -393,6 +395,7 @@ test("manual acceptance installs exact rental authority, activates at room tail,
     async completeSession() { return { ok: true as const, status: 200, body: session({ status: "completed" }) }; },
   };
   const daemon = {
+    async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation: 99 }; },
     async compareAndSetDesiredState() { return entry; },
     async list() { return [entry]; },
@@ -452,7 +455,7 @@ test("launch failure is sanitized, acknowledged, and remains retryable", async (
         return { ok: true as const, status: 200, body: session() };
       },
     } as never,
-    { async ensureRunning() { return { generation: 1 }; } } as never,
+    { async isMaintenanceHeld() { return false; }, async ensureRunning() { return { generation: 1 }; } } as never,
     {} as never,
     () => "host",
     async () => "agent_rental",
@@ -480,7 +483,7 @@ test("unsafe or implicit native profiles are rejected before provider acceptance
         return { ok: true as const, status: 200, body: session() };
       },
     } as never,
-    {} as never,
+    { async isMaintenanceHeld() { return false; } } as never,
     {} as never,
     () => "host",
     async () => "agent_rental",
@@ -524,7 +527,7 @@ test("recovery completes an active server rental when its daemon worker is absen
       async getSession() { refreshed += 1; return { ok: true as const, status: 200, body: session({ status: "active" }) }; },
       async completeSession() { completed += 1; return { ok: true as const, status: 200, body: session({ status: "completed" }) }; },
     } as never,
-    { async list() { return []; } } as never,
+    { async isMaintenanceHeld() { return false; }, async list() { return []; } } as never,
     restoredGrants as never,
   );
   try {
@@ -579,6 +582,7 @@ test("recovery fences a historical worker binding instead of treating it as live
         entry.observedState = "stopped";
         return entry;
       },
+      async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 1 }; },
       async purgeAgent() { purged += 1; return { outcome: "purged" }; },
     } as never,
@@ -632,7 +636,7 @@ test("one malformed recovered launch does not stop reconciliation of the others"
         return { ok: true as const, status: 200, body: session({ id, status: "active" }) };
       },
     } as never,
-    { async list() { return [bad, good]; } } as never,
+    { async isMaintenanceHeld() { return false; }, async list() { return [bad, good]; } } as never,
     restoredGrants as never,
   );
   try {
@@ -690,6 +694,7 @@ test("a lost active acknowledgement response is recovered without purging the wo
       },
     } as never,
     {
+      async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 1 }; },
       async compareAndSetDesiredState() { return entry; },
       async list() { return [entry]; },
@@ -738,7 +743,7 @@ test("recovery resumes a durable pre-accept intent instead of stranding capacity
         return { ok: false as const, status: 400, error: "request_expired", body: null };
       },
     } as never,
-    { async list() { return []; } } as never,
+    { async isMaintenanceHeld() { return false; }, async list() { return []; } } as never,
     restoredGrants as never,
     () => "host",
     async () => "agent_rental",
@@ -791,6 +796,7 @@ test("recovery arms a persisted hard deadline before daemon or API connectivity"
         return [entry];
       },
       async setDesiredState() { stops += 1; return entry; },
+      async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 1 }; },
       async purgeAgent() { return { outcome: "purged" }; },
     } as never,
@@ -813,4 +819,37 @@ test("recovery arms a persisted hard deadline before daemon or API connectivity"
     if (previous === undefined) delete process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
     else process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = previous;
   }
+});
+
+
+test("maintenance blocks rental admission and reclassification while durable deadlines still complete", async (t) => {
+  const h = await recoveryFixture(t); h.daemon.isMaintenanceHeld = async () => true;
+  h.daemon.setDesiredState = async () => { throw new Error("maintenance"); };
+  await assert.rejects(h.coordinator.acceptAndLaunch("new", { providerId: "cursor", permissionProfileId: "sandboxed_write" }), /maintenance/);
+  await h.coordinator.recover(); await h.tick();
+  assert.deepEqual(await readRentalLaunch(h.launch.sessionId), h.launch);
+  assert.deepEqual(h.calls, { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0 });
+  await writeRentalLaunch({ ...h.launch, deadlineAt: new Date(Date.now() - 1).toISOString() });
+  const deadline = t.mock.method(h.coordinator as unknown as { completeAtDeadline(id: string): Promise<void> }, "completeAtDeadline");
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  try {
+    await h.tick(); t.mock.timers.tick(0);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(deadline.mock.callCount(), 1); await deadline.mock.calls[0]!.result;
+    assert.equal(h.calls.complete, 1); assert.equal(h.calls.ack, 0); assert.equal(h.calls.grants, 0);
+    assert.equal((await readRentalLaunch(h.launch.sessionId))?.state, "stopping", "blocked local cleanup must not report stopped");
+  } finally { await Promise.allSettled(deadline.mock.calls.map(c => c.result)); t.mock.timers.reset(); }
+});
+
+
+test("maintenance fences rental acceptance when an earlier preflight finishes late", async t => {
+  const h = await recoveryFixture(t); let held = false; let finish!: () => void; let started!: () => void;
+  const gate = new Promise<void>(r => { finish = r; }); const entered = new Promise<void>(r => { started = r; });
+  h.daemon.isMaintenanceHeld = async () => held;
+  const coordinator = new RentalLaunchCoordinator({ acceptRequest: async () => assert.fail("late rental acceptance") } as never, h.daemon as never, h.grants as never,
+    () => "inert-host", async () => assert.fail("late identity"), async () => { started(); await gate; return { canStart: true, status: "ready" } as never; });
+  const operation = coordinator.acceptAndLaunch("late", { providerId: "cursor", permissionProfileId: "sandboxed_write" });
+  await entered; held = true; finish();
+  await assert.rejects(operation, /maintenance/);
+  assert.equal(await readRentalLaunch("late"), null);
 });

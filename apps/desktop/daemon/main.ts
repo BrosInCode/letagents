@@ -1,6 +1,6 @@
+import { openDaemonMaintenance, registerDaemonBoardAccess, maintenanceStatus, type DaemonMaintenanceService } from "./maintenance-service.js";
 import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
 import { restoreLocalRoomAuthorities, localRoomRuntime } from "./local-room-runtime.js";
-import { registerLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
 import { dirname } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
@@ -106,6 +106,7 @@ type RecoveryClock = {
 export class SupervisorDaemon {
   private readonly stateDatabasePath: string;
   private readonly singleton: DaemonSingleton;
+  private maintenance: DaemonMaintenanceService | null = null;
   private readonly authority: DaemonAuthority;
   private readonly store: ManifestStore;
   private readonly legacyLanes: LegacyLaneCoordinator;
@@ -959,13 +960,13 @@ export class SupervisorDaemon {
     } satisfies DaemonControlOperations;
     this.socket = new DaemonControlSocket(
       paths.socketPath,
-      createDaemonControlRequestHandler({
+      (request, signal) => this.maintenance ? this.maintenance.handle(request) : createDaemonControlRequestHandler({
         assertCurrent: () => this.singleton.assertCurrent(),
         currentGeneration: () => this.singleton.currentGeneration,
         isHandoffScheduled: () => this.handoffScheduled,
         isHandoffDraining: () => this.handoffDraining,
         requestBarrier: this.controlRequestBarrier,
-      }, controlOperations),
+      }, controlOperations)(request, signal),
       async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); },
     );
     this.nowMs = recoveryClock.nowMs ?? Date.now;
@@ -974,15 +975,17 @@ export class SupervisorDaemon {
   async start(storage: StateRecoveryBootstrap = {}): Promise<void> {
     assertMacOS(this.platform);
     await this.singleton.acquire();
-    this.boardOwnershipActive = true;
-    const boardGeneration = this.singleton.currentGeneration;
-    registerLocalBoardOwner(() => {
-      if (!this.boardOwnershipActive || this.handoffScheduled || this.singleton.currentGeneration !== boardGeneration) {
-        throw new Error("The board service is restarting.");
-      }
-    });
     try {
-      await this.hostApprovals.enroll(storage);
+      this.maintenance = await openDaemonMaintenance({
+        singleton: this.singleton, store: this.store, socket: this.socket,
+        stores: [this.durability, this.workerBindings, this.supervisedInbox],
+        status: () => this.status(),
+        retire: () => { this.handoffScheduled = true; this.boardOwnershipActive = false; },
+      });
+      this.boardOwnershipActive = true;
+      registerDaemonBoardAccess(this.singleton, () =>
+        this.boardOwnershipActive && !this.maintenance && !this.handoffScheduled);
+      if (!this.maintenance) await this.hostApprovals.enroll(storage);
       this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
         this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
         return (await this.store.load()).generation;
@@ -993,6 +996,7 @@ export class SupervisorDaemon {
       await this.singleton.release();
       throw error;
     }
+    if (this.maintenance) { await this.socket.start(); return; }
     if (!this.handoffScheduled) {
       this.typedLifecycleEffects = new TypedLifecycleEffectCoordinator({
         store: this.store,
@@ -1081,7 +1085,7 @@ export class SupervisorDaemon {
    * must acknowledge before it tears down the connection carrying that reply.
    */
   async waitForHandoff(): Promise<void> {
-    await this.handoff.waitForCompletion();
+    await (this.maintenance?.completion ?? this.handoff.waitForCompletion());
   }
 
   /**
@@ -1223,7 +1227,7 @@ export class SupervisorDaemon {
   }
 
   private status() {
-    return this.readModel.status();
+    return maintenanceStatus(this.readModel.status(), this.maintenance?.hold);
   }
 
   private async retireForHandoff(): Promise<void> {

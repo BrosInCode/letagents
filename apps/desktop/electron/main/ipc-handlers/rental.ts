@@ -76,6 +76,8 @@ export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): 
     void rentalLaunchCoordinator.recover().catch((error) => {
       console.warn(`Rental launch recovery unavailable: ${error instanceof Error ? error.message : String(error)}`);
     });
-    setActiveRentalProviderHostManager(rentalProviderHostManager);
+    void supervisorDaemonClient.isMaintenanceHeld().then(held => {
+      if (!held) setActiveRentalProviderHostManager(rentalProviderHostManager);
+    }).catch(() => undefined);
   };
 }

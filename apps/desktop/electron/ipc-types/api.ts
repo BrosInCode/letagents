@@ -151,6 +151,10 @@ export interface DesktopApi {
     openCredentialStorage: () => Promise<void>;
     getGitHubPullRequestStats: (url: string) => Promise<DesktopGitHubPullRequestStats | null>;
   };
+  maintenance?: {
+    getStatus(): Promise<{ held: boolean; ready: boolean }>;
+    restart(resume: boolean): Promise<void>;
+  };
   updates?: {
     getStatus: () => Promise<DesktopUpdateStatus>;
     check: () => Promise<DesktopUpdateStatus>;

@@ -7,6 +7,8 @@ import { access, appendFile, chmod, mkdir, stat } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import { withDaemonMaintenanceOperation, readDaemonMaintenance, daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../shared/daemon-maintenance.mjs";
+import { forceStopDaemon } from "./force-daemon-restart.js";
 
 import type {
   DesktopSupervisorActivityEvent,
@@ -474,6 +476,71 @@ export class SupervisorDaemonClient {
   private applicationUpdateHandoff: Promise<void> | null = null;
   private environmentRefreshHandoff: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private applicationUpdatePrepared = false;
+  private maintenanceRequested = false;
+  private readonly maintenanceRequests = new Set<() => void>();
+  private maintenanceTarget: DaemonProcessIdentity | null = null;
+  private maintenanceOperation: Promise<void> | null = null;
+  private get maintenancePath(): string { return daemonMaintenancePath(dirname(this.socketPath)); }
+  async isMaintenanceHeld(): Promise<boolean> {
+    if (this.maintenanceRequested) return true;
+    const hold = await readDaemonMaintenance(this.maintenancePath);
+    return this.maintenanceRequested || Boolean(hold);
+  }
+  async getMaintenanceStatus(): Promise<{ held: boolean; ready: boolean }> {
+    const hold = await readDaemonMaintenance(this.maintenancePath);
+    if (!hold) return { held: false, ready: false };
+    const status = await this.request<Record<string, unknown>>("daemon.negotiate", undefined,
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.requestTimeoutMs, false, undefined, undefined, true).catch(() => null);
+    return { held: true, ready: status?.maintenance_hold_id === hold.id };
+  }
+  private assertNotRestarting(): void {
+    if (this.maintenanceRequested) throw new Error(DAEMON_MAINTENANCE_MESSAGE);
+  }
+  /** Native-confirmed action. The caller relaunches Electron after success. */
+  stopForMaintenance(resume = false): Promise<void> {
+    if (this.applicationUpdatePrepared) return Promise.reject(new Error("The application update is already being installed."));
+    if (this.maintenanceOperation) return this.maintenanceOperation;
+    this.maintenanceRequested = true;
+    for (const cancel of this.maintenanceRequests) cancel();
+    const operation = withDaemonMaintenanceOperation(async owner => {
+      const hold = await owner.read();
+      const observed: { negotiated: Record<string, unknown> | null } = { negotiated: null };
+      const identify = async () => {
+        try {
+          observed.negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined,
+            SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.requestTimeoutMs, false, undefined, undefined, true);
+          return this.captureRetiredDaemon(observed.negotiated);
+        } catch (error) {
+          if (observed.negotiated || !this.maintenanceTarget) throw error;
+          return this.maintenanceTarget;
+        }
+      };
+      if (resume) {
+        const target = await identify();
+        if (!hold || observed.negotiated?.maintenance_hold_id !== hold.id) {
+          throw new Error("Force restart the service before resuming supervision.");
+        }
+        await this.request("daemon.prepare_handoff", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+          this.requestTimeoutMs, false, undefined, undefined, true);
+        const stopped = await this.waitForRetiredProcessChange(target, this.terminateTimeoutMs);
+        if (!["absent", "zombie"].includes(stopped.kind) || !await this.isSocketReleased(SUPERVISOR_DAEMON_PROTOCOL_VERSION, true)) {
+          throw new Error("The maintenance service has not stopped. Supervision remains paused.");
+        }
+        await owner.clear(hold.id);
+      } else {
+        await forceStopDaemon({ identify, persistHold: () => owner.create(),
+          observe: target => this.observeRetiredDaemon(target), signal: (target, signal) => this.guardedSignalRetiredDaemon(target, signal),
+          wait: (target, timeout) => this.waitForRetiredProcessChange(target, timeout),
+          socketReleased: () => this.isSocketReleased(SUPERVISOR_DAEMON_PROTOCOL_VERSION, true),
+          terminateTimeoutMs: this.terminateTimeoutMs, killTimeoutMs: this.killTimeoutMs });
+      }
+      this.stopAttachedDaemonObservation();
+      this.ownedDaemon = null;
+    }, this.maintenancePath);
+    this.maintenanceOperation = operation;
+    void operation.finally(() => { if (this.maintenanceOperation === operation) this.maintenanceOperation = null; }).catch(() => undefined);
+    return operation;
+  }
   private drainingCurrentDaemon = false;
   private readonly startupApprovalWaiters = new Set<() => void>();
   private lastReadyGeneration: number | null = null;
@@ -552,6 +619,7 @@ export class SupervisorDaemonClient {
   }
 
   ensureRunning(startupPreparation?: Promise<void>): Promise<DesktopSupervisorDaemonStatus> {
+    if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Supervised agents currently require macOS."));
     }
@@ -764,6 +832,7 @@ export class SupervisorDaemonClient {
    * generations during normal startup reconciliation.
    */
   prepareForApplicationUpdate(): Promise<void> {
+    if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Application update handoff currently requires macOS."));
     }
@@ -788,6 +857,7 @@ export class SupervisorDaemonClient {
 
   /** Explicit setup action: reconcile provider environment without replacing an already current service. */
   restartForEnvironmentRefresh(): Promise<DesktopSupervisorDaemonStatus> {
+    if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Supervised agents currently require macOS."));
     }
@@ -856,6 +926,7 @@ export class SupervisorDaemonClient {
   }
 
   private rememberReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
+    if (this.maintenanceRequested || status.maintenanceHoldId) return status;
     if (this.lastReadyGeneration !== status.generation) {
       this.lastReadyGeneration = status.generation;
       queueMicrotask(() => {
@@ -1542,15 +1613,20 @@ export class SupervisorDaemonClient {
 
   private async ensureRunningOnce(refreshRuntimeEnvironment = false): Promise<DesktopSupervisorDaemonStatus> {
     await this.waitForOwnedDaemonReadiness();
+    this.assertNotRestarting();
+    const hold = await readDaemonMaintenance(this.maintenancePath);
     const spawnEnvironment = supervisorDaemonSpawnEnvironment();
     const expectedRuntimeEnvironmentFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT!;
     let retiredGeneration: number | undefined;
     try {
       const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
+      this.assertNotRestarting();
+      if (hold && negotiated.maintenance_hold_id !== hold.id) throw new Error("Service maintenance is pending. Use Force restart service in Settings → Updates.");
       const daemonVersion = Number(negotiated.protocol_version ?? 0);
       const implementationVersion = String(negotiated.implementation_version ?? "unknown");
       if (
         daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION
+        && Boolean(hold) === Boolean(negotiated.maintenance_hold_id)
         && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
         && negotiated.compatibility_fingerprint === spawnEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT
         && (!refreshRuntimeEnvironment || negotiated.runtime_environment_fingerprint === expectedRuntimeEnvironmentFingerprint)
@@ -1578,7 +1654,12 @@ export class SupervisorDaemonClient {
     await access(this.daemonScriptPath);
     this.stopAttachedDaemonObservation();
     await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
+    this.assertNotRestarting();
     const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory, spawnEnvironment);
+    if (child.pid) {
+      const identity = this.safeInspectDaemon(child.pid);
+      if (identity?.state === "live" && identity.pid === child.pid) this.maintenanceTarget = { ...identity, expectedScriptPath: this.daemonScriptPath };
+    }
     const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs);
     const childPid = Number.isSafeInteger(child.pid) && (child.pid ?? 0) > 0 ? child.pid! : null;
     const owned = {
@@ -1719,7 +1800,7 @@ export class SupervisorDaemonClient {
     // the stable daemon socket. Let that negotiated daemon retire itself, but
     // retain the current script path as the hard boundary for TERM/KILL: only
     // the exact executable this desktop expected to launch may be signalled.
-    return { ...inspected, expectedScriptPath: this.daemonScriptPath };
+    return this.maintenanceTarget = { ...inspected, expectedScriptPath: this.daemonScriptPath };
   }
 
   private observeAttachedDaemon(status: DesktopSupervisorDaemonStatus): void {
@@ -1739,6 +1820,7 @@ export class SupervisorDaemonClient {
       generation: status.generation,
     };
     this.attachedDaemonObservation = observation;
+    this.maintenanceTarget = observation.identity;
   }
 
   private recordAttachedDaemonDisconnect(): void {
@@ -1792,6 +1874,7 @@ export class SupervisorDaemonClient {
     if (implementationVersion === "2.0.25" && authorityReleased) {
       this.emitHandoffDiagnostic(retired, implementationVersion, authorityReleased, "legacy_sigterm_expected", "Daemon 2.0.25 released authority but retains live RPC handles; SIGTERM escalation is expected.");
     }
+    this.assertNotRestarting();
     observation = this.guardedSignalRetiredDaemon(retired, "SIGTERM");
     if (observation.kind === "same") {
       observation = await this.waitForRetiredProcessChange(retired, this.terminateTimeoutMs);
@@ -1809,6 +1892,7 @@ export class SupervisorDaemonClient {
       return;
     }
 
+    this.assertNotRestarting();
     observation = this.guardedSignalRetiredDaemon(retired, "SIGKILL");
     if (observation.kind === "same") {
       observation = await this.waitForRetiredProcessChange(retired, this.killTimeoutMs);
@@ -1890,9 +1974,9 @@ export class SupervisorDaemonClient {
     return command === expectedScriptPath || command.endsWith(` ${expectedScriptPath}`);
   }
 
-  private async isSocketReleased(daemonVersion: number): Promise<boolean> {
+  private async isSocketReleased(daemonVersion: number, maintenance = false): Promise<boolean> {
     try {
-      await this.request("daemon.negotiate", undefined, daemonVersion);
+      await this.request("daemon.negotiate", undefined, daemonVersion, this.requestTimeoutMs, false, undefined, undefined, maintenance);
       return false;
     } catch (error) {
       if (isConnectionUnavailable(error)) return true;
@@ -1935,7 +2019,9 @@ export class SupervisorDaemonClient {
     unrefSocket = false,
     signal?: AbortSignal,
     assertDispatch?: () => void,
+    maintenance = false,
   ): Promise<T> {
+    if (!maintenance && this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
       const socket = createConnection(this.socketPath);
@@ -1947,9 +2033,12 @@ export class SupervisorDaemonClient {
         if (settled) return;
         settled = true;
         if (onAbort) signal?.removeEventListener("abort", onAbort);
+        this.maintenanceRequests.delete(cancelForMaintenance);
         socket.destroy();
         if (error) reject(error); else resolve(value as T);
       };
+      const cancelForMaintenance = () => finish(new Error(DAEMON_MAINTENANCE_MESSAGE));
+      if (!maintenance) this.maintenanceRequests.add(cancelForMaintenance);
       onAbort = () => finish(new Error(`Supervisor daemon request aborted: ${method}`));
       if (signal?.aborted) {
         onAbort();
@@ -1959,6 +2048,7 @@ export class SupervisorDaemonClient {
       socket.setEncoding("utf8");
       socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
       socket.once("error", (error) => finish(error));
+      socket.once("close", () => finish(new Error(`Supervisor daemon disconnected before replying: ${method}`)));
       socket.on("data", (chunk: string) => {
         if (settled) return;
         // Each earlier chunk is already known to contain no newline. Scanning
@@ -1982,7 +2072,7 @@ export class SupervisorDaemonClient {
       });
       socket.once("connect", () => {
         if (settled) return;
-        try { assertDispatch?.(); socket.write(`${JSON.stringify({ version, id, method, params })}\n`); }
+        try { if (!maintenance) this.assertNotRestarting(); assertDispatch?.(); socket.write(`${JSON.stringify({ version, id, method, params })}\n`); }
         catch (error) { finish(error instanceof Error ? error : new Error("Supervisor request was not dispatched.")); }
       });
     });
@@ -2041,6 +2131,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
+    maintenanceHoldId: typeof value.maintenance_hold_id === "string" ? value.maintenance_hold_id : null,
     recoveryDiagnostics,
   };
 }

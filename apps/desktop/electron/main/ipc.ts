@@ -1,3 +1,4 @@
+import { registerDaemonMaintenanceIpcHandlers } from "./ipc-handlers/maintenance.js";
 import electron from "electron";
 import type { IpcMain } from "electron";
 
@@ -25,6 +26,7 @@ export function registerDesktopIpcHandlers(
   registerDesktopAuthAndSetupIpcHandlers(targetIpcMain);
   registerConversationIpcHandlers(targetIpcMain);
   registerDesktopAppIpcHandlers(targetIpcMain);
+  registerDaemonMaintenanceIpcHandlers(targetIpcMain);
   registerDesktopRoomIpcHandlers(targetIpcMain);
   const startRentalServices = registerDesktopRentalDomainIpcHandlers(targetIpcMain);
   registerDesktopRepoIpcHandlers(targetIpcMain);

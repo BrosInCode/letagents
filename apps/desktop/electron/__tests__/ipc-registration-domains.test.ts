@@ -10,6 +10,7 @@ const mainSource = readFileSync(
 
 const domainSources = {
   app: readDomainSource("app"),
+  maintenance: readDomainSource("maintenance"),
   authSetup: readDomainSource("auth-setup"),
   rental: readDomainSource("rental"),
   rooms: readDomainSource("rooms"),
@@ -48,6 +49,8 @@ const expectedDirectChannels = [
   "desktop:chat-storage:set-room-mode",
   "desktop:chat-storage:sync-local-room",
   "desktop:diagnostics:get-snapshot",
+  "desktop:maintenance:restart",
+  "desktop:maintenance:status",
   "desktop:notifications:get-status",
   "desktop:notifications:set-enabled",
   "desktop:notifications:take-pending-activation",
@@ -187,6 +190,7 @@ test("desktop IPC composition root delegates without owning channel behavior", (
   for (const registrar of [
     "registerDesktopAuthAndSetupIpcHandlers",
     "registerDesktopAppIpcHandlers",
+    "registerDaemonMaintenanceIpcHandlers",
     "registerDesktopRoomIpcHandlers",
     "registerDesktopRentalDomainIpcHandlers",
     "registerDesktopRepoIpcHandlers",
@@ -249,7 +253,7 @@ test("rental registration defers recovery and host startup to one explicit appli
     mock.module("../main/room-stream.js", { namedExports: {
       emitRoomStreamEvent: unexpected, getActiveRoomIdentifier: unexpected,
     } }),
-    mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: {} } }),
+    mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: { async isMaintenanceHeld() { return false; } } } }),
     mock.module("../main/window.js", { namedExports: { emitToMainWindow: unexpected } }),
   ];
   try {
@@ -290,6 +294,7 @@ test("application registers startup preparation before rental recovery without d
       retireLegacyCodexBackedOpenModelSessions: async () => { calls.push("prepared"); },
     } }),
     mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: {
+      async isMaintenanceHeld() { return false; },
       async ensureRunning(prerequisite: Promise<void>) {
         calls.push("startup-registered");
         assert.ok(prerequisite instanceof Promise);
@@ -354,6 +359,7 @@ test("desktop IPC channel prefixes stay in their owning domains", () => {
       "desktop:supervisor-grant:",
     ],
     rental: [],
+    maintenance: ["desktop:maintenance:"],
     rooms: ["desktop:room:", "desktop:chat-storage:"],
     repos: ["desktop:repos:"],
     supervisor: ["desktop:supervisor:"],

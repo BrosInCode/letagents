@@ -145,6 +145,10 @@ export class SupervisorGrantCoordinator {
     private readonly resolveOpenModelSettings: () => Promise<StoredOpenModelSettings> = readOpenModelSettings,
   ) {}
 
+  private async assertSupervisionAvailable(): Promise<void> {
+    if (await this.daemon.isMaintenanceHeld()) throw new Error("Agent supervision is paused for service maintenance.");
+  }
+
   private async serialize<T>(entryId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.entryTails.get(entryId) ?? Promise.resolve();
     let release!: () => void;
@@ -153,6 +157,7 @@ export class SupervisorGrantCoordinator {
     this.entryTails.set(entryId, current);
     await previous.catch(() => undefined);
     try {
+      await this.assertSupervisionAvailable();
       return await operation();
     } finally {
       release();
@@ -188,6 +193,7 @@ export class SupervisorGrantCoordinator {
    * daemon generation, and only then allow the caller to activate ownership.
    */
   async createPausedAndInstall(input: DesktopSupervisorCreateInput): Promise<SupervisedGrantPreparation> {
+    await this.assertSupervisionAvailable();
     const entryId = `supervised_${input.creationRequestId?.trim() ?? ""}`;
     if (!/^supervised_[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(entryId)) {
       throw new Error("A valid supervised agent creation request id is required.");
@@ -223,6 +229,7 @@ export class SupervisorGrantCoordinator {
             )
           : input.displayName.trim();
         const normalizedInput = { ...input, displayName };
+        await this.assertSupervisionAvailable();
         const agentKey = await this.operations.resolveIdentity({
           entryId,
           displayName,
@@ -230,6 +237,7 @@ export class SupervisorGrantCoordinator {
         }, { apiFetch: this.request });
         // Failure here occurs before the durable claim, hence cannot activate a
         // daemon-inbox worker without its scoped authority.
+        await this.assertSupervisionAvailable();
         const grant = await this.operations.provision({
           hostId: this.hostId(), entryId, agentKey,
           roomScopes: [{ requestedRoomId: input.roomIdentifier, canonicalRoomId: roomId }],
@@ -394,6 +402,7 @@ export class SupervisorGrantCoordinator {
   }
 
   private async reconcileDesiredRunningOnce(): Promise<void> {
+    await this.assertSupervisionAvailable();
     const status = await this.daemon.ensureRunning();
     this.requestedDaemonGeneration = status.generation;
     const entries = await this.daemon.list(null);
@@ -419,6 +428,7 @@ export class SupervisorGrantCoordinator {
 
   /** Install authority and commit running state in one retirement-exclusion lane. */
   async activateEntry<T>(entry: DesktopSupervisorManifestEntry, activate: () => Promise<T>): Promise<T> {
+    await this.assertSupervisionAvailable();
     if (!requiresSupervisorGrant(entry)) return activate();
     return this.serialize(entry.id, async () => {
       const status = await this.daemon.ensureRunning();
@@ -482,6 +492,7 @@ export class SupervisorGrantCoordinator {
    * session retirement, and successor convergence.
    */
   async prepareEntryForRuntimeRecovery(entry: DesktopSupervisorManifestEntry): Promise<void> {
+    await this.assertSupervisionAvailable();
     if (!requiresSupervisorGrant(entry)) {
       throw new Error("This supervised provider does not support runtime recovery.");
     }
@@ -503,6 +514,7 @@ export class SupervisorGrantCoordinator {
    * choice rather than an accidental side effect of "Reconnect".
    */
   async reconnectEntry(entry: DesktopSupervisorManifestEntry): Promise<void> {
+    await this.assertSupervisionAvailable();
     if (!requiresSupervisorGrant(entry)) {
       throw new Error("This supervised provider does not support credential reconnection.");
     }
@@ -589,6 +601,7 @@ export class SupervisorGrantCoordinator {
     if (!agentKey) {
       // Legacy entries can be recovered only from a durable mapping or by
       // creating a new explicit identity. Labels are never identity inputs.
+      await this.assertSupervisionAvailable();
       const created = await this.operations.resolveIdentity({
         entryId: entry.id,
         displayName: entry.displayName,
@@ -603,6 +616,7 @@ export class SupervisorGrantCoordinator {
       // lowercase key. Re-resolve the deterministic server identity before
       // provisioning whenever no usable encrypted grant proves this local
       // mapping, so restart recovery converges on the exact canonical key.
+      await this.assertSupervisionAvailable();
       const resolved = await this.operations.resolveIdentity(
         { entryId: entry.id, displayName: entry.displayName, providerId: entry.provider },
         { apiFetch: this.request },
@@ -649,6 +663,7 @@ export class SupervisorGrantCoordinator {
         current.id,
       );
       const previousAgentKey = await this.operations.readEntryAgentKey(current.id);
+      await this.assertSupervisionAvailable();
       const resolvedAgentKey = await this.operations.resolveIdentity({
         entryId: current.id,
         displayName,
@@ -766,6 +781,7 @@ export class SupervisorGrantCoordinator {
     recoveryOnly = false,
   ) {
     const canonicalRoomId = await this.resolveRoomId(entry.roomId);
+    await this.assertSupervisionAvailable();
     const grant = await this.operations.provision({
       hostId: this.hostId(), entryId: entry.id, agentKey,
       roomScopes: [{ requestedRoomId: entry.roomId, canonicalRoomId }], forceReprovision,
@@ -798,6 +814,7 @@ export class SupervisorGrantCoordinator {
   }> {
     let agentKey = await this.operations.readEntryAgentKey(entry.id);
     if (!agentKey) {
+      await this.assertSupervisionAvailable();
       agentKey = await this.operations.resolveIdentity({
         entryId: entry.id,
         displayName: entry.displayName,
@@ -812,6 +829,7 @@ export class SupervisorGrantCoordinator {
       && stored?.entryId === entry.id && this.grantExactlyScopes(stored, roomId, agentKey)) {
       return { agentKey, grant: stored };
     }
+    await this.assertSupervisionAvailable();
     const grant = await this.operations.provision({
       hostId: this.hostId(), entryId: entry.id, agentKey,
       roomScopes: [{ requestedRoomId: roomId, canonicalRoomId: roomId }],
@@ -837,6 +855,7 @@ export class SupervisorGrantCoordinator {
     daemonGeneration: number,
   ) {
     try {
+      await this.assertSupervisionAvailable();
       const response = await this.request<GrantResponse>(`/supervisor-host-grants/${encodeURIComponent(stored.metadata.grantId)}/handoff`, {
         method: "POST",
         headers: { Authorization: `Bearer ${stored.token}` },
@@ -863,6 +882,7 @@ export class SupervisorGrantCoordinator {
         throw new Error("Saved supervisor grant does not match this desktop host installation.");
       }
       const canonicalRoomId = await this.resolveRoomId(entry.roomId);
+      await this.assertSupervisionAvailable();
       const replacement = await this.operations.provision({
         hostId, entryId: entry.id, agentKey,
         roomScopes: [{ requestedRoomId: entry.roomId, canonicalRoomId }], forceReprovision: true,
