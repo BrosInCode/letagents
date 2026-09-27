@@ -205,6 +205,40 @@ test("grant recovery treats a failed manifest read as unknown rather than an abs
   assert.deepEqual(await readRentalLaunch(h.launch.sessionId), h.launch);
 });
 
+test("grant recovery cannot acknowledge an expired launch while its deadline completion is pending", async (t) => {
+  const h = await recoveryFixture(t);
+  h.entry.agentSessionBindingState = "active";
+  const expired = { ...h.launch, state: "launching" as const, deadlineAt: new Date(Date.now() - 1).toISOString() };
+  await writeRentalLaunch(expired);
+  let releaseRead!: () => void;
+  let readStarted!: () => void;
+  let releaseCompletion!: () => void;
+  const reading = new Promise<void>((resolve) => { readStarted = resolve; });
+  const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+  const completionGate = new Promise<void>((resolve) => { releaseCompletion = resolve; });
+  h.api.getSession = async () => { readStarted(); await readGate; return { ok: true, status: 200, body: session({ status: "active" }) }; };
+  h.api.completeSession = async () => { h.calls.complete++; await completionGate; return { ok: true, status: 200, body: session({ status: "completed" }) }; };
+  const deadline = t.mock.method(h.coordinator as unknown as { completeAtDeadline(id: string): Promise<void> }, "completeAtDeadline");
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const recovering = h.coordinator.recover();
+  try {
+    await reading;
+    t.mock.timers.tick(0);
+    assert.equal(h.calls.complete, 1);
+    releaseRead();
+    await recovering;
+    assert.equal(h.calls.ack, 0, "pending completion cannot authorize an expired launch to become active");
+    assert.deepEqual(await readRentalLaunch(h.launch.sessionId), expired);
+  } finally {
+    releaseRead();
+    releaseCompletion();
+    await recovering;
+    await Promise.allSettled(deadline.mock.calls.map((call) => call.result));
+    t.mock.timers.reset();
+  }
+  assert.equal((await readRentalLaunch(h.launch.sessionId))?.state, "stopped");
+});
+
 for (const completionOk of [true, false]) {
   test(`grant recovery keeps expired deadline teardown independent (completion ${completionOk})`, async (t) => {
     const h = await recoveryFixture(t);

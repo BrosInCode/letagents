@@ -581,6 +581,9 @@ export class RentalLaunchCoordinator {
     launch: RentalLaunchJournalEntry,
     entry: DesktopSupervisorManifestEntry,
   ): Promise<void> {
+    // Deadline completion may be waiting on its API response while the row is
+    // still launching. That obligation cannot authorize a fresh active ACK.
+    if (launch.deadlineAt && Date.parse(launch.deadlineAt) <= Date.now()) return;
     if (!entry.agentSessionId) return;
     const result = await this.api.acknowledgeLaunch(launch.sessionId, {
       launchAttempt: launch.launchAttempt,
