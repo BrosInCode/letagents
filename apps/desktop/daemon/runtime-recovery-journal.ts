@@ -265,7 +265,7 @@ export function recoveredRuntime(database: DatabaseSync, agentId: string, runtim
 /** The caller proved the exact Cursor turn's origin execution terminal and owns the reset transaction. */
 export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: SupervisedProviderTurnBinding, at: string): string | null {
   if (!database.isTransaction) throw new Error("Runtime recovery requires a fenced transaction.");
-  const runtime = database.prepare(`SELECT r.runtime_generation_id FROM execution_turns t
+  let runtime = database.prepare(`SELECT r.runtime_generation_id FROM execution_turns t
     JOIN execution_runtime_generations r ON r.agent_id=t.agent_id
       AND r.execution_generation_id=t.execution_generation_id AND r.runtime_generation_id=t.runtime_generation_id
     JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
@@ -274,6 +274,25 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
       AND t.provider_continuation_id=? AND t.provider_turn_id=? AND g.workspace_id=? AND r.provider='cursor'`)
     .get(turn.agent_id, turn.room_id, turn.origin_execution_generation_id,
       turn.provider_continuation_id, turn.provider_turn_id, turn.work_attempt_id) as { runtime_generation_id: string } | undefined;
+  if (!runtime) {
+    // A failed child may never acquire a typed turn. Retain the exact retired
+    // predecessor's observer instead; its missing events remain unknown.
+    runtime = database.prepare(`SELECT DISTINCT r.runtime_generation_id FROM execution_observers o
+      JOIN execution_runtime_generations r ON r.agent_id=o.agent_id
+        AND r.execution_generation_id=o.observer_execution_generation_id AND r.runtime_generation_id=o.observer_runtime_generation_id
+      JOIN execution_turns t ON t.agent_id=r.agent_id AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
+      JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
+        AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id
+      WHERE o.agent_id=? AND o.observer_execution_generation_id=? AND o.execution_generation_id=o.observer_execution_generation_id
+        AND o.runtime_generation_id=o.observer_runtime_generation_id AND r.provider='cursor'
+        AND r.runtime_state='exited' AND r.control_state='lost' AND t.state='terminal'
+        AND t.provider_continuation_id=? AND t.room_id=? AND g.workspace_id=?`)
+      .get(turn.agent_id, turn.origin_execution_generation_id, turn.provider_continuation_id,
+        turn.room_id, turn.work_attempt_id) as { runtime_generation_id: string } | undefined;
+    if (!runtime && database.prepare("SELECT 1 FROM execution_observers WHERE agent_id=?").get(turn.agent_id)) {
+      throw new Error("Runtime recovery cannot archive an unrelated or unretired Cursor observer.");
+    }
+  }
   if (!runtime) return null; // Older deliveries may have no captured native runtime.
   const runtimeId = runtime.runtime_generation_id;
   if (pendingRuntimeRecovery(database, turn.agent_id)) throw new Error("A different runtime recovery is already recorded.");
@@ -291,7 +310,7 @@ export function recordInterruptedCursorRecovery(database: DatabaseSync, turn: Su
   database.prepare(`UPDATE execution_observers SET observer_epoch=observer_epoch+1
     WHERE agent_id=? AND observer_runtime_generation_id=?`).run(turn.agent_id, runtimeId);
   database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
-    ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=?`).run(Date.parse(at), turn.agent_id, runtimeId);
+    ended_at_ms=MAX(created_at_ms,?) WHERE agent_id=? AND runtime_generation_id=? AND runtime_state<>'exited'`).run(Date.parse(at), turn.agent_id, runtimeId);
   database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
     WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`).run(Date.parse(at), turn.agent_id, runtimeId);
   database.prepare(`UPDATE supervised_agent_effects SET state='uncertain',error=?,updated_at=?
