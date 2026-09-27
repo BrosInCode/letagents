@@ -112,10 +112,20 @@ function hasGenericSupervisedDisplayName(
  * live provider processes and dynamic worker bearer rotation. This coordinator
  * only makes the former available over one exact local daemon generation.
  */
+export type SupervisorGrantReconciliationObservation = {
+  readonly attempt: Promise<void>;
+  readonly status: "pending" | "succeeded" | "failed";
+  readonly error: unknown;
+  readonly current: boolean;
+};
+
 export class SupervisorGrantCoordinator {
   private readonly entryTails = new Map<string, Promise<void>>();
   private readonly displayNameTails = new Map<string, Promise<void>>();
   private reconciliation: Promise<void> | null = null;
+  private latestReconciliation: {
+    attempt: Promise<void>; status: SupervisorGrantReconciliationObservation["status"]; error: unknown; eventSerial: number;
+  } | null = null;
   private requestedDaemonGeneration: number | null = null;
   private lastReconciledDaemonGeneration: number | null = null;
   private reconciliationEventSerial = 0;
@@ -309,6 +319,15 @@ export class SupervisorGrantCoordinator {
     });
   }
 
+  /** Observation never initiates work or clears a failed attempt. Queued wakes
+   * invalidate success before their follow-up operation starts. */
+  getReconciliationObservation(): SupervisorGrantReconciliationObservation | null {
+    const latest = this.latestReconciliation;
+    return latest ? { attempt: latest.attempt, status: latest.status, error: latest.error,
+      current: latest.eventSerial === this.reconciliationEventSerial || (latest.status === "succeeded"
+        && !this.credentialRecoveryPending && this.requestedDaemonGeneration === this.lastReconciledDaemonGeneration) } : null;
+  }
+
   /** Reinstall the encrypted grant after app/daemon recovery without restarting a provider. */
   async reconcileDesiredRunning(): Promise<void> {
     if (this.reconciliation) return this.reconciliation;
@@ -316,9 +335,15 @@ export class SupervisorGrantCoordinator {
     this.credentialRecoveryPending = false;
     const operation = this.reconcileDesiredRunningOnce();
     this.reconciliation = operation;
+    const observation = { attempt: operation, status: "pending" as SupervisorGrantReconciliationObservation["status"],
+      error: undefined as unknown, eventSerial: startedEventSerial };
+    this.latestReconciliation = observation;
     try {
       await operation;
+      observation.status = "succeeded";
     } catch (error) {
+      observation.status = "failed";
+      observation.error = error;
       // Seed startup recovery before the first native probe. Once probed,
       // a credential-specific write failure is not an availability transition:
       // otherwise every unchanged successful probe would retry that failure.
