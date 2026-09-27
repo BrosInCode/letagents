@@ -6,6 +6,7 @@ import {
   type SupervisorGrantHttp,
   type CloudWorkLease,
 } from "./cloud-http.js";
+import { cursorLaneRetirementSchema } from "./runtime-recovery-journal.js";
 import { nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
@@ -902,7 +903,19 @@ export class WorkerAuthorityCoordinator {
         const terminal = execution?.terminal;
         const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
         const expectedKind = entry.provider === "claude-code" ? "claude_cli" : entry.provider === "codex" ? "codex_app_server" : null;
-        if (!execution || execution.work_attempt_id !== entry.work_attempt_id || !terminal || !death.success || death.data.kind !== expectedKind
+        const parsedLane = cursorLaneRetirementSchema.safeParse(record.cursor_lane_retirement);
+        const lane = parsedLane.success ? parsedLane.data : undefined;
+        const retiredCursorLane = entry.provider === "cursor" && binding && lane
+          && lane.entry_id === entry.id && lane.room_id === entry.room_id && lane.work_attempt_id === entry.work_attempt_id
+          && lane.execution_generation_id === record.execution_generation_id && lane.agent_session_id === lease.agent_session_id
+          && binding.entry_id === entry.id && binding.execution_generation_id === record.execution_generation_id
+          && binding.agent_session_id === lease.agent_session_id
+          && lane.api_url === grant.apiUrl && lane.grant_id === grant.grantId && lane.agent_key === grant.agentKey
+          && terminal?.terminal_cause === "stopped"
+          && lane.provider_continuation_id === terminal?.provider_continuation_id
+          && Number.isFinite(Date.parse(lane.retired_at)) && Date.parse(lane.retired_at) >= Date.parse(terminal?.ended_at ?? "");
+        if (!execution || execution.work_attempt_id !== entry.work_attempt_id || !terminal
+          || !(retiredCursorLane || (death.success && death.data.kind === expectedKind))
           || terminal.actor !== execution.actor || terminal.generation !== execution.generation
           || !Number.isFinite(Date.parse(terminal.ended_at)) || Date.parse(terminal.ended_at) < Date.parse(execution.started_at)
           || !["exited", "killed", "stopped", "crashed", "protocol_error"].includes(terminal.terminal_cause)) {
