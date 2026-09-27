@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { RentalLaunchCoordinator } from "../rental/launch-coordinator.js";
-import { readRentalLaunch, writeRentalLaunch } from "../rental/launch-journal.js";
+import { listRentalLaunches, pruneRentalLaunches, readRentalLaunch, writeRentalLaunch } from "../rental/launch-journal.js";
 
 function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -21,6 +21,77 @@ function session(overrides: Record<string, unknown> = {}): Record<string, unknow
     ...overrides,
   };
 }
+
+for (const [name, input] of [
+  ["malformed JSON", '{"version":1,"entries":{"unfinished":'],
+  ["unsupported version", '{"version":99,"entries":{"unfinished":{"state":"active"}}}'],
+  ["array entries", '{"version":1,"entries":[{"state":"active"}]}'],
+  ["missing entries", '{"version":1}'],
+  ["null document", 'null'],
+]) test(`rental journal preserves ${name} and prevents recovery from inventing empty state`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-rental-journal-"));
+  const path = join(directory, "launches.json");
+  const previous = process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
+  process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = path;
+  await writeFile(path, input!, { mode: 0o600 });
+  let daemonCalls = 0;
+  const coordinator = new RentalLaunchCoordinator({} as never, {
+    async list() { daemonCalls++; return []; },
+  } as never, {} as never);
+  try {
+    for (const operation of [
+      () => readRentalLaunch("unfinished"), () => listRentalLaunches(), () => pruneRentalLaunches(),
+      () => writeRentalLaunch({ sessionId: "new", launchAttempt: 1, entryId: "entry", roomId: "room",
+        state: "active", updatedAt: "2026-09-27T00:00:00.000Z" }),
+      () => coordinator.recover(),
+    ]) {
+      await assert.rejects(operation(), /Rental launch journal/);
+      assert.equal(await readFile(path, "utf8"), input);
+      assert.deepEqual(await readdir(directory), ["launches.json"], "uncertain reads cannot create replacement files");
+    }
+    assert.equal(daemonCalls, 0, "unknown launch history cannot authorize recovery actions");
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
+    else process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = previous;
+  }
+});
+
+test("rental journal propagates a non-absence read failure without creating a replacement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-rental-journal-"));
+  const path = join(directory, "launches.json");
+  const previous = process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
+  process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = path;
+  await mkdir(path);
+  try {
+    await assert.rejects(listRentalLaunches(), { code: "EISDIR" });
+    await assert.rejects(pruneRentalLaunches(), { code: "EISDIR" });
+    assert.deepEqual(await readdir(directory), ["launches.json"]);
+    assert.deepEqual(await readdir(path), []);
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
+    else process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = previous;
+  }
+});
+
+test("rental journal initializes only missing state and preserves active deadlines during valid pruning", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-rental-journal-"));
+  const path = join(directory, "launches.json");
+  const previous = process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
+  process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = path;
+  const active = { sessionId: "active", launchAttempt: 3, entryId: "entry", roomId: "room",
+    state: "active" as const, updatedAt: "2026-01-01T00:00:00.000Z", deadlineAt: "2026-10-01T00:00:00.000Z" };
+  try {
+    assert.equal(await readRentalLaunch("active"), null);
+    assert.deepEqual(await listRentalLaunches(), []);
+    await Promise.all([writeRentalLaunch(active), writeRentalLaunch({ ...active, sessionId: "old", state: "stopped" })]);
+    assert.equal(await pruneRentalLaunches(new Date("2026-09-01T00:00:00.000Z")), 1);
+    assert.deepEqual(await listRentalLaunches(), [active]);
+    assert.deepEqual(await readRentalLaunch("active"), active);
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
+    else process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = previous;
+  }
+});
 
 test("manual acceptance installs exact rental authority, activates at room tail, and returns no credential", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-rental-launch-"));
