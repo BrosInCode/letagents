@@ -1,4 +1,4 @@
-import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -126,6 +126,33 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   const degradedStreamRooms = new Map<string, number>();
   const pendingVerifiedRecoveries = new Map<string, number>();
   const pendingDeliveryRepairs = new Map<string, PendingDeliveryRepairState>();
+  let artifactRefreshContext = 0;
+  let artifactRefreshDisposed = false;
+  let artifactRefresh: {
+    context: number;
+    roomIdentifier: string;
+    streamGeneration: number;
+    streamToken: number;
+    invalidated: boolean;
+  } | null = null;
+
+  function invalidateArtifactRefresh(): void {
+    artifactRefreshContext += 1;
+    artifactRefresh = null;
+  }
+
+  watch([
+    () => options.activeEntry.value.id,
+    () => options.sessionGeneration.value,
+    () => options.authStatus.value?.account?.id,
+    () => options.authStatus.value?.apiUrl,
+    () => normalizeRoomIdentifier(options.selectedSnapshot.value?.roomIdentifier),
+  ], invalidateArtifactRefresh, { flush: "sync" });
+
+  if (getCurrentScope()) onScopeDispose(() => {
+    artifactRefreshDisposed = true;
+    invalidateArtifactRefresh();
+  });
 
   function sessionIsCurrent(generation: number): boolean {
     return generation === options.sessionGeneration.value;
@@ -880,10 +907,37 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   async function refreshSelectedRoomArtifacts(roomIdentifier: string): Promise<void> {
-    const artifacts = await desktopIpc.room.getArtifacts?.(roomIdentifier).catch(() => null);
-    if (!artifacts) return;
-    if (!snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)) return;
-    setSelectedSnapshot(replaceSnapshotRoomArtifacts(options.selectedSnapshot.value, artifacts));
+    const isCurrent = (request: NonNullable<typeof artifactRefresh>): boolean => !artifactRefreshDisposed
+      && artifactRefresh === request
+      && request.context === artifactRefreshContext
+      && request.streamGeneration === streamReconcileGeneration
+      && request.streamToken === activeStreamToken
+      && snapshotMatchesRoom(options.selectedSnapshot.value, request.roomIdentifier);
+    if (artifactRefreshDisposed || !snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)) return;
+    if (artifactRefresh && isCurrent(artifactRefresh)) {
+      artifactRefresh.invalidated = true;
+      return;
+    }
+    const request = {
+      context: artifactRefreshContext, roomIdentifier,
+      streamGeneration: streamReconcileGeneration, streamToken: activeStreamToken,
+      invalidated: false,
+    };
+    artifactRefresh = request;
+    const baseline = options.selectedSnapshot.value?.roomArtifacts;
+    try {
+      const artifacts = await desktopIpc.room.getArtifacts?.(roomIdentifier).catch(() => null);
+      // A later event requires a trailing read. A newer snapshot or explicit
+      // artifact mutation already owns the displayed list and must also win.
+      if (!artifacts || !isCurrent(request) || request.invalidated
+        || options.selectedSnapshot.value?.access.status !== "ready"
+        || options.selectedSnapshot.value?.roomArtifacts !== baseline) return;
+      setSelectedSnapshot(replaceSnapshotRoomArtifacts(options.selectedSnapshot.value, artifacts));
+    } finally {
+      const refreshAgain = isCurrent(request) && request.invalidated;
+      if (artifactRefresh === request) artifactRefresh = null;
+      if (refreshAgain) void refreshSelectedRoomArtifacts(roomIdentifier);
+    }
   }
 
   function handleRoomRenamed(room: DesktopRoomInfo): void {

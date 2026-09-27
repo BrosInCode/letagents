@@ -42,7 +42,7 @@
           :delivery-retry-keys="deliveryRetryKeys"
           :continuation-repair-keys="continuationRepairKeys"
           :room-delivery-skip-keys="roomDeliverySkipKeys"
-          :provider-label="resolveMessageProviderLabel(entry.message, participants, presence, supervisorEntries)"
+          :provider-label="resolveProviderLabel(entry.message)"
           @quote-reply="$emit('quote-reply', $event)"
           @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
@@ -167,7 +167,7 @@ import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
-import { resolveMessageProviderLabel } from "../../../../domain/agent-provider";
+import { createMessageProviderLabelResolver } from "../../../../domain/agent-provider";
 import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
 import { buildMessageTimelineEntries } from "./timeline";
@@ -288,6 +288,9 @@ let threadActivityNamespace = props.messageNamespace;
 let suppressNextThreadActivityNotice = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
+const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
+  props.participants, props.presence, props.supervisorEntries,
+));
 const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages, props.roomAgentWork));
 const messageReferenceIds = computed(() =>
   new Set(props.messages.map((message) => message.id))
