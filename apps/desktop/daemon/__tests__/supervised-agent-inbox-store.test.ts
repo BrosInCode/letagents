@@ -10,7 +10,7 @@ import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
-import { settleCapturedExecutionAttempts } from "../supervised-agent-history-retention.js";
+import { RETAINED_TERMINAL_TIMELINE_EVENTS, RETAINED_TERMINAL_CONTINUATION_REPAIRS, settleCapturedExecutionAttempts } from "../supervised-agent-history-retention.js";
 import type { DaemonManifestEntry } from "../types.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
@@ -847,10 +847,12 @@ test("result-recovery debt survives a truncated receipt timeline and database re
         insert.run(item!.inbox_item_id, index + 100, `noise:${index}`, "2026-08-31T00:00:00.000Z");
       }
     } finally { database.close(); }
+    await store.pruneHistory("retry-history");
     assert.equal((await store.receipts("retry-history"))[0]!.timeline.length, 64);
     assert.equal((await store.receipts("retry-history"))[0]!.timeline.some((event) => event.phase === "retry_scheduled"), false);
     await store.close();
     reopened = new SupervisedAgentInboxStore(env.database);
+    await reopened.pruneHistory("retry-history");
     const exhausted = await reopened.recordRetryFailure(item!.inbox_item_id, { domain: "result_recovery", error: "read still failed" });
     assert.equal(exhausted.attempt, 3);
     assert.equal(exhausted.item.state, "blocked");
@@ -1842,7 +1844,7 @@ test("room move compensation restores only its source queue and exact pre-move c
 
 test("room-move compensation pins cancelled history until rollback or terminal release", async () => {
   const env = await fixture();
-  const inbox = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T12:30:00.000Z");
+  let inbox = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T12:30:00.000Z");
   const manifest = new ManifestStore(env.database);
   try {
     await seedActiveAgent(env, {
@@ -1880,7 +1882,15 @@ test("room-move compensation pins cancelled history until rollback or terminal r
     assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
       WHERE agent_id='bounded-move' AND state='cancelled_by_room_move'`).get() as { count: number }).count), 205,
     "nonterminal move authority may temporarily exceed receipt history because every row is rollback state");
+    const noisyItem = inspection.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id='bounded-move' ORDER BY fifo_sequence DESC LIMIT 1").get()!;
+    const addNoise = inspection.prepare(`INSERT INTO supervised_agent_inbox_events
+      VALUES (?,?,?,'conversation_restoring','2026-08-05T12:30:00.000Z',NULL)`);
+    for (let index = 0; index < 100; index++) addNoise.run(String(noisyItem.inbox_item_id), index + 100, `move-noise:${index}`);
     inspection.close();
+    await inbox.pruneHistory("bounded-move");
+    await inbox.close();
+    inbox = new SupervisedAgentInboxStore(env.database);
+    await inbox.pruneHistory("bounded-move");
 
     assert.equal(await inbox.rollbackRoomMoveIngress({
       operation_id: "move-rollback", agent_id: "bounded-move", source_room_id: "old-room", destination_room_id: "new-room",
@@ -1899,6 +1909,11 @@ test("room-move compensation pins cancelled history until rollback or terminal r
     assert.equal(await inbox.commitRoomMoveQueue({
       operation_id: "move-success", agent_id: "bounded-move", old_room_id: "old-room", after_fifo_sequence: 0,
     }), 205);
+    inspection = new DatabaseSync(env.database);
+    const settledNoise = inspection.prepare(`INSERT INTO supervised_agent_inbox_events
+      VALUES (?,?,?,'conversation_restoring','2026-08-05T12:30:00.000Z',NULL)`);
+    for (let index = 0; index < 100; index++) settledNoise.run(String(noisyItem.inbox_item_id), index + 1000, `settled-move-noise:${index}`);
+    inspection.close();
     await manifest.advanceRoomMove({
       operationId: "move-success", agentId: "bounded-move", expectedDaemonGeneration: generation,
       expectedExecutionGenerationId: "generation", from: ["membership_committed"], to: "active",
@@ -1907,6 +1922,12 @@ test("room-move compensation pins cancelled history until rollback or terminal r
     assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
       WHERE agent_id='bounded-move' AND state='cancelled_by_room_move'`).get() as { count: number }).count), 200,
     "terminal move release converges compensation rows to the ordinary history budget");
+    await inbox.pruneHistory("bounded-move");
+    await inbox.pruneHistory("bounded-move");
+    assert.equal(inspection.prepare(`SELECT COUNT(*) AS n FROM supervised_agent_inbox_events
+      WHERE inbox_item_id=? AND idempotency_key GLOB 'room_move_cancelled:move-success:*'`).get(String(noisyItem.inbox_item_id))!.n, 1);
+    assert.ok(Number(inspection.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?")
+      .get(String(noisyItem.inbox_item_id))!.n) <= RETAINED_TERMINAL_TIMELINE_EVENTS + 3);
     assert.deepEqual(inspection.prepare("PRAGMA foreign_key_check").all(), []);
     inspection.close();
 
@@ -3842,4 +3863,108 @@ test("reply-thread intent rejects foreign or stale authority, extra arguments an
       assert.equal(await store.hasInterceptedThreadReply(item.inbox_item_id), false);
     } finally { await store.close(); await env.cleanup(); }
   }
+});
+
+
+test("settled child history converges on migration and settlement, retaining exact outcomes and ordering", async () => {
+  const env = await fixture();
+  let store = new SupervisedAgentInboxStore(env.database, () => "2026-09-01T00:00:00.000Z");
+  let database: DatabaseSync | undefined;
+  try {
+    const [item] = await store.ingestPoll({ agent_id: "large-history", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "retain this" }, activation: {} }] });
+    database = new DatabaseSync(env.database);
+    await completeCapturedReceipt(store, database, item!, "reply");
+    const before = await store.get(item!.inbox_item_id);
+    const binding = await store.providerTurnBinding(item!.inbox_item_id);
+    const terminal = database.prepare("SELECT * FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item!.inbox_item_id);
+    const publication = database.prepare("SELECT * FROM supervised_agent_publications WHERE inbox_item_id=?").get(item!.inbox_item_id);
+    const seed = (id: string, count: number) => {
+      database!.exec("BEGIN");
+      try {
+        const events = database!.prepare(`INSERT INTO supervised_agent_inbox_events
+          VALUES (?,?,?,'conversation_restoring','2026-09-01T00:00:00.000Z',NULL)`);
+        const repairs = database!.prepare(`INSERT INTO provider_continuation_repairs
+          (repair_id,agent_id,room_id,inbox_item_id,daemon_generation,execution_generation_id,work_attempt_id,
+           expected_pid,expected_process_identity,missing_continuation,replacement_continuation,phase,attempt_count,last_error,created_at,updated_at)
+          VALUES (?,'large-history','room',?,1,'generation','attempt',1,'process','old','new','committed',1,NULL,?,?)`);
+        for (let index = 0; index < count; index++) {
+          events.run(id, index + 100, `noise:${index}`);
+          repairs.run(`${id}:repair:${index}`, id, "2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+        }
+        database!.exec("COMMIT");
+      } catch (error) { database!.exec("ROLLBACK"); throw error; }
+    };
+    seed(item!.inbox_item_id, 10_000);
+    const latest = await store.latestContinuationRepair("large-history");
+    const maxSequence = database.prepare("SELECT MAX(event_sequence) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(item!.inbox_item_id)!.n;
+    await store.close();
+    database.exec(`DROP INDEX provider_continuation_repairs_agent_created; DROP INDEX provider_continuation_repairs_inbox_created;
+      DROP INDEX activity_events_summary; UPDATE manifest_metadata SET schema_version=47; PRAGMA user_version=47`);
+    store = new SupervisedAgentInboxStore(env.database);
+    assert.deepEqual(await store.get(item!.inbox_item_id), before);
+    const assertBounded = (id: string) => {
+      assert.equal(database!.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(id)!.n,
+        RETAINED_TERMINAL_TIMELINE_EVENTS + 2);
+      assert.equal(database!.prepare("SELECT COUNT(*) AS n FROM provider_continuation_repairs WHERE inbox_item_id=?").get(id)!.n,
+        RETAINED_TERMINAL_CONTINUATION_REPAIRS);
+    };
+    assertBounded(item!.inbox_item_id);
+    assert.deepEqual(await store.latestContinuationRepair("large-history"), latest);
+    assert.deepEqual(await store.providerTurnBinding(item!.inbox_item_id), binding);
+    assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item!.inbox_item_id), terminal);
+    assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_publications WHERE inbox_item_id=?").get(item!.inbox_item_id), publication);
+    assert.equal(database.prepare("SELECT MAX(event_sequence) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(item!.inbox_item_id)!.n, maxSequence);
+    await store.pruneHistory("large-history");
+    assertBounded(item!.inbox_item_id);
+    const [next] = await store.ingestPoll({ agent_id: "large-history", room_id: "room", last_observed_message_id: "2",
+      messages: [{ source_message_id: "2", source_message: {}, activation: {} }] });
+    seed(next!.inbox_item_id, 100);
+    await store.pruneHistory("large-history");
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM provider_continuation_repairs WHERE inbox_item_id=?").get(next!.inbox_item_id)!.n, 100);
+    database.exec("CREATE TRIGGER fail_child_cleanup BEFORE DELETE ON provider_continuation_repairs BEGIN SELECT RAISE(ABORT,'child cleanup interrupted'); END");
+    await store.transition(next!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(next!.inbox_item_id, "next-turn", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.checkpointTerminalOutcome(next!.inbox_item_id, JSON.stringify({ kind: "no_reply", text: null }));
+    await store.transition(next!.inbox_item_id, "awaiting_result");
+    const active = await store.get(next!.inbox_item_id);
+    const eventsBefore = database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(next!.inbox_item_id)!.n;
+    await assert.rejects(store.transition(next!.inbox_item_id, "acknowledged_no_reply"), /child cleanup interrupted/);
+    assert.deepEqual(await store.get(next!.inbox_item_id), active);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events WHERE inbox_item_id=?").get(next!.inbox_item_id)!.n, eventsBefore);
+    database.exec("DROP TRIGGER fail_child_cleanup");
+    await store.transition(next!.inbox_item_id, "acknowledged_no_reply");
+    assertBounded(next!.inbox_item_id);
+    const [failed] = await store.ingestPoll({ agent_id: "large-history", room_id: "room", last_observed_message_id: "3",
+      messages: [{ source_message_id: "3", source_message: {}, activation: {} }] });
+    await completeCapturedReceipt(store, database, failed!, "failed");
+    const failureEvidence = database.prepare("SELECT * FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(failed!.inbox_item_id);
+    seed(failed!.inbox_item_id, 100);
+    database.prepare("UPDATE provider_continuation_repairs SET phase='probing' WHERE repair_id=?").run(`${failed!.inbox_item_id}:repair:99`);
+    await store.pruneHistory("large-history");
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM provider_continuation_repairs WHERE inbox_item_id=?").get(failed!.inbox_item_id)!.n, 100,
+      "an unfinished repair remains recoverable with its causal history");
+    await store.close();
+    store = new SupervisedAgentInboxStore(env.database);
+    assert.equal((await store.latestContinuationRepair("large-history"))!.phase, "probing");
+    database.prepare("UPDATE provider_continuation_repairs SET phase='committed' WHERE repair_id=?").run(`${failed!.inbox_item_id}:repair:99`);
+    database.prepare(`INSERT INTO supervised_agent_effects
+      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+      VALUES ('generation-pin','large-history','room','generation','native:3','request','send_message','{}',1,'executing',NULL,NULL,?,?)`)
+      .run("2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+    await store.pruneHistory("large-history");
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM provider_continuation_repairs WHERE inbox_item_id=?").get(failed!.inbox_item_id)!.n, 100);
+    database.exec("UPDATE supervised_agent_effects SET execution_generation_id='unrelated-generation' WHERE effect_id='generation-pin'");
+    await store.pruneHistory("large-history");
+    assertBounded(failed!.inbox_item_id);
+    assert.equal(database.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id='generation-pin'").get()!.state, "executing",
+      "unrelated generation authority is preserved without pinning this receipt's history");
+    assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(failed!.inbox_item_id), failureEvidence);
+    assert.equal((await store.get(failed!.inbox_item_id))!.state, "acknowledged_failed");
+    await store.close();
+    store = new SupervisedAgentInboxStore(env.database);
+    await store.pruneHistory("large-history");
+    assertBounded(failed!.inbox_item_id);
+    await assert.rejects(store.transition(failed!.inbox_item_id, "pending"), /Invalid supervised inbox transition/);
+  } finally { database?.close(); await store.close(); await env.cleanup(); }
 });

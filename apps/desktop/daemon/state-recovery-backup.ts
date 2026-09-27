@@ -164,28 +164,16 @@ async function readEnvelope(path: string): Promise<{ bytes: Buffer; header: Head
   } finally { await file.close(); }
 }
 
-/**
- * Recovery inspection only: never opens or replaces the live database. A future
- * restore flow must fence the daemon and revoke/remint restored worker credentials.
- */
-export async function decryptStateRecoveryBackup(path: string, key: Buffer): Promise<DatabaseSync> {
+function restoreSnapshot(records: Iterable<SnapshotRecord>, version: number, pageSize = 4096): DatabaseSync {
   let restored: DatabaseSync | undefined;
-  let plaintext: Buffer | undefined;
   try {
-    const { bytes } = await readEnvelope(path);
-    const { header, aad, ciphertext, tag } = parseEnvelope(bytes);
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(header.nonce, "base64"));
-    decipher.setAAD(aad);
-    decipher.setAuthTag(tag);
-    // Authenticate completely before interpreting any SQL.
-    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     restored = new DatabaseSync(":memory:");
+    restored.exec(`PRAGMA page_size=${pageSize}`);
     restored.exec("PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF; PRAGMA trusted_schema=OFF; BEGIN");
     let insert: ReturnType<DatabaseSync["prepare"]> | undefined;
     let ended = false;
-    for (const line of plaintext.toString("utf8").trimEnd().split("\n")) {
+    for (const record of records) {
       if (ended) throw failure();
-      const record = JSON.parse(line) as SnapshotRecord;
       switch (record.kind) {
         case "table": {
           if (record.sql) restored.exec(record.sql);
@@ -208,7 +196,7 @@ export async function decryptStateRecoveryBackup(path: string, key: Buffer): Pro
         case "ddl": insert = undefined; restored.exec(record.sql); break;
         case "end": {
           if (!Number.isSafeInteger(record.applicationId)) throw failure();
-          restored.exec(`PRAGMA user_version=${header.sourceVersion}; PRAGMA application_id=${record.applicationId}`);
+          restored.exec(`PRAGMA user_version=${version}; PRAGMA application_id=${record.applicationId}`);
           ended = true;
           break;
         }
@@ -218,6 +206,44 @@ export async function decryptStateRecoveryBackup(path: string, key: Buffer): Pro
     if (!ended) throw failure();
     checkDatabase(restored);
     restored.exec("COMMIT; PRAGMA foreign_keys=ON");
+    return restored;
+  } catch (error) {
+    try { restored?.close(); } catch { /* preserve original error */ }
+    throw error;
+  }
+}
+
+/** A compact, typed copy that preserves implicit rowids as well as authority.
+ * Caller holds the daemon singleton, before opening any runtime stores. */
+export function cloneStateDatabaseForCompaction(database: DatabaseSync): DatabaseSync {
+  database.exec("BEGIN");
+  try {
+    const version = Number(database.prepare("PRAGMA user_version").get()!.user_version);
+    const pageSize = Number(database.prepare("PRAGMA page_size").get()!.page_size);
+    return restoreSnapshot(snapshot(database), version, pageSize);
+  } finally { database.exec("ROLLBACK"); }
+}
+
+/**
+ * Recovery inspection only: never opens or replaces the live database. A future
+ * restore flow must fence the daemon and revoke/remint restored worker credentials.
+ */
+export async function decryptStateRecoveryBackup(path: string, key: Buffer): Promise<DatabaseSync> {
+  let restored: DatabaseSync | undefined;
+  let plaintext: Buffer | undefined;
+  try {
+    const { bytes } = await readEnvelope(path);
+    const { header, aad, ciphertext, tag } = parseEnvelope(bytes);
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(header.nonce, "base64"));
+    decipher.setAAD(aad);
+    decipher.setAuthTag(tag);
+    // Authenticate completely before interpreting any SQL.
+    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const lines = plaintext.toString("utf8").trimEnd().split("\n");
+    function* records(): Generator<SnapshotRecord> {
+      for (const line of lines) yield JSON.parse(line) as SnapshotRecord;
+    }
+    restored = restoreSnapshot(records(), header.sourceVersion);
     return restored;
   } catch {
     try { restored?.close(); } catch { /* no database content in errors */ }
