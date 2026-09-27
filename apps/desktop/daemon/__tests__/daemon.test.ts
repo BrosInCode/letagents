@@ -6254,9 +6254,17 @@ for (const scenario of [
   { name: "recovering unknown", desired: "running", observed: "recovering", custody: "unknown", installed: false, allowed: false },
   { name: "recovering mismatched retired", desired: "running", observed: "recovering", custody: "mismatched_retired", installed: false, allowed: false },
   { name: "working absent with installed handle", desired: "running", observed: "working", custody: "absent", installed: true, allowed: false },
+  { name: "cleared ref retired", desired: "running", observed: "starting", custody: "retired", installed: false, clearedRef: true, allowed: true },
+  { name: "cleared ref wrong retired attempt", desired: "running", custody: "wrong_attempt_retired", installed: false, clearedRef: true, allowed: false },
+  { name: "cleared ref retired with handle", desired: "running", custody: "retired", installed: true, clearedRef: true, allowed: false },
+  { name: "cleared ref retired with stale observation", desired: "running", custody: "retired", installed: true, clearedRef: true, staleObservation: true, allowed: true },
+  { name: "cleared ref owned", desired: "running", custody: "owned", installed: false, clearedRef: true, allowed: false },
+  { name: "cleared ref unknown", desired: "running", custody: "unknown", installed: false, clearedRef: true, allowed: false },
 ] as const) test(`provider-aware handoff preserves historical Cursor ambiguity: ${scenario.name}`, async () => {
   const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "cursor", {
-    runtimeCustody: () => scenario.custody === "mismatched" || scenario.custody === "mismatched_retired"
+    runtimeCustody: () => scenario.custody === "wrong_attempt_retired"
+      ? { state: "retired", handle: { ...env.handle, workAttemptId: "another-attempt" } }
+      : scenario.custody === "mismatched" || scenario.custody === "mismatched_retired"
       ? { state: scenario.custody === "mismatched" ? "owned" : "retired", handle: { ...env.handle, providerContinuationId: "another-continuation" } }
       : scenario.custody === "owned" || scenario.custody === "retired" ? { state: scenario.custody, handle: env.handle } : { state: scenario.custody },
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
@@ -6292,6 +6300,15 @@ for (const scenario of [
       await (env.daemon as unknown as { updateManifestEntry(id: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry): Promise<unknown> })
         .updateManifestEntry(env.id, value => ({ ...value, observed_state: scenario.observed }));
       assert.equal((await env.internals.store.getEntry(env.id))?.observed_state, scenario.observed);
+    }
+    if ("clearedRef" in scenario) {
+      await (env.daemon as unknown as { updateManifestEntry(id: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry): Promise<unknown> })
+        .updateManifestEntry(env.id, value => ({ ...value, provider_ref: null, run_id: null, deployment_id: null }));
+    }
+    if ("staleObservation" in scenario) {
+      env.internals.liveHandles.delete(env.id);
+      assert.equal(env.internals.providerStreams.currentInstallation(env.id), undefined,
+        "a retained observation without its live handle is not a current installation");
     }
     const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
     assert.equal(result.ok, scenario.allowed, result.error);
