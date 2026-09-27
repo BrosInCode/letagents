@@ -1,4 +1,6 @@
-import type { WorkDurabilityStore } from "./durability-store.js";
+import { isDeepStrictEqual } from "node:util";
+import { ImmutableExecutionError, type WorkDurabilityStore } from "./durability-store.js";
+import { DaemonFenceLostError } from "./singleton.js";
 import type {
   ProviderActionHandle,
   ProviderActionTerminal,
@@ -15,6 +17,11 @@ import type {
 } from "./types.js";
 
 export type ProviderTerminalPorts = {
+  authority: {
+    assertCurrent(): Promise<void>;
+    isClosing(): boolean;
+    fenceCommit(commit: () => Promise<void>): Promise<void>;
+  };
   currentDaemonGeneration(): number;
   nowMs(): number;
   liveHandles: Map<string, ProviderActionHandle>;
@@ -47,20 +54,43 @@ export type ProviderTerminalPorts = {
     reconciliation?: DaemonManifestEntry["reconciliation"],
     notice?: ReconciliationNotice["kind"],
     terminal?: ExecutionTerminalPayload,
+    commitFence?: TerminalCommitFence,
   ): Promise<void>;
   requestConvergence(entryId: string): void;
-  settleRuntimeApprovals(entryId: string): Promise<void>;
+  settleRuntimeApprovals(entryId: string, commitFence?: TerminalCommitFence): Promise<void>;
+  diagnostic?(entryId: string, error: unknown): void;
 };
+
+export type TerminalCommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 type PlannedConfigurationReplacement = {
   settled: Promise<void>;
+  cancelled: Promise<never>;
+  failed: boolean;
   resolve(): void;
   reject(error: unknown): void;
 };
 
+type TerminalSettlement = {
+  installation: ProviderInstallationToken;
+  terminal: ProviderActionTerminal;
+  daemonGeneration: number;
+  replacement?: PlannedConfigurationReplacement;
+  operation: Promise<void> | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  failures: number;
+  admitted: boolean;
+  reportedCanonicalDifference?: boolean;
+};
+
+class TerminalOwnerLostError extends Error {}
+
 /** Owns terminal evidence, exact-handle retirement, and exit-state projection. */
 export class ProviderTerminalCoordinator {
-  private readonly plannedConfigurationReplacements = new WeakMap<
+  private readonly pending = new Map<ProviderInstallationToken, TerminalSettlement>();
+  private readonly completed = new WeakSet<ProviderInstallationToken>();
+  private phase: "open" | "retiring" | "closed" = "open";
+  private readonly plannedConfigurationReplacements = new Map<
     ProviderInstallationToken,
     PlannedConfigurationReplacement
   >();
@@ -76,26 +106,35 @@ export class ProviderTerminalCoordinator {
     installation: ProviderInstallationToken,
     stop: () => Promise<ProviderActionTerminal>,
   ): Promise<void> {
-    if (!this.ports.streams.isLatestInstallation(installation)
+    if (this.phase !== "open" || this.ports.authority.isClosing() || !this.ports.streams.isLatestInstallation(installation)
       || this.ports.liveHandles.get(installation.entryId) !== installation.handle) {
       throw new Error("Provider installation changed before configuration replacement.");
     }
     if (this.plannedConfigurationReplacements.has(installation)) {
       throw new Error("Configuration replacement is already in progress.");
     }
-    let resolve!: () => void;
-    let reject!: (error: unknown) => void;
-    const settled = new Promise<void>((accept, decline) => {
-      resolve = accept;
-      reject = decline;
-    });
+    let resolve!: () => void, rejectSettlement!: (error: unknown) => void;
+    let cancel!: (error: unknown) => void;
+    const settled = new Promise<void>((accept, decline) => { resolve = accept; rejectSettlement = decline; });
+    const cancelled = new Promise<never>((_accept, decline) => { cancel = decline; });
     void settled.catch(() => undefined);
-    const replacement = { settled, resolve, reject };
+    void cancelled.catch(() => undefined);
+    const replacement: PlannedConfigurationReplacement = {
+      settled, cancelled, failed: false, resolve,
+      reject(error) { this.failed = true; rejectSettlement(error); cancel(error); },
+    };
     this.plannedConfigurationReplacements.set(installation, replacement);
+    try {
     let terminal: ProviderActionTerminal;
     try {
-      terminal = await stop();
+      terminal = await Promise.race([
+        stop(),
+        // Closing rejects the waiter promptly even if native stop never returns.
+        // A successful onExit still waits for the native stop result as before.
+        replacement.cancelled,
+      ]);
     } catch (error) {
+      if (replacement.failed) throw error;
       if (this.ports.streams.isLatestInstallation(installation)
         && this.ports.liveHandles.get(installation.entryId) === installation.handle) {
         if (this.plannedConfigurationReplacements.get(installation) === replacement) {
@@ -104,13 +143,35 @@ export class ProviderTerminalCoordinator {
         replacement.resolve();
         throw error;
       }
+      if (!this.pending.has(installation) && !this.completed.has(installation)) {
+        this.plannedConfigurationReplacements.delete(installation);
+        replacement.reject(error);
+        throw error;
+      }
       // onExit removed the exact live installation before stop rejected.
       // Its terminal handler remains the sole source of durable classification.
       await replacement.settled;
       return;
     }
-    await this.handleTerminal(installation, terminal);
+    if (!this.pending.has(installation) && !this.completed.has(installation)
+      && (this.phase !== "open" || !this.ports.streams.isLatestInstallation(installation)
+        || this.ports.liveHandles.get(installation.entryId) !== installation.handle)) {
+      const error = new TerminalOwnerLostError("Configuration replacement lost its exact installation before terminal admission.");
+      this.plannedConfigurationReplacements.delete(installation);
+      replacement.reject(error);
+      throw error;
+    }
+    try { await this.handleTerminal(installation, terminal); }
+    catch (error) {
+      if (!this.pending.has(installation)) throw error;
+      // A failed local attempt keeps its original replacement completion.
+    }
     await replacement.settled;
+    } finally {
+      if (this.plannedConfigurationReplacements.get(installation) === replacement) {
+        this.plannedConfigurationReplacements.delete(installation);
+      }
+    }
   }
 
   terminalPayload(
@@ -137,80 +198,210 @@ export class ProviderTerminalCoordinator {
     installation: ProviderInstallationToken,
     terminal: ProviderActionTerminal,
   ): Promise<void> {
-    const { entryId, handle, executionGenerationId } = installation;
-    const replacement = this.plannedConfigurationReplacements.get(installation);
-    if (!this.ports.streams.remove(installation)) return;
-    let replacementObserved = false;
+    const existing = this.pending.get(installation);
+    if (existing) return this.attemptSettlement(existing);
+    if (this.phase === "closed" || this.completed.has(installation)
+      || !this.ports.streams.isLatestInstallation(installation)
+      || this.ports.liveHandles.get(installation.entryId) !== installation.handle) return;
+    const owner: TerminalSettlement = {
+      installation, terminal: structuredClone(terminal),
+      daemonGeneration: this.ports.currentDaemonGeneration(),
+      replacement: this.plannedConfigurationReplacements.get(installation),
+      operation: null, timer: null, failures: 0, admitted: this.phase === "retiring",
+    };
+    this.pending.set(installation, owner);
     try {
-      this.ports.runtimeCustody.deletePendingResumeBinding(entryId);
-      let shouldStartDelivery = false;
-      await this.ports.serializeEntry(entryId, async () => {
-        if (!this.ports.streams.isLatestInstallation(installation)) return;
-        const entry = (await this.ports.manifest.load()).entries.find((candidate) =>
-          candidate.id === entryId);
-        if (!entry || !this.matchesInstallation(entry, installation)) return;
-        if (this.ports.liveHandles.get(entryId)) return;
-        if (entry?.work_attempt_id) {
-          const attempt = await this.ports.durability.getAttempt(entry.work_attempt_id);
-          if (!this.ports.streams.isLatestInstallation(installation)
-            || this.ports.liveHandles.get(entryId)) return;
-          const execution = attempt.execution_generations.find((candidate) =>
-            candidate.execution_generation_id === executionGenerationId);
-          if (execution && !execution.terminal) {
-            await this.ports.durability.recordTerminal(
-              entry.work_attempt_id,
-              execution.execution_generation_id,
-              {
-                ...this.terminalPayload(terminal, execution.actor, installation.providerConnection),
-                generation: execution.generation,
-              },
-            );
-          }
-          await this.ports.settleRuntimeApprovals(entryId);
-          if (entry.desired_state === "stopped") {
-            await this.ports.durability.releaseTerminalExecutionFence(
-              entry.work_attempt_id,
-              executionGenerationId,
-            );
-          }
-        }
-        if (!this.ports.streams.isLatestInstallation(installation)
-          || this.ports.liveHandles.get(entryId)) return;
-        // The owner-only credential remains available for an exact successor;
-        // only its live publication authority was removed with the handle.
-        await this.observeExitOnce(
-          entryId,
-          terminal,
-          "daemon-provider",
-          executionGenerationId,
-          handle,
-          installation,
-          Boolean(replacement),
-        );
-        replacementObserved = Boolean(replacement);
-        if (!this.ports.streams.isLatestInstallation(installation)
-          || this.ports.liveHandles.get(entryId)) return;
-        if (!replacement) {
-          this.ports.requestConvergence(entryId);
-          shouldStartDelivery = entry.desired_state === "running";
-        }
-      });
-      if (replacement && !replacementObserved) {
-        throw new Error("Configuration replacement lost exact provider coordinates.");
+      if (!this.ports.streams.remove(installation)) {
+        this.finishSettlement(owner, new TerminalOwnerLostError("Terminal removal lost its installation."));
+        return;
       }
-      if (shouldStartDelivery && this.ports.streams.isLatestInstallation(installation)
-        && !this.ports.liveHandles.get(entryId)) {
-        void this.ports.delivery.start(entryId).catch(() => undefined);
-      }
-      replacement?.resolve();
     } catch (error) {
-      replacement?.reject(error);
+      // Listener cleanup may throw after revocation. Keep only the exact
+      // inert owner, never the dead handle's operational authority.
+      this.failedSettlement(owner, error);
       throw error;
-    } finally {
-      if (replacement && this.plannedConfigurationReplacements.get(installation) === replacement) {
-        this.plannedConfigurationReplacements.delete(installation);
-      }
     }
+    try { this.terminalPayload(owner.terminal, "daemon-provider", installation.providerConnection); }
+    catch (error) { this.finishSettlement(owner, error); throw error; }
+    return this.attemptSettlement(owner);
+  }
+
+  private owns(owner: TerminalSettlement): boolean {
+    return this.phase !== "closed" && this.pending.get(owner.installation) === owner
+      && owner.daemonGeneration === this.ports.currentDaemonGeneration()
+      && (!this.ports.authority.isClosing() || owner.admitted)
+      && this.ports.streams.isLatestInstallation(owner.installation)
+      && !this.ports.liveHandles.has(owner.installation.entryId);
+  }
+
+  private assertOwner(owner: TerminalSettlement): void {
+    if (!this.owns(owner)) throw new TerminalOwnerLostError("Terminal settlement lost its exact installation authority.");
+  }
+
+  private fence(owner: TerminalSettlement): TerminalCommitFence {
+    return commit => this.ports.authority.fenceCommit(async () => {
+      this.assertOwner(owner);
+      await commit();
+    });
+  }
+
+  private attemptSettlement(owner: TerminalSettlement): Promise<void> {
+    if (owner.operation) return owner.operation;
+    if (owner.timer) { clearTimeout(owner.timer); owner.timer = null; }
+    const operation = this.settleOnce(owner).then(
+      () => this.finishSettlement(owner),
+      error => {
+        this.failedSettlement(owner, error);
+        // Emergency close cancels observer work without poisoning its drain.
+        // Replacement callers were rejected separately; real failures stay visible.
+        if (this.phase === "closed" && error instanceof TerminalOwnerLostError) return;
+        throw error;
+      },
+    );
+    owner.operation = operation;
+    void operation.finally(() => { if (owner.operation === operation) owner.operation = null; }).catch(() => undefined);
+    return operation;
+  }
+
+  private failedSettlement(owner: TerminalSettlement, error: unknown): void {
+    this.ports.diagnostic?.(owner.installation.entryId, error);
+    // A throwing listener disposer must not bypass native identity validation.
+    try { this.terminalPayload(owner.terminal, "daemon-provider", owner.installation.providerConnection); }
+    catch (invalid) { this.finishSettlement(owner, invalid); return; }
+    if (!this.owns(owner) || error instanceof TerminalOwnerLostError
+      || error instanceof DaemonFenceLostError || error instanceof ImmutableExecutionError) {
+      this.finishSettlement(owner, error);
+      return;
+    }
+    if (owner.timer) return;
+    // Retain the obligation while this owner remains valid; only the delay is
+    // capped. Retrying local bookkeeping never sends native work again.
+    const delay = Math.min(30_000, 25 * 2 ** Math.min(owner.failures++, 11));
+    owner.timer = setTimeout(() => {
+      owner.timer = null;
+      void this.attemptSettlement(owner).catch(() => undefined);
+    }, delay);
+    owner.timer.unref();
+  }
+
+  private finishSettlement(owner: TerminalSettlement, error?: unknown): void {
+    if (this.pending.get(owner.installation) !== owner) return;
+    if (owner.timer) clearTimeout(owner.timer);
+    this.pending.delete(owner.installation);
+    this.completed.add(owner.installation);
+    const replacement = owner.replacement;
+    if (replacement) {
+      if (error === undefined) replacement.resolve(); else replacement.reject(error);
+    }
+  }
+
+  private async settleOnce(owner: TerminalSettlement): Promise<void> {
+    const { installation, replacement } = owner;
+    const { entryId, handle, executionGenerationId } = installation;
+    let shouldStartDelivery = false;
+    await this.ports.serializeEntry(entryId, async () => {
+      this.assertOwner(owner);
+      await this.ports.authority.assertCurrent();
+      this.assertOwner(owner);
+      const entry = (await this.ports.manifest.load()).entries.find(candidate => candidate.id === entryId);
+      this.assertOwner(owner);
+      if (!entry || !this.matchesInstallation(entry, installation)) {
+        throw new TerminalOwnerLostError("Terminal settlement lost its saved provider coordinates.");
+      }
+      this.ports.runtimeCustody.deletePendingResumeBinding(entryId);
+      let terminal = owner.terminal;
+      if (entry.work_attempt_id) {
+        const attempt = await this.ports.durability.getAttempt(entry.work_attempt_id);
+        this.assertOwner(owner);
+        const execution = attempt.execution_generations.find(candidate => candidate.execution_generation_id === executionGenerationId);
+        if (!execution) throw new TerminalOwnerLostError("Terminal execution is no longer present.");
+        const expected = { ...this.terminalPayload(terminal, execution.actor, installation.providerConnection), generation: execution.generation };
+        if (execution.terminal) {
+          // stopRef and onExit can observe the same installation differently.
+          // Finish from its immutable committed result without enriching it.
+          const saved = execution.terminal;
+          if (saved.actor !== execution.actor || saved.generation !== execution.generation
+            || saved.provider_continuation_id !== installation.providerContinuationId
+            || saved.provider_continuation_id !== expected.provider_continuation_id) {
+            throw new ImmutableExecutionError("Committed terminal does not match its exact execution identity.");
+          }
+          terminal = { endedAt: saved.ended_at, exitCode: saved.exit_code, signal: saved.signal,
+            terminalCause: saved.terminal_cause as ProviderActionTerminal["terminalCause"],
+            providerContinuationId: saved.provider_continuation_id,
+            ...(saved.native_runtime_death ? { nativeRuntimeDeath: saved.native_runtime_death } : {}) };
+          try { validatedNativeRuntimeDeath(terminal, installation.providerConnection); }
+          catch { throw new ImmutableExecutionError("Committed native death does not match its exact provider installation."); }
+          if (!owner.reportedCanonicalDifference && (saved.ended_at !== expected.ended_at
+            || saved.exit_code !== expected.exit_code || saved.signal !== expected.signal
+            || saved.terminal_cause !== expected.terminal_cause
+            || !isDeepStrictEqual(saved.native_runtime_death, expected.native_runtime_death))) {
+            owner.reportedCanonicalDifference = true;
+            try { this.ports.diagnostic?.(entryId, new Error("Exact installation has differing terminal observations; retaining its committed result.")); }
+            catch { /* A diagnostic cannot change the settlement outcome. */ }
+          }
+        } else {
+          await this.ports.durability.recordTerminal(entry.work_attempt_id, executionGenerationId, expected, undefined, this.fence(owner));
+        }
+        this.assertOwner(owner);
+        await this.ports.settleRuntimeApprovals(entryId, this.fence(owner));
+        this.assertOwner(owner);
+        if (entry.desired_state === "stopped") {
+          await this.ports.durability.releaseTerminalExecutionFence(entry.work_attempt_id, executionGenerationId, this.fence(owner));
+          this.assertOwner(owner);
+        }
+      }
+      await this.observeExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle,
+        installation, Boolean(replacement), this.fence(owner));
+      this.assertOwner(owner);
+      if (!replacement && !owner.admitted) {
+        this.ports.requestConvergence(entryId);
+        shouldStartDelivery = entry.desired_state === "running";
+      }
+    });
+    if (shouldStartDelivery && this.owns(owner)) void this.ports.delivery.start(entryId).catch(() => undefined);
+  }
+
+  /** Reversible update preparation; an error leaves every retained owner live. */
+  async drain(): Promise<void> {
+    while (this.pending.size) await Promise.all([...this.pending.values()].map(owner => this.attemptSettlement(owner)));
+    this.assertNoReplacement();
+  }
+
+  beginRetirement(): void {
+    if (this.phase === "closed") throw new TerminalOwnerLostError("Terminal settlement is closed.");
+    this.assertNoReplacement();
+    this.phase = "retiring";
+    for (const owner of this.pending.values()) owner.admitted = true;
+  }
+
+  cancelRetirement(): void {
+    if (this.phase !== "retiring") return;
+    this.phase = "open";
+    for (const owner of this.pending.values()) owner.admitted = false;
+  }
+
+  async drainAndClose(detach: () => void): Promise<void> {
+    while (this.pending.size) await Promise.all([...this.pending.values()].map(owner => this.attemptSettlement(owner)));
+    this.assertNoReplacement();
+    // No await between closing admission and detaching callbacks. Already
+    // retained terminals must finish; later observations belong to no old owner.
+    this.phase = "closed";
+    detach();
+  }
+
+  private assertNoReplacement(): void {
+    if (this.plannedConfigurationReplacements.size) {
+      throw new Error("Update deferred: an agent configuration replacement is still stopping its original process.");
+    }
+  }
+
+  close(): void {
+    this.phase = "closed";
+    for (const owner of this.pending.values()) this.finishSettlement(owner, new TerminalOwnerLostError("Daemon terminal settlement closed."));
+    for (const replacement of this.plannedConfigurationReplacements.values()) {
+      replacement.reject(new TerminalOwnerLostError("Daemon configuration replacement closed."));
+    }
+    this.plannedConfigurationReplacements.clear();
   }
 
   private matchesInstallation(
@@ -252,6 +443,7 @@ export class ProviderTerminalCoordinator {
     expectedHandle?: ProviderActionHandle,
     expectedInstallation?: ProviderInstallationToken,
     plannedConfigurationReplacement = false,
+    commitFence?: TerminalCommitFence,
   ): Promise<void> {
     await this.ports.serializeManifest(async () => {
       if (expectedInstallation
@@ -266,6 +458,7 @@ export class ProviderTerminalCoordinator {
       if (expectedInstallation && !this.matchesInstallation(entry, expectedInstallation)) return;
       const payload = this.terminalPayload(terminal, actor, expectedInstallation?.providerConnection ?? expectedHandle?.providerConnection ?? entry.provider_ref?.provider_connection);
       if (entry.condition === "quarantined") {
+        if (commitFence && isDeepStrictEqual(entry.reconciliation?.last_terminal, payload)) return;
         await this.ports.transitionOnce(
           entryId,
           entry.observed_state,
@@ -282,6 +475,7 @@ export class ProviderTerminalCoordinator {
           },
           "quarantine_death",
           payload,
+          commitFence,
         );
         return;
       }
@@ -311,6 +505,8 @@ export class ProviderTerminalCoordinator {
         ...advanceReconciliationState(entry.reconciliation, observedState, this.ports.nowMs()),
         last_terminal: payload,
       };
+      if (commitFence && entry.observed_state === observedState && entry.condition === "none"
+        && isDeepStrictEqual(entry.reconciliation?.last_terminal, payload)) return;
       await this.ports.transitionOnce(
         entryId,
         observedState,
@@ -322,6 +518,9 @@ export class ProviderTerminalCoordinator {
             : `provider terminal: ${terminal.terminalCause}`,
         actor,
         reconciliation,
+        undefined,
+        undefined,
+        commitFence,
       );
     });
   }

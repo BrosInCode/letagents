@@ -185,7 +185,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // timing and signal interpretation stay in the provider-owned tracker.
   // 1633 -> 1635: scoped manifest reads and post-commit capture notification ports;
   // SQL hydration and capture scheduling stay in their owning stores/coordinator.
-  assert.ok(mainSource.split("\n").length < 1_635, "main.ts must remain a thin composition root");
+  // 1635 -> 1657: exact terminal commit ports and planned/emergency retirement
+  // composition; retries, storage ownership and handoff policy remain extracted.
+  assert.ok(mainSource.split("\n").length < 1_657, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

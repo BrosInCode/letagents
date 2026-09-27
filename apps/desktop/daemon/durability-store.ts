@@ -122,6 +122,7 @@ export class WorkDurabilityStore {
   // rebind / successor-generation handoff.  The on-disk PID record lets a new
   // daemon recover after a crash without treating a live predecessor as stale.
   private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
+  private readonly executionFenceOperations = new Map<string, Promise<void>>();
   private database: DatabaseSync | null = null;
   private initializing: Promise<DatabaseSync> | null = null;
   private closed = false;
@@ -227,6 +228,7 @@ export class WorkDurabilityStore {
   }
 
   async startGeneration(workAttemptId: string, actor: string, generation: number): Promise<ExecutionGeneration> {
+    return this.serializeExecutionFence(workAttemptId, async () => {
     const attempt = await this.getAttempt(workAttemptId);
     await this.ensureExecutionFence(attempt);
     try { return await this.exclusive(async () => {
@@ -246,6 +248,7 @@ export class WorkDurabilityStore {
       return execution;
       } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
     }); } catch (error) { await this.releaseExecutionFence(workAttemptId); throw error; }
+    });
   }
 
   /**
@@ -255,18 +258,25 @@ export class WorkDurabilityStore {
    * to the replacement supervisor process.
    */
   async recoverExecutionFence(workAttemptId: string): Promise<void> {
+    return this.serializeExecutionFence(workAttemptId, async () => {
     const attempt = await this.getAttempt(workAttemptId);
     if (!attempt.execution_generations.some((generation) => generation.terminal === null)) {
       throw new ImmutableExecutionError("Only a live execution generation can recover its workspace fence.");
     }
     await this.ensureExecutionFence(attempt);
+    });
   }
 
-  async recordTerminal(workAttemptId: string, executionGenerationId: string, terminal: ExecutionTerminalPayload, maxStdioTailBytes = 64 * 1024): Promise<ExecutionGeneration> {
+  async recordTerminal(workAttemptId: string, executionGenerationId: string, terminal: ExecutionTerminalPayload,
+    maxStdioTailBytes = 64 * 1024, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionGeneration> {
     if (!isTerminal(terminal)) throw new ImmutableExecutionError("Terminal payload has an invalid runtime schema.");
     if (!Number.isInteger(maxStdioTailBytes) || maxStdioTailBytes < 0) throw new ImmutableExecutionError("Terminal stdio limit must be a non-negative integer.");
     return this.exclusive(async () => {
       const database = await this.getDatabase();
+      let result!: ExecutionGeneration;
+      // Queue/database acquisition can outlive the installation that observed
+      // this exit. Reserve the authority check at the synchronous SQL boundary.
+      const commit = async () => {
       database.exec("BEGIN IMMEDIATE");
       try {
       const attempt = this.readAttempt(database, workAttemptId);
@@ -289,8 +299,11 @@ export class WorkDurabilityStore {
       const updated = database.prepare("UPDATE work_attempt_executions SET terminal_json = ? WHERE execution_generation_id = ? AND work_attempt_id = ? AND terminal_json IS NULL").run(JSON.stringify(redacted), executionGenerationId, workAttemptId);
       if (Number(updated.changes) !== 1) throw new ImmutableExecutionError("Execution terminal payloads are append-only and immutable.");
       database.exec("COMMIT");
-      return { ...execution, terminal: redacted };
+      result = { ...execution, terminal: redacted };
       } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+      };
+      if (commitFence) await commitFence(commit); else await commit();
+      return result;
     });
   }
 
@@ -300,14 +313,24 @@ export class WorkDurabilityStore {
    * Failed launches and an intentional desired=stopped terminal use this path;
    * pause/resume and reattachable successor handoffs deliberately retain it.
    */
-  async releaseTerminalExecutionFence(workAttemptId: string, executionGenerationId: string): Promise<void> {
-    const attempt = await this.getAttempt(workAttemptId);
-    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
-    if (!execution?.terminal) throw new ImmutableExecutionError("An execution fence can be released only after durable terminal attestation.");
-    if (attempt.execution_generations.some((candidate) => candidate.terminal === null)) {
-      throw new ImmutableExecutionError("An execution fence cannot be released while another execution generation is live.");
-    }
-    await this.releaseExecutionFence(workAttemptId);
+  async releaseTerminalExecutionFence(workAttemptId: string, executionGenerationId: string,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<void> {
+    const held = this.executionFences.get(workAttemptId);
+    return this.serializeExecutionFence(workAttemptId, async () => {
+      const attempt = await this.getAttempt(workAttemptId);
+      const execution = attempt.execution_generations.find(candidate => candidate.execution_generation_id === executionGenerationId);
+      if (!execution?.terminal) throw new ImmutableExecutionError("An execution fence can be released only after durable terminal attestation.");
+      if (attempt.execution_generations.some(candidate => candidate.terminal === null)) {
+        throw new ImmutableExecutionError("An execution fence cannot be released while another execution generation is live.");
+      }
+      const release = async () => {
+        if (this.executionFences.get(workAttemptId) !== held) {
+          throw new ImmutableExecutionError("Terminal workspace fence ownership changed before release.");
+        }
+        await this.releaseExecutionFence(workAttemptId);
+      };
+      if (commitFence) await commitFence(release); else await release();
+    });
   }
 
   async appendStdio(workAttemptId: string, line: string, maxBytes = 1024 * 1024): Promise<string> {
@@ -336,6 +359,7 @@ export class WorkDurabilityStore {
   }
 
   async concludeAttempt(workAttemptId: string, input: { state: Extract<WorkAttemptState, "cleanly_concluded" | "abandoned">; cause: string; postmortemDiff?: string; maxPostmortemBytes?: number }): Promise<TaskWorkAttempt> {
+    return this.serializeExecutionFence(workAttemptId, async () => {
     this.assertAttemptId(workAttemptId);
     const current = await this.getAttempt(workAttemptId);
     if (current.execution_generations.some((generation) => generation.terminal === null)) {
@@ -358,6 +382,7 @@ export class WorkDurabilityStore {
       return attempt;
       });
     } finally { await this.releaseExecutionFence(workAttemptId); }
+    });
   }
 
   async markState(workAttemptId: string, state: Extract<WorkAttemptState, "ambiguous" | "coordination_blocked" | "quarantined" | "unreviewed">): Promise<TaskWorkAttempt> {
@@ -773,6 +798,20 @@ export class WorkDurabilityStore {
     return captured;
   }
 
+  /** A successor cannot reuse a workspace handle while its release is pending. */
+  private async serializeExecutionFence<T>(workAttemptId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.executionFenceOperations.get(workAttemptId);
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    this.executionFenceOperations.set(workAttemptId, pending);
+    await previous;
+    try { return await operation(); }
+    finally {
+      if (this.executionFenceOperations.get(workAttemptId) === pending) this.executionFenceOperations.delete(workAttemptId);
+      release();
+    }
+  }
+
   private async ensureExecutionFence(attempt: TaskWorkAttempt): Promise<void> {
     if (this.executionFences.has(attempt.work_attempt_id)) return;
     if (!this.supervisorFence || !this.supervisorFence.supervisor_id.trim() || !Number.isSafeInteger(this.supervisorFence.supervisor_generation) || this.supervisorFence.supervisor_generation < 1) {
@@ -784,8 +823,8 @@ export class WorkDurabilityStore {
   private async releaseExecutionFence(workAttemptId: string): Promise<void> {
     const held = this.executionFences.get(workAttemptId);
     if (!held) return;
-    this.executionFences.delete(workAttemptId);
     await held.release();
+    if (this.executionFences.get(workAttemptId) === held) this.executionFences.delete(workAttemptId);
   }
 
   /**
