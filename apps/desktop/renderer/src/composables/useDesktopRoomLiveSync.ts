@@ -1,4 +1,4 @@
-import { ref, watch, type ComputedRef, type Ref } from "vue";
+import { getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
 import type { DesktopRoomAgentWork, DesktopRoomSnapshot, WorkerSnapshot } from "../../../electron/ipc-types";
 import {
   applyRoomLiveMetadata,
@@ -33,7 +33,10 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let liveMetadataRefreshInterval: number | null = null;
   let liveMetadataRefreshIntervalRoomIdentifier: string | null = null;
   let liveMetadataRefreshSequence = 0;
-  let periodicMetadataRefreshInFlight = false;
+  let liveMetadataRefreshContext = 0;
+  let liveMetadataRefreshDisposed = false;
+  let periodicMetadataRefreshInFlight: number | null = null;
+  let fullSnapshotRefresh: { context: number; invalidated: boolean } | null = null;
   let roomAgentWorkCursor: string | null = null;
   let roomAgentWorkRefreshSequence = 0;
   let roomAgentWorkInFlightSequence: number | null = null;
@@ -156,13 +159,35 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     { flush: "sync" },
   );
 
+  function invalidateMetadataRefresh(): void {
+    liveMetadataRefreshContext += 1;
+    fullSnapshotRefresh = null;
+    periodicMetadataRefreshInFlight = null;
+    clearLiveMetadataRefreshTimer();
+  }
+
+  watch([
+    () => normalizeRoomIdentifier(options.selectedRoomIdentifier.value),
+    () => options.sessionGeneration.value,
+    () => options.accountId.value,
+  ], invalidateMetadataRefresh, { flush: "sync" });
+
+  if (getCurrentScope()) onScopeDispose(() => {
+    liveMetadataRefreshDisposed = true;
+    invalidateMetadataRefresh();
+    clearLiveMetadataRefreshInterval();
+  });
+
   function isStaleRefresh(
     refreshSequence: number,
     roomIdentifier: string,
     sessionGeneration: number,
+    context: number,
   ): boolean {
     return (
-      refreshSequence !== liveMetadataRefreshSequence
+      liveMetadataRefreshDisposed
+      || context !== liveMetadataRefreshContext
+      || refreshSequence !== liveMetadataRefreshSequence
       || sessionGeneration !== options.sessionGeneration.value
       || normalizeRoomIdentifier(options.selectedRoomIdentifier.value) !== normalizeRoomIdentifier(roomIdentifier)
     );
@@ -177,18 +202,35 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
    */
   async function refreshSelectedRoomSnapshotFromServer(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
-    if (!roomIdentifier) return;
+    if (!roomIdentifier || liveMetadataRefreshDisposed) return;
+    if (fullSnapshotRefresh) {
+      fullSnapshotRefresh.invalidated = true;
+      return;
+    }
+    const request = { context: liveMetadataRefreshContext, invalidated: false };
+    fullSnapshotRefresh = request;
     const sessionGeneration = options.sessionGeneration.value;
     const refreshSequence = ++liveMetadataRefreshSequence;
-    const [snapshot, nextWorkers] = await Promise.all([
-      desktopIpc.room.getSnapshot(roomIdentifier),
-      desktopIpc.workers.list().catch(() => options.workers.value),
-    ]);
-    if (isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration)) return;
-    options.workers.value = nextWorkers;
-    options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot);
-    if (options.rootRoomSnapshot.value && roomSnapshotsMatch(options.rootRoomSnapshot.value, snapshot)) {
-      options.rootRoomSnapshot.value = mergeRoomSnapshotMessages(options.rootRoomSnapshot.value, snapshot);
+    try {
+      const [snapshot, nextWorkers] = await Promise.all([
+        desktopIpc.room.getSnapshot(roomIdentifier),
+        desktopIpc.workers.list().catch(() => options.workers.value),
+      ]);
+      if (request.invalidated || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, request.context)) return;
+      options.workers.value = nextWorkers;
+      options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot);
+      if (options.rootRoomSnapshot.value && roomSnapshotsMatch(options.rootRoomSnapshot.value, snapshot)) {
+        options.rootRoomSnapshot.value = mergeRoomSnapshotMessages(options.rootRoomSnapshot.value, snapshot);
+      }
+    } finally {
+      if (fullSnapshotRefresh === request) {
+        fullSnapshotRefresh = null;
+        // A scheduled debounce still owns its deadline. Otherwise, events
+        // received during this read need exactly one fresh trailing read.
+        if (request.invalidated && liveMetadataRefreshTimer === null) {
+          void refreshSelectedRoomSnapshotFromServer().catch(() => undefined);
+        }
+      }
     }
   }
 
@@ -215,25 +257,28 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
    */
   async function refreshSelectedRoomLiveMetadata(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
-    if (!roomIdentifier) return;
+    if (!roomIdentifier || liveMetadataRefreshDisposed) return;
     if (shouldSkipPollTick({ hidden: Boolean(window.document?.hidden) })) return;
     const roomAgentWorkRefresh = refreshSelectedRoomAgentWork();
     // The retained-work poll is independent of the older live-metadata bridge:
     // a stale preload may omit either optional binding without suppressing the
     // other resource or causing a full-snapshot fallback.
-    if (!desktopIpc.room.getLiveMetadata || periodicMetadataRefreshInFlight) {
+    // A full read already includes these sections. Starting a newer periodic
+    // sequence here would discard the required message/history backfill.
+    if (!desktopIpc.room.getLiveMetadata || periodicMetadataRefreshInFlight !== null || fullSnapshotRefresh) {
       await roomAgentWorkRefresh;
       return;
     }
-    periodicMetadataRefreshInFlight = true;
     const sessionGeneration = options.sessionGeneration.value;
+    const context = liveMetadataRefreshContext;
     const refreshSequence = ++liveMetadataRefreshSequence;
+    periodicMetadataRefreshInFlight = refreshSequence;
     try {
       const [metadata, nextWorkers] = await Promise.all([
         desktopIpc.room.getLiveMetadata?.(roomIdentifier),
         desktopIpc.workers.list().catch(() => options.workers.value),
       ]);
-      if (!metadata || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration)) return;
+      if (!metadata || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, context)) return;
       options.workers.value = nextWorkers;
       options.selectedSnapshot.value = applyRoomLiveMetadata(options.selectedSnapshot.value, metadata);
       if (
@@ -243,13 +288,15 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
         options.rootRoomSnapshot.value = applyRoomLiveMetadata(options.rootRoomSnapshot.value, metadata);
       }
     } finally {
-      periodicMetadataRefreshInFlight = false;
+      if (periodicMetadataRefreshInFlight === refreshSequence) periodicMetadataRefreshInFlight = null;
     }
     await roomAgentWorkRefresh;
   }
 
   function scheduleLiveMetadataRefresh(delayMs = 800): void {
-    if (liveMetadataRefreshTimer) {
+    if (liveMetadataRefreshDisposed) return;
+    if (fullSnapshotRefresh) fullSnapshotRefresh.invalidated = true;
+    if (liveMetadataRefreshTimer !== null) {
       window.clearTimeout(liveMetadataRefreshTimer);
     }
     liveMetadataRefreshTimer = window.setTimeout(() => {
@@ -259,7 +306,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   }
 
   function clearLiveMetadataRefreshTimer(): void {
-    if (!liveMetadataRefreshTimer) return;
+    if (liveMetadataRefreshTimer === null) return;
     window.clearTimeout(liveMetadataRefreshTimer);
     liveMetadataRefreshTimer = null;
   }
@@ -295,8 +342,9 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     roomIdentifier: string | null,
     afterMessageId?: string | null,
   ): Promise<void> {
-    if (!desktopIpc.room?.startStream) return;
+    if (liveMetadataRefreshDisposed || !desktopIpc.room?.startStream) return;
     if (!roomIdentifier) {
+      invalidateMetadataRefresh();
       clearLiveMetadataRefreshInterval();
       clearSelectedRoomAgentWork();
       await desktopIpc.room.stopStream();
@@ -306,7 +354,11 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
       ? options.selectedSnapshot.value?.messages.at(-1)?.id || null
       : afterMessageId;
     const shouldRefreshRoomAgentWork = roomAgentWorkStatus.value === "idle";
-    await desktopIpc.room.startStream(roomIdentifier, latestMessageId);
+    const streamReady = desktopIpc.room.startStream(roomIdentifier, latestMessageId);
+    const context = liveMetadataRefreshContext;
+    await streamReady;
+    if (liveMetadataRefreshDisposed || context !== liveMetadataRefreshContext
+      || normalizeRoomIdentifier(options.selectedRoomIdentifier.value) !== normalizeRoomIdentifier(roomIdentifier)) return;
     startLiveMetadataRefreshInterval(roomIdentifier);
     if (shouldRefreshRoomAgentWork) void refreshSelectedRoomAgentWork();
   }

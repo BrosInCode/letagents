@@ -33,11 +33,20 @@ export function renderMessageText(
   taskReferenceIds?: ReadonlySet<string>,
 ): string {
   const rendered = renderDesktopMarkdown(value, { block: true });
-  const linked = linkTaskReferences(linkMessageReferences(rendered, messageReferenceIds), taskReferenceIds);
+  const linked = linkRenderedMessageReferences(rendered, messageReferenceIds, taskReferenceIds);
   return highlightRenderedMessage(linked, highlightQuery);
 }
 
-function highlightRenderedMessage(html: string, highlightQuery: string): string {
+/** Decorate only HTML already escaped by renderMessageText. */
+export function linkRenderedMessageReferences(
+  html: string,
+  messageReferenceIds?: ReadonlySet<string>,
+  taskReferenceIds?: ReadonlySet<string>,
+): string {
+  return linkTaskReferences(linkMessageReferences(html, messageReferenceIds), taskReferenceIds);
+}
+
+export function highlightRenderedMessage(html: string, highlightQuery: string): string {
   const normalizedQuery = highlightQuery.trim();
   if (!normalizedQuery) return html;
   const chunks = html.split(/(<[^>]+>)/g);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { computed, ref, type Ref } from "vue";
+import { computed, effectScope, ref, type Ref } from "vue";
 
 import type {
   DesktopRoomLiveMetadata,
@@ -10,6 +10,7 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import { useDesktopRoomLiveSync } from "../src/composables/useDesktopRoomLiveSync";
+import { mergeRoomSnapshotMessages } from "../src/domain/desktop-room-snapshots";
 
 const ROOM = "room_live";
 const WORK_CURSOR = `rw1.${"a".repeat(64)}.${"b".repeat(64)}`;
@@ -385,6 +386,320 @@ describe("useDesktopRoomLiveSync full-refresh path", () => {
     assert.deepEqual(harness.getSnapshotRequests, [ROOM]);
     assert.deepEqual(harness.getLiveMetadataRequests, []);
   });
+
+  it("coalesces overlapping full refreshes and applies the trailing canonical snapshot with the same merge semantics", async () => {
+    const harness = createHarness();
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    harness.rootRoomSnapshot.value = snapshotWithEventData();
+    const initial = harness.selectedSnapshot.value;
+    const first = deferred<DesktopRoomSnapshot>();
+    const trailing = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = first.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      for (let index = 0; index < 10; index += 1) {
+        harness.sync.scheduleLiveMetadataRefresh(0);
+        await harness.runTimeout();
+      }
+      assert.deepEqual(harness.getSnapshotRequests, [ROOM]);
+      assert.equal(harness.workersListCalls, 1);
+      harness.nextSnapshot = trailing.promise;
+      first.resolve(baseSnapshot());
+      await harness.settle();
+      assert.strictEqual(harness.selectedSnapshot.value, initial);
+      assert.deepEqual(harness.getSnapshotRequests, [ROOM, ROOM]);
+      assert.equal(harness.workersListCalls, 2);
+      const canonical = snapshotWithEventData();
+      canonical.messages[0]!.id = "backfilled_message";
+      canonical.tasks = [{ id: "canonical_task" }] as DesktopRoomSnapshot["tasks"];
+      trailing.resolve(canonical);
+      await harness.settle();
+      const expected = mergeRoomSnapshotMessages(initial, canonical);
+      assert.deepEqual(harness.selectedSnapshot.value, expected);
+      assert.deepEqual(harness.rootRoomSnapshot.value, expected);
+    });
+  });
+
+  it("keeps the pending debounce deadline when an invalidated full read finishes first", async () => {
+    const harness = createHarness();
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const initial = harness.selectedSnapshot.value;
+    const pending = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      harness.sync.scheduleLiveMetadataRefresh(800);
+      pending.resolve(baseSnapshot());
+      await harness.settle();
+      assert.strictEqual(harness.selectedSnapshot.value, initial);
+      assert.deepEqual(harness.getSnapshotRequests, [ROOM]);
+      harness.nextSnapshot = Promise.resolve(baseSnapshot());
+      await harness.runTimeout();
+      assert.deepEqual(harness.getSnapshotRequests, [ROOM, ROOM]);
+    });
+  });
+
+  it("keeps retained work polling during full backfill without letting metadata invalidate that backfill", async () => {
+    const harness = createHarness();
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = baseSnapshot();
+    const pending = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+      assert.deepEqual(harness.getLiveMetadataRequests, []);
+      assert.equal(harness.workersListCalls, 1);
+      assert.equal(harness.pollAgentWorkRequests.length, 1);
+      assert.equal(harness.sync.roomAgentWorkStatus.value, "ready");
+      pending.resolve(snapshotWithEventData());
+      await harness.settle();
+      assert.deepEqual(harness.selectedSnapshot.value?.messages.map(message => message.id), ["msg_1"]);
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+      assert.deepEqual(harness.getLiveMetadataRequests, [ROOM]);
+      assert.equal(harness.workersListCalls, 2);
+      assert.deepEqual(harness.selectedSnapshot.value?.participants, liveMetadata().participants);
+      assert.deepEqual(harness.selectedSnapshot.value?.messages.map(message => message.id), ["msg_1"]);
+    });
+  });
+
+  it("rejects an older periodic metadata response that completes after a full snapshot", async () => {
+    const harness = createHarness();
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = baseSnapshot();
+    const pendingMetadata = deferred<DesktopRoomLiveMetadata>();
+    harness.nextMetadata = pendingMetadata.promise;
+    const canonical = snapshotWithEventData();
+    canonical.participants = [{ participantKey: "canonical" }] as DesktopRoomSnapshot["participants"];
+    harness.nextSnapshot = Promise.resolve(canonical);
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const periodic = harness.sync.refreshSelectedRoomLiveMetadata();
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      assert.deepEqual(harness.selectedSnapshot.value?.participants, canonical.participants);
+      pendingMetadata.resolve(liveMetadata());
+      await periodic;
+      assert.deepEqual(harness.selectedSnapshot.value?.participants, canonical.participants);
+      assert.deepEqual(harness.selectedSnapshot.value?.messages.map(message => message.id), ["msg_1"]);
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+      assert.equal(harness.getLiveMetadataRequests.length, 2);
+      assert.deepEqual(harness.selectedSnapshot.value?.participants, liveMetadata().participants);
+    });
+  });
+
+  it("releases failed full reads and retries only a pending or later invalidation", async () => {
+    const harness = createHarness();
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const initial = harness.selectedSnapshot.value;
+    const first = deferred<DesktopRoomSnapshot>();
+    const trailing = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = first.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      harness.nextSnapshot = trailing.promise;
+      first.reject(new Error("offline"));
+      await harness.settle();
+      assert.equal(harness.getSnapshotRequests.length, 2);
+      trailing.reject(new Error("still offline"));
+      await harness.settle();
+      assert.equal(harness.getSnapshotRequests.length, 2);
+      assert.strictEqual(harness.selectedSnapshot.value, initial);
+      harness.nextSnapshot = Promise.resolve(baseSnapshot());
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      assert.equal(harness.getSnapshotRequests.length, 3);
+      assert.deepEqual(harness.selectedSnapshot.value?.tasks, []);
+    });
+  });
+
+  it("fences old account/session results and clears their pending debounce", async () => {
+    const harness = createHarness();
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const first = deferred<DesktopRoomSnapshot>();
+    const second = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = first.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      harness.sync.scheduleLiveMetadataRefresh(800);
+      harness.accountId.value = "account_2";
+      await harness.runTimeout();
+      assert.equal(harness.getSnapshotRequests.length, 1);
+      harness.nextSnapshot = second.promise;
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      harness.sessionGeneration.value += 1;
+      const current = baseSnapshot();
+      current.tasks = [{ id: "current-session" }] as DesktopRoomSnapshot["tasks"];
+      harness.nextSnapshot = Promise.resolve(current);
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      first.resolve(snapshotWithEventData());
+      second.resolve(snapshotWithEventData());
+      await harness.settle();
+      assert.equal(harness.getSnapshotRequests.length, 3);
+      assert.deepEqual(harness.selectedSnapshot.value?.tasks, current.tasks);
+    });
+  });
+
+  it("does not share reads across navigation away and back to the same room", async () => {
+    const harness = createHarness();
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const old = deferred<DesktopRoomSnapshot>();
+    const current = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = old.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      harness.sync.scheduleLiveMetadataRefresh(800);
+      harness.currentRoomId.value = "room_other";
+      harness.currentRoomId.value = ROOM;
+      harness.nextSnapshot = current.promise;
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      old.resolve(baseSnapshot());
+      await harness.settle();
+      assert.deepEqual(harness.selectedSnapshot.value?.tasks, snapshotWithEventData().tasks);
+      assert.equal(harness.getSnapshotRequests.length, 2);
+      // An obsolete completion must not release the current read's ownership.
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+      assert.deepEqual(harness.getLiveMetadataRequests, []);
+      current.resolve(baseSnapshot());
+      await harness.settle();
+      assert.deepEqual(harness.selectedSnapshot.value?.tasks, []);
+    });
+  });
+
+  it("discards old periodic results across account changes without blocking the new account read", async () => {
+    const harness = createHarness();
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = baseSnapshot();
+    const old = deferred<DesktopRoomLiveMetadata>();
+    const current = deferred<DesktopRoomLiveMetadata>();
+    harness.nextMetadata = old.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const priorRead = harness.sync.refreshSelectedRoomLiveMetadata();
+      harness.accountId.value = "account_2";
+      harness.nextMetadata = current.promise;
+      const currentRead = harness.sync.refreshSelectedRoomLiveMetadata();
+      old.resolve(liveMetadata());
+      await priorRead;
+      assert.deepEqual(harness.selectedSnapshot.value?.participants, []);
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+      assert.equal(harness.getLiveMetadataRequests.length, 2);
+      current.resolve(liveMetadata());
+      await currentRead;
+      assert.deepEqual(harness.selectedSnapshot.value?.participants, liveMetadata().participants);
+    });
+  });
+
+  it("clears pending full reads and timers when the owner scope is disposed", async () => {
+    const scope = effectScope();
+    const harness = scope.run(() => createHarness())!;
+    harness.currentRoomId.value = ROOM;
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const initial = harness.selectedSnapshot.value;
+    const pending = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      harness.sync.scheduleLiveMetadataRefresh(800);
+      scope.stop();
+      pending.resolve(baseSnapshot());
+      await harness.settle();
+      await harness.runTimeout();
+      await harness.runInterval();
+      assert.equal(harness.getSnapshotRequests.length, 1);
+      assert.deepEqual(harness.getLiveMetadataRequests, []);
+      assert.equal(harness.clearIntervalCalls, 1);
+      assert.strictEqual(harness.selectedSnapshot.value, initial);
+    });
+  });
+
+  it("does not accept a full read or pending debounce from a stopped and reopened room stream", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    const initial = harness.selectedSnapshot.value;
+    const pending = deferred<DesktopRoomSnapshot>();
+    harness.nextSnapshot = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      harness.sync.scheduleLiveMetadataRefresh(800);
+      await harness.sync.syncSelectedRoomStream(null);
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      pending.resolve(baseSnapshot());
+      await harness.settle();
+      await harness.runTimeout();
+      assert.strictEqual(harness.selectedSnapshot.value, initial);
+      assert.equal(harness.getSnapshotRequests.length, 1);
+      harness.nextSnapshot = Promise.resolve(baseSnapshot());
+      harness.sync.scheduleLiveMetadataRefresh(0);
+      await harness.runTimeout();
+      assert.deepEqual(harness.selectedSnapshot.value?.tasks, []);
+      assert.equal(harness.getSnapshotRequests.length, 2);
+    });
+  });
+
+  it("does not reinstall polling when a delayed stream start finishes after scope disposal", async () => {
+    const scope = effectScope();
+    const harness = scope.run(() => createHarness())!;
+    const ready = deferred<void>();
+    harness.nextStreamReady = ready.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const start = harness.sync.syncSelectedRoomStream(ROOM);
+      scope.stop();
+      ready.resolve();
+      await start;
+      assert.equal(harness.setIntervalCalls, 0);
+      assert.deepEqual(harness.pollAgentWorkRequests, []);
+    });
+  });
+
+  it("does not reinstall polling from a delayed stream start after a same-room stop and return", async () => {
+    const harness = createHarness();
+    const old = deferred<void>();
+    const current = deferred<void>();
+    harness.nextStreamReady = old.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const priorStart = harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.sync.syncSelectedRoomStream(null);
+      harness.nextStreamReady = current.promise;
+      const currentStart = harness.sync.syncSelectedRoomStream(ROOM);
+      old.resolve();
+      await priorStart;
+      assert.equal(harness.setIntervalCalls, 0);
+      assert.deepEqual(harness.pollAgentWorkRequests, []);
+      current.resolve();
+      await currentStart;
+      assert.equal(harness.setIntervalCalls, 1);
+      assert.equal(harness.pollAgentWorkRequests.length, 1);
+    });
+  });
 });
 
 function snapshotWithEventData(): DesktopRoomSnapshot {
@@ -570,6 +885,8 @@ function createHarness() {
   let documentHidden = false;
 
   const state = {
+    nextSnapshot: Promise.resolve(baseSnapshot()) as Promise<DesktopRoomSnapshot>,
+    nextStreamReady: Promise.resolve() as Promise<void>,
     nextMetadata: Promise.resolve(liveMetadata()) as Promise<DesktopRoomLiveMetadata>,
     nextAgentWork: Promise.resolve(changedRoomAgentWork()) as Promise<DesktopRoomAgentWorkPollResult>,
   };
@@ -595,7 +912,7 @@ function createHarness() {
       room: {
         getSnapshot: async (roomIdentifier: string | null): Promise<DesktopRoomSnapshot> => {
           getSnapshotRequests.push(roomIdentifier);
-          return baseSnapshot();
+          return state.nextSnapshot;
         },
         getLiveMetadata: async (roomIdentifier: string): Promise<DesktopRoomLiveMetadata> => {
           getLiveMetadataRequests.push(roomIdentifier);
@@ -610,6 +927,7 @@ function createHarness() {
         },
         startStream: async (roomIdentifier: string): Promise<void> => {
           currentRoomId.value = roomIdentifier;
+          await state.nextStreamReady;
         },
         stopStream: async (): Promise<void> => {
           stopStreamCalls += 1;
@@ -636,7 +954,7 @@ function createHarness() {
       timeoutCallback = callback;
       return 1;
     },
-    clearTimeout: () => undefined,
+    clearTimeout: () => { timeoutCallback = null; },
   };
 
   return {
@@ -650,6 +968,7 @@ function createHarness() {
     getLiveMetadataRequests,
     pollAgentWorkRequests,
     sessionGeneration,
+    workers,
     get stopStreamCalls() {
       return stopStreamCalls;
     },
@@ -661,6 +980,12 @@ function createHarness() {
     },
     get clearIntervalCalls() {
       return clearIntervalCalls;
+    },
+    set nextSnapshot(value: Promise<DesktopRoomSnapshot>) {
+      state.nextSnapshot = value;
+    },
+    set nextStreamReady(value: Promise<void>) {
+      state.nextStreamReady = value;
     },
     set nextMetadata(value: Promise<DesktopRoomLiveMetadata>) {
       state.nextMetadata = value;
@@ -682,7 +1007,9 @@ function createHarness() {
       await flush();
     },
     runTimeout: async () => {
-      timeoutCallback?.();
+      const callback = timeoutCallback;
+      timeoutCallback = null;
+      callback?.();
       await flush();
     },
     settle: flush,
