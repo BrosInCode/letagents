@@ -2333,7 +2333,9 @@ for (const shutdown of ["stop", "handoff"] as const) test(`daemon captures only 
   } finally { inspection.close(); await env.cleanup(); }
 });
 
-for (const shutdown of ["stop", "handoff"] as const) test(`daemon ${shutdown} does not wait for a pending native subscription and disposes its late result`, async () => {
+for (const shutdown of ["stop", "handoff"] as const) test(shutdown === "stop"
+  ? "daemon stop does not wait for a pending native subscription and disposes its late result"
+  : "daemon handoff defers a pending native subscription and preserves its queued evidence", async () => {
   let release!: (subscription: NativeExecutionSubscription) => void;
   const pending = new Promise<NativeExecutionSubscription>((resolve) => { release = resolve; });
   let listener: ((event: NativeExecutionObservation) => void) | undefined;
@@ -2346,18 +2348,34 @@ for (const shutdown of ["stop", "handoff"] as const) test(`daemon ${shutdown} do
     const event: NativeExecutionObservation = { sourceId: "source-late", sequence: 1, observedAtMs: Date.now(), nativeProcessPid: 7123, nativeProcessIdentity: "observed-birth",
       fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } };
     listener!(event);
-    if (shutdown === "stop") await within(env.daemon.stop(), "stop with unresolved optional subscription", 1000);
+    const subscription = { sourceId: "source-late", position: () => ({ firstRetainedSequence: 1, latestSequence: 1 }), dispose: () => { disposed += 1; } };
+    if (shutdown === "stop") {
+      await within(env.daemon.stop(), "stop with unresolved optional subscription", 1000);
+      release(subscription);
+    }
     else {
+      const deferred = await within(daemonRequest(env.paths.socketPath, "daemon.prepare_handoff"),
+        "handoff promptly defers an unresolved subscription", 1000);
+      assert.equal(deferred.ok, false);
+      assert.match(deferred.error!, /pending agent lifecycle evidence could not be preserved/);
+      assert.equal(disposed, 0);
+      assert.equal(env.internals.liveHandles.get(env.id), env.handle);
+      assert.equal((env.internals.executionCapture as unknown as { database: DatabaseSync }).database.isOpen, true);
+      release(subscription);
+      const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
+      try {
+        await eventually(async () => inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count === 1,
+          "deferred handoff retains and commits the original queued observation");
+      } finally { inspection.close(); }
       const handoff = env.daemon.waitForHandoff();
       assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true);
-      await within(handoff, "handoff with unresolved optional subscription", 1000);
+      await within(handoff, "handoff after the original subscription resolves", 1000);
     }
-    release({ sourceId: "source-late", position: () => ({ firstRetainedSequence: 1, latestSequence: 1 }), dispose: () => { disposed += 1; } });
-    await eventually(async () => disposed === 1, "late subscription is disposed rather than reinstalled");
+    await eventually(async () => disposed === 1, "shutdown disposes the original subscription exactly once");
     listener!(event);
     await new Promise<void>((resolve) => setImmediate(resolve));
     const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
-    try { assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count, 0); }
+    try { assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count, shutdown === "stop" ? 0 : 1); }
     finally { inspection.close(); }
     assert.equal(subscriptions, 1);
     assert.equal((env.internals.executionCapture as unknown as { database: DatabaseSync }).database.isOpen, false);
