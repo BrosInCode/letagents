@@ -8,6 +8,7 @@ import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 
+import { DaemonAuthority } from "../daemon-authority.js";
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import type { ProviderActionHandle, ProviderActionTerminal } from "../provider-action-port.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
@@ -19,7 +20,7 @@ import {
   RuntimeConfigurationApplyCoordinator,
   type RuntimeConfigurationApplyCoordinatorOptions,
 } from "../runtime-configuration-apply-coordinator.js";
-import type { DaemonManifestEntry } from "../types.js";
+import type { DaemonManifestEntry, ExecutionTerminalPayload } from "../types.js";
 
 const connection = {
   kind: "codex_app_server" as const,
@@ -53,6 +54,12 @@ const terminal: ProviderActionTerminal = {
   signal: null,
   terminalCause: "stopped",
   providerContinuationId: "continuation-1",
+};
+
+const terminalAuthority: ProviderTerminalPorts["authority"] = {
+  assertCurrent: async () => {},
+  isClosing: () => false,
+  fenceCommit: async commit => { await commit(); },
 };
 
 function manifestEntry(): DaemonManifestEntry {
@@ -259,6 +266,7 @@ test("intentional replacement classifies an onExit/stop-result race exactly once
   let terminalRecords = 0;
   let convergenceRequests = 0;
   const ports: ProviderTerminalPorts = {
+    authority: terminalAuthority,
     settleRuntimeApprovals: async () => {},
     currentDaemonGeneration: () => 7,
     nowMs: () => Date.parse("2026-09-02T00:00:00.000Z"),
@@ -312,6 +320,7 @@ test("a native stop failure clears the replacement reservation without misclassi
   let removed = false;
   let transitions = 0;
   const ports: ProviderTerminalPorts = {
+    authority: terminalAuthority,
     settleRuntimeApprovals: async () => {},
     currentDaemonGeneration: () => 7,
     nowMs: () => Date.parse("2026-09-02T00:00:00.000Z"),
@@ -357,6 +366,36 @@ test("a native stop failure clears the replacement reservation without misclassi
   assert.equal(transitions, 1, "the exact installation remains replaceable after the failed stop");
 });
 
+for (const ending of ["close", "superseded-result", "superseded-error"] as const) test(`configuration replacement cancels before terminal admission on ${ending}`, async () => {
+  const liveHandles = new Map([["agent-1", handle]]);
+  let current = true, resolve!: (terminal: ProviderActionTerminal) => void, reject!: (error: Error) => void;
+  const stopping = new Promise<ProviderActionTerminal>((accept, decline) => { resolve = accept; reject = decline; });
+  const coordinator = new ProviderTerminalCoordinator({
+    authority: terminalAuthority, currentDaemonGeneration: () => 7, liveHandles,
+    streams: { isLatestInstallation: () => current, remove: () => { throw new Error("obsolete terminal cannot revoke a handle"); } },
+  } as unknown as ProviderTerminalPorts);
+  const operation = coordinator.replaceConfiguration(installation, () => stopping).then(
+    () => "resolved", error => String(error),
+  );
+  if (ending === "close") {
+    coordinator.close();
+    await assert.rejects(coordinator.replaceConfiguration(installation, async () => {
+      throw new Error("closed coordinator must never invoke native stop");
+    }), /Provider installation changed/);
+  }
+  else {
+    current = false;
+    liveHandles.set("agent-1", { ...handle, pid: 43 });
+    if (ending === "superseded-result") resolve(terminal); else reject(new Error("native stop failed after supersession"));
+  }
+  const outcome = await Promise.race([operation, new Promise<string>(resolve => setImmediate(() => resolve("pending")))]);
+  assert.match(outcome, ending === "close" ? /replacement closed/ : /lost its exact installation|stop failed after supersession/);
+  assert.equal((coordinator as unknown as { plannedConfigurationReplacements: Map<unknown, unknown> }).plannedConfigurationReplacements.size, 0);
+  resolve(terminal); // a late native result cannot re-admit work after cancellation
+  await coordinator.handleTerminal(installation, terminal);
+  assert.equal(liveHandles.get("agent-1")?.pid, ending === "close" ? 42 : 43);
+});
+
 test("process-death evidence must match the immutable installation, including PID birth", () => {
   const coordinator = new ProviderTerminalCoordinator({ currentDaemonGeneration: () => 7 } as ProviderTerminalPorts);
   const connection = { kind: "codex_app_server" as const, url: "ws://localhost:4000", pid: 4000, processIdentity: "original-birth" };
@@ -370,6 +409,235 @@ test("process-death evidence must match the immutable installation, including PI
   const { nativeRuntimeDeath, ...transportOnly } = terminal;
   assert.equal(coordinator.terminalPayload({ ...transportOnly, terminalCause: "protocol_error" }, "provider", connection).native_runtime_death, undefined);
 });
+
+for (const retry of ["callback", "automatic", "superseded", "closed", "generation-loss", "invalid-cleanup", "replacement", "quarantine"] as const) for (const failedStage of ["cleanup", "record", "record-committed", "approvals", "fence", "projection", "projection-committed"] as const) {
+  if (retry === "invalid-cleanup" && failedStage !== "cleanup") continue;
+  test(`terminal settlement resumes the exact retired installation after ${failedStage} fails via ${retry}`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const liveHandles = new Map([["agent-1", handle]]);
+    const entry = manifestEntry();
+    if (failedStage === "fence") entry.desired_state = "stopped";
+    let failed = false, generation = 7;
+    if (retry === "quarantine") entry.condition = "quarantined";
+    const failOnce = (stage: string) => {
+      if (stage === failedStage && !failed) { failed = true; throw new Error(`injected ${stage} failure`); }
+    };
+    let saved: ReturnType<ProviderTerminalCoordinator["terminalPayload"]> | null = null;
+    let records = 0, approvals = 0, projections = 0, convergence = 0, fenceReleases = 0;
+    const ports: ProviderTerminalPorts = {
+      authority: terminalAuthority,
+      currentDaemonGeneration: () => generation,
+      nowMs: () => Date.parse(terminal.endedAt),
+      liveHandles,
+      manifest: { getEntry: async () => entry, load: async () => ({ entries: [entry] }) },
+      durability: {
+        getAttempt: async () => ({ execution_generations: [{ execution_generation_id: "generation-1",
+          actor: "daemon-provider", generation: 7, terminal: saved }] }) as never,
+        recordTerminal: async (_attempt, _execution, payload) => {
+          failOnce("record");
+          assert.equal(saved, null, "a committed terminal must never be written again");
+          saved = structuredClone(payload); records += 1;
+          failOnce("record-committed");
+          return {} as never;
+        },
+        releaseTerminalExecutionFence: async () => { failOnce("fence"); fenceReleases += 1; },
+      },
+      runtimeCustody: { deletePendingResumeBinding: () => {} },
+      streams: {
+        remove: exact => {
+          if (exact !== installation || liveHandles.get("agent-1") !== handle) return false;
+          liveHandles.delete("agent-1"); failOnce("cleanup"); return true;
+        },
+        isLatestInstallation: exact => exact === installation,
+      },
+      settleRuntimeApprovals: async () => { failOnce("approvals"); approvals += 1; },
+      delivery: { start: async () => {} },
+      serializeEntry: async (_id, operation) => operation(),
+      serializeManifest: async operation => operation(),
+      transitionOnce: async (_id, state, condition, _cause, _actor, reconciliation) => {
+        failOnce("projection");
+        entry.observed_state = state; entry.condition = condition; entry.reconciliation = reconciliation;
+        projections += 1; failOnce("projection-committed");
+      },
+      requestConvergence: () => { convergence += 1; },
+    };
+    const coordinator = new ProviderTerminalCoordinator(ports);
+    const observed = retry === "invalid-cleanup" ? { ...terminal,
+      nativeRuntimeDeath: { kind: "codex_app_server" as const, pid: 42, processIdentity: "wrong-birth" } } : terminal;
+    let replaced: Promise<void> | undefined;
+    if (retry === "replacement") {
+      replaced = coordinator.replaceConfiguration(installation, async () => {
+        await assert.rejects(coordinator.handleTerminal(installation, observed), /injected .* failure/);
+        throw new Error("stop failed after exact onExit");
+      });
+      await new Promise<void>(resolve => setImmediate(resolve));
+    } else await assert.rejects(coordinator.handleTerminal(installation, observed), /injected .* failure/);
+    assert.equal(liveHandles.has("agent-1"), false, "failed persistence cannot restore dead publication authority");
+    if (retry === "superseded" || retry === "closed" || retry === "generation-loss" || retry === "invalid-cleanup") {
+      const before = [records, approvals, projections, convergence, fenceReleases];
+      const successor = { ...handle, pid: 43, providerContinuationId: "successor" };
+      if (retry === "superseded") liveHandles.set("agent-1", successor);
+      else if (retry === "closed") coordinator.close();
+      else if (retry === "generation-loss") generation = 8;
+      t.mock.timers.tick(30_000);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.deepEqual([records, approvals, projections, convergence, fenceReleases], before,
+        "an obsolete retry cannot complete another owner's bookkeeping");
+      if (retry === "superseded") assert.equal(liveHandles.get("agent-1"), successor);
+      return;
+    }
+    if (retry === "callback") await coordinator.handleTerminal(installation, { ...terminal, terminalCause: "protocol_error" });
+    else {
+      t.mock.timers.tick(25);
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    if (replaced) await replaced;
+    assert.equal(records, 1, "the first exact terminal is eventually persisted once");
+    assert.equal(saved!.terminal_cause, "stopped", "a repeated callback cannot replace the retained first terminal");
+    assert.ok(approvals >= 1, "approval settlement eventually completes");
+    assert.equal(projections, 1, "committed projection is recognized without duplicate notices");
+    if (retry === "replacement") assert.equal(entry.observed_state, "recovering");
+    assert.equal(entry.reconciliation?.last_terminal?.terminal_cause, "stopped");
+    assert.equal(convergence, retry === "replacement" ? 0 : 1, "a successful terminal settlement requests one successor reconciliation");
+    assert.equal(fenceReleases, failedStage === "fence" ? 1 : 0);
+    await coordinator.handleTerminal(installation, terminal);
+    assert.equal(records, 1); assert.equal(convergence, retry === "replacement" ? 0 : 1, "a completed obligation is not dispatched twice");
+  });
+}
+
+for (const change of ["successor", "closed", "closed-error", "generation", "retiring"] as const) for (const stage of ["record", "approvals", "fence", "projection"] as const) test(`terminal commit guard preserves authority during ${stage} on ${change}`, async () => {
+  const liveHandles = new Map([["agent-1", handle]]);
+  const entry = manifestEntry();
+  entry.desired_state = "stopped";
+  let saved: ReturnType<ProviderTerminalCoordinator["terminalPayload"]> | null = null;
+  let generation = 7, closing = false;
+  const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => closing, notifyStateChanged: () => {} });
+  let heldStage = "", effects = 0, entered!: () => void, unblock!: () => void;
+  const entering = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { unblock = resolve; });
+  const guarded = async (name: string, commit: () => Promise<void>, fence?: (commit: () => Promise<void>) => Promise<void>) => {
+    heldStage = name;
+    assert.ok(fence, "every terminal mutation supplies the exact-owner commit guard");
+    await fence(async () => { effects++; await commit(); });
+  };
+  const ports: ProviderTerminalPorts = {
+    authority: { ...terminalAuthority, isClosing: () => closing, fenceCommit: async commit => {
+      if (heldStage === stage) {
+        entered(); await gate;
+        if (change === "closed-error") throw new Error("real local failure during close");
+      }
+      await authority.fenceAdmittedTransitionCommit(commit);
+    } },
+    currentDaemonGeneration: () => generation, nowMs: () => Date.parse(terminal.endedAt), liveHandles,
+    manifest: { getEntry: async () => entry, load: async () => ({ entries: [entry] }) },
+    durability: {
+      getAttempt: async () => ({ execution_generations: [{ execution_generation_id: "generation-1",
+        actor: "daemon-provider", generation: 7, terminal: saved }] }) as never,
+      recordTerminal: async (_attempt, _execution, payload, _limit, fence) => {
+        await guarded("record", async () => { saved = payload; }, fence); return {} as never;
+      },
+      releaseTerminalExecutionFence: async (_attempt, _execution, fence) => guarded("fence", async () => {}, fence),
+    },
+    runtimeCustody: { deletePendingResumeBinding: () => {} },
+    streams: { remove: () => { liveHandles.delete("agent-1"); return true; }, isLatestInstallation: exact => exact === installation },
+    settleRuntimeApprovals: async (_id, fence) => guarded("approvals", async () => {}, fence),
+    delivery: { start: async () => { throw new Error("superseded terminal cannot deliver"); } },
+    serializeEntry: async (_id, run) => run(), serializeManifest: async run => run(),
+    transitionOnce: async (_id, _state, _condition, _cause, _actor, _reconciliation, _notice, _terminal, fence) =>
+      guarded("projection", async () => {}, fence),
+    requestConvergence: () => { throw new Error("superseded terminal cannot converge"); },
+  };
+  const coordinator = new ProviderTerminalCoordinator(ports);
+  const operation = coordinator.handleTerminal(installation, terminal);
+  await entering;
+  const before = effects;
+  const successor = { ...handle, pid: 43 };
+  if (change === "successor") liveHandles.set("agent-1", successor);
+  else if (change === "closed" || change === "closed-error") coordinator.close();
+  else if (change === "generation") generation = 8;
+  else { coordinator.beginRetirement(); closing = true; }
+  unblock();
+  if (change === "retiring") {
+    await operation;
+    assert.equal(effects, 4, "an exact terminal admitted before retirement finishes under the existing authority");
+  } else {
+    if (change === "closed") await operation;
+    else await assert.rejects(operation, change === "closed-error" ? /real local failure during close/ : /lost its exact installation authority/);
+    assert.equal(effects, before, "a guard after asynchronous authority acquisition prevents the stale commit itself");
+    if (change === "successor") assert.equal(liveHandles.get("agent-1"), successor);
+  }
+  coordinator.close();
+});
+
+for (const variant of ["different-observation", "canonical-unknown-death", "callback-unknown-death",
+  "wrong-actor", "wrong-generation", "wrong-continuation", "wrong-birth", "wrong-callback-birth",
+  "wrong-callback-continuation"] as const) {
+  test(`terminal settlement completes only exact committed evidence: ${variant}`, async () => {
+    const entry = manifestEntry();
+    entry.desired_state = "stopped";
+    entry.observed_state = "stopping";
+    const death = { kind: connection.kind, pid: connection.pid, processIdentity: connection.processIdentity };
+    const callback: ProviderActionTerminal = { ...terminal, signal: "SIGTERM", exitCode: 143,
+      endedAt: "2026-09-02T00:00:00.009Z", terminalCause: "killed", nativeRuntimeDeath: death };
+    const saved: ExecutionTerminalPayload = { ended_at: "2026-09-02T00:00:00.010Z", exit_code: null,
+      signal: null, terminal_cause: "stopped", actor: "daemon-provider", generation: 7,
+      provider_continuation_id: "continuation-1", native_runtime_death: death,
+      stdio_archive_ref: null, stdio_tail: "" };
+    if (variant === "canonical-unknown-death") delete saved.native_runtime_death;
+    if (variant === "callback-unknown-death") delete callback.nativeRuntimeDeath;
+    if (variant === "wrong-actor") saved.actor = "another-owner";
+    if (variant === "wrong-generation") saved.generation = 8;
+    if (variant === "wrong-continuation") saved.provider_continuation_id = "another-continuation";
+    if (variant === "wrong-birth") saved.native_runtime_death = { ...death, processIdentity: "another-birth" };
+    if (variant === "wrong-callback-birth") callback.nativeRuntimeDeath = { ...death, processIdentity: "another-birth" };
+    if (variant === "wrong-callback-continuation") callback.providerContinuationId = "another-continuation";
+    const original = structuredClone(saved);
+    const liveHandles = new Map([[entry.id, handle]]);
+    let approvals = 0, approvalAttempts = 0, fenceReleases = 0, projections = 0;
+    const diagnostics: string[] = [];
+    const coordinator = new ProviderTerminalCoordinator({
+      authority: terminalAuthority, currentDaemonGeneration: () => 7, nowMs: () => Date.parse(saved.ended_at), liveHandles,
+      manifest: { getEntry: async () => entry, load: async () => ({ entries: [entry] }) },
+      durability: {
+        getAttempt: async () => ({ execution_generations: [{ execution_generation_id: "generation-1",
+          actor: "daemon-provider", generation: 7, terminal: saved }] }) as never,
+        recordTerminal: async () => { throw new Error("committed evidence must never be overwritten"); },
+        releaseTerminalExecutionFence: async () => { fenceReleases += 1; },
+      },
+      runtimeCustody: { deletePendingResumeBinding: () => {} },
+      streams: { isLatestInstallation: exact => exact === installation,
+        remove: () => { liveHandles.delete(entry.id); return true; } },
+      delivery: { start: async () => {} },
+      serializeEntry: async (_id, operation) => operation(), serializeManifest: operation => operation(),
+      transitionOnce: async (_id, state, condition, _cause, _actor, reconciliation) => {
+        projections += 1; entry.observed_state = state; entry.condition = condition; entry.reconciliation = reconciliation;
+      },
+      requestConvergence: () => {}, settleRuntimeApprovals: async () => {
+        if (++approvalAttempts === 1) throw new Error("local approval storage unavailable once");
+        approvals += 1;
+      },
+      diagnostic: (_id, error) => { diagnostics.push(String(error)); },
+    });
+    try {
+      if (variant.startsWith("wrong-")) {
+        await assert.rejects(coordinator.handleTerminal(installation, callback), /exact execution identity|exact provider installation/);
+        assert.deepEqual([approvals, fenceReleases, projections], [0, 0, 0]);
+        assert.equal(entry.observed_state, "stopping");
+      } else {
+        await assert.rejects(coordinator.handleTerminal(installation, callback), /local approval storage unavailable once/);
+        await coordinator.handleTerminal(installation, callback);
+        assert.deepEqual([approvals, fenceReleases, projections], [1, 1, 1]);
+        assert.equal(entry.observed_state, "stopped");
+        assert.deepEqual(entry.reconciliation?.last_terminal, original,
+          "remaining projection uses the committed result, including honest unknown death");
+        assert.equal(diagnostics.filter(message => message.includes("differing terminal observations")).length, 1,
+          "a repeated local settlement reports the observation difference only once");
+      }
+      assert.deepEqual(saved, original, "all historical evidence remains immutable");
+      await coordinator.drain();
+    } finally { coordinator.close(); }
+  });
+}
 
 function managedHarness() {
   const env = applyHarness({ head: async () => ({ state: "pending", provider_turn_id: null }) });

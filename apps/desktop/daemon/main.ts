@@ -51,7 +51,7 @@ import {
 } from "./provider-reconciliation-coordinator.js";
 import { ProviderSchedulerFailureCoordinator } from "./provider-scheduler-failure-coordinator.js";
 import { ProviderStreamCoordinator } from "./provider-stream-coordinator.js";
-import { ProviderTerminalCoordinator } from "./provider-terminal-coordinator.js";
+import { ProviderTerminalCoordinator, type TerminalCommitFence } from "./provider-terminal-coordinator.js";
 import { RoomDeliveryControl } from "./room-delivery-control.js";
 import { RoomMoveCoordinator } from "./room-move-coordinator.js";
 import { RuntimeConfigurationApplyCoordinator } from "./runtime-configuration-apply-coordinator.js";
@@ -150,6 +150,7 @@ export class SupervisorDaemon {
   private readonly providerReconciliation: ProviderReconciliationCoordinator | null;
   private readonly providerSchedulerFailures: ProviderSchedulerFailureCoordinator;
   private readonly providerTerminals: ProviderTerminalCoordinator;
+  private readonly handoffCleanupFailures: unknown[] = [];
   /**
    * Control requests must be able to fence a launch while its per-entry
    * reconciliation lane is awaiting remote authorization or capabilities.
@@ -671,7 +672,14 @@ export class SupervisorDaemon {
       scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
     });
     this.providerTerminals = new ProviderTerminalCoordinator({
-      settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
+      authority: {
+        assertCurrent: () => this.singleton.assertCurrent(),
+        isClosing: () => this.handoffScheduled,
+        // The exact owner checks retirement admission inside the reserved commit.
+        fenceCommit: commit => this.fenceAdmittedTransitionCommit(commit),
+      },
+      diagnostic: (entryId, error) => console.warn("[terminal_settlement]", entryId, redactCredentialText(String(error)).value),
+      settleRuntimeApprovals: (entryId, fence) => this.settleRuntimeApprovals(entryId, fence),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
       liveHandles: this.liveHandles,
@@ -687,8 +695,8 @@ export class SupervisorDaemon {
       },
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
-      transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal) =>
-        this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal),
+      transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal, fence) =>
+        this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal, fence),
       requestConvergence: (entryId) => this.requestConvergence(entryId),
     });
     this.runtimeConfigurationApply = new RuntimeConfigurationApplyCoordinator({
@@ -870,7 +878,12 @@ export class SupervisorDaemon {
       isNativeControlActive: (entryId) => this.entryConcurrency.isNativeControlActive(entryId),
       isRetiring: () => this.handoffScheduled,
       setDraining: (draining) => { this.handoffDraining = draining; },
-      beginRetirement: () => { this.executionCapture?.sealForPlannedHandoff(); this.handoffScheduled = true; },
+      drainTerminals: () => this.providerTerminals.drain(),
+      beginRetirement: () => {
+        this.providerTerminals.beginRetirement();
+        try { this.executionCapture?.sealForPlannedHandoff(); this.handoffScheduled = true; }
+        catch (error) { this.providerTerminals.cancelRetirement(); throw error; }
+      },
       retire: () => this.retireForHandoff(),
       finish: () => this.stopForHandoff(),
       requestConvergence: (entryId) => this.requestConvergence(entryId),
@@ -1035,6 +1048,7 @@ export class SupervisorDaemon {
     // continuations before awaiting any drain so they cannot retain a socket
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
+    this.providerTerminals.close();
     this.hostApprovals.close();
     const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
     this.roomWorkPublisher?.close();
@@ -1080,7 +1094,7 @@ export class SupervisorDaemon {
     // committing daemon-owned state by fenceDaemonCommit().
     this.workerRuntimeCustody.destroyAllCredentials();
     this.wakeRoomMoveReconciliationWaiters();
-    const failures: unknown[] = [];
+    const failures: unknown[] = [...this.handoffCleanupFailures];
     try { await this.deliveryCutovers.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.fenceAndDrainRoomMoveReconciliations(); } catch (error) { failures.push(error); }
@@ -1240,6 +1254,9 @@ export class SupervisorDaemon {
     await this.providerExecution?.drainDispatches();
     await this.boundedEffects.drainJournalReservations();
     await this.boundedEffects.drainExternalExecutions();
+    await this.providerTerminals.drainAndClose(() => {
+      try { this.providerStreams.detachAll(); } catch (error) { this.handoffCleanupFailures.push(error); }
+    });
   }
 
   private beginBootstrap<T>(run: (input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation) => Promise<T>, input: { entry_id: string; daemon_generation: number }): Promise<T> {
@@ -1482,7 +1499,7 @@ export class SupervisorDaemon {
     return this.manifestTransitions.transition(entryId, to, condition, cause, actor, reconciliation);
   }
 
-  private async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload): Promise<void> {
+  private async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload, fence?: TerminalCommitFence): Promise<void> {
     await this.manifestTransitions.transitionOnce(
       entryId,
       to,
@@ -1492,6 +1509,7 @@ export class SupervisorDaemon {
       reconciliation,
       notice,
       terminal,
+      fence,
     );
   }
 
@@ -1589,13 +1607,13 @@ export class SupervisorDaemon {
     return this.authority.serializeManifestCommit(operation);
   }
 
-  private settleRuntimeApprovals(entryId: string): Promise<void> {
+  private settleRuntimeApprovals(entryId: string, fence?: TerminalCommitFence): Promise<void> {
     return settleRuntimeApprovalRequests(entryId, {
-      settle: () => this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(), commit => this.fenceDaemonCommit(commit)),
+      settle: () => this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(), fence ?? (commit => this.fenceDaemonCommit(commit))),
       notifyChanged: () => this.notifyStateChanged(),
       isHandoffScheduled: () => this.handoffScheduled,
       assertCurrent: () => this.singleton.assertCurrent(),
-      scheduleRecovery: (id, delayMs) => this.scheduleRecoveryConvergence(id, delayMs),
+      scheduleRecovery: (id, delayMs) => { if (!fence) this.scheduleRecoveryConvergence(id, delayMs); },
     });
   }
 

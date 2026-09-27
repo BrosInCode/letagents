@@ -17,6 +17,7 @@ type ProviderHandoffCoordinatorOptions = {
   isNativeControlActive(entryId: string): boolean;
   isRetiring(): boolean;
   setDraining(draining: boolean): void;
+  drainTerminals(): Promise<void>;
   beginRetirement(): void;
   retire(): Promise<void>;
   finish(): Promise<void>;
@@ -27,6 +28,7 @@ type ProviderHandoffCoordinatorOptions = {
 export class ProviderHandoffCoordinator {
   private preparation: Promise<void> | null = null;
   private prepared = false;
+  private retirement: Promise<void> | null = null;
 
   /** Resolves only once the daemon has relinquished every authority surface. */
   private readonly completion: Promise<void>;
@@ -55,29 +57,35 @@ export class ProviderHandoffCoordinator {
   }
 
   private async prepareOnce(): Promise<void> {
-    this.options.setDraining(true);
-    this.options.delivery()?.pauseDispatch();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const controller = new AbortController();
-    try {
-      await Promise.race([
-        this.drainNonSurvivingProviders(controller.signal),
-        new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => reject(new Error("Update deferred: agents are still finishing work. Their current turns and approvals remain available; try again when they finish.")), 30_000);
-        }),
-      ]);
-      if (this.options.isRetiring()) return;
-      this.options.beginRetirement();
-    } finally {
-      if (timeout) clearTimeout(timeout);
-      controller.abort();
-      this.options.setDraining(false);
-      if (!this.options.isRetiring()) {
-        this.options.delivery()?.resumeDispatch();
-        for (const entry of (await this.options.manifest.load()).entries) this.options.requestConvergence(entry.id);
+    if (!this.options.isRetiring()) {
+      this.options.setDraining(true);
+      this.options.delivery()?.pauseDispatch();
+      const controller = new AbortController();
+      try {
+        await this.withDeadline((async () => {
+          await this.drainNonSurvivingProviders(controller.signal);
+          controller.signal.throwIfAborted();
+          await this.options.drainTerminals();
+        })(), "Update deferred: agents are still finishing work. Their current turns and approvals remain available; try again when they finish.");
+        if (!this.options.isRetiring()) this.options.beginRetirement();
+      } finally {
+        controller.abort();
+        this.options.setDraining(false);
+        if (!this.options.isRetiring()) {
+          this.options.delivery()?.resumeDispatch();
+          for (const entry of (await this.options.manifest.load()).entries) this.options.requestConvergence(entry.id);
+        }
       }
     }
-    await this.options.retire();
+    // A set retirement flag proves revocation, not completed settlement. Keep
+    // an in-flight retirement across timeout; a rejected attempt may be resumed.
+    if (!this.retirement) {
+      const operation = this.options.retire();
+      this.retirement = operation;
+      void operation.catch(() => { if (this.retirement === operation) this.retirement = null; });
+    }
+    await this.withDeadline(this.retirement,
+      "Update deferred: agent exit evidence is still being saved. Work is preserved; retirement has not completed.");
     this.prepared = true;
     // Delayed teardown exists only to flush the successful socket reply.
     setTimeout(() => {
@@ -86,6 +94,15 @@ export class ProviderHandoffCoordinator {
         (error) => this.rejectCompletion(error),
       );
     }, 25).unref();
+  }
+
+  private async withDeadline(operation: Promise<void>, message: string): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), 30_000);
+      })]);
+    } finally { if (timeout) clearTimeout(timeout); }
   }
 
   /** The approval/stdio owner stays live until non-surviving providers finish. */
