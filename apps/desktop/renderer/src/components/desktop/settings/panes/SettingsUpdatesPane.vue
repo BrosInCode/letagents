@@ -54,14 +54,14 @@
       </div>
     </article>
 
-    <article v-if="desktopIpc.maintenance" class="settings-update-card" :data-tone="maintenanceHeld ? 'warning' : 'neutral'">
+    <article v-if="desktopIpc.maintenance && (restartFailed || maintenanceHeld)" class="settings-update-card" data-testid="service-recovery" data-tone="warning">
       <div class="settings-update-copy">
         <p>Background service</p>
         <h2>{{ maintenanceReady ? 'Supervision paused for maintenance' : maintenanceHeld ? 'Service maintenance requested' : 'Service recovery' }}</h2>
         <span>{{ maintenanceReady
           ? 'Saved work is preserved. You can install an update now, or resume supervision. Detached provider processes may still be running.'
           : maintenanceHeld ? 'Waiting for the restarted service. Refresh its status to check whether supervision can resume. Saved work is preserved.'
-          : 'If an agent prevents the service from restarting, force restart LetAgents with supervision paused.' }}</span>
+          : 'The normal restart failed. You can force restart LetAgents with supervision paused.' }}</span>
         <span v-if="maintenanceError" role="alert">{{ maintenanceError }}</span>
       </div>
       <div class="settings-update-actions">
@@ -69,7 +69,7 @@
           :disabled="maintenanceBusy" data-testid="refresh-service-status" @click="refreshMaintenance">Refresh service status</button>
         <button v-if="maintenanceReady" type="button" class="primary-button settings-action-button"
           :disabled="maintenanceBusy" data-testid="resume-supervision" @click="restartService(true)">Resume supervision</button>
-        <button type="button" class="ghost-button settings-action-button" :disabled="maintenanceBusy"
+        <button v-if="!maintenanceReady" type="button" class="ghost-button settings-action-button" :disabled="maintenanceBusy"
           data-testid="force-restart-service" @click="restartService(false)">{{ maintenanceBusy ? 'Please wait…' : 'Force restart service' }}</button>
       </div>
     </article>
@@ -123,6 +123,7 @@ defineEmits<{
 }>();
 
 const presentation = computed(() => desktopUpdatePresentation(props.updateStatus));
+const restartFailed = computed(() => props.updateStatus?.failureStage === 'install' && Boolean(props.updateStatus.error));
 const maintenanceHeld = ref(false);
 const maintenanceReady = ref(false);
 const maintenanceBusy = ref(false);
