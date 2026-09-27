@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,8 @@ import {
   prepareStateRecoveryBackup, StateRecoveryError, type StateRecoveryBackup,
 } from "../state-recovery-backup.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
+import { compactDaemonStateDatabase } from "../daemon-state-maintenance.js";
+import { cloneStateDatabaseForCompaction } from "../state-recovery-backup.js";
 import { requestStateRecoveryKey, withProtectedStateUpgrade } from "../state-recovery-key.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "../lifecycle-log.js";
 
@@ -424,4 +427,126 @@ test("post-commit/pre-receipt crash retains one unverified snapshot without fake
   try { assert.equal(await cleanupStateRecoveryBackup(env.path, current, { clear: true }), true); } finally { current.close(); }
   assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
   assert.equal(env.keyRequests(), 1);
+});
+
+
+async function fragmentedStateFixture(t: test.TestContext) {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-compact-state-"));
+  const path = join(directory, "daemon.sqlite");
+  const initial = new DatabaseSync(path);
+  initial.exec("PRAGMA page_size=8192; CREATE TABLE page_size_seed(x); DROP TABLE page_size_seed");
+  initial.close();
+  const database = await openDaemonStateDatabase(path, db => new DaemonStateSchema().createSchema(db));
+  database.exec(`PRAGMA wal_autocheckpoint=0;
+    PRAGMA application_id=741;
+    CREATE TABLE maintenance_parent(id INTEGER PRIMARY KEY);
+    CREATE TABLE maintenance_child(parent_id INTEGER REFERENCES maintenance_parent(id), payload ANY) STRICT;
+    INSERT INTO maintenance_parent VALUES(99);
+    INSERT INTO maintenance_child(rowid,parent_id,payload) VALUES(77,99,9223372036854775807);
+    CREATE TABLE maintenance_generated(id INTEGER, doubled INTEGER GENERATED ALWAYS AS(id*2) STORED);
+    INSERT INTO maintenance_generated(rowid,id) VALUES(88,5);
+    CREATE TABLE maintenance_auto(id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT);
+    INSERT INTO maintenance_auto VALUES(200,'then deleted'); DELETE FROM maintenance_auto;
+    CREATE TABLE maintenance_without_rowid(id TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID;
+    INSERT INTO maintenance_without_rowid VALUES('blob',X'0001FF');
+    CREATE INDEX maintenance_child_payload ON maintenance_child(payload);
+    CREATE VIEW maintenance_view AS SELECT payload FROM maintenance_child;
+    CREATE TRIGGER maintenance_parent_deleted AFTER DELETE ON maintenance_parent
+      BEGIN DELETE FROM maintenance_child WHERE parent_id=old.id; END;
+    CREATE TABLE maintenance_padding(data BLOB); BEGIN;
+    INSERT INTO maintenance_padding VALUES(zeroblob(80*1024*1024));
+    COMMIT; PRAGMA wal_checkpoint(TRUNCATE); DELETE FROM maintenance_padding;
+    INSERT INTO maintenance_auto(value) VALUES('committed only in WAL');`);
+  assert.ok(Number(database.prepare("PRAGMA freelist_count").get()!.freelist_count) * 8192 > 64 * 1024 * 1024);
+  t.after(async () => { try { database.close(); } catch {} await rm(directory, { recursive: true, force: true }); });
+  return { database, path };
+}
+
+test("startup compaction reclaims free pages while preserving rowids, WAL rows, sequence and schema", async t => {
+  const { database, path } = await fragmentedStateFixture(t);
+  const before = (await lstat(path)).size;
+  let fenceChecks = 0;
+  assert.equal(await compactDaemonStateDatabase(path, database, async () => { fenceChecks++; }), "compacted");
+  assert.equal(fenceChecks, 2);
+  assert.ok((await lstat(path)).size < before / 4);
+  assert.equal((await lstat(`${path}-wal`)).size, 0);
+  assert.equal(database.prepare("PRAGMA page_size").get()!.page_size, 8192);
+  assert.equal(database.prepare("PRAGMA journal_mode").get()!.journal_mode, "wal");
+  assert.equal(database.prepare("PRAGMA application_id").get()!.application_id, 741);
+  assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+  const child = database.prepare("SELECT rowid,parent_id,payload FROM maintenance_child");
+  child.setReadBigInts(true);
+  assert.deepEqual({ ...child.get()! }, { rowid: 77n, parent_id: 99n, payload: 9223372036854775807n });
+  assert.deepEqual({ ...database.prepare("SELECT rowid,* FROM maintenance_generated").get()! }, { rowid: 88, id: 5, doubled: 10 });
+  assert.equal(database.prepare("SELECT id FROM maintenance_auto").get()!.id, 201);
+  database.exec("INSERT INTO maintenance_auto(value) VALUES('next'); INSERT INTO maintenance_generated(id) VALUES(6)");
+  assert.equal(database.prepare("SELECT MAX(id) AS id FROM maintenance_auto").get()!.id, 202);
+  assert.equal(database.prepare("SELECT MAX(rowid) AS id FROM maintenance_generated").get()!.id, 89);
+  assert.equal(Buffer.from(database.prepare("SELECT value FROM maintenance_without_rowid").get()!.value as Uint8Array).toString("hex"), "0001ff");
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM maintenance_view").get()!.n, 1);
+  database.exec("DELETE FROM maintenance_parent");
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM maintenance_child").get()!.n, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.equal(database.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
+  assert.equal(await compactDaemonStateDatabase(path, database, async () => assert.fail("small database needs no maintenance")), "not_needed");
+});
+
+test("compaction refuses lost ownership before replacement and reports a busy checkpoint after commit", async t => {
+  const { database, path } = await fragmentedStateFixture(t);
+  let checks = 0;
+  const pagesBefore = database.prepare("PRAGMA page_count").get()!.page_count;
+  await assert.rejects(compactDaemonStateDatabase(path, database, async () => {
+    if (++checks === 2) throw new Error("lost singleton");
+  }), /lost singleton/);
+  assert.equal(database.prepare("PRAGMA page_count").get()!.page_count, pagesBefore);
+  assert.equal(database.prepare("SELECT rowid FROM maintenance_child").get()!.rowid, 77);
+  const reader = new DatabaseSync(path, { readOnly: true });
+  database.exec("PRAGMA busy_timeout=0");
+  reader.exec("BEGIN");
+  reader.prepare("SELECT rowid FROM maintenance_child").get();
+  try {
+    assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "checkpoint_busy");
+    assert.ok(Number(database.prepare("PRAGMA page_count").get()!.page_count) < Number(pagesBefore) / 4,
+      "the replacement committed even though the old reader pins WAL pages");
+    assert.equal(reader.prepare("SELECT rowid FROM maintenance_child").get()!.rowid, 77);
+  } finally { reader.exec("ROLLBACK"); reader.close(); }
+  database.exec("INSERT INTO migration_failures VALUES('state-space-maintenance','checkpoint_busy','2026-09-01T00:00:00.000Z','')");
+  assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "compacted",
+    "a later startup retries deferred WAL reclamation even though the compact copy has no free pages");
+  assert.ok((await lstat(path)).size < Number(pagesBefore) * 8192 / 4);
+});
+
+test("typed compaction clone refuses invalid text before any source replacement", async t => {
+  const env = await fixture(t);
+  env.database.exec("CREATE TABLE invalid_text(value TEXT); INSERT INTO invalid_text VALUES(CAST(X'80FF' AS TEXT))");
+  assert.throws(() => cloneStateDatabaseForCompaction(env.database), ERROR);
+  assert.equal(env.database.isTransaction, false);
+  assert.equal(env.database.prepare("SELECT hex(value) AS value FROM invalid_text").get()!.value, "80FF");
+});
+
+
+test("process death during compact database replacement rolls back the SQLite backup transaction", async t => {
+  const { database, path } = await fragmentedStateFixture(t);
+  const originalPageCount = database.prepare("PRAGMA page_count").get()!.page_count;
+  const moduleUrl = new URL("../state-recovery-backup.ts", import.meta.url).href;
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { DatabaseSync, backup } from 'node:sqlite';
+    import { cloneStateDatabaseForCompaction } from ${JSON.stringify(moduleUrl)};
+    const original = new DatabaseSync(process.argv[1]);
+    const compact = cloneStateDatabaseForCompaction(original);
+    compact.exec("INSERT INTO maintenance_auto(value) VALUES('must roll back')");
+    await backup(compact, process.argv[1], { rate: 1, progress({ remainingPages, totalPages }) {
+      if (remainingPages > 0 && remainingPages < totalPages) process.kill(process.pid, 'SIGKILL');
+    }});
+    process.exit(99);
+  `, path], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(child.error, undefined);
+  assert.equal(child.signal, "SIGKILL", child.stderr);
+  assert.equal(database.prepare("PRAGMA page_count").get()!.page_count, originalPageCount);
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM maintenance_auto").get()!.n, 1);
+  assert.equal(database.prepare("SELECT rowid FROM maintenance_child").get()!.rowid, 77);
+  assert.equal(database.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.equal(await compactDaemonStateDatabase(path, database, async () => {}), "compacted",
+    "a later startup can safely retry after the killed backup");
 });
