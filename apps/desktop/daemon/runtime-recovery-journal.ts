@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { hostGrantApiOrigin } from "./cloud-http.js";
 import { executionIdentity, nativeRuntimeDeathSchema } from "./execution-protocol.js";
 import { processBirthState, type ProcessIdentity } from "./process-identity.js";
 import type { DatabaseSync } from "node:sqlite";
@@ -12,7 +13,10 @@ export const cursorLaneRetirementSchema = z.strictObject({
   kind: z.literal("cursor_idle_lane_retired_v1"),
   entry_id: executionIdentity, room_id: executionIdentity, work_attempt_id: executionIdentity,
   execution_generation_id: executionIdentity, provider_continuation_id: executionIdentity,
-  agent_session_id: executionIdentity, api_url: executionIdentity, grant_id: executionIdentity,
+  agent_session_id: executionIdentity, grant_id: executionIdentity,
+  api_url: z.string().min(1).max(512).refine(value => {
+    try { return hostGrantApiOrigin(value) === value; } catch { return false; }
+  }, "Expected a canonical host grant API origin"),
   agent_key: executionIdentity, retired_at: z.iso.datetime(),
 });
 export type CursorLaneRetirement = z.infer<typeof cursorLaneRetirementSchema>;

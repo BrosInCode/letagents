@@ -6981,7 +6981,9 @@ for (const cachedLane of [false, true]) {
 for (const missingTurn of [false, true]) {
 for (const recoveryFailure of ["none", "stop", "end", "commit"] as const) {
   if (recoveryFailure !== "none" && (!cachedLane || !missingTurn)) continue;
-  test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"}; ${missingTurn ? "missing native turn" : "captured native turn"}; ${recoveryFailure})`, async () => {
+for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
+  if (apiUrl !== "https://letagents.test" && (!cachedLane || missingTurn || recoveryFailure !== "none")) continue;
+  test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"}; ${missingTurn ? "missing native turn" : "captured native turn"}; ${recoveryFailure}; ${apiUrl})`, async () => {
     const env = await fixture();
     const paths = {
       lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -7199,15 +7201,15 @@ for (const recoveryFailure of ["none", "stop", "end", "commit"] as const) {
       }
       internals.workerRuntimeCustody.installHostGrant({
         entryId: id, roomId: entry.room_id, agentKey: lease.agent_key, grantId: "cursor-grant",
-        supervisorGrant: "inert-grant", grantGeneration: 1, apiUrl: "https://letagents.test",
+        supervisorGrant: "inert-grant", grantGeneration: 1, apiUrl,
         daemonGeneration: generation, hostId: "host", installationId: "installation", expiresAt: "2099-01-01T00:00:00.000Z",
       });
       await internals.workerBindings.bind({ entry_id: id, room_id: entry.room_id,
         work_attempt_id: attempt.work_attempt_id, execution_generation_id: execution.execution_generation_id,
-        agent_session_id: lease.agent_session_id, agent_session_token: "inert-old-secret", api_url: "https://letagents.test" });
+        agent_session_id: lease.agent_session_id, agent_session_token: "inert-old-secret", api_url: apiUrl });
       await internals.workerBindings.recordExecutionBinding({ entry_id: id, room_id: entry.room_id,
         work_attempt_id: attempt.work_attempt_id, execution_generation_id: execution.execution_generation_id,
-        agent_session_id: lease.agent_session_id, api_url: "https://letagents.test", grant_id: "cursor-grant", agent_key: lease.agent_key });
+        agent_session_id: lease.agent_session_id, api_url: apiUrl, grant_id: "cursor-grant", agent_key: lease.agent_key });
       if (recoveryFailure === "commit") capture.exec(`CREATE TRIGGER reject_retirement BEFORE INSERT ON agent_runtime_recoveries
         BEGIN SELECT RAISE(ABORT, 'injected retirement commit failure'); END`);
       const result = await recover();
@@ -7276,7 +7278,7 @@ for (const recoveryFailure of ["none", "stop", "end", "commit"] as const) {
         // Same-session grant rotation keeps both launch receipts for one lane.
         await internals.workerBindings.recordExecutionBinding({ entry_id: id, room_id: entry.room_id,
           work_attempt_id: attempt.work_attempt_id, execution_generation_id: execution.execution_generation_id,
-          agent_session_id: "retired-worker", api_url: "https://letagents.test", grant_id: "older-grant", agent_key: lease.agent_key });
+          agent_session_id: "retired-worker", api_url: apiUrl, grant_id: "older-grant", agent_key: lease.agent_key });
         const reopened = new WorkerBindingStore(join(env.root, "reopened-bindings.json"), undefined, paths.manifestPath);
         try {
           const predecessors = await reopened.executionPredecessors(id, attempt.work_attempt_id, entry.room_id);
@@ -7341,6 +7343,7 @@ for (const recoveryFailure of ["none", "stop", "end", "commit"] as const) {
       await env.cleanup();
     }
   });
+}
 }
 }
 }

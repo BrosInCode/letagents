@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { SupervisorGrantRequestError } from "../cloud-http.js";
+import { cursorLaneRetirementSchema } from "../runtime-recovery-journal.js";
 import { WorkerCredentialMintError } from "../daemon-error-policy.js";
 import {
   WorkerAuthorityCoordinator,
@@ -1884,6 +1885,21 @@ function cursorRetiredLeaseFixture(overrides: HarnessOptions = {}) {
     predecessors: [{ execution_generation_id: "execution-1", agent_session_id: "session-old",
       authority: seed.authority, cursor_lane_retirement: lane }], ...overrides });
 }
+
+test("Cursor lane retirement accepts canonical supported API origins without changing their authority", () => {
+  const seed = retiredLeaseFixture();
+  const lane = { kind: "cursor_idle_lane_retired_v1", ...seed.authority,
+    provider_continuation_id: "continuation-1", retired_at: "2026-08-26T02:00:00.000Z" };
+  for (const api_url of ["https://letagents.test", "http://127.0.0.1:3000", "http://[::1]:3000",
+    "https://[2001:db8::1]:444", "letagents-local://rooms"]) {
+    assert.equal(cursorLaneRetirementSchema.parse({ ...lane, api_url }).api_url, api_url);
+  }
+  for (const api_url of ["http://letagents.test", "https://letagents.test/path", "https://letagents.test/",
+    "https://user:secret@letagents.test", "https://letagents.test?query", "https://letagents.test#fragment",
+    "https://[::1", " https://letagents.test", "https://" + "a".repeat(512)]) {
+    assert.equal(cursorLaneRetirementSchema.safeParse({ ...lane, api_url }).success, false, api_url);
+  }
+});
 
 test("an exactly retired Cursor lane restores its lease without inventing native death", async () => {
   const f = cursorRetiredLeaseFixture();
