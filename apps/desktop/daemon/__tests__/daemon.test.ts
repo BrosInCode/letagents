@@ -6798,7 +6798,8 @@ test(`explicit runtime recovery retires proven-dead ${providerId} without replac
 }
 
 for (const cachedLane of [false, true]) {
-  test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"})`, async () => {
+for (const missingTurn of [false, true]) {
+  test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"}; ${missingTurn ? "missing native turn" : "captured native turn"})`, async () => {
     const env = await fixture();
     const paths = {
       lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -6903,14 +6904,21 @@ for (const cachedLane of [false, true]) {
       shadow.registerRuntime({ ...oldIdentity, provider: "cursor", authorityMode: "typed", configRevision: 1, createdAtMs: 1 });
       const oldAttempt = shadow.trackMessage({ agentId: id, roomId: entry.room_id, sourceMessageId: "failed-message",
         executionGenerationId: failedExecution.execution_generation_id, workspaceId: attempt.work_attempt_id, createdAtMs: 1 });
-      const oldTurn = { turnId: "captured-crashed-turn", providerContinuationId: handle.providerContinuationId!, providerTurnId: "cursor-crashed-turn" };
+      const oldTurn = { turnId: "captured-crashed-turn", providerContinuationId: handle.providerContinuationId!, providerTurnId: missingTurn ? "previous-completed-turn" : "cursor-crashed-turn" };
       shadow.trackNativeTurn({ ...oldIdentity, ...oldTurn, attemptId: oldAttempt, roomId: entry.room_id, createdAtMs: 1 });
       const oldObserver = shadow.bindObserver({ agentId: id, subjectRuntimeGenerationId: oldRuntime, observerRuntimeGenerationId: oldRuntime,
         daemonGenerationId: String(generation), sourceId: "crashed-source", expectedEpoch: 0, boundAtMs: 1 });
       shadow.ingest(oldObserver.sourceId, oldObserver, { ...oldIdentity, ...oldTurn, factId: "crashed-lost", observerEpoch: oldObserver.epoch,
-        sourceSequence: 1, observedAtMs: 2, domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none" });
+        sourceSequence: 1, observedAtMs: 2, domain: "turn", kind: "state_changed", state: missingTurn ? "terminal" : "lost", sideEffects: "none",
+        ...(missingTurn ? { turnOutcome: "completed" as const } : {}) });
+      if (missingTurn) {
+        capture.prepare("UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=2 WHERE runtime_generation_id=?").run(oldRuntime);
+        shadow.registerRuntime({ ...oldIdentity, runtimeGenerationId: "uncaptured-next-child", provider: "cursor",
+          authorityMode: "typed", configRevision: 1, createdAtMs: 3 });
+      }
       shadow.observeSourcePosition(oldObserver.sourceId, oldObserver, 9);
       const oldFacts = capture.prepare("SELECT * FROM execution_facts WHERE runtime_generation_id=?").all(oldRuntime);
+      const oldRuntimeBefore = capture.prepare("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?").get(oldRuntime);
       if (cachedLane) {
         handle.pid = 42;
         handle.providerConnection = { kind: "cursor_cli", pid: 42, processIdentity: "live-wrapper" };
@@ -6923,12 +6931,12 @@ for (const cachedLane of [false, true]) {
       }
       assert.equal(calls.stop, 0);
       const readTurnBinding = internals.supervisedInbox.providerTurnBinding.bind(internals.supervisedInbox);
-      internals.supervisedInbox.providerTurnBinding = async () => ({
-        ...bindingBefore!, provider_continuation_id: "unrelated-continuation",
-      });
-      assert.match((await recover()).error!, /exact provider authority/);
-      assert.equal(calls.stop, 0, "unverified turn authority must fail before stopping a lane");
-      assert.deepEqual(await internals.supervisedInbox.get(head.inbox_item_id), before);
+      for (const key of ["agent_id", "room_id", "work_attempt_id", "origin_execution_generation_id", "provider_continuation_id", "provider_turn_id"]) {
+        internals.supervisedInbox.providerTurnBinding = async () => ({ ...bindingBefore!, [key]: "unrelated" });
+        assert.match((await recover()).error!, /exact provider authority/, key);
+        assert.equal(calls.stop, 0, "unverified turn authority must fail before stopping a lane");
+        assert.deepEqual(await internals.supervisedInbox.get(head.inbox_item_id), before);
+      }
       internals.supervisedInbox.providerTurnBinding = readTurnBinding;
 
       if (!cachedLane) {
@@ -6954,6 +6962,26 @@ for (const cachedLane of [false, true]) {
         }
       }
 
+      if (missingTurn && !cachedLane) {
+        capture.prepare("UPDATE execution_runtime_generations SET runtime_state='ready',ended_at_ms=NULL WHERE runtime_generation_id=?").run(oldRuntime);
+        assert.match((await recover()).error!, /unrelated or unretired Cursor observer/);
+        assert.deepEqual(await internals.supervisedInbox.get(head.inbox_item_id), before);
+        capture.prepare("UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=2 WHERE runtime_generation_id=?").run(oldRuntime);
+        for (const [table, key, value, column, invalid] of [
+          ["execution_turns", "turn_id", oldTurn.turnId, "provider_continuation_id", "unrelated"],
+          ["execution_attempt_generations", "attempt_id", oldAttempt, "workspace_id", "unrelated"],
+          ["execution_runtime_generations", "runtime_generation_id", oldRuntime, "provider", "codex"],
+          ["execution_runtime_generations", "runtime_generation_id", oldRuntime, "control_state", "responsive"],
+          ["execution_observers", "agent_id", id, "observer_runtime_generation_id", "uncaptured-next-child"],
+        ]) {
+          const original = capture.prepare(`SELECT ${column} AS value FROM ${table} WHERE ${key}=?`).get(value)!.value;
+          capture.prepare(`UPDATE ${table} SET ${column}=? WHERE ${key}=?`).run(invalid, value);
+          assert.match((await recover()).error!, /unrelated or unretired Cursor observer/, column);
+          assert.deepEqual(await internals.supervisedInbox.get(head.inbox_item_id), before, "rejected recovery cannot clear the failed delivery");
+          assert.equal(capture.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=?").get(id)!.n, 0);
+          capture.prepare(`UPDATE ${table} SET ${column}=? WHERE ${key}=?`).run(original, value);
+        }
+      }
       const result = await recover();
       assert.equal(result.ok, true, result.error);
       const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
@@ -6978,10 +7006,16 @@ for (const cachedLane of [false, true]) {
       assert.equal(durable.execution_generations[0]?.terminal?.terminal_cause, "crashed");
       assert.equal(durable.execution_generations.at(-1)?.terminal?.terminal_cause, cachedLane ? "stopped" : "crashed");
       const boundary = capture.prepare("SELECT phase,observer_json FROM agent_runtime_recoveries WHERE agent_id=? AND runtime_generation_id=?").get(id, oldRuntime)!;
+      assert.ok(boundary, "recovery must archive the exact prior observer even when the failed native turn was not captured");
       assert.equal(boundary.phase, "complete");
       assert.equal(JSON.parse(String(boundary.observer_json)).max_observed_sequence, 9);
       assert.deepEqual(capture.prepare("SELECT * FROM execution_facts WHERE runtime_generation_id=?").all(oldRuntime), oldFacts);
-      assert.equal(capture.prepare("SELECT state FROM execution_turns WHERE turn_id=?").get(oldTurn.turnId)!.state, "lost");
+      assert.equal(capture.prepare("SELECT state FROM execution_turns WHERE turn_id=?").get(oldTurn.turnId)!.state, missingTurn ? "terminal" : "lost");
+      if (missingTurn) {
+        assert.deepEqual(capture.prepare("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?").get(oldRuntime), oldRuntimeBefore, "known predecessor retirement stays exact");
+        assert.equal(capture.prepare("SELECT COUNT(*) AS n FROM execution_turns WHERE provider_turn_id='cursor-crashed-turn'").get()!.n, 0, "recovery never invents the uncaptured turn");
+        assert.equal(capture.prepare("SELECT runtime_state FROM execution_runtime_generations WHERE runtime_generation_id='uncaptured-next-child'").get()!.runtime_state, "starting", "uncaptured native history stays unknown");
+      }
       assert.throws(() => shadow.observeSourcePosition(oldObserver.sourceId, oldObserver, 10), /stale_observer/);
 
       // Drive the next FIFO message through the real native observation path.
@@ -7018,6 +7052,7 @@ for (const cachedLane of [false, true]) {
       await env.cleanup();
     }
   });
+}
 }
 
 test("runtime recovery atomically fails a pre-join room move without losing its activating authority evidence", async () => {
