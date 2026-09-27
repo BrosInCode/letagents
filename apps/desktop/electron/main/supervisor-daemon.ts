@@ -530,7 +530,7 @@ export class SupervisorDaemonClient {
       } else {
         await forceStopDaemon({ identify, persistHold: () => owner.create(),
           observe: target => this.observeRetiredDaemon(target), signal: (target, signal) => this.guardedSignalRetiredDaemon(target, signal),
-          wait: (target, timeout) => this.waitForRetiredProcessChange(target, timeout),
+          delay, now: Date.now, pollIntervalMs: this.processPollIntervalMs,
           socketReleased: () => this.isSocketReleased(SUPERVISOR_DAEMON_PROTOCOL_VERSION, true),
           terminateTimeoutMs: this.terminateTimeoutMs, killTimeoutMs: this.killTimeoutMs });
       }

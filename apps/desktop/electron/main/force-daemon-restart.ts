@@ -7,10 +7,28 @@ export interface ForceDaemonRestartPort {
   persistHold(): Promise<DaemonMaintenanceHold>;
   observe(identity: DaemonProcessIdentity): Observation;
   signal(identity: DaemonProcessIdentity, signal: "SIGTERM" | "SIGKILL"): Observation;
-  wait(identity: DaemonProcessIdentity, timeoutMs: number): Promise<Observation>;
+  delay(timeoutMs: number): Promise<void>;
+  now(): number;
+  pollIntervalMs: number;
   socketReleased(): Promise<boolean>;
   terminateTimeoutMs: number;
   killTimeoutMs: number;
+}
+
+async function waitForForcedExit(port: ForceDaemonRestartPort, identity: DaemonProcessIdentity,
+  observation: Observation, timeoutMs: number): Promise<Observation> {
+  const deadline = port.now() + timeoutMs;
+  let identityLoss: Observation | undefined;
+  while (true) {
+    if (observation.kind === "changed" || observation.kind === "unverifiable") identityLoss ??= observation;
+    // Once identity is lost, neither a later match nor a zombie permits another
+    // signal or proves this process stopped. Positive PID absence still can.
+    if (observation.kind === "absent" || (observation.kind === "zombie" && !identityLoss)) return observation;
+    const remaining = deadline - port.now();
+    if (remaining <= 0) return identityLoss ?? observation;
+    await port.delay(Math.min(port.pollIntervalMs, remaining));
+    observation = port.observe(identity);
+  }
 }
 
 /** An explicit interruption, never a provider handoff or a native death receipt. */
@@ -24,11 +42,10 @@ export async function forceStopDaemon(port: ForceDaemonRestartPort): Promise<voi
   if (!hold || hold.version !== 1 || !hold.id) throw new Error("Service maintenance was not saved. No process was stopped.");
   let observation = port.observe(identity);
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    if (observation.kind === "same") observation = port.signal(identity, signal);
+    observation = await waitForForcedExit(port, identity, observation,
+      signal === "SIGTERM" ? port.terminateTimeoutMs : port.killTimeoutMs);
     if (observation.kind !== "same") break;
-    observation = port.signal(identity, signal);
-    if (observation.kind === "same") {
-      observation = await port.wait(identity, signal === "SIGTERM" ? port.terminateTimeoutMs : port.killTimeoutMs);
-    }
   }
   // Socket loss alone never permits a second owner; neither do an ambiguous
   // identity change or a signal's successful return value.
