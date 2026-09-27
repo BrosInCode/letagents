@@ -46,7 +46,7 @@ export type DaemonReadModelPorts = {
   bindings: Pick<WorkerBindingStore, "credentialFor" | "get" | "list">;
   inbox: Pick<
     SupervisedAgentInboxStore,
-    "detail" | "ingressHealth" | "latestContinuationRepair" | "receipts"
+    "detail" | "ingressHealth" | "latestContinuationRepair" | "receiptProjection"
   >;
   durability: Pick<WorkDurabilityStore, "getAttempt">;
   workerAuthority: Pick<WorkerAuthorityCoordinator, "currentHostGrant" | "pollingContract">;
@@ -144,7 +144,7 @@ export class DaemonReadModel {
     const binding = projectedBinding === undefined
       ? await this.ports.bindings.get(entry.id)
       : projectedBinding;
-    const receipts = await this.ports.inbox.receipts(entry.id);
+    const receipts = await this.ports.inbox.receiptProjection(entry.id);
     const credential = bindingMatchesRoomAgentGeneration(entry, binding)
       ? await this.ports.bindings.credentialFor(binding)
       : null;
@@ -204,8 +204,7 @@ export class DaemonReadModel {
   }
 
   async attempt(entryId: string) {
-    const entry = (await this.ports.manifest.load()).entries.find((candidate) =>
-      candidate.id === entryId);
+    const entry = await this.ports.manifest.getEntry(entryId);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
     const attempt = entry.work_attempt_id
       ? await this.ports.durability.getAttempt(entry.work_attempt_id)

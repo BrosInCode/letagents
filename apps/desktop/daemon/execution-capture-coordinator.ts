@@ -201,9 +201,21 @@ export class ExecutionCaptureCoordinator {
   }
 
   /** A post-COMMIT hint only schedules work; it cannot reject that checkpoint. */
-  refresh(): void {
-    for (const lane of this.retiring.values()) this.schedule(lane);
-    for (const lane of this.lanes.values()) { lane.receiptCursor = 0; this.schedule(lane); }
+  refresh(agentId?: string): void {
+    const refreshLane = (lane: Lane | undefined) => {
+      if (!lane) return;
+      // A corrected receipt can precede either lane's last settlement scan.
+      lane.receiptCursor = 0;
+      this.schedule(lane);
+    };
+    if (agentId !== undefined) {
+      refreshLane(this.retiring.get(agentId));
+      refreshLane(this.lanes.get(agentId));
+      return;
+    }
+    // Unscoped commits and recovery hints retain the conservative fleet sweep.
+    for (const lane of this.retiring.values()) refreshLane(lane);
+    for (const lane of this.lanes.values()) refreshLane(lane);
   }
 
   private schedule(lane: Lane): void {

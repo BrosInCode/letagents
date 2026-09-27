@@ -1,8 +1,8 @@
-import type { SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
+import type { SupervisedInboxReceiptProjection } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntryView } from "./types.js";
 
 export function projectDeliveryReceipts(
-  receipts: readonly SupervisedInboxReceiptWithTimeline[],
+  receipts: readonly SupervisedInboxReceiptProjection[],
   restoringInboxItemId: string | null,
 ): DaemonManifestEntryView["delivery_receipts"] {
   const sourceMessageByInboxId = new Map(receipts.map((receipt) => [receipt.inbox_item_id, receipt.source_message_id]));
@@ -28,7 +28,7 @@ export function projectDeliveryReceipts(
 }
 
 export function projectDeliveryTurn(
-  head: SupervisedInboxReceiptWithTimeline | null,
+  head: SupervisedInboxReceiptProjection | null,
   activeTurn: { inboxItemId: string; sourceMessageId: string; phase: "dispatching" | "responding" | "publishing" } | null,
 ): NonNullable<DaemonManifestEntryView["room_agent_state"]>["turn"] {
   if (!head) return { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null };

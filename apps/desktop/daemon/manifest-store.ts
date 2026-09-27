@@ -1,3 +1,4 @@
+import { PreparedReadStatements } from "./prepared-reads.js";
 import { ManagedRuntimeRefreshDeferred } from "./provider-action-port.js";
 import type { ProcessIdentity } from "./process-identity.js";
 import { listHostToolRules, findHostToolRule, readHostToolContext, bindHostToolRule, assertDecisionToolRule, revokeHostToolRule,
@@ -186,37 +187,7 @@ function run(statement: StatementSync, ...values: unknown[]): void {
   statement.run(...values as never[]);
 }
 
-/**
- * SQLite-backed durable state for the daemon's compatibility manifest.
- *
- * The flat manifest entry remains the control-socket contract only. Each row is
- * decomposed into records with distinct ownership before persistence, and reads
- * recompose the same flat projection for existing callers.
- */
-export class ManifestStore {
-  private database: DatabaseSync | null = null;
-  private initializing: Promise<DatabaseSync> | null = null;
-  private writes: Promise<void> = Promise.resolve();
-  private closed = false;
-
-  constructor(
-    readonly path: string,
-    private readonly legacyJsonPath?: string,
-    private readonly permissionHousekeeping?: (paths: string[]) => Promise<void>,
-    private readonly schemaInitializationHook?: (database: DatabaseSync) => void,
-    private readonly schemaPrepared = false,
-  ) {}
-
-  /** Initialise/upgrade the shared daemon database without retaining a handle. */
-  static async ensureDatabase(path: string): Promise<void> {
-    const store = new ManifestStore(path);
-    try { await store.load(); } finally { await store.close(); }
-  }
-
-  async load(activityMode: "full" | "summary" = "full"): Promise<DaemonManifest> {
-    const database = await this.getDatabase();
-    const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
-    const entries = (database.prepare(`
+const MANIFEST_ENTRY_SELECT = `
       SELECT
         i.agent_id, i.created_by, i.created_at,
         p.display_name, m.room_id, m.local_room_id,
@@ -267,8 +238,61 @@ export class ManifestStore {
       LEFT JOIN turn_control_sequence_watermarks w USING (agent_id)
       JOIN retained_worker_bindings b USING (agent_id)
       JOIN reconciliation_records q USING (agent_id)
-      ORDER BY i.sort_order
-    `).all() as Row[]).map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)));
+`;
+
+const MANIFEST_READS = {
+  generation: "SELECT generation FROM manifest_metadata WHERE singleton = 1",
+  allEntries: `${MANIFEST_ENTRY_SELECT} ORDER BY i.sort_order`,
+  roomEntries: `${MANIFEST_ENTRY_SELECT} WHERE m.room_id = ? ORDER BY i.sort_order`,
+  entry: `${MANIFEST_ENTRY_SELECT} WHERE i.agent_id = ?`,
+  activityState: `SELECT observed_state,
+    (SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1) AS last_sequence
+    FROM runtime_deployments WHERE agent_id = ?`,
+  activity: "SELECT * FROM activity_events WHERE agent_id = ? ORDER BY sort_order",
+  activitySummary: `SELECT observed_at, sequence, provider, kind, method, summary, status,
+    NULL AS payload_json, payload_truncated, payload_redacted, durable_payload_ref
+    FROM activity_events WHERE agent_id = ? ORDER BY sequence DESC, sort_order DESC LIMIT ?`,
+  lastSequence: "SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1",
+  stages: "SELECT stage FROM turn_control_stages WHERE agent_id = ? ORDER BY sort_order",
+  completedActions: `SELECT action_id FROM reconciliation_completed_actions
+    WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?`,
+  exitTimestamps: "SELECT timestamp_ms FROM reconciliation_exit_timestamps WHERE agent_id = ? ORDER BY sort_order",
+  notices: "SELECT * FROM reconciliation_notices WHERE agent_id = ? ORDER BY sort_order",
+} as const;
+
+/**
+ * SQLite-backed durable state for the daemon's compatibility manifest.
+ *
+ * The flat manifest entry remains the control-socket contract only. Each row is
+ * decomposed into records with distinct ownership before persistence, and reads
+ * recompose the same flat projection for existing callers.
+ */
+export class ManifestStore {
+  private readonly reads = new PreparedReadStatements(MANIFEST_READS);
+  private database: DatabaseSync | null = null;
+  private initializing: Promise<DatabaseSync> | null = null;
+  private writes: Promise<void> = Promise.resolve();
+  private closed = false;
+
+  constructor(
+    readonly path: string,
+    private readonly legacyJsonPath?: string,
+    private readonly permissionHousekeeping?: (paths: string[]) => Promise<void>,
+    private readonly schemaInitializationHook?: (database: DatabaseSync) => void,
+    private readonly schemaPrepared = false,
+  ) {}
+
+  /** Initialise/upgrade the shared daemon database without retaining a handle. */
+  static async ensureDatabase(path: string): Promise<void> {
+    const store = new ManifestStore(path);
+    try { await store.load(); } finally { await store.close(); }
+  }
+
+  async load(activityMode: "full" | "summary" = "full"): Promise<DaemonManifest> {
+    const database = await this.getDatabase();
+    const generation = Number((this.reads.get(database, "generation").get() as Row).generation);
+    const entries = (this.reads.get(database, "allEntries").all() as Row[])
+      .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)));
 
     const legacyLaneOwners = (database.prepare(`
       SELECT reservation_id, room_id, provider, owner_pid, owner_process_identity,
@@ -297,7 +321,9 @@ export class ManifestStore {
   }
 
   async listRoomEntries(roomId: string): Promise<DaemonManifestEntry[]> {
-    return (await this.load()).entries.filter((entry) => entry.room_id === roomId);
+    const database = await this.getDatabase();
+    return (this.reads.get(database, "roomEntries").all(roomId) as Row[])
+      .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row)));
   }
 
   /**
@@ -1378,58 +1404,7 @@ export class ManifestStore {
   }
 
   private readEntryFromDatabase(database: DatabaseSync, agentId: string): DaemonManifestEntry | undefined {
-    const row = database.prepare(`
-      SELECT
-        i.agent_id, i.created_by, i.created_at,
-        p.display_name, m.room_id, m.local_room_id,
-        c.provider, c.model, c.reasoning_effort, c.charter, c.permission_profile_id, c.config_revision, c.runtime_configuration_revision, c.delivery_mode, c.delivery_cutover_json,
-        c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
-        l.desired_state, l.source_repo_path_present, l.source_repo_path,
-        d.deployment_id, d.run_id, d.observed_state,
-        d.workspace_path_present, d.workspace_path,
-        d.work_attempt_id_present, d.work_attempt_id,
-        d.provider_ref_present, d.provider_work_attempt_id, d.provider_continuation_id,
-        d.provider_connection_kind, d.provider_connection_url, d.provider_server_auth_path,
-        d.provider_connection_pid,
-        d.provider_process_identity_present, d.provider_process_identity, d.provider_execution_generation_id, d.custodial_launch_agent_session_id,
-        d.workplace_liveness_present, d.workplace_liveness_state,
-        d.workplace_liveness_observed_at, d.workplace_liveness_detail,
-        d.native_liveness_present, d.native_liveness_state,
-        d.native_liveness_observed_at, d.native_liveness_detail,
-        d.activity_present,
-        s.condition, s.last_error_present, s.last_error,
-        r.ready_reached_at_present, r.ready_reached_at,
-        COALESCE(w.last_sequence,0) AS last_turn_control_sequence,
-        t.turn_control_present, t.action_id, t.action_sequence, t.turn_work_attempt_id,
-        t.turn_execution_generation_id, t.target_room_id, t.target_source_message_id,
-        t.target_provider_continuation_id, t.has_correction, t.status AS turn_status,
-        t.inbox_item_id, t.provider_turn_id, t.correction_text, t.correction_strategy, t.operator_resolution,
-        t.capability, t.interrupted, t.resumed, t.turn_state, t.error AS turn_error,
-        t.recorded_at, t.updated_at,
-        b.last_worker_binding_present, b.binding_agent_session_id,
-        b.binding_work_attempt_id, b.binding_execution_generation_id, b.binding_updated_at,
-        q.reconciliation_present, q.consecutive_action_failures,
-        q.last_observed_state, q.next_restart_at_ms, q.last_action_sequence,
-        q.pending_action_id, q.pending_action_sequence, q.pending_action_kind,
-        q.pending_action_recorded_at_ms, q.last_terminal_present,
-        q.terminal_ended_at, q.terminal_exit_code, q.terminal_signal,
-        q.terminal_stdio_archive_ref, q.terminal_stdio_tail, q.terminal_cause,
-        q.terminal_actor, q.terminal_generation, q.terminal_provider_continuation_id,
-        q.reconciliation_notices_present
-      FROM agent_identities i
-      JOIN agent_profiles p USING (agent_id)
-      JOIN agent_room_memberships m USING (agent_id)
-      JOIN agent_configurations c USING (agent_id)
-      JOIN agent_launch_intents l USING (agent_id)
-      JOIN runtime_deployments d USING (agent_id)
-      JOIN agent_lifecycle_states s USING (agent_id)
-      JOIN agent_readiness r USING (agent_id)
-      JOIN turn_control_journals t USING (agent_id)
-      LEFT JOIN turn_control_sequence_watermarks w USING (agent_id)
-      JOIN retained_worker_bindings b USING (agent_id)
-      JOIN reconciliation_records q USING (agent_id)
-      WHERE i.agent_id = ?
-    `).get(agentId) as Row | undefined;
+    const row = this.reads.get(database, "entry").get(agentId) as Row | undefined;
     return row ? composeDaemonManifestEntry(this.projectionFromRow(database, row)) : undefined;
   }
 
@@ -2647,6 +2622,15 @@ export class ManifestStore {
     return { generation: result.generation, configuration };
   }
 
+  async getActivityState(agentId: string): Promise<{
+    observed_state: DaemonManifestEntry["observed_state"]; last_sequence: number;
+  } | undefined> {
+    const database = await this.getDatabase();
+    const row = this.reads.get(database, "activityState").get(agentId, agentId) as Row | undefined;
+    return row ? { observed_state: String(row.observed_state) as DaemonManifestEntry["observed_state"],
+      last_sequence: row.last_sequence == null ? -1 : Number(row.last_sequence) } : undefined;
+  }
+
   async appendActivity(
     expectedGeneration: number,
     agentId: string,
@@ -2656,20 +2640,8 @@ export class ManifestStore {
     limit = 200,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
-    const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
-      const updated = database.prepare(`
-        UPDATE runtime_deployments
-        SET observed_state = ?, native_liveness_present = 1, native_liveness_state = ?,
-            native_liveness_observed_at = ?, native_liveness_detail = ?, activity_present = 1
-        WHERE agent_id = ?
-      `).run(observedState, nativeLiveness.state, nativeLiveness.observed_at ?? null, nativeLiveness.detail ?? null, agentId);
-      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
-      this.appendActivityEvent(database, agentId, normalizedEvent, limit);
-      const persisted = this.readEntryFromDatabase(database, agentId);
-      if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity append: ${agentId}`);
-      return persisted;
-    }, commitFence);
+    const result = await this.writeActivity(expectedGeneration, agentId, event, { observedState, nativeLiveness }, limit,
+      database => this.activityEntry(database, agentId), commitFence);
     return { generation: result.generation, entry: result.value };
   }
 
@@ -2681,18 +2653,55 @@ export class ManifestStore {
     limit = 200,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+    const result = await this.writeActivity(expectedGeneration, agentId, event, null, limit,
+      database => this.activityEntry(database, agentId), commitFence);
+    return { generation: result.generation, entry: result.value };
+  }
+
+  /** Native stream consumers do not need a fresh full-history return value. */
+  async recordActivity(
+    expectedGeneration: number,
+    agentId: string,
+    event: DaemonActivityEvent,
+    runtimeUpdate: { observedState: DaemonManifestEntry["observed_state"];
+      nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]> } | null,
+    limit = 200,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number }> {
+    const result = await this.writeActivity(expectedGeneration, agentId, event, runtimeUpdate, limit,
+      () => undefined, commitFence);
+    return { generation: result.generation };
+  }
+
+  private activityEntry(database: DatabaseSync, agentId: string): DaemonManifestEntry {
+    const persisted = this.readEntryFromDatabase(database, agentId);
+    if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity append: ${agentId}`);
+    return persisted;
+  }
+
+  private writeActivity<T>(
+    expectedGeneration: number,
+    agentId: string,
+    event: DaemonActivityEvent,
+    runtimeUpdate: { observedState: DaemonManifestEntry["observed_state"];
+      nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]> } | null,
+    limit: number,
+    project: (database: DatabaseSync) => T,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; value: T }> {
     const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
-      const updated = database.prepare(`
-        UPDATE runtime_deployments SET activity_present = 1 WHERE agent_id = ?
-      `).run(agentId);
+    return this.writeTargeted(expectedGeneration, database => {
+      const updated = runtimeUpdate
+        ? database.prepare(`UPDATE runtime_deployments
+            SET observed_state = ?, native_liveness_present = 1, native_liveness_state = ?,
+                native_liveness_observed_at = ?, native_liveness_detail = ?, activity_present = 1
+            WHERE agent_id = ?`).run(runtimeUpdate.observedState, runtimeUpdate.nativeLiveness.state,
+          runtimeUpdate.nativeLiveness.observed_at ?? null, runtimeUpdate.nativeLiveness.detail ?? null, agentId)
+        : database.prepare("UPDATE runtime_deployments SET activity_present = 1 WHERE agent_id = ?").run(agentId);
       if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
       this.appendActivityEvent(database, agentId, normalizedEvent, limit);
-      const persisted = this.readEntryFromDatabase(database, agentId);
-      if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity-only append: ${agentId}`);
-      return persisted;
+      return project(database);
     }, commitFence);
-    return { generation: result.generation, entry: result.value };
   }
 
   private appendActivityEvent(
@@ -2701,7 +2710,7 @@ export class ManifestStore {
     event: DaemonActivityEvent,
     limit: number,
   ): void {
-    const latest = database.prepare("SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1").get(agentId) as Row | undefined;
+    const latest = this.reads.get(database, "lastSequence").get(agentId) as Row | undefined;
     const lastSequence = latest ? Number(latest.sequence) : -1;
     if (event.sequence <= lastSequence) throw new Error(`Native activity sequence ${event.sequence} is not newer than ${lastSequence}.`);
     const order = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM activity_events WHERE agent_id = ?").get(agentId) as Row).next_order);
@@ -2747,6 +2756,7 @@ export class ManifestStore {
     this.closed = true;
     await this.writes;
     await this.initializing?.catch(() => undefined);
+    this.reads.clear();
     this.database?.close();
     this.database = null;
     this.initializing = null;
@@ -2775,7 +2785,7 @@ export class ManifestStore {
             WHERE singleton = 1 AND generation = ?
           `).run(expectedGeneration);
           if (Number(result.changes) !== 1) {
-            const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
+            const current = Number((this.reads.get(database, "generation").get() as Row).generation);
             throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
           }
           if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
@@ -2877,7 +2887,7 @@ export class ManifestStore {
 
     database.exec("BEGIN IMMEDIATE");
     try {
-      const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
+      const current = Number((this.reads.get(database, "generation").get() as Row).generation);
       const count = Number((database.prepare("SELECT COUNT(*) AS count FROM agent_identities").get() as Row).count);
       if (current !== 0 || count !== 0) throw new Error("Refusing to import a legacy manifest into non-empty daemon state.");
       this.replaceEntries(database, stored.manifest.entries.map((entry) =>
@@ -3155,12 +3165,9 @@ export class ManifestStore {
     // Bound the database read itself: state watchers never need raw payloads.
     // sort_order breaks sequence ties exactly as the stable wire projection does.
     const activityRows = activityMode === "summary"
-      ? (database.prepare(`SELECT observed_at, sequence, provider, kind, method, summary, status,
-          NULL AS payload_json, payload_truncated, payload_redacted, durable_payload_ref
-          FROM activity_events WHERE agent_id = ?
-          ORDER BY sequence DESC, sort_order DESC LIMIT ?`)
+      ? (this.reads.get(database, "activitySummary")
         .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
-      : database.prepare("SELECT * FROM activity_events WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[];
+      : this.reads.get(database, "activity").all(agentId) as Row[];
     const activity = activityRows.map((event): DaemonActivityEvent => ({
       observed_at: String(event.observed_at), sequence: Number(event.sequence), provider: String(event.provider),
       kind: String(event.kind), method: String(event.method), summary: String(event.summary),
@@ -3168,12 +3175,11 @@ export class ManifestStore {
       payload_truncated: bool(event.payload_truncated), payload_redacted: bool(event.payload_redacted),
       durable_payload_ref: nullableString(event.durable_payload_ref),
     }));
-    const stages = (database.prepare("SELECT stage FROM turn_control_stages WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[]).map((stage) => String(stage.stage)) as DaemonTurnControlEffect["stages"];
-    const completedActions = (database.prepare(`SELECT action_id FROM reconciliation_completed_actions
-      WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?`).all(agentId, MAX_PROJECTED_COMPLETED_ACTION_IDS) as Row[])
+    const stages = (this.reads.get(database, "stages").all(agentId) as Row[]).map((stage) => String(stage.stage)) as DaemonTurnControlEffect["stages"];
+    const completedActions = (this.reads.get(database, "completedActions").all(agentId, MAX_PROJECTED_COMPLETED_ACTION_IDS) as Row[])
       .map((action) => String(action.action_id)).reverse();
-    const exitTimestamps = (database.prepare("SELECT timestamp_ms FROM reconciliation_exit_timestamps WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[]).map((item) => Number(item.timestamp_ms));
-    const notices = (database.prepare("SELECT * FROM reconciliation_notices WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[]).map((notice): ReconciliationNotice => ({
+    const exitTimestamps = (this.reads.get(database, "exitTimestamps").all(agentId) as Row[]).map((item) => Number(item.timestamp_ms));
+    const notices = (this.reads.get(database, "notices").all(agentId) as Row[]).map((notice): ReconciliationNotice => ({
       at: String(notice.at), kind: String(notice.kind) as ReconciliationNotice["kind"], cause: String(notice.cause),
       ...(bool(notice.terminal_present) ? { terminal: this.terminalFromRow(notice, "terminal_") } : {}),
     }));
@@ -3426,7 +3432,7 @@ export class ManifestStore {
             WHERE singleton = 1 AND generation = ?
           `).run(expectedGeneration);
           if (Number(result.changes) !== 1) {
-            const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
+            const current = Number((this.reads.get(database, "generation").get() as Row).generation);
             throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
           }
           value = mutation(database);

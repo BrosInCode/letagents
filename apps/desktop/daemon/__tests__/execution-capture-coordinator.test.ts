@@ -658,7 +658,7 @@ test("control coalescing preserves changed evidence, native events, exact proces
   ]);
 });
 
-test("committed receipts settle captured attempts independently of capture gaps and late native outcomes", async () => {
+test("scoped refresh settles receipts independently of capture gaps and late native outcomes", async () => {
   for (const gap of [false, true]) {
     let hints = 0;
     const f = fixture("codex_app_server", undefined, () => { hints++; });
@@ -673,7 +673,7 @@ test("committed receipts settle captured attempts independently of capture gaps 
         outcome=?,acknowledged_at=?,updated_at=?`).run(JSON.stringify({ kind: "no_reply", text: null }), now, now);
       const operational = f.db.prepare("SELECT * FROM supervised_agent_inbox").all();
       const beforeSettlement = hints;
-      f.capture.refresh(); await flush();
+      f.capture.refresh("agent"); await flush();
       assert.equal(hints, beforeSettlement + 1, "receipt-only progress notifies even when capture is suspended");
       const settled = f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get();
       assert.deepEqual({ ...settled }, { state: "cleanly_concluded", conclusion: "acknowledged_no_reply", settled_at_ms: Date.parse(now) });
@@ -684,12 +684,45 @@ test("committed receipts settle captured attempts independently of capture gaps 
         await flush(); assert.equal(f.facts().length, 4, "late exact native evidence remains ingestible after logical settlement");
       }
       const beforeRefresh = hints;
-      f.capture.refresh(); await flush();
+      f.capture.refresh("agent"); await flush();
       assert.equal(hints, beforeRefresh, "already settled receipts do not notify again");
       assert.deepEqual(f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get(), settled);
       assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), operational);
     } finally { f.capture.close(); }
   }
+});
+
+test("scoped refresh leaves unrelated capture lanes untouched while unscoped hints still sweep", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const reads = new Map<ProviderActionHandle, number>();
+  const f = fixture("codex_app_server", (handle, listener) => {
+    const subscription = sources.get(handle)!.subscribe(listener);
+    return { ...subscription, position: () => {
+      reads.set(handle, (reads.get(handle) ?? 0) + 1);
+      return subscription.position();
+    } };
+  });
+  const second = secondCaptureLane(f);
+  sources.set(f.handle, f.observer);
+  sources.set(second.handle, new ProviderExecutionObserver(() => now));
+  try {
+    f.install(); f.capture.install(second.token); await flush();
+    assert.equal(f.admission(), "ready");
+    assert.equal(f.capture.captureAdmission(second.token), "ready");
+    const before = f.db.prepare("SELECT * FROM execution_observers ORDER BY agent_id").all();
+    reads.clear();
+    f.capture.refresh("agent"); await flush();
+    assert.ok((reads.get(f.handle) ?? 0) > 0);
+    assert.equal(reads.get(second.handle) ?? 0, 0, "one agent's commit never rereads its peer's source");
+    reads.clear();
+    f.capture.refresh("unknown-agent"); await flush();
+    assert.equal(reads.size, 0, "an exact missing agent is not an unscoped hint");
+    f.capture.refresh(); await flush();
+    assert.ok((reads.get(f.handle) ?? 0) > 0);
+    assert.ok((reads.get(second.handle) ?? 0) > 0);
+    assert.deepEqual(f.db.prepare("SELECT * FROM execution_observers ORDER BY agent_id").all(), before);
+    assert.deepEqual(f.diagnostics, []);
+  } finally { f.capture.close(); }
 });
 
 test("capture change hints follow fact and receipt commits, survive callback failure and never run on close", async () => {
@@ -767,7 +800,7 @@ test("capture announces partial committed progress but not repeated failed no-op
   } finally { f.capture.close(); }
 });
 
-test("scheduled receipt batches advance past unavailable proof without starving later attempts", async () => {
+test("scoped receipt batches revisit corrected earlier receipts and settle late native attempts", async () => {
   const f = fixture();
   try {
     await f.install(); f.emit(ready); await flush();
@@ -788,7 +821,7 @@ test("scheduled receipt batches advance past unavailable proof without starving 
         VALUES(?,?,'agent','room','generation',?,'continuation',?,'terminal','none',?,?)`)
         .run(turn, attempt, runtime, turn, Date.parse(now), Date.parse(now));
     }
-    f.capture.refresh(); await flush();
+    f.capture.refresh("agent"); await flush();
     assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.n, 39);
     assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id='attempt-0'").get()!.state, "active");
     assert.ok(f.diagnostics.includes("settlement_unavailable"));
@@ -797,7 +830,7 @@ test("scheduled receipt batches advance past unavailable proof without starving 
     // A later authoritative correction rechecks earlier receipts rather than
     // treating the in-memory scan cursor as durable settlement authority.
     f.db.prepare("UPDATE supervised_agent_inbox SET outcome=? WHERE inbox_item_id='native-0'").run(JSON.stringify({ kind: "no_reply", text: null }));
-    f.capture.refresh(); await flush();
+    f.capture.refresh("agent"); await flush();
     assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.n, 40);
     // No new operational mutation: native capture itself must reconsider the
     // older receipt once its previously missing attempt becomes available.
@@ -830,7 +863,7 @@ test("settlement diagnostics never hide a native capture failure", async () => {
   } finally { f.capture.close(); }
 });
 
-test("detached exit drains before a fresh source and storage-busy retirement retries only on a hint", async () => {
+test("scoped refresh drains a detached exit before its paused successor source", async () => {
   const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
   const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
   const old = new ProviderExecutionObserver(() => now);
@@ -851,7 +884,10 @@ test("detached exit drains before a fresh source and storage-busy retirement ret
     await flush();
     assert.ok(blocked >= 1); assert.equal(f.facts().length, 1);
     await flush(); assert.equal(f.facts().length, 1, "optional diagnostics cannot timer-retry operational fact capture");
-    f.db.exec = exec; f.capture.refresh(); await flush();
+    f.db.exec = exec;
+    f.capture.refresh("unknown-agent"); await flush();
+    assert.equal(f.facts().length, 1, "another agent's hint cannot retry the retained exit or paused successor");
+    f.capture.refresh("agent"); await flush();
     assert.equal(f.facts().length, 3);
     const rows = f.facts();
     assert.equal(rows[0].runtime_generation_id, rows[1].runtime_generation_id);

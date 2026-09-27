@@ -183,7 +183,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // fingerprint, reservation, replacement, and deferral policy stay extracted.
   // 1630 -> 1633: compaction progress getter and state-watch notification ports;
   // timing and signal interpretation stay in the provider-owned tracker.
-  assert.ok(mainSource.split("\n").length < 1_633, "main.ts must remain a thin composition root");
+  // 1633 -> 1635: scoped manifest reads and post-commit capture notification ports;
+  // SQL hydration and capture scheduling stay in their owning stores/coordinator.
+  assert.ok(mainSource.split("\n").length < 1_635, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

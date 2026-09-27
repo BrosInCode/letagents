@@ -1013,14 +1013,21 @@ test("source watermarks preserve unaccepted tails without minting facts and rema
     assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), before);
     const exec = db.exec.bind(db);
     let failCommit = true;
+    let transactions = 0;
     t.mock.method(db, "exec", (sql: string) => {
+      if (sql === "BEGIN IMMEDIATE") transactions += 1;
       if (sql === "COMMIT" && failCommit) { failCommit = false; throw new Error("injected watermark commit failure"); }
       exec(sql);
     });
     assert.throws(() => store.observeSourcePosition(token.sourceId, token, 4), /injected watermark commit failure/);
     assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), before);
     store.observeSourcePosition(token.sourceId, token, 4);
+    const changes = db.prepare("SELECT total_changes() AS n").get()?.n;
+    const beforeNoOps = transactions;
     store.observeSourcePosition(token.sourceId, token, 2);
+    store.observeSourcePosition(token.sourceId, token, 4);
+    assert.equal(transactions, beforeNoOps, "unchanged frontiers do not acquire a writer transaction");
+    assert.equal(db.prepare("SELECT total_changes() AS n").get()?.n, changes, "unchanged frontiers do not write");
     assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
     assert.equal(db.prepare("SELECT max_observed_sequence FROM execution_observers").get()?.max_observed_sequence, 4);
     assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 1);
@@ -1034,6 +1041,68 @@ test("source watermarks preserve unaccepted tails without minting facts and rema
     assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 1);
     assert.deepEqual(store.projectRuntime("runtime"), projection);
   } finally { db.close(); }
+});
+
+test("unchanged source watermarks still validate current observer, source admission, and storage", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    store.ingest(token.sourceId, token, fact(1));
+    assert.throws(() => store.observeSourcePosition("wrong-source", token, 1), /identity_mismatch/);
+    assert.throws(() => store.observeSourcePosition(token.sourceId, { ...token }, 1), /stale_observer/);
+    assert.throws(() => store.observeSourcePosition(token.sourceId, token, 0), /source_gap/);
+    db.prepare("DELETE FROM execution_observer_sources WHERE agent_id=? AND source_id=?").run(token.agentId, token.sourceId);
+    assert.throws(() => store.observeSourcePosition(token.sourceId, token, 1), /source_unverified/);
+    db.prepare("INSERT INTO execution_observer_sources(agent_id,source_id) VALUES(?,?)").run(token.agentId, token.sourceId);
+    const resumed = observer(store, { expectedEpoch: 1, sourceId: token.sourceId });
+    assert.throws(() => store.observeSourcePosition(token.sourceId, token, 1), /stale_observer/);
+    const prepare = db.prepare.bind(db);
+    t.mock.method(db, "prepare", (sql: string) => {
+      if (sql === "SELECT * FROM execution_observers WHERE agent_id=?") throw new Error("injected storage unavailable");
+      return prepare(sql);
+    });
+    assert.throws(() => store.observeSourcePosition(resumed.sourceId, resumed, 1), /injected storage unavailable/,
+      "a previous valid token cannot conceal a failed durable read");
+  } finally { db.close(); }
+});
+
+test("source watermark advancement revalidates observer and sequence after acquiring the writer lock", (t) => {
+  for (const race of ["observer", "cursor", "frontier"] as const) {
+    const { db, store } = fixture();
+    try {
+      seed(store); const token = observer(store);
+      store.ingest(token.sourceId, token, fact(1));
+      const exec = db.exec.bind(db);
+      let raced = false;
+      t.mock.method(db, "exec", (sql: string) => {
+        if (sql === "BEGIN IMMEDIATE" && !raced) {
+          raced = true;
+          // Model the other connection's commit immediately before we obtain
+          // the lock, without timers or a live database.
+          if (race === "observer") exec("UPDATE execution_observers SET observer_epoch=2");
+          else if (race === "cursor") exec("UPDATE execution_observers SET last_source_sequence=5,max_observed_sequence=5");
+          else exec("UPDATE execution_observers SET max_observed_sequence=5");
+        }
+        exec(sql);
+      });
+      if (race === "observer") assert.throws(() => store.observeSourcePosition(token.sourceId, token, 4), /stale_observer/);
+      else if (race === "cursor") assert.throws(() => store.observeSourcePosition(token.sourceId, token, 4), /source_gap/);
+      else {
+        const prepare = db.prepare.bind(db);
+        let updates = 0;
+        t.mock.method(db, "prepare", (sql: string) => {
+          if (sql.startsWith("UPDATE execution_observers SET max_observed_sequence=")) updates += 1;
+          return prepare(sql);
+        });
+        store.observeSourcePosition(token.sourceId, token, 4);
+        assert.equal(updates, 0, "an intervening frontier advance makes the transaction a no-op");
+      }
+      assert.equal(raced, true);
+      assert.equal(db.isTransaction, false);
+      assert.equal(db.prepare("SELECT max_observed_sequence FROM execution_observers").get()?.max_observed_sequence,
+        race === "observer" ? 1 : 5);
+    } finally { db.close(); }
+  }
 });
 
 test("same-source admission survives store replacement and database reopen without replaying the prefix", async () => {

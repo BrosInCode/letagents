@@ -205,14 +205,11 @@ export type ProviderStreamCoordinatorOptions = {
   serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   serializeManifest<T>(operation: () => Promise<T>): Promise<T>;
   transition: ProviderStreamTransition;
-  appendActivity(
+  appendNativeActivity(
     entryId: string,
     event: DaemonActivityEvent,
-  ): Promise<unknown>;
-  appendActivityOnly(
-    entryId: string,
-    event: DaemonActivityEvent,
-  ): Promise<unknown>;
+    activityOnly: boolean,
+  ): Promise<void>;
   publishNativeActivity(
     entryId: string,
     method: string,
@@ -1232,11 +1229,8 @@ export class ProviderStreamCoordinator {
       }
       await this.options.serializeEntry(entryId, async () => {
         if (!this.isCurrentInstallation(installation)) return;
-        if (daemonInbox && this.typedDaemonInboxInstallations.has(installation)) {
-          await this.options.appendActivityOnly(entryId, sanitizedEvent);
-        } else {
-          await this.options.appendActivity(entryId, sanitizedEvent);
-        }
+        await this.options.appendNativeActivity(entryId, sanitizedEvent,
+          daemonInbox && this.typedDaemonInboxInstallations.has(installation));
       });
       if (!this.isCurrentInstallation(installation)) return;
     }

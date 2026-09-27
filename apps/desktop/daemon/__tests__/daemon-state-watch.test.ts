@@ -26,7 +26,7 @@ test("state watch returns immediately for a new generation and wakes on notifica
   await Promise.resolve();
   watch.notify();
   assert.deepEqual(await pending, { daemon_generation: 7, sequence: 2, entries });
-  assert.equal(asserted, 2);
+  assert.equal(asserted, 4, "each request checks authority before and after its read");
 
   generation = 8;
   assert.equal((await watch.watch({ afterDaemonGeneration: 7, afterSequence: 2, waitMs: 30_000 })).daemon_generation, 8);
@@ -203,4 +203,194 @@ test("coalescing never delays a handoff close", async () => {
   watch.notify();
   watch.close();
   assert.deepEqual(await pending, { daemon_generation: 9, sequence: 2, entries: [] });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function fakeClock() {
+  const timers = new Map<ReturnType<typeof setTimeout>, { callback: () => void; delay: number }>();
+  return {
+    timers,
+    setTimeout: ((callback: () => void, delay?: number) => {
+      const token = {} as ReturnType<typeof setTimeout>;
+      timers.set(token, { callback, delay: delay ?? 0 });
+      return token;
+    }) as typeof setTimeout,
+    clearTimeout: ((token: ReturnType<typeof setTimeout>) => { timers.delete(token); }) as typeof clearTimeout,
+    fire(delay: number) {
+      const match = [...timers].find(([, timer]) => timer.delay === delay);
+      assert.ok(match, `expected a ${delay} ms timer`);
+      timers.delete(match[0]);
+      match[1].callback();
+    },
+  };
+}
+
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("concurrent subscribers share an in-flight projection but check their own fences", async () => {
+  const read = deferred<DaemonManifestEntryView[]>();
+  let builds = 0;
+  let assertions = 0;
+  const watch = new DaemonStateWatch({
+    currentGeneration: () => 1, isHandoffScheduled: () => false,
+    assertCurrent: async () => { assertions += 1; },
+    entries: () => { builds += 1; return read.promise; },
+  });
+  const requests = Array.from({ length: 5 }, () => watch.watch({ afterDaemonGeneration: 1, afterSequence: 0, waitMs: 0 }));
+  await flush();
+  assert.equal(builds, 1);
+  assert.equal(assertions, 5);
+  read.resolve([]);
+  assert.deepEqual((await Promise.all(requests)).map((snapshot) => snapshot.sequence), [1, 1, 1, 1, 1]);
+  assert.equal(assertions, 10);
+});
+
+test("invalidation during projection preserves its cursor and coalesces a shared successor", async () => {
+  const clock = fakeClock();
+  const firstRead = deferred<DaemonManifestEntryView[]>();
+  let builds = 0;
+  const watch = new DaemonStateWatch({
+    ...clock, coalesceMs: 150, currentGeneration: () => 1, isHandoffScheduled: () => false,
+    assertCurrent: async () => {},
+    entries: async () => { builds += 1; return builds === 1 ? firstRead.promise : []; },
+  });
+  const first = watch.watch({ afterDaemonGeneration: 1, afterSequence: 0, waitMs: 25_000 });
+  await flush();
+  watch.notify();
+  watch.notify();
+  firstRead.resolve([]);
+  assert.equal((await first).sequence, 1, "a read cannot claim mutations that arrived after it began");
+  const next = watch.watch({ afterDaemonGeneration: 1, afterSequence: 1, waitMs: 25_000 });
+  const other = watch.watch({ afterDaemonGeneration: 1, afterSequence: 1, waitMs: 25_000 });
+  await flush();
+  assert.equal(builds, 1, "a stale cursor does not bypass the production window");
+  assert.deepEqual([...clock.timers.values()].map((timer) => timer.delay), [150]);
+  clock.fire(150);
+  assert.deepEqual((await Promise.all([next, other])).map((snapshot) => snapshot.sequence), [3, 3]);
+  assert.equal(builds, 2);
+});
+
+test("zero-wait reads and expired long polls bypass a pending production window", async () => {
+  const clock = fakeClock();
+  let builds = 0;
+  const watch = new DaemonStateWatch({
+    ...clock, coalesceMs: 150, currentGeneration: () => 1, isHandoffScheduled: () => false,
+    assertCurrent: async () => {}, entries: async () => { builds += 1; return []; },
+  });
+  const deadline = watch.watch({ afterDaemonGeneration: 1, afterSequence: 1, waitMs: 10 });
+  watch.notify();
+  assert.equal((await watch.watch({ afterDaemonGeneration: 1, afterSequence: 1, waitMs: 0 })).sequence, 2);
+  assert.equal(builds, 1);
+  clock.fire(10);
+  assert.equal((await deadline).sequence, 2);
+  assert.equal(builds, 2, "the deadline produces a fresh projection without waiting for coalescing");
+  watch.close();
+  assert.equal(clock.timers.size, 0);
+});
+
+test("a long-poll timeout refreshes time-derived liveness without a state mutation", async () => {
+  const clock = fakeClock();
+  let stale = false;
+  let builds = 0;
+  const watch = new DaemonStateWatch({
+    ...clock, coalesceMs: 150, currentGeneration: () => 1, isHandoffScheduled: () => false,
+    assertCurrent: async () => {},
+    entries: async () => {
+      builds += 1;
+      return [{ id: "agent", native_liveness: { state: stale ? "stale" : "active" } }] as DaemonManifestEntryView[];
+    },
+  });
+  const initial = await watch.watch({ afterDaemonGeneration: 1, afterSequence: 0, waitMs: 0 });
+  const pending = watch.watch({ afterDaemonGeneration: 1, afterSequence: initial.sequence, waitMs: 25_000 });
+  stale = true;
+  clock.fire(25_000);
+  const refreshed = await pending;
+  assert.equal(refreshed.sequence, initial.sequence);
+  assert.equal(refreshed.entries[0]!.native_liveness?.state, "stale");
+  assert.equal(builds, 2, "completed results are never cached by sequence");
+});
+
+test("generation changes cannot reuse an old in-flight projection or delay on its coalescing window", async () => {
+  const clock = fakeClock();
+  const read = deferred<DaemonManifestEntryView[]>();
+  let generation = 1;
+  let builds = 0;
+  const watch = new DaemonStateWatch({
+    ...clock, coalesceMs: 150, currentGeneration: () => generation, isHandoffScheduled: () => false,
+    assertCurrent: async () => {},
+    entries: async () => { builds += 1; return builds === 1 ? read.promise : []; },
+  });
+  const old = watch.watch({ afterDaemonGeneration: 1, afterSequence: 0, waitMs: 25_000 });
+  await flush();
+  generation = 2;
+  watch.notify();
+  const fresh = watch.watch({ afterDaemonGeneration: 1, afterSequence: 1, waitMs: 25_000 });
+  read.resolve([]);
+  assert.deepEqual((await Promise.all([old, fresh])).map((snapshot) => snapshot.daemon_generation), [2, 2]);
+  assert.equal(builds, 2);
+  watch.close();
+});
+
+test("close and handoff release subscribers waiting for snapshot production", async () => {
+  for (const mode of ["close", "handoff"] as const) {
+    const clock = fakeClock();
+    const read = deferred<DaemonManifestEntryView[]>();
+    let handoff = false;
+    let builds = 0;
+    const watch = new DaemonStateWatch({
+      ...clock, coalesceMs: 150, currentGeneration: () => 1, isHandoffScheduled: () => handoff,
+      assertCurrent: async () => {},
+      entries: async () => { builds += 1; return builds === 1 ? read.promise : []; },
+    });
+    const first = watch.watch({ afterDaemonGeneration: 1, afterSequence: 0, waitMs: 25_000 });
+    await flush();
+    watch.notify();
+    read.resolve([]);
+    await first;
+    const pending = watch.watch({ afterDaemonGeneration: 1, afterSequence: 1, waitMs: 25_000 });
+    await flush();
+    assert.equal(builds, 1);
+    if (mode === "close") watch.close();
+    else { handoff = true; watch.notify(); }
+    assert.equal((await pending).sequence, mode === "close" ? 2 : 3);
+    assert.equal(builds, 2);
+    assert.equal(clock.timers.size, 0);
+  }
+});
+
+test("failed shared reads release their slot and post-read fence loss rejects every subscriber", async () => {
+  const read = deferred<DaemonManifestEntryView[]>();
+  let builds = 0;
+  let fenced = false;
+  const watch = new DaemonStateWatch({
+    currentGeneration: () => 1, isHandoffScheduled: () => false,
+    assertCurrent: async () => { if (fenced) throw new Error("fence lost"); },
+    entries: async () => { builds += 1; return builds === 1 ? read.promise : []; },
+  });
+  const requests = Array.from({ length: 2 }, () => watch.watch({ afterDaemonGeneration: 1, afterSequence: 0, waitMs: 0 }));
+  const rejected = Promise.all(requests.map((request) => assert.rejects(request, /read failed/)));
+  await flush();
+  read.reject(new Error("read failed"));
+  await rejected;
+  assert.equal((await watch.watch({ afterDaemonGeneration: 1, afterSequence: 0, waitMs: 0 })).sequence, 1);
+  assert.equal(builds, 2);
+
+  const heldRead = deferred<DaemonManifestEntryView[]>();
+  const other = new DaemonStateWatch({
+    currentGeneration: () => 1, isHandoffScheduled: () => false,
+    assertCurrent: async () => { if (fenced) throw new Error("fence lost"); },
+    entries: () => heldRead.promise,
+  });
+  const held = Array.from({ length: 2 }, () => other.watch({ afterDaemonGeneration: 1, afterSequence: 0, waitMs: 0 }));
+  const lost = Promise.all(held.map((request) => assert.rejects(request, /fence lost/)));
+  await flush();
+  fenced = true;
+  heldRead.resolve([]);
+  await lost;
 });

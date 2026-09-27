@@ -254,6 +254,56 @@ test("a successful poll exposes received work and observing health in one notifi
   }
 });
 
+test("unchanged empty successful polls preserve durable state without notifications and still validate ingress", async () => {
+  const env = await fixture();
+  let timestamp = "2026-09-20T00:00:00.000Z";
+  const notifications: Array<string | undefined> = [];
+  const store = new SupervisedAgentInboxStore(env.database, () => timestamp, (agentId) => notifications.push(agentId));
+  let observer: DatabaseSync | undefined;
+  const poll = { agent_id: "quiet", room_id: "room", execution_generation_id: "generation",
+    last_observed_message_id: "1", expected_cursor: "1", messages: [] };
+  try {
+    await store.ingestSuccessfulPoll({ ...poll, expected_cursor: null,
+      messages: [{ source_message_id: "1", source_message: { text: "retained" }, activation: {} }] });
+    assert.deepEqual(notifications, ["quiet"]);
+    notifications.length = 0;
+    observer = new DatabaseSync(env.database);
+    const state = () => ["supervised_agent_ingress_cursors", "supervised_agent_ingress_health", "supervised_agent_history_boundaries"]
+      .map((table) => observer!.prepare(`SELECT * FROM ${table}`).all());
+    const before = state();
+    const version = observer.prepare("PRAGMA data_version").get()!.data_version;
+    timestamp = "2026-09-21T00:00:00.000Z";
+    for (const cursor of ["1", "0", null]) {
+      assert.deepEqual(await store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: cursor }), []);
+    }
+    assert.deepEqual(state(), before, "idle polling does not rewrite timestamps or prune history boundaries");
+    assert.equal(observer.prepare("PRAGMA data_version").get()!.data_version, version, "no SQLite pages changed");
+    assert.deepEqual(notifications, []);
+    await assert.rejects(store.ingestSuccessfulPoll({ ...poll, expected_cursor: "0" }), /cursor changed/);
+    await assert.rejects(store.ingestSuccessfulPoll({ ...poll, room_id: "other" }), /ingress room changed/);
+    await assert.rejects(store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: "invalid" }), /numeric room message/);
+    assert.deepEqual(notifications, []);
+
+    await store.ingestSuccessfulPoll({ ...poll, execution_generation_id: "replacement" });
+    assert.equal((await store.ingressHealth("quiet"))?.execution_generation_id, "replacement");
+    assert.deepEqual(notifications, ["quiet"], "generation changes cannot take the no-op path");
+    await store.setIngressHealth({ agent_id: "quiet", room_id: "room", execution_generation_id: "replacement", state: "backoff", detail: "retry" });
+    notifications.length = 0;
+    await store.ingestSuccessfulPoll({ ...poll, execution_generation_id: "replacement" });
+    assert.deepEqual(await store.ingressHealth("quiet"), { room_id: "room", execution_generation_id: "replacement", state: "observing", detail: null });
+    assert.deepEqual(notifications, ["quiet"], "an empty recovery poll clears backoff and notifies after commit");
+
+    notifications.length = 0;
+    await store.ingestSuccessfulPoll({ ...poll, execution_generation_id: "replacement", last_observed_message_id: "502",
+      observed_messages: Array.from({ length: 501 }, (_, index) => ({ source_message_id: String(index + 2),
+        source_message: {}, activation: {}, activation_decision: "ignore" })) });
+    assert.equal((await store.cursor("quiet"))?.last_observed_message_id, "502");
+    assert.equal(observer.prepare("SELECT COUNT(*) AS n FROM supervised_agent_observed_messages WHERE agent_id='quiet'").get()!.n, 501,
+      "silent growth is pruned to 500 recent observations plus the active message's pinned provenance");
+    assert.deepEqual(notifications, ["quiet"]);
+  } finally { observer?.close(); await store.close(); await env.cleanup(); }
+});
+
 test("new-source observation follows commit and excludes replay, synthetic insertion and rolled-back polls", async () => {
   const env = await fixture();
   const store = new SupervisedAgentInboxStore(env.database);
@@ -621,6 +671,7 @@ test("reverse stop intent freezes late poll, bootstrap, and synthetic ingress ac
         messages: [{ source_message_id: "48", source_message: { text: "late B" }, activation: {} }] };
       await assert.rejects(store.ingestPoll(late), /freezes daemon inbox ingress/);
       await assert.rejects(store.ingestSuccessfulPoll({ ...late, execution_generation_id: "generation" }), /freezes daemon inbox ingress/);
+      await assert.rejects(store.ingestSuccessfulPoll({ ...late, execution_generation_id: "generation", last_observed_message_id: "47", messages: [] }), /freezes daemon inbox ingress/);
       await assert.rejects(store.bootstrapCursor({ agent_id: "draining", room_id: "room", last_observed_message_id: "999" }), /freezes daemon inbox ingress/);
       await assert.rejects(store.enqueueInitialMessage({ agent_id: "draining", room_id: "room", source_message_id: "initial-B", source_message: {}, activation: {} }), /freezes daemon inbox ingress/);
       await assert.rejects(store.enqueueCorrection({ agent_id: "draining", room_id: "room", source_message_id: "correction-B", source_message: {}, activation: {} }), /freezes daemon inbox ingress/);
@@ -916,6 +967,41 @@ test("the same source id in separate rooms remains separate durable inbox and ob
     assert.equal((await store.observedContext("stone", "room_b"))[0]?.source_message_id, "msg_1");
     await store.close();
   } finally { await env.cleanup(); }
+});
+
+test("payload-free receipt projections preserve ordering, terminal bounds, blocked causality and timelines", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database);
+  let raw: DatabaseSync | undefined;
+  try {
+    const items = await store.ingestPoll({ agent_id: "projection", room_id: "room", last_observed_message_id: "205",
+      messages: Array.from({ length: 205 }, (_, index) => ({ source_message_id: String(index + 1),
+        source_message: { text: "payload".repeat(300) }, activation: { for_current_agent: true } })) });
+    raw = new DatabaseSync(env.database);
+    raw.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply' WHERE agent_id='projection' AND fifo_sequence<=203").run();
+    raw.prepare("UPDATE supervised_agent_inbox SET state='blocked',last_error='blocked' WHERE inbox_item_id=?").run(items[203]!.inbox_item_id);
+    raw.prepare("INSERT INTO supervised_agent_publications VALUES(?,?,?,?,?,?)").run(items[202]!.inbox_item_id, "projection", "room", "reply-203", "canonical-203", "2026-09-20T00:00:00Z");
+    const event = raw.prepare("INSERT INTO supervised_agent_inbox_events VALUES(?,?,?,'queued',?,?)");
+    for (let index = 3; index <= 82; index += 1) event.run(items[203]!.inbox_item_id, index, `extra-${index}`, "2026-09-20T00:00:00Z", `event-${index}`);
+    for (const [limit, count] of [[0, 2], [2, 4], [500, 202]]) {
+      const full = await store.receipts("projection", limit);
+      const projected = await store.receiptProjection("projection", limit);
+      assert.deepEqual(projected, full.map(({ source_message: _source, activation: _activation, ...metadata }) => metadata));
+      assert.equal(projected.length, count);
+      assert.equal(projected.at(-1)?.receipt_state, "queued_behind_blocked");
+      assert.equal(projected.at(-1)?.blocked_by_inbox_item_id, items[203]!.inbox_item_id);
+      assert.equal(projected.at(-2)?.timeline.length, 64);
+      assert.equal(projected.at(-2)?.timeline[0]?.event_sequence, 19);
+      if (limit! > 0) assert.equal(projected.find(item => item.fifo_sequence === 203)?.canonical_message_id, "canonical-203");
+      assert.ok(full.every(item => typeof item.source_message === "object" && item.activation.for_current_agent === true));
+    }
+    const before = await store.receiptProjection("projection");
+    raw.prepare("UPDATE supervised_agent_inbox SET source_message_json='invalid-json',activation_json='invalid-json' WHERE agent_id='projection'").run();
+    assert.deepEqual(await store.receiptProjection("projection"), before, "projection does not load or parse either payload column");
+    await assert.rejects(store.receipts("projection"), SyntaxError, "the operational full receipt reader retains its payload contract");
+    raw.prepare("UPDATE supervised_agent_inbox SET last_error='current error' WHERE inbox_item_id=?").run(items[203]!.inbox_item_id);
+    assert.equal((await store.receiptProjection("projection")).at(-2)?.last_error, "current error", "prepared reads return current rows");
+  } finally { raw?.close(); await store.close(); await env.cleanup(); }
 });
 
 test("blocked FIFO head exposes the causal wait and retry resumes that exact item", async () => {

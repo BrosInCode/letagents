@@ -6713,6 +6713,73 @@ test("managed launch receipts survive reopening, reject relabeling, and legacy m
 });
 
 
+test("scoped manifest reads hydrate only matching entries and prepared reads observe new commits", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const saved = await store.write(0, [
+      { ...entry, id: "outside", room_id: "other-room" },
+      { ...entry, id: "selected-z", room_id: "selected-room" },
+      { ...entry, id: "selected-a", room_id: "selected-room" },
+    ]);
+    const expected = saved.entries.filter(value => value.room_id === "selected-room");
+    assert.deepEqual(await store.listRoomEntries("selected-room"), expected);
+    assert.deepEqual(await store.getEntry("selected-a"), expected[1]);
+    assert.deepEqual(await store.listRoomEntries("missing-room"), []);
+    assert.equal(await store.getEntry("missing-entry"), undefined);
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.prepare("UPDATE activity_events SET payload_json='invalid-json' WHERE agent_id=?").run("outside");
+      assert.deepEqual(await store.listRoomEntries("selected-room"), expected,
+        "an unrelated room payload must not be hydrated");
+      assert.deepEqual(await store.getEntry("selected-a"), expected[1]);
+      await assert.rejects(store.load(), /JSON/);
+      database.prepare("UPDATE agent_profiles SET display_name=? WHERE agent_id=?").run("Changed elsewhere", "selected-a");
+      assert.equal((await store.getEntry("selected-a"))?.display_name, "Changed elsewhere");
+      assert.deepEqual((await store.listRoomEntries("selected-room")).map(value => value.id), ["selected-z", "selected-a"],
+        "room reads preserve canonical sort order");
+      assert.equal((await store.listRoomEntries("selected-room"))[1]?.display_name, "Changed elsewhere",
+        "cached statements never cache authority results");
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("native activity records avoid history hydration and preserve transactional admission and retention", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const base = entry.activity![0]!;
+    await store.write(0, [{ ...entry, observed_state: "recovering",
+      activity: [{ ...base, sequence: 100 }, { ...base, sequence: 5 }] }]);
+    assert.deepEqual(await store.getActivityState(entry.id), { observed_state: "recovering", last_sequence: 5 },
+      "admission uses the last sort-order event, not the maximum sequence");
+    assert.equal(await store.getActivityState("missing"), undefined);
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.prepare("UPDATE activity_events SET payload_json='invalid-json' WHERE agent_id=? AND sort_order=0").run(entry.id);
+      const recorded = await store.recordActivity(1, entry.id, { ...base, sequence: 6 }, null, 2);
+      assert.deepEqual(recorded, { generation: 2 });
+      const current = (await store.getEntry(entry.id))!;
+      assert.equal(current.observed_state, "recovering", "presentation-only records cannot alter lifecycle state");
+      assert.deepEqual(current.native_liveness, entry.native_liveness);
+      assert.deepEqual(current.activity?.map(event => event.sequence), [5, 6]);
+      await assert.rejects(store.recordActivity(2, entry.id, { ...base, sequence: 6 }, null), /not newer/);
+      await assert.rejects(store.recordActivity(1, entry.id, { ...base, sequence: 7 }, null), ManifestConflictError);
+      await assert.rejects(store.recordActivity(2, entry.id, { ...base, sequence: 7 }, null, 2,
+        async () => { throw new Error("fenced"); }), /fenced/);
+      assert.deepEqual(await store.getEntry(entry.id), current);
+      assert.equal((await store.load()).generation, 2);
+      // A stale scalar admission cannot bypass the sequence check inside the write transaction.
+      database.prepare("UPDATE activity_events SET sequence=9 WHERE agent_id=? AND sequence=6").run(entry.id);
+      await assert.rejects(store.recordActivity(2, entry.id, { ...base, sequence: 7 }, {
+        observedState: "working", nativeLiveness: { state: "active" },
+      }), /not newer than 9/);
+      assert.equal((await store.getEntry(entry.id))?.observed_state, "recovering", "failed append rolls back runtime fields");
+      assert.equal((await store.load()).generation, 2);
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("state summary loads only the newest payload-free activity without changing full reads", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
