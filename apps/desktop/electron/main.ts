@@ -41,7 +41,7 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-registerDesktopIpcHandlers();
+const startRentalServices = registerDesktopIpcHandlers();
 setExecutionDelegationInvalidationHandler(async (roomId) => { await supervisorDaemonClient.syncExecutionDelegations(roomId); });
 
 app.once("ready", async (_event, launchInfo) => {
@@ -73,6 +73,9 @@ app.once("ready", async (_event, launchInfo) => {
       await startupPreparation;
     }
   })();
+  // Rental recovery restores local deadlines promptly, then joins the startup
+  // operation already registered by the application above.
+  startRentalServices();
   if (process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE === "1") {
     await backgroundStartup;
     const status = await supervisorDaemonClient.ensureRunning();

@@ -224,6 +224,121 @@ test("rental IPC domain delegates to the existing rental capability registrar", 
   );
 });
 
+test("rental registration defers recovery and host startup to one explicit application start", async () => {
+  const calls: string[] = [];
+  const unexpected = () => { throw new Error("registration performed a lifecycle operation"); };
+  const mocks = [
+    mock.module("../rental-handlers.js", { namedExports: {
+      registerDesktopRentalIpcHandlers: () => { calls.push("handlers"); },
+    } }),
+    mock.module("../rental/api-client.js", { namedExports: { RentalApiClient: class {} } }),
+    mock.module("../rental/launch-coordinator.js", { namedExports: { RentalLaunchCoordinator: class {
+      async recover() { calls.push("recovery"); }
+    } } }),
+    mock.module("../rental/provider-event-poller.js", { namedExports: {
+      RentalProviderEventPoller: class {}, setActiveRentalProviderEventPoller: () => {},
+    } }),
+    mock.module("../rental/provider-host-manager.js", { namedExports: {
+      RentalProviderHostManager: class {}, setActiveRentalProviderHostManager: () => { calls.push("host"); },
+    } }),
+    mock.module("../rental/renter-trigger.js", { namedExports: { RenterTriggerRuntime: class {} } }),
+    mock.module("../main/agents/providers.js", { namedExports: { runDesktopAgentProviderPreflight: unexpected } }),
+    mock.module("../main/agents/state.js", { namedExports: { getOrCreateDesktopHostId: unexpected } }),
+    mock.module("../main/auth.js", { namedExports: { readStoredAuth: unexpected } }),
+    mock.module("../main/paths.js", { namedExports: { apiUrl: "http://127.0.0.1:9" } }),
+    mock.module("../main/room-stream.js", { namedExports: {
+      emitRoomStreamEvent: unexpected, getActiveRoomIdentifier: unexpected,
+    } }),
+    mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: {} } }),
+    mock.module("../main/window.js", { namedExports: { emitToMainWindow: unexpected } }),
+  ];
+  try {
+    const { registerDesktopRentalDomainIpcHandlers } = await import("../main/ipc-handlers/rental.js");
+    const start = registerDesktopRentalDomainIpcHandlers({} as never);
+    assert.deepEqual(calls, ["handlers"], "registration cannot own background lifecycle work");
+    start();
+    start();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["handlers", "recovery", "host"], "initial recovery and manager start happen once");
+  } finally { for (const stub of mocks.reverse()) stub.restore(); }
+});
+
+test("application registers startup preparation before rental recovery without delaying the window", async () => {
+  const calls: string[] = [];
+  let ready!: () => Promise<void>;
+  let releasePreparation!: () => void;
+  const preparation = new Promise<void>((resolve) => { releasePreparation = resolve; });
+  let releaseDaemon!: () => void;
+  const daemonReady = new Promise<void>((resolve) => { releaseDaemon = resolve; });
+  let backgroundDone!: () => void;
+  const reconciled = new Promise<void>((resolve) => { backgroundDone = resolve; });
+  const mockApp = { once: (_name: string, handler: () => Promise<void>) => { ready = handler; },
+    on() {}, setName() {}, isPackaged: true };
+  const previousSmoke = process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
+  delete process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
+  const mocks = [
+    mock.module("electron", { namedExports: { app: mockApp,
+      protocol: { registerSchemesAsPrivileged() {}, handle() {} } } }),
+    mock.module("../main/ipc.js", { namedExports: { registerDesktopIpcHandlers: () => {
+      calls.push("register");
+      return () => { calls.push("rental-start"); };
+    } } }),
+    mock.module("../main/desktop-shell-environment.js", { namedExports: {
+      startDesktopShellEnvironmentHydration: () => preparation,
+    } }),
+    mock.module("../main/agents/legacy-open-model-retirement.js", { namedExports: {
+      retireLegacyCodexBackedOpenModelSessions: async () => { calls.push("prepared"); },
+    } }),
+    mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: {
+      async ensureRunning(prerequisite: Promise<void>) {
+        calls.push("startup-registered");
+        assert.ok(prerequisite instanceof Promise);
+        await prerequisite;
+        calls.push("native-start");
+        await daemonReady;
+      },
+    } } }),
+    mock.module("../main/supervisor-grant-coordinator.js", { namedExports: { supervisorGrantCoordinator: {
+      async reconcileDesiredRunning() { calls.push("grants"); backgroundDone(); },
+    } } }),
+    mock.module("../main/notifications.js", { namedExports: {
+      initializeDesktopNotifications: async () => {}, prepareDesktopNotificationLaunch() {}, prepareDesktopNotifications() {},
+    } }),
+    mock.module("../main/attachments.js", { namedExports: { handleAttachmentProtocolRequest() {} } }),
+    mock.module("../main/menu.js", { namedExports: { configureApplicationMenu() {} } }),
+    mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", workspaceRoot: "/fixture" } }),
+    mock.module("../main/room-stream.js", { namedExports: {
+      setExecutionDelegationInvalidationHandler() {}, stopDesktopRoomStream: async () => {},
+    } }),
+    mock.module("../main/smoke.js", { namedExports: { configureDesktopSmokeEnvironment() {}, seedDesktopSmokeState() {} } }),
+    mock.module("../main/window.js", { namedExports: {
+      createWindow: () => { calls.push("window"); }, hasOpenWindows: () => true,
+    } }),
+    mock.module("../main/updates.js", { namedExports: { initializeDesktopUpdates() {}, stopDesktopUpdates() {} } }),
+    mock.module("../rental/provider-host-manager.js", { namedExports: { stopActiveRentalProviderHostManager: async () => {} } }),
+    mock.module("../rental/provider-event-poller.js", { namedExports: { stopActiveRentalProviderEventPoller: async () => {} } }),
+  ];
+  try {
+    await import("../main.js");
+    assert.deepEqual(calls, ["register"]);
+    await ready();
+    assert.deepEqual(calls, process.platform === "darwin"
+      ? ["register", "startup-registered", "rental-start", "window"]
+      : ["register", "rental-start", "window"]);
+    releasePreparation();
+    releaseDaemon();
+    if (process.platform === "darwin") {
+      await reconciled;
+      assert.deepEqual(calls.slice(-3), ["prepared", "native-start", "grants"]);
+    }
+  } finally {
+    releasePreparation(); releaseDaemon();
+    for (const stub of mocks.reverse()) stub.restore();
+    if (previousSmoke === undefined) delete process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
+    else process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE = previousSmoke;
+  }
+});
+
 test("desktop IPC channel prefixes stay in their owning domains", () => {
   const expectedPrefixes: Record<keyof typeof domainSources, string[]> = {
     app: [
