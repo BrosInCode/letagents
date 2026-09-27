@@ -500,7 +500,7 @@ export class WorkerAuthorityCoordinator {
     authorization?: MintedWorkerAuthorization,
   ): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
     await this.assertRuntimeAdmission(input.entry_id);
-    const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
+    const entry = await this.options.store.getEntry(input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
     if (await this.pollingContract(entry) && !authorization) {
       throw new Error("Custodial polling binds only daemon-minted worker authority.");
@@ -1378,7 +1378,7 @@ export class WorkerAuthorityCoordinator {
   }
 
   private async verifyWorkerSessionLocked(input: VerifyWorkerSessionInput): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {
-    const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
+    const entry = await this.options.store.getEntry(input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
     if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
     if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker session work attempt does not match the supervised manifest entry.");
@@ -1607,7 +1607,7 @@ export class WorkerAuthorityCoordinator {
   }): Promise<{ checkpointed: true; entry_id: string; room_cursor: string }> {
     return this.options.serializeEntry(input.entry_id, () => this.options.serializeCursorCheckpoint(input.entry_id, async () => {
       await this.assertRuntimeAdmission(input.entry_id);
-      const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
+      const entry = await this.options.store.getEntry(input.entry_id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
       if (await this.pollingContract(entry)) {
         throw new Error("Custodial polling requires exact offer acknowledgement; legacy cursor checkpoints are disabled.");

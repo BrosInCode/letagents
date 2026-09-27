@@ -16,7 +16,7 @@ import { DaemonControlSocket } from "./control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
 import { createHostApprovalBridge } from "./host-approval-broker.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
-import { DaemonAuthority } from "./daemon-authority.js";
+import { DaemonAuthority, type DaemonCommitNotification } from "./daemon-authority.js";
 import { DaemonReadModel } from "./daemon-read-model.js";
 import { DeliveryCutoverCoordinator } from "./delivery-cutover-coordinator.js";
 import { DeliveryCutoverExecutionCoordinator } from "./delivery-cutover-execution-coordinator.js";
@@ -186,7 +186,7 @@ export class SupervisorDaemon {
     };
     this.authority = new DaemonAuthority({
       ...daemonAuthority,
-      notifyStateChanged: () => this.notifyStateChanged(),
+      notifyStateChanged: (captureAgentId) => this.notifyStateChanged(captureAgentId),
     });
     this.entryConcurrency = new EntryConcurrencyGate({
       isHandoffScheduled: () => this.handoffScheduled || this.handoffDraining,
@@ -267,7 +267,7 @@ export class SupervisorDaemon {
     this.ephemeralProvisioner = new EphemeralWorkspaceProvisioner(root);
     this.workerBindings = new WorkerBindingStore(
       paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
-      (commit) => this.fenceDaemonCommit(commit),
+      (commit, notification) => this.fenceDaemonCommit(commit, notification),
       paths.manifestPath, undefined, /* schemaPrepared */ true,
     );
     this.nativeActivity = new NativeActivityPublicationCoordinator({
@@ -311,7 +311,7 @@ export class SupervisorDaemon {
     // path is a legacy JSON import source and must never become a second SQLite
     // authority for delivery receipts.
     this.supervisedInbox = new SupervisedAgentInboxStore(
-      paths.manifestPath, undefined, () => this.notifyStateChanged(), /* schemaPrepared */ true,
+      paths.manifestPath, undefined, (agentId) => this.notifyStateChanged(agentId), /* schemaPrepared */ true,
     );
     this.workerAuthority = new WorkerAuthorityCoordinator({
       store: this.store,
@@ -380,8 +380,7 @@ export class SupervisorDaemon {
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
       transition: (entryId, state, condition, detail, actor) =>
         this.transition(entryId, state, condition, detail, actor),
-      appendActivity: (entryId, event) => this.appendActivity(entryId, event),
-      appendActivityOnly: (entryId, event) => this.manifestAdministration.appendActivityOnly(entryId, event),
+      appendNativeActivity: (entryId, event, activityOnly) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly),
       publishNativeActivity: (entryId, method, status, observedAt) =>
         this.publishNativeActivity(entryId, method, status, observedAt),
       handleTerminal: (installation, _bindingIdentity, terminal) =>
@@ -919,7 +918,9 @@ export class SupervisorDaemon {
       installHostGrant: this.executionDelegations.installHostGrant.bind(this.executionDelegations),
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
-      listManifest: async (roomId) => this.entriesWithDerivedLiveness((await this.store.load()).entries.filter((entry) => !roomId || entry.room_id === roomId)),
+      listManifest: async (roomId) => this.entriesWithDerivedLiveness(roomId
+        ? await this.store.listRoomEntries(roomId)
+        : (await this.store.load()).entries),
       prepareBoundedEffect: this.boundedEffects.prepare.bind(this.boundedEffects),
       prepareHandoff: () => this.handoff.prepare(),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
@@ -1347,9 +1348,10 @@ export class SupervisorDaemon {
     return this.readModel.entriesWithDerivedLiveness(entries);
   }
 
-  private notifyStateChanged(): void {
+  private notifyStateChanged(captureAgentId?: string | false): void {
     this.stateWatch.notify();
-    try { this.executionCapture?.refresh(); } catch { /* optional observation */ }
+    if (captureAgentId === false) return;
+    try { this.executionCapture?.refresh(captureAgentId); } catch { /* optional observation */ }
   }
 
   private pushAgentStreamEvent(entryId: string, event: DaemonActivityEvent): void {
@@ -1587,8 +1589,8 @@ export class SupervisorDaemon {
     );
   }
 
-  private fenceDaemonCommit(commit: () => Promise<void>): Promise<void> {
-    return this.authority.fenceDaemonCommit(commit);
+  private fenceDaemonCommit(commit: () => Promise<void>, notification?: DaemonCommitNotification): Promise<void> {
+    return this.authority.fenceDaemonCommit(commit, notification);
   }
 
   /**
