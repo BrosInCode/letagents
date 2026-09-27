@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, h } from "vue";
+import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 import {
@@ -105,6 +105,76 @@ test("context-menu dismissal restores focus only for keyboard and copy actions",
     focus: (options) => calls.push(options),
   });
   assert.deepEqual(calls, [{ preventScroll: true }]);
+});
+
+test("a mounted message reuses escaped Markdown while references and search remain reactive", async (t) => {
+  const originalWindow = globalThis.window;
+  Object.assign(globalThis, { window: { removeEventListener() {} } });
+  const text = "## **Original**\nSee msg_42, task_7, `msg_42` and <script>.";
+  const replacement = "## **Changed**\nSee msg_42 and <img>.";
+  let parses = 0;
+  const originalReplace = String.prototype.replace;
+  t.mock.method(String.prototype, "replace", function (this: string, pattern: RegExp, value: string) {
+    // The block parser starts by normalizing source newlines. Count the real
+    // parser entry without changing the production formatter or Vue cache.
+    if ((String(this) === text || String(this) === replacement) && pattern instanceof RegExp && pattern.source === "\\r\\n") parses++;
+    return originalReplace.call(this, pattern, value);
+  });
+  const props = reactive({
+    message: {
+      id: "msg_1", sender: "Oak", text, displayText: null, source: "agent",
+      timestamp: "2026-09-27T00:00:00Z", attachments: [], agentIdentity: null,
+    },
+    messageReferenceIds: new Set<string>(), taskReferenceIds: new Set<string>(),
+    highlightQuery: "", context: "timeline", deliveryReceipts: [],
+    threadSummary: { count: 0, unreadCount: 0, participants: [] },
+  });
+  let html = "";
+  const renderer = createRenderer<any, any>({
+    patchProp(_node, key, _previous, value) { if (key === "innerHTML") html = value; },
+    insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}),
+    setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null,
+  });
+  const app = renderer.createApp({
+    setup() {
+      const vm = (DesktopChatMessage as any).setup(props, { expose() {}, emit() {} });
+      return () => h("div", { innerHTML: vm.renderedText.value });
+    },
+  });
+  app.provide(ssrContextKey, { modules: new Set() });
+  try {
+    app.mount({});
+    assert.equal(parses, 1);
+    assert.match(html, /<h2><strong>Original<\/strong><\/h2>/);
+    assert.match(html, /&lt;script&gt;/);
+    assert.doesNotMatch(html, /data-message-reference-id|data-task-reference-id/);
+    props.messageReferenceIds = new Set(["msg_42"]);
+    props.taskReferenceIds.add("task_7");
+    await nextTick();
+    assert.equal(parses, 1, "history and task updates must not reparse existing message Markdown");
+    assert.match(html, /data-message-reference-id="msg_42"/);
+    assert.match(html, /data-task-reference-id="task_7"/);
+    assert.match(html, /<code>msg_42<\/code>/);
+    props.highlightQuery = "42";
+    await nextTick();
+    assert.equal(parses, 1, "search must only decorate the already escaped message");
+    assert.match(html, /msg_<mark class="message-search-hit">42<\/mark><\/button>/);
+    assert.match(html, /<code>msg_42<\/code>/);
+    props.messageReferenceIds.clear();
+    props.taskReferenceIds = new Set();
+    await nextTick();
+    assert.equal(parses, 1);
+    assert.doesNotMatch(html, /data-message-reference-id|data-task-reference-id/);
+    props.message.text = replacement;
+    await nextTick();
+    assert.equal(parses, 2, "edited message content must be reparsed");
+    assert.match(html, /<strong>Changed<\/strong>/);
+    assert.match(html, /&lt;img&gt;/);
+    assert.doesNotMatch(html, /<img|Original/);
+  } finally {
+    app.unmount();
+    Object.assign(globalThis, { window: originalWindow });
+  }
 });
 
 test("one room message groups delivery receipts for every activated agent", async () => {

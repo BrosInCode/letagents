@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { computed, ref, type Ref } from "vue";
+import { computed, effectScope, ref, type Ref } from "vue";
 
 import type {
   DesktopAccountRoomEntry,
@@ -1120,7 +1120,197 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
       ["artifact:pr:1"],
     );
   });
+
+  it("coalesces an artifact burst into one read and one trailing read without applying the superseded response", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_held", "Preserved")]);
+    const first = deferred<DesktopRoomSharedArtifact[]>();
+    const trailing = deferred<DesktopRoomSharedArtifact[]>();
+    harness.nextArtifacts = first.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      for (let index = 0; index < 25; index += 1) artifactUpdate(harness, null);
+      assert.deepEqual(harness.getArtifactsRequests, ["focus_a"]);
+      harness.nextArtifacts = trailing.promise;
+      first.resolve([sharedArtifact("artifact:stale")]);
+      await flushAsync();
+      assert.deepEqual(harness.getArtifactsRequests, ["focus_a", "focus_a"]);
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, []);
+      const expected = sharedArtifact("artifact:latest");
+      trailing.resolve([expected]);
+      await flushAsync();
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, [expected]);
+      assert.deepEqual(messageIds(harness.selectedSnapshot.value), ["msg_held"]);
+      assert.deepEqual(harness.getSnapshotRequests, []);
+    });
+  });
+
+  it("applies typed artifact events immediately while a trailing read preserves their freshness", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    const first = deferred<DesktopRoomSharedArtifact[]>();
+    const trailing = deferred<DesktopRoomSharedArtifact[]>();
+    harness.nextArtifacts = first.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      artifactUpdate(harness, null);
+      const pushed = sharedArtifact("artifact:pushed");
+      artifactUpdate(harness, pushed);
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, [pushed]);
+      harness.nextArtifacts = trailing.promise;
+      first.resolve([]);
+      await flushAsync();
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, [pushed]);
+      const canonical = { ...pushed, title: "Canonical title" };
+      trailing.resolve([canonical]);
+      await flushAsync();
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, [canonical]);
+    });
+  });
+
+  it("does not replace artifacts from a newer snapshot or explicit mutation with an older read", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    const pending = deferred<DesktopRoomSharedArtifact[]>();
+    harness.nextArtifacts = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      artifactUpdate(harness, null);
+      const newer = roomSnapshot("focus_a", { roomArtifacts: [sharedArtifact("artifact:mutation")] });
+      harness.state.handleRefreshRoom(newer);
+      const retained = harness.selectedSnapshot.value?.roomArtifacts;
+      pending.resolve([sharedArtifact("artifact:older-read")]);
+      await flushAsync();
+      assert.strictEqual(harness.selectedSnapshot.value?.roomArtifacts, retained);
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, newer.roomArtifacts);
+      assert.deepEqual(harness.getArtifactsRequests, ["focus_a"]);
+    });
+  });
+
+  it("retries a failed artifact read only for a pending or later invalidation", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    const first = deferred<DesktopRoomSharedArtifact[]>();
+    const trailing = deferred<DesktopRoomSharedArtifact[]>();
+    harness.nextArtifacts = first.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      artifactUpdate(harness, null);
+      artifactUpdate(harness, null);
+      harness.nextArtifacts = trailing.promise;
+      first.reject(new Error("offline"));
+      await flushAsync();
+      assert.equal(harness.getArtifactsRequests.length, 2);
+      trailing.reject(new Error("still offline"));
+      await flushAsync();
+      assert.equal(harness.getArtifactsRequests.length, 2);
+      harness.nextArtifacts = [sharedArtifact("artifact:recovered")];
+      artifactUpdate(harness, null);
+      await flushAsync();
+      assert.equal(harness.getArtifactsRequests.length, 3);
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, harness.nextArtifacts);
+    });
+  });
+
+  it("fences artifact reads and pending invalidations across account changes and session reset", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    const priorAccount = deferred<DesktopRoomSharedArtifact[]>();
+    const priorSession = deferred<DesktopRoomSharedArtifact[]>();
+    harness.nextArtifacts = priorAccount.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      artifactUpdate(harness, null);
+      artifactUpdate(harness, null);
+      harness.authStatus.value = { account: { id: "account_new" } } as DesktopAuthStatus;
+      harness.nextArtifacts = priorSession.promise;
+      artifactUpdate(harness, null);
+      harness.state.invalidateSession();
+      const current = sharedArtifact("artifact:current-account-session");
+      harness.nextArtifacts = [current];
+      artifactUpdate(harness, null);
+      await flushAsync();
+      priorAccount.resolve([sharedArtifact("artifact:prior-account")]);
+      priorSession.resolve([sharedArtifact("artifact:prior-session")]);
+      await flushAsync();
+      assert.equal(harness.getArtifactsRequests.length, 3);
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, [current]);
+    });
+  });
+
+  it("does not reuse an artifact read after navigating away and back to the same cached room", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    const originalSnapshot = harness.selectedSnapshot.value;
+    const pending = deferred<DesktopRoomSharedArtifact[]>();
+    harness.nextArtifacts = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      artifactUpdate(harness, null);
+      artifactUpdate(harness, null);
+      harness.activeEntry.value = focusEntry("focus_b");
+      harness.selectedSnapshot.value = roomSnapshot("focus_b");
+      harness.activeEntry.value = focusEntry("focus_a");
+      harness.selectedSnapshot.value = originalSnapshot;
+      harness.nextArtifacts = [sharedArtifact("artifact:return")];
+      artifactUpdate(harness, null);
+      await flushAsync();
+      pending.resolve([sharedArtifact("artifact:before-navigation")]);
+      await flushAsync();
+      assert.deepEqual(harness.getArtifactsRequests, ["focus_a", "focus_a"]);
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, harness.nextArtifacts);
+    });
+  });
+
+  it("rejects an artifact response from a previous room-stream lifecycle", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    const pending = deferred<DesktopRoomSharedArtifact[]>();
+    harness.nextArtifacts = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.syncSelectedRoomStream("focus_a");
+      artifactUpdate(harness, null);
+      artifactUpdate(harness, null);
+      await harness.state.syncSelectedRoomStream(null);
+      await harness.state.syncSelectedRoomStream("focus_a");
+      pending.resolve([sharedArtifact("artifact:old-stream")]);
+      await flushAsync();
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, []);
+      assert.deepEqual(harness.getArtifactsRequests, ["focus_a"]);
+      harness.nextArtifacts = [sharedArtifact("artifact:new-stream")];
+      artifactUpdate(harness, null);
+      await flushAsync();
+      assert.equal(harness.getArtifactsRequests.length, 2);
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, harness.nextArtifacts);
+    });
+  });
+
+  it("discards artifact responses and trailing refreshes after the owner scope is disposed", async () => {
+    const scope = effectScope();
+    const harness = scope.run(() => createHarness())!;
+    harness.selectedSnapshot.value = focusSnapshot();
+    const pending = deferred<DesktopRoomSharedArtifact[]>();
+    harness.nextArtifacts = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      artifactUpdate(harness, null);
+      artifactUpdate(harness, null);
+      scope.stop();
+      pending.resolve([sharedArtifact("artifact:disposed")]);
+      await flushAsync();
+      assert.deepEqual(harness.selectedSnapshot.value?.roomArtifacts, []);
+      assert.deepEqual(harness.getArtifactsRequests, ["focus_a"]);
+    });
+  });
 });
+
+function artifactUpdate(harness: ReturnType<typeof createHarness>, artifact: DesktopRoomSharedArtifact | null): void {
+  harness.state.handleRoomStreamEvent({
+    type: "artifact_update", roomIdentifier: "focus_a",
+    artifactIdentityKey: artifact?.identityKey ?? "artifact:changed", artifact,
+  });
+}
 
 function createHarness(options: {
   deliveryRepairRetryMs?: number;
@@ -1128,13 +1318,14 @@ function createHarness(options: {
   openedRoom?: DesktopRepoRoomSelection;
 } = {}): {
   accountRooms: Ref<DesktopAccountRoomEntry[]>;
+  authStatus: Ref<DesktopAuthStatus | null>;
   activeEntry: Ref<SidebarEntry>;
   getSnapshotRequests: Array<string | null>;
   deliveryRepairs: Array<{ roomIdentifier: string; repair: DesktopRoomDeliveryRepair }>;
   deliveryRepairFailures: number;
   getArtifactsRequests: Array<string>;
   metadataRefreshCalls: Array<number | undefined>;
-  nextArtifacts: DesktopRoomSharedArtifact[];
+  nextArtifacts: DesktopRoomSharedArtifact[] | Promise<DesktopRoomSharedArtifact[]>;
   listAccountRoomsCalls: Array<DesktopAccountRoomListOptions | undefined>;
   nextAccountRooms: DesktopAccountRoomEntry[];
   nextAppInfo: Promise<DesktopAppInfo>;
@@ -1159,6 +1350,7 @@ function createHarness(options: {
   const repoStatus = ref<RepoStatus | null>(null);
   const activeEntry = ref<SidebarEntry>(focusEntry("focus_a", "Focus A"));
   const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
+  const authStatus = ref<DesktopAuthStatus | null>(null);
   const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const sessionGeneration = ref(0);
   const getSnapshotRequests: Array<string | null> = [];
@@ -1172,7 +1364,7 @@ function createHarness(options: {
       parentRoomId: "room_parent",
     })),
     nextAccountRooms: [] as DesktopAccountRoomEntry[],
-    nextArtifacts: [] as DesktopRoomSharedArtifact[],
+    nextArtifacts: [] as DesktopRoomSharedArtifact[] | Promise<DesktopRoomSharedArtifact[]>,
     nextAppInfo: Promise.resolve({} as DesktopAppInfo),
     nextStreamReady: Promise.resolve(),
     deliveryRepairFailures: 0,
@@ -1183,7 +1375,7 @@ function createHarness(options: {
     accountRooms,
     activeEntry,
     appInfo: ref<DesktopAppInfo | null>(null),
-    authStatus: ref<DesktopAuthStatus | null>(null),
+    authStatus,
     currentParentRoom: computed(() => parentEntry()),
     diagnostics: ref<DiagnosticsSnapshot | null>(null),
     loading: ref(false),
@@ -1213,6 +1405,7 @@ function createHarness(options: {
 
   return {
     accountRooms,
+    authStatus,
     activeEntry,
     deliveryRepairs,
     get deliveryRepairFailures() {
@@ -1228,7 +1421,7 @@ function createHarness(options: {
     get nextArtifacts() {
       return harness.nextArtifacts;
     },
-    set nextArtifacts(value: DesktopRoomSharedArtifact[]) {
+    set nextArtifacts(value: DesktopRoomSharedArtifact[] | Promise<DesktopRoomSharedArtifact[]>) {
       harness.nextArtifacts = value;
     },
     get nextAccountRooms() {

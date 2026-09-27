@@ -193,6 +193,94 @@ test('workspace links require an exact receipt and a verified published file; ha
 });
 
 
+test('workspace link decoration shares exact editor verification only inside one request', async (t) => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const { DatabaseSync } = await import('node:sqlite');
+  const { tmpdir } = await import('node:os');
+  const { join, basename } = await import('node:path');
+  const { promisify } = await import('node:util');
+  const root = await mkdtemp(join(tmpdir(), 'workspace-editor-verification-'));
+  const paths = ['one.ts', 'two.ts', 'three.ts'];
+  for (const path of paths) await writeFile(join(root, path), 'export {};\n');
+  const workspace = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready',
+    files: paths.map(path => ({ path, previous_path: null, status: 'added', additions: 1, deletions: 0, binary: false })),
+    additions: 3, deletions: 0, hidden_files: 0, patch: '', patch_truncated: false };
+  const editor = { id: 'com.microsoft.VSCode', path: '/Applications/Code.app' };
+  const associations = new Map(paths.map(path => [path, editor]));
+  const commands: Array<{ command: string; args: string[] }> = [];
+  let failVerification = false;
+  await mkdir(join(root, '.letagents'));
+  const database = new DatabaseSync(join(root, '.letagents', 'daemon-state.sqlite'));
+  database.exec(`CREATE TABLE room_workspace_captures(agent_id TEXT, room_id TEXT, source_message_id TEXT, work_attempt_id TEXT, settled_json TEXT);
+    CREATE TABLE room_work_publications(agent_id TEXT, room_id TEXT, source_message_id TEXT, agent_key TEXT, state TEXT, api_origin TEXT);
+    CREATE TABLE work_attempts(work_attempt_id TEXT, workspace_path TEXT)`);
+  const { apiUrl } = await import('../main/paths.js');
+  database.prepare('INSERT INTO room_workspace_captures VALUES (?, ?, ?, ?, ?)').run('agent', ROOM, 'msg_123', ATTEMPT, JSON.stringify({ ...summary(), version: 2, workspace }));
+  database.prepare('INSERT INTO room_work_publications VALUES (?, ?, ?, ?, ?, ?)').run('agent', ROOM, 'msg_123', 'test/agent', 'open', apiUrl);
+  database.prepare('INSERT INTO work_attempts VALUES (?, ?)').run(ATTEMPT, root);
+  t.mock.module('node:os', { namedExports: { homedir: () => root } });
+  t.mock.module('../main/rooms/agent-work.js', { namedExports: { pollDesktopRoomAgentWork: async () => null } });
+  const execute = async (command: string, args: string[]) => {
+    commands.push({ command, args });
+    if (command === '/usr/bin/osascript') return { stdout: JSON.stringify(associations.get(basename(args.at(-1)!))), stderr: '' };
+    if (command === '/usr/bin/codesign') {
+      assert.ok(args.includes('--strict'));
+      assert.ok(args.some(argument => argument.includes('anchor apple')));
+      if (failVerification) throw new Error('Invalid signature');
+      return { stdout: '', stderr: '' };
+    }
+    assert.equal(command, '/usr/bin/open');
+    return { stdout: '', stderr: '' };
+  };
+  t.mock.module('node:child_process', { namedExports: { execFile: Object.assign(
+    () => { throw new Error('Use the promisified command runner'); }, { [promisify.custom]: execute },
+  ) } });
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+  try {
+    // A distinct module instance uses the mocked OS commands; other receipt tests
+    // retain their normal dependencies and real temporary-file containment checks.
+    const subject = await import(new URL('../main/workspace-file-links.js?editor-verification-test', import.meta.url).href);
+    const input = { roomId: ROOM, agentKey: 'test/agent', sourceMessageId: 'msg_123', paths };
+    const expected = paths.map(path => ({ path, kind: 'local' }));
+    const count = (command: string) => commands.filter(call => call.command === command).length;
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/osascript'), 3, 'every exact file keeps its own association query');
+    assert.equal(count('/usr/bin/codesign'), 1, 'three identical editor checks share one verification');
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/codesign'), 2, 'a later request verifies again');
+    database.exec("UPDATE room_work_publications SET state='closed'");
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), [], 'each request still rechecks its current receipt');
+    assert.equal(count('/usr/bin/codesign'), 2);
+    database.exec("UPDATE room_work_publications SET state='open'");
+    assert.equal(await subject.openLocalSourceFile(join(root, paths[0]!)), '');
+    assert.equal(count('/usr/bin/codesign'), 3, 'opening never uses the decoration verification');
+    assert.equal(count('/usr/bin/open'), 1);
+
+    commands.length = 0;
+    associations.set(paths[1]!, { ...editor, path: '/Applications/Other Code.app' });
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/codesign'), 2, 'different application paths do not share verification');
+    commands.length = 0;
+    associations.set(paths[1]!, { ...editor, id: 'com.microsoft.VSCodeInsiders' });
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/codesign'), 2, 'different identifiers at the same path do not share verification');
+
+    commands.length = 0;
+    associations.set(paths[1]!, editor);
+    failVerification = true;
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), []);
+    assert.equal(count('/usr/bin/codesign'), 1, 'a shared failure denies every affected link');
+    assert.notEqual(await subject.openLocalSourceFile(join(root, paths[0]!)), '');
+    assert.equal(count('/usr/bin/codesign'), 2, 'a failed open also performs fresh verification');
+    assert.equal(count('/usr/bin/open'), 0);
+  } finally {
+    Object.defineProperty(process, 'platform', platform);
+    database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('on-demand full review reads every page and rejects mixed or damaged captures', async () => {
   const { loadWorkspaceReviewPages } = await import('../main/workspace-review.js');
   const { encodeWorkspaceReview, decodeWorkspaceReview, REVIEW_PAGE_SIZE } = await import('../../../../shared/workspace-review.mjs');

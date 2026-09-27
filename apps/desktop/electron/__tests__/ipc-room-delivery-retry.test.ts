@@ -19,6 +19,15 @@ mock.module("electron", {
   namedExports: { ipcMain: fakeIpcMain },
 });
 
+// Full IPC registration also starts rental recovery, which owns the installed
+// daemon and rental journal. These handler tests do not exercise that domain.
+const rentalRegistrations: unknown[] = [];
+mock.module("../main/ipc-handlers/rental.js", {
+  namedExports: {
+    registerDesktopRentalDomainIpcHandlers: (target: unknown) => { rentalRegistrations.push(target); },
+  },
+});
+
 let sendMessage = async (..._args: unknown[]): Promise<unknown> => { throw new Error("unexpected send"); };
 let deliverMessage = async (..._args: unknown[]): Promise<void> => { throw new Error("unexpected delivery"); };
 mock.module("../main/rooms.js", {
@@ -31,6 +40,25 @@ mock.module("../main/room-stream.js", {
 const { registerDesktopIpcHandlers } = await import("../main/ipc.js");
 const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
 const { supervisorGrantCoordinator } = await import("../main/supervisor-grant-coordinator.js");
+
+// The real supervisor registrar installs a state listener immediately. Keep
+// both daemon boundaries inert for this process's entire lifetime, including
+// cleanup and delayed registration work; never restore access to the host.
+let observerConnectionCalls = 0;
+let daemonStartupCalls = 0;
+supervisorDaemonClient.connectIfRunning = async () => {
+  observerConnectionCalls += 1;
+  return null;
+};
+supervisorDaemonClient.ensureRunning = async () => {
+  daemonStartupCalls += 1;
+  throw new Error("Unexpected daemon lifecycle access from an IPC handler test");
+};
+
+test.after(async () => {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(daemonStartupCalls, 0, "even caught background lifecycle calls must fail the suite");
+});
 
 test("registerDesktopIpcHandlers routes exact room-delivery retries and propagates stale failures", async () => {
   const original = supervisorDaemonClient.retryRoomDelivery;
@@ -240,3 +268,13 @@ for (const failure of ["delivery", "blocked", "persistence"] as const) {
     } finally { release(); }
   });
 }
+
+test("full IPC handler registration composes inert rental and daemon observation boundaries", async () => {
+  const before = rentalRegistrations.length;
+  registerDesktopIpcHandlers(fakeIpcMain as never);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(rentalRegistrations.length, before + 1);
+  assert.ok(rentalRegistrations.every((target) => target === fakeIpcMain));
+  assert.equal(observerConnectionCalls, 1, "the process-wide state bridge observes only the inert client");
+  assert.equal(daemonStartupCalls, 0);
+});

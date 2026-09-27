@@ -305,6 +305,8 @@ import {
 } from "./desktop-chat-message/context-menu-focus";
 import {
   formatTimestamp,
+  highlightRenderedMessage,
+  linkRenderedMessageReferences,
   renderMessageText,
   isAmbientSystemMessage,
   stripStatusPrefix,
@@ -473,15 +475,16 @@ const replyDisplayName = computed(() =>
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.displayText || props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const visibleText = computed(() => props.message.displayText || props.message.text);
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedText = computed(() => {
+const renderedMarkdown = computed(() => {
   const text = visibleText.value || "No message body.";
-  return renderMessageText(
-    isAmbientSystem.value ? stripStatusPrefix(text) : text,
-    props.highlightQuery,
-    props.messageReferenceIds,
-    props.taskReferenceIds,
-  );
+  return renderMessageText(isAmbientSystem.value ? stripStatusPrefix(text) : text, "");
 });
+const linkedText = computed(() => linkRenderedMessageReferences(
+  renderedMarkdown.value,
+  props.messageReferenceIds,
+  props.taskReferenceIds,
+));
+const renderedText = computed(() => highlightRenderedMessage(linkedText.value, props.highlightQuery));
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
 const tertiaryActionLabel = computed(() => props.context === "timeline" ? "Reply in thread" : "Jump to root");
 const selectionActionLabel = computed(() => props.context === "timeline" ? "Add to chat" : "Add to thread");

@@ -70,10 +70,11 @@ export async function resolveWorkspaceFileLinks(input: WorkspaceFileRequest): Pr
   if (!value) return [];
   const snapshot = value.summary.contribution?.changes ?? value.summary.workspace;
   if (!snapshot) return [];
+  const editorVerifications = new Map<string, Promise<unknown>>();
   return (await Promise.all(input.paths.map(async (path): Promise<WorkspaceFileLink | null> => {
     if (!snapshot.files.some(file => file.path === path)) return null;
     const local = value.root && await localWorkspaceFile(value.root, path);
-    if (local && await defaultSourceEditor(local)) return { path, kind: 'local' as const };
+    if (local && await findDefaultSourceEditor(local, editorVerifications)) return { path, kind: 'local' as const };
     const url = await githubFile(input.roomId, snapshot.branch, path);
     return url ? { path, kind: 'github' as const, url } : null;
   }))).filter((item): item is WorkspaceFileLink => item !== null);
@@ -113,6 +114,9 @@ export function trustedEditor(value: unknown): value is { id: string; path: stri
     && typeof editor.path === 'string' && editor.path.startsWith('/') && editor.path.endsWith('.app') && !/[\x00-\x1f]/.test(editor.path);
 }
 export async function defaultSourceEditor(path: string): Promise<{ id: string; path: string } | null> {
+  return findDefaultSourceEditor(path);
+}
+async function findDefaultSourceEditor(path: string, verifications?: Map<string, Promise<unknown>>): Promise<{ id: string; path: string } | null> {
   if (process.platform !== 'darwin') return null;
   // Query Launch Services only. The pathname is an argv value, never evaluated as code.
   const script = `ObjC.import('AppKit'); function run(argv) {
@@ -124,7 +128,15 @@ export async function defaultSourceEditor(path: string): Promise<{ id: string; p
     const { stdout } = await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script, path], { timeout: 3000, maxBuffer: 8192 });
     const editor: unknown = JSON.parse(stdout);
     if (!trustedEditor(editor)) return null;
-    await run('/usr/bin/codesign', ['--verify', '--strict', '-R', '=' + editorSignatureRequirement(editor.id)!, editor.path], { timeout: 5000, maxBuffer: 8192 });
+    // Only advisory links in one resolution share verification. Opening a file
+    // always queries its current association and verifies the application again.
+    const key = JSON.stringify([editor.id, editor.path]);
+    let verification = verifications?.get(key);
+    if (!verification) {
+      verification = run('/usr/bin/codesign', ['--verify', '--strict', '-R', '=' + editorSignatureRequirement(editor.id)!, editor.path], { timeout: 5000, maxBuffer: 8192 });
+      verifications?.set(key, verification);
+    }
+    await verification;
     return editor;
   } catch { return null; }
 }

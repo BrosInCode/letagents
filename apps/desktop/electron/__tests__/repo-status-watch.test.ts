@@ -322,6 +322,61 @@ test("repo status watch permits one refresh with one coalesced trailing refresh"
   }
 });
 
+test("repo status watch coalesces busy trailing signals without a tight scan loop", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let focus!: () => void;
+  let collecting = false;
+  let refreshCalls = 0;
+  let targetRefreshes = 8;
+  const drain = async () => { for (let index = 0; index < 20; index += 1) await Promise.resolve(); };
+  const restore = configureRepoStatusWatchForTest({
+    buildRepoStatus: async () => repoStatus(),
+    refreshRepoStatus: async () => {
+      if (collecting) {
+        refreshCalls += 1;
+        await Promise.resolve();
+        // Focus and filesystem events use the same debounce-eligible path.
+        if (refreshCalls < targetRefreshes) for (let index = 0; index < 8; index += 1) focus();
+      }
+      return repoStatus({ ahead: refreshCalls });
+    },
+    emitToMainWindow: () => undefined,
+    getMainWindow: () => ({ ...visibleWindow(), on: (event, listener) => {
+      if (event === "focus") focus = listener;
+    }, off: () => undefined }),
+  });
+  try {
+    await startRepoStatusWatch("/repo");
+    collecting = true;
+    const refresh = refreshActiveRepoStatusForTest({ status: true });
+    await drain();
+    assert.equal(refreshCalls, 1);
+    for (let expected = 2; expected <= targetRefreshes; expected += 1) {
+      t.mock.timers.tick(249);
+      await drain();
+      assert.equal(refreshCalls, expected - 1);
+      // More signals must not reset the deadline and starve a busy repository.
+      focus();
+      t.mock.timers.tick(1);
+      await drain();
+      assert.equal(refreshCalls, expected);
+    }
+    await refresh;
+
+    targetRefreshes = 100;
+    const stoppedRefresh = refreshActiveRepoStatusForTest({ status: true });
+    await drain();
+    assert.equal(refreshCalls, 9);
+    stopRepoStatusWatch();
+    t.mock.timers.tick(250);
+    await stoppedRefresh;
+    assert.equal(refreshCalls, 9, "stop cancels a delayed trailing scan and settles its waiter");
+  } finally {
+    stopRepoStatusWatch();
+    restore();
+  }
+});
+
 test("repo status watch retains hidden invalidations and drains them on focus", async () => {
   let visible = false;
   const listeners = new Map<string, Set<() => void>>();

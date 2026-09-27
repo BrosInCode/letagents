@@ -61,7 +61,7 @@
         :delivery-retry-keys="deliveryRetryKeys"
         :continuation-repair-keys="continuationRepairKeys"
         :room-delivery-skip-keys="roomDeliverySkipKeys"
-        :provider-label="resolveMessageProviderLabel(parent, participants, presence, supervisorEntries)"
+        :provider-label="resolveProviderLabel(parent)"
         @quote-reply="quoteInThread(parent)"
         @message-info="(messageId, context) => $emit('message-info', messageId, context)"
         @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
@@ -107,7 +107,7 @@
           :delivery-retry-keys="deliveryRetryKeys"
           :continuation-repair-keys="continuationRepairKeys"
           :room-delivery-skip-keys="roomDeliverySkipKeys"
-          :provider-label="resolveMessageProviderLabel(reply, participants, presence, supervisorEntries)"
+          :provider-label="resolveProviderLabel(reply)"
           @quote-reply="quoteInThread(reply)"
           @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
@@ -233,7 +233,7 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../../../../../electron/ipc-types";
 import { roomMentionCandidates } from "../../../../domain/participants";
-import { resolveMessageProviderLabel } from "../../../../domain/agent-provider";
+import { createMessageProviderLabelResolver } from "../../../../domain/agent-provider";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
@@ -304,6 +304,9 @@ const emit = defineEmits<{
   "skip-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
+const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
+  props.participants, props.presence, props.supervisorEntries,
+));
 const { text: draft, quote: quoteTarget, selectedQuoteText, captureSubmittedDraft } = useDesktopMessageDraft(
   () => props.messageNamespace || props.roomIdentifier, () => props.parent.id,
 );
