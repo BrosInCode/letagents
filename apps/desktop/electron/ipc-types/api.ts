@@ -417,7 +417,8 @@ export interface DesktopApi {
     getRetirementStatus?: (input: { entryId: string; daemonGeneration: number }) => Promise<import("./agents.js").DesktopSupervisorRetirementStatus>;
     purgeAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<{ outcome: "purged" | "invalid"; error?: string }>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
-    onState: (callback: (snapshot: import("./agents.js").DesktopSupervisorStateSnapshot) => void) => () => void;
+    /** Optional exact-room projection is applied before crossing contextBridge. */
+    onState: (callback: (snapshot: import("./agents.js").DesktopSupervisorStateSnapshot) => void, roomIdentifier?: string) => () => void;
     onRetirement?: (callback: (event: import("./agents.js").DesktopSupervisorRetirementEvent) => void) => () => void;
     /** Subscribe to ordered launch facts (task_84). Fold idempotently by `sequence`. */
     onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;
