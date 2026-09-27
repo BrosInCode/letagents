@@ -14,6 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { AuditLog } from "../audit-log.js";
 import { mapEntry } from "../../electron/main/supervisor-daemon.js";
+import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
 import { canReconnectRoomAgent, canRecoverSavedRoomAgent } from "../../renderer/src/domain/room-agent-delivery.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
@@ -5893,6 +5894,42 @@ test("normal daemon shutdown drains an admitted bounded-effect journal mutation 
   }
 });
 
+test("provider-aware handoff seals capture before retirement and keeps ownership after a failed seal", async () => {
+  const observer = new ProviderExecutionObserver(() => new Date().toISOString());
+  const env = await observationDaemonFixture((_handle, listener) => observer.subscribe(listener), "codex");
+  const internal = env.daemon as unknown as { handoffDraining: boolean; handoffScheduled: boolean };
+  const db = new DatabaseSync(env.paths.manifestPath);
+  try {
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation);
+    const ready = { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } as const;
+    const emit = () => observer.emit(ready, "observed-birth", 7123);
+    emit();
+    await eventually(async () => Number(db.prepare("SELECT COUNT(*) n FROM execution_facts WHERE agent_id=?").get(env.id)!.n) === 1,
+      "initial capture is durable");
+    db.exec("CREATE TRIGGER reject_handoff_tail BEFORE INSERT ON execution_facts BEGIN SELECT RAISE(ABORT,'synthetic capture failure'); END");
+    const capture = env.internals.executionCapture!;
+    const seal = capture.sealForPlannedHandoff.bind(capture);
+    let queueTail = true;
+    capture.sealForPlannedHandoff = () => {
+      if (queueTail) { queueTail = false; emit(); }
+      seal();
+      emit(); // synchronous cleanup callback after sealing must not advance the frozen frontier
+    };
+    const rejected = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(rejected.ok, false); assert.match(rejected.error ?? "", /Update deferred/);
+    assert.equal(internal.handoffScheduled, false); assert.equal(internal.handoffDraining, false);
+    assert.equal(env.internals.liveHandles.get(env.id), env.handle);
+    assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
+    db.exec("DROP TRIGGER reject_handoff_tail");
+    const accepted = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(accepted.ok, true, accepted.error);
+    await within(env.daemon.waitForHandoff(), "sealed handoff completes");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts WHERE agent_id=?").get(env.id)!.n, 2);
+    assert.deepEqual({ ...db.prepare("SELECT last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?").get(env.id) },
+      { last_source_sequence: 2, max_observed_sequence: 2 });
+  } finally { db.close(); await env.cleanup(); }
+});
+
 for (const { provider, defer } of [{ provider: "claude-code", defer: false }, { provider: "claude-code", defer: true }, { provider: "cursor", defer: false }] as const) test(`provider-aware ${provider} handoff ${defer ? "defers without interrupting work on timeout" : "drains the exact turn while approvals remain available"}`, { timeout: 10_000 }, async (t) => {
   let expireHandoff!: () => void;
   const realSetTimeout = globalThis.setTimeout;
@@ -5913,7 +5950,7 @@ for (const { provider, defer } of [{ provider: "claude-code", defer: false }, { 
   const toolCompleted = new Promise<void>(resolve => { toolDone = resolve; });
   let calls = 0;
   let detached = false;
-  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), provider, {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), provider, {
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: false }),
     runRoomTurn: async (handle, _request, options) => {
       const turnId = `handoff-turn-${++calls}`;
@@ -6019,7 +6056,7 @@ for (const { provider, defer } of [{ provider: "claude-code", defer: false }, { 
 for (const mode of ["idle", "surviving", "missing_turn_id", "missing_terminal", "unreadable_terminal"] as const) test(`provider-aware handoff ${mode}`, async () => {
   const survivesRestart = mode === "surviving";
   const unresolved = mode !== "idle" && mode !== "surviving";
-  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "claude-code", {
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart }),
   });
   await env.internals.providerStreams.install(env.id, env.handle, env.generation);
@@ -6075,7 +6112,7 @@ for (const scenario of [
   { name: "recovering mismatched retired", desired: "running", observed: "recovering", custody: "mismatched_retired", installed: false, allowed: false },
   { name: "working absent with installed handle", desired: "running", observed: "working", custody: "absent", installed: true, allowed: false },
 ] as const) test(`provider-aware handoff preserves historical Cursor ambiguity: ${scenario.name}`, async () => {
-  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "cursor", {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "cursor", {
     runtimeCustody: () => scenario.custody === "mismatched" || scenario.custody === "mismatched_retired"
       ? { state: scenario.custody === "mismatched" ? "owned" : "retired", handle: { ...env.handle, providerContinuationId: "another-continuation" } }
       : scenario.custody === "owned" || scenario.custody === "retired" ? { state: scenario.custody, handle: env.handle } : { state: scenario.custody },
@@ -6136,7 +6173,7 @@ for (const stage of ["before_native_attach", "native_attach", "attach_error"] as
   const gate = new Promise<void>(resolve => { release = resolve; });
   let calls = 0;
   let acquired = false;
-  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "claude-code", {
     runtimeCustody: () => acquired ? { state: "owned", handle: env.handle } : { state: "absent" },
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
     attach: async () => {
@@ -6184,7 +6221,7 @@ for (const stage of ["before_native_attach", "native_attach", "attach_error"] as
 
 for (const kind of ["lifecycle", "turn_control"] as const) for (const custody of ["absent", "retired"] as const) test(`provider-aware handoff preserves admitted ${kind} with ${custody} custody`, async () => {
   let custodyReads = 0;
-  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "cursor", {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "cursor", {
     runtimeCustody: () => { custodyReads++; return custody === "absent" ? { state: "absent" } : { state: "retired", handle: env.handle }; },
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
   });
@@ -6203,7 +6240,7 @@ for (const kind of ["lifecycle", "turn_control"] as const) for (const custody of
 });
 
 test("provider-aware handoff defers when both handle caches predate the manifest generation", async () => {
-  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "claude-code", {
     runtimeCustody: () => ({ state: "owned", handle: env.handle }),
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
   });
@@ -6244,7 +6281,7 @@ test("provider-aware handoff retains router custody after stream installation fa
       observedState: () => env.handle.observedState }),
   } as unknown as NativeProviderAdapter;
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
-  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "claude-code", {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "claude-code", {
     capabilities: router.capabilities.bind(router), runtimeCustody: router.runtimeCustody.bind(router), attach: router.attach.bind(router),
     onStream: async () => { throw new Error("stream installation failed"); },
   });
