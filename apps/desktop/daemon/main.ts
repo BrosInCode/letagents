@@ -1,8 +1,6 @@
-import { readDaemonMaintenance, daemonMaintenancePath } from "../../../shared/daemon-maintenance.mjs";
-import { DaemonMaintenanceService } from "./maintenance-service.js";
+import { openDaemonMaintenance, registerDaemonBoardAccess, maintenanceStatus, type DaemonMaintenanceService } from "./maintenance-service.js";
 import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
 import { restoreLocalRoomAuthorities, localRoomRuntime } from "./local-room-runtime.js";
-import { registerLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
 import { dirname } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
@@ -978,27 +976,15 @@ export class SupervisorDaemon {
     assertMacOS(this.platform);
     await this.singleton.acquire();
     try {
-      const hold = await readDaemonMaintenance(daemonMaintenancePath(dirname(this.singleton.lockPath)));
-      if (hold) this.maintenance = new DaemonMaintenanceService(hold, {
-        assertCurrent: () => this.singleton.assertCurrent(), status: () => this.status(),
-        list: async () => (await this.store.load()).entries,
-        close: async () => {
-          this.handoffScheduled = true;
-          this.boardOwnershipActive = false;
-          const results = await Promise.allSettled([this.socket.stop(), this.store.close(), this.durability.close(),
-            this.workerBindings.close(), this.supervisedInbox.close()]);
-          await this.singleton.release();
-          const failures = results.filter(result => result.status === "rejected");
-          if (failures.length) throw new AggregateError(failures, "Maintenance service shutdown failed.");
-        },
+      this.maintenance = await openDaemonMaintenance({
+        singleton: this.singleton, store: this.store, socket: this.socket,
+        stores: [this.durability, this.workerBindings, this.supervisedInbox],
+        status: () => this.status(),
+        retire: () => { this.handoffScheduled = true; this.boardOwnershipActive = false; },
       });
       this.boardOwnershipActive = true;
-      const boardGeneration = this.singleton.currentGeneration;
-      registerLocalBoardOwner(() => {
-        if (!this.boardOwnershipActive || this.maintenance || this.handoffScheduled || this.singleton.currentGeneration !== boardGeneration) {
-          throw new Error("The board service is restarting.");
-        }
-      });
+      registerDaemonBoardAccess(this.singleton, () =>
+        this.boardOwnershipActive && !this.maintenance && !this.handoffScheduled);
       if (!this.maintenance) await this.hostApprovals.enroll(storage);
       this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
         this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
@@ -1241,11 +1227,7 @@ export class SupervisorDaemon {
   }
 
   private status() {
-    const status = this.readModel.status();
-    return { ...status, maintenance_hold_id: this.maintenance?.hold.id ?? null,
-      capabilities: this.maintenance
-        ? Object.fromEntries(Object.keys(status.capabilities).map(key => [key, false])) as typeof status.capabilities
-        : status.capabilities };
+    return maintenanceStatus(this.readModel.status(), this.maintenance?.hold);
   }
 
   private async retireForHandoff(): Promise<void> {
