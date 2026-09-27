@@ -5948,6 +5948,131 @@ test("provider-aware handoff seals capture before retirement and keeps ownership
   } finally { db.close(); await env.cleanup(); }
 });
 
+for (const terminalFirst of [false, true]) test(`handoff defers native configuration stop with terminal ${terminalFirst ? "saved" : "pending"}`, async () => {
+  let onExit: ((terminal: ProviderActionTerminal) => void) | undefined, finishStop!: (terminal: ProviderActionTerminal) => void;
+  const nativeStop = new Promise<ProviderActionTerminal>(resolve => { finishStop = resolve; });
+  const env = await observationDaemonFixture(async () => ({ sourceId: "replacement-retirement",
+    position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose() {},
+  }), "codex", { onExit: async (_handle, listener) => { onExit = listener; return () => {}; } });
+  const internal = env.daemon as unknown as { handoffScheduled: boolean;
+    providerTerminals: import("../provider-terminal-coordinator.js").ProviderTerminalCoordinator };
+  const terminal: ProviderActionTerminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+    terminalCause: "stopped", providerContinuationId: env.handle.providerContinuationId! };
+  try {
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    const token = env.internals.providerStreams.currentInstallation(env.id)!;
+    const replacement = internal.providerTerminals.replaceConfiguration(token, () => nativeStop);
+    void replacement.catch(() => undefined);
+    if (terminalFirst) {
+      onExit!(terminal);
+      await eventually(async () => Boolean((await env.internals.store.getEntry(env.id))?.reconciliation?.last_terminal),
+        "terminal bookkeeping completes before native stop returns");
+    }
+    const response = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(response.ok, false);
+    assert.match(response.error ?? "", /configuration replacement/);
+    assert.equal(internal.handoffScheduled, false, "an unfinished native stop remains a reversible update deferral");
+    assert.throws(() => internal.providerTerminals.beginRetirement(), /configuration replacement/);
+    const stopped = env.daemon.stop();
+    await assert.rejects(within(replacement, "emergency stop cancels replacement caller", 1000), /replacement closed/);
+    await within(stopped, "emergency stop is not held by the native stop result");
+    finishStop(terminal);
+    await assert.rejects(replacement, /replacement closed/);
+  } finally { finishStop(terminal); await env.cleanup(); }
+});
+
+test("retained terminal approval failures retry locally without scheduling provider recovery", async () => {
+  let onExit: ((terminal: ProviderActionTerminal) => void) | undefined;
+  const env = await observationDaemonFixture(async () => ({ sourceId: "approval-terminal",
+    position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose() {},
+  }), "codex", { onExit: async (_handle, listener) => { onExit = listener; return () => {}; } });
+  const internal = env.daemon as unknown as { scheduleRecoveryConvergence(id: string, delay: number): void };
+  let recoveryWakes = 0, settlements = 0;
+  internal.scheduleRecoveryConvergence = () => { recoveryWakes++; };
+  const settle = env.internals.store.settleWitnessedRuntimeApprovalClosures.bind(env.internals.store);
+  env.internals.store.settleWitnessedRuntimeApprovalClosures = async (...args) => {
+    if (++settlements === 1) throw new Error("fixture approval persistence unavailable");
+    return settle(...args);
+  };
+  try {
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    recoveryWakes = 0;
+    onExit!({ endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+      terminalCause: "exited", providerContinuationId: env.handle.providerContinuationId! });
+    await eventually(async () => Boolean((await env.internals.store.getEntry(env.id))?.reconciliation?.last_terminal),
+      "the terminal owner completes its original approval and projection work automatically");
+    assert.ok(settlements >= 2);
+    assert.equal(recoveryWakes, 0, "a local approval write failure must not wake native recovery");
+  } finally { await env.cleanup(); }
+});
+
+for (const failure of ["none", "before-seal", "after-seal", "post-seal-timeout"] as const) test(`handoff retains exact terminal settlement across ${failure}`, async t => {
+  let expire!: () => void, unblock!: () => void;
+  const realSetTimeout = globalThis.setTimeout;
+  const blocked = new Promise<void>(resolve => { unblock = resolve; });
+  if (failure === "post-seal-timeout") t.mock.method(globalThis, "setTimeout", (callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+    if (delay === 30_000) {
+      expire = () => callback(...args);
+      return realSetTimeout(() => {}, delay);
+    }
+    return realSetTimeout(callback, delay, ...args);
+  });
+  let onExit: ((terminal: ProviderActionTerminal) => void) | undefined;
+  let fire!: () => void;
+  let disposeCalls = 0;
+  const env = await observationDaemonFixture(async () => ({
+    sourceId: "terminal-at-seal", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }),
+    dispose: () => { disposeCalls++; if (failure !== "before-seal") fire(); },
+  }), "codex", { onExit: async (_handle, listener) => { onExit = listener; return () => {}; } });
+  const internal = env.daemon as unknown as { handoffScheduled: boolean; providerTerminals: { drain(): Promise<void> } };
+  const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
+  const record = env.internals.durability.recordTerminal.bind(env.internals.durability);
+  let rejectWrites = failure !== "none", recordAttempts = 0;
+  env.internals.durability.recordTerminal = async (...args) => {
+    recordAttempts++;
+    if (failure === "post-seal-timeout") await blocked;
+    else if (rejectWrites) throw new Error("fixture terminal storage unavailable");
+    return record(...args);
+  };
+  try {
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    fire = () => onExit!({ endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+      terminalCause: "exited", providerContinuationId: env.handle.providerContinuationId! });
+    assert.ok(onExit, "real stream terminal callback is installed");
+    if (failure === "before-seal") {
+      fire();
+      await eventually(async () => recordAttempts > 0, "first terminal attempts persistence before handoff");
+    }
+    const preparing = daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    if (failure === "post-seal-timeout") {
+      await eventually(async () => recordAttempts === 1, "post-seal terminal reached its blocked storage call");
+      expire();
+    }
+    const response = await preparing;
+    if (failure !== "none") {
+      assert.equal(response.ok, false, "unsettled terminal never authorizes a successful handoff");
+      assert.match(response.error ?? "", failure === "post-seal-timeout" ? /exit evidence is still being saved/ : /terminal storage unavailable/);
+      assert.equal(internal.handoffScheduled, failure !== "before-seal",
+        "only the pre-seal failure remains reversible");
+      assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
+      rejectWrites = false;
+      const retried = daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+      if (failure === "post-seal-timeout") {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(recordAttempts, 1, "a timed-out preparation keeps the original in-flight retirement");
+        unblock();
+      }
+      const retry = await retried;
+      assert.equal(retry.ok, true, retry.error);
+    } else assert.equal(response.ok, true, response.error);
+    await within(env.daemon.waitForHandoff(), "retained terminal finishes before stores close");
+    const saved = inspection.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id=?").get(env.generation)!;
+    assert.equal(JSON.parse(String(saved.terminal_json)).terminal_cause, "exited");
+    assert.equal(disposeCalls, 1, "capture seal and terminal removal share one disposer");
+    assert.ok(recordAttempts >= 1);
+  } finally { unblock(); inspection.close(); await env.cleanup(); }
+});
+
 for (const { provider, defer } of [{ provider: "claude-code", defer: false }, { provider: "claude-code", defer: true }, { provider: "cursor", defer: false }] as const) test(`provider-aware ${provider} handoff ${defer ? "defers without interrupting work on timeout" : "drains the exact turn while approvals remain available"}`, { timeout: 10_000 }, async (t) => {
   let expireHandoff!: () => void;
   const realSetTimeout = globalThis.setTimeout;
@@ -11980,6 +12105,103 @@ test("work attempts survive generations and lease rebinds while terminal payload
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "reviewed", postmortemDiff: "diff --git a/a b/a" });
     await assert.rejects(() => store.rebindAttempt(attempt.work_attempt_id, "lease-3", 3), ImmutableExecutionError);
   } finally { await env.cleanup(); }
+});
+
+for (const failure of ["before-commit", "after-commit"] as const) test(`terminal persistence retains exact evidence when its commit fence fails ${failure}`, async () => {
+  const env = await fixture();
+  const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"),
+    () => "2026-01-01T00:00:00.000Z", join(env.root, "worktrees"), undefined, undefined, undefined, TEST_SUPERVISOR);
+  try {
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1,
+      workspacePath: workspace.path, workAttemptId: workspace.id });
+    const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
+    const terminal = { ended_at: "2026-01-01T00:00:01.000Z", exit_code: 0, signal: null,
+      stdio_archive_ref: null, stdio_tail: "", terminal_cause: "exited", actor: "daemon", generation: 1,
+      provider_continuation_id: "original" };
+    let current = true, fences = 0;
+    const operation = store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, terminal, 0,
+      async commit => {
+        fences += 1;
+        await Promise.resolve();
+        if (!current) throw new DaemonFenceLostError("terminal owner changed before commit");
+        await commit();
+        throw new Error("terminal write committed before callback failed");
+      });
+    if (failure === "before-commit") current = false;
+    await assert.rejects(operation, failure === "before-commit" ? /owner changed/ : /write committed/);
+    assert.equal(fences, 1, "the exact fence runs inside the store's reserved write operation");
+    const saved = (await store.getAttempt(attempt.work_attempt_id)).execution_generations[0]!.terminal;
+    assert.deepEqual(saved, failure === "before-commit" ? null : terminal);
+    if (failure === "before-commit") {
+      await store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, terminal);
+    }
+    await assert.rejects(store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id,
+      { ...terminal, provider_continuation_id: "replacement" }), ImmutableExecutionError);
+    assert.equal((await store.getAttempt(attempt.work_attempt_id)).execution_generations[0]!.terminal?.provider_continuation_id, "original");
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+for (const boundary of ["failed-release", "successor-overlap", "owner-loss"] as const) test(`terminal workspace fence preserves exact ownership across ${boundary}`, async () => {
+  const env = await fixture();
+  const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"),
+    () => "2026-01-01T00:00:00.000Z", join(env.root, "worktrees"), undefined, undefined, undefined, TEST_SUPERVISOR);
+  try {
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1,
+      workspacePath: workspace.path, workAttemptId: workspace.id });
+    const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
+    await store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, {
+      ended_at: "2026-01-01T00:00:01.000Z", exit_code: 0, signal: null, stdio_archive_ref: null,
+      stdio_tail: "", terminal_cause: "exited", actor: "daemon", generation: 1, provider_continuation_id: "original",
+    });
+    const held = (store as unknown as { executionFences: Map<string, Awaited<ReturnType<typeof acquireWorkspaceFence>>> }).executionFences;
+    const original = held.get(attempt.work_attempt_id)!;
+    const release = original.release.bind(original);
+    let releases = 0;
+    if (boundary === "failed-release") {
+      original.release = async () => { if (++releases === 1) throw new Error("fixture filesystem release failure"); await release(); };
+      await assert.rejects(store.releaseTerminalExecutionFence(attempt.work_attempt_id, execution.execution_generation_id), /filesystem release failure/);
+      assert.equal(held.get(attempt.work_attempt_id), original, "failed release retains the actual filesystem handle");
+      await store.releaseTerminalExecutionFence(attempt.work_attempt_id, execution.execution_generation_id);
+      assert.equal(releases, 2);
+      assert.equal(held.has(attempt.work_attempt_id), false);
+      const exclusive = await acquireWorkspaceFence(workspace.path, "exclusive-proof", 1, "exclusive");
+      await exclusive.release();
+    } else if (boundary === "owner-loss") {
+      await assert.rejects(store.releaseTerminalExecutionFence(attempt.work_attempt_id, execution.execution_generation_id,
+        async () => { throw new DaemonFenceLostError("fixture owner superseded after validation"); }), /owner superseded/);
+      assert.equal(held.get(attempt.work_attempt_id), original);
+      await store.releaseTerminalExecutionFence(attempt.work_attempt_id, execution.execution_generation_id);
+    } else {
+      let entered!: () => void, unblock!: () => void;
+      const entering = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { unblock = resolve; });
+      original.release = async () => { releases++; entered(); await gate; await release(); };
+      const retiring = store.releaseTerminalExecutionFence(attempt.work_attempt_id, execution.execution_generation_id);
+      await entering;
+      let successorStarted = false;
+      const starting = store.startGeneration(attempt.work_attempt_id, "daemon", 2).then(result => { successorStarted = true; return result; });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const overlapped = successorStarted;
+      unblock();
+      await retiring;
+      const successor = await starting;
+      assert.equal(overlapped, false, "a successor cannot adopt H while its release is in progress");
+      const replacement = held.get(attempt.work_attempt_id)!;
+      assert.notEqual(replacement, original);
+      await assert.rejects(store.releaseTerminalExecutionFence(attempt.work_attempt_id, execution.execution_generation_id), /another execution generation is live/);
+      assert.equal(held.get(attempt.work_attempt_id), replacement, "old terminal cannot release successor H2");
+      await store.recoverExecutionFence(attempt.work_attempt_id);
+      assert.equal(held.get(attempt.work_attempt_id), replacement);
+      await store.recordTerminal(attempt.work_attempt_id, successor.execution_generation_id, {
+        ended_at: "2026-01-01T00:00:02.000Z", exit_code: 0, signal: null, stdio_archive_ref: null,
+        stdio_tail: "", terminal_cause: "exited", actor: "daemon", generation: 2, provider_continuation_id: "successor",
+      });
+      await store.releaseTerminalExecutionFence(attempt.work_attempt_id, successor.execution_generation_id);
+      assert.equal(releases, 1);
+    }
+  } finally { await store.close(); await env.cleanup(); }
 });
 
 test("independent SQLite connections cannot start two live generations for one attempt", async () => {

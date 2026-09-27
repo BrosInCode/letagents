@@ -89,6 +89,7 @@ export class ManifestTransitionCoordinator {
     reconciliation?: DaemonManifestEntry["reconciliation"],
     notice?: ReconciliationNotice["kind"],
     terminal?: ExecutionTerminalPayload,
+    commitFence?: CommitFence,
   ): Promise<void> {
     await this.ports.authority.assertCurrent();
     const entry = await this.ports.store.getEntry(entryId);
@@ -139,7 +140,7 @@ export class ManifestTransitionCoordinator {
     const next = await this.ports.store.replaceEntry(
       this.ports.authority.currentManifestGeneration(),
       updated,
-      this.ports.authority.fenceCommit,
+      commitFence ?? this.ports.authority.fenceCommit,
     );
     this.ports.authority.acceptManifestGeneration(next.generation);
     await this.ports.authority.serializeCommit(async () => {

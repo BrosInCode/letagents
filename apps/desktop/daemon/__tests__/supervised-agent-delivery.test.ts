@@ -651,6 +651,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
       pid: 43141,
       processIdentity: "pid:43141:birth:exact",
     };
+    const terminalAt = new Date().toISOString();
     let liveContinuation = pendingContinuation;
     const liveHandle = {
       workAttemptId,
@@ -731,7 +732,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
             execution_generation_id: string;
             actor: string;
             generation: number;
-            terminal: { terminal_cause: "crashed" };
+            terminal: import("../types.js").ExecutionTerminalPayload;
           }>;
         }>;
         checkpoint(id: string, input: { provider_continuation_id: string | null }): Promise<void>;
@@ -782,7 +783,8 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
         execution_generation_id: executionGenerationId,
         actor: "test",
         generation: 1,
-        terminal: { terminal_cause: "crashed" },
+        terminal: { ended_at: terminalAt, exit_code: 1, signal: null, terminal_cause: "crashed",
+          provider_continuation_id: realContinuation, actor: "test", generation: 1, stdio_archive_ref: null, stdio_tail: "" },
       }],
     });
     internals.durability.checkpoint = async (_id, checkpoint) => {
@@ -820,7 +822,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     const installation = internals.providerStreams.currentInstallation(ingressAgent.agentId);
     assert.ok(installation);
     await internals.providerTerminals.handleTerminal(installation, {
-        endedAt: new Date().toISOString(),
+        endedAt: terminalAt,
         exitCode: 1,
         signal: null,
         terminalCause: "crashed",
