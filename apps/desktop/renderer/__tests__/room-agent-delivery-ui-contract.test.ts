@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   canReconnectRoomAgent,
   canRecoverSavedRoomAgent,
+  roomAgentRecoveryAction,
   roomAgentActivityProjection,
   roomAgentDeliveryGroup,
   roomAgentDeliverySummary,
@@ -172,6 +173,58 @@ describe("durable room delivery UI contracts", () => {
     assert.match(shell, /<AgentInspectorHost/);
     assert.match(inspectorDomain, /kind: "reconnect"/);
     assert.match(inspectorDomain, /kind: "recover"/);
+  });
+
+  it("keeps exact blocked Cursor recovery available while desktop credentials are missing", () => {
+    const waiting = {
+      provider: "cursor", providerPid: null, deliveryMode: "daemon_inbox",
+      desiredState: "running", observedState: "idle", condition: "coordination_blocked",
+      nativeLiveness: { state: "stale" }, lastError: "Execution evidence rejected: identity_mismatch.",
+      workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+      providerContinuationId: "continuation_1", runtimeGenerationId: null, runtimeRecovery: null,
+      roomAgentState: {
+        connection: { state: "disconnected" },
+        inbox: { state: "waiting_for_desktop_credentials", blockedByMessageId: "msg_23" },
+        turn: { state: "failed", inboxItemId: "inbox_23", sourceMessageId: "msg_23", providerTurnId: "cursor:turn_23" },
+      },
+    };
+    assert.equal(roomAgentRecoveryAction(waiting as never), "recover",
+      "credential admission must not hide recovery of the exact blocked processless lane");
+    assert.equal(roomAgentRecoveryAction({ ...waiting, runtimeGenerationId: "runtime_1" } as never), "recover");
+    assert.equal(canReconnectRoomAgent(waiting as never), false,
+      "recovery already restores credentials before its daemon ownership checks");
+    for (const turn of [
+      { ...waiting.roomAgentState.turn, state: "idle" },
+      { ...waiting.roomAgentState.turn, sourceMessageId: "different_message" },
+      { ...waiting.roomAgentState.turn, inboxItemId: null },
+      { ...waiting.roomAgentState.turn, providerTurnId: null },
+      undefined,
+    ]) {
+      assert.notEqual(roomAgentRecoveryAction({ ...waiting,
+        roomAgentState: { ...waiting.roomAgentState, turn },
+      } as never), "recover", "unbound or unrelated turn evidence does not permit legacy recovery");
+    }
+    for (const inbox of [
+      { ...waiting.roomAgentState.inbox, blockedByMessageId: null },
+      { ...waiting.roomAgentState.inbox, state: "empty" },
+    ]) {
+      assert.notEqual(roomAgentRecoveryAction({ ...waiting,
+        roomAgentState: { ...waiting.roomAgentState, inbox },
+      } as never), "recover");
+    }
+    for (const change of [
+      { providerPid: 123 }, { provider: "codex" }, { observedState: "working" },
+      { desiredState: "stopped" }, { deliveryMode: "mcp_polling" },
+      { runtimeRecovery: { mode: "resume" } },
+    ]) assert.notEqual(roomAgentRecoveryAction({ ...waiting, ...change } as never), "recover");
+    const healthyWait = { ...waiting, condition: "none", runtimeGenerationId: null,
+      roomAgentState: { ...waiting.roomAgentState,
+        inbox: { state: "waiting_for_desktop_credentials", blockedByMessageId: null },
+        turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null },
+      },
+    };
+    assert.equal(canReconnectRoomAgent(healthyWait as never), true);
+    assert.equal(canRecoverSavedRoomAgent(healthyWait as never), false);
   });
 
   it("deduplicates only matching supervised roster rows and leaves other participants inspectable", async () => {

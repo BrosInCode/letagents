@@ -160,6 +160,7 @@ export function canReconnectRoomAgent(
     && agent.nativeLiveness?.state !== "terminal"
     && !providerIsKnownStopped
     && agent.roomAgentState?.inbox.state === "waiting_for_desktop_credentials"
+    && !isBlockedIdleCursor(agent)
     && !automaticRecoveryIsActive
     && (Boolean(agent.providerPid) || agent.provider === "cursor")
     && Boolean(agent.workAttemptId)
@@ -172,11 +173,24 @@ type RoomAgentRecoveryEntry = Pick<DesktopSupervisorManifestEntry,
   | "nativeLiveness" | "roomAgentState" | "executionGenerationId" | "providerContinuationId"
   | "runtimeGenerationId" | "runtimeRecovery">;
 
+function isBlockedIdleCursor(agent: Pick<RoomAgentRecoveryEntry,
+  "provider" | "providerPid" | "observedState" | "roomAgentState">): boolean {
+  const inbox = agent.roomAgentState?.inbox;
+  const turn = agent.roomAgentState?.turn;
+  // Credential admission can mask the blocked FIFO state after a restart.
+  // Retain its exact failed-message boundary; the daemon still owns recovery.
+  const blockedWhileWaiting = inbox?.state === "waiting_for_desktop_credentials"
+    && Boolean(inbox.blockedByMessageId)
+    && turn?.state === "failed"
+    && turn.sourceMessageId === inbox.blockedByMessageId
+    && Boolean(turn.inboxItemId && turn.providerTurnId);
+  return agent.provider === "cursor" && agent.providerPid === null
+    && agent.observedState === "idle" && (inbox?.state === "blocked" || blockedWhileWaiting);
+}
+
 /** An exact runtime requires a deliberate recovery choice, never implicit replacement. */
 export function roomAgentRecoveryAction(agent: RoomAgentRecoveryEntry): "recover" | "recovery_options" | null {
   if (agent.deliveryMode !== "daemon_inbox" || agent.desiredState === "stopped") return null;
-  const blockedIdleCursor = agent.provider === "cursor" && agent.providerPid === null
-    && agent.observedState === "idle" && agent.roomAgentState?.inbox.state === "blocked";
   const recoveryState = ["absent", "paused", "failed", "recovering"].includes(agent.observedState)
     || agent.condition === "coordination_blocked"
     || agent.condition === "auth_blocked";
@@ -185,7 +199,7 @@ export function roomAgentRecoveryAction(agent: RoomAgentRecoveryEntry): "recover
   if (agent.runtimeRecovery) return "recovery_options";
   // The daemon has a separately fenced repair for a processless blocked Cursor
   // lane. Retain it; a missing PID on any other provider is not proof of absence.
-  if (blockedIdleCursor) return "recover";
+  if (isBlockedIdleCursor(agent)) return "recover";
   if (!recoveryState) return null;
   const legacyRecoveryCandidate = !agent.executionGenerationId
     || !agent.providerContinuationId
