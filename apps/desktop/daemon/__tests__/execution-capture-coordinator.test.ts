@@ -107,6 +107,38 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
   return { db, handle, handles, observer, capture, diagnostics, install, advance, admission, typedAdmission, tokenFor, emit, facts, position, bindTurn };
 }
 
+// A second independent capture lane in the same real store/coordinator.
+function secondCaptureLane(f: ReturnType<typeof fixture>) {
+  const agentId = "second-agent";
+  const generation = "second-generation";
+  const workspace = "second-workspace";
+  for (const [table, key, original] of [
+    ["work_attempts", "work_attempt_id", "workspace"],
+    ["work_attempt_executions", "execution_generation_id", "generation"],
+    ["agent_identities", "agent_id", "agent"],
+    ["agent_configurations", "agent_id", "agent"],
+    ["runtime_deployments", "agent_id", "agent"],
+  ]) {
+    const row = f.db.prepare(`SELECT * FROM ${table} WHERE ${key}=?`).get(original)!;
+    if ("agent_id" in row) row.agent_id = agentId;
+    if ("work_attempt_id" in row) row.work_attempt_id = workspace;
+    if (table === "work_attempts") { row.task_id = agentId; row.lease_id = agentId; row.workspace_path = "/private/second-workspace"; }
+    if (table === "work_attempt_executions") row.execution_generation_id = generation;
+    if (table === "agent_identities") row.sort_order = 1;
+    if (table === "runtime_deployments") { row.provider_execution_generation_id = generation; row.provider_work_attempt_id = workspace; }
+    const columns = Object.keys(row);
+    f.db.prepare(`INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`).run(...Object.values(row));
+  }
+  const handle = { ...f.handle, workAttemptId: workspace, providerConnection: { ...f.handle.providerConnection! } };
+  f.handles.set(agentId, handle);
+  const token = Object.freeze({ ...f.tokenFor(), entryId: agentId, workAttemptId: workspace,
+    executionGenerationId: generation, handle, nonce: Symbol("second-installation") });
+  new ExecutionShadowStore(f.db).registerRuntime({ agentId, executionGenerationId: generation,
+    runtimeGenerationId: executionRuntimeStorageIdentity(agentId, generation, "codex_app_server", 42, "birth-secret"),
+    provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+  return { agentId, handle, token };
+}
+
 test("capture admission is exact, fail-closed, and never promoted by elapsed time", async () => {
   const f = fixture();
   try {
@@ -866,6 +898,156 @@ test("rapid replacement suspends capture instead of accumulating retired subscri
   } finally { f.db.exec = exec; f.capture.close(); }
 });
 
+test("planned handoff drains a valid tail and freezes its boundary before cleanup callbacks", async () => {
+  const f = fixture("codex_app_server", undefined, undefined, new DatabaseSync(":memory:"), "typed");
+  const close = f.db.close.bind(f.db);
+  let replacement: ExecutionCaptureCoordinator | undefined;
+  try {
+    f.install(); f.emit(ready); await flush();
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+    f.capture.sealForPlannedHandoff();
+    f.emit({ domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" });
+    f.db.close = () => {};
+    f.capture.close();
+    assert.equal(f.facts().length, 2);
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 2, max_observed_sequence: 2 });
+    const fresh = new ProviderExecutionObserver(() => now);
+    const diagnostics: string[] = [];
+    replacement = new ExecutionCaptureCoordinator(f.db, {
+      provider: { onExecution: (_handle, listener) => fresh.subscribe(listener) },
+      currentHandle: id => f.handles.get(id), daemonGeneration: () => 2,
+      diagnostic: (_id, code) => diagnostics.push(code),
+    });
+    replacement.install(f.tokenFor()); fresh.emit(ready, "birth-secret", 42); await flush();
+    assert.equal(replacement.captureAdmission(f.tokenFor()), "ready");
+    assert.deepEqual(diagnostics, [], "the preserved process can adopt a new source without a fabricated gap");
+  } finally { replacement?.close(); f.db.close = close; f.capture.close(); close(); }
+});
+
+test("planned capture handoff defers on a real storage lock without detaching observation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "capture-handoff-lock-"));
+  const path = join(directory, "synthetic.sqlite");
+  const f = fixture("codex_app_server", undefined, undefined, new DatabaseSync(path), "typed");
+  const competing = new DatabaseSync(path);
+  try {
+    f.install(); f.emit(ready); await flush();
+    competing.exec("BEGIN IMMEDIATE");
+    f.emit(ready);
+    assert.throws(() => f.capture.sealForPlannedHandoff(), /Update deferred/);
+    competing.exec("ROLLBACK");
+    f.emit(ready);
+    f.capture.sealForPlannedHandoff();
+    assert.equal(f.facts().length, 3, "failure preserved the old owner's subscription and queued tail");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 3, max_observed_sequence: 3 });
+  } finally {
+    if (competing.isTransaction) competing.exec("ROLLBACK");
+    competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("planned capture handoff preserves a preexisting suspended gap without requiring recovery", async () => {
+  const f = fixture();
+  try {
+    f.install(); f.emit(ready); await flush();
+    f.observer.markUnavailable(); f.emit(ready); await flush();
+    const before = { facts: f.facts(), position: f.position(), diagnostics: [...f.diagnostics] };
+    assert.equal(before.position!.last_source_sequence, 1);
+    assert.equal(before.position!.max_observed_sequence, 3);
+    assert.doesNotThrow(() => f.capture.sealForPlannedHandoff());
+    assert.deepEqual({ facts: f.facts(), position: f.position(), diagnostics: f.diagnostics }, before);
+    assert.equal(f.admission(), "unavailable");
+  } finally { f.capture.close(); }
+});
+
+test("planned handoff keeps every current subscription when a later lane fails preparation", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  let failing: ProviderActionHandle | undefined;
+  const f = fixture("codex_app_server", (handle, listener) => {
+    const subscription = sources.get(handle)!.subscribe(listener);
+    return { ...subscription, position: () => {
+      if (failing === handle) throw new Error("source position temporarily unavailable");
+      return subscription.position();
+    } };
+  });
+  const second = secondCaptureLane(f);
+  const other = new ProviderExecutionObserver(() => now);
+  sources.set(f.handle, f.observer); sources.set(second.handle, other);
+  try {
+    f.install(); f.capture.install(second.token);
+    f.emit(ready); other.emit(ready, "birth-secret", 42); await flush();
+    f.emit(ready); other.emit(ready, "birth-secret", 42); failing = second.handle;
+    assert.throws(() => f.capture.sealForPlannedHandoff(), /Update deferred/);
+    assert.equal(f.facts().filter(row => row.agent_id === "agent").length, 2,
+      "useful progress committed before the later failure is retained");
+    failing = undefined;
+    f.emit(ready); other.emit(ready, "birth-secret", 42);
+    f.capture.sealForPlannedHandoff();
+    for (const agentId of ["agent", second.agentId]) {
+      assert.equal(f.facts().filter(row => row.agent_id === agentId).length, 3,
+        "both original subscriptions survived the rejected preparation");
+    }
+  } finally { failing = undefined; f.capture.close(); }
+});
+
+test("planned handoff drains a healthy lane alongside an unchanged historical source gap", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
+  const second = secondCaptureLane(f);
+  const other = new ProviderExecutionObserver(() => now);
+  sources.set(f.handle, f.observer); sources.set(second.handle, other);
+  try {
+    f.install(); f.capture.install(second.token);
+    f.emit(ready); other.emit(ready, "birth-secret", 42); await flush();
+    other.markUnavailable(); other.emit(ready, "birth-secret", 42); await flush();
+    const damaged = () => f.db.prepare("SELECT * FROM execution_observers WHERE agent_id=?").get(second.agentId);
+    const before = damaged();
+    assert.equal(before!.last_source_sequence, 1); assert.equal(before!.max_observed_sequence, 3);
+    f.emit(ready); f.capture.sealForPlannedHandoff();
+    assert.equal(f.facts().filter(row => row.agent_id === "agent").length, 2);
+    assert.equal(f.facts().filter(row => row.agent_id === second.agentId).length, 1);
+    assert.deepEqual(damaged(), before, "planned update cannot rewrite or repair the historical gap");
+  } finally { f.capture.close(); }
+});
+
+for (const damaged of [false, true]) test(`planned handoff preserves predecessor ordering with ${damaged ? "a source gap" : "a queued exit"}`, async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
+  sources.set(f.handle, f.observer);
+  try {
+    const detach = f.install(); f.emit(ready); await flush();
+    if (damaged) { f.observer.markUnavailable(); f.emit(ready); await flush(); }
+    else f.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+    detach();
+    const next = successor(f, "successor-birth");
+    const fresh = new ProviderExecutionObserver(() => now); sources.set(next, fresh);
+    f.install(next); fresh.emit(ready, "successor-birth", 42);
+    await Promise.resolve(); // resolve subscription without running the scheduled capture drain
+    f.capture.sealForPlannedHandoff();
+    assert.equal(f.facts().length, damaged ? 1 : 3);
+    assert.deepEqual({ ...f.position() }, damaged
+      ? { last_source_sequence: 1, max_observed_sequence: 3 }
+      : { last_source_sequence: 1, max_observed_sequence: 1 });
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_observer_sources").get()!.n, damaged ? 1 : 2,
+      "a successor may bind only after its predecessor's retained tail is complete");
+  } finally { f.capture.close(); }
+});
+
+test("planned capture handoff defers an unresolved subscription without dropping its queued facts", async () => {
+  const pending = deferred<NativeExecutionSubscription>();
+  let subscription!: NativeExecutionSubscription;
+  const f = fixture("codex_app_server", (_handle, listener) => {
+    subscription = f.observer.subscribe(listener);
+    return pending.promise;
+  });
+  try {
+    f.install(); f.emit(ready);
+    assert.throws(() => f.capture.sealForPlannedHandoff(), /Update deferred/);
+    pending.resolve(subscription); await flush();
+    f.capture.sealForPlannedHandoff();
+    assert.equal(f.facts().length, 1);
+  } finally { f.capture.close(); }
+});
+
 test("administrative close records only the admitted source frontier and tolerates storage failure", async () => {
   for (const busy of [false, true]) {
     const f = fixture(); const close = f.db.close.bind(f.db); const exec = f.db.exec.bind(f.db);
@@ -1068,7 +1250,57 @@ test("older-generation recovery without captured original runtime proof stays un
   } finally { f.capture.close(); }
 });
 
-test("optional storage failure retains queued facts and retries only on a later hint", async (t) => {
+for (const initialFact of [false, true]) test(`capture automatically revalidates after a SQLite lock with ${initialFact ? "queued ready evidence" : "an empty exact source"}`, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const directory = mkdtempSync(join(tmpdir(), "capture-storage-retry-"));
+  const path = join(directory, "synthetic.sqlite");
+  const f = fixture("codex_app_server", undefined, undefined, new DatabaseSync(path), "typed");
+  const competing = new DatabaseSync(path);
+  try {
+    if (initialFact) f.emit(ready);
+    competing.exec("BEGIN IMMEDIATE");
+    f.install(); await flush();
+    assert.equal(f.admission(), "unavailable");
+    assert.equal(f.facts().length, 0);
+    competing.exec("ROLLBACK");
+    t.mock.timers.tick(25); await flush();
+    assert.equal(f.facts().length, initialFact ? 1 : 0);
+    assert.equal(f.admission(), "ready", "storage recovery must not require another provider fact or human action");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: initialFact ? 1 : 0, max_observed_sequence: initialFact ? 1 : 0 });
+    const before = f.facts();
+    t.mock.timers.tick(30_000); await flush();
+    assert.deepEqual(f.facts(), before, "the successful frontier is not repeatedly ingested");
+  } finally {
+    if (competing.isTransaction) competing.exec("ROLLBACK");
+    competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+for (const release of ["close", "replace"] as const) test(`capture storage retry cannot outlive ${release}`, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture();
+  const close = f.db.close.bind(f.db);
+  const exec = f.db.exec.bind(f.db);
+  let closed = false;
+  f.db.close = () => { closed = true; };
+  try {
+    f.db.exec = sql => {
+      if (sql === "BEGIN IMMEDIATE") throw Object.assign(new Error("database is locked"), { code: "ERR_SQLITE_ERROR", errcode: 6 });
+      return exec(sql);
+    };
+    f.emit(ready); f.install(); await flush();
+    assert.equal(f.admission(), "unavailable");
+    if (release === "close") f.capture.close();
+    else f.handles.set("agent", { ...f.handle });
+    f.db.exec = exec;
+    t.mock.timers.tick(30_000); await flush();
+    assert.equal(f.facts().length, 0, "a retry cannot admit observations for a closed or replaced owner");
+    assert.equal(f.admission(), "unavailable");
+    assert.equal(closed, release === "close");
+  } finally { f.db.exec = exec; f.capture.close(); f.db.close = close; close(); }
+});
+
+test("non-retryable storage failure retains queued facts and requires a later hint", async (t) => {
   const f = fixture();
   try {
     await f.install(); await flush();
