@@ -8,6 +8,7 @@ import { forceStopDaemon, performConfirmedMaintenance, type ForceDaemonRestartPo
 
 function fixture() {
   const events: string[] = [];
+  let clock = 0;
   let state: "same" | "absent" | "zombie" | "changed" | "unverifiable" = "same";
   const target = { pid: 98765, kernelStartTime: "exact birth", command: "electron /app/daemon.js", expectedScriptPath: "/app/daemon.js", state: "live" as const };
   const port: ForceDaemonRestartPort = {
@@ -15,11 +16,11 @@ function fixture() {
     persistHold: async () => { events.push("hold"); return { version: 1, id: "held", createdAt: new Date().toISOString() }; },
     observe: () => ({ kind: state }),
     signal: (identity, signal) => { assert.equal(identity, target); events.push(signal); return { kind: state }; },
-    wait: async () => { state = "absent"; return { kind: state }; },
+    delay: async ms => { clock += ms; state = "absent"; }, now: () => clock, pollIntervalMs: 1,
     socketReleased: async () => { events.push("socket"); return true; },
     terminateTimeoutMs: 1, killTimeoutMs: 1,
   };
-  return { port, target, events, setState: (value: typeof state) => { state = value; } };
+  return { port, target, events, advance: (ms: number) => { clock += ms; }, setState: (value: typeof state) => { state = value; } };
 }
 
 test("force restart persists the hold before signalling only the exact daemon", async () => {
@@ -28,15 +29,40 @@ test("force restart persists the hold before signalling only the exact daemon", 
 });
 test("force restart escalates only while the original process identity remains live", async () => {
   const f = fixture(); let waits = 0;
-  f.port.wait = async () => ({ kind: ++waits === 1 ? "same" : "zombie" });
+  f.port.delay = async ms => { f.advance(ms); f.setState(++waits === 1 ? "same" : "zombie"); };
   await forceStopDaemon(f.port);
   assert.deepEqual(f.events, ["hold", "SIGTERM", "SIGKILL", "socket"]);
 });
 for (const kind of ["changed", "unverifiable", "same"] as const) test(`force restart never reports completion for ${kind} identity after TERM`, async () => {
-  const f = fixture(); f.port.wait = async () => { f.setState(kind); return { kind }; };
+  const f = fixture(); f.port.delay = async ms => { f.advance(ms); f.setState(kind); };
   await assert.rejects(forceStopDaemon(f.port), /Could not confirm/);
   assert.equal(f.events.includes("socket"), false);
   assert.equal(f.events.includes("SIGKILL"), kind === "same");
+});
+for (const boundary of ["observe", "signal", "after_term"] as const) {
+  for (const loss of ["changed", "unverifiable"] as const) test(`force restart observes absence after ${loss} at ${boundary}`, async () => {
+    const f = fixture(); f.port.terminateTimeoutMs = 4;
+    if (boundary === "observe") f.setState(loss);
+    if (boundary === "signal") f.port.signal = () => ({ kind: loss });
+    let polls = 0;
+    f.port.delay = async ms => { f.advance(ms); polls++; f.setState(polls === 1 && boundary === "after_term" ? loss : polls === 2 ? "same" : "absent"); };
+    await forceStopDaemon(f.port);
+    assert.deepEqual(f.events, boundary === "after_term" ? ["hold", "SIGTERM", "socket"] : ["hold", "socket"]);
+    assert.ok(f.port.now() <= 4);
+  });
+}
+for (const later of ["same", "zombie", "changed", "unverifiable"] as const) test(`force restart cannot restore authority from ${later} after identity loss`, async () => {
+  const f = fixture(); f.port.terminateTimeoutMs = 3; let polls = 0;
+  f.port.delay = async ms => { f.advance(ms); f.setState(++polls === 1 ? "changed" : later); };
+  await assert.rejects(forceStopDaemon(f.port), /stopped \(changed\)/);
+  assert.deepEqual(f.events, ["hold", "SIGTERM"]); assert.equal(f.port.now(), 3);
+});
+test("force restart bounds identity-loss observation after KILL and still requires socket release", async () => {
+  const f = fixture(); f.port.killTimeoutMs = 3; let polls = 0;
+  f.port.delay = async ms => { f.advance(ms); f.setState(++polls === 1 ? "same" : polls === 2 ? "unverifiable" : "absent"); };
+  f.port.socketReleased = async () => { f.events.push("socket"); return false; };
+  await assert.rejects(forceStopDaemon(f.port), /still answers/);
+  assert.deepEqual(f.events, ["hold", "SIGTERM", "SIGKILL", "socket"]); assert.equal(f.port.now(), 3);
 });
 for (const pid of [0, -98765, 1, process.pid, NaN]) test(`force restart refuses invalid daemon PID ${pid}`, async () => {
   const f = fixture(); f.target.pid = pid;
