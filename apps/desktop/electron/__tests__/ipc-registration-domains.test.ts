@@ -20,8 +20,6 @@ const domainSources = {
 };
 
 const expectedDirectChannels = [
-  "desktop:maintenance:status",
-  "desktop:maintenance:restart",
   "desktop:app-agent:get-settings-status",
   "desktop:app-agent:list-actions",
   "desktop:app-agent:run",
@@ -51,6 +49,8 @@ const expectedDirectChannels = [
   "desktop:chat-storage:set-room-mode",
   "desktop:chat-storage:sync-local-room",
   "desktop:diagnostics:get-snapshot",
+  "desktop:maintenance:restart",
+  "desktop:maintenance:status",
   "desktop:notifications:get-status",
   "desktop:notifications:set-enabled",
   "desktop:notifications:take-pending-activation",
