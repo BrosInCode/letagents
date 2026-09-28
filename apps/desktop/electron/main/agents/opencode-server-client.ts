@@ -270,10 +270,19 @@ export function eventReferencesSession(
   ].some((value) => value === sessionId);
 }
 
-function serverStatus(value: unknown, sessionId: string): string {
-  const statuses = record(value);
-  const status = record(statuses?.[sessionId]);
-  return typeof status?.type === "string" ? status.type : "idle";
+/**
+ * OpenCode lists only sessions that are not idle. A listed session is either
+ * running its turn ("busy") or waiting out a backoff before it re-sends a
+ * failed model request ("retry"). Both are an active turn: a retrying session
+ * resumes by itself and can still produce an answer, so reading it as a turn
+ * boundary would drop a Stop and settle a turn that is still running.
+ */
+function serverStatus(value: unknown, sessionId: string): "busy" | "idle" {
+  const listed = record(value)?.[sessionId];
+  if (listed === undefined || listed === null) return "idle";
+  // An entry this client cannot read is still a listed session, so it fails
+  // towards an active turn rather than towards a turn boundary.
+  return record(listed)?.type === "idle" ? "idle" : "busy";
 }
 
 function eventData(block: string): string | null {
@@ -480,7 +489,7 @@ export class OpenCodeServerClient {
     );
   }
 
-  async status(sessionId: string): Promise<string> {
+  async status(sessionId: string): Promise<"busy" | "idle"> {
     return serverStatus(
       await this.requestJson<unknown>("/session/status"),
       sessionId,

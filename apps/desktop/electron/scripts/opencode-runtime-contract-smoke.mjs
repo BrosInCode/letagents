@@ -171,6 +171,7 @@ async function startFixtureProvider() {
   const state = {
     credentialBoundaryObserved: false,
     unknownFinishRequests: 0,
+    retriedRequests: 0,
     requestCount: 0,
     paths: [],
   };
@@ -185,6 +186,14 @@ async function startFixtureProvider() {
     const name = toolName(body);
     const serializedMessages = JSON.stringify(body.messages ?? []);
     const hasToolResult = (body.messages ?? []).some((message) => message?.role === "tool");
+    if (serializedMessages.includes("LETAGENTS_RETRY_FIXTURE")) {
+      if (name) {
+        state.retriedRequests += 1;
+        response.writeHead(429, { "content-type": "application/json" })
+          .end(JSON.stringify({ error: { message: "Rate limit exceeded", code: 429 } }));
+      } else assistantText(response, "contract-background-request-ok");
+      return;
+    }
     if (serializedMessages.includes("LETAGENTS_UNKNOWN_FINISH_FIXTURE")) {
       // Only the agent turn carries tools; OpenCode's background title
       // request for the same prompt gets an ordinary answer.
@@ -501,6 +510,37 @@ try {
   assert.equal(provider.state.unknownFinishRequests, 1, "an unknown finish reason must not re-invoke the model");
   assert.ok(JSON.stringify(await reattached.messages(unknownFinish.id)).includes("unknown-finish-ok"));
 
+  // While OpenCode waits to re-send a failed model request it reports the
+  // session as "retry", not "busy". That is still an active turn: the client
+  // must read it as busy, and a native abort must end it.
+  const retrying = await reattached.createSession("LetAgents retry status");
+  assert.equal(typeof retrying.id, "string");
+  const retryStart = observation.seen.length;
+  await reattached.promptAsync(retrying.id, {
+    messageID: mintNativeUserMessageId(Date.now()),
+    model: { providerID: OPEN_MODEL_OPENCODE_PROVIDER_ID, modelID: "contract-model" },
+    parts: [{ type: "text", text: "LETAGENTS_RETRY_FIXTURE" }],
+  });
+  await observation.waitFor((event) => event.type === "session.status"
+    && event.properties.sessionID === retrying.id
+    && event.properties.status?.type === "retry", retryStart);
+  assert.equal(await reattached.status(retrying.id), "busy", "a retrying session is an active turn");
+  await reattached.abort(retrying.id);
+  await observation.waitFor((event) => event.type === "session.idle"
+    && eventReferencesSession(event, retrying.id), retryStart);
+  assert.equal(await reattached.status(retrying.id), "idle");
+  assert.ok(provider.state.retriedRequests >= 1);
+  // OpenCode's first backoff is 2 to 2.5 seconds, so a retry that survived
+  // the abort has sent its next request by then. The wait sits here because
+  // the instance disposal further down would end a surviving retry too.
+  const retriedRequestsAtAbort = provider.state.retriedRequests;
+  await new Promise((resolveWait) => setTimeout(resolveWait, 3_000));
+  assert.equal(
+    provider.state.retriedRequests,
+    retriedRequestsAtAbort,
+    "an aborted retry must not send the model another request",
+  );
+
   // Reconstructing the authenticated client models desktop/daemon restart:
   // the process and session stay authoritative without another native launch.
   const sessions = await reattached.listSessions();
@@ -577,6 +617,7 @@ try {
     messageId,
     npmRegistryRequests: registry.requests.length,
     unknownFinishEndsTurnAfterOneRequest: true,
+    retryStatusReadAsActiveAndAborted: true,
     credentialBoundaryObserved: true,
     reattachedWithoutRelaunch: true,
     nativeAbortAccepted: true,
