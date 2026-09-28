@@ -844,18 +844,20 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   }
 
   async resume(ref: ProviderContinuationRef, req: ProviderSpawnRequest): Promise<ProviderHandle> {
-    if ((ref.lifecycleAuthorityMode ?? "typed_shadow") !== (req.lifecycleAuthorityMode ?? "typed_shadow")) {
-      throw new Error("Open Model resume lifecycle authority does not match the frozen provider birth.");
-    }
     // Load-bearing two-writer invariant: attach() may return null when process
     // identity or local control authentication is unreadable. resume() must
     // never interpret that uncertainty as permission to spawn a replacement.
     // Only a terminal identity proves that the saved writer is gone.
     const attached = await this.attach(ref);
-    if (attached && !("state" in attached)) return attached;
     // Terminal identity is proof the process is gone: the daemon must recover
-    // by starting a fresh runtime, not retry resume against a corpse.
-    if (attached?.state === "terminal") throw new OpenCodeRuntimeGoneError();
+    // by starting a fresh runtime, not retry resume against a corpse. This is
+    // checked before the authority comparison so a dead runtime born under an
+    // older mode is replaced instead of refused on every attempt.
+    if (attached && "state" in attached) throw new OpenCodeRuntimeGoneError();
+    if ((ref.lifecycleAuthorityMode ?? "typed_shadow") !== (req.lifecycleAuthorityMode ?? "typed_shadow")) {
+      throw new Error("Open Model resume lifecycle authority does not match the frozen provider birth.");
+    }
+    if (attached) return attached;
     throw new Error("The saved OpenCode process could not be authenticated; refusing to start a competing runtime.");
   }
 
