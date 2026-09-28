@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 
 export const OPEN_MODEL_OPENCODE_PROVIDER_ID = "letagents-open-model";
@@ -63,6 +66,56 @@ export function credentialBoundaryPluginSource(): string {
     "});",
     "",
   ].join("\n");
+}
+
+const OPENCODE_PLUGIN_SDK_PACKAGE = "@opencode-ai/plugin";
+
+/**
+ * Marks a fresh runtime's OpenCode config directory as already provisioned.
+ *
+ * OpenCode installs its plugin SDK (~61MB) into every config directory that
+ * has no `node_modules`, or whose lockfile does not lock the SDK by name, and
+ * a configured plugin makes the first session wait for that install. Each
+ * supervised runtime owns a fresh config directory, so every launch paid a
+ * registry round trip that took seconds on a warm npm cache, tens of seconds
+ * on a cold one, and over a minute when the registry was unreachable.
+ *
+ * The credential-boundary plugin imports nothing, so the SDK is dead weight
+ * here. Existing files are never overwritten; only missing ones are added.
+ * The contract smoke proves against the pinned binary that this seed
+ * suppresses the install.
+ *
+ * Only the runtime's own config directory is covered. OpenCode also installs
+ * into a project's `.opencode` directories and into `~/.opencode`, which
+ * belong to the user and may hold tools that need the SDK.
+ */
+export async function seedOpenCodeConfigHome(
+  configHome: string,
+  openCodeVersion: string,
+): Promise<void> {
+  const directory = join(configHome, "opencode");
+  await mkdir(join(directory, "node_modules"), { recursive: true, mode: 0o700 });
+  const dependencies = { [OPENCODE_PLUGIN_SDK_PACKAGE]: openCodeVersion };
+  const seeds: Array<[string, unknown]> = [
+    ["package.json", { dependencies }],
+    ["package-lock.json", {
+      name: "opencode",
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": { dependencies } },
+    }],
+  ];
+  for (const [name, value] of seeds) {
+    try {
+      await writeFile(join(directory, name), `${JSON.stringify(value, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
 }
 
 export function supervisedOpenCodeMcpEnvironment(

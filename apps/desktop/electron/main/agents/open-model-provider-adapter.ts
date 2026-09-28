@@ -55,9 +55,10 @@ import {
   openCodeAuthContent,
   openCodeConfig,
   parseConfiguredOpenModel,
+  seedOpenCodeConfigHome,
   supervisedOpenCodeMcpEnvironment,
 } from "./opencode-launch-contract.js";
-import { resolveOpenCodeBinary } from "./opencode-runtime.js";
+import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
 import {
@@ -330,15 +331,20 @@ class OpenCodeBoundedTurnError extends Error {
 }
 
 /**
- * The fresh OpenCode server did not answer health checks inside the launch
- * budget. The launch was terminated, nothing durable changed, and another
- * attempt is expected to succeed — the daemon may retry automatically.
+ * The fresh OpenCode server did not finish starting inside the launch budget:
+ * either it never answered health checks, or it answered them and then did
+ * not prepare its first session. The launch was terminated, nothing durable
+ * changed, and another attempt is expected to succeed — the daemon may retry
+ * automatically. The phase keeps the two failures distinguishable, because
+ * they have different causes.
  */
 export class OpenCodeStartTimeoutError extends Error {
   readonly transientProviderStart = true;
 
-  constructor() {
-    super("Timed out waiting for the supervised OpenCode server.");
+  constructor(readonly phase: "health" | "session" = "health") {
+    super(phase === "session"
+      ? "Timed out waiting for the supervised OpenCode server to prepare its first session."
+      : "Timed out waiting for the supervised OpenCode server.");
     this.name = "OpenCodeStartTimeoutError";
   }
 }
@@ -581,6 +587,12 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     // where health connections can be accepted but never answered.
     const sharedCacheRoot = join(this.runtimeRoot, "shared-cache");
     await mkdir(sharedCacheRoot, { recursive: true, mode: 0o700 });
+    // The shared cache cannot cover OpenCode's plugin SDK, which installs
+    // into the isolated config directory rather than the cache.
+    const configHome = join(runtimeRoot, "config");
+    // The seed only saves time. A directory it cannot write leaves OpenCode
+    // on its own install path, which must not block the launch.
+    await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION).catch(() => undefined);
     const env = minimalOpenCodeEnvironment(process.env, {
       // Resolve gh's config before isolating OpenCode's XDG directories. Keep
       // the existing credential store location, never copy its credentials.
@@ -595,7 +607,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       OPENCODE_AUTH_CONTENT: openCodeAuthContent(credential.apiKey),
       XDG_DATA_HOME: join(runtimeRoot, "data"),
       XDG_CACHE_HOME: sharedCacheRoot,
-      XDG_CONFIG_HOME: join(runtimeRoot, "config"),
+      XDG_CONFIG_HOME: configHome,
       XDG_STATE_HOME: join(runtimeRoot, "state"),
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
     });
@@ -644,16 +656,23 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const client = new OpenCodeServerClient(url, auth, this.deps.fetch);
     let sessionId: string;
     let connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }>;
+    // One budget covers the whole launch. The first session bootstraps the
+    // OpenCode instance, so it gets whatever the health wait left over rather
+    // than the shorter steady-state control deadline.
+    const launchDeadline = Date.now() + this.startTimeoutMs;
+    let phase: "health" | "session" = "health";
     try {
       await writeRuntimeControl(authPath, {
         ...auth,
         lifecycleAuthorityMode,
         startupProcess: { url, pid, processIdentity: identity },
       });
-      const ready = await this.waitForHealth(client, launch.exited);
-      if (!ready) throw new OpenCodeStartTimeoutError();
+      const ready = await this.waitForHealth(client, launch.exited, launchDeadline);
+      if (!ready) throw new OpenCodeStartTimeoutError("health");
+      phase = "session";
       const session = await client.createSession(
         req.agentDisplayName?.trim() || "LetAgents Open Model",
+        AbortSignal.timeout(Math.max(1, launchDeadline - Date.now())),
       );
       sessionId = typeof session.id === "string" ? session.id : "";
       if (!sessionId) {
@@ -674,7 +693,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     } catch (error) {
       await terminateFreshLaunch({ pid, exited: launch.exited, processIdentity: identity }, this.deps, this.stopGraceMs);
       if (error instanceof Error && error.name === "TimeoutError") {
-        throw new OpenCodeStartTimeoutError();
+        throw new OpenCodeStartTimeoutError(phase);
       }
       throw error;
     }
@@ -1766,8 +1785,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   private async waitForHealth(
     client: OpenCodeServerClient,
     exited: Promise<ProviderProcessExit>,
+    deadline: number,
   ): Promise<boolean> {
-    const deadline = Date.now() + this.startTimeoutMs;
     let terminal = false;
     void exited.then(() => { terminal = true; });
     while (!terminal && Date.now() < deadline) {
