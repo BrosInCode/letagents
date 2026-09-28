@@ -103,7 +103,7 @@ jobs:
         run: npm audit signatures --prefix apps/desktop
 
       - name: Audit desktop dependency advisories
-        run: node scripts/verify-dependency-advisories.mjs apps/desktop
+        run: node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents
 
       - name: Run verified desktop dependency lifecycle scripts
         run: npm rebuild --prefix apps/desktop
