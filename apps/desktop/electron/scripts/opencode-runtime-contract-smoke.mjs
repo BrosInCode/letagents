@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,6 +16,7 @@ const {
   OPENCODE_SERVER_USERNAME,
   openCodeAuthContent,
   openCodeConfig,
+  seedOpenCodeConfigHome,
 } = await import("../../dist-electron/main/agents/opencode-launch-contract.js");
 const { OPENCODE_RUNTIME_VERSION } = await import(
   "../../dist-electron/main/agents/opencode-runtime.js"
@@ -118,6 +119,18 @@ function assistantText(response, text) {
   ]);
 }
 
+// Some OpenAI-compatible endpoints end a complete answer without a standard
+// finish_reason, which OpenCode records as an "unknown" finish.
+function assistantTextWithoutFinishReason(response, text) {
+  writeSse(response, [{
+    id: `chatcmpl_${randomUUID()}`,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1_000),
+    model: "contract-model",
+    choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }],
+  }]);
+}
+
 function assistantToolCall(response, name, commands = [
   "printf '%s|%s|%s|%s' \"$OPENCODE_AUTH_CONTENT\" \"$OPENCODE_CONFIG_CONTENT\" \"$OPENCODE_SERVER_USERNAME\" \"$OPENCODE_SERVER_PASSWORD\"",
 ]) {
@@ -157,6 +170,7 @@ function assistantToolCall(response, name, commands = [
 async function startFixtureProvider() {
   const state = {
     credentialBoundaryObserved: false,
+    unknownFinishRequests: 0,
     requestCount: 0,
     paths: [],
   };
@@ -171,6 +185,15 @@ async function startFixtureProvider() {
     const name = toolName(body);
     const serializedMessages = JSON.stringify(body.messages ?? []);
     const hasToolResult = (body.messages ?? []).some((message) => message?.role === "tool");
+    if (serializedMessages.includes("LETAGENTS_UNKNOWN_FINISH_FIXTURE")) {
+      // Only the agent turn carries tools; OpenCode's background title
+      // request for the same prompt gets an ordinary answer.
+      if (name) {
+        state.unknownFinishRequests += 1;
+        assistantTextWithoutFinishReason(response, "unknown-finish-ok");
+      } else assistantText(response, "contract-background-request-ok");
+      return;
+    }
     if (serializedMessages.includes("LETAGENTS_PERMISSION_REJECT_FIXTURE")
       || serializedMessages.includes("LETAGENTS_PERMISSION_FOREIGN_FIXTURE")) {
       if (hasToolResult) assistantText(response, "permission-contract-settled");
@@ -208,6 +231,30 @@ async function startFixtureProvider() {
   return {
     state,
     url: `http://127.0.0.1:${port}/v1`,
+    close: () => new Promise((resolveClose, reject) => {
+      server.close((error) => error ? reject(error) : resolveClose());
+    }),
+  };
+}
+
+// Stands in for the npm registry. Every request is evidence that OpenCode
+// tried to install a package during a supervised launch.
+async function startFixtureRegistry() {
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    request.resume();
+    response.writeHead(404, { "content-type": "application/json" }).end('{"error":"not_found"}');
+  });
+  await new Promise((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  const port = address && typeof address === "object" ? address.port : 0;
+  return {
+    requests,
+    url: `http://127.0.0.1:${port}/`,
     close: () => new Promise((resolveClose, reject) => {
       server.close((error) => error ? reject(error) : resolveClose());
     }),
@@ -296,6 +343,7 @@ async function watchEvents(client, eventTypes) {
 const binary = resolveBinary();
 const actualVersion = verifyVersion(binary);
 const provider = await startFixtureProvider();
+const registry = await startFixtureRegistry();
 const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-contract-"));
 const pluginPath = join(runtimeRoot, "credential-boundary.mjs");
 const mcpPath = join(runtimeRoot, "noop-mcp.mjs");
@@ -316,14 +364,20 @@ const config = openCodeConfig({
   mcpEnvironment: {},
   permissionProfileId: "ask_before_write",
 });
+// Production seeds every fresh runtime so OpenCode has no plugin SDK to
+// install. npm is pointed at a loopback registry that records every request,
+// so an attempted install is observed instead of inferred from a timeout.
+const configHome = join(runtimeRoot, "config");
+await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION);
 const environment = minimalOpenCodeEnvironment(process.env, {
+  npm_config_registry: registry.url,
   OPENCODE_SERVER_USERNAME: auth.username,
   OPENCODE_SERVER_PASSWORD: auth.password,
   OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
   OPENCODE_AUTH_CONTENT: openCodeAuthContent(CONTRACT_SENTINEL),
   XDG_DATA_HOME: join(runtimeRoot, "data"),
   XDG_CACHE_HOME: join(runtimeRoot, "cache"),
-  XDG_CONFIG_HOME: join(runtimeRoot, "config"),
+  XDG_CONFIG_HOME: configHome,
   XDG_STATE_HOME: join(runtimeRoot, "state"),
 });
 const output = { value: "" };
@@ -362,6 +416,18 @@ try {
   const initial = await client.createSession("LetAgents live contract");
   const sessionId = typeof initial.id === "string" ? initial.id : "";
   if (!sessionId) throw new Error("OpenCode live contract did not create a session.");
+  // The launch inherits HOME, so an unprovisioned ~/.opencode on this machine
+  // shows up here too: production launches on it would pay the same install.
+  assert.deepEqual(
+    registry.requests,
+    [],
+    "a supervised launch must not contact the npm registry before its first session",
+  );
+  assert.deepEqual(
+    await readdir(join(configHome, "opencode", "node_modules")),
+    [],
+    "the seeded config directory must stay empty of installed packages",
+  );
   const eventTypes = new Set();
   observation = await watchEvents(client, eventTypes);
   // The adapter dispatches user message IDs in OpenCode's own ascending
@@ -418,6 +484,22 @@ try {
   assert.deepEqual(await reattached.listPendingPermissions(sessionId), [], "a processed request must remain absent after reconnect");
   await assert.rejects(reattached.replyPermission(sessionId, pending[0], "once"), (error) => error?.outcome === "not_pending");
   assert.equal(permissionReplyPosts, 1, "a repeated processed request must be refused before another native POST");
+
+  // A complete answer with an unknown finish reason must end the turn after
+  // one model request. OpenCode 1.18.21 through at least 1.18.33 instead
+  // re-invoke the model without bound. Run this smoke before changing the pin.
+  const unknownFinish = await reattached.createSession("LetAgents unknown finish");
+  assert.equal(typeof unknownFinish.id, "string");
+  const unknownFinishStart = observation.seen.length;
+  await reattached.promptAsync(unknownFinish.id, {
+    messageID: mintNativeUserMessageId(Date.now()),
+    model: { providerID: OPEN_MODEL_OPENCODE_PROVIDER_ID, modelID: "contract-model" },
+    parts: [{ type: "text", text: "LETAGENTS_UNKNOWN_FINISH_FIXTURE" }],
+  });
+  await observation.waitFor((event) => event.type === "session.idle"
+    && eventReferencesSession(event, unknownFinish.id), unknownFinishStart);
+  assert.equal(provider.state.unknownFinishRequests, 1, "an unknown finish reason must not re-invoke the model");
+  assert.ok(JSON.stringify(await reattached.messages(unknownFinish.id)).includes("unknown-finish-ok"));
 
   // Reconstructing the authenticated client models desktop/daemon restart:
   // the process and session stay authoritative without another native launch.
@@ -481,6 +563,11 @@ try {
   await assert.rejects(reattached.replyPermission(sessionId, pending[0], "once"),
     (error) => error?.outcome === "not_pending");
   assert.equal(permissionReplyPosts, 2, "disposal must not permit re-dispatch of lost or previously processed requests");
+  assert.deepEqual(
+    registry.requests,
+    [],
+    "no turn, reconnect, or instance disposal may contact the npm registry",
+  );
   console.log(JSON.stringify({
     runtime: "opencode",
     version: actualVersion,
@@ -488,6 +575,8 @@ try {
     sessionId,
     replacementSessionId,
     messageId,
+    npmRegistryRequests: registry.requests.length,
+    unknownFinishEndsTurnAfterOneRequest: true,
     credentialBoundaryObserved: true,
     reattachedWithoutRelaunch: true,
     nativeAbortAccepted: true,
@@ -515,5 +604,6 @@ try {
   ]);
   if (child.exitCode === null) child.kill("SIGKILL");
   await provider.close();
+  await registry.close();
   await rm(runtimeRoot, { recursive: true, force: true });
 }

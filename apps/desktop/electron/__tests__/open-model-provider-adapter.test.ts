@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,6 +29,8 @@ import {
   parseOpenCodePermissionEvent,
   type OpenCodePermissionRequest,
 } from "../main/agents/opencode-server-client.js";
+import { seedOpenCodeConfigHome } from "../main/agents/opencode-launch-contract.js";
+import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
 
 type LaunchRecord = {
   binary: string;
@@ -94,7 +96,7 @@ function createHarness() {
       const url = new URL(input);
       const authorization = new Headers(init?.headers).get("authorization");
       assert.match(authorization ?? "", /^Basic /);
-      if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.9" });
+      if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.20" });
       if (url.pathname === "/permission") return json(permissions);
       const permissionMatch = url.pathname.match(/^\/permission\/([^/]+)\/reply$/);
       if (permissionMatch && init?.method === "POST") {
@@ -1260,7 +1262,8 @@ test("Open Model launch honors its startup budget even when a health request han
     adapter.spawn(spawnRequest()),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /Timed out waiting for the supervised OpenCode server/);
+      assert.equal(error.message, "Timed out waiting for the supervised OpenCode server.");
+      assert.equal((error as Error & { phase?: string }).phase, "health");
       assert.equal(
         (error as Error & { transientProviderStart?: boolean }).transientProviderStart,
         true,
@@ -1328,6 +1331,190 @@ test("Open Model terminates and retries a fresh server when session creation tim
   );
   assert.deepEqual(signals, ["SIGTERM"], "the ambiguous fresh runtime is fenced before retry");
   assert.equal(identityChecks, 2, "cleanup re-verifies the captured process birth before signaling");
+});
+
+test("Open Model bounds first-session bootstrap by the launch budget and names the phase", async () => {
+  const harness = createHarness();
+  const baseFetch = harness.dependencies.fetch;
+  let exitLaunch!: (exit: ProviderProcessExit) => void;
+  const launchExited = new Promise<ProviderProcessExit>((resolve) => { exitLaunch = resolve; });
+  let sessionSignal: AbortSignal | null = null;
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-session-budget-")),
+    dependencies: {
+      ...harness.dependencies,
+      launch() {
+        const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+        Object.assign(child, { pid: 6104, unref() {} });
+        return { child, exited: launchExited };
+      },
+      getProcessIdentity: (pid) => (pid === 6104 ? "opencode-birth-6104" : null),
+      signalProcess(_pid, signal) {
+        exitLaunch({ type: "exit", code: null, signal });
+      },
+      fetch(input, init) {
+        const url = new URL(input);
+        if (url.pathname !== "/session" || init?.method !== "POST") return baseFetch(input, init);
+        // A healthy server whose instance bootstrap never finishes: only the
+        // request's own deadline can end this wait.
+        sessionSignal = init.signal ?? null;
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      },
+    },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    stopGraceMs: 5,
+  });
+
+  const startedAt = Date.now();
+  // AbortSignal.timeout does not hold the event loop open by itself.
+  const keepAlive = setInterval(() => undefined, 25);
+  await assert.rejects(
+    adapter.spawn(spawnRequest()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "OpenCodeStartTimeoutError");
+      assert.equal((error as Error & { phase?: string }).phase, "session");
+      assert.match(error.message, /prepare its first session/);
+      assert.equal(
+        (error as Error & { transientProviderStart?: boolean }).transientProviderStart,
+        true,
+      );
+      return true;
+    },
+  ).finally(() => clearInterval(keepAlive));
+  assert.ok(sessionSignal, "first-session bootstrap carries an explicit deadline");
+  assert.ok(
+    Date.now() - startedAt < 5_000,
+    "the 100ms launch budget, not the 15s steady-state control deadline, ends the wait",
+  );
+});
+
+test("Open Model gives the first session only what the health wait left of the launch budget", async () => {
+  const startTimeoutMs = 2_500;
+  // Returns how long after launch the first-session request was aborted,
+  // for a server that stays unhealthy for `healthDelayMs` and then never
+  // finishes its first session.
+  const sessionAbortedAfterMs = async (healthDelayMs: number, pid: number): Promise<number> => {
+    const harness = createHarness();
+    const baseFetch = harness.dependencies.fetch;
+    let exitLaunch!: (exit: ProviderProcessExit) => void;
+    const launchExited = new Promise<ProviderProcessExit>((resolve) => { exitLaunch = resolve; });
+    let startedAt = 0;
+    let abortedAt = 0;
+    const adapter = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-shared-budget-")),
+      dependencies: {
+        ...harness.dependencies,
+        launch() {
+          const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+          Object.assign(child, { pid, unref() {} });
+          return { child, exited: launchExited };
+        },
+        getProcessIdentity: (candidate) => (candidate === pid ? `opencode-birth-${pid}` : null),
+        signalProcess(_pid, signal) {
+          exitLaunch({ type: "exit", code: null, signal });
+        },
+        fetch(input, init) {
+          const url = new URL(input);
+          if (url.pathname === "/global/health" && Date.now() - startedAt < healthDelayMs) {
+            return Promise.resolve(json({ healthy: false }, 503));
+          }
+          if (url.pathname !== "/session" || init?.method !== "POST") return baseFetch(input, init);
+          return new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              abortedAt = Date.now();
+              reject(init.signal?.reason);
+            }, { once: true });
+          });
+        },
+      },
+      startTimeoutMs,
+      turnTimeoutMs: 100,
+      stopGraceMs: 5,
+    });
+    const keepAlive = setInterval(() => undefined, 25);
+    startedAt = Date.now();
+    await assert.rejects(
+      adapter.spawn(spawnRequest()),
+      (error: unknown) => (error as Error & { phase?: string }).phase === "session",
+    ).finally(() => clearInterval(keepAlive));
+    return abortedAt - startedAt;
+  };
+
+  const afterShortHealthWait = await sessionAbortedAfterMs(200, 6105);
+  const afterLongHealthWait = await sessionAbortedAfterMs(1_200, 6106);
+
+  // A shared deadline ends both launches at the same moment. Any budget the
+  // session owned for itself would move the second one a second later.
+  assert.ok(
+    Math.abs(afterLongHealthWait - afterShortHealthWait) < 500,
+    `the launch deadline must not move with the health wait (${afterShortHealthWait}ms, ${afterLongHealthWait}ms)`,
+  );
+  assert.ok(afterShortHealthWait >= startTimeoutMs - 50, "the first session may use the whole remainder");
+});
+
+test("Open Model still launches when the runtime config directory cannot be seeded", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-unseedable-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const directory = join(runtimeRoot, "work-attempt-open-model-1", "config", "opencode");
+  await mkdir(directory, { recursive: true });
+  // A regular file where OpenCode expects a directory defeats the seed.
+  await writeFile(join(directory, "node_modules"), "");
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  const handle = await adapter.spawn(spawnRequest());
+
+  assert.equal(handle.providerContinuationId, "session-open-model-1");
+  assert.equal(harness.launches.length, 1);
+});
+
+test("Open Model seeds a fresh runtime so OpenCode has no plugin SDK to install", async (t) => {
+  const { harness, runtimeRoot } = await spawnAdapter();
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const configHome = join(runtimeRoot, "work-attempt-open-model-1", "config");
+  assert.equal(harness.launches[0]?.env.XDG_CONFIG_HOME, configHome);
+
+  const directory = join(configHome, "opencode");
+  const dependencies = { "@opencode-ai/plugin": OPENCODE_RUNTIME_VERSION };
+  assert.deepEqual(await readdir(join(directory, "node_modules")), []);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(directory, "package.json"), "utf8")),
+    { dependencies },
+  );
+  // OpenCode skips its install only when the lockfile's root entry already
+  // names every declared dependency.
+  assert.deepEqual(
+    JSON.parse(await readFile(join(directory, "package-lock.json"), "utf8")).packages[""],
+    { dependencies },
+  );
+});
+
+test("Open Model config seeding preserves a directory OpenCode already provisioned", async (t) => {
+  const configHome = await mkdtemp(join(tmpdir(), "letagents-opencode-seed-"));
+  t.after(() => rm(configHome, { recursive: true, force: true }));
+  const directory = join(configHome, "opencode");
+  await mkdir(join(directory, "node_modules", "@opencode-ai"), { recursive: true });
+  const provisioned = '{"dependencies":{"@opencode-ai/plugin":"1.18.9"}}';
+  await writeFile(join(directory, "package.json"), provisioned);
+
+  await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION);
+  await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION);
+
+  assert.equal(await readFile(join(directory, "package.json"), "utf8"), provisioned);
+  assert.deepEqual(await readdir(join(directory, "node_modules")), ["@opencode-ai"]);
+  assert.ok(JSON.parse(await readFile(join(directory, "package-lock.json"), "utf8")).packages[""]);
 });
 
 test("Open Model durably fences the crash window between detached launch and PID capture", async (t) => {
@@ -2368,12 +2555,12 @@ test("OpenCode control probe validates authenticated health and keeps failures d
     assert.equal(new URL(input).pathname, "/global/health");
     assert.equal(new Headers(init?.headers).get("authorization"), `Basic ${Buffer.from("opencode:client-test").toString("base64")}`);
     assert.ok(init?.signal);
-    return json({ healthy: true, version: "1.18.9" });
+    return json({ healthy: true, version: "1.18.20" });
   });
-  assert.deepEqual(await healthy.probeControl(), { state: "responsive", version: "1.18.9" });
+  assert.deepEqual(await healthy.probeControl(), { state: "responsive", version: "1.18.20" });
   const cases = [
     { fetch: async () => json({ healthy: true }), reason: "invalid_response" },
-    { fetch: async () => json({ healthy: false, version: "1.18.9" }), reason: "invalid_response" },
+    { fetch: async () => json({ healthy: false, version: "1.18.20" }), reason: "invalid_response" },
     { fetch: async () => new Response("not JSON"), reason: "invalid_response" },
     { fetch: async () => json({}, 401), reason: "authentication_failed" },
     { fetch: async () => json({}, 503), reason: "http_error" },
