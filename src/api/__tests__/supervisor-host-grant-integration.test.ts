@@ -796,6 +796,32 @@ test("idempotent supervisor worker creation rotates one session and revokes its 
     "the retired process cleanup cannot decrement the replacement delivery lease");
 });
 
+test("a mint blocked behind another transaction fails before the daemon's 10s deadline", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const body = { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "blocked-worker" };
+  // Stand in for an earlier attempt whose client gave up while its
+  // transaction still holds this worker's mint lock.
+  const holder = await client!.pool.connect();
+  try {
+    await holder.query("SELECT pg_advisory_lock(hashtextextended($1, 0))",
+      [`supervisor_worker:owner_route:${room.id}:${agent.canonical_key}:blocked-worker`]);
+    const blocked = recorder();
+    const startedAt = Date.now();
+    await mint({ ...reqBase, body }, blocked);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(blocked.statusCode, 503, "a lock timeout is a retryable busy response");
+    assert.equal(blocked.headers["Retry-After"], "1");
+    assert.ok(elapsedMs < 9_000, `blocked mint answered after ${elapsedMs}ms`);
+  } finally {
+    await holder.query("SELECT pg_advisory_unlock_all()");
+    holder.release();
+  }
+  const retried = recorder();
+  await mint({ ...reqBase, body }, retried);
+  assert.equal(retried.statusCode, 201);
+});
+
 test("supervisor worker end is idempotent after a committed response is lost", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);

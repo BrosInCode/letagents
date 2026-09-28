@@ -1703,7 +1703,7 @@ function fakeRecoveryClock(startMs = 10_000) {
     if (id !== undefined) timers.delete(id);
   }) as typeof clearTimeout;
   return {
-    clock: { nowMs: () => nowMs, setTimeout: setTimer, clearTimeout: clearTimer },
+    clock: { nowMs: () => nowMs, setTimeout: setTimer, clearTimeout: clearTimer, random: () => 0 },
     delays,
     pending: () => timers.size,
     advance: async (deltaMs: number) => {
@@ -3890,6 +3890,10 @@ for (const [rotationFailures, rotationStatus, providerName] of [[0, 500, "codex"
       pendingTimers.delete(timer);
       clearTimeout(timer);
     }) as typeof clearTimeout,
+    // The test drives recovery timers by hand; mint backoff inside one pass
+    // is not what it measures, and jitter would move timers off the fake clock.
+    sleep: async () => undefined,
+    random: () => 0,
   }, {
     poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
@@ -8172,9 +8176,9 @@ test("string-thrown transient worker mint failures redact credentials and automa
       host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
     })).ok, true);
     await eventually(async () => mintCalls === 1, "first transient mint attempt");
-    await recovery.advance(100);
+    await recovery.advance(1_000);
     await eventually(async () => mintCalls === 2, "second transient mint attempt");
-    await recovery.advance(100);
+    await recovery.advance(3_000);
     await eventually(async () => mintCalls === 3, "third transient mint attempt");
     await eventually(async () => recovery.pending() === 1, "automatic convergence timer after exhausted transient mint");
     const beforeRetry = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
@@ -8245,9 +8249,9 @@ test("429 worker mint failures retry three times and automatically reconverge", 
       host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
     })).ok, true);
     await eventually(async () => mintCalls === 1, "first 429 mint attempt");
-    await recovery.advance(100);
+    await recovery.advance(1_000);
     await eventually(async () => mintCalls === 2, "second 429 mint attempt");
-    await recovery.advance(100);
+    await recovery.advance(3_000);
     await eventually(async () => mintCalls === 3, "third 429 mint attempt");
     await eventually(async () => recovery.pending() === 1, "automatic convergence after exhausted 429 mint attempts");
     const beforeRecovery = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
