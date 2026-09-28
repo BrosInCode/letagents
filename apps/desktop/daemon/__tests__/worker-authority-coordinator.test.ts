@@ -167,6 +167,7 @@ type HarnessOptions = {
   loseAuthorityAfterFirstAssert?: "handoff";
   fireMintTimeout?: boolean;
   holdRetryTimers?: boolean;
+  advanceClockOnTimers?: boolean;
   random?: () => number;
   recordExactMint?: () => Promise<void>;
   boundedContextError?: Error;
@@ -474,7 +475,11 @@ function fixture(options: HarnessOptions = {}) {
     nowMs: () => currentTime,
     setTimeout: ((callback: (...args: unknown[]) => void, delay?: number) => {
       timerDelays.push(delay ?? 0);
-      if (delay === 10_000 ? options.fireMintTimeout : !options.holdRetryTimers) queueMicrotask(callback);
+      const fires = delay === 10_000 || options.advanceClockOnTimers ? options.fireMintTimeout : !options.holdRetryTimers;
+      if (fires) queueMicrotask(() => {
+        if (options.advanceClockOnTimers) currentTime += delay ?? 0;
+        callback();
+      });
       const timer = setTimeout(() => undefined, 60_000);
       timer.unref();
       return timer;
@@ -842,6 +847,30 @@ test("cancelling during mint backoff ends the mint without waiting out the delay
   await assert.rejects(harness.subject.mintHostWorkerAuthorization(harness.entry, controller.signal), /cancelled/);
   assert.equal(calls, 1);
   assert.ok(harness.timerDelays.includes(1_000), "the mint was parked in its backoff when cancelled");
+});
+
+test("a caller deadline shortens the last mint attempt and skips retries that cannot finish", async () => {
+  let calls = 0;
+  const harness = fixture({
+    fireMintTimeout: true,
+    advanceClockOnTimers: true,
+    createWorkerSession: async () => {
+      calls += 1;
+      return new Promise<never>(() => undefined);
+    },
+  });
+  harness.custody.installHostGrant(hostGrant());
+
+  // 10s attempt, 1s backoff, then only 5s remain: the second attempt is cut
+  // to fit and the third is skipped instead of overrunning the caller.
+  await assert.rejects(
+    harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, false, now + 16_000),
+    (error: unknown) => error instanceof WorkerCredentialMintError
+      && error.retryable
+      && /failed after 2 attempts.*timed out after 5000ms/.test(error.message),
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(harness.timerDelays, [10_000, 1_000, 5_000]);
 });
 
 test("the local mint record is not on the server deadline", async () => {

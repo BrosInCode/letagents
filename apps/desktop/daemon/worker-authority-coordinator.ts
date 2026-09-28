@@ -48,6 +48,10 @@ import {
 const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
 const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
 const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 40_000;
+// Time kept for reading the room tail after the mint, so a late mint fails
+// with its own error instead of being cancelled halfway through the tail read.
+const BOOTSTRAP_ROOM_TAIL_RESERVE_MS = 8_000;
+const WORKER_MINT_MIN_ATTEMPT_MS = 1_000;
 const WORKER_MINT_TIMEOUT_MS = 10_000;
 const WORKER_MINT_MAX_ATTEMPTS = 3;
 // Aborting a timed-out request does not cancel the server transaction, which
@@ -817,6 +821,7 @@ export class WorkerAuthorityCoordinator {
     entry: DaemonManifestEntry,
     grant: InstalledHostGrant,
     signal?: AbortSignal,
+    deadlineAtMs?: number,
   ): Promise<Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>> {
     let lastError: unknown = null;
     let attempts = 0;
@@ -830,6 +835,11 @@ export class WorkerAuthorityCoordinator {
     });
     for (let attempt = 1; attempt <= WORKER_MINT_MAX_ATTEMPTS; attempt += 1) {
       if (signal?.aborted) throw new Error("Worker credential mint was cancelled.");
+      // A caller deadline shortens the attempt so it ends with its own error
+      // rather than being cancelled mid-request. The backoff check below
+      // leaves every retry at least the minimum attempt time.
+      const remainingMs = deadlineAtMs === undefined ? Infinity : deadlineAtMs - this.options.nowMs();
+      const attemptTimeoutMs = Math.max(WORKER_MINT_MIN_ATTEMPT_MS, Math.min(WORKER_MINT_TIMEOUT_MS, remainingMs));
       attempts = attempt;
       const controller = new AbortController();
       const abort = () => controller.abort();
@@ -838,8 +848,8 @@ export class WorkerAuthorityCoordinator {
       const timedOut = new Promise<never>((_resolve, reject) => { timeoutReject = reject; });
       const timeout = this.options.setTimeout(() => {
         controller.abort();
-        timeoutReject(new Error(`Worker credential mint timed out after ${WORKER_MINT_TIMEOUT_MS}ms waiting for the LetAgents server.`));
-      }, WORKER_MINT_TIMEOUT_MS);
+        timeoutReject(new Error(`Worker credential mint timed out after ${attemptTimeoutMs}ms waiting for the LetAgents server.`));
+      }, attemptTimeoutMs);
       timeout.unref();
       try {
         // Only the server round trip is on the network deadline. The local
@@ -878,6 +888,7 @@ export class WorkerAuthorityCoordinator {
         lastRetryable = retryable && !signal?.aborted;
         if (!retryable || signal?.aborted || attempt === WORKER_MINT_MAX_ATTEMPTS) break;
         const delay = this.jittered(WORKER_MINT_RETRY_DELAYS_MS[Math.min(attempt - 1, WORKER_MINT_RETRY_DELAYS_MS.length - 1)]!);
+        if (deadlineAtMs !== undefined && this.options.nowMs() + delay + WORKER_MINT_MIN_ATTEMPT_MS > deadlineAtMs) break;
         await this.sleep(delay, signal);
       }
     }
@@ -983,6 +994,7 @@ export class WorkerAuthorityCoordinator {
     entry: DaemonManifestEntry,
     signal?: AbortSignal,
     forceFresh = false,
+    deadlineAtMs?: number,
   ): Promise<MintedWorkerAuthorization | null> {
     await this.assertRuntimeAdmission(entry.id);
     const grant = this.currentHostGrant(entry);
@@ -1003,7 +1015,7 @@ export class WorkerAuthorityCoordinator {
       agentSession: cached.agentSession,
       authority,
     };
-    const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal);
+    const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal, deadlineAtMs);
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
       || !this.options.custody.hostGrantIsCurrent(entry.id, grant)) {
       this.revokeHostGrantIfCurrent(entry.id, grant);
@@ -1380,9 +1392,10 @@ export class WorkerAuthorityCoordinator {
         if (operation.phase === "observing") operation.controller.abort();
       }, BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS);
       timeout.unref();
+      const mintDeadlineAtMs = this.options.nowMs() + BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS - BOOTSTRAP_ROOM_TAIL_RESERVE_MS;
       let tail: { messages?: Array<Record<string, unknown>> };
       try {
-        const authorization = await this.mintHostWorkerAuthorization(entry, operation.controller.signal);
+        const authorization = await this.mintHostWorkerAuthorization(entry, operation.controller.signal, false, mintDeadlineAtMs);
         if (!authorization) throw new Error("Room ingress bootstrap lost host grant authority before minting a worker credential.");
         if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
         tail = await latest({
