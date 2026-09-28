@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1693,6 +1693,10 @@ test("Open Model gives the first session only what the health wait left of the l
     `the launch deadline must not move with the health wait (${afterShortHealthWait}ms, ${afterLongHealthWait}ms)`,
   );
   assert.ok(afterShortHealthWait >= startTimeoutMs - 50, "the first session may use the whole remainder");
+  assert.ok(
+    afterShortHealthWait < startTimeoutMs + 1_000,
+    `a shared deadline that lands late is still wrong (${afterShortHealthWait}ms)`,
+  );
 });
 
 test("Open Model still launches when the runtime config directory cannot be seeded", async (t) => {
@@ -1752,6 +1756,94 @@ test("Open Model config seeding preserves a directory OpenCode already provision
   assert.equal(await readFile(join(directory, "package.json"), "utf8"), provisioned);
   assert.deepEqual(await readdir(join(directory, "node_modules")), ["@opencode-ai"]);
   assert.ok(JSON.parse(await readFile(join(directory, "package-lock.json"), "utf8")).packages[""]);
+  assert.deepEqual(
+    (await readdir(directory)).sort(),
+    ["node_modules", "package-lock.json", "package.json"],
+    "seeding leaves no staging files behind, including for a file that already existed",
+  );
+});
+
+test("Open Model config seeding never publishes a file whose write was cut short", async (t) => {
+  const configHome = await mkdtemp(join(tmpdir(), "letagents-opencode-seed-partial-"));
+  t.after(() => rm(configHome, { recursive: true, force: true }));
+  const directory = join(configHome, "opencode");
+  let writes = 0;
+
+  await assert.rejects(seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION, {
+    mkdir,
+    link,
+    unlink,
+    // The disk fills halfway through the first file.
+    writeFile: (async (path: string, content: string, options: { flag?: string }) => {
+      writes += 1;
+      await writeFile(path, content.slice(0, Math.floor(content.length / 2)), options);
+      throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+    }) as typeof writeFile,
+  }), /no space left/);
+
+  assert.equal(writes, 1);
+  assert.deepEqual(
+    await readdir(directory),
+    ["node_modules"],
+    "neither a truncated target nor its staging file is left for a later launch to preserve",
+  );
+
+  await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(directory, "package.json"), "utf8")),
+    { dependencies: { "@opencode-ai/plugin": OPENCODE_RUNTIME_VERSION } },
+    "the next launch seeds the directory normally",
+  );
+});
+
+test("Open Model config seeding writes directly where hard links are unsupported", async (t) => {
+  const configHome = await mkdtemp(join(tmpdir(), "letagents-opencode-seed-nolink-"));
+  t.after(() => rm(configHome, { recursive: true, force: true }));
+  const directory = join(configHome, "opencode");
+  await mkdir(directory, { recursive: true });
+  const provisioned = '{"dependencies":{"@opencode-ai/plugin":"1.18.9"}}';
+  await writeFile(join(directory, "package.json"), provisioned);
+
+  await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION, {
+    mkdir,
+    writeFile,
+    unlink,
+    link: (async () => {
+      throw Object.assign(new Error("operation not supported"), { code: "ENOTSUP" });
+    }) as typeof link,
+  });
+
+  assert.deepEqual(
+    (await readdir(directory)).sort(),
+    ["node_modules", "package-lock.json", "package.json"],
+  );
+  assert.equal(
+    await readFile(join(directory, "package.json"), "utf8"),
+    provisioned,
+    "the direct write still refuses to replace an existing file",
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(join(directory, "package-lock.json"), "utf8")).packages[""],
+    { dependencies: { "@opencode-ai/plugin": OPENCODE_RUNTIME_VERSION } },
+  );
+});
+
+test("Open Model config seeding survives concurrent seeds of one directory", async (t) => {
+  const configHome = await mkdtemp(join(tmpdir(), "letagents-opencode-seed-race-"));
+  t.after(() => rm(configHome, { recursive: true, force: true }));
+
+  await Promise.all(Array.from({ length: 16 }, () =>
+    seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION)));
+
+  const directory = join(configHome, "opencode");
+  assert.deepEqual(
+    (await readdir(directory)).sort(),
+    ["node_modules", "package-lock.json", "package.json"],
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(join(directory, "package.json"), "utf8")),
+    { dependencies: { "@opencode-ai/plugin": OPENCODE_RUNTIME_VERSION } },
+  );
 });
 
 test("Open Model durably fences the crash window between detached launch and PID capture", async (t) => {
