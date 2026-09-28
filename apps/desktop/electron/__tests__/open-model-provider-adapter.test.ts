@@ -61,6 +61,10 @@ function createHarness() {
   let assistantText = "OpenCode bounded reply.";
   let includeAssistantText = true;
   let holdTurnOpen = false;
+  let nativeStatus: Record<string, unknown> = { type: "busy" };
+  let statusReads = 0;
+  let statusReadsHeldAfterAbort = 0;
+  const messageReadWaiters: Array<() => void> = [];
   let transcriptWhileBusy = false;
   let transcriptFactories: TranscriptFactory[] | null = null;
   let streamEvents: Array<Record<string, unknown>> = [];
@@ -160,6 +164,7 @@ function createHarness() {
       const messageMatch = url.pathname.match(/^\/session\/([^/]+)\/message$/);
       if (messageMatch) {
         messageReads += 1;
+        for (const wake of messageReadWaiters.splice(0)) wake();
         if (holdTurnOpen && !transcriptWhileBusy) return json([]);
         const turnId = String(promptBodies.at(-1)?.messageID ?? "turn-recovery");
         if (transcriptFactories) {
@@ -185,7 +190,12 @@ function createHarness() {
         }]);
       }
       if (url.pathname === "/session/status") {
-        return json(holdTurnOpen ? { "session-open-model-1": { type: "busy" } } : {});
+        statusReads += 1;
+        if (!holdTurnOpen && statusReadsHeldAfterAbort > 0) {
+          statusReadsHeldAfterAbort -= 1;
+          return json({ "session-open-model-1": nativeStatus });
+        }
+        return json(holdTurnOpen ? { "session-open-model-1": nativeStatus } : {});
       }
       if (url.pathname.endsWith("/abort") && init?.method === "POST") {
         aborts.push(decodeURIComponent(url.pathname.split("/")[2] ?? ""));
@@ -211,6 +221,17 @@ function createHarness() {
     get messageReads() {
       return messageReads;
     },
+    get statusReads() {
+      return statusReads;
+    },
+    /** Resolves when the adapter next reads the session transcript. */
+    nextMessageRead(): Promise<void> {
+      return new Promise((resolve) => { messageReadWaiters.push(resolve); });
+    },
+    /** The session keeps reporting its held status for this many reads after an abort. */
+    holdStatusAfterAbort(reads: number) {
+      statusReadsHeldAfterAbort = reads;
+    },
     setAssistantText(value: string) {
       assistantText = value;
       includeAssistantText = true;
@@ -224,6 +245,17 @@ function createHarness() {
     holdTurnOpenWithTranscript() {
       holdTurnOpen = true;
       transcriptWhileBusy = true;
+    },
+    /** OpenCode is waiting out a backoff before it re-sends a failed model request. */
+    holdTurnInRetry() {
+      holdTurnOpen = true;
+      transcriptWhileBusy = true;
+      nativeStatus = {
+        type: "retry",
+        attempt: 2,
+        message: "Rate limit exceeded",
+        next: 1_790_000_000_000,
+      };
     },
     completeTurn() {
       holdTurnOpen = false;
@@ -1122,6 +1154,121 @@ test("Open Model interrupts the exact active session through the native abort en
   assert.equal(checkpointedTurnId, "turn-active");
   assert.equal(dispatchMarked, true);
   assert.deepEqual(harness.aborts, ["session-open-model-1"]);
+});
+
+test("Open Model interrupts a session that is waiting to retry a failed model request", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.holdTurnInRetry();
+  (handle as unknown as { activeRoomTurnId: string | null }).activeRoomTurnId = "turn-active";
+
+  const result = await adapter.controlTurn(handle, null, { targetTurnId: "turn-active" });
+
+  assert.deepEqual(result, {
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: false,
+    state: "idle",
+  });
+  assert.deepEqual(harness.aborts, ["session-open-model-1"], "a retrying turn is still running and must be aborted");
+});
+
+test("Open Model keeps observing a recovered turn that is waiting to retry", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.holdTurnInRetry();
+  // The assistant message exists from the first attempt but has no answer yet.
+  harness.setTranscriptFactories([
+    (turnId) => [{ info: { id: "assistant-retrying", role: "assistant", parentID: turnId, time: { created: 10 } }, parts: [] }],
+    (turnId) => [assistantMessage(turnId, "assistant-retrying", 10, "Answer after the retry.")],
+  ]);
+  let settled = false;
+  const firstSnapshot = harness.nextMessageRead();
+  const recovered = adapter.recoverRoomTurn(handle, {
+    inboxItemId: "inbox-recovery",
+    providerTurnId: "turn-recovery",
+  }).finally(() => { settled = true; });
+
+  // The boundary decision follows the first transcript snapshot and one
+  // status read; let both finish before looking.
+  await firstSnapshot;
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(harness.statusReads >= 1, "the adapter consulted the session status");
+  assert.equal(settled, false, "a retrying turn is not a turn boundary");
+
+  harness.completeTurn();
+  const result = await recovered;
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Answer after the retry.");
+});
+
+test("Open Model verifies a Stop only once a retrying session is idle", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.holdTurnInRetry();
+  harness.holdStatusAfterAbort(3);
+  (handle as unknown as { activeRoomTurnId: string | null }).activeRoomTurnId = "turn-active";
+  const readsBeforeStop = harness.statusReads;
+
+  // The adapter's wait between status reads does not hold the event loop open.
+  const keepAlive = setInterval(() => undefined, 25);
+  const result = await adapter.controlTurn(handle, null, { targetTurnId: "turn-active" })
+    .finally(() => clearInterval(keepAlive));
+
+  assert.equal(result.interrupted, true);
+  // Two reads precede the abort; the three held reads and the idle read follow it.
+  assert.ok(
+    harness.statusReads - readsBeforeStop >= 6,
+    `the abort is not verified while the session still reports retry (${harness.statusReads - readsBeforeStop} reads)`,
+  );
+});
+
+test("Open Model settles a turn stopped during a retry as unreadable, not as a provider failure", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.holdTurnInRetry();
+  // OpenCode completes the assistant message without an error or any parts
+  // when the interrupt lands in a retry backoff, and emits only session.idle.
+  harness.setTranscriptFactories([
+    (turnId) => [{ info: { id: "assistant-retrying", role: "assistant", parentID: turnId, time: { created: 10 } }, parts: [] }],
+    (turnId) => [{ info: { id: "assistant-retrying", role: "assistant", parentID: turnId, time: { created: 10, completed: 11 } }, parts: [] }],
+  ]);
+  let turnId: string | null = null;
+  const firstSnapshot = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-stop-during-retry",
+    sourceMessage: { text: "hello" },
+    activation: { kind: "mention" },
+    actionId: "action-stop-during-retry",
+  }, { checkpointTurnStarted: async (id) => { turnId = id; } });
+  await firstSnapshot;
+
+  const keepAlive = setInterval(() => undefined, 25);
+  try {
+    const stopped = await adapter.controlTurn(handle, null, { targetTurnId: turnId! });
+    harness.completeTurn();
+
+    assert.equal(stopped.interrupted, true);
+    assert.deepEqual(harness.aborts, ["session-open-model-1"]);
+    assert.deepEqual(await turn, { turnId, outcome: "unreadable", text: null, evidence: "none" });
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test("OpenCode session status reads every listed session as an active turn", async () => {
+  const statusFor = (listed: unknown): Promise<string> => new OpenCodeServerClient(
+    "http://127.0.0.1:43821",
+    { username: "opencode", password: "secret" },
+    async () => json(listed),
+  ).status("session-open-model-1");
+
+  assert.equal(await statusFor({ "session-open-model-1": { type: "busy" } }), "busy");
+  assert.equal(await statusFor({ "session-open-model-1": { type: "retry", attempt: 1, message: "x", next: 1 } }), "busy");
+  assert.equal(await statusFor({ "session-open-model-1": { type: "a-future-active-state" } }), "busy");
+  assert.equal(await statusFor({ "session-open-model-1": {} }), "busy");
+  assert.equal(await statusFor({ "session-open-model-1": "busy" }), "busy");
+  assert.equal(await statusFor({ "session-open-model-1": null }), "idle");
+  assert.equal(await statusFor({ "session-open-model-1": { type: "idle" } }), "idle");
+  assert.equal(await statusFor({ "another-session": { type: "busy" } }), "idle");
+  assert.equal(await statusFor({}), "idle");
 });
 
 test("Open Model reports a completed child as active while the native session is still busy", async () => {
