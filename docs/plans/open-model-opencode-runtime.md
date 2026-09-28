@@ -49,6 +49,31 @@ Codex-backed implementation.
 | Room delivery | Daemon inbox only |
 | Credential persistence | Electron encrypted settings only; never daemon SQLite, manifests, or room activity |
 
+## Session status
+
+OpenCode lists only sessions that are not idle, as `busy` or `retry`. `retry`
+means it is waiting out a backoff before it re-sends a failed model request.
+The adapter reads every listed session as an active turn. Reading `retry` as
+a turn boundary made Stop a no-op during the backoff and let turn recovery
+settle a turn as unreadable while OpenCode was still working on it.
+
+How long a session stays in `retry` is not bounded by the adapter. OpenCode
+1.18.20 retries five times. Without a `Retry-After` header the waits are 2,
+4, 8, 16 and 32 seconds, each with up to 25% added, so 62 to 78 seconds in
+total; one measured run took 69. With the header, the provider chooses each
+wait. Only the turn timeout ends a long wait, and under `typed`
+lifecycle authority there is no turn timeout. Stop is not delayed by the
+backoff.
+
+A turn stopped during a retry settles differently from one stopped while
+busy. OpenCode reports an aborted busy turn as a failed message, so the turn
+rejects with that failure. It reports an aborted retry with `session.idle`
+only and an empty assistant message, so the turn resolves as unreadable. Both
+results predate this fix. A turn stopped during a retry records no provider
+failure, so the daemon settles it as cancelled by the user. A turn stopped
+while busy can record its failure first, and the daemon then keeps that
+failure. The daemon's side of this was read, not run.
+
 ## Launch budget
 
 One 30 second budget covers a fresh launch: the health wait and the first
@@ -104,9 +129,11 @@ pin. On 2026-09-28 it verified:
 - a fresh authenticated control client finds the exact existing session
   without a process relaunch;
 - native session abort succeeds;
-- a distinct replacement session can be created on the same process; and
+- a distinct replacement session can be created on the same process;
 - a complete answer with an unknown finish reason ends its turn after one
-  model request.
+  model request; and
+- a session waiting to re-send a failed model request reports `retry`, is
+  read as an active turn, and ends on native abort.
 
 ## Choosing the pinned version
 
