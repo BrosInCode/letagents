@@ -378,7 +378,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   const expectedCiAudits = [
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs src/web",
-    "node scripts/verify-dependency-advisories.mjs apps/desktop",
+    "node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents",
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs .",
   ];
@@ -390,7 +390,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     releaseScripts.filter((script) =>
       script.startsWith("node scripts/verify-dependency-advisories.mjs"),
     ),
-    ["node scripts/verify-dependency-advisories.mjs . apps/desktop"],
+    ["node scripts/verify-dependency-advisories.mjs . apps/desktop apps/desktop/electron/runtime/letagents"],
   );
 
   assert.deepEqual(ciScripts.filter(containsDirectNpmAudit), [

@@ -77,7 +77,7 @@ jobs:
           echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
 
       - name: Audit dependency advisories
-        run: node scripts/verify-dependency-advisories.mjs . apps/desktop
+        run: node scripts/verify-dependency-advisories.mjs . apps/desktop apps/desktop/electron/runtime/letagents
 
       - name: Run verified dependency lifecycle scripts
         run: |
