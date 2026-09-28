@@ -50,16 +50,9 @@ const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
 const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 40_000;
 const WORKER_MINT_TIMEOUT_MS = 10_000;
 const WORKER_MINT_MAX_ATTEMPTS = 3;
-// Aborting a timed-out request does not cancel the server transaction, which
-// keeps this worker's mint lock until it finishes. An immediate retry queues
-// behind that transaction and times out too, so give it time to drain.
-const WORKER_MINT_RETRY_DELAYS_MS = [1_000, 3_000] as const;
+const WORKER_MINT_RETRY_DELAY_MS = 100;
 const WORKER_BIND_MAX_ATTEMPTS = 3;
 const WORKER_BIND_RETRY_DELAYS_MS = [1_000, 3_000, 10_000, 30_000, 60_000] as const;
-// Agents that lost room access together (API restart, network drop) would
-// otherwise retry in lockstep and hit the recovering server at the same time.
-// Jitter only shortens a delay so the documented caps still hold.
-const RETRY_JITTER_RATIO = 0.25;
 
 class InvalidSupervisorGrantRenewalError extends Error {}
 
@@ -241,8 +234,6 @@ export type WorkerAuthorityCoordinatorOptions = {
   nowMs(): number;
   setTimeout: typeof setTimeout;
   clearTimeout: typeof clearTimeout;
-  random?: (() => number) | undefined;
-  sleep?: ((delayMs: number) => Promise<void>) | undefined;
 };
 
 export type SyncInstalledExecutionDelegationInput = {
@@ -796,23 +787,6 @@ export class WorkerAuthorityCoordinator {
     }, grant, this.options.nowMs());
   }
 
-  private jittered(delayMs: number): number {
-    return delayMs - Math.floor((this.options.random ?? Math.random)() * delayMs * RETRY_JITTER_RATIO);
-  }
-
-  private sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
-    if (this.options.sleep) return this.options.sleep(delayMs);
-    return new Promise<void>((resolve) => {
-      const done = () => {
-        this.options.clearTimeout(timer);
-        signal?.removeEventListener("abort", done);
-        resolve();
-      };
-      const timer = this.options.setTimeout(done, delayMs);
-      signal?.addEventListener("abort", done, { once: true });
-    });
-  }
-
   private async mintWorkerSessionWithRetry(
     entry: DaemonManifestEntry,
     grant: InstalledHostGrant,
@@ -838,16 +812,12 @@ export class WorkerAuthorityCoordinator {
       const timedOut = new Promise<never>((_resolve, reject) => { timeoutReject = reject; });
       const timeout = this.options.setTimeout(() => {
         controller.abort();
-        timeoutReject(new Error(`Worker credential mint timed out after ${WORKER_MINT_TIMEOUT_MS}ms waiting for the LetAgents server.`));
+        timeoutReject(new Error(`Worker credential mint timed out after ${WORKER_MINT_TIMEOUT_MS}ms.`));
       }, WORKER_MINT_TIMEOUT_MS);
       timeout.unref();
       try {
-        // Only the server round trip is on the network deadline. The local
-        // write below waits on the daemon's own store; timing it here made a
-        // busy store look like a server timeout and discarded a good mint.
-        let minted: Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>;
-        try {
-          minted = await Promise.race([this.options.supervisorGrantHttp.createWorkerSession({
+        const request = (async () => {
+          const minted = await this.options.supervisorGrantHttp.createWorkerSession({
             apiUrl: grant.apiUrl,
             grantId: grant.grantId,
             supervisorGrant: grant.supervisorGrant,
@@ -860,25 +830,25 @@ export class WorkerAuthorityCoordinator {
             model: entry.model ?? null,
             charter: entry.charter ?? null,
             signal: controller.signal,
-          }), timedOut]);
-        } finally {
-          this.options.clearTimeout(timeout);
-          signal?.removeEventListener("abort", abort);
-        }
-        await this.options.bindings.recordExactSupervisedWorkerSessionMint({
-          agent_id: entry.id,
-          room_id: entry.room_id,
-          agent_instance_id: agentInstanceId,
-          agent_session_id: minted.sessionId,
-        });
-        return minted;
+          });
+          await this.options.bindings.recordExactSupervisedWorkerSessionMint({
+            agent_id: entry.id,
+            room_id: entry.room_id,
+            agent_instance_id: agentInstanceId,
+            agent_session_id: minted.sessionId,
+          });
+          return minted;
+        })();
+        return await Promise.race([request, timedOut]);
       } catch (error) {
         lastError = error;
         const retryable = retryableWorkerMintFailure(error);
         lastRetryable = retryable && !signal?.aborted;
         if (!retryable || signal?.aborted || attempt === WORKER_MINT_MAX_ATTEMPTS) break;
-        const delay = this.jittered(WORKER_MINT_RETRY_DELAYS_MS[Math.min(attempt - 1, WORKER_MINT_RETRY_DELAYS_MS.length - 1)]!);
-        await this.sleep(delay, signal);
+        await new Promise<void>((resolve) => this.options.setTimeout(resolve, WORKER_MINT_RETRY_DELAY_MS));
+      } finally {
+        this.options.clearTimeout(timeout);
+        signal?.removeEventListener("abort", abort);
       }
     }
     throw new WorkerCredentialMintError(attempts, lastRetryable, lastError);
@@ -1136,7 +1106,7 @@ export class WorkerAuthorityCoordinator {
     const transient = exhaustedTransientWorkerMint(error)
       || (error instanceof SupervisorGrantRequestError && retryableWorkerMintFailure(error));
     const retrying = transient || attempts < WORKER_BIND_MAX_ATTEMPTS;
-    let retryDelay = this.jittered(WORKER_BIND_RETRY_DELAYS_MS[Math.min(attempts - 1, WORKER_BIND_RETRY_DELAYS_MS.length - 1)]!);
+    let retryDelay: number = WORKER_BIND_RETRY_DELAYS_MS[Math.min(attempts - 1, WORKER_BIND_RETRY_DELAYS_MS.length - 1)]!;
     // Do not let the capped backoff carry a retained credential past expiry
     // without another convergence pass to pause delivery and remove it.
     const session = await this.options.bindings.supervisedWorkerSession(entryId);

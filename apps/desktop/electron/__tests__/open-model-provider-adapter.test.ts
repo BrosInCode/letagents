@@ -497,6 +497,66 @@ test("Open Model freezes lifecycle authority across spawn, attach, and resume", 
   assert.equal(harness.launches.length, 1);
 });
 
+test("a dead Open Model runtime reports terminal evidence even under a mismatched lifecycle authority", async () => {
+  const { handle, harness, runtimeRoot } = await spawnAdapter({ lifecycleAuthorityMode: "typed" });
+  const ref = {
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed" as const,
+  };
+  const afterDeath = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: { ...harness.dependencies, getProcessIdentity: () => null },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  // A legacy-frozen birth read back against a typed control file used to
+  // return null here, leaving the generation live with no handle forever.
+  for (const lifecycleAuthorityMode of ["typed", "typed_shadow", "legacy", undefined] as const) {
+    const attached = await afterDeath.attach({ ...ref, lifecycleAuthorityMode } as typeof ref);
+    assert.ok(attached && "state" in attached && attached.state === "terminal", String(lifecycleAuthorityMode));
+    assert.equal(attached.terminal.providerContinuationId, ref.providerContinuationId);
+  }
+  assert.equal(harness.launches.length, 1, "death evidence never starts a replacement");
+});
+
+test("attach finishes a cached handle whose process died before its exit observer fired", async () => {
+  const harness = createHarness();
+  let alive = true;
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-adapter-")),
+    dependencies: { ...harness.dependencies,
+      getProcessIdentity: (pid) => alive ? harness.dependencies.getProcessIdentity(pid) : null },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  alive = false;
+
+  const attached = await adapter.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed_shadow",
+  });
+
+  assert.ok(attached && "state" in attached && attached.state === "terminal");
+  assert.ok(observations.some(({ fact }) => fact.domain === "runtime" && fact.kind === "state_changed" && fact.state === "exited"),
+    "the cached handle's observers learn the runtime exited");
+  assert.equal(await adapter.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed",
+  }).then(value => value && "state" in value ? value.state : "handle"), "terminal", "the dead handle is no longer served from cache");
+});
+
 test("Open Model reattaches from its exact runtime sidecar when a legacy daemon omitted the connection", async () => {
   const { handle, harness, runtimeRoot } = await spawnAdapter();
   assert.ok(handle.providerContinuationId);

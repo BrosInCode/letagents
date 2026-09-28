@@ -1233,6 +1233,57 @@ test("a crashed Cursor generation with a blocked FIFO head cannot recover as a h
   assert.equal(runtime.entry().provider_ref?.provider_continuation_id, "replacement-continuation");
 });
 
+test("a live generation without an attachable handle re-checks with capped backoff and one durable write", async () => {
+  const runtime = ownedRecoveryHarness();
+  let attaches = 0;
+  runtime.options.provider.attach = async () => { attaches++; return null; };
+  let launches = 0;
+  runtime.options.provider.resume = async () => { launches++; return returnedHandle; };
+  runtime.options.provider.spawn = async () => { launches++; return returnedHandle; };
+  const transition = runtime.options.transition;
+  let transitions = 0;
+  runtime.options.transition = async (...args) => { transitions++; return transition(...args); };
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+    setTimeout: ((callback: () => void, delay: number) => {
+      timers.push({ callback, delay });
+      return { unref() {} };
+    }) as unknown as typeof setTimeout,
+    clearTimeout: (() => {}) as typeof clearTimeout,
+  });
+
+  await coordinator.converge("agent-1");
+  for (let fired = 0; fired < 6; fired++) {
+    timers.at(-1)!.callback();
+    await coordinator.drainConvergence();
+  }
+
+  assert.equal(runtime.entry().condition, "coordination_blocked");
+  assert.equal(runtime.entry().last_error, "durable execution generation remains live without an attachable provider handle");
+  assert.equal(launches, 0, "an unproven old runtime never gets a competing successor");
+  assert.equal(attaches, 7, "each timer really re-runs attach");
+  assert.deepEqual(timers.map(timer => timer.delay), [60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000]);
+  assert.equal(transitions, 1, "repeated checks of an unchanged state do not rewrite the manifest");
+});
+
+test("a sooner recovery replaces a pending later one and never the reverse", async () => {
+  const runtime = harness({});
+  const scheduled: number[] = [];
+  const cleared: number[] = [];
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+    setTimeout: ((_callback: () => void, delay: number) => {
+      scheduled.push(delay);
+      return { unref() {}, delay };
+    }) as unknown as typeof setTimeout,
+    clearTimeout: ((timer: { delay: number }) => { cleared.push(timer.delay); }) as unknown as typeof clearTimeout,
+  });
+  coordinator.scheduleRecovery("agent-1", 60_000);
+  coordinator.scheduleRecovery("agent-1", 5_000);
+  coordinator.scheduleRecovery("agent-1", 60_000);
+  assert.deepEqual(scheduled, [60_000, 5_000]);
+  assert.deepEqual(cleared, [60_000]);
+});
+
 test("a healthy processless Cursor lane remains idle and delivery-capable", async () => {
   const runtime = ownedRecoveryHarness();
   runtime.binding.execution_generation_id = "generation-2";

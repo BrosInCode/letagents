@@ -720,6 +720,21 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const resolved = await this.resolveAttachConnection(ref);
     if (!resolved) return null;
     const { connection, control, recoveredLegacyConnection } = resolved;
+    // Death evidence does not depend on who holds lifecycle authority. Checking
+    // it first lets the daemon settle a dead generation whose authority mode no
+    // longer matches; otherwise it stays live with no handle and never recovers.
+    const identity = this.deps.getProcessIdentity(connection.pid);
+    if (identity === null || (typeof identity === "string" && !sameProcessBirthIdentity(identity, connection.processIdentity))) {
+      const terminal = synthesizeTerminalPayload({
+        exitCode: null, signal: null, providerContinuationId: ref.providerContinuationId,
+        endedAt: this.deps.now(),
+      });
+      // A cached handle may not have observed its own exit yet; finishing it
+      // emits the lost turn/control events its observers are waiting for.
+      const stale = this.handles.get(ref.workAttemptId);
+      if (stale) this.finish(stale, terminal, true);
+      return { state: "terminal", terminal } satisfies ProviderAttachTerminal;
+    }
     if ((control.lifecycleAuthorityMode ?? "typed_shadow") !== lifecycleAuthorityMode) return null;
     const cached = this.handles.get(ref.workAttemptId);
     if (cached) {
@@ -729,16 +744,6 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         && cached.providerConnection.processIdentity === connection.processIdentity
         ? cached
         : null;
-    }
-    const identity = this.deps.getProcessIdentity(connection.pid);
-    if (identity === null || (typeof identity === "string" && !sameProcessBirthIdentity(identity, connection.processIdentity))) {
-      return {
-        state: "terminal",
-        terminal: synthesizeTerminalPayload({
-          exitCode: null, signal: null, providerContinuationId: ref.providerContinuationId,
-          endedAt: this.deps.now(),
-        }),
-      } satisfies ProviderAttachTerminal;
     }
     if (identity === undefined) return null;
     const auth: OpenCodeRuntimeAuth = {

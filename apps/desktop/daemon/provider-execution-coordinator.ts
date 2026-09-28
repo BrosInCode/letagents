@@ -58,6 +58,14 @@ import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.j
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 
+// A live generation with no attachable handle resolves on its own once the
+// old process exits or answers again. Re-check with capped backoff so the
+// agent is not left blocked until some unrelated event wakes it, while a
+// runtime that stays unattachable costs one cheap check per half hour.
+const UNATTACHABLE_GENERATION_RECHECK_MS = 60_000;
+const UNATTACHABLE_GENERATION_RECHECK_MAX_MS = 30 * 60_000;
+const UNATTACHABLE_GENERATION_CAUSE = "durable execution generation remains live without an attachable provider handle";
+
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 export type ConvergenceRequestKind = "owned" | "rehydration";
@@ -263,6 +271,8 @@ export class ProviderExecutionCoordinator {
   private readonly pendingReminders = new Map<string, symbol>();
   private readonly failedLaunchAdmissions = new Map<string, string>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly recoveryDueAtMs = new Map<string, number>();
+  private readonly unattachableRechecks = new Map<string, number>();
   private readonly dispatchReservations = new Map<Promise<void>, string>();
   private readonly activeDispatches = new Map<symbol, DispatchReservation>();
   private fatalDispatchError: unknown = null;
@@ -330,17 +340,25 @@ export class ProviderExecutionCoordinator {
   }
 
   scheduleRecovery(entryId: string, delayMs: number): void {
-    if (this.recoveryTimers.has(entryId)) return;
+    const dueAtMs = this.options.nowMs() + Math.max(1, delayMs);
+    // Keep whichever wake-up is sooner so a slow re-check never delays a
+    // restart that another path scheduled for earlier.
+    const existingDueAtMs = this.recoveryDueAtMs.get(entryId);
+    if (this.recoveryTimers.has(entryId) && (existingDueAtMs === undefined || existingDueAtMs <= dueAtMs)) return;
+    this.clearRecovery(entryId);
     const timer = this.setRecoveryTimeout(() => {
       this.recoveryTimers.delete(entryId);
+      this.recoveryDueAtMs.delete(entryId);
       this.request(entryId);
     }, Math.max(1, delayMs));
     timer.unref?.();
     this.recoveryTimers.set(entryId, timer);
+    this.recoveryDueAtMs.set(entryId, dueAtMs);
   }
 
   clearRecovery(entryId: string): void {
     const timer = this.recoveryTimers.get(entryId);
+    this.recoveryDueAtMs.delete(entryId);
     if (!timer) return;
     this.clearRecoveryTimeout(timer);
     this.recoveryTimers.delete(entryId);
@@ -360,6 +378,8 @@ export class ProviderExecutionCoordinator {
   clearRecoveryTimers(): void {
     for (const timer of this.recoveryTimers.values()) this.clearRecoveryTimeout(timer);
     this.recoveryTimers.clear();
+    this.recoveryDueAtMs.clear();
+    this.unattachableRechecks.clear();
   }
 
   async drainDispatches(entryIds?: readonly string[]): Promise<void> {
@@ -1339,15 +1359,27 @@ export class ProviderExecutionCoordinator {
       }
     }
     if (activeExecution && !resumableCursorLane) {
-      await this.options.transition(
-        entry.id,
-        "recovering",
-        "coordination_blocked",
-        "durable execution generation remains live without an attachable provider handle",
-        "daemon-convergence",
-      );
+      // Repeated checks must not rewrite the manifest or append a notice each
+      // time; only the first observation of this state is durable news.
+      if (entry.observed_state !== "recovering" || entry.condition !== "coordination_blocked"
+        || entry.last_error !== UNATTACHABLE_GENERATION_CAUSE) {
+        await this.options.transition(
+          entry.id,
+          "recovering",
+          "coordination_blocked",
+          UNATTACHABLE_GENERATION_CAUSE,
+          "daemon-convergence",
+        );
+      }
+      const checks = (this.unattachableRechecks.get(entry.id) ?? 0) + 1;
+      this.unattachableRechecks.set(entry.id, checks);
+      this.scheduleRecovery(entry.id, Math.min(
+        UNATTACHABLE_GENERATION_RECHECK_MS * 2 ** Math.min(checks - 1, 10),
+        UNATTACHABLE_GENERATION_RECHECK_MAX_MS,
+      ));
       return;
     }
+    this.unattachableRechecks.delete(entry.id);
     if (!activeExecution && entry.turn_control && entry.turn_control.status !== "completed") {
       entry = await this.options.completeTurnControlForRuntimeRecovery(entry);
     }
