@@ -299,6 +299,14 @@ function fence(grant: { grant_id: string; current_generation: number; token_vers
 }
 
 /** Exact HTTP mapping for the in-transaction grant-fence race. */
+function isLockTimeout(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 4; depth += 1) {
+    if ((current as { code?: unknown }).code === "55P03") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export function respondToStaleSupervisorGrantFence(res: Response, error: unknown): boolean {
   if (!isSupervisorGrantFenceStaleError(error)) return false;
   res.status(409).json({ error: "Supervisor grant fence is stale." });
@@ -462,6 +470,13 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       });
     } catch (error) {
       if (respondToStaleSupervisorGrantFence(res, error)) return;
+      if (isLockTimeout(error)) {
+        // Another mint for this grant or worker is still committing; the
+        // daemon retries 5xx responses after a backoff.
+        res.setHeader("Retry-After", "1");
+        res.status(503).json({ error: "Worker session mint is busy. Retry shortly." });
+        return;
+      }
       respondWithInternalError(res, "POST /supervisor-host-grants/:grantId/worker-sessions", error, "Worker session could not be minted.");
     }
   });
