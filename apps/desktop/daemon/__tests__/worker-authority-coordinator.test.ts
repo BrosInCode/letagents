@@ -166,9 +166,6 @@ type HarnessOptions = {
   terminal?: ExecutionGeneration["terminal"];
   loseAuthorityAfterFirstAssert?: "handoff";
   fireMintTimeout?: boolean;
-  holdRetryTimers?: boolean;
-  random?: () => number;
-  recordExactMint?: () => Promise<void>;
   boundedContextError?: Error;
   publishNative?: () => Promise<void>;
   delegationCommitMutation?: "generation" | "control" | "grant" | "clock" | "native" | "request_expiry";
@@ -254,7 +251,6 @@ function fixture(options: HarnessOptions = {}) {
     },
     recordExactSupervisedWorkerSessionMint: async (input) => {
       events.push("mint:record-exact");
-      await options.recordExactMint?.();
       return {
         agent_id: input.agent_id,
         room_id: input.room_id,
@@ -474,7 +470,7 @@ function fixture(options: HarnessOptions = {}) {
     nowMs: () => currentTime,
     setTimeout: ((callback: (...args: unknown[]) => void, delay?: number) => {
       timerDelays.push(delay ?? 0);
-      if (delay === 10_000 ? options.fireMintTimeout : !options.holdRetryTimers) queueMicrotask(callback);
+      if (delay === 100 || (delay === 10_000 && options.fireMintTimeout)) queueMicrotask(callback);
       const timer = setTimeout(() => undefined, 60_000);
       timer.unref();
       return timer;
@@ -483,7 +479,6 @@ function fixture(options: HarnessOptions = {}) {
       clearedTimers += 1;
       clearTimeout(timer);
     }) as typeof clearTimeout,
-    random: options.random ?? (() => 0),
   });
 
   return {
@@ -805,72 +800,6 @@ test("authority changing after the remote mint records public identity but never
   assert.ok(harness.events.includes("mint:record-exact"));
   assert.equal(harness.custody.workerAuthorization("agent-1"), undefined);
   assert.equal(harness.custody.hostGrant("agent-1"), undefined);
-});
-
-test("worker mint retries back off instead of queueing behind the timed-out server transaction", async () => {
-  let calls = 0;
-  const harness = fixture({
-    fireMintTimeout: true,
-    createWorkerSession: async () => {
-      calls += 1;
-      return new Promise<never>(() => undefined);
-    },
-  });
-  harness.custody.installHostGrant(hostGrant());
-
-  await assert.rejects(
-    harness.subject.mintHostWorkerAuthorization(harness.entry),
-    /failed after 3 attempts.*waiting for the LetAgents server/,
-  );
-  assert.equal(calls, 3);
-  assert.deepEqual(harness.timerDelays, [10_000, 1_000, 10_000, 3_000, 10_000]);
-});
-
-test("cancelling during mint backoff ends the mint without waiting out the delay", async () => {
-  const controller = new AbortController();
-  let calls = 0;
-  const harness = fixture({
-    holdRetryTimers: true,
-    createWorkerSession: async () => {
-      calls += 1;
-      setImmediate(() => controller.abort());
-      throw new SupervisorGrantRequestError(503, "mint");
-    },
-  });
-  harness.custody.installHostGrant(hostGrant());
-
-  await assert.rejects(harness.subject.mintHostWorkerAuthorization(harness.entry, controller.signal), /cancelled/);
-  assert.equal(calls, 1);
-  assert.ok(harness.timerDelays.includes(1_000), "the mint was parked in its backoff when cancelled");
-});
-
-test("the local mint record is not on the server deadline", async () => {
-  let clearedAtRecord = -1;
-  let harness!: ReturnType<typeof fixture>;
-  harness = fixture({
-    recordExactMint: async () => { clearedAtRecord = harness.clearedTimers; },
-  });
-  harness.custody.installHostGrant(hostGrant());
-
-  assert.equal((await harness.subject.mintHostWorkerAuthorization(harness.entry))?.bearer, "minted-secret");
-  assert.equal(clearedAtRecord, 1, "the network timer is cleared before the local store write starts");
-});
-
-test("retry delays are jittered so agents that failed together do not retry together", async () => {
-  const mint = fixture({
-    random: () => 0.999,
-    createWorkerSession: async () => { throw new SupervisorGrantRequestError(503, "mint"); },
-  });
-  mint.custody.installHostGrant(hostGrant());
-  await assert.rejects(mint.subject.mintHostWorkerAuthorization(mint.entry), /failed after 3 attempts/);
-  assert.deepEqual(mint.timerDelays.filter((delay) => delay !== 10_000), [751, 2_251]);
-
-  const bind = fixture({ random: () => 0.5 });
-  const error = new WorkerCredentialMintError(3, true, new SupervisorGrantRequestError(503, "mint"));
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    await bind.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1", error);
-  }
-  assert.deepEqual(bind.scheduled, [875, 2_625, 8_750, 26_250, 52_500]);
 });
 
 test("retryable worker mint failures are bounded at three attempts", async () => {

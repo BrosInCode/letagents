@@ -573,12 +573,6 @@ export async function createOrRotateSupervisorWorkerSession(
   if (!instanceId) throw new Error("Supervisor worker agent_instance_id is required.");
 
   const committed = await db.transaction(async (tx) => {
-    // The daemon gives up on a mint after 10s and retries, but its abort does
-    // not end this transaction. Fail lock waits first so a slow mint answers
-    // with a retryable error instead of outliving the client and queueing the
-    // retry behind it. The limit applies to each wait, and the grant and
-    // worker locks can both be contended, so two waits must fit inside 10s.
-    await tx.execute(sql`SET LOCAL lock_timeout = '3s'`);
     if (!(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
       throw new SupervisorGrantFenceStaleError();
     }
