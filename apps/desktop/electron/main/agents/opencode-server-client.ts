@@ -129,13 +129,18 @@ export function parseOpenCodePermissionEvent(event: OpenCodeEvent): OpenCodePerm
 }
 
 /**
- * OpenCode orders messages by raw string comparison of their IDs, and its
- * agentic loop only exits once the newest user message sorts BELOW the newest
- * assistant message. It accepts caller-supplied user message IDs verbatim, so
- * a caller ID outside its ascending scheme ("msg_" + 12 lowercase-hex chars of
- * unix-ms * 0x1000 + 14 base62 chars) permanently reads as "an unanswered user
- * message newer than every reply" and the model is re-invoked until an
- * external bound aborts the turn.
+ * OpenCode accepts caller-supplied user message IDs verbatim, and up to
+ * 1.18.14 its agentic loop only exited once the newest user message sorted
+ * BELOW the newest assistant message by raw string comparison. A caller ID
+ * outside its ascending scheme ("msg_" + 12 lowercase-hex chars of
+ * unix-ms * 0x1000 + 14 base62 chars) permanently read as "an unanswered user
+ * message newer than every reply" and the model was re-invoked until an
+ * external bound aborted the turn.
+ *
+ * From 1.18.15 the loop exits when the newest assistant message answers the
+ * newest user message, and messages order by creation time with the ID as
+ * tiebreak. Native IDs remain the contract: they keep that tiebreak correct
+ * and keep sessions created under an older runtime readable.
  */
 const NATIVE_ASCENDING_MESSAGE_ID = /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 
@@ -452,10 +457,15 @@ export class OpenCodeServerClient {
     return this.requestJson<JsonRecord[]>("/session");
   }
 
-  createSession(title: string): Promise<JsonRecord> {
+  /**
+   * The first session on a fresh server bootstraps the whole OpenCode
+   * instance, so a launch passes its own remaining budget as `signal`.
+   */
+  createSession(title: string, signal?: AbortSignal): Promise<JsonRecord> {
     return this.requestJson<JsonRecord>("/session", {
       method: "POST",
       body: JSON.stringify({ title }),
+      signal,
     });
   }
 

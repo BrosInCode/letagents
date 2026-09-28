@@ -49,12 +49,36 @@ Codex-backed implementation.
 | Room delivery | Daemon inbox only |
 | Credential persistence | Electron encrypted settings only; never daemon SQLite, manifests, or room activity |
 
+## Launch budget
+
+One 30 second budget covers a fresh launch: the health wait and the first
+session share it. The first session bootstraps the OpenCode instance, so it
+receives whatever the health wait left over instead of the 15 second
+steady-state control deadline. A timeout names its phase (`health` or
+`session`) and stays a transient start failure that the daemon may retry.
+
+OpenCode installs its plugin SDK into any config directory that has no
+`node_modules`, and a configured plugin makes the first session wait for that
+install. Every runtime owns a fresh config directory, so the adapter seeds it
+as already provisioned before launch. The credential-boundary plugin imports
+nothing, so no package is needed. If the directory cannot be seeded the
+launch proceeds on OpenCode's own install path.
+
+The seed covers only the runtime's own config directory. OpenCode also
+installs into every `.opencode` directory between the working directory and
+the worktree root, and into `~/.opencode`, because the launch inherits `HOME`.
+Those belong to the user and may hold tools that need the SDK, so they are
+left alone. Each one that is not yet provisioned adds an install to the first
+session: from a second to tens of seconds on a working network, depending
+on the npm cache, and about 70 seconds when the registry
+is unreachable, which exceeds the launch budget on every attempt.
+
 `attach()` uncertainty is deliberately not spawn authority. A missing or
 temporarily unreadable local control sidecar may return an unknown result, but
 only verified process death permits a replacement writer. This invariant keeps
 restart recovery from creating two OpenCode processes for one durable agent.
 
-## Live 1.18.9 contract evidence
+## Live 1.18.20 contract evidence
 
 Run:
 
@@ -65,9 +89,13 @@ npm run smoke:opencode-contract
 
 The smoke launches the pinned OpenCode binary against a loopback
 OpenAI-compatible fixture and imports the same launch-contract and control
-client modules as production. On 2026-07-29 it verified:
+client modules as production. It points npm at a loopback registry that
+records every request. CI does not run it; run it by hand before changing the
+pin. On 2026-09-28 it verified:
 
-- the actual binary reports `1.18.9`;
+- the actual binary reports `1.18.20`;
+- the launch makes no npm registry request before its first session, and
+  the seeded config directory stays empty of installed packages;
 - `prompt_async`, authenticated `/event`, exact message IDs, transcript reads,
   and `session.idle` complete one bounded turn;
 - a model-issued shell command observes empty `OPENCODE_AUTH_CONTENT`,
@@ -75,8 +103,34 @@ client modules as production. On 2026-07-29 it verified:
   `OPENCODE_SERVER_PASSWORD` values;
 - a fresh authenticated control client finds the exact existing session
   without a process relaunch;
-- native session abort succeeds; and
-- a distinct replacement session can be created on the same process.
+- native session abort succeeds;
+- a distinct replacement session can be created on the same process; and
+- a complete answer with an unknown finish reason ends its turn after one
+  model request.
+
+## Choosing the pinned version
+
+Change the pin only to a version that passes the contract smoke and is at
+least seven days old, matching the dependency cooldown.
+
+1.18.20 is the newest version that passes. OpenCode 1.18.21 through at least
+1.18.33 re-invoke the model without bound when a provider ends a complete
+answer without a standard `finish_reason` (upstream issues 49414 and 45315,
+both open on 2026-09-28). Any OpenAI-compatible endpoint can do that, so those
+versions would turn one room turn into a request storm against the user's
+provider account. The adapter's 32-step bound ends the turn only outside
+`typed` lifecycle authority; under `typed` it raises attention instead.
+
+Known cost of 1.18.20: from 1.18.17 OpenCode retries a provider error up to
+five times when its message or body contains `429`, `500`, `502`, `503`,
+`504` or `524` anywhere, including inside another number. A 402 that says the
+account "can only afford 1500" tokens is retried for about 70 seconds before
+the same error is reported. 1.18.9 reported it at once, but retried a 429
+until the turn timed out, which 1.18.20 now bounds at six requests.
+
+From 1.18.15 OpenCode ends a turn when the last assistant message answers the
+last user message, instead of comparing message IDs as strings. The adapter
+still mints user message IDs in OpenCode's ascending scheme.
 
 This command is the load-bearing evidence behind the adapter’s `resume`,
 `survivesRestart`, `native_interrupt`, and `same_process` capability claims.
