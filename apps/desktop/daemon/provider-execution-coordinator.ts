@@ -299,6 +299,19 @@ export class ProviderExecutionCoordinator {
     };
   }
 
+  private async frozenLifecycleAuthority(entry: DaemonManifestEntry): Promise<LifecycleAuthorityMode | null> {
+    const ref = entry.provider_ref;
+    if (!ref?.provider_connection) return null;
+    const appliedRevision = (await this.options.store.getAgentConfiguration(entry.id))?.runtime_configuration_revision;
+    if (!Number.isSafeInteger(appliedRevision) || appliedRevision! < 1) return null;
+    return this.options.store.readRuntimeLifecycleAuthority({
+      agentId: entry.id,
+      executionGenerationId: ref.execution_generation_id,
+      providerConnection: ref.provider_connection,
+      configurationRevision: appliedRevision!,
+    });
+  }
+
   isAttachTerminal(
     attachment: ProviderActionHandle | ProviderActionAttachTerminal,
   ): attachment is ProviderActionAttachTerminal {
@@ -1395,7 +1408,10 @@ export class ProviderExecutionCoordinator {
           roomCursor: priorBinding.room_cursor ?? null,
         }
       : null;
-    const ref = entry.provider_ref ? this.providerRef(entry) : null;
+    // Resume must name the lifecycle authority the saved runtime was born
+    // under, exactly as attach does; without it a typed birth is read back as
+    // typed_shadow and every daemon-inbox resume is refused.
+    const ref = entry.provider_ref ? this.providerRef(entry, await this.frozenLifecycleAuthority(entry) ?? undefined) : null;
     const requiresGrant = await this.options.host.requiresGrant(entry);
     const mintedAuthorization = requiresGrant
       ? await this.options.host.mintAuthorization(entry)

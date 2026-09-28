@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  OpenCodeRuntimeGoneError,
   OpenModelProviderAdapter,
   type OpenCodePermissionObservation,
   type OpenModelProviderAdapterDependencies,
@@ -587,6 +588,35 @@ test("attach finishes a cached handle whose process died before its exit observe
     providerConnection: handle.providerConnection,
     lifecycleAuthorityMode: "typed",
   }).then(value => value && "state" in value ? value.state : "handle"), "terminal", "the dead handle is no longer served from cache");
+});
+
+test("resuming a dead runtime under a changed lifecycle authority starts fresh instead of refusing forever", async () => {
+  const harness = createHarness();
+  let alive = true;
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-adapter-"));
+  const dependencies = { ...harness.dependencies,
+    getProcessIdentity: (pid: number) => alive ? harness.dependencies.getProcessIdentity(pid) : null };
+  const born = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot, dependencies,
+    startTimeoutMs: 100, turnTimeoutMs: 100 });
+  const handle = await born.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const ref = {
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed" as const,
+  };
+  const afterRestart = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot, dependencies,
+    startTimeoutMs: 100, turnTimeoutMs: 100 });
+
+  // Alive: a changed authority is still refused rather than attached.
+  await assert.rejects(afterRestart.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed_shadow" })),
+    /does not match the frozen provider birth/);
+  alive = false;
+  const afterDeath = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot, dependencies,
+    startTimeoutMs: 100, turnTimeoutMs: 100 });
+  await assert.rejects(afterDeath.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed_shadow" })),
+    (error: unknown) => error instanceof OpenCodeRuntimeGoneError);
+  assert.equal(harness.launches.length, 1, "resume itself never launches; the daemon replaces the runtime");
 });
 
 test("Open Model reattaches from its exact runtime sidecar when a legacy daemon omitted the connection", async () => {

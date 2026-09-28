@@ -1284,6 +1284,41 @@ test("a sooner recovery replaces a pending later one and never the reverse", asy
   assert.deepEqual(cleared, [60_000]);
 });
 
+test("resume after a crashed generation names the frozen lifecycle authority of the saved birth", async () => {
+  const resumed: Array<{ ref?: string; request?: string }> = [];
+  const runtime = harness({
+    entry: {
+      ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", observed_state: "failed",
+      provider_ref: {
+        work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1", provider_connection: openModelHandle.providerConnection,
+      },
+    },
+    frozenAuthorityMode: "typed",
+    provider: provider({
+      capabilities: async () => ({
+        deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+        transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true,
+      }),
+      attach: async () => null,
+      resume: async (ref, request) => {
+        resumed.push({ ref: ref.lifecycleAuthorityMode, request: request.lifecycleAuthorityMode });
+        return openModelHandle;
+      },
+    }),
+  });
+  runtime.executionGenerations.push({
+    execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z", actor: "test", generation: 1,
+    terminal: runtime.options.terminalPayload({ ...terminal(openModelHandle), exitCode: 1, terminalCause: "crashed" }, "test"),
+  });
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.deepEqual(resumed, [{ ref: "typed", request: "typed" }],
+    "a daemon-inbox resume carries the typed birth instead of defaulting to typed_shadow");
+});
+
 test("a healthy processless Cursor lane remains idle and delivery-capable", async () => {
   const runtime = ownedRecoveryHarness();
   runtime.binding.execution_generation_id = "generation-2";
