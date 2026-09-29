@@ -68,12 +68,6 @@ function withStateLock<T>(callback: (statePath: string) => T): T {
   return withStateFileLock(getLocalStatePath(), callback);
 }
 
-export function writeLocalState(state: LetagentsLocalState): void {
-  withStateLock((statePath) => {
-    writeLocalStateUnlocked(statePath, state);
-  });
-}
-
 export function updateLocalState(
   updater: (state: LetagentsLocalState) => LetagentsLocalState | void
 ): LetagentsLocalState {
