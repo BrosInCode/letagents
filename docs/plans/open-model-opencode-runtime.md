@@ -33,6 +33,13 @@ Codex-backed implementation.
 - The OpenCode control server binds only to loopback and uses a random Basic
   auth secret stored in an owner-only sidecar. The durable provider connection
   stores the sidecar path, never the provider API key.
+- The launch environment sets `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, so OpenCode
+  does not list skills from `.claude/skills` or `.agents/skills` under the
+  owner's home directory or the project. OpenCode's own `.opencode/skill(s)`
+  directories, `skills.paths` from configuration, and its built-in skills still
+  load. The owner's `~/.claude/CLAUDE.md` is still read as instructions;
+  disabling that also changes how a project's `CLAUDE.md` is used, so it is a
+  separate decision.
 
 ## Lifecycle evidence
 

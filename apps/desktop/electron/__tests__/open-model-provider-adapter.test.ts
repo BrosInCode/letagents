@@ -1787,6 +1787,19 @@ test("Open Model still launches when the runtime config directory cannot be seed
   assert.equal(harness.launches.length, 1);
 });
 
+test("Open Model launches without loading the owner's external Claude and agent skills", async (t) => {
+  const previous = process.env.OPENCODE_DISABLE_EXTERNAL_SKILLS;
+  process.env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "0";
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPENCODE_DISABLE_EXTERNAL_SKILLS;
+    else process.env.OPENCODE_DISABLE_EXTERNAL_SKILLS = previous;
+  });
+  const { harness, runtimeRoot } = await spawnAdapter();
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  assert.equal(harness.launches[0]?.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, "1",
+    "the runtime always launches with external skills disabled; the owner's value is not inherited");
+});
+
 test("Open Model seeds a fresh runtime so OpenCode has no plugin SDK to install", async (t) => {
   const { harness, runtimeRoot } = await spawnAdapter();
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
