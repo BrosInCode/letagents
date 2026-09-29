@@ -2170,7 +2170,7 @@ test("supervised Claude exposes one-time native approval without enabling its le
   assert.equal(legacy.status, "gated");
 });
 
-test("supervised Claude and Codex expose Auto, and other providers leave it as they found it", () => {
+test("supervised Claude, Codex, and Open Model expose Auto, and Cursor leaves it as it found it", () => {
   const legacy = { id: "auto_review", label: "Auto", description: "Unavailable", status: "gated", risk: "medium", detail: "Unavailable", isDefault: false } as const;
   const claude = supervisedPermissionProfilePresentation("claude-code", legacy);
   assert.equal(claude.status, "available");
@@ -2179,7 +2179,13 @@ test("supervised Claude and Codex expose Auto, and other providers leave it as t
   assert.equal(codex.status, "available");
   assert.match(codex.detail!, /only in its working folder and temporary folders, with no network access, until Codex approves more/);
   assert.match(codex.detail!, /Anything a room message asks for counts as approved/);
-  assert.equal(supervisedPermissionProfilePresentation("open-model", legacy).status, "gated");
+  const openModel = supervisedPermissionProfilePresentation("open-model", legacy);
+  assert.equal(openModel.status, "available");
+  assert.match(openModel.detail!, /Each command is sent to LetAgents and to Jev.*Reading project files and looking things up on the web are not reviewed\..*cannot open files outside the project\./);
+  assert.equal(supervisedPermissionProfilePresentation("cursor", legacy).status, "gated");
+  assert.match(autoReviewNotice("Open Model", "open-model"), /sends each command to LetAgents and Jev.*run the project's own scripts/);
+  assert.doesNotMatch(autoReviewNotice("Open Model", "open-model"), /room message/);
+  assert.equal(autoReviewNotice("Codex", "codex"), autoReviewNotice("Codex"));
   assert.equal(legacy.status, "gated");
   assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "auto_review"), { permissionMode: "auto" });
   assert.match(autoReviewNotice("Codex"), /^Codex decides which actions are safe instead of asking you\..*trust everyone who can post\.$/);

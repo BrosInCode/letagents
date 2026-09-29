@@ -49,30 +49,36 @@ const CONVERSATION_TEXT_MAX_CHARS = 400;
 const AGENT_SNIPPET_MAX_CHARS = 240;
 const AGENT_CHARTER_MAX_CHARS = 300;
 
-export function readJevRoutingConfig(env: NodeJS.ProcessEnv = process.env): JevRoutingConfigResolution {
-  const mode = (env.LETAGENTS_JEV_ROUTING ?? "off").trim().toLowerCase();
-  if (mode !== "shadow" && mode !== "active") return { status: "off" };
+/** Where Jev is reached. It says nothing about which features may use it. */
+export type JevEndpoint = Omit<JevRoutingConfig, "mode">;
+
+/** Null when the server holds no Jev credential. */
+export function readJevEndpoint(env: NodeJS.ProcessEnv = process.env): JevEndpoint | null {
   // A direct TypeSafe key wins over the gateway when both are present.
   const typesafeKey = env.TYPESAFE_API_KEY?.trim();
   const gatewayKey = env.AI_GATEWAY_API_KEY?.trim();
   const apiKey = typesafeKey || gatewayKey;
-  if (!apiKey) return { status: "missing_api_key", mode };
+  if (!apiKey) return null;
   const provider: JevRoutingProvider = typesafeKey ? "typesafe" : "gateway";
   const timeout = Number.parseInt(env.LETAGENTS_JEV_ROUTING_TIMEOUT_MS ?? "", 10);
   return {
-    status: "enabled",
-    config: {
-      mode,
-      provider,
-      apiKey,
-      baseUrl: (provider === "typesafe"
-        ? env.TYPESAFE_BASE_URL?.trim() || JEV_TYPESAFE_DEFAULT_BASE_URL
-        : env.AI_GATEWAY_EVALUATE_BASE_URL?.trim() || JEV_ROUTING_DEFAULT_BASE_URL).replace(/\/+$/, ""),
-      model: env.LETAGENTS_JEV_ROUTING_MODEL?.trim()
-        || (provider === "typesafe" ? JEV_TYPESAFE_DEFAULT_MODEL : JEV_ROUTING_DEFAULT_MODEL),
-      timeoutMs: Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 4_000) : JEV_ROUTING_DEFAULT_TIMEOUT_MS,
-    },
+    provider,
+    apiKey,
+    baseUrl: (provider === "typesafe"
+      ? env.TYPESAFE_BASE_URL?.trim() || JEV_TYPESAFE_DEFAULT_BASE_URL
+      : env.AI_GATEWAY_EVALUATE_BASE_URL?.trim() || JEV_ROUTING_DEFAULT_BASE_URL).replace(/\/+$/, ""),
+    model: env.LETAGENTS_JEV_ROUTING_MODEL?.trim()
+      || (provider === "typesafe" ? JEV_TYPESAFE_DEFAULT_MODEL : JEV_ROUTING_DEFAULT_MODEL),
+    timeoutMs: Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 4_000) : JEV_ROUTING_DEFAULT_TIMEOUT_MS,
   };
+}
+
+export function readJevRoutingConfig(env: NodeJS.ProcessEnv = process.env): JevRoutingConfigResolution {
+  const mode = (env.LETAGENTS_JEV_ROUTING ?? "off").trim().toLowerCase();
+  if (mode !== "shadow" && mode !== "active") return { status: "off" };
+  const endpoint = readJevEndpoint(env);
+  if (!endpoint) return { status: "missing_api_key", mode };
+  return { status: "enabled", config: { mode, ...endpoint } };
 }
 
 export interface JevRoutingAgentCandidate {
@@ -360,6 +366,16 @@ export async function evaluateWithJev(
   request: Pick<JevEvaluationRequest, "state" | "questions">,
   deps: { fetchImpl?: typeof fetch } = {},
 ): Promise<JevEvaluationResult> {
+  const { body, latencyMs } = await requestJevEvaluation(config, request, deps);
+  return { answers: parseJevEvaluationResponse(body), latencyMs };
+}
+
+/** One evaluation call. The caller owns the questions and reads the answers. */
+export async function requestJevEvaluation(
+  config: JevEndpoint,
+  request: { state: unknown; questions: Record<string, unknown> },
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<{ body: unknown; latencyMs: number }> {
   const startedAtMs = Date.now();
   const target: { url: string; headers: Record<string, string>; body: unknown } = config.provider === "typesafe"
     ? {
@@ -401,8 +417,5 @@ export async function evaluateWithJev(
     // Provider bodies may echo room context or credentials. Keep them out of logs.
     throw new Error(`Jev evaluation failed: HTTP ${response.status}`);
   }
-  return {
-    answers: parseJevEvaluationResponse(await response.json()),
-    latencyMs: Date.now() - startedAtMs,
-  };
+  return { body: await response.json() as unknown, latencyMs: Date.now() - startedAtMs };
 }

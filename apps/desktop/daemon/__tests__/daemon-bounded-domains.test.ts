@@ -187,7 +187,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // SQL hydration and capture scheduling stay in their owning stores/coordinator.
   // 1635 -> 1657: exact terminal commit ports and planned/emergency retirement
   // composition; retries, storage ownership and handoff policy remain extracted.
-  assert.ok(mainSource.split("\n").length < 1_657, "main.ts must remain a thin composition root");
+  // 1657 -> 1660: automatic permission review composition; the rules, the
+  // edit and command decisions, and the server call stay in their own modules.
+  assert.ok(mainSource.split("\n").length < 1_660, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

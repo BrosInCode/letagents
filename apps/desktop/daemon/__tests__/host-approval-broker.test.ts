@@ -38,7 +38,7 @@ const now = Date.parse("2026-08-31T00:00:00.000Z");
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 async function fixture(providerId: "codex" | "open-model" | "claude-code" = "codex",
-  overrides: Partial<Pick<ConstructorParameters<typeof HostApprovalBroker>[0], "exactAuthority" | "fenceCommit" | "hostActorId" | "onPermissionChanged">> = {}, roomWorkspace = false) {
+  overrides: Partial<Pick<ConstructorParameters<typeof HostApprovalBroker>[0], "exactAuthority" | "fenceCommit" | "hostActorId" | "onPermissionChanged" | "automaticReview" | "automaticReviewTimeoutMs">> = {}, roomWorkspace = false) {
   const root = await mkdtemp(join(tmpdir(), "letagents-approval-broker-"));
   const workAttemptId = roomWorkspace ? "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a" : "workspace";
   const room = roomWorkspace ? await new EphemeralWorkspaceProvisioner(root).provision({ workAttemptId, taskId: "task" }) : null;
@@ -1806,4 +1806,224 @@ test("saved rules do not self-requeue a managed refresh when native idle proof i
     await pending;
     assert.equal(attempts, 1, "releasing an empty approval lane must not start another refresh");
   } finally { armed = false; await pending; await f.close(); }
+});
+
+async function eventually(done: () => boolean | Promise<boolean>, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (await done()) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+function reviewer(verdict: "allow" | "ask" | (() => Promise<"allow" | "ask">), applies = true) {
+  const reviewed: unknown[] = [];
+  return { reviewed,
+    automaticReview: {
+      applies: () => applies,
+      review: async (input: { request: unknown }) => {
+        reviewed.push(structuredClone(input.request));
+        return typeof verdict === "function" ? verdict() : verdict;
+      },
+    } };
+}
+
+test("automatic review allows a request once, as itself, and leaves no card", async () => {
+  const review = reviewer("allow");
+  const f = await fixture("open-model", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => f.sends.length === 1, "the reviewed decision to reach the provider");
+    assert.deepEqual(f.sends, ["once"]);
+    assert.deepEqual(f.order, ["decision_committed", "dispatch_committed", "native_write"]);
+    assert.deepEqual(review.reviewed, [f.native.native]);
+    const decision = f.db.prepare("SELECT source,actor_id,decision,delegation_instance_id FROM execution_approval_decisions").all();
+    assert.deepEqual(decision.map(row => ({ ...row })), [{ source: "host", actor_id: "automatic-review", decision: "allow_once", delegation_instance_id: null }]);
+    await eventually(async () => (await f.broker.list("room")).every(item => item.status !== "pending"), "the card to clear");
+    // The same request listed again is never reviewed or sent twice.
+    f.emit(); f.emit();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(review.reviewed.length, 1);
+    assert.deepEqual(f.sends, ["once"]);
+  } finally { await f.close(); }
+});
+
+test("automatic review that does not allow leaves the request exactly as a person would find it", async () => {
+  for (const verdict of ["ask", async () => { throw new Error("review failed"); }] as const) {
+    const review = reviewer(verdict);
+    const f = await fixture("open-model", { automaticReview: review.automaticReview });
+    try {
+      await eventually(() => review.reviewed.length === 1, "the review");
+      await eventually(async () => (await f.broker.list("room")).some(item => item.status === "pending"), "the card to appear");
+      // The same request listed again is not reviewed a second time.
+      f.emit(); f.emit();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal(review.reviewed.length, 1);
+      assert.deepEqual(f.sends, []);
+      assert.equal(f.db.prepare("SELECT count(*) AS count FROM execution_approval_decisions").get()!.count, 0);
+      const [candidate] = await f.broker.list("room");
+      assert.equal(await f.broker.decide(decision(candidate!)), "resolved");
+      assert.deepEqual(f.sends, ["once"]);
+      assert.notEqual(f.db.prepare("SELECT actor_id FROM execution_approval_decisions").get()!.actor_id, "automatic-review");
+    } finally { await f.close(); }
+  }
+});
+
+test("a request under automatic review is not shown until the review leaves it undecided", async () => {
+  let finish!: (verdict: "ask") => void;
+  const review = reviewer(() => new Promise<"ask">(resolve => { finish = resolve; }));
+  const f = await fixture("open-model", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => review.reviewed.length === 1, "the review to start");
+    assert.deepEqual(await f.broker.list("room"), []);
+    finish("ask");
+    await eventually(async () => (await f.broker.list("room")).length === 1, "the card to appear");
+    assert.equal((await f.broker.list("room"))[0]!.status, "pending");
+  } finally { await f.close(); }
+});
+
+test("automatic review runs only for the agents and providers it applies to", async () => {
+  const notChosen = reviewer("allow", false);
+  const unchosen = await fixture("open-model", { automaticReview: notChosen.automaticReview });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual(notChosen.reviewed, []);
+    assert.deepEqual(unchosen.sends, []);
+    assert.equal((await unchosen.broker.list("room"))[0]!.status, "pending");
+  } finally { await unchosen.close(); }
+
+  for (const provider of ["codex", "claude-code"] as const) {
+    const other = reviewer("allow");
+    const f = await fixture(provider, { automaticReview: other.automaticReview });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      assert.deepEqual(other.reviewed, [], provider);
+      assert.deepEqual(f.sends, []);
+    } finally { await f.close(); }
+  }
+});
+
+test("an allowed review cannot be applied once the agent's authority has changed", async () => {
+  let finish!: (verdict: "allow") => void;
+  const review = reviewer(() => new Promise<"allow">(resolve => { finish = resolve; }));
+  const f = await fixture("open-model", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => review.reviewed.length === 1, "the review to start");
+    f.state.owned = false;
+    finish("allow");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual(f.sends, []);
+    assert.equal(f.db.prepare("SELECT count(*) AS count FROM execution_approval_decisions WHERE dispatch_id IS NOT NULL").get()!.count, 0);
+  } finally { await f.close(); }
+});
+
+/** A review that answers only when the test says so, one answer for each request in turn. */
+function heldReview() {
+  const answers: Array<(verdict: "allow" | "ask") => void> = [];
+  const reviewed: Array<{ request: { id: string; metadata: unknown }; signal: AbortSignal }> = [];
+  return { answers, reviewed, automaticReview: { applies: () => true,
+    review: (input: { request: unknown; signal: AbortSignal }) => {
+      reviewed.push({ request: structuredClone(input.request) as { id: string; metadata: unknown }, signal: input.signal });
+      return new Promise<"allow" | "ask">(resolve => { answers.push(resolve); });
+    } } };
+}
+
+function another(f: Awaited<ReturnType<typeof fixture>>, change: Record<string, unknown>): ProviderPermissionRequest {
+  return { provider: "open-model", native: { ...(f.native.native as object), ...change } } as ProviderPermissionRequest;
+}
+
+test("an allowance for a reviewed request never answers the request that replaced it", async () => {
+  const review = heldReview();
+  const f = await fixture("open-model", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => review.reviewed.length === 1, "the review to start");
+    // The same native id now asks for something else.
+    f.emit([another(f, { patterns: ["rm -rf /"], metadata: { command: "rm -rf /" } })]);
+    review.answers[0]!("allow");
+    await eventually(() => review.reviewed.length === 2, "the replacement to be reviewed as itself");
+    assert.deepEqual(review.reviewed[1]!.request.metadata, { command: "rm -rf /" });
+    assert.deepEqual(f.sends, []);
+    assert.equal(f.db.prepare("SELECT count(*) AS count FROM execution_approval_decisions").get()!.count, 0);
+    review.answers[1]!("ask");
+    await eventually(async () => (await f.broker.list("room")).some(item => item.status === "pending"), "the replacement's card");
+    assert.deepEqual(f.sends, []);
+  } finally { review.answers.forEach(answer => answer("ask")); await f.close(); }
+});
+
+test("a review that does not end is stopped, and the request is shown to its owner", async () => {
+  const review = heldReview();
+  const f = await fixture("open-model", { automaticReview: review.automaticReview, automaticReviewTimeoutMs: 40 });
+  try {
+    await eventually(() => review.reviewed.length === 1, "the review to start");
+    assert.deepEqual(await f.broker.list("room"), []);
+    await eventually(async () => (await f.broker.list("room")).some(item => item.status === "pending"), "the card to appear");
+    assert.equal(review.reviewed[0]!.signal.aborted, true, "the review is told to stop");
+    // An answer that arrives after the limit decides nothing.
+    review.answers[0]!("allow");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual(f.sends, []);
+    assert.equal(f.db.prepare("SELECT count(*) AS count FROM execution_approval_decisions").get()!.count, 0);
+    const [candidate] = await f.broker.list("room");
+    assert.equal(await f.broker.decide(decision(candidate!)), "resolved");
+  } finally { await f.close(); }
+});
+
+test("a request that could not be matched to its turn is reviewed once it can be", async () => {
+  const review = reviewer("allow");
+  const f = await fixture("open-model", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => f.sends.length === 1, "the first request to be allowed");
+    f.state.correlation = false;
+    const second = another(f, { id: "permission-2" });
+    f.emit([second]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(review.reviewed.length, 1, "a request that cannot be verified is not reviewed");
+    f.state.correlation = true;
+    f.emit([second]);
+    await eventually(() => f.sends.length === 2, "the second request to be allowed");
+    assert.equal(review.reviewed.length, 2);
+  } finally { await f.close(); }
+});
+
+test("a request seen while the lane was reserved is reviewed when the reservation ends", async () => {
+  const review = reviewer("allow");
+  const f = await fixture("open-model", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => f.sends.length === 1, "the first request to be allowed");
+    f.emit([]);
+    const reservation = f.broker.reserveIdle(idleInstallation(f));
+    assert.ok(reservation);
+    f.emit([another(f, { id: "permission-2" })]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(review.reviewed.length, 1, "nothing is decided while the lane is reserved");
+    reservation.release();
+    await eventually(() => f.sends.length === 2, "the second request to be allowed");
+    assert.equal(review.reviewed.length, 2);
+  } finally { await f.close(); }
+});
+
+test("a request left for a person is shown while the next one is still under review", async () => {
+  const review = heldReview();
+  const f = await fixture("open-model", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => review.reviewed.length === 1, "the first review to start");
+    f.emit([f.native, another(f, { id: "permission-2" })]);
+    review.answers[0]!("ask");
+    await eventually(() => review.reviewed.length === 2, "the second review to start");
+    const shown = await f.broker.list("room");
+    assert.deepEqual(shown.map(item => [item.status, item.reference?.nativeRequestId]), [["pending", "permission"]]);
+  } finally { review.answers.forEach(answer => answer("ask")); await f.close(); }
+});
+
+test("a review is told to stop when its agent's connection is replaced", async () => {
+  const review = heldReview();
+  const f = await fixture("open-model", { automaticReview: review.automaticReview, automaticReviewTimeoutMs: 60_000 });
+  try {
+    await eventually(() => review.reviewed.length === 1, "the review to start");
+    assert.equal(review.reviewed[0]!.signal.aborted, false);
+    f.broker.close();
+    assert.equal(review.reviewed[0]!.signal.aborted, true);
+    review.answers[0]!("allow");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual(f.sends, []);
+  } finally { await f.close(); }
 });

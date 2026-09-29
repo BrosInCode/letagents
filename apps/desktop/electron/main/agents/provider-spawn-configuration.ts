@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import { assertManagedAgentPermissionProfileAvailable } from "./managed-agent-permission-profiles.js";
-import { supervisedOpenCodePermissionPolicy } from "./opencode-launch-contract.js";
+import { supervisedOpenCodePermissionPolicy, supervisedOpenCodePermissionProfileId } from "./opencode-launch-contract.js";
 
 /**
  * Shared final attestation used by every native adapter. The daemon has
@@ -44,9 +44,7 @@ export function attestProviderSpawnPolicy(
       requireMatch(policy, key, value, provider);
     }
   } else if (provider === "open-model") {
-    requireMatch(policy, "permission", supervisedOpenCodePermissionPolicy(
-      profile === "ask_before_write" ? "ask_before_write" : "full_access",
-    ), provider);
+    requireMatch(policy, "permission", supervisedOpenCodePermissionPolicy(supervisedOpenCodePermissionProfileId(profile)), provider);
   } else if (provider === "claude-code") {
     const authority = profile === "read_only"
       ? {
