@@ -101,7 +101,7 @@ type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "soc
 type RecoveryClock = {
   nowMs?: () => number;
   setTimeout?: typeof setTimeout;
-  clearTimeout?: typeof clearTimeout;
+  clearTimeout?: typeof clearTimeout; sleep?: (delayMs: number) => Promise<void>; random?: () => number;
 };
 export class SupervisorDaemon {
   private readonly stateDatabasePath: string;
@@ -354,6 +354,7 @@ export class SupervisorDaemon {
       nowMs: recoveryClock.nowMs ?? Date.now,
       setTimeout: recoveryClock.setTimeout ?? setTimeout,
       clearTimeout: recoveryClock.clearTimeout ?? clearTimeout,
+      sleep: recoveryClock.sleep, random: recoveryClock.random,
     });
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
