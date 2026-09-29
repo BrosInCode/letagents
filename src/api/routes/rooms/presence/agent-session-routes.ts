@@ -1,5 +1,5 @@
 import type { Express } from "express";
-import { getDurableRoomWorkerSessions } from "../../../db/auth/room-agent-sessions.js";
+import { getDurableRoomWorkerSessions, getRoomWorkerNameHolders } from "../../../db/auth/room-agent-sessions.js";
 import { isMcpWorkerId, isMcpConnectionToken } from "../../../../shared/mcp-worker.js";
 
 import {
@@ -42,6 +42,10 @@ import {
   normalizeRuntime,
 } from "./helpers.js";
 import type { RoomPresenceRouteDeps } from "./types.js";
+import {
+  allocateAgentDisplayName,
+  isNameHeldByAnotherAgent,
+} from "../../../rooms/agent-display-name-allocation.js";
 
 export function desktopManagedPausePresence(input: {
   availability?: "failure" | "room_closed";
@@ -58,8 +62,9 @@ export function desktopManagedPausePresence(input: {
 
 /**
  * True when `label` is exactly `base` plus one or more trailing space-separated
- * pure-digit groups — i.e. the shape the collision allocator produces
- * (`${base} ${offset}`), possibly compounded by the historical bug. Used to
+ * pure-digit groups — i.e. the shape the collision allocator used to produce
+ * (`${base} ${offset}`), possibly compounded by the historical bug. The
+ * allocator no longer mints these, but clients still replay stored ones. Used to
  * validate that a trusted base signal actually corresponds to the requested
  * label before reducing to it.
  */
@@ -216,7 +221,7 @@ export function registerAgentSessionRoutes(
         });
         return;
       }
-      const [activeParticipants, activeSessionsForIdentity, durableWorkers] = await Promise.all([
+      const [activeParticipants, activeSessionsForIdentity, durableWorkers, workerNameHolders] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
         requestedSessionKind === "worker"
           ? getActiveRoomAgentSessionsForWorkerIdentity({
@@ -225,6 +230,7 @@ export function registerAgentSessionRoutes(
             })
           : Promise.resolve([]),
         getDurableRoomWorkerSessions(project.id),
+        getRoomWorkerNameHolders(project.id),
       ]);
       const replaceableSessionIds = new Set(
         activeSessionsForIdentity
@@ -333,23 +339,34 @@ export function registerAgentSessionRoutes(
         baseDisplayName = durablePredecessor.display_name;
         usedDisplayNames.delete(baseDisplayName);
       }
-      const pickSessionDisplayName = (suffixOffset: number): string => (
-        suffixOffset === 0
-          ? baseDisplayName
-          : isGenericName
-            ? pickLocalCodename(`${agent.canonical_key}:${suffixOffset}`).display_name
-            : `${baseDisplayName} ${suffixOffset}`
-      );
+      // Room history is matched exactly, as it always was: it records what a
+      // participant was once called and cannot make a mention ambiguous. An
+      // agent of another identity that answers to a name now is matched the
+      // way mention routing matches it, so no spelling of that name is free.
+      const ownSessions = workerNameHolders.filter((holder) =>
+        holder.agent_key === agent.canonical_key && !holder.ended_at);
+      const isHeld = (displayName: string): boolean => usedDisplayNames.has(displayName)
+        || isNameHeldByAnotherAgent({
+          display_name: displayName,
+          agent_key: agent.canonical_key,
+          own_sessions: ownSessions,
+          holders: workerNameHolders,
+        });
 
       let offset = 0;
       const normalizedRepoBranch = normalizeOptionalText(repo_branch);
       const maxRegistrationAttempts = 25;
       for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
-        let sessionDisplayName = pickSessionDisplayName(offset);
-        while (usedDisplayNames.has(sessionDisplayName)) {
-          offset++;
-          sessionDisplayName = pickSessionDisplayName(offset);
-        }
+        // A held name receives its own codename, never a numbered variant.
+        const allocated = allocateAgentDisplayName({
+          base_display_name: baseDisplayName,
+          agent_key: agent.canonical_key,
+          is_held: isHeld,
+          from_offset: offset,
+        });
+        if (!allocated) break;
+        offset = allocated.collision_offset;
+        const sessionDisplayName = allocated.display_name;
         const actorLabel = buildAgentActorLabel({
           display_name: sessionDisplayName,
           owner_label: agent.owner_label,

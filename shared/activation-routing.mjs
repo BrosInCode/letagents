@@ -359,15 +359,23 @@ export function createGlobalAgentAddressResolver(identities, options = {}) {
         const hasMention = mentions.some((mention) => !isBroadcastHandle(mention));
         const hasAgentMention = mentions.some(isLikelyAgentMentionHandle);
         const explicitMentionKeys = new Set();
+        const ambiguousMentions = [];
         for (const mention of mentions) {
             if (isBroadcastHandle(mention))
                 continue;
             const alias = normalizeMentionIdentityHandle(mention);
             if (!alias)
                 continue;
-            const resolvedKey = resolveExplicitMentionKey(keysByAlias.get(alias));
+            const matchingKeys = keysByAlias.get(alias);
+            const resolvedKey = resolveExplicitMentionKey(matchingKeys);
             if (resolvedKey)
                 explicitMentionKeys.add(resolvedKey);
+            else if (matchingKeys && matchingKeys.size > 1
+                && !ambiguousMentions.some((entry) => normalizeMentionIdentityHandle(entry.handle) === alias)) {
+                // The mention names several agents and wakes none of them.
+                // Report it so the sender is not left waiting on silence.
+                ambiguousMentions.push({ handle: mention, agentKeys: [...matchingKeys].sort() });
+            }
         }
         const replyTargetKeys = new Set();
         const replyAliases = normalizedString(message.reply_to?.source) === "agent"
@@ -410,6 +418,7 @@ export function createGlobalAgentAddressResolver(identities, options = {}) {
             hasMention,
             hasAgentMention,
             explicitMentionKeys,
+            ambiguousMentions,
             replyTargetKeys,
             senderKeys,
         };
