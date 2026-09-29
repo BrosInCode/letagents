@@ -1,5 +1,6 @@
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
+import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
 import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
 import type { DesktopNeedsYou } from "./knowledge.js";
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
@@ -279,6 +280,10 @@ export interface DesktopApi {
     ) => Promise<DesktopFocusRoomMutationResult>;
     getConversationRouting: (roomIdentifier: string) => Promise<DesktopConversationRoutingSettings>;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
+    getGitHubEventFilter: (roomIdentifier: string) => Promise<GitHubRoomChatEventFilter>;
+    setGitHubEventFilter: (roomIdentifier: string, enabledKinds: GitHubRoomChatEventKind[]) => Promise<GitHubRoomChatEventFilter>;
+    getAgentGuidelines: (roomIdentifier: string) => Promise<RoomAgentGuidelines>;
+    setAgentGuidelines: (roomIdentifier: string, guidelines: string) => Promise<RoomAgentGuidelines>;
     updateFocusRoomSettings: (
       roomIdentifier: string,
       focusKey: string,

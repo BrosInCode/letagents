@@ -1,4 +1,5 @@
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
+import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
 import { getDesktopNeedsYou, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain } from "electron";
 
@@ -430,6 +431,10 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle("desktop:room:get-conversation-routing", (_event, roomIdentifier: string) => getDesktopConversationRouting(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
+  targetIpcMain.handle("desktop:room:get-github-event-filter", (_event, roomIdentifier: string) => getDesktopGitHubEventFilter(roomIdentifier));
+  targetIpcMain.handle("desktop:room:set-github-event-filter", (_event, roomIdentifier: string, enabledKinds: unknown) => setDesktopGitHubEventFilter(roomIdentifier, enabledKinds));
+  targetIpcMain.handle("desktop:room:get-agent-guidelines", (_event, roomIdentifier: string) => getDesktopRoomAgentGuidelines(roomIdentifier));
+  targetIpcMain.handle("desktop:room:set-agent-guidelines", (_event, roomIdentifier: string, guidelines: unknown) => setDesktopRoomAgentGuidelines(roomIdentifier, guidelines));
   targetIpcMain.handle(
     "desktop:room:update-focus-room-settings",
     async (

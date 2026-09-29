@@ -9,6 +9,7 @@ import { LOCAL_ROOM_API_ORIGIN } from "../../../shared/room-api-origin.mjs";
 import { registerTools } from "../server/register-tools.js";
 import { LETAGENTS_RUNTIME_READINESS_URI, letAgentsRuntimeContract, registerRuntimeReadinessResource } from "../server/runtime-contract.js";
 import type { LetAgentsExecutionProfile } from "../server/runtime/execution-profile.js";
+import { supervisedToolIsMutation } from "../server/supervised-tool-facade.js";
 
 function discovered(profile: LetAgentsExecutionProfile, provider: string | null = null): Set<string> {
   const names = new Set<string>();
@@ -129,6 +130,17 @@ test("custodial polling advertises the restricted real tool surface with deliver
 });
 
 
+test("every cloud profile can read room guidelines, and reading them is never a mutation", () => {
+  for (const [profile, provider] of [
+    ["autonomous_mcp_worker", null], ["interactive_desktop", null],
+    ["supervised_room_turn", "cursor"], ["supervised_room_turn", "codex"], ["supervised_room_turn", "claude-code"],
+    ["supervised_mcp_polling", "codex"],
+  ] as const) {
+    assert.equal(discovered(profile, provider).has("get_room_guidelines"), true, `${profile}/${provider} reads guidelines`);
+  }
+  assert.equal(supervisedToolIsMutation("get_room_guidelines"), false);
+});
+
 test("local native discovery and runtime contract agree and expose an executable closeout path", async () => {
   for (const provider of ["cursor", "codex", "claude-code"]) {
     const server = new McpServer({ name: "local-tool-contract", version: "1" });
@@ -143,7 +155,7 @@ test("local native discovery and runtime contract agree and expose an executable
       for (const name of ["get_board", "read_messages", "claim_task", "complete_task", "update_task", "send_thread_message", "set_reply_thread", "publish_room_artifact"]) {
         assert.ok(tools.some(tool => tool.name === name), `${provider} keeps ${name}`);
       }
-      for (const name of ["join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "submit_review_verdict"]) {
+      for (const name of ["join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "get_room_guidelines", "submit_review_verdict"]) {
         assert.ok(!tools.some(tool => tool.name === name), `${provider} cannot discover unsupported ${name}`);
       }
       assert.match(tools.find(tool => tool.name === "update_task")!.description!, /merged work with status 'done'; no close intent or replacement work lease/);

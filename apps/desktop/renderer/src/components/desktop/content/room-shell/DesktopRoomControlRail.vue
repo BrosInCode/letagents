@@ -1,42 +1,42 @@
 <template>
-  <Transition name="desktop-room-tool-rail">
-    <div v-if="actionPanelOpen || searchOpen" class="desktop-room-control-rail" data-testid="desktop-room-control-rail">
-      <Transition name="desktop-room-tool-surface" mode="out-in">
-        <DesktopRoomActionPanel
-          v-if="actionPanelOpen"
-          key="settings"
-          :room="room"
-          :storage="storage"
-          :room-url="roomUrl"
-          :copied="copied"
-          :sound-enabled="soundEnabled"
-          :notifications-enabled="notificationsEnabled"
-          :notification-permission="notificationPermission"
-          :rename-busy="renameBusy"
-          :rename-error="renameError"
-          :github-status="githubStatus"
-          :github-loading="githubLoading"
-          :github-busy="githubBusy"
-          :github-error="githubError"
-          :github-events-available="githubEventsAvailable"
-          :github-events-visible="githubEventsVisible"
-          :storage-busy="storageBusy"
-          @copy-room-link="emit('copyRoomLink')"
-          @open-rules="emit('openRules')"
-          @toggle-sound="emit('toggleSound')"
-          @toggle-notifications="emit('toggleNotifications')"
-          @toggle-github-events-visible="emit('toggleGithubEventsVisible')"
-          @set-room-storage-mode="emit('setRoomStorageMode', $event)"
-          @fork-room-to-local="emit('forkRoomToLocal')"
-          @publish-local-room="emit('publishLocalRoom')"
-          @rename-room="emit('renameRoom', $event)"
-          @refresh-github="emit('refreshGithub')"
-          @install-github="emit('installGithub')"
-          @export-chat="emit('exportChat')"
-          @close="emit('closeActionPanel')"
-        />
+  <RoomSettingsDialog :open="actionPanelOpen" @close="emit('closeActionPanel')">
+    <DesktopRoomActionPanel
+      :room="room"
+      :storage="storage"
+      :room-url="roomUrl"
+      :copied="copied"
+      :sound-enabled="soundEnabled"
+      :notifications-enabled="notificationsEnabled"
+      :notification-permission="notificationPermission"
+      :rename-busy="renameBusy"
+      :rename-error="renameError"
+      :github-status="githubStatus"
+      :github-loading="githubLoading"
+      :github-busy="githubBusy"
+      :github-error="githubError"
+      :github-events-available="githubEventsAvailable"
+      :github-events-visible="githubEventsVisible"
+      :storage-busy="storageBusy"
+      @copy-room-link="emit('copyRoomLink')"
+      @open-rules="emit('openRules')"
+      @toggle-sound="emit('toggleSound')"
+      @toggle-notifications="emit('toggleNotifications')"
+      @toggle-github-events-visible="emit('toggleGithubEventsVisible')"
+      @set-room-storage-mode="emit('setRoomStorageMode', $event)"
+      @fork-room-to-local="emit('forkRoomToLocal')"
+      @publish-local-room="emit('publishLocalRoom')"
+      @rename-room="emit('renameRoom', $event)"
+      @refresh-github="emit('refreshGithub')"
+      @install-github="emit('installGithub')"
+      @export-chat="emit('exportChat')"
+      @close="emit('closeActionPanel')"
+    />
+  </RoomSettingsDialog>
 
-        <div v-else-if="searchOpen" key="find" class="desktop-room-search-strip" data-testid="desktop-room-search-strip">
+  <Transition name="desktop-room-tool-rail">
+    <div v-if="searchOpen" class="desktop-room-control-rail" data-testid="desktop-room-control-rail">
+      <Transition name="desktop-room-tool-surface" mode="out-in">
+        <div v-if="searchOpen" key="find" class="desktop-room-search-strip" data-testid="desktop-room-search-strip">
           <label>
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
@@ -71,6 +71,7 @@ import type {
   DesktopRoomStorageState,
 } from "../../../../../../electron/ipc-types";
 import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
+import RoomSettingsDialog from "./RoomSettingsDialog.vue";
 
 const props = defineProps<{
   actionPanelOpen: boolean;

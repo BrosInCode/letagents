@@ -1,243 +1,373 @@
 <template>
-  <section class="desktop-room-action-panel" data-testid="desktop-room-action-panel">
-    <div class="desktop-room-action-panel-topbar">
+  <div class="room-settings" data-testid="desktop-room-action-panel">
+    <header class="room-settings-header">
       <div>
-        <p class="desktop-room-action-kicker">Room settings</p>
-        <p class="desktop-room-action-summary">Name, share, store, and connect this room without leaving the conversation.</p>
+        <h2 id="desktop-room-settings-title">Room settings</h2>
+        <p>
+          <strong>{{ room.displayName }}</strong>
+          <span class="room-settings-pill">{{ room.role }}</span>
+        </p>
       </div>
       <button
-        class="desktop-room-action-panel-close"
+        class="room-settings-button room-settings-close"
         type="button"
         aria-label="Close room settings"
         @click="$emit('close')"
       >
-        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-        </svg>
+        <X aria-hidden="true" />
       </button>
-    </div>
-      <div class="desktop-room-inspector">
-        <form class="desktop-room-identity-card" data-testid="desktop-room-rename-card" @submit.prevent="submitRename">
-          <div class="desktop-room-inspector-header">
-            <div>
-              <p class="desktop-room-action-kicker">Room identity</p>
-              <h4>{{ room.displayName }}</h4>
+    </header>
+
+    <nav class="room-settings-rail" aria-label="Room settings sections">
+      <div class="room-settings-nav">
+        <span
+          class="room-settings-nav-indicator"
+          aria-hidden="true"
+          :data-ready="indicatorReady"
+          :style="{ transform: `translateY(${activeSectionIndex * 42}px)` }"
+        />
+        <button
+          v-for="section in sections"
+          :key="section.id"
+          class="room-settings-nav-item"
+          type="button"
+          :data-testid="`desktop-room-settings-nav-${section.id}`"
+          :aria-current="activeSection === section.id ? 'true' : undefined"
+          @click="goToSection(section.id)"
+        >
+          <component :is="section.icon" aria-hidden="true" />
+          <span>{{ section.title }}</span>
+          <span v-if="section.dot" class="room-settings-nav-value">
+            <span class="room-settings-dot" :data-state="section.dot" aria-hidden="true" />
+            <span class="sr-only">{{ section.summary }}</span>
+          </span>
+          <span v-else-if="section.summary" class="room-settings-nav-value">{{ section.summary }}</span>
+        </button>
+      </div>
+    </nav>
+
+    <div ref="contentElement" class="room-settings-content" @scroll.passive="syncActiveSection" @wheel.passive="releaseSectionLock">
+      <section class="room-settings-section" data-section="general" aria-labelledby="room-settings-heading-general">
+        <h3 id="room-settings-heading-general">General</h3>
+        <div class="room-settings-list">
+          <form class="room-settings-row" data-testid="desktop-room-rename-card" @submit.prevent="submitRename">
+            <div class="room-settings-row-copy">
+              <label class="room-settings-row-title" for="room-settings-name">Name</label>
+              <p
+                id="room-settings-name-description"
+                class="room-settings-row-description"
+                :data-tone="renameError ? 'error' : undefined"
+                :role="renameError ? 'alert' : undefined"
+              >{{ renameError || "Shown in the sidebar and room list." }}</p>
             </div>
-            <span class="desktop-room-status-chip">{{ room.role }}</span>
-          </div>
-
-          <label class="desktop-room-title-control">
-            <span class="sr-only">Room name</span>
-            <input v-model="renameDraft" type="text" :disabled="renameBusy" placeholder="Name this room">
-            <button type="submit" :disabled="renameBusy || !renameDraft.trim()">
-              {{ renameBusy ? "Saving" : "Save" }}
-            </button>
-          </label>
-
-          <div class="desktop-room-inline-note" :data-state="renameError ? 'error' : 'neutral'">
-            <span class="desktop-room-mini-dot" />
-            <p v-if="renameError">{{ renameError }}</p>
-            <p v-else>Use a name teammates can recognize in the sidebar and room list.</p>
-          </div>
-
-          <div class="desktop-room-link-line" data-testid="desktop-room-share-card">
-            <div>
-              <small>Room link</small>
-              <span :title="roomUrl">{{ shortRoomUrl }}</span>
-            </div>
-            <button type="button" @click="$emit('copy-room-link')">{{ copied ? "Copied" : "Copy link" }}</button>
-          </div>
-        </form>
-
-        <div class="desktop-room-property-list" aria-label="Room settings inspector">
-          <RoomConversationRouting v-if="storage.effectiveMode === 'cloud'" :room-identifier="room.identifier" />
-          <div
-            class="desktop-room-property-row desktop-room-storage-row"
-            :data-busy="storageBusy"
-            :aria-busy="storageBusy"
-            data-testid="desktop-room-storage-card"
-          >
-            <span class="desktop-room-action-icon is-emerald" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M5 7c0-2 3.1-3.5 7-3.5S19 5 19 7v10c0 2-3.1 3.5-7 3.5S5 19 5 17V7Z" stroke="currentColor" stroke-width="1.8"/>
-                <path d="M5 7c0 2 3.1 3.5 7 3.5S19 9 19 7M5 12c0 2 3.1 3.5 7 3.5S19 14 19 12" stroke="currentColor" stroke-width="1.8"/>
-              </svg>
-            </span>
-            <span class="desktop-room-property-copy">
-              <strong>Storage</strong>
-              <small>{{ storageBusy ? "Changing room storage..." : storageDescription }}</small>
-              <small v-if="storage.effectiveMode === 'local'" class="desktop-room-storage-path">
-                DB {{ storage.databasePath }}
-              </small>
-            </span>
-            <span class="desktop-room-storage-actions">
+            <div class="room-settings-row-action room-settings-name">
+              <input
+                id="room-settings-name"
+                v-model="renameDraft"
+                class="room-settings-input"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Name this room"
+                aria-describedby="room-settings-name-description"
+                :readonly="renameBusy"
+                @keydown.esc="discardRenameOnEscape"
+              >
               <button
-                type="button"
-                :data-active="storage.overrideMode === 'inherit'"
-                :disabled="storageBusy"
-                @click="$emit('set-room-storage-mode', 'inherit')"
-              >
-                App default
+                class="room-settings-button room-settings-save"
+                type="submit"
+                :data-variant="renameDirty ? 'primary' : undefined"
+                :aria-disabled="renameBusy || !renameDirty"
+              >{{ renameLabel }}</button>
+            </div>
+          </form>
+
+          <div class="room-settings-row" data-inline="true" data-testid="desktop-room-share-card">
+            <div class="room-settings-row-copy">
+              <p class="room-settings-row-title">Room link</p>
+              <p class="room-settings-mono" :title="roomUrl">{{ shortRoomUrl }}</p>
+            </div>
+            <div class="room-settings-row-action">
+              <button class="room-settings-button room-settings-copy" type="button" :data-copied="copied" @click="$emit('copy-room-link')">
+                <span class="room-settings-copy-icons" aria-hidden="true"><Copy /><Check /></span>
+                {{ copied ? "Copied" : "Copy link" }}
               </button>
-              <span
-                class="desktop-room-storage-choice"
-                :class="{ 'is-unavailable': cloudStorageUnavailableReason }"
-                :title="cloudStorageUnavailableReason || undefined"
-                :tabindex="cloudStorageUnavailableReason ? 0 : undefined"
-                :aria-label="cloudStorageUnavailableReason || undefined"
-              >
-                <button
-                  type="button"
-                  data-testid="desktop-room-storage-cloud"
-                  :data-active="!cloudStorageUnavailableReason && storage.overrideMode === 'cloud'"
-                  :disabled="storageBusy || Boolean(cloudStorageUnavailableReason)"
-                  @click="$emit('set-room-storage-mode', 'cloud')"
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        v-if="cloudRoom"
+        class="room-settings-section"
+        data-section="conversation"
+        aria-labelledby="room-settings-heading-conversation"
+      >
+        <h3 id="room-settings-heading-conversation">Conversation</h3>
+        <div class="room-settings-list">
+          <RoomConversationRouting :room-identifier="room.identifier" @summary="routingSummary = $event" />
+        </div>
+      </section>
+
+      <section class="room-settings-section" data-section="guidelines" aria-labelledby="room-settings-heading-guidelines">
+        <h3 id="room-settings-heading-guidelines">Guidelines</h3>
+        <div class="room-settings-list">
+          <div class="room-settings-row" data-inline="true" data-testid="desktop-room-rules-card">
+            <div class="room-settings-row-copy">
+              <p class="room-settings-row-title">Room contract</p>
+              <p class="room-settings-row-description">How work moves in every LetAgents room. Built in, the same for everyone.</p>
+            </div>
+            <div class="room-settings-row-action">
+              <button class="room-settings-button" type="button" @click="$emit('open-rules')">Open</button>
+            </div>
+          </div>
+          <RoomAgentGuidelines v-if="cloudRoom" :room-identifier="room.identifier" @summary="guidelinesSummary = $event" />
+        </div>
+      </section>
+
+      <section class="room-settings-section" data-section="data" aria-labelledby="room-settings-heading-data">
+        <h3 id="room-settings-heading-data">Data</h3>
+        <div class="room-settings-list">
+          <SmoothHeight>
+            <div
+              class="room-settings-row"
+              :aria-busy="storageBusy"
+              data-testid="desktop-room-storage-card"
+            >
+              <div class="room-settings-row-copy">
+                <p id="room-settings-storage-title" class="room-settings-row-title">Storage</p>
+                <Transition name="room-settings-text" mode="out-in">
+                  <p :key="storageDescription" class="room-settings-row-description">{{ storageDescription }}</p>
+                </Transition>
+                <p class="sr-only" role="status">{{ storageBusy ? "Changing room storage…" : "" }}</p>
+              </div>
+              <div class="room-settings-row-action">
+                <div
+                  class="room-settings-segmented"
+                  role="radiogroup"
+                  aria-labelledby="room-settings-storage-title"
+                  @keydown="moveStorageSelection"
                 >
-                  Cloud
-                </button>
-              </span>
-              <button
-                type="button"
-                :data-active="storage.effectiveMode === 'local'"
-                :disabled="storageBusy"
-                @click="selectLocalStorage"
-              >
-                Local
+                  <span
+                    class="room-settings-segmented-thumb"
+                    aria-hidden="true"
+                    :style="{ transform: `translateX(${storageOptions.findIndex((option) => option.active) * 100}%)` }"
+                  />
+                  <span
+                    v-for="option in storageOptions"
+                    :key="option.mode"
+                    class="room-settings-segment"
+                    :class="{ 'is-unavailable': option.unavailableReason }"
+                    :title="option.unavailableReason || undefined"
+                  >
+                    <!-- Not `disabled`: a choice that cannot be made stays reachable,
+                         so its reason is read out, and focus is never dropped mid-change. -->
+                    <button
+                      type="button"
+                      role="radio"
+                      :data-testid="`desktop-room-storage-${option.mode}`"
+                      :data-mode="option.mode"
+                      :aria-checked="option.active"
+                      :aria-disabled="storageBusy || Boolean(option.unavailableReason)"
+                      :aria-describedby="option.unavailableReason ? `room-settings-storage-${option.mode}-reason` : undefined"
+                      :tabindex="option.active ? 0 : -1"
+                      @click="selectStorage(option.mode)"
+                    >{{ option.label }}</button>
+                    <span
+                      v-if="option.unavailableReason"
+                      :id="`room-settings-storage-${option.mode}-reason`"
+                      class="sr-only"
+                    >{{ option.unavailableReason }}</span>
+                  </span>
+                </div>
+              </div>
+              <Transition name="room-settings-reveal">
+                <div v-if="storage.effectiveMode === 'local'" class="room-settings-storage-local">
+                  <p class="room-settings-mono" :title="storage.databasePath">{{ storage.databasePath }}</p>
+                  <button
+                    v-if="canPublishLocalRoom"
+                    class="room-settings-button room-settings-publish"
+                    type="button"
+                    data-variant="primary"
+                    :aria-disabled="storageBusy"
+                    @click="publishLocalRoom"
+                  >{{ publishing ? "Publishing…" : "Publish to cloud" }}</button>
+                </div>
+              </Transition>
+              <Transition name="room-settings-progress">
+                <span v-if="storageBusy" class="room-settings-progress" aria-hidden="true" />
+              </Transition>
+            </div>
+          </SmoothHeight>
+
+          <div class="room-settings-row" data-inline="true" data-testid="desktop-room-export-card">
+            <div class="room-settings-row-copy">
+              <p class="room-settings-row-title">Export chat</p>
+              <p class="room-settings-row-description">Download the visible chat history as plain text.</p>
+            </div>
+            <div class="room-settings-row-action">
+              <button class="room-settings-button" type="button" @click="$emit('export-chat')">
+                <Download aria-hidden="true" />
+                Export
               </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="room-settings-section" data-section="alerts" aria-labelledby="room-settings-heading-alerts">
+        <h3 id="room-settings-heading-alerts">Alerts</h3>
+        <div class="room-settings-list">
+          <div class="room-settings-row" data-inline="true" data-testid="desktop-room-sounds-card">
+            <div class="room-settings-row-copy">
+              <p id="room-settings-sound-title" class="room-settings-row-title">Sound effects</p>
+              <Transition name="room-settings-text" mode="out-in">
+                <p id="room-settings-sound-description" :key="String(soundEnabled)" class="room-settings-row-description">
+                  {{ soundEnabled ? "Message and send sounds are on." : "Room sounds are muted." }}
+                </p>
+              </Transition>
+            </div>
+            <div class="room-settings-row-action">
               <button
-                v-if="canPublishLocalRoom"
+                class="room-settings-switch"
                 type="button"
-                :disabled="storageBusy"
-                @click="$emit('publish-local-room')"
+                role="switch"
+                aria-labelledby="room-settings-sound-title"
+                aria-describedby="room-settings-sound-description"
+                :aria-checked="soundEnabled"
+                @click="$emit('toggle-sound')"
               >
-                {{ storageBusy ? "Publishing..." : "Publish to cloud" }}
+                <span class="room-settings-switch-track"><span class="room-settings-switch-knob" /></span>
               </button>
-            </span>
-            <span v-if="storageBusy" class="desktop-room-storage-progress" aria-hidden="true"></span>
+            </div>
           </div>
 
-          <button class="desktop-room-property-row" type="button" data-testid="desktop-room-rules-card" @click="$emit('open-rules')">
-            <span class="desktop-room-action-icon is-blue" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M5 5h14v11H8l-3 3V5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                <path d="M9 9h6M9 12h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-            </span>
-            <span class="desktop-room-property-copy">
-              <strong>Room contract</strong>
-              <small>Review the instructions agents and teammates should follow here.</small>
-            </span>
-            <span class="desktop-room-row-action">Open</span>
-          </button>
+          <div class="room-settings-row" data-inline="true" data-testid="desktop-room-notifications-card">
+            <div class="room-settings-row-copy">
+              <p id="room-settings-notifications-title" class="room-settings-row-title">
+                Desktop notifications
+                <span
+                  v-if="notificationShortLabel !== 'On' && notificationShortLabel !== 'Off'"
+                  class="room-settings-pill"
+                  data-tone="amber"
+                >{{ notificationShortLabel }}</span>
+              </p>
+              <Transition name="room-settings-text" mode="out-in">
+                <p
+                  id="room-settings-notifications-description"
+                  :key="notificationDescription"
+                  class="room-settings-row-description"
+                >{{ notificationDescription }}</p>
+              </Transition>
+            </div>
+            <div class="room-settings-row-action">
+              <button
+                class="room-settings-switch"
+                type="button"
+                role="switch"
+                aria-labelledby="room-settings-notifications-title"
+                aria-describedby="room-settings-notifications-description"
+                :aria-checked="notificationsEnabled"
+                :disabled="notificationPermission === 'unsupported'"
+                @click="$emit('toggle-notifications')"
+              >
+                <span class="room-settings-switch-track"><span class="room-settings-switch-knob" /></span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
 
-          <button class="desktop-room-property-row" type="button" data-testid="desktop-room-sounds-card" @click="$emit('toggle-sound')">
-            <span class="desktop-room-action-icon is-amber" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                <path d="M13.7 21a2 2 0 0 1-3.4 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-            </span>
-            <span class="desktop-room-property-copy">
-              <strong>Sound effects</strong>
-              <small>{{ soundEnabled ? "Message and send sounds are active." : "Room sounds are muted." }}</small>
-            </span>
-            <span class="desktop-room-toggle" :data-active="soundEnabled">
-              <span />
-            </span>
-          </button>
-
-          <button class="desktop-room-property-row" type="button" data-testid="desktop-room-notifications-card" @click="$emit('toggle-notifications')">
-            <span class="desktop-room-action-icon is-emerald" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                <path d="m9 12 2 2 4-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <span class="desktop-room-property-copy">
-              <strong>Desktop notifications</strong>
-              <small>{{ notificationDescription }}</small>
-            </span>
-            <span class="desktop-room-status-chip" :data-state="notificationShortLabel.toLowerCase()">{{ notificationShortLabel }}</span>
-          </button>
-
-          <button
-            v-if="githubEventsAvailable"
-            class="desktop-room-property-row"
-            type="button"
-            data-testid="desktop-room-github-events-card"
-            @click="$emit('toggle-github-events-visible')"
-          >
-            <span class="desktop-room-action-icon is-blue" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M4 12h3l2-5 4 10 2-5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                <path d="M7 4h10M7 20h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-            </span>
-            <span class="desktop-room-property-copy">
-              <strong>Events in chat</strong>
-              <small>{{ githubEventsVisible ? "GitHub events also appear in Chat." : "Keep GitHub events in the Events tab." }}</small>
-            </span>
-            <span class="desktop-room-toggle" :data-active="githubEventsVisible">
-              <span />
-            </span>
-          </button>
-
-          <button class="desktop-room-property-row" type="button" data-testid="desktop-room-export-card" @click="$emit('export-chat')">
-            <span class="desktop-room-action-icon is-slate" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                <path d="M7 10l5 5 5-5M12 15V3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <span class="desktop-room-property-copy">
-              <strong>Export chat</strong>
-              <small>Download the visible chat history as plain text.</small>
-            </span>
-            <span class="desktop-room-row-action">Export</span>
-          </button>
-
+      <section
+        v-if="githubIntegrationAvailable || githubEventsAvailable"
+        class="room-settings-section"
+        data-section="github"
+        aria-labelledby="room-settings-heading-github"
+      >
+        <h3 id="room-settings-heading-github">GitHub</h3>
+        <div class="room-settings-list">
           <div
             v-if="githubIntegrationAvailable"
-            class="desktop-room-github-pill"
+            class="room-settings-row"
+            data-inline="true"
             :data-state="githubDotState"
             data-testid="desktop-room-github-card"
           >
-            <div class="desktop-room-github-summary">
-              <span class="desktop-room-github-dot" :data-state="githubDotState" />
-              <div>
-                <strong>{{ githubTitle }}</strong>
-                <small>{{ githubDescription }}</small>
-                <small
-                  v-if="githubStatus?.connected"
-                  data-testid="desktop-room-github-reviews"
-                  :title="githubReviewDetails"
-                >{{ githubReviewDescription }}</small>
-              </div>
+            <div class="room-settings-row-copy">
+              <p class="room-settings-row-title">
+                <span class="room-settings-dot" :data-state="githubDotState" aria-hidden="true" />
+                <span>{{ githubTitle }}</span>
+              </p>
+              <p class="room-settings-row-description">{{ githubDescription }}</p>
+              <p
+                v-if="githubStatus?.connected"
+                class="room-settings-row-description"
+                data-testid="desktop-room-github-reviews"
+                :title="githubReviewDetails"
+              >{{ githubReviewDescription }}</p>
             </div>
-            <div class="desktop-room-github-actions">
-              <span class="desktop-room-status-chip" :data-state="githubDotState">{{ githubStatusLabel }}</span>
+            <div class="room-settings-row-action">
               <button
                 v-if="githubStatus && !githubStatus.connected && githubStatus.installUrlAvailable"
+                class="room-settings-button"
                 type="button"
-                :disabled="githubBusy"
-                @click="$emit('install-github')"
-              >
-                {{ githubBusy ? "Opening" : "Install" }}
-              </button>
-              <button v-else type="button" :disabled="githubBusy" @click="$emit('refresh-github')">
-                {{ githubLoading ? "Checking" : "Check" }}
+                data-variant="primary"
+                :aria-disabled="githubBusy"
+                @click="!githubBusy && $emit('install-github')"
+              >{{ githubBusy ? "Opening…" : "Install" }}</button>
+              <button v-else class="room-settings-button" type="button" :aria-disabled="githubBusy" @click="!githubBusy && $emit('refresh-github')">
+                {{ githubLoading ? "Checking…" : "Check connection" }}
               </button>
             </div>
-            <p v-if="githubFriendlyError" class="desktop-room-action-error">{{ githubFriendlyError }}</p>
+            <p v-if="githubFriendlyError" class="room-settings-error" role="alert">{{ githubFriendlyError }}</p>
+          </div>
+
+          <RoomGitHubEventFilter v-if="githubIntegrationAvailable && cloudRoom" :room-identifier="room.identifier" />
+
+          <div
+            v-if="githubEventsAvailable"
+            class="room-settings-row"
+            data-inline="true"
+            data-testid="desktop-room-github-events-card"
+          >
+            <div class="room-settings-row-copy">
+              <p id="room-settings-events-title" class="room-settings-row-title">Show GitHub events in my chat</p>
+              <Transition name="room-settings-text" mode="out-in">
+                <p id="room-settings-events-description" :key="String(githubEventsVisible)" class="room-settings-row-description">
+                  {{ githubEventsVisible
+                    ? "Posted events appear in your Chat. This only changes your view."
+                    : "Posted events stay in the Events tab for you. This only changes your view." }}
+                </p>
+              </Transition>
+            </div>
+            <div class="room-settings-row-action">
+              <button
+                class="room-settings-switch"
+                type="button"
+                role="switch"
+                aria-labelledby="room-settings-events-title"
+                aria-describedby="room-settings-events-description"
+                :aria-checked="githubEventsVisible"
+                @click="$emit('toggle-github-events-visible')"
+              >
+                <span class="room-settings-switch-track"><span class="room-settings-switch-knob" /></span>
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-  </section>
+      </section>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
+import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, X } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
+import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
-import { computed, ref, watch } from "vue";
+import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
+import SmoothHeight from "./SmoothHeight.vue";
+import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
   DesktopGitHubIntegrationStatus,
   DesktopRoomInfo,
@@ -285,6 +415,25 @@ const emit = defineEmits<{
 }>();
 
 const renameDraft = ref(props.room.displayName);
+const renameSaved = ref(false);
+const routingSummary = ref<string | null>(null);
+const guidelinesSummary = ref<string | null>(null);
+const contentElement = ref<HTMLElement | null>(null);
+
+type SectionId = "general" | "conversation" | "guidelines" | "data" | "alerts" | "github";
+type StorageChoice = "inherit" | "cloud" | "local";
+interface SectionLink {
+  id: SectionId;
+  title: string;
+  icon: Component;
+  /** What the section is set to, readable from the rail without opening it. */
+  summary: string | null;
+  dot?: string;
+}
+
+const cloudRoom = computed(() => props.storage.effectiveMode === "cloud");
+const { activeSection, indicatorReady, syncActiveSection, releaseSectionLock, goToSection } =
+  useSectionScrollSpy<SectionId>(contentElement, "general");
 
 const shortRoomUrl = computed(() => {
   try {
@@ -331,6 +480,60 @@ function selectLocalStorage(): void {
     return;
   }
   emit("fork-room-to-local", "local");
+}
+
+// Exactly one choice is selected: following the app default wins over where
+// that default currently puts the room.
+const storageChoice = computed<StorageChoice>(() => {
+  if (props.storage.overrideMode === "inherit") return "inherit";
+  return props.storage.effectiveMode === "local" ? "local" : "cloud";
+});
+
+// The choice just made is shown at once; the room's real state replaces it
+// when the change finishes, so a failed change slides back.
+const pendingStorageChoice = ref<StorageChoice | null>(null);
+const publishing = ref(false);
+
+watch(() => props.storageBusy, (busy) => {
+  if (busy) return;
+  pendingStorageChoice.value = null;
+  publishing.value = false;
+});
+
+function publishLocalRoom(): void {
+  if (props.storageBusy) return;
+  publishing.value = true;
+  emit("publish-local-room");
+  void nextTick(() => { if (!props.storageBusy) publishing.value = false; });
+}
+
+const storageOptions = computed(() => [
+  { mode: "inherit" as const, label: "App default", unavailableReason: null },
+  { mode: "cloud" as const, label: "Cloud", unavailableReason: cloudStorageUnavailableReason.value },
+  { mode: "local" as const, label: "Local", unavailableReason: null },
+].map((option) => ({ ...option, active: option.mode === (pendingStorageChoice.value ?? storageChoice.value) })));
+
+function selectStorage(mode: StorageChoice): void {
+  if (props.storageBusy || mode === storageChoice.value) return;
+  if (storageOptions.value.find((option) => option.mode === mode)?.unavailableReason) return;
+  if (mode === "local") selectLocalStorage();
+  else emit("set-room-storage-mode", mode);
+  // The change may be declined (moving a room to this device asks first), so
+  // the choice is shown only once the change is under way.
+  void nextTick(() => { if (props.storageBusy) pendingStorageChoice.value = mode; });
+}
+
+function moveStorageSelection(event: KeyboardEvent): void {
+  const step = ({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 } as Record<string, number>)[event.key];
+  if (!step || props.storageBusy) return;
+  event.preventDefault();
+  const available = storageOptions.value.filter((option) => !option.unavailableReason);
+  const current = available.findIndex((option) => option.active);
+  const next = available[(current + step + available.length) % available.length];
+  if (!next) return;
+  selectStorage(next.mode);
+  const group = event.currentTarget as HTMLElement;
+  void nextTick(() => group.querySelector<HTMLElement>(`button[data-mode="${next.mode}"]`)?.focus());
 }
 
 const notificationDescription = computed(() => {
@@ -422,6 +625,55 @@ const githubBridgeUpgradeNeeded = computed(() => {
   );
 });
 
+const sections = computed<SectionLink[]>(() => {
+  const soundsOn = Number(props.soundEnabled) + Number(props.notificationsEnabled);
+  const all: Array<SectionLink | null> = [
+    { id: "general", title: "General", icon: SlidersHorizontal, summary: null },
+    cloudRoom.value
+      ? { id: "conversation", title: "Conversation", icon: MessageSquare, summary: routingSummary.value }
+      : null,
+    { id: "guidelines", title: "Guidelines", icon: FileText, summary: cloudRoom.value ? guidelinesSummary.value : null },
+    {
+      id: "data",
+      title: "Data",
+      icon: Database,
+      summary: storageChoice.value === "inherit" ? "Default" : storageChoice.value === "local" ? "Local" : "Cloud",
+    },
+    { id: "alerts", title: "Alerts", icon: Bell, summary: soundsOn ? `${soundsOn} on` : "Off" },
+    githubIntegrationAvailable.value || props.githubEventsAvailable
+      ? {
+          id: "github",
+          title: "GitHub",
+          icon: GitBranch,
+          summary: githubIntegrationAvailable.value ? githubStatusLabel.value : null,
+          dot: githubIntegrationAvailable.value ? githubDotState.value : undefined,
+        }
+      : null,
+  ];
+  return all.filter((section): section is SectionLink => section !== null);
+});
+
+const activeSectionIndex = computed(() =>
+  Math.max(0, sections.value.findIndex((section) => section.id === activeSection.value))
+);
+
+let renameSavedTimer: ReturnType<typeof setTimeout> | undefined;
+onBeforeUnmount(() => clearTimeout(renameSavedTimer));
+
+watch(sections, () => {
+  if (!sections.value.some((section) => section.id === activeSection.value)) activeSection.value = "general";
+});
+
+const renameDirty = computed(() => {
+  const draft = renameDraft.value.trim();
+  return Boolean(draft) && draft !== props.room.displayName;
+});
+
+const renameLabel = computed(() => {
+  if (props.renameBusy) return "Saving…";
+  return renameSaved.value && !renameDirty.value ? "Saved" : "Save";
+});
+
 watch(
   () => props.room.displayName,
   (displayName) => {
@@ -429,9 +681,28 @@ watch(
   }
 );
 
+watch(
+  () => props.renameBusy,
+  (busy, wasBusy) => {
+    if (busy || !wasBusy || props.renameError || renameDirty.value) return;
+    renameSaved.value = true;
+    clearTimeout(renameSavedTimer);
+    renameSavedTimer = setTimeout(() => { renameSaved.value = false; }, 1400);
+  }
+);
+
 function submitRename(): void {
   const nextName = renameDraft.value.trim();
-  if (!nextName) return;
+  if (!renameDirty.value || props.renameBusy) return;
   emit("rename-room", nextName);
+}
+
+// The first Escape discards an unsaved name; the dialog stays open.
+function discardRenameOnEscape(event: KeyboardEvent): void {
+  // Escape while composing text belongs to the input method.
+  if (!renameDirty.value || event.isComposing) return;
+  event.stopPropagation();
+  event.preventDefault();
+  renameDraft.value = props.room.displayName;
 }
 </script>

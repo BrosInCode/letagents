@@ -22,7 +22,7 @@ const READ_TOOLS = new Set([
   "wait_for_messages",
   "get_board",
   "get_board_settings",
-  "get_room_memory", "get_human_requests",
+  "get_room_memory", "get_human_requests", "get_room_guidelines",
   "get_room_artifacts",
   "get_room_events",
   "list_board_intents",
