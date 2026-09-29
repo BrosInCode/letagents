@@ -75,6 +75,43 @@ test("managed provider spawn attestation preserves the resolved native authority
   });
 });
 
+test("managed provider spawn attestation binds Auto to the provider's own review", () => {
+  const codexAuto = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" };
+  assert.deepEqual(attestProviderSpawnPolicy("codex", { ...request, permissionProfileId: "auto_review", launchPolicy: codexAuto }), codexAuto);
+  const { approvalsReviewer: _reviewer, ...withoutReviewer } = codexAuto;
+  assert.throws(() => attestProviderSpawnPolicy("codex", { ...request, permissionProfileId: "auto_review", launchPolicy: withoutReviewer }), /approvalsReviewer/);
+  assert.throws(() => attestProviderSpawnPolicy("codex", {
+    ...request, permissionProfileId: "auto_review", launchPolicy: { ...codexAuto, sandboxPolicy: { type: "dangerFullAccess" } },
+  }), /sandboxPolicy/);
+  assert.throws(() => attestProviderSpawnPolicy("codex", {
+    ...request, permissionProfileId: "ask_before_write",
+    launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, approvalsReviewer: "auto_review" },
+  }), /approvalsReviewer/);
+  assert.throws(() => attestProviderSpawnPolicy("codex", {
+    ...request, launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, approvalsReviewer: "auto_review" },
+  }), /approvalsReviewer/);
+
+  const claudeAuto = {
+    permissionMode: "auto", dangerouslySkipPermissions: false, allowDangerouslySkipPermissions: false,
+    tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
+    allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+  };
+  assert.deepEqual(attestProviderSpawnPolicy("claude-code", { ...request, permissionProfileId: "auto_review", launchPolicy: claudeAuto }), claudeAuto);
+  assert.throws(() => attestProviderSpawnPolicy("claude-code", {
+    ...request, permissionProfileId: "auto_review", launchPolicy: { ...claudeAuto, permissionMode: "default" },
+  }), /authority at 'permissionMode'/);
+  assert.throws(() => attestProviderSpawnPolicy("claude-code", {
+    ...request, permissionProfileId: "ask_before_write", launchPolicy: claudeAuto,
+  }), /authority at 'permissionMode'/);
+  assert.throws(() => attestProviderSpawnPolicy("claude-code", {
+    ...request, permissionProfileId: "auto_review", launchPolicy: { ...claudeAuto, "permission-mode": "bypassPermissions" },
+  }), /cannot override 'permission-mode'/);
+
+  for (const provider of ["open-model", "cursor"] as const) {
+    assert.throws(() => attestProviderSpawnPolicy(provider, { ...request, permissionProfileId: "auto_review", launchPolicy: {} }), /Unknown permission profile 'auto_review'/);
+  }
+});
+
 test("managed provider spawn attestation rejects downgraded or unsupported authority", () => {
   assert.throws(() => attestProviderSpawnPolicy("cursor", {
     ...request,

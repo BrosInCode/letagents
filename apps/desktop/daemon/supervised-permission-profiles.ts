@@ -31,6 +31,12 @@ const codexProfiles: readonly SupervisedPermissionProfile[] = [
     detail: "Starts with read-only file access and no network access. Requests approval when it needs more access.", isDefault: false,
   },
   {
+    id: "auto_review", label: "Auto",
+    description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
+    status: "available", risk: "high",
+    detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project.", isDefault: false,
+  },
+  {
     id: "sandboxed_write", label: "Sandboxed writes",
     description: "Restricted file editing is unavailable for Codex here.",
     status: "gated", risk: "medium",
@@ -56,6 +62,12 @@ const claudeProfiles: readonly SupervisedPermissionProfile[] = [
     description: "Requires approval before Claude can change files or run write-capable commands.",
     status: "available", risk: "medium",
     detail: "Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available.", isDefault: false,
+  },
+  {
+    id: "auto_review", label: "Auto",
+    description: "Lets Claude check each action before it runs. Actions it judges safe run without asking.",
+    status: "available", risk: "high",
+    detail: "Claude blocks actions it judges risky. Anything a room message asks for counts as approved, including commands that reach outside your project. Other Claude settings do not apply.", isDefault: false,
   },
   {
     id: "full_access", label: "Full access",

@@ -110,6 +110,8 @@ interface HarnessOptions {
   mcpStatus?: string;
   mcpTools?: string[];
   noApprovalLifecycle?: boolean;
+  /** The mode the CLI reports it started in; an account without Auto reports another. */
+  initPermissionMode?: string;
   bootstrapResultSubtype?: string;
   bootstrapMessages?: (sessionId: string, turnId: string) => Record<string, unknown>[];
   omitBootstrapResult?: boolean;
@@ -180,7 +182,7 @@ function createHarness(options: HarnessOptions = {}) {
             session_id: initSessionId,
             model: "claude-fable-5",
             capabilities: options.noApprovalLifecycle ? [] : ["msg_lifecycle_v1"],
-            permissionMode: "default",
+            permissionMode: options.initPermissionMode ?? "default",
             cwd: input.cwd,
             mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }],
             tools: options.mcpTools ?? ["mcp__letagents__get_board", "mcp__letagents__read_messages", "mcp__letagents__send_message"],
@@ -2493,6 +2495,38 @@ test("Claude Ask before writes owns prompting policy and requires native exact-t
   assert.equal(old.children[0]!.alive, false);
   for (const override of [{ permissionMode: "acceptEdits" }, { allowedTools: ["*"] }, { settings: '{"permissions":{"allow":["Bash"]}}' }, { "permission-mode": "bypassPermissions" }]) {
     await assert.rejects(adapter.spawn(spawnRequest({ permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: { ...claudeAskPolicy, ...override } })), /authority|cannot override/);
+  }
+});
+
+test("Claude Auto starts in the native mode, keeps the prompt bridge, and refuses a runtime that did not apply it", async () => {
+  const claudeAutoPolicy = { ...claudeAskPolicy, permissionMode: "auto" };
+  const request = () => spawnRequest({ permissionProfileId: "auto_review", configurationRevision: 1, launchPolicy: claudeAutoPolicy });
+  const harness = createHarness({ versionOutput: "2.1.272 (Claude Code)", initPermissionMode: "auto" });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(request());
+  try {
+    const args = harness.launches[0]!.args;
+    assert.equal(argValue(args, "--permission-mode"), "auto");
+    assert.equal(argValue(args, "--permission-prompt-tool"), "stdio", "anything Claude leaves undecided still reaches the host");
+    assert.equal(argValue(args, "--setting-sources"), "");
+    assert.equal(argValue(args, "--settings"), "{}");
+    assert.equal(args.includes("--dangerously-skip-permissions"), false);
+    assert.equal(args.includes("--allow-dangerously-skip-permissions"), false);
+  } finally { await adapter.stop(handle); }
+
+  const unsupported = createHarness({ versionOutput: "2.1.272 (Claude Code)" });
+  await assert.rejects(new ClaudeCodeProviderAdapter({ dependencies: unsupported.dependencies }).spawn(request()), /did not start in Auto mode/);
+  assert.equal(unsupported.children[0]!.alive, false);
+
+  const old = createHarness({ versionOutput: "2.1.220 (Claude Code)", initPermissionMode: "auto" });
+  await assert.rejects(new ClaudeCodeProviderAdapter({ dependencies: old.dependencies }).spawn(request()), /too old for Auto/);
+  assert.equal(old.children.length, 0);
+
+  const noLifecycle = createHarness({ noApprovalLifecycle: true, versionOutput: "2.1.272 (Claude Code)", initPermissionMode: "auto" });
+  await assert.rejects(new ClaudeCodeProviderAdapter({ dependencies: noLifecycle.dependencies }).spawn(request()), /exact native turn lifecycle/);
+
+  for (const override of [{ permissionMode: "bypassPermissions" }, { permissionMode: "default" }, { allowedTools: ["*"] }, { "permission-mode": "bypassPermissions" }, { dangerouslySkipPermissions: true }]) {
+    await assert.rejects(adapter.spawn(spawnRequest({ permissionProfileId: "auto_review", configurationRevision: 1, launchPolicy: { ...claudeAutoPolicy, ...override } })), /authority|cannot override/);
   }
 });
 

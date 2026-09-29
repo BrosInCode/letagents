@@ -808,8 +808,9 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
     if (!Object.hasOwn(frame, "id")) return;
     if (frame.method === "thread/turns/list") assert.deepEqual(frame.params,
       { threadId: "continuation", limit: 1, sortDirection: "desc", itemsView: "full" });
+    // A repair names the host as reviewer; joining a live thread changes nothing about it.
     if (frame.method === "thread/resume") assert.deepEqual(frame.params,
-      { threadId: "continuation", ...((frame.params as Record<string, unknown>).cwd ? { cwd: f.workspace } : {}) });
+      { threadId: "continuation", ...((frame.params as Record<string, unknown>).cwd ? { cwd: f.workspace, approvalsReviewer: "user" } : {}) });
     const result = frame.method === "mcpServerStatus/list" ? { data: [{ name: "letagents" }] }
       : frame.method === "thread/resume" ? { thread: { id: "continuation" } }
       : frame.method === "thread/read" ? { thread: { id: "continuation", status: { type: "active" },

@@ -24,6 +24,15 @@ const CLAUDE_CODE_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     isDefault: false,
   },
   {
+    id: "auto_review",
+    label: "Auto",
+    description: "Automatic review is unavailable for Claude Code in this connection mode.",
+    status: "gated",
+    risk: "high",
+    detail: "Choose another available access level.",
+    isDefault: false,
+  },
+  {
     id: "full_access",
     label: "Full access",
     description: "Can change files and run commands on this Mac without asking.",
@@ -59,6 +68,15 @@ const CODEX_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Approval requests are unavailable for Codex in this connection mode.",
     status: "gated",
     risk: "medium",
+    detail: "Choose another available access level.",
+    isDefault: false,
+  },
+  {
+    id: "auto_review",
+    label: "Auto",
+    description: "Automatic review is unavailable for Codex in this connection mode.",
+    status: "gated",
+    risk: "high",
     detail: "Choose another available access level.",
     isDefault: false,
   },
@@ -209,6 +227,15 @@ export function assertManagedAgentPermissionProfileAvailable(
     throw new Error(`Unknown permission profile '${requested}' for ${providerId}.`);
   }
   const profile = managedAgentPermissionProfileForProvider(providerId, requestedProfileId);
+  if (launchMode === "supervised" && profile.id === "auto_review" && (providerId === "claude-code" || providerId === "codex")) {
+    return providerId === "claude-code"
+      ? { ...profile, status: "available",
+        description: "Lets Claude check each action before it runs. Actions it judges safe run without asking.",
+        detail: "Claude blocks actions it judges risky. Anything a room message asks for counts as approved, including commands that reach outside your project. Other Claude settings do not apply." }
+      : { ...profile, status: "available",
+        description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
+        detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project." };
+  }
   if (launchMode === "supervised" && providerId === "claude-code" && profile.id === "ask_before_write") {
     return { ...profile, status: "available",
       description: "Requires approval before Claude can change files or run write-capable commands.",

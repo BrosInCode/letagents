@@ -183,6 +183,7 @@ export interface DesktopManagedAgentActiveWork {
 export type DesktopManagedAgentPermissionProfileId =
   | "read_only"
   | "ask_before_write"
+  | "auto_review"
   | "sandboxed_write"
   | "full_access"
   | (string & {});

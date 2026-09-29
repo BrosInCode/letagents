@@ -44,6 +44,8 @@ import {
   managedAgentPermissionProfileSummary,
   supervisedCursorPermissionProfilePresentation,
   supervisedPermissionProfilePresentation,
+  supervisedProviderLaunchPolicy,
+  autoReviewNotice,
   managedAgentPermissionRequestTargetLabel,
   managedAgentDetailSelection,
   managedAgentProviderIdentityForTarget,
@@ -807,6 +809,11 @@ test("provider activity becomes product language instead of a protocol trace", (
   assert.equal(humanFacingSupervisorActivitySummary({ kind: "text_delta", method: "item/agentMessage/delta", summary: "codex · item/agentMessage/delta" }), "Writing a response");
   assert.equal(humanFacingSupervisorActivitySummary({ kind: "item_lifecycle", method: "item/reasoning/summaryTextDelta", summary: "codex · item/reasoning/summaryTextDelta" }), "Thinking through the request");
   assert.equal(humanFacingSupervisorActivitySummary({ kind: "tool_lifecycle", method: "item/mcpToolCall/progress", summary: "codex · item/mcpToolCall/progress" }), "Using a tool");
+  // Codex's own review asks nobody, so it must not read as a request waiting on the host.
+  for (const method of ["item/autoApprovalReview/started", "item/autoApprovalReview/completed", "guardianWarning"]) {
+    assert.equal(humanFacingSupervisorActivitySummary({ kind: "approval", method, summary: `codex · ${method}` }), "Checking an action");
+  }
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "approval", method: "item/permissions/requestApproval", summary: "codex" }), "Waiting for approval");
 });
 
 test("a successful first supervised Start has an immediate non-recovery runtime label", () => {
@@ -2161,6 +2168,22 @@ test("supervised Claude exposes one-time native approval without enabling its le
   assert.match(supervised.description, /Claude.*change files/);
   assert.match(supervised.detail!, /Each approval allows one action.*Other Claude settings do not apply/);
   assert.equal(legacy.status, "gated");
+});
+
+test("supervised Claude and Codex expose Auto, and other providers leave it as they found it", () => {
+  const legacy = { id: "auto_review", label: "Auto", description: "Unavailable", status: "gated", risk: "medium", detail: "Unavailable", isDefault: false } as const;
+  const claude = supervisedPermissionProfilePresentation("claude-code", legacy);
+  assert.equal(claude.status, "available");
+  assert.match(claude.detail!, /Anything a room message asks for counts as approved, including commands that reach outside your project/);
+  const codex = supervisedPermissionProfilePresentation("codex", legacy);
+  assert.equal(codex.status, "available");
+  assert.match(codex.detail!, /only in its working folder and temporary folders, with no network access, until Codex approves more/);
+  assert.match(codex.detail!, /Anything a room message asks for counts as approved/);
+  assert.equal(supervisedPermissionProfilePresentation("open-model", legacy).status, "gated");
+  assert.equal(legacy.status, "gated");
+  assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "auto_review"), { permissionMode: "auto" });
+  assert.match(autoReviewNotice("Codex"), /^Codex decides which actions are safe instead of asking you\..*trust everyone who can post\.$/);
+  assert.equal(supervisedProviderLaunchPolicy("codex", "auto_review"), undefined);
 });
 
 test("repo-less Cursor setup offers read-only and reserves write profiles for a connected project", () => {

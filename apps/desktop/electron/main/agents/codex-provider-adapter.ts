@@ -92,7 +92,23 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-type CodexThreadResult = { thread?: { id?: string } };
+type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown };
+
+/**
+ * The reviewer Codex reports must be the one this launch named. The owner's
+ * own Codex settings can name another, and an older app-server can ignore the
+ * request; either would route approvals somewhere the access level did not
+ * choose. An app-server that reports no reviewer has none to route to.
+ */
+function assertCodexReviewerApplied(policy: Record<string, unknown>, result: CodexThreadResult): void {
+  if (policy.approvalsReviewer === "auto_review") {
+    if (result.approvalsReviewer === "auto_review") return;
+    throw new Error("Codex did not turn on automatic review. Update Codex, or choose another access level.");
+  }
+  if (result.approvalsReviewer !== undefined && result.approvalsReviewer !== null && result.approvalsReviewer !== "user") {
+    throw new Error("Codex would review approvals itself instead of asking you. Choose Auto to allow that, or remove the reviewer from your Codex settings.");
+  }
+}
 
 function isUnmaterializedEmptyThreadRead(error: unknown): boolean {
   const message = errorMessage(error).toLowerCase();
@@ -205,9 +221,19 @@ function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
       throw new Error(`Codex launchPolicy cannot override reserved field '${key}'.`);
     }
   }
-  const { sandboxPolicy, ...threadPolicy } = policy;
-  if (sandboxPolicy === undefined) return threadPolicy;
+  const { sandboxPolicy, ...namedPolicy } = policy;
+  const reviewer = namedPolicy.approvalsReviewer ?? "user";
+  if (reviewer !== "user" && reviewer !== "auto_review") {
+    throw new Error("Codex launchPolicy names an unsupported approval reviewer.");
+  }
+  // Always name the reviewer, so the owner's own Codex settings cannot choose it.
+  const threadPolicy: Record<string, unknown> = { ...namedPolicy, approvalsReviewer: reviewer };
   const sandbox = recordValue(sandboxPolicy);
+  // Codex reviews its own escalations only beneath project-only writes.
+  if (reviewer === "auto_review" && (sandbox?.type !== "workspaceWrite" || threadPolicy.approvalPolicy !== "on-request")) {
+    throw new Error("Codex launchPolicy names automatic review outside the Auto access level.");
+  }
+  if (sandboxPolicy === undefined) return threadPolicy;
   if (sandbox?.type === "dangerFullAccess" && Object.keys(sandbox).length === 1) {
     return { ...threadPolicy, sandbox: "danger-full-access" };
   }
@@ -217,6 +243,17 @@ function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
     && Object.keys(sandbox).length === 2
   ) {
     return { ...threadPolicy, sandbox: "read-only" };
+  }
+  // Project-only writes exist solely beneath Codex's own approval review.
+  // The thread takes the owner's settings for network access; every turn
+  // restates this exact policy, and the turn's policy is the one Codex applies.
+  if (
+    sandbox?.type === "workspaceWrite"
+    && sandbox.networkAccess === false
+    && Object.keys(sandbox).length === 2
+    && reviewer === "auto_review"
+  ) {
+    return { ...threadPolicy, sandbox: "workspace-write" };
   }
   throw new Error("Codex launchPolicy contains an unsupported thread sandbox policy.");
 }
@@ -230,6 +267,9 @@ function codexTurnPolicy(value: unknown): Readonly<Record<string, unknown>> {
   return Object.freeze({
     approvalPolicy: policy.approvalPolicy,
     sandboxPolicy: Object.freeze(structuredClone(policy.sandboxPolicy as Record<string, unknown>)),
+    // Every turn restates the reviewer, so neither a resumed thread nor the
+    // owner's Codex settings can move approvals to another one.
+    approvalsReviewer: policy.approvalsReviewer ?? "user",
   });
 }
 
@@ -703,6 +743,11 @@ class CodexProviderHandle implements ProviderHandle {
 
   requireTurnPolicy(): Readonly<Record<string, unknown>> {
     if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
+    return this.turnPolicy;
+  }
+
+  /** The policy this runtime was launched under, when it is known. */
+  appliedTurnPolicy(): Readonly<Record<string, unknown>> | null {
     return this.turnPolicy;
   }
 
@@ -1501,7 +1546,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // Probe at absolute offsets 0s, 1s, 3s, and 7s. The waits are therefore
     // the differences between offsets, not 1s + 3s + 7s (which would turn the
     // advertised seven-second grace into eleven seconds).
-    const policy = normalizeLaunchPolicy(request.launchPolicy);
+    // A stored policy can predate the access level it was launched under. The
+    // policy bound to this runtime is the one a replacement thread must keep.
+    const policy = normalizeLaunchPolicy({ ...(recordValue(request.launchPolicy) ?? {}), ...(handle.appliedTurnPolicy() ?? {}) });
     const probeDelays = [0, 1_000, 2_000, 4_000];
     const probe = async (threadId: string): Promise<boolean> => {
       for (const waitMs of probeDelays) {
@@ -1520,6 +1567,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
           });
           assertAttached();
+          assertCodexReviewerApplied(policy, resumed);
           if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
         } catch (error) {
@@ -1569,6 +1617,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ...(request.model ? { model: request.model } : {}),
       ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
     });
+    assertCodexReviewerApplied(policy, started);
     const replacement = started.thread?.id?.trim();
     if (!replacement || replacement === expected) {
       throw new Error("Codex continuation repair did not return a distinct replacement thread.");
@@ -1962,6 +2011,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
         });
       }
+      assertCodexReviewerApplied(policy, threadResult);
       const threadId = threadResult.thread?.id;
       if (!threadId) {
         throw new Error("Codex app-server did not return a thread id.");

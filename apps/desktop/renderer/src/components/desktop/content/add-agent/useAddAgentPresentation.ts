@@ -7,6 +7,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import {
+  autoReviewNotice,
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
   branchScopedGitRoomExpectedBranch,
@@ -340,6 +341,7 @@ export function useAddAgentPresentation(
         return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, Git history is kept, and LetAgents room tools remain available.";
       }
     }
+    if (launchMode.value === "supervised" && profile.id === "auto_review") return autoReviewNotice(providerName);
     if (profile.risk === "high") {
       return `${providerName} can change files and run commands without asking, including outside your project. Use only with projects and connected tools you trust.`;
     }
