@@ -64,6 +64,15 @@ export function normalizeRegistrationLiveness(value: unknown) {
   };
 }
 
+/** A statement gave up waiting for a lock (PostgreSQL 55P03). */
+export function isLockTimeout(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 4; depth += 1) {
+    if ((current as { code?: unknown }).code === "55P03") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export function isActiveWorkerActorLabelConflict(error: unknown): boolean {
   const cause = typeof error === "object" && error !== null && "cause" in error
     ? (error as { cause?: unknown }).cause

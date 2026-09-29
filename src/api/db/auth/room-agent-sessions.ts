@@ -1,6 +1,7 @@
 import crypto, { randomUUID } from "node:crypto";
 import { isMcpWorkerId, isMcpConnectionToken } from "../../../shared/mcp-worker.js";
-import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { getSessionConnections } from "../messages/session-connections.js";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import {
@@ -9,6 +10,7 @@ import {
   room_agent_delivery_instances,
   room_agent_delivery_sessions,
   room_agent_presence,
+  room_participants,
   room_agent_session_bearers,
   room_agent_sessions,
   supervisor_host_grants,
@@ -27,6 +29,8 @@ import {
   ROOM_AGENT_RECONNECT_GRACE_MS,
   type RoomAgentSessionKind,
   type RoomAgentDeliveryCredentialFence,
+  isAgentProcessGone,
+  AGENT_PROCESS_EXITED,
 } from "../../../shared/agent-presence.js";
 import {
   DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES,
@@ -181,6 +185,8 @@ export interface CreateRoomAgentSessionInput {
   supervisor_grant_fence?: SupervisorGrantFence;
   /** Prepared and persisted by the MCP client before registration; never public. */
   connection_token?: string;
+  /** The machine the registering process runs on, as the process derived it. */
+  process_host_id?: string | null;
 }
 
 export const SAME_INSTANCE_RECLAIM_STALE_AFTER_MS =
@@ -255,6 +261,8 @@ async function insertRoomAgentSessionTx(
     agent_instance_id: input.agent_instance_id ?? null,
     display_name: input.display_name,
     assigned_base_display_name: input.assigned_base_display_name ?? null,
+    process_host_id: input.process_host_id ?? null,
+    agent_heard_at: now,
     owner_account_id: input.owner_account_id,
     supervisor_grant_id: input.supervisor_grant_id ?? null,
     owner_label: input.owner_label,
@@ -323,6 +331,13 @@ async function rotateRoomAgentSessionTx(
     ide_label: input.ide_label,
     updated_at: now,
     last_seen_at: now,
+    // Whatever was known about a process was known about the one that
+    // registered before. Nothing is known about this one until it connects.
+    process_seen_at: null,
+    process_connection_id: null,
+    process_disconnected_at: null,
+    process_host_id: input.process_host_id ?? null,
+    agent_heard_at: now,
     ended_at: null,
   }).where(and(
     eq(room_agent_sessions.session_id, current.session_id),
@@ -386,9 +401,16 @@ export async function createRoomAgentSession(
 export async function createFencedRoomAgentSession(
   input: CreateRoomAgentSessionInput,
   replacementProof?: RoomAgentSessionReplacementProof | null,
+  /**
+   * Sessions whose name this registration takes because their process is
+   * gone. Each is ended in this transaction, after its guard is read again
+   * here. If one no longer qualifies, the registration is refused the name.
+   */
+  takeoverSessionIds: readonly string[] = [],
 ): Promise<{
   session: CreatedRoomAgentSession;
   replaced_session_ids: string[];
+  taken_over_session_ids: string[];
 }> {
   const durable = isMcpWorkerId(input.agent_instance_id);
   if ((durable && input.session_kind !== "worker") || durable !== Boolean(input.connection_token)
@@ -399,17 +421,27 @@ export async function createFencedRoomAgentSession(
     return {
       session: await createRoomAgentSession(input),
       replaced_session_ids: [],
+      taken_over_session_ids: [],
     };
   }
 
+  const takeover = [...new Set(takeoverSessionIds)].sort();
+  const unavailableReceiptTargets: number[] = [];
   const committed = await db.transaction(async (tx) => {
     if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
       throw new Error("Supervisor grant fence is stale.");
     }
 
     const instanceId = input.agent_instance_id!.trim();
-    if (durable) {
-      // Names belong to durable workers, including while they are offline.
+    if (takeover.length > 0) {
+      // A registration must answer, not queue. Waiting behind another one's
+      // lock ends in a retryable error rather than an agent that hangs.
+      await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
+    }
+    if (durable || takeover.length > 0) {
+      // Names belong to durable workers, including while they are offline,
+      // and a name changes hands in one step. Registrations that do either
+      // take turns per room, so two cannot each hold what the other needs.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mcp_worker_names:${input.room_id}`}, 0))`);
     }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_instance:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
@@ -451,6 +483,7 @@ export async function createFencedRoomAgentSession(
         return { result: {
           session: { ...toRoomAgentSession(prior), session_token: input.connection_token!, worker_bearer: null },
           replaced_session_ids: [],
+          taken_over_session_ids: [],
         }, invalidations: [] };
       }
     }
@@ -479,23 +512,110 @@ export async function createFencedRoomAgentSession(
     if (durable && replacementProof && !replacementTarget) {
       throw new ActiveAgentInstanceConflictError(replacementProof.session_id);
     }
-    if (durable && replacementTarget) {
-      // Reconnecting is never a rename; preserve the name originally assigned.
+    const observer = { now_ms: nowMs, process_host_id: input.process_host_id ?? null };
+    const nameConflict = (message: string) => Object.assign(new Error(message), {
+      code: "23505", constraint: "room_agent_sessions_active_worker_actor_label_idx",
+    });
+
+    // The process behind each of these is gone, the caller says. Read the
+    // evidence again under the row lock: the caller read it before this
+    // transaction began, and a process can come back in between.
+    const takenOver: RoomAgentSessionRow[] = [];
+    if (takeover.length > 0) {
+      if (predecessors.length > 0) {
+        throw nameConflict("A registration that has a session of its own takes no name from another.");
+      }
+      const holders = await tx.select().from(room_agent_sessions)
+        .where(and(
+          eq(room_agent_sessions.room_id, input.room_id),
+          inArray(room_agent_sessions.session_id, takeover),
+        ))
+        .orderBy(asc(room_agent_sessions.session_id))
+        .for("update") as RoomAgentSessionRow[];
+      // Read inside the transaction, like the rest of the evidence.
+      const { connected } = await getSessionConnections(tx, input.room_id, takeover, nowMs);
+      for (const sessionId of takeover) {
+        const holder = holders.find((row) => row.session_id === sessionId);
+        if (!holder
+          || holder.owner_account_id !== input.owner_account_id
+          || holder.session_kind !== "worker"
+          || holder.supervisor_grant_id
+          || holder.ended_at
+          || holder.agent_instance_id === instanceId
+          || !isAgentProcessGone({ ...holder, delivery_connected: connected.has(holder.session_id) }, observer)) {
+          throw nameConflict("The holder of this name is not gone.");
+        }
+        takenOver.push(holder);
+      }
+    }
+    const takenOverIds = new Set(takenOver.map((row) => row.session_id));
+
+    // A durable worker's name stays reserved while it is offline, until there
+    // is evidence its process is gone. Then another agent of the same owner
+    // may take the name, and this reservation no longer counts.
+    const reservedByAnotherWorker = async (actorLabel: string): Promise<boolean> => {
+      const rows = await tx.select().from(room_agent_sessions).where(and(
+        eq(room_agent_sessions.room_id, input.room_id),
+        eq(room_agent_sessions.actor_label, actorLabel),
+        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+        // A session registered without an instance id is still another session.
+        sql`${room_agent_sessions.agent_instance_id} IS DISTINCT FROM ${instanceId}`,
+        or(
+          isNull(room_agent_sessions.ended_at),
+          sql`${room_agent_sessions.agent_instance_id} LIKE 'worker\\_%'`,
+        ),
+      )).orderBy(asc(room_agent_sessions.session_id)).limit(64) as RoomAgentSessionRow[];
+      return rows.some((row) => {
+        if (takenOverIds.has(row.session_id)) return false;
+        // Whoever is living under the label holds it.
+        if (!row.ended_at) return true;
+        return !(row.owner_account_id === input.owner_account_id
+          && !row.supervisor_grant_id
+          && isAgentProcessGone(row, observer));
+      });
+    };
+    if (durable && replacementTarget
+      && !(await reservedByAnotherWorker(replacementTarget.actor_label))) {
+      // Reconnecting is not a rename: keep the name originally assigned. The
+      // one exception is a name another agent took while this worker was
+      // gone; then the name the caller allocated stands.
       input = { ...input, display_name: replacementTarget.display_name,
         actor_label: replacementTarget.actor_label,
         assigned_base_display_name: replacementTarget.assigned_base_display_name };
     }
-    if (durable) {
-      const [reserved] = await tx.select({ session_id: room_agent_sessions.session_id })
-        .from(room_agent_sessions).where(and(
-          eq(room_agent_sessions.room_id, input.room_id),
-          eq(room_agent_sessions.actor_label, input.actor_label),
-          sql`${room_agent_sessions.agent_instance_id} LIKE 'worker\\_%'`,
-          sql`${room_agent_sessions.agent_instance_id} <> ${instanceId}`,
-        )).limit(1);
-      if (reserved) throw Object.assign(new Error("Worker name is reserved."), {
-        code: "23505", constraint: "room_agent_sessions_active_worker_actor_label_idx",
-      });
+    if (durable && await reservedByAnotherWorker(input.actor_label)) {
+      throw nameConflict("Worker name is reserved.");
+    }
+    if (takenOver.length > 0) {
+      const now = new Date(nowMs).toISOString();
+      const ids = takenOver.map((row) => row.session_id);
+      // The time each was last seen is left as it was: it is the record of
+      // why the name changed hands.
+      await tx.update(room_agent_sessions)
+        .set({ ended_at: now, updated_at: now })
+        .where(and(inArray(room_agent_sessions.session_id, ids), isNull(room_agent_sessions.ended_at)));
+      await tx.update(room_agent_session_bearers)
+        .set({ revoked_at: now })
+        .where(and(
+          inArray(room_agent_session_bearers.session_id, ids),
+          isNull(room_agent_session_bearers.revoked_at),
+        ));
+      await retireRoomAgentDeliveryTx(tx, ids, now);
+      // Room history holds a name for the agent that had it. The name has
+      // passed to this agent, so its history passes too; otherwise the row
+      // would refuse this agent the name at its next registration.
+      const formerKeys = [...new Set(takenOver.map((row) => row.agent_key))]
+        .filter((key) => key !== input.agent_key);
+      if (formerKeys.length > 0) {
+        await tx.update(room_participants)
+          .set({ agent_key: input.agent_key })
+          .where(and(
+            eq(room_participants.room_id, input.room_id),
+            eq(room_participants.kind, "agent"),
+            inArray(room_participants.agent_key, formerKeys),
+            inArray(room_participants.display_name, [...new Set(takenOver.map((row) => row.display_name))]),
+          ));
+      }
     }
     const replacedSessionIds = predecessors.map((row: RoomAgentSessionRow) => row.session_id);
     const retiredCredentials = await collectSessionCredentialFingerprintsTx(
@@ -527,29 +647,148 @@ export async function createFencedRoomAgentSession(
       // id keeps task leases, Board Manager authority, and liveness lineage.
     }
 
-    const invalidations = (predecessors as RoomAgentSessionRow[]).map((previous) => ({
-      room_id: previous.room_id,
-      agent_session_id: previous.session_id,
-      credential_fingerprints: retiredCredentials.get(previous.session_id) ?? [],
-      reason: "replaced" as const,
-    }));
+    const takenOverCredentials = await collectSessionCredentialFingerprintsTx(tx, takenOver);
+    const invalidations = [
+      ...(predecessors as RoomAgentSessionRow[]).map((previous) => ({
+        room_id: previous.room_id,
+        agent_session_id: previous.session_id,
+        credential_fingerprints: retiredCredentials.get(previous.session_id) ?? [],
+        reason: "replaced" as const,
+      })),
+      ...takenOver.map((holder) => ({
+        room_id: holder.room_id,
+        agent_session_id: holder.session_id,
+        credential_fingerprints: takenOverCredentials.get(holder.session_id) ?? [],
+        reason: "ended" as const,
+      })),
+    ];
     await queueRoomAgentCredentialInvalidationsTx(tx, invalidations);
+    const session = replacementTarget
+      ? await rotateRoomAgentSessionTx(
+          tx,
+          replacementTarget as RoomAgentSessionRow,
+          { ...input, agent_instance_id: instanceId },
+        )
+      : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId });
+    // After the successor exists: what was addressed to an agent follows its
+    // key to the new session, and only an agent that has no live session
+    // left loses what it had not answered.
+    const endedAt = new Date(nowMs).toISOString();
+    for (const holder of takenOver) {
+      unavailableReceiptTargets.push(
+        ...await markUnresolvedReceiptsUnavailableTx(tx, holder, endedAt),
+      );
+    }
     return {
       result: {
-        session: replacementTarget
-          ? await rotateRoomAgentSessionTx(
-              tx,
-              replacementTarget as RoomAgentSessionRow,
-              { ...input, agent_instance_id: instanceId },
-            )
-          : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId }),
+        session,
         replaced_session_ids: replacedSessionIds,
+        taken_over_session_ids: takenOver.map((row) => row.session_id),
       },
       invalidations,
     };
   });
   emitCommittedCredentialInvalidations(committed.invalidations);
+  if (unavailableReceiptTargets.length > 0) {
+    // Dynamic import: the server event module transitively imports this file.
+    const { queueMessageInfoInvalidation } = await import("../../server/message-info-events.js");
+    queueMessageInfoInvalidation(input.room_id, null);
+  }
   return committed.result;
+}
+
+/**
+ * The agent's process has opened its connection. Returns the id under which
+ * this connection refreshes and closes it, or null when the session is not
+ * live. Opening supersedes any earlier connection for the session, so a late
+ * close from that one records nothing.
+ */
+export async function openRoomAgentProcessConnection(input: {
+  session_id: string;
+  room_id: string;
+}): Promise<string | null> {
+  const connectionId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const [row] = await db.update(room_agent_sessions)
+    .set({ process_seen_at: now, process_connection_id: connectionId, process_disconnected_at: null })
+    .where(and(
+      eq(room_agent_sessions.session_id, input.session_id),
+      eq(room_agent_sessions.room_id, input.room_id),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      isNull(room_agent_sessions.ended_at),
+    ))
+    .returning({ session_id: room_agent_sessions.session_id });
+  return row ? connectionId : null;
+}
+
+/**
+ * "replaced" when a newer connection holds the session, which says nothing
+ * about the session itself; "ended" only when the session has ended.
+ */
+export async function refreshRoomAgentProcessConnection(input: {
+  session_id: string;
+  connection_id: string;
+}): Promise<"current" | "replaced" | "ended"> {
+  const [row] = await db.update(room_agent_sessions)
+    .set({ process_seen_at: new Date().toISOString() })
+    .where(and(
+      eq(room_agent_sessions.session_id, input.session_id),
+      eq(room_agent_sessions.process_connection_id, input.connection_id),
+      isNull(room_agent_sessions.ended_at),
+    ))
+    .returning({ session_id: room_agent_sessions.session_id });
+  if (row) return "current";
+  const [session] = await db.select({ ended_at: room_agent_sessions.ended_at })
+    .from(room_agent_sessions)
+    .where(eq(room_agent_sessions.session_id, input.session_id))
+    .limit(1);
+  return !session || session.ended_at ? "ended" : "replaced";
+}
+
+/**
+ * The process is exiting and says so. This is the only evidence that needs no
+ * waiting: a closed connection may reopen, a process that has left will not.
+ *
+ * A process speaks for its own connection only. If another connection holds
+ * the session, another process is there, and this exit says nothing about it.
+ */
+export async function recordRoomAgentProcessExit(input: {
+  session_id: string;
+  room_id: string;
+  connection_id: string | null;
+}): Promise<boolean> {
+  const now = new Date().toISOString();
+  // This request is itself the last thing heard from the agent, and it is
+  // recorded as heard when it is authenticated. The exit is not earlier.
+  const left = sql`GREATEST(${now}::timestamptz, COALESCE(${room_agent_sessions.agent_heard_at}, ${now}::timestamptz))`;
+  const [row] = await db.update(room_agent_sessions)
+    .set({ process_seen_at: left, process_disconnected_at: left, process_connection_id: AGENT_PROCESS_EXITED })
+    .where(and(
+      eq(room_agent_sessions.session_id, input.session_id),
+      eq(room_agent_sessions.room_id, input.room_id),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      isNull(room_agent_sessions.ended_at),
+      isNotNull(room_agent_sessions.process_seen_at),
+      input.connection_id
+        ? eq(room_agent_sessions.process_connection_id, input.connection_id)
+        : isNotNull(room_agent_sessions.process_disconnected_at),
+    ))
+    .returning({ session_id: room_agent_sessions.session_id });
+  return Boolean(row);
+}
+
+/** Records that the connection closed, unless a newer one has replaced it. */
+export async function closeRoomAgentProcessConnection(input: {
+  session_id: string;
+  connection_id: string;
+}): Promise<void> {
+  const now = new Date().toISOString();
+  await db.update(room_agent_sessions)
+    .set({ process_seen_at: now, process_disconnected_at: now })
+    .where(and(
+      eq(room_agent_sessions.session_id, input.session_id),
+      eq(room_agent_sessions.process_connection_id, input.connection_id),
+    ));
 }
 
 /**
@@ -570,6 +809,14 @@ export interface RoomWorkerNameHolderRow {
   assigned_base_display_name: string | null;
   created_at: string;
   ended_at: string | null;
+  owner_account_id: string;
+  last_seen_at: string;
+  supervisor_grant_id: string | null;
+  process_host_id: string | null;
+  agent_heard_at: string | null;
+  process_seen_at: string | null;
+  process_connection_id: string | null;
+  process_disconnected_at: string | null;
 }
 
 /** The room could not offer this worker any name that is still free. */
@@ -741,6 +988,14 @@ export async function getRoomWorkerNameHolders(
     assigned_base_display_name: room_agent_sessions.assigned_base_display_name,
     created_at: room_agent_sessions.created_at,
     ended_at: room_agent_sessions.ended_at,
+    owner_account_id: room_agent_sessions.owner_account_id,
+    last_seen_at: room_agent_sessions.last_seen_at,
+    supervisor_grant_id: room_agent_sessions.supervisor_grant_id,
+    process_host_id: room_agent_sessions.process_host_id,
+    agent_heard_at: room_agent_sessions.agent_heard_at,
+    process_seen_at: room_agent_sessions.process_seen_at,
+    process_connection_id: room_agent_sessions.process_connection_id,
+    process_disconnected_at: room_agent_sessions.process_disconnected_at,
   }).from(room_agent_sessions).where(and(
     eq(room_agent_sessions.room_id, roomId),
     eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
@@ -810,6 +1065,30 @@ export async function getRoomAgentSessionByCredentials(input: {
     .limit(1);
 
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
+}
+
+/**
+ * Whether these are the credentials of a session that has ended. A process
+ * that asks after its session is told so, instead of being refused like a
+ * stranger: it is how a process whose name passed on learns of it.
+ */
+export async function isEndedRoomAgentSessionCredential(input: {
+  session_id: string;
+  session_token: string;
+  room_id: string;
+  owner_account_id: string;
+}): Promise<boolean> {
+  const [row] = await db.select({ session_id: room_agent_sessions.session_id })
+    .from(room_agent_sessions)
+    .where(and(
+      eq(room_agent_sessions.session_id, input.session_id),
+      eq(room_agent_sessions.token_hash, hashToken(input.session_token)),
+      eq(room_agent_sessions.room_id, input.room_id),
+      eq(room_agent_sessions.owner_account_id, input.owner_account_id),
+      isNotNull(room_agent_sessions.ended_at),
+    ))
+    .limit(1);
+  return Boolean(row);
 }
 
 export async function getSupervisorRoomAgentSession(input: {
@@ -981,6 +1260,7 @@ export async function touchRoomAgentSession(sessionId: string): Promise<void> {
     .set({
       updated_at: now,
       last_seen_at: now,
+      agent_heard_at: now,
     })
     .where(eq(room_agent_sessions.session_id, sessionId));
 }

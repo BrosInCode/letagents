@@ -87,6 +87,23 @@ export const room_agent_sessions = pgTable(
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
     last_seen_at: timestamp("last_seen_at", { mode: "string", withTimezone: true }).notNull(),
+    // The agent's process holds one connection open for as long as it runs.
+    // These record that connection, which is the only evidence the server has
+    // of whether the process still exists: activity on the session cannot
+    // tell a process that is gone from one that is busy or waiting.
+    // Null `process_seen_at` means the client never opened one, so nothing
+    // may be concluded about its process.
+    process_seen_at: timestamp("process_seen_at", { mode: "string", withTimezone: true }),
+    process_connection_id: text("process_connection_id"),
+    process_disconnected_at: timestamp("process_disconnected_at", { mode: "string", withTimezone: true }),
+    // Names the machine the process runs on. Unlike `host_id`, which is read
+    // from a file that can be copied or shared, it is derived from the
+    // machine itself, so two machines never report the same one.
+    process_host_id: text("process_host_id"),
+    // When the agent itself last made a room call. `last_seen_at` is also
+    // moved by the server's own bookkeeping, such as closing a delivery
+    // lease after the agent has gone, so it cannot say the agent was there.
+    agent_heard_at: timestamp("agent_heard_at", { mode: "string", withTimezone: true }),
     ended_at: timestamp("ended_at", { mode: "string", withTimezone: true }),
   },
   (table) => ({

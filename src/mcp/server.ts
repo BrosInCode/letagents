@@ -5,6 +5,7 @@ import { registerRoomResources } from "./server/resources.js";
 import { registerTools } from "./server/register-tools.js";
 import { attachMcpServer, autoJoinFromContext, shutdownRuntime } from "./server/runtime.js";
 import { requireValidWorkerBearerRuntime } from "./server/runtime/worker-bearer.js";
+import { announceProcessExit } from "./server/runtime/process-connection.js";
 import { executionProfile } from "./server/runtime/execution-profile.js";
 import { WORKSPACE_CAPTURE_INSTRUCTIONS } from "./server/tools/workspace.js";
 import {
@@ -35,15 +36,23 @@ async function main() {
   await autoJoinFromContext();
 }
 
-process.on("SIGINT", () => {
+let exiting = false;
+/**
+ * Leave once, telling the room on the way out. The host closing stdin is an
+ * exit too: without it this process would outlive its host, kept running by
+ * the connections it holds, and the room would go on believing it exists.
+ */
+function exit(): void {
+  if (exiting) return;
+  exiting = true;
   shutdownRuntime();
-  process.exit(0);
-});
+  void announceProcessExit().finally(() => process.exit(0));
+}
 
-process.on("SIGTERM", () => {
-  shutdownRuntime();
-  process.exit(0);
-});
+process.on("SIGINT", exit);
+process.on("SIGTERM", exit);
+process.stdin.on("end", exit);
+process.stdin.on("close", exit);
 
 main().catch((err) => {
   console.error("Fatal error:", err);
