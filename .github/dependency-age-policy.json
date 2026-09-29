@@ -12,11 +12,6 @@
       "reason": "Exact patched release required to remediate GHSA-9mqv-5hh9-4cgg before the normal cooldown expires; registry signatures and the full test suite are verified in CI."
     },
     {
-      "name": "electron",
-      "version": "42.8.1",
-      "reason": "Exact patched release required to remediate GHSA-r4w5-6pfg-jxp5 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-11 when the cooldown is naturally satisfied."
-    },
-    {
       "name": "qs",
       "version": "6.16.0",
       "reason": "Exact patched release required to remediate GHSA-x5fp-wj9c-mxmx and GHSA-4mjr-xmp4-gh2g before the normal cooldown expires; registry signatures, dependency audits, and full test suites are verified in CI. Remove after 2026-09-06 when the cooldown is naturally satisfied."

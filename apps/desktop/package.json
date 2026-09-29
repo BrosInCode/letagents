@@ -67,7 +67,7 @@
     "@vitejs/plugin-vue": "5.2.4",
     "concurrently": "9.2.4",
     "cross-env": "10.1.0",
-    "electron": "42.8.1",
+    "electron": "42.11.6",
     "eslint": "10.6.0",
     "eslint-plugin-vue": "10.9.2",
     "monaco-editor": "0.56.0",
@@ -89,7 +89,7 @@
     "hono": "4.13.5",
     "ip-address": "10.5.1",
     "builder-util-runtime": "9.7.0",
-    "joi": "18.2.5",
+    "joi": "18.2.9",
     "js-yaml": "4.3.2"
   }
 }
