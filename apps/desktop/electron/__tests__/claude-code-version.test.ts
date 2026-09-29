@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  claudeApprovalProfileLabel,
   inspectClaudeCodeVersion,
   MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION,
   requireSupportedClaudeCodeVersion,
@@ -118,7 +119,15 @@ test("Claude Code preflight truthfully includes the managed LetAgents connection
 
 test("tool approvals require the verified native version without raising existing Claude profile minimums", () => {
   assert.equal(inspectClaudeCodeVersion("2.1.220 (Claude Code)").supported, true);
-  assert.equal(inspectClaudeCodeVersion("2.1.220 (Claude Code)", true).supported, false);
-  assert.match(inspectClaudeCodeVersion("2.1.220 (Claude Code)", true).error!, /Ask before writes.*2\.1\.272.*claude update/);
-  assert.equal(requireSupportedClaudeCodeVersion("2.1.272 (Claude Code)", true), "2.1.272");
+  assert.equal(inspectClaudeCodeVersion("2.1.220 (Claude Code)", "Ask before writes").supported, false);
+  assert.match(inspectClaudeCodeVersion("2.1.220 (Claude Code)", "Ask before writes").error!, /Ask before writes.*2\.1\.272.*claude update/);
+  assert.equal(requireSupportedClaudeCodeVersion("2.1.272 (Claude Code)", "Ask before writes"), "2.1.272");
+});
+
+test("Auto uses the prompt bridge, so it needs the same native version as asking", () => {
+  assert.equal(claudeApprovalProfileLabel("ask_before_write"), "Ask before writes");
+  assert.equal(claudeApprovalProfileLabel("auto_review"), "Auto");
+  assert.equal(claudeApprovalProfileLabel("full_access"), null);
+  assert.equal(claudeApprovalProfileLabel(null), null);
+  assert.match(inspectClaudeCodeVersion("2.1.220 (Claude Code)", claudeApprovalProfileLabel("auto_review")).error!, /too old for Auto\. Update to 2\.1\.272/);
 });

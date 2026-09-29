@@ -38,9 +38,16 @@ function compareVersions(left: ParsedVersion, right: ParsedVersion): number {
   return left.major - right.major || left.minor - right.minor || left.patch - right.patch;
 }
 
-export function inspectClaudeCodeVersion(output: string, toolApprovals = false): ClaudeCodeVersionReadiness {
+/** Profiles whose approvals travel over the stdio prompt bridge. */
+export function claudeApprovalProfileLabel(permissionProfileId: string | null | undefined): string | null {
+  return permissionProfileId === "ask_before_write" ? "Ask before writes"
+    : permissionProfileId === "auto_review" ? "Auto"
+      : null;
+}
+
+export function inspectClaudeCodeVersion(output: string, approvalProfileLabel: string | null = null): ClaudeCodeVersionReadiness {
   const parsed = parseVersion(output.trim());
-  const requiredVersion = toolApprovals ? MINIMUM_CLAUDE_TOOL_APPROVAL_VERSION : MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION;
+  const requiredVersion = approvalProfileLabel ? MINIMUM_CLAUDE_TOOL_APPROVAL_VERSION : MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION;
   const minimum = parseVersion(requiredVersion)!;
   if (!parsed) {
     return {
@@ -53,14 +60,14 @@ export function inspectClaudeCodeVersion(output: string, toolApprovals = false):
     return {
       version: parsed.version,
       supported: false,
-      error: `Claude Code ${parsed.version} is too old for ${toolApprovals ? "Ask before writes" : "supervised room agents"}. Update to ${requiredVersion} or newer with 'claude update', then try again.`,
+      error: `Claude Code ${parsed.version} is too old for ${approvalProfileLabel ?? "supervised room agents"}. Update to ${requiredVersion} or newer with 'claude update', then try again.`,
     };
   }
   return { version: parsed.version, supported: true, error: null };
 }
 
-export function requireSupportedClaudeCodeVersion(output: string, toolApprovals = false): string {
-  const readiness = inspectClaudeCodeVersion(output, toolApprovals);
+export function requireSupportedClaudeCodeVersion(output: string, approvalProfileLabel: string | null = null): string {
+  const readiness = inspectClaudeCodeVersion(output, approvalProfileLabel);
   if (!readiness.supported || !readiness.version) {
     throw new Error(readiness.error ?? "Claude Code is not supported.");
   }

@@ -21,7 +21,13 @@ export function attestProviderSpawnPolicy(
   ).id;
   const policy = plainPolicy(request.launchPolicy, provider);
   if (provider === "codex") {
-    const authority = profile === "ask_before_write"
+    const authority = profile === "auto_review"
+      ? {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "workspaceWrite", networkAccess: false },
+        approvalsReviewer: "auto_review",
+      }
+      : profile === "ask_before_write"
       ? {
         approvalPolicy: "on-request",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
@@ -30,8 +36,13 @@ export function attestProviderSpawnPolicy(
         approvalPolicy: "never",
         sandboxPolicy: { type: "dangerFullAccess" },
       };
-    requireMatch(policy, "approvalPolicy", authority.approvalPolicy, provider);
-    requireMatch(policy, "sandboxPolicy", authority.sandboxPolicy, provider);
+    // Only the Auto profile may hand approvals to a reviewer other than the host.
+    if (profile !== "auto_review" && Object.hasOwn(policy, "approvalsReviewer") && policy.approvalsReviewer !== "user") {
+      throw new Error(`${provider} launch does not attest permission-profile authority at 'approvalsReviewer'.`);
+    }
+    for (const [key, value] of Object.entries(authority)) {
+      requireMatch(policy, key, value, provider);
+    }
   } else if (provider === "open-model") {
     requireMatch(policy, "permission", supervisedOpenCodePermissionPolicy(
       profile === "ask_before_write" ? "ask_before_write" : "full_access",
@@ -48,12 +59,12 @@ export function attestProviderSpawnPolicy(
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
         : {
-          permissionMode: "default", dangerouslySkipPermissions: false,
+          permissionMode: profile === "auto_review" ? "auto" : "default", dangerouslySkipPermissions: false,
           allowDangerouslySkipPermissions: false,
           tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
           allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
         };
-    if (profile === "ask_before_write") {
+    if (profile === "ask_before_write" || profile === "auto_review") {
       const authorityFlags = new Set(Object.keys(authority).map(key => key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)));
       for (const key of Object.keys(policy)) {
         if (key.includes("-") && authorityFlags.has(key)) throw new Error(`Claude approval profile cannot override '${key}'.`);

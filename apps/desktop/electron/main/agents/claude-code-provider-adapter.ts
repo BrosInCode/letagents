@@ -76,7 +76,7 @@ import {
 } from "./claude-room-turn-evidence.js";
 import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
-import { requireSupportedClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
+import { claudeApprovalProfileLabel, requireSupportedClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 
 // Claude Code through its native headless CLI. The daemon owns room ingress,
 // exact-turn dispatch, retry, credentials, and publication; this adapter owns
@@ -1365,7 +1365,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
     const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
     const versionOutput = await this.deps.readVersion(this.claudeBin);
-    requireSupportedClaudeCodeVersion(versionOutput, req.permissionProfileId === "ask_before_write");
+    const approvalProfileLabel = claudeApprovalProfileLabel(req.permissionProfileId);
+    requireSupportedClaudeCodeVersion(versionOutput, approvalProfileLabel);
 
     const policyArgs = claudeLaunchPolicyArgs(attestProviderSpawnPolicy("claude-code", req));
     const managedMcpConfig = await this.deps.createLetAgentsMcpConfig(req);
@@ -1383,7 +1384,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       "--verbose",
       "--input-format", "stream-json",
       "--output-format", "stream-json",
-      ...(req.permissionProfileId === "ask_before_write" ? ["--permission-prompt-tool", "stdio"] : []),
+      // Auto keeps the bridge: anything Claude declines to decide reaches the host.
+      ...(approvalProfileLabel ? ["--permission-prompt-tool", "stdio"] : []),
       "--strict-mcp-config",
       "--mcp-config", managedMcpConfig.path,
       ...policyArgs,
@@ -1491,9 +1493,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       if (bootstrapFailure in observedInit) {
         throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields()));
       }
-      if (req.permissionProfileId === "ask_before_write"
+      if (approvalProfileLabel
         && (!Array.isArray(observedInit.capabilities) || !observedInit.capabilities.includes("msg_lifecycle_v1"))) {
         throw new Error("Claude tool approvals require exact native turn lifecycle support. Update Claude Code, then try again.");
+      }
+      // An account without automatic review starts in another mode. Running
+      // there would either prompt for everything or decide nothing.
+      if (req.permissionProfileId === "auto_review" && observedInit.permissionMode !== "auto") {
+        throw new Error("Claude Code did not start in Auto mode. This account or Claude Code version may not support it. Choose another access level, then try again.");
       }
       // A named but failed server is not a usable room connection.
       if (!hasReadyRoomWorkplace(observedInit)) {
