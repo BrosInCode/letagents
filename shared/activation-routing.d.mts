@@ -131,6 +131,11 @@ export declare function createGlobalAgentAddressResolver(identities: readonly Ac
     hasMention: boolean;
     hasAgentMention: boolean;
     explicitMentionKeys: Set<string>;
+    /** Mentions that name more than one agent and therefore wake none. */
+    ambiguousMentions: Array<{
+        handle: string;
+        agentKeys: string[];
+    }>;
     replyTargetKeys: Set<string>;
     senderKeys: Set<string>;
 };

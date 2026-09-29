@@ -562,11 +562,40 @@ export async function createFencedRoomAgentSession(
  * prove replacement.  The current grant fence plus this tuple lock are the
  * authority to rotate the worker bearer in place.
  */
+export interface RoomWorkerNameHolderRow {
+  session_id: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  display_name: string;
+  assigned_base_display_name: string | null;
+  created_at: string;
+  ended_at: string | null;
+}
+
+/** The room could not offer this worker any name that is still free. */
+export class WorkerDisplayNameExhaustedError extends Error {
+  readonly code = "agent_session_display_name_exhausted";
+  constructor() {
+    super("Could not allocate a unique active worker display name for this room.");
+  }
+}
+
+export function isWorkerDisplayNameExhaustedError(error: unknown): error is WorkerDisplayNameExhaustedError {
+  return error instanceof WorkerDisplayNameExhaustedError;
+}
+
 export async function createOrRotateSupervisorWorkerSession(
   input: CreateRoomAgentSessionInput & {
     supervisor_grant_id: string;
     supervisor_grant_fence: SupervisorGrantFence;
     agent_instance_id: string;
+    /**
+     * Decides the worker's name from the names taken in the room. It runs on
+     * this transaction's connection, after the lock timeout is set, so naming
+     * never waits on a second connection outside the mint's deadline.
+     */
+    resolve_display_name?: (holders: readonly RoomWorkerNameHolderRow[]) =>
+      { display_name: string; actor_label: string } | null;
   },
 ): Promise<{ session: CreatedRoomAgentSession; bearer: RoomAgentSessionBearer }> {
   const instanceId = input.agent_instance_id.trim();
@@ -642,9 +671,16 @@ export async function createOrRotateSupervisorWorkerSession(
       const now = new Date().toISOString();
       await retireRoomAgentDeliveryTx(tx, [retained.session_id], now);
     }
+    const { resolve_display_name: resolveDisplayName, ...sessionInput } = input;
+    let named: CreateRoomAgentSessionInput = sessionInput;
+    if (resolveDisplayName) {
+      const resolved = resolveDisplayName(await getRoomWorkerNameHolders(input.room_id, tx));
+      if (!resolved) throw new WorkerDisplayNameExhaustedError();
+      named = { ...sessionInput, display_name: resolved.display_name, actor_label: resolved.actor_label };
+    }
     const session = retained
-      ? await rotateRoomAgentSessionTx(tx, retained as RoomAgentSessionRow, { ...input, agent_instance_id: instanceId })
-      : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId });
+      ? await rotateRoomAgentSessionTx(tx, retained as RoomAgentSessionRow, { ...named, agent_instance_id: instanceId })
+      : await insertRoomAgentSessionTx(tx, { ...named, agent_instance_id: instanceId });
     if (!session.worker_bearer) throw new Error("Worker bearer mode is not enabled.");
     const [bearer] = await tx.select().from(room_agent_session_bearers).where(and(
       eq(room_agent_session_bearers.session_id, session.session_id),
@@ -685,6 +721,31 @@ export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
     .orderBy(desc(room_agent_sessions.last_seen_at))
 
   return rows.map((row) => toRoomAgentSession(row as RoomAgentSessionRow));
+}
+
+/**
+ * Worker sessions whose names are taken in a room: every live worker, and
+ * every durable worker even while offline, because a durable worker keeps its
+ * name across reconnects. Kept narrow because the supervisor mint reads it
+ * inside its transaction.
+ */
+export async function getRoomWorkerNameHolders(
+  roomId: string,
+  executor: Pick<typeof db, "select"> = db,
+): Promise<RoomWorkerNameHolderRow[]> {
+  return await executor.select({
+    session_id: room_agent_sessions.session_id,
+    agent_key: room_agent_sessions.agent_key,
+    agent_instance_id: room_agent_sessions.agent_instance_id,
+    display_name: room_agent_sessions.display_name,
+    assigned_base_display_name: room_agent_sessions.assigned_base_display_name,
+    created_at: room_agent_sessions.created_at,
+    ended_at: room_agent_sessions.ended_at,
+  }).from(room_agent_sessions).where(and(
+    eq(room_agent_sessions.room_id, roomId),
+    eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+    sql`(${room_agent_sessions.ended_at} IS NULL OR ${room_agent_sessions.agent_instance_id} LIKE 'worker\\_%')`,
+  ));
 }
 
 export async function getDurableRoomWorkerSessions(roomId: string): Promise<RoomAgentSession[]> {

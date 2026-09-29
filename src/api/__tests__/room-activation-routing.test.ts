@@ -171,6 +171,10 @@ test("global mention routing lets one reachable identity break a stale friendly-
     currentGardenPoint,
   ])(message);
   assert.deepEqual([...withoutReachability.explicitMentionKeys], []);
+  assert.deepEqual(withoutReachability.ambiguousMentions, [{
+    handle: "GardenPoint",
+    agentKeys: [currentGardenPoint.agent_key, staleGardenPoint.agent_key].sort(),
+  }]);
 
   const oneReachable = createGlobalAgentAddressResolver([
     staleGardenPoint,
@@ -183,6 +187,7 @@ test("global mention routing lets one reachable identity break a stale friendly-
     ]),
   })(message);
   assert.deepEqual([...oneReachable.explicitMentionKeys], [currentGardenPoint.agent_key]);
+  assert.deepEqual(oneReachable.ambiguousMentions, [], "a resolved tie is not reported");
 
   const bothReachable = createGlobalAgentAddressResolver([
     staleGardenPoint,

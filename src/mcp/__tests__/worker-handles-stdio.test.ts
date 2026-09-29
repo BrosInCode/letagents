@@ -309,6 +309,7 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     const localOne = await call(first.client, "register_agent_session", localCreate);
     const localTwo = await call(first.client, "register_agent_session", { ...localCreate, registration_key: "local-chat-b" });
     assert.notEqual(localOne.agent_session.display_name, localTwo.agent_session.display_name);
+    assert.match(localTwo.agent_session.display_name, /^[A-Za-z]+$/, "a held name yields its own codename, not a numbered variant");
     await call(second.client, "register_agent_session", { worker_id: localOne.worker_id, room_id: "room_local" });
     assert.ok((await raw(first.client, "send_message", { room_id: "room_local", agent_session_id: localOne.agent_session.session_id, text: "stale local writer" })).isError);
     assert.ok((await raw(first.client, "disconnect_agent_session", { room_id: "room_local", agent_session_id: localOne.agent_session.session_id })).isError);

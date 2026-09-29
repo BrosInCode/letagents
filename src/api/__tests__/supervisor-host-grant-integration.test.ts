@@ -822,6 +822,123 @@ test("a mint blocked behind another transaction fails before the daemon's 10s de
   assert.equal(retried.statusCode, 201);
 });
 
+test("a supervised worker requesting a name a live agent holds is given its own name", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const otherAgent = await authDb!.registerAgentIdentity({ canonical_key: "owner/route-agent-two", name: "route-agent-two", display_name: "FieldMeadow", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const otherGrant = (await authDb!.createSupervisorHostGrant({ owner_account_id: "owner_route", host_id: "host_route_two", installation_id: "install_route_two", allowed_room_ids: [room.id], allowed_agent_keys: [otherAgent.canonical_key], expires_at: new Date(Date.now() + 60_000).toISOString() })).grant;
+  const otherReqBase = { ...reqBase, supervisorGrant: otherGrant, params: { grantId: otherGrant.grant_id } };
+  const first = { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "daemon:first", display_name: "FieldMeadow", ide_label: "Codex" };
+  // A different provider label used to make the same name acceptable.
+  const second = { generation: otherGrant.current_generation, room_id: room.id, agent_key: otherAgent.canonical_key, agent_instance_id: "daemon:second", display_name: "fieldmeadow", ide_label: "Claude Code" };
+
+  const holder = recorder();
+  await mint({ ...reqBase, body: first }, holder);
+  assert.equal(holder.statusCode, 201, JSON.stringify(holder.body));
+  assert.equal(holder.body.display_name, "FieldMeadow");
+  assert.equal(holder.body.display_name_reassigned, false);
+
+  const newcomer = recorder();
+  await mint({ ...otherReqBase, body: second }, newcomer);
+  assert.equal(newcomer.statusCode, 201, JSON.stringify(newcomer.body));
+  assert.equal(newcomer.body.display_name_reassigned, true);
+  assert.equal(newcomer.body.requested_display_name, "fieldmeadow");
+  assert.match(newcomer.body.display_name, /^[A-Za-z]+$/, "the assigned name is one mentionable word");
+  assert.notEqual(newcomer.body.display_name.toLowerCase(), "fieldmeadow");
+  assert.match(newcomer.body.actor_label, new RegExp(`^${newcomer.body.display_name} \\| `));
+
+  // A supervisor that has not adopted the assignment asks for the taken name
+  // again on every rotation. The room keeps the name it already assigned.
+  const newcomerAgain = recorder();
+  await mint({ ...otherReqBase, body: second }, newcomerAgain);
+  assert.equal(newcomerAgain.statusCode, 201, JSON.stringify(newcomerAgain.body));
+  assert.equal(newcomerAgain.body.session_id, newcomer.body.session_id);
+  assert.equal(newcomerAgain.body.display_name, newcomer.body.display_name);
+
+  const holderAgain = recorder();
+  await mint({ ...reqBase, body: first }, holderAgain);
+  assert.equal(holderAgain.statusCode, 201, JSON.stringify(holderAgain.body));
+  assert.equal(holderAgain.body.display_name, "FieldMeadow", "the holder is never renamed by a newcomer");
+
+  // The holder going offline must not hand its name to the newcomer: people
+  // would keep typing the name and reach a different agent.
+  await authDb!.endRoomAgentSession({ session_id: holder.body.session_id, room_id: room.id });
+  const newcomerAfterHolderLeft = recorder();
+  await mint({ ...otherReqBase, body: second }, newcomerAfterHolderLeft);
+  assert.equal(newcomerAfterHolderLeft.statusCode, 201, JSON.stringify(newcomerAfterHolderLeft.body));
+  assert.equal(newcomerAfterHolderLeft.body.display_name, newcomer.body.display_name);
+  assert.equal(newcomerAfterHolderLeft.body.display_name_reassigned, true);
+
+  const holderReturns = recorder();
+  await mint({ ...reqBase, body: first }, holderReturns);
+  assert.equal(holderReturns.statusCode, 201, JSON.stringify(holderReturns.body));
+  assert.equal(holderReturns.body.display_name, "FieldMeadow", "the holder returns to its own name");
+});
+
+test("a supervised worker never takes a name an offline durable worker or another agent's key answers to", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const durable = await authDb!.registerAgentIdentity({ canonical_key: "owner/worker-abc", name: "worker-abc", display_name: "FieldMeadow", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const offline = await authDb!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "claude-code", ide_label: "Claude",
+    agent_key: durable.canonical_key, agent_instance_id: "worker_abc", display_name: "FieldMeadow",
+    actor_label: "FieldMeadow | Owner's agent | Claude", owner_account_id: "owner_route", owner_label: "Owner",
+  });
+  await authDb!.endRoomAgentSession({ session_id: offline.session_id, room_id: room.id });
+  // A legacy agent's key ends in the name it was created with, and mention
+  // routing matches that segment whatever the agent is called now.
+  const legacy = await authDb!.registerAgentIdentity({ canonical_key: "owner/owlsolar", name: "owlsolar", display_name: "GraniteHarbor", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  await authDb!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "codex", ide_label: "Codex",
+    agent_key: legacy.canonical_key, agent_instance_id: "legacy-instance", display_name: "GraniteHarbor",
+    actor_label: "GraniteHarbor | Owner's agent | Codex", owner_account_id: "owner_route", owner_label: "Owner",
+  });
+
+  for (const requested of ["FieldMeadow", "OwlSolar"]) {
+    const minted = recorder();
+    await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key,
+      agent_instance_id: `daemon:${requested}`, display_name: requested, ide_label: "Codex" } }, minted);
+    assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+    assert.equal(minted.body.display_name_reassigned, true, `${requested} is taken`);
+    assert.notEqual(minted.body.display_name.toLowerCase(), requested.toLowerCase());
+  }
+});
+
+test("live workers that already share a name converge by renaming only the newer one", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const otherAgent = await authDb!.registerAgentIdentity({ canonical_key: "owner/route-agent-two", name: "route-agent-two", display_name: "FieldMeadow", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const otherGrant = (await authDb!.createSupervisorHostGrant({ owner_account_id: "owner_route", host_id: "host_route_two", installation_id: "install_route_two", allowed_room_ids: [room.id], allowed_agent_keys: [otherAgent.canonical_key], expires_at: new Date(Date.now() + 60_000).toISOString() })).grant;
+  const otherReqBase = { ...reqBase, supervisorGrant: otherGrant, params: { grantId: otherGrant.grant_id } };
+  const common = {
+    room_id: room.id, session_kind: "worker" as const, display_name: "FieldMeadow", owner_account_id: "owner_route",
+    owner_label: "Owner", worker_bearer_expires_at: new Date(Date.now() + 30_000).toISOString(),
+  };
+  const older = await authDb!.createRoomAgentSession({ ...common, runtime: "codex", ide_label: "Codex",
+    agent_key: agent.canonical_key, agent_instance_id: "daemon:older", actor_label: "FieldMeadow | Owner's agent | Codex",
+    supervisor_grant_id: grantResult.grant.grant_id });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const newer = await authDb!.createRoomAgentSession({ ...common, runtime: "claude-code", ide_label: "Claude Code",
+    agent_key: otherAgent.canonical_key, agent_instance_id: "daemon:newer", actor_label: "FieldMeadow | Owner's agent | Claude Code",
+    supervisor_grant_id: otherGrant.grant_id });
+
+  const olderMint = recorder();
+  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key,
+    agent_instance_id: "daemon:older", display_name: "FieldMeadow", ide_label: "Codex" } }, olderMint);
+  assert.equal(olderMint.statusCode, 201, JSON.stringify(olderMint.body));
+  assert.equal(olderMint.body.session_id, older.session_id);
+  assert.equal(olderMint.body.display_name, "FieldMeadow", "the older holder keeps the shared name");
+
+  const newerMint = recorder();
+  await mint({ ...otherReqBase, body: { generation: otherGrant.current_generation, room_id: room.id, agent_key: otherAgent.canonical_key,
+    agent_instance_id: "daemon:newer", display_name: "FieldMeadow", ide_label: "Claude Code" } }, newerMint);
+  assert.equal(newerMint.statusCode, 201, JSON.stringify(newerMint.body));
+  assert.equal(newerMint.body.session_id, newer.session_id);
+  assert.equal(newerMint.body.display_name_reassigned, true);
+  assert.notEqual(newerMint.body.display_name, "FieldMeadow");
+  assert.match(newerMint.body.display_name, /^[A-Za-z]+$/);
+});
+
 test("supervisor worker end is idempotent after a committed response is lost", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
