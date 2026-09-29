@@ -62,6 +62,7 @@ export interface RoomMessageRouteDeps {
   rememberRoomParticipantFromMessage(input: {
     projectId: string;
     sender: string;
+    agentKey?: string | null;
     source?: string | null;
     sessionAccount?: AuthenticatedRequest["sessionAccount"];
     timestamp?: string;

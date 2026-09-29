@@ -90,6 +90,7 @@ export function registerCreateMessageRoute(
       void Promise.resolve().then(() => deps.rememberRoomParticipantFromMessage({
         projectId: project.id,
         sender: normalizedSender,
+        agentKey: workerIdentity?.agent_key ?? null,
         source,
         sessionAccount: req.sessionAccount,
         timestamp: message.timestamp,
