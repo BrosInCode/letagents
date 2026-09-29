@@ -159,6 +159,15 @@ const OPEN_MODEL_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     isDefault: false,
   },
   {
+    id: "auto_review",
+    label: "Auto",
+    description: "Automatic review is unavailable for OpenCode in this connection mode.",
+    status: "gated",
+    risk: "high",
+    detail: "Choose another available access level.",
+    isDefault: false,
+  },
+  {
     id: "sandboxed_write",
     label: "Sandboxed writes",
     description: "Restricted file editing is unavailable for OpenCode here.",
@@ -227,6 +236,11 @@ export function assertManagedAgentPermissionProfileAvailable(
     throw new Error(`Unknown permission profile '${requested}' for ${providerId}.`);
   }
   const profile = managedAgentPermissionProfileForProvider(providerId, requestedProfileId);
+  if (launchMode === "supervised" && profile.id === "auto_review" && providerId === "open-model") {
+    return { ...profile, status: "available",
+      description: "Lets LetAgents review each command before it runs. Routine commands and edits to project files run without asking.",
+      detail: "Each command is sent to LetAgents and to Jev, a decision model, for review. A command that deletes, publishes, installs, or reaches the network still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project." };
+  }
   if (launchMode === "supervised" && profile.id === "auto_review" && (providerId === "claude-code" || providerId === "codex")) {
     return providerId === "claude-code"
       ? { ...profile, status: "available",

@@ -10,6 +10,7 @@ const SUPERVISOR_GRANT_ROUTE_PATTERNS: ReadonlyArray<{ method: string; pattern: 
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/agent-work$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/execution-approval-publications$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/execution-approval-publications\/[^/]+\/close$/ },
+  { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/command-reviews$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/leases\/[^/]+\/attestation$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/leases\/[^/]+\/rebind$/ },
   // Reconciliation reads are explicit grant capabilities, not generic

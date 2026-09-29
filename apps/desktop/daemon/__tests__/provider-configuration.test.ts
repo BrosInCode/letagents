@@ -389,12 +389,27 @@ test("Auto hands approval review to the provider and leaves no trace when switch
   assert.equal(supervisedPermissionProfilesForProvider("claude-code").find((profile) => profile.id === "auto_review")?.risk, "high");
   assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "auto_review")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "auto_review")?.risk, "high");
-  for (const provider of ["open-model", "cursor"]) {
-    assert.equal(supervisedPermissionProfilesForProvider(provider).some((profile) => profile.id === "auto_review"), false);
-    assert.throws(() => deriveProviderConfigurationSnapshot({
-      provider, model: null, reasoningEffort: null, permissionProfileId: "auto_review", configurationRevision: 1,
-    }, {}), /unavailable/);
+  assert.equal(supervisedPermissionProfilesForProvider("cursor").some((profile) => profile.id === "auto_review"), false);
+  assert.throws(() => deriveProviderConfigurationSnapshot({
+    provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "auto_review", configurationRevision: 1,
+  }, {}), /unavailable/);
+
+  const openModel = { provider: "open-model", model: "qwen-next", reasoningEffort: null, configurationRevision: 5 } as const;
+  const openModelAuto = deriveProviderConfigurationSnapshot({ ...openModel, permissionProfileId: "auto_review" }, { permission: { "*": "allow" }, share: "disabled" });
+  // Nothing outside the project is opened: no review could see what a command does there.
+  assert.deepEqual(openModelAuto.launchPolicy, {
+    share: "disabled", permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" },
+  });
+  assert.deepEqual(deriveProviderConfigurationSnapshot({ ...openModel, permissionProfileId: "ask_before_write" }, openModelAuto.launchPolicy).launchPolicy,
+    { share: "disabled", permission: { "*": "allow", edit: "ask", bash: "ask" } });
+  assert.deepEqual(deriveProviderConfigurationSnapshot({ ...openModel, permissionProfileId: "full_access" }, openModelAuto.launchPolicy).launchPolicy,
+    { share: "disabled", permission: { "*": "allow" } });
+  for (const permission of [{ "*": "allow" }, { "*": "allow", edit: "ask", bash: "ask" }, { "*": "allow", edit: "ask", bash: "ask", external_directory: "ask" }]) {
+    assert.throws(() => resolveProviderConfigurationSnapshot({ ...openModel, permissionProfileId: "auto_review", launchPolicy: { permission } }),
+      /conflicts with permission-profile authority at 'permission'/);
   }
+  assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "auto_review")?.status, "available");
+  assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "auto_review")?.risk, "high");
   assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "auto_review"), /verified workspace-rooted/);
 });
 

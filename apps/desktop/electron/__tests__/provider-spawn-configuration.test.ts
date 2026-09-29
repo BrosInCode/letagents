@@ -107,9 +107,15 @@ test("managed provider spawn attestation binds Auto to the provider's own review
     ...request, permissionProfileId: "auto_review", launchPolicy: { ...claudeAuto, "permission-mode": "bypassPermissions" },
   }), /cannot override 'permission-mode'/);
 
-  for (const provider of ["open-model", "cursor"] as const) {
-    assert.throws(() => attestProviderSpawnPolicy(provider, { ...request, permissionProfileId: "auto_review", launchPolicy: {} }), /Unknown permission profile 'auto_review'/);
+  assert.throws(() => attestProviderSpawnPolicy("cursor", { ...request, permissionProfileId: "auto_review", launchPolicy: {} }), /Unknown permission profile 'auto_review'/);
+
+  const openModelAuto = { permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" } };
+  assert.deepEqual(attestProviderSpawnPolicy("open-model", { ...request, permissionProfileId: "auto_review", launchPolicy: openModelAuto }), openModelAuto);
+  for (const permission of [{ "*": "allow" }, { "*": "allow", edit: "ask", bash: "ask" }, { "*": "allow", edit: "allow", bash: "ask", external_directory: "deny" }]) {
+    assert.throws(() => attestProviderSpawnPolicy("open-model", { ...request, permissionProfileId: "auto_review", launchPolicy: { permission } }), /permission-profile authority/);
   }
+  // Asking for every write never carries the rule that only automatic review needs.
+  assert.throws(() => attestProviderSpawnPolicy("open-model", { ...request, permissionProfileId: "ask_before_write", launchPolicy: openModelAuto }), /permission-profile authority/);
 });
 
 test("managed provider spawn attestation rejects downgraded or unsupported authority", () => {

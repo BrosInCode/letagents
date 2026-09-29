@@ -557,17 +557,17 @@ test("managed agent permission profiles map provider-specific available and gate
     "available",
   );
 
-  for (const provider of ["claude-code", "codex"] as const) {
+  for (const provider of ["claude-code", "codex", "open-model"] as const) {
     assert.equal(listManagedAgentPermissionProfiles(provider).find((profile) => profile.id === "auto_review")?.status, "gated");
     assert.throws(() => assertManagedAgentPermissionProfileAvailable(provider, "auto_review"), /Auto is not available/);
     const supervised = assertManagedAgentPermissionProfileAvailable(provider, "auto_review", "supervised");
     assert.equal(supervised.status, "available");
-    assert.match(supervised.detail ?? "", /Anything a room message asks for counts as approved/);
+    assert.equal(supervised.risk, "high");
+    assert.match(supervised.detail ?? "", provider === "open-model"
+      ? /Each command is sent to LetAgents and to Jev/
+      : /Anything a room message asks for counts as approved/);
   }
-  assert.equal(assertManagedAgentPermissionProfileAvailable("claude-code", "auto_review", "supervised").risk, "high");
-  for (const provider of ["open-model", "cursor"] as const) {
-    assert.throws(() => assertManagedAgentPermissionProfileAvailable(provider, "auto_review", "supervised"), /Unknown permission profile 'auto_review'/);
-  }
+  assert.throws(() => assertManagedAgentPermissionProfileAvailable("cursor", "auto_review", "supervised"), /Unknown permission profile 'auto_review'/);
 
   assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "read_only");
   assert.equal(managedAgentPermissionProfileForProvider("cursor", null).id, "read_only");

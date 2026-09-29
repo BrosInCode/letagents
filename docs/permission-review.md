@@ -5,8 +5,66 @@ in one session. Most of those requests are for `npm test`, `git diff`, or
 `cat package.json`. Automatic review lets common reading and checking commands
 run, and leaves the rest to a person.
 
-This page covers the rules and the evaluation. The code is in
-`shared/permission-review.mjs`. Nothing uses it yet.
+This page covers where it is used, the rules, and the evaluation. The code is
+in `shared/permission-review.mjs`.
+
+## Where it is used
+
+Open Model agents, when their owner chooses the **Auto** access level. Claude
+and Codex have their own review and use that instead.
+
+| Request from the agent | Who decides |
+|---|---|
+| Edit a file inside the project | The desktop. It runs unless the file is one of the kinds listed below. Nothing is sent anywhere. |
+| Run a command | The fixed rules on the desktop, then the server's review |
+| Open anything outside the project | OpenCode refuses it |
+| Anything else | A person |
+
+An edit always asks a person when it removes a file, and when the file, or
+the place a file is moved to:
+- has a name that starts with a dot, or is inside a folder whose name does.
+  By convention these are settings: an agent's rules (`.claude`, `.cursor`,
+  `.opencode`, `.mcp.json`), CI workflows and Git hooks, a tool's options
+  (`.eslintrc.js`, `.npmrc`), credentials (`.env`, `.ssh`), Git's own files,
+  and LetAgents' own markers;
+- has a name that looks like a credential, such as `id_rsa` or `server.pem`;
+- has a name with a character outside plain printable ones, or with a space
+  or a dot at its end. A file system can read such a name as another one:
+  macOS opens `package.json` for a name written with a long s (`ſ`). So a
+  file with an accented or non-Latin name always asks;
+- is reached through a symbolic link, has a second name (a hard link), or is
+  not an ordinary file;
+- says what an agent may do: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
+  `CONTEXT.md`, `SKILL.md`, `opencode.json`;
+- defines what a command allowed by name will run: `package.json`, a
+  `Makefile`, a `justfile`, a `Taskfile`, `pyproject.toml`, `Cargo.toml`,
+  `go.mod`, `tsconfig.json`, `lefthook.yml`, anything inside `node_modules`,
+  and the settings file of a test runner, linter, or bundler, such as
+  `jest.config.js`.
+
+A request must also say which file it means twice, as OpenCode does. One that
+does not asks a person.
+
+Source and test files are not on that list. Changing them is the agent's
+work, and a check that runs them runs what the agent wrote.
+
+A request that review allows is recorded with the decider `automatic-review`.
+A request it does not allow appears as an ordinary approval card.
+
+A request is not shown while it is under review. A review may take at most 10
+seconds; after that the request appears as an ordinary approval card, and a
+late answer decides nothing. Requests from one agent are reviewed one at a
+time.
+
+**Not reviewed at all:** reading a file inside the project, searching it, and
+fetching a web page. OpenCode allows these without asking under Auto, as it
+does under Ask before writes. So an agent under Auto can read a credentials
+file inside the project and can reach the web.
+
+The server needs `TYPESAFE_API_KEY` or `AI_GATEWAY_API_KEY`, the same
+credential Smart conversation routing uses. Without one, every command asks a
+person, as Ask before writes does. Review does not depend on
+`LETAGENTS_JEV_ROUTING`.
 
 ## How a command is decided
 
@@ -64,9 +122,11 @@ person.
 ## What Jev is sent
 
 The commands and the project folder path. File contents, command output, and
-room messages are not sent.
+room messages are not sent. The desktop sends them to the LetAgents server,
+which sends them to TypeSafe, or to Vercel's AI Gateway when that is the
+configured credential.
 
-In this evaluation the commands went to OpenRouter, which passed them to
+In the evaluation the commands went to OpenRouter, which passed them to
 TypeSafe.
 
 ## Evaluation
@@ -114,6 +174,11 @@ nothing.
   whatever the project defines. `node <file>` includes command-line tools
   inside `node_modules`. An agent that may edit project files can change what
   any of these run.
+- **The folder a command runs in is not reviewed.** OpenCode lets an agent
+  choose a working folder inside the project, and the request does not say
+  which. `cat config` run inside `.git` reads a file the rules would refuse
+  by name, and `npm test` run inside an installed package runs that
+  package's script.
 - **A name can lie.** Jev allowed `node scripts/list-files.js` and
   `node scripts/run-tests.js` on their names alone. A harmful script with a
   harmless name would run.
