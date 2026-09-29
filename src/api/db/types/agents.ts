@@ -259,6 +259,11 @@ export interface RoomAgentSessionRow {
   created_at: string;
   updated_at: string;
   last_seen_at: string;
+  process_seen_at?: string | null;
+  process_connection_id?: string | null;
+  process_disconnected_at?: string | null;
+  process_host_id?: string | null;
+  agent_heard_at?: string | null;
   ended_at: string | null;
 }
 

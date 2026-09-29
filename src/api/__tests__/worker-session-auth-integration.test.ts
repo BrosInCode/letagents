@@ -174,6 +174,9 @@ function createResponseRecorder() {
       this.body = { location };
       return this;
     },
+    setHeader() {
+      return this;
+    },
     write() {
       return true;
     },
@@ -1507,6 +1510,891 @@ test(
     assert.equal(rows.find((row) => row.display_name === "Heron")?.agent_key, null, "an unproven owner is never recorded");
   },
 );
+
+// ---------------------------------------------------------------------------
+// Takeover: a name held by a session whose process is gone passes on.
+// ---------------------------------------------------------------------------
+async function takeoverHarness() {
+  if (!db || !agents || !pool || !dbModule) throw new Error("DB-backed worker session tests require TEST_DB_URL");
+  const { room } = await seedHarness();
+  const handlers = registerRoutesForRoom(room);
+  const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+  const now = new Date().toISOString();
+  const addIdentity = async (key: string) => {
+    await db!.insert(agents!).values({
+      ...agentIdentity, id: `agent_${key.replace(/[^a-z0-9]/gi, "_")}`, canonical_key: key,
+      name: key.split("/")[1]!, created_at: now, updated_at: now,
+    });
+    return key;
+  };
+  const register = async (body: Record<string, unknown>, host = "host_a") => {
+    const response = await invoke(
+      registerHandler,
+      ownerTokenRequest({
+        ide_label: "Agent", session_kind: "worker", runtime: "claude-code",
+        // One stored host id throughout: the file that holds it can be copied
+        // between machines, so it is not what tells machines apart.
+        registration_liveness: { host_id: "host_shared_file", host_kind: "macos", liveness_capability: "session_activity" },
+        process_host_id: host,
+        ...body,
+      }, { params: { 0: room.id } }),
+    );
+    return { status: response.statusCode, session: response.body as CreatedSession & { code?: string } };
+  };
+  const set = (sessionId: string, assignments: string) => pool!.query(
+    `UPDATE room_agent_sessions SET ${assignments} WHERE session_id = $1`, [sessionId],
+  );
+  const evidence = {
+    // The process exited: its connection was seen to close this long ago.
+    closed: (sessionId: string, secondsAgo: number) => set(sessionId,
+      `process_seen_at = NOW() - INTERVAL '${secondsAgo} seconds', process_disconnected_at = NOW() - INTERVAL '${secondsAgo} seconds', process_connection_id = 'closed-connection', last_seen_at = NOW() - INTERVAL '${secondsAgo} seconds', agent_heard_at = NOW() - INTERVAL '${secondsAgo} seconds'`),
+    // Its connection closed this long ago, but the agent has made a room call since.
+    heardAfter: (sessionId: string, how: "closed" | "exited", secondsAgo: number, heardSecondsAgo: number) => set(sessionId,
+      `process_seen_at = NOW() - INTERVAL '${secondsAgo} seconds', process_disconnected_at = NOW() - INTERVAL '${secondsAgo} seconds', process_connection_id = '${how === "exited" ? "exited" : "closed-connection"}', last_seen_at = NOW() - INTERVAL '${heardSecondsAgo} seconds', agent_heard_at = NOW() - INTERVAL '${heardSecondsAgo} seconds'`),
+    // Alive and connected, but the agent has made no room call for this long.
+    quiet: (sessionId: string, minutes: number) => set(sessionId,
+      `process_seen_at = NOW(), process_disconnected_at = NULL, process_connection_id = 'open-connection', last_seen_at = NOW() - INTERVAL '${minutes} minutes', agent_heard_at = NOW() - INTERVAL '${minutes} minutes'`),
+    // Nothing at all from it for this long: no connection, no activity.
+    unseen: (sessionId: string, minutes: number) => set(sessionId,
+      `process_seen_at = NOW() - INTERVAL '${minutes} minutes', process_disconnected_at = NULL, process_connection_id = 'open-connection', last_seen_at = NOW() - INTERVAL '${minutes} minutes', agent_heard_at = NOW() - INTERVAL '${minutes} minutes'`),
+    // The process said it was exiting, this long ago.
+    exited: (sessionId: string, secondsAgo: number) => set(sessionId,
+      `process_seen_at = NOW() - INTERVAL '${secondsAgo} seconds', process_disconnected_at = NOW() - INTERVAL '${secondsAgo} seconds', process_connection_id = 'exited', last_seen_at = NOW() - INTERVAL '${secondsAgo} seconds', agent_heard_at = NOW() - INTERVAL '${secondsAgo} seconds'`),
+    // Its connection closed this long ago and the agent has made no call
+    // since. The server has: it closed the agent's delivery lease afterwards.
+    closedThenBookkept: (sessionId: string, how: "closed" | "exited", secondsAgo: number) => set(sessionId,
+      `process_seen_at = NOW() - INTERVAL '${secondsAgo} seconds', process_disconnected_at = NOW() - INTERVAL '${secondsAgo} seconds', process_connection_id = '${how === "exited" ? "exited" : "closed-connection"}', agent_heard_at = NOW() - INTERVAL '${secondsAgo} seconds', last_seen_at = NOW()`),
+    // An older client: it never opens a process connection.
+    none: (sessionId: string, minutes: number) => set(sessionId,
+      `process_seen_at = NULL, process_disconnected_at = NULL, process_connection_id = NULL, last_seen_at = NOW() - INTERVAL '${minutes} minutes', agent_heard_at = NOW() - INTERVAL '${minutes} minutes'`),
+  };
+  const stored = async (sessionId: string) => {
+    const row = (await pool!.query(
+      "SELECT display_name, ended_at FROM room_agent_sessions WHERE session_id = $1", [sessionId],
+    )).rows[0] as { display_name: string; ended_at: string | null };
+    return { display_name: row.display_name, ended: row.ended_at !== null };
+  };
+  const liveNamed = async (name: string) => (await pool!.query(
+    "SELECT session_id FROM room_agent_sessions WHERE room_id = $1 AND display_name = $2 AND session_kind = 'worker' AND ended_at IS NULL",
+    [room.id, name],
+  )).rows.map((row) => row.session_id as string);
+  const worker = (letter: string) => ({ id: `worker_${letter.repeat(32)}`, token: letter.repeat(43) });
+  return { room, handlers, addIdentity, register, evidence, stored, liveNamed, worker };
+}
+
+const takeoverTest = { concurrency: false, skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false };
+
+test("a restarted process takes its name back from the session its old process left behind", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const ask = (instance: string, host?: string) => h.register({
+    actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: instance,
+  }, host);
+
+  const first = await ask("process-1");
+  assert.equal(first.session.display_name, "MossDawn");
+
+  // Its process exited a moment ago and a new one on the same machine
+  // registers. They share a network, so had the old one been alive it would
+  // have reopened its connection by now.
+  await h.evidence.closed(first.session.session_id, 20);
+  const restarted = await ask("process-2");
+  assert.equal(restarted.status, 201, JSON.stringify(restarted.session));
+  assert.equal(restarted.session.display_name, "MossDawn");
+  assert.deepEqual(await h.stored(first.session.session_id), { display_name: "MossDawn", ended: true });
+  assert.deepEqual(await h.liveNamed("MossDawn"), [restarted.session.session_id]);
+
+  // And on every later restart: the name does not drift and nothing piles up.
+  for (const instance of ["process-3", "process-4"]) {
+    const holder = (await h.liveNamed("MossDawn"))[0]!;
+    await h.evidence.closed(holder, 20);
+    const next = await ask(instance);
+    assert.equal(next.session.display_name, "MossDawn");
+    assert.deepEqual(await h.liveNamed("MossDawn"), [next.session.session_id]);
+  }
+  const live = await pool!.query(
+    "SELECT count(*)::int AS n FROM room_agent_sessions WHERE room_id = $1 AND agent_key = $2 AND ended_at IS NULL",
+    [h.room.id, key],
+  );
+  assert.equal(live.rows[0].n, 1, "each restart ends the session it replaces");
+});
+
+test("being quiet is not being gone: a session is never ended without evidence its process is", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const holder = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: "process-1" });
+  let sibling = 0;
+  const refused = async (why: string, host?: string) => {
+    sibling += 1;
+    const other = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+      agent_instance_id: `sibling-${sibling}` }, host);
+    assert.equal(other.status, 201, JSON.stringify(other.session));
+    assert.notEqual(other.session.display_name, "MossDawn", why);
+    assert.deepEqual(await h.stored(holder.session.session_id), { display_name: "MossDawn", ended: false }, why);
+  };
+
+  await h.evidence.quiet(holder.session.session_id, 600);
+  await refused("connected, and busy or waiting for ten hours");
+  await h.evidence.none(holder.session.session_id, 60 * 24 * 30);
+  await refused("an older client, unseen for a month: nothing is known about its process");
+  await h.evidence.closed(holder.session.session_id, 10);
+  await refused("its connection dropped ten seconds ago: it may be about to reopen it");
+  await h.evidence.closed(holder.session.session_id, 120);
+  await refused("seen from another machine, a closed connection may be a laptop asleep", "host_b");
+  // Its connection is closed, or even announced as left, and yet the agent
+  // has made a room call since. Whatever the connection says, it is there.
+  await h.evidence.heardAfter(holder.session.session_id, "closed", 20, 1);
+  await refused("its connection closed twenty seconds ago and it was heard from a second ago");
+  await h.evidence.heardAfter(holder.session.session_id, "exited", 20, 1);
+  await refused("an exit was announced for it, and it was heard from after that");
+  // The same, as the room records it when the agent makes a call.
+  await h.evidence.closed(holder.session.session_id, 20);
+  await dbModule!.touchRoomAgentSession(holder.session.session_id);
+  await refused("it made a room call after its connection closed");
+  // Its process connection is closed and it has made no call since, but it
+  // is waiting for messages on a connection that is open now.
+  await h.evidence.closed(holder.session.session_id, 20);
+  await markRoomAgentDeliveryConnected!({
+    room_id: h.room.id, actor_label: holder.session.actor_label, agent_key: key, agent_instance_id: "process-1",
+    agent_session_id: holder.session.session_id, session_kind: "worker", runtime: "claude-code",
+    display_name: "MossDawn", owner_label: "EmmyMay", ide_label: "Agent", transport: "long_poll",
+    credential_fence: { kind: "session_token", token_hash: hashToken(holder.session.session_token) },
+  });
+  await refused("it holds a delivery connection open");
+  await pool!.query("UPDATE room_agent_delivery_sessions SET active_connection_count = 0 WHERE room_id = $1 AND agent_session_id = $2",
+    [h.room.id, holder.session.session_id]);
+  await h.evidence.unseen(holder.session.session_id, 9);
+  await refused("nothing from it for nine minutes", "host_b");
+
+  await h.evidence.unseen(holder.session.session_id, 11);
+  const taker = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+    agent_instance_id: "process-2" }, "host_b");
+  assert.equal(taker.session.display_name, "MossDawn", "nothing from it for the whole window");
+  assert.deepEqual(await h.stored(holder.session.session_id), { display_name: "MossDawn", ended: true });
+});
+
+test("what the server does for a session after its agent has gone is not the agent being there", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const ask = (instance: string, host: string) => h.register({
+    actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: instance,
+  }, host);
+
+  // The agent was waiting for messages when its process went. The server
+  // closed its delivery lease ten seconds later, and marked the session seen
+  // as it did. That is the server's doing, and no sign of the agent.
+  const first = await ask("process-1", "host_a");
+  await h.evidence.closedThenBookkept(first.session.session_id, "closed", 20);
+  const restarted = await ask("process-2", "host_a");
+  assert.equal(restarted.session.display_name, "MossDawn");
+  assert.deepEqual(await h.stored(first.session.session_id), { display_name: "MossDawn", ended: true });
+
+  await h.evidence.closedThenBookkept(restarted.session.session_id, "exited", 12);
+  const elsewhere = await ask("process-3", "host_b");
+  assert.equal(elsewhere.session.display_name, "MossDawn");
+});
+
+test("a process that said it was exiting passes its name on without the wait", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const ask = (instance: string, host: string) => h.register({
+    actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: instance,
+  }, host);
+  const first = await ask("process-1", "host_a");
+
+  // A second ago, and asked for from another machine: a connection that had
+  // merely closed would hold the name for the whole window.
+  await h.evidence.exited(first.session.session_id, 1);
+  const next = await ask("process-2", "host_b");
+  assert.equal(next.status, 201, JSON.stringify(next.session));
+  assert.equal(next.session.display_name, "MossDawn");
+  assert.deepEqual(await h.stored(first.session.session_id), { display_name: "MossDawn", ended: true });
+});
+
+test("an agent that registers afresh takes the name of the registration it lost", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const common = { display_name: "Atlas", requested_base_display_name: "Atlas" };
+  const one = h.worker("a");
+  const two = h.worker("b");
+  const three = h.worker("c");
+  const first = await h.register({ ...common, actor_key: await h.addIdentity("EmmyMay/worker-one"),
+    agent_instance_id: one.id, connection_token: one.token });
+  assert.equal(first.session.display_name, "Atlas");
+
+  // Offline is not gone. A worker that disconnected keeps its name reserved
+  // while its process may still be there to reconnect.
+  await h.evidence.quiet(first.session.session_id, 0);
+  await endRoomAgentSession!({ room_id: h.room.id, session_id: first.session.session_id });
+  const tooSoon = await h.register({ ...common, actor_key: await h.addIdentity("EmmyMay/worker-two"),
+    agent_instance_id: two.id, connection_token: two.token });
+  assert.equal(tooSoon.status, 201, JSON.stringify(tooSoon.session));
+  assert.notEqual(tooSoon.session.display_name, "Atlas");
+
+  await h.evidence.closed(first.session.session_id, 20);
+  const fresh = await h.register({ ...common, actor_key: await h.addIdentity("EmmyMay/worker-three"),
+    agent_instance_id: three.id, connection_token: three.token });
+  assert.equal(fresh.status, 201, JSON.stringify(fresh.session));
+  assert.equal(fresh.session.display_name, "Atlas");
+
+  // The evidence was wrong, or the machine woke up: the first worker returns.
+  // It proves who it is, keeps its identity and its session, and is given a
+  // name of its own instead of being refused.
+  const returned = await h.register({ ...common, actor_key: first.session.agent_key, agent_instance_id: one.id,
+    connection_token: "d".repeat(43),
+    replace_agent_session_id: first.session.session_id, replace_agent_session_token: first.session.session_token });
+  assert.equal(returned.status, 201, JSON.stringify(returned.session));
+  assert.equal(returned.session.session_id, first.session.session_id);
+  assert.equal(returned.session.agent_key, first.session.agent_key);
+  assert.notEqual(returned.session.display_name, "Atlas");
+  assert.match(returned.session.display_name, /^[A-Za-z]+$/);
+  assert.deepEqual(await h.liveNamed("Atlas"), [fresh.session.session_id]);
+
+  // It asks for "Atlas" again on every reconnect. It has a session of its
+  // own, so it takes nothing, even from a holder whose process is gone.
+  await h.evidence.closed(fresh.session.session_id, 3600);
+  const again = await h.register({ ...common, actor_key: first.session.agent_key, agent_instance_id: one.id,
+    connection_token: "e".repeat(43),
+    replace_agent_session_id: returned.session.session_id, replace_agent_session_token: returned.session.session_token });
+  assert.equal(again.status, 201, JSON.stringify(again.session));
+  assert.equal(again.session.display_name, returned.session.display_name);
+  assert.deepEqual(await h.stored(fresh.session.session_id), { display_name: "Atlas", ended: false });
+});
+
+test("a connected durable worker whose process is gone is ended, and can still return", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const common = { display_name: "Atlas", requested_base_display_name: "Atlas" };
+  const one = h.worker("a");
+  const two = h.worker("b");
+  const first = await h.register({ ...common, actor_key: await h.addIdentity("EmmyMay/worker-one"),
+    agent_instance_id: one.id, connection_token: one.token });
+  await h.evidence.closed(first.session.session_id, 20);
+
+  const fresh = await h.register({ ...common, actor_key: await h.addIdentity("EmmyMay/worker-two"),
+    agent_instance_id: two.id, connection_token: two.token });
+  assert.equal(fresh.status, 201, JSON.stringify(fresh.session));
+  assert.equal(fresh.session.display_name, "Atlas");
+  assert.deepEqual(await h.stored(first.session.session_id), { display_name: "Atlas", ended: true });
+
+  const returned = await h.register({ ...common, actor_key: first.session.agent_key, agent_instance_id: one.id,
+    connection_token: "c".repeat(43),
+    replace_agent_session_id: first.session.session_id, replace_agent_session_token: first.session.session_token });
+  assert.equal(returned.status, 201, JSON.stringify(returned.session));
+  assert.equal(returned.session.session_id, first.session.session_id);
+  assert.notEqual(returned.session.display_name, "Atlas");
+  assert.equal((await h.stored(first.session.session_id)).ended, false);
+});
+
+test("a name is never taken from another owner's agent or from a supervised worker", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  if (!db || !accounts || !createRoomAgentSession || !createFencedRoomAgentSession || !pool) throw new Error("no db");
+  const now = new Date().toISOString();
+  await db.insert(accounts).values({ ...ownerAccount, id: "acct_someone_else", provider_user_id: "someone-else",
+    login: "someone", display_name: "Someone", created_at: now, updated_at: now });
+  await db.insert(agents!).values({ ...agentIdentity, id: "agent_theirs", canonical_key: "someone/worker-theirs",
+    name: "worker-theirs", owner_account_id: "acct_someone_else", owner_login: "someone", owner_label: "Someone",
+    created_at: now, updated_at: now });
+  const label = (name: string, owner: string) => buildAgentActorLabel({ display_name: name, owner_label: owner, ide_label: "Agent" });
+  const hold = (input: { key: string; name: string; owner?: string; ownerLabel?: string; instance: string }) =>
+    createRoomAgentSession!({
+      room_id: h.room.id, runtime: "claude-code", session_kind: "worker", agent_key: input.key,
+      agent_instance_id: input.instance, owner_account_id: input.owner ?? ownerAccount.id,
+      owner_label: input.ownerLabel ?? "EmmyMay", ide_label: "Agent", display_name: input.name,
+      actor_label: label(input.name, input.ownerLabel ?? "EmmyMay"),
+      registration_liveness: { host_id: "host_a", host_kind: "macos", host_label: null, liveness_capability: null, tool_bridge_id: null },
+    });
+  const theirs = await hold({ key: "someone/worker-theirs", name: "Heron", owner: "acct_someone_else", ownerLabel: "Someone", instance: "their-process" });
+  const supervised = await hold({ key: await h.addIdentity("EmmyMay/desktop-codex-supervised"), name: "Crane", instance: "daemon:supervised" });
+  const alive = await hold({ key: await h.addIdentity("EmmyMay/worker-alive"), name: "Wren", instance: "alive-process" });
+  // Supervision is recorded on the session; a grant row is not needed to mark it.
+  await pool.query("ALTER TABLE room_agent_sessions DISABLE TRIGGER ALL");
+  await pool.query("UPDATE room_agent_sessions SET supervisor_grant_id = 'grant_supervised' WHERE session_id = $1", [supervised.session_id]);
+  await pool.query("ALTER TABLE room_agent_sessions ENABLE TRIGGER ALL");
+  for (const session of [theirs, supervised]) await h.evidence.unseen(session.session_id, 600);
+  await h.evidence.quiet(alive.session_id, 600);
+
+  const mine = await h.addIdentity("EmmyMay/worker-mine");
+  for (const [name, holder] of [["Heron", theirs], ["Crane", supervised], ["Wren", alive]] as const) {
+    const registered = await h.register({ actor_key: mine, display_name: name, requested_base_display_name: name,
+      agent_instance_id: `process-${name}` });
+    assert.equal(registered.status, 201, JSON.stringify(registered.session));
+    assert.notEqual(registered.session.display_name, name, `${name} is not given up`);
+    assert.deepEqual(await h.stored(holder.session_id), { display_name: name, ended: false }, `the holder of ${name} is untouched`);
+
+    // The store decides for itself. Asked outright to end the holder, it
+    // refuses the registration and leaves the holder as it was.
+    await assert.rejects(createFencedRoomAgentSession({
+      room_id: h.room.id, runtime: "claude-code", session_kind: "worker", agent_key: mine,
+      agent_instance_id: `forced-${name}`, owner_account_id: ownerAccount.id, owner_label: "EmmyMay",
+      ide_label: "Agent", display_name: `${name}Forced`, actor_label: label(`${name}Forced`, "EmmyMay"),
+      registration_liveness: { host_id: "host_a", host_kind: "macos", host_label: null, liveness_capability: null, tool_bridge_id: null },
+    }, null, [holder.session_id]),
+    (error: { code?: string }) => error.code === "23505", `${name} cannot be taken by asking`);
+    assert.deepEqual(await h.stored(holder.session_id), { display_name: name, ended: false });
+  }
+});
+
+test("a registration that has a session of its own ends nobody, whatever it is asked to do", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  if (!createFencedRoomAgentSession) throw new Error("no db");
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const holder = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+    agent_instance_id: "process-1" });
+  const own = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+    agent_instance_id: "process-2" });
+  await h.evidence.closed(holder.session.session_id, 3600);
+  await assert.rejects(createFencedRoomAgentSession({
+    room_id: h.room.id, runtime: "claude-code", session_kind: "worker", agent_key: key,
+    agent_instance_id: "process-2", owner_account_id: ownerAccount.id, owner_label: "EmmyMay",
+    ide_label: "Agent", display_name: own.session.display_name, actor_label: own.session.actor_label,
+    registration_liveness: { host_id: "host_a", host_kind: "macos", host_label: null, liveness_capability: null, tool_bridge_id: null },
+  }, { session_id: own.session.session_id, session_token: own.session.session_token }, [holder.session.session_id]),
+  (error: { code?: string }) => error.code === "23505");
+  assert.deepEqual(await h.stored(holder.session.session_id), { display_name: "MossDawn", ended: false });
+
+  // Through the route it keeps the name it has, and the holder is untouched.
+  const again = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+    agent_instance_id: "process-2",
+    replace_agent_session_id: own.session.session_id, replace_agent_session_token: own.session.session_token });
+  assert.equal(again.status, 201, JSON.stringify(again.session));
+  assert.equal(again.session.display_name, own.session.display_name);
+  assert.deepEqual(await h.stored(holder.session.session_id), { display_name: "MossDawn", ended: false });
+});
+
+test("a process that comes back before the registration commits keeps its session and its name", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  if (!createFencedRoomAgentSession || !dbModule) throw new Error("no db");
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const first = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+    agent_instance_id: "process-1" });
+  await h.evidence.closed(first.session.session_id, 20);
+  // The route has read it as gone. Before the registration runs, the process
+  // reopens its connection.
+  assert.ok(await dbModule.openRoomAgentProcessConnection({ session_id: first.session.session_id, room_id: h.room.id }));
+  await assert.rejects(createFencedRoomAgentSession({
+    room_id: h.room.id, runtime: "claude-code", session_kind: "worker", agent_key: key,
+    agent_instance_id: "process-2", owner_account_id: ownerAccount.id, owner_label: "EmmyMay",
+    ide_label: "Agent", display_name: "MossDawn", actor_label: first.session.actor_label,
+    registration_liveness: { host_id: "host_a", host_kind: "macos", host_label: null, liveness_capability: null, tool_bridge_id: null },
+  }, null, [first.session.session_id]), (error: { code?: string }) => error.code === "23505");
+  assert.deepEqual(await h.stored(first.session.session_id), { display_name: "MossDawn", ended: false });
+});
+
+test("what was addressed to an agent follows it to its restarted process", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  if (!addMessage) throw new Error("no db");
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const first = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+    agent_instance_id: "process-1" });
+  await addMessage(h.room.id, "Human", "@MossDawn please investigate this");
+  await h.evidence.closed(first.session.session_id, 20);
+  const restarted = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+    agent_instance_id: "process-2" });
+  assert.equal(restarted.session.display_name, "MossDawn");
+
+  const receipts = await pool!.query(
+    "SELECT receipt_state, agent_session_id FROM message_agent_receipts WHERE message_room_id = $1", [h.room.id]);
+  assert.deepEqual(receipts.rows, [{ receipt_state: "queued", agent_session_id: first.session.session_id }],
+    "the message is still waiting for the agent");
+  const poll = await invoke(
+    h.handlers.get.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/"),
+    requestWithDeliveryHeaders(restarted.session, { params: { 0: h.room.id }, query: { timeout: "1000" } }),
+  );
+  assert.equal(poll.statusCode, 200, JSON.stringify(poll.body));
+  const decisions = ((poll.body as { messages?: Array<{ activation?: { for_current_agent?: { decision?: string; reason?: string } } }> }).messages ?? [])
+    .map((message) => `${message.activation?.for_current_agent?.decision}:${message.activation?.for_current_agent?.reason}`);
+  assert.deepEqual(decisions, ["activate:explicit_mention"]);
+});
+
+test("an agent whose name passes to a different agent loses what it had not answered, and its history passes too", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  if (!addMessage || !dbModule) throw new Error("no db");
+  const holderKey = await h.addIdentity("EmmyMay/first-agent");
+  const takerKey = await h.addIdentity("EmmyMay/cedar");
+  const holder = await h.register({ actor_key: holderKey, display_name: "Atlas", requested_base_display_name: "Atlas",
+    agent_instance_id: "holder-process" });
+  await dbModule.upsertRoomParticipant({
+    room_id: h.room.id, participant_key: `agent:${holder.session.actor_label.toLowerCase()}`, kind: "agent",
+    actor_label: holder.session.actor_label, agent_key: holderKey, display_name: "Atlas",
+    owner_label: "EmmyMay", ide_label: "Agent",
+  });
+  await addMessage(h.room.id, "Human", "@Atlas please investigate this");
+  await h.evidence.closed(holder.session.session_id, 20);
+
+  const ask = (instance: string, extra: Record<string, unknown> = {}) => h.register({
+    actor_key: takerKey, display_name: "Atlas", requested_base_display_name: "Atlas", agent_instance_id: instance, ...extra,
+  });
+  const taker = await ask("process-1");
+  assert.equal(taker.session.display_name, "Atlas");
+  const receipts = await pool!.query(
+    "SELECT receipt_state FROM message_agent_receipts WHERE message_room_id = $1", [h.room.id]);
+  assert.deepEqual(receipts.rows, [{ receipt_state: "unavailable" }]);
+
+  // The name stays with the agent that took it: when it registers again, and
+  // when its own process restarts.
+  const again = await ask("process-1", {
+    replace_agent_session_id: taker.session.session_id, replace_agent_session_token: taker.session.session_token,
+  });
+  assert.equal(again.session.display_name, "Atlas");
+  await h.evidence.closed(again.session.session_id, 20);
+  const restarted = await ask("process-2");
+  assert.equal(restarted.session.display_name, "Atlas");
+});
+
+test("registrations racing for one name each get a session, one gets the name, and none fails", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const first = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+    agent_instance_id: "process-1" });
+  await h.evidence.closed(first.session.session_id, 20);
+  const racers = await Promise.all(Array.from({ length: 5 }, (_, index) => h.register({
+    actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: `racer-${index}`,
+  })));
+  assert.deepEqual(racers.map((racer) => racer.status), [201, 201, 201, 201, 201], JSON.stringify(racers.map((racer) => racer.session)));
+  const names = racers.map((racer) => racer.session.display_name);
+  assert.equal(names.filter((name) => name === "MossDawn").length, 1);
+  assert.equal(new Set(names).size, 5, "no two share a name");
+  assert.equal((await h.stored(first.session.session_id)).ended, true);
+});
+
+test("a session that registers again keeps the name it has when the one it asks for is held", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const ask = (instance: string, extra: Record<string, unknown> = {}) => h.register({
+    actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: instance, ...extra,
+  });
+  const first = await ask("process-1");
+  const second = await ask("process-2");
+  const third = await ask("process-3");
+  assert.equal(first.session.display_name, "MossDawn");
+  assert.equal(new Set([first, second, third].map((entry) => entry.session.display_name)).size, 3);
+
+  // The second chat leaves, so the name it had is free again. The third
+  // asks for "MossDawn" as it always does; that is still held, and it must
+  // not be moved to the freed name just because that name now comes first.
+  await endRoomAgentSession!({ room_id: h.room.id, session_id: second.session.session_id });
+  const again = await ask("process-3", {
+    replace_agent_session_id: third.session.session_id, replace_agent_session_token: third.session.session_token,
+  });
+  assert.equal(again.status, 201, JSON.stringify(again.session));
+  assert.equal(again.session.session_id, third.session.session_id);
+  assert.equal(again.session.display_name, third.session.display_name);
+});
+
+test("a returning durable worker is renamed when a session with no instance id holds its name", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  if (!createRoomAgentSession) throw new Error("no db");
+  const common = { display_name: "Atlas", requested_base_display_name: "Atlas" };
+  const one = h.worker("a");
+  const first = await h.register({ ...common, actor_key: await h.addIdentity("EmmyMay/worker-one"),
+    agent_instance_id: one.id, connection_token: one.token });
+  await endRoomAgentSession!({ room_id: h.room.id, session_id: first.session.session_id });
+  await createRoomAgentSession({
+    room_id: h.room.id, runtime: "desktop", session_kind: "worker", agent_key: await h.addIdentity("EmmyMay/worker-desktop"),
+    agent_instance_id: null, owner_account_id: ownerAccount.id, owner_label: "EmmyMay", ide_label: "Agent",
+    display_name: "Atlas", actor_label: first.session.actor_label,
+  });
+  const returned = await h.register({ ...common, actor_key: first.session.agent_key, agent_instance_id: one.id,
+    connection_token: "b".repeat(43),
+    replace_agent_session_id: first.session.session_id, replace_agent_session_token: first.session.session_token });
+  assert.equal(returned.status, 201, JSON.stringify(returned.session));
+  assert.equal(returned.session.session_id, first.session.session_id);
+  assert.notEqual(returned.session.display_name, "Atlas");
+});
+
+test("a process connection records when the process was there and when it left", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  if (!dbModule) throw new Error("no db");
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const session = (await h.register({ actor_key: key, display_name: "MossDawn", agent_instance_id: "process-1" })).session;
+  const row = async () => (await pool!.query(
+    "SELECT process_seen_at IS NOT NULL AS seen, process_disconnected_at IS NOT NULL AS disconnected FROM room_agent_sessions WHERE session_id = $1",
+    [session.session_id],
+  )).rows[0] as { seen: boolean; disconnected: boolean };
+  assert.deepEqual(await row(), { seen: false, disconnected: false }, "nothing is known until the process connects");
+
+  const dropped = await dbModule.openRoomAgentProcessConnection({ session_id: session.session_id, room_id: h.room.id });
+  assert.ok(dropped);
+  assert.deepEqual(await row(), { seen: true, disconnected: false });
+  // The connection drops and the process reopens it. The old connection's
+  // close arrives late, and must not say the process has left.
+  const reopened = await dbModule.openRoomAgentProcessConnection({ session_id: session.session_id, room_id: h.room.id });
+  assert.ok(reopened);
+  await dbModule.closeRoomAgentProcessConnection({ session_id: session.session_id, connection_id: dropped! });
+  assert.deepEqual(await row(), { seen: true, disconnected: false });
+  assert.equal(await dbModule.refreshRoomAgentProcessConnection({ session_id: session.session_id, connection_id: dropped! }), "replaced");
+  assert.equal(await dbModule.refreshRoomAgentProcessConnection({ session_id: session.session_id, connection_id: reopened! }), "current");
+
+  // A process that exits speaks for its own connection. Another process
+  // holds the session now, so the exit of the first says nothing about it.
+  const exit = (connection_id: string | null) =>
+    dbModule!.recordRoomAgentProcessExit({ session_id: session.session_id, room_id: h.room.id, connection_id });
+  const exited = async () => (await pool!.query(
+    "SELECT process_connection_id = 'exited' AS exited FROM room_agent_sessions WHERE session_id = $1", [session.session_id],
+  )).rows[0].exited as boolean;
+  assert.equal(await exit(dropped!), false);
+  assert.equal(await exit(null), false, "a process with no connection cannot speak over one that has");
+  assert.equal(await exited(), false);
+  assert.equal(await exit(reopened!), true);
+  assert.equal(await exited(), true);
+  assert.equal(await dbModule.refreshRoomAgentProcessConnection({ session_id: session.session_id, connection_id: reopened! }), "replaced");
+  // The process starts again and connects: it is there.
+  const restarted = await dbModule.openRoomAgentProcessConnection({ session_id: session.session_id, room_id: h.room.id });
+  assert.equal(await exited(), false);
+  assert.deepEqual(await row(), { seen: true, disconnected: false });
+  await dbModule.closeRoomAgentProcessConnection({ session_id: session.session_id, connection_id: restarted! });
+  assert.equal(await exit(null), true, "its connection had dropped when it exited");
+  const last = await dbModule.openRoomAgentProcessConnection({ session_id: session.session_id, room_id: h.room.id });
+
+  await dbModule.closeRoomAgentProcessConnection({ session_id: session.session_id, connection_id: last! });
+  assert.deepEqual(await row(), { seen: true, disconnected: true });
+
+  await endRoomAgentSession!({ room_id: h.room.id, session_id: session.session_id });
+  assert.equal(await dbModule.openRoomAgentProcessConnection({ session_id: session.session_id, room_id: h.room.id }), null,
+    "an ended session accepts no connection");
+});
+
+// The routes themselves, driven as a process drives them.
+async function processRoutes(h: Awaited<ReturnType<typeof takeoverHarness>>) {
+  const { waitForSseCleanupDrain } = await import("../http/sse.js");
+  const connections = await import("../rooms/agent-process-connections.js");
+  const open = h.handlers.get.get("/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/process$/");
+  const exit = h.handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/process\\/exit$/");
+  const disconnect = h.handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/disconnect$/");
+  const connect = async (
+    targetSessionId: string,
+    credentials: { session_id: string; session_token: string },
+    account: Record<string, unknown> = {},
+  ) => {
+    const req = Object.assign(new EventEmitter(), ownerTokenRequest({}, {
+      ...account,
+      params: { 0: h.room.id, 1: targetSessionId },
+      headers: {
+        [LETAGENTS_AGENT_SESSION_ID_HEADER.toLowerCase()]: credentials.session_id,
+        [LETAGENTS_AGENT_SESSION_TOKEN_HEADER.toLowerCase()]: credentials.session_token,
+      },
+    }));
+    const written: string[] = [];
+    const res = Object.assign(new EventEmitter(), {
+      statusCode: 200, body: null as unknown, writableEnded: false, destroyed: false,
+      writableNeedDrain: false, writableLength: 0, socket: null,
+      status(code: number) { this.statusCode = code; return this; },
+      json(payload: unknown) { this.body = payload; return this; },
+      setHeader() { return this; },
+      flushHeaders() { return undefined; },
+      write(chunk: string) { written.push(chunk); return true; },
+      end() { this.writableEnded = true; return this; },
+    });
+    await open!(req as never, res as never);
+    return {
+      status: res.statusCode, body: res.body as { code?: string } | null, written,
+      get closed() { return res.writableEnded; },
+      connectionId: () => /"connection_id":"([^"]+)"/.exec(written.join(""))?.[1] ?? null,
+      // The process goes away: its end of the connection closes.
+      drop: async () => { req.emit("close"); await waitForSseCleanupDrain(); },
+      settle: waitForSseCleanupDrain,
+    };
+  };
+  const evidence = async (sessionId: string) => (await pool!.query(
+    `SELECT process_seen_at IS NOT NULL AS seen, process_disconnected_at IS NOT NULL AS disconnected,
+            process_connection_id AS connection FROM room_agent_sessions WHERE session_id = $1`, [sessionId],
+  )).rows[0] as { seen: boolean; disconnected: boolean; connection: string | null };
+  return { connect, exit, disconnect, evidence, connections };
+}
+
+test("the process connection is open to a session's own process and to no one else", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const routes = await processRoutes(h);
+  const mine = (await h.register({ actor_key: await h.addIdentity("EmmyMay/mossdawn"), display_name: "MossDawn", agent_instance_id: "process-1" })).session;
+  const other = (await h.register({ actor_key: await h.addIdentity("EmmyMay/heron"), display_name: "Heron", agent_instance_id: "process-2" })).session;
+
+  // Another session's id and an id that does not exist are refused alike,
+  // so the answer says nothing of which sessions exist.
+  assert.equal((await routes.connect(other.session_id, mine)).status, 403);
+  assert.equal((await routes.connect("agent_session_999999", mine)).status, 403);
+  assert.equal((await routes.connect(mine.session_id, { session_id: mine.session_id, session_token: "not-the-token" })).status, 401);
+  assert.deepEqual(await routes.evidence(other.session_id), { seen: false, disconnected: false, connection: null });
+  assert.deepEqual(await routes.evidence(mine.session_id), { seen: false, disconnected: false, connection: null });
+
+  const connection = await routes.connect(mine.session_id, mine);
+  assert.equal(connection.status, 200);
+  assert.ok(connection.connectionId(), "the process is told the name of its connection");
+  assert.deepEqual(await routes.evidence(mine.session_id), { seen: true, disconnected: false, connection: connection.connectionId() });
+  await connection.drop();
+  assert.deepEqual(await routes.evidence(mine.session_id), { seen: true, disconnected: true, connection: connection.connectionId() });
+  assert.equal(routes.connections.heldAgentProcessConnectionCount(), 0);
+});
+
+test("a process whose session ended is told so, connected or not", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const routes = await processRoutes(h);
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const ask = (instance: string) => h.register({
+    actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: instance,
+  });
+
+  // Connected when its session is ended: told at once, over the connection.
+  const first = (await ask("process-1")).session;
+  const connection = await routes.connect(first.session_id, first);
+  const ended = await invoke(routes.disconnect, ownerTokenRequest(sessionCredentials(first), {
+    params: { 0: h.room.id, 1: first.session_id },
+  }));
+  assert.equal(ended.statusCode, 200, JSON.stringify(ended.body));
+  await connection.settle();
+  assert.ok(connection.written.join("").includes("event: ended"));
+  assert.equal(connection.closed, true);
+
+  // Its name passes on. A connection it still had open, against what the
+  // evidence said, is told at once; and it is told again when it next asks.
+  // It is refused as a stranger only if it cannot prove the session was its
+  // own, or if it is asked after on another owner's account.
+  const second = (await ask("process-2")).session;
+  const stillOpen = await routes.connect(second.session_id, second);
+  await h.evidence.closed(second.session_id, 20);
+  const taker = (await ask("process-3")).session;
+  assert.equal(taker.display_name, "MossDawn");
+  await stillOpen.settle();
+  assert.ok(stillOpen.written.join("").includes("event: ended"));
+  const returning = await routes.connect(second.session_id, second);
+  assert.equal(returning.status, 410);
+  assert.equal(returning.body?.code, "agent_session_ended");
+  assert.equal((await routes.connect(second.session_id, { session_id: second.session_id, session_token: "not-the-token" })).status, 401);
+  assert.equal((await routes.connect(second.session_id, second, {
+    sessionAccount: { account_id: "acct_someone_else", login: "someone", display_name: "Someone" },
+  })).status, 401);
+});
+
+test("a worker that disconnects while its process runs keeps its name for the full window", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const routes = await processRoutes(h);
+  const worker = h.worker("a");
+  const common = { display_name: "Atlas", requested_base_display_name: "Atlas" };
+  const first = (await h.register({ ...common, actor_key: await h.addIdentity("EmmyMay/worker-one"),
+    agent_instance_id: worker.id, connection_token: worker.token }, "host_a")).session;
+  const connection = await routes.connect(first.session_id, first);
+  const left = await invoke(routes.disconnect, ownerTokenRequest(sessionCredentials(first), {
+    params: { 0: h.room.id, 1: first.session_id },
+  }));
+  assert.equal(left.statusCode, 200, JSON.stringify(left.body));
+  await connection.settle();
+  assert.equal(connection.closed, true);
+  // The room closed the connection, not the process: nothing is recorded
+  // against the process, which is still running.
+  assert.equal((await routes.evidence(first.session_id)).disconnected, false);
+
+  const age = (minutes: number) => pool!.query(
+    `UPDATE room_agent_sessions SET process_seen_at = NOW() - INTERVAL '${minutes} minutes',
+       last_seen_at = NOW() - INTERVAL '${minutes} minutes', agent_heard_at = NOW() - INTERVAL '${minutes} minutes'
+     WHERE session_id = $1`, [first.session_id]);
+  let asked = 0;
+  const askFor = async () => {
+    asked += 1;
+    const other = h.worker("bcdef"[asked]!);
+    return (await h.register({ ...common, actor_key: await h.addIdentity(`EmmyMay/worker-other-${asked}`),
+      agent_instance_id: other.id, connection_token: other.token }, "host_a")).session;
+  };
+  await age(9);
+  assert.notEqual((await askFor()).display_name, "Atlas", "same machine, nine minutes on: still reserved");
+  await age(11);
+  assert.equal((await askFor()).display_name, "Atlas");
+});
+
+test("a server that shuts down lets go of its connections and says nothing about the processes", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const routes = await processRoutes(h);
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const holder = (await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: "process-1" })).session;
+  const connection = await routes.connect(holder.session_id, holder);
+  assert.equal(routes.connections.heldAgentProcessConnectionCount(), 1);
+
+  routes.connections.releaseAgentProcessConnectionsForShutdown();
+  await connection.settle();
+  assert.equal(connection.closed, true, "nothing is left open to hold the server up");
+  assert.equal(routes.connections.heldAgentProcessConnectionCount(), 0);
+  assert.deepEqual(await routes.evidence(holder.session_id), { seen: true, disconnected: false, connection: connection.connectionId() });
+
+  // However long the server is away, the process is not taken for gone on
+  // the strength of a connection the server itself closed.
+  await pool!.query("UPDATE room_agent_sessions SET process_seen_at = NOW() - INTERVAL '5 minutes', last_seen_at = NOW() - INTERVAL '5 minutes' WHERE session_id = $1", [holder.session_id]);
+  const other = await h.register({ actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: "process-2" });
+  assert.notEqual(other.session.display_name, "MossDawn");
+  assert.deepEqual(await h.stored(holder.session_id), { display_name: "MossDawn", ended: false });
+
+  // A connection that arrives while the server is letting go is let go too.
+  try {
+    const late = await routes.connect(holder.session_id, holder);
+    await late.settle();
+    assert.equal(late.closed, true);
+    assert.equal(routes.connections.heldAgentProcessConnectionCount(), 0);
+    assert.equal((await routes.evidence(holder.session_id)).disconnected, false);
+  } finally {
+    routes.connections.resumeAgentProcessConnections();
+  }
+});
+
+test("a session that registers again in place is not told it has ended", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const routes = await processRoutes(h);
+  const body = { actor_key: await h.addIdentity("EmmyMay/mossdawn"), display_name: "MossDawn",
+    requested_base_display_name: "MossDawn", agent_instance_id: "process-1" };
+  const first = (await h.register(body)).session;
+  const connection = await routes.connect(first.session_id, first);
+  const again = await h.register({ ...body,
+    replace_agent_session_id: first.session_id, replace_agent_session_token: first.session_token });
+  assert.equal(again.status, 201, JSON.stringify(again.session));
+  assert.equal(again.session.session_id, first.session_id);
+  await connection.settle();
+  assert.equal(connection.written.join("").includes("event: ended"), false);
+  await connection.drop();
+});
+
+test("a process announces its exit over the route, for its own connection only", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const routes = await processRoutes(h);
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const ask = (instance: string, host: string) => h.register({
+    actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: instance,
+  }, host);
+  const holder = (await ask("process-1", "host_a")).session;
+  const other = (await h.register({ actor_key: await h.addIdentity("EmmyMay/heron"), display_name: "Heron", agent_instance_id: "process-9" })).session;
+  const connection = await routes.connect(holder.session_id, holder);
+  const announce = (targetSessionId: string, credentials: CreatedSession, connectionId: string | null) => invoke(routes.exit,
+    ownerTokenRequest({ ...sessionCredentials(credentials), process_connection_id: connectionId }, {
+      params: { 0: h.room.id, 1: targetSessionId },
+    }));
+
+  assert.equal((await announce(holder.session_id, other, connection.connectionId())).statusCode, 403, "not for another's session");
+  const stale = await announce(holder.session_id, holder, "00000000-0000-4000-8000-000000000000");
+  assert.deepEqual(stale.body, { recorded: false }, "not for a connection that is not the one open");
+  assert.equal((await routes.evidence(holder.session_id)).connection, connection.connectionId());
+
+  await connection.drop();
+  const announced = await announce(holder.session_id, holder, connection.connectionId());
+  assert.deepEqual(announced.body, { recorded: true });
+  assert.equal((await routes.evidence(holder.session_id)).connection, "exited");
+
+  // The exit is never recorded as earlier than the last thing the agent
+  // did, even if the clocks that stamped the two disagree.
+  await pool!.query("UPDATE room_agent_sessions SET process_connection_id = 'open-again', process_disconnected_at = NULL, agent_heard_at = NOW() + INTERVAL '2 seconds' WHERE session_id = $1", [holder.session_id]);
+  assert.equal(await dbModule!.recordRoomAgentProcessExit({ session_id: holder.session_id, room_id: h.room.id, connection_id: "open-again" }), true);
+  const stamps = (await pool!.query("SELECT process_disconnected_at >= agent_heard_at AS ordered FROM room_agent_sessions WHERE session_id = $1", [holder.session_id])).rows[0];
+  assert.equal(stamps.ordered, true);
+
+  // The announcement was itself a room call, heard as it was made. It does
+  // not count as the agent being heard from after it left.
+  const next = await ask("process-2", "host_b");
+  assert.equal(next.session.display_name, "MossDawn");
+  assert.deepEqual(await h.stored(holder.session_id), { display_name: "MossDawn", ended: true });
+});
+
+test("what was known of one process is not held against the next to register", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const routes = await processRoutes(h);
+  const worker = h.worker("a");
+  const common = { display_name: "Atlas", requested_base_display_name: "Atlas" };
+  const durable = { ...common, actor_key: await h.addIdentity("EmmyMay/worker-one"), agent_instance_id: worker.id, connection_token: worker.token };
+  const first = (await h.register(durable, "host_a")).session;
+  await h.evidence.exited(first.session_id, 30);
+
+  // Its process starts again and registers. Whether or not this one ever
+  // opens a connection, the exit of the last one says nothing about it.
+  const again = await h.register({ ...durable, connection_token: "b".repeat(43),
+    replace_agent_session_id: first.session_id, replace_agent_session_token: first.session_token }, "host_a");
+  assert.equal(again.status, 201, JSON.stringify(again.session));
+  assert.equal(again.session.session_id, first.session_id);
+  assert.deepEqual(await routes.evidence(first.session_id), { seen: false, disconnected: false, connection: null });
+
+  const other = h.worker("c");
+  const asked = await h.register({ ...common, actor_key: await h.addIdentity("EmmyMay/worker-two"),
+    agent_instance_id: other.id, connection_token: other.token }, "host_b");
+  assert.notEqual(asked.session.display_name, "Atlas");
+  assert.deepEqual(await h.stored(first.session_id), { display_name: "Atlas", ended: false });
+});
+
+test("a registration that finds the room busy is asked to come back, and ends nobody", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const ask = (instance: string) => h.register({
+    actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: instance,
+  });
+  const holder = (await ask("process-1")).session;
+  await h.evidence.closed(holder.session_id, 20);
+
+  const busy = await pool!.connect();
+  try {
+    await busy.query("BEGIN");
+    await busy.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`mcp_worker_names:${h.room.id}`]);
+    const started = Date.now();
+    const refused = await ask("process-2");
+    assert.equal(refused.status, 503, JSON.stringify(refused.session));
+    assert.ok(Date.now() - started < 8_000, "the wait is bounded");
+    assert.deepEqual(await h.stored(holder.session_id), { display_name: "MossDawn", ended: false });
+  } finally {
+    await busy.query("ROLLBACK");
+    busy.release();
+  }
+  const retried = await ask("process-2");
+  assert.equal(retried.status, 201);
+  assert.equal(retried.session.display_name, "MossDawn");
+});
+
+test("the store refuses a takeover the route should never have asked for", takeoverTest, async () => {
+  const h = await takeoverHarness();
+  if (!createFencedRoomAgentSession) throw new Error("no db");
+  const holderKey = await h.addIdentity("EmmyMay/mossdawn");
+  const takerKey = await h.addIdentity("EmmyMay/heron");
+  const holder = (await h.register({ actor_key: holderKey, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: "process-1" })).session;
+  const take = (instance: string, displayName: string, takeover: string[], connectionToken?: string) => createFencedRoomAgentSession({
+    room_id: h.room.id, session_kind: "worker", runtime: "claude-code", agent_key: takerKey, agent_instance_id: instance,
+    connection_token: connectionToken,
+    display_name: displayName, assigned_base_display_name: displayName,
+    actor_label: buildAgentActorLabel({ display_name: displayName, owner_label: "EmmyMay", ide_label: "Agent" }),
+    owner_account_id: ownerAccount.id, owner_label: "EmmyMay", ide_label: "Agent", process_host_id: "host_a",
+  }, null, takeover);
+  const conflict = (error: unknown) => (error as { code?: string }).code === "23505";
+
+  // Gone by every sign, but the instance asking is the holder's own.
+  await h.evidence.exited(holder.session_id, 30);
+  await assert.rejects(take("process-1", "MossDawn", [holder.session_id]), conflict);
+  assert.deepEqual(await h.stored(holder.session_id), { display_name: "MossDawn", ended: false });
+
+  // Gone by every sign when the route looked, but waiting for messages on a
+  // connection it has opened since.
+  await markRoomAgentDeliveryConnected!({
+    room_id: h.room.id, actor_label: holder.actor_label, agent_key: holderKey, agent_instance_id: "process-1",
+    agent_session_id: holder.session_id, session_kind: "worker", runtime: "claude-code",
+    display_name: "MossDawn", owner_label: "EmmyMay", ide_label: "Agent", transport: "long_poll",
+    credential_fence: { kind: "session_token", token_hash: hashToken(holder.session_token) },
+  });
+  await h.evidence.exited(holder.session_id, 30);
+  await assert.rejects(take("process-5", "MossDawn", [holder.session_id]), conflict);
+  assert.deepEqual(await h.stored(holder.session_id), { display_name: "MossDawn", ended: false });
+
+  // A supervised worker that is offline keeps its name reserved: its
+  // lifetime belongs to its supervisor, whatever its process evidence says.
+  const supervised = h.worker("d");
+  const reserved = (await h.register({ actor_key: await h.addIdentity("EmmyMay/worker-sup"), display_name: "Juniper",
+    requested_base_display_name: "Juniper", agent_instance_id: supervised.id, connection_token: supervised.token })).session;
+  await endRoomAgentSession!({ room_id: h.room.id, session_id: reserved.session_id });
+  await h.evidence.exited(reserved.session_id, 30);
+  await pool!.query("ALTER TABLE room_agent_sessions DISABLE TRIGGER ALL");
+  try {
+    await pool!.query("UPDATE room_agent_sessions SET supervisor_grant_id = 'grant_test' WHERE session_id = $1", [reserved.session_id]);
+  } finally {
+    await pool!.query("ALTER TABLE room_agent_sessions ENABLE TRIGGER ALL");
+  }
+  const asking = h.worker("e");
+  await assert.rejects(take(asking.id, "Juniper", [], asking.token), conflict);
+
+  // The same worker, unsupervised, has let the name go.
+  await pool!.query("ALTER TABLE room_agent_sessions DISABLE TRIGGER ALL");
+  try {
+    await pool!.query("UPDATE room_agent_sessions SET supervisor_grant_id = NULL WHERE session_id = $1", [reserved.session_id]);
+  } finally {
+    await pool!.query("ALTER TABLE room_agent_sessions ENABLE TRIGGER ALL");
+  }
+  const taken = await take(asking.id, "Juniper", [], asking.token);
+  assert.equal(taken.session.display_name, "Juniper");
+});
 
 test(
   "a mention that names two live agents tells the sender it reached neither",

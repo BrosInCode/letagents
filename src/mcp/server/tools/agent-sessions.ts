@@ -41,6 +41,9 @@ import {
 } from "../runtime/worker-bearer.js";
 import { bindSupervisedWorkerSessionWithContext } from "../runtime/supervisor-bridge.js";
 import { registerMcpWorker } from "../runtime/worker-handles.js";
+import { holdProcessConnection, releaseProcessConnection } from "../runtime/process-connection.js";
+import { apiCallWhenFree } from "../runtime/api.js";
+import { getProcessHostId } from "../runtime/identity/liveness.js";
 import { WORKSPACE_CAPTURE_INSTRUCTIONS } from './workspace.js';
 
 export function registerAgentSessionTools(server: McpServer): void {
@@ -227,7 +230,7 @@ export function registerAgentSessionTools(server: McpServer): void {
             && Boolean(session.session_token)
           ) ?? null
         : null;
-      const created = await apiCall<Record<string, unknown>>(
+      const created = await apiCallWhenFree<Record<string, unknown>>(
         `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions`,
         {
           method: "POST",
@@ -242,6 +245,7 @@ export function registerAgentSessionTools(server: McpServer): void {
             runtime: requestedRuntime,
             repo_branch: repoBranch,
             registration_liveness: getSessionLivenessRegistration(requestedRuntime),
+            process_host_id: getProcessHostId(),
             replace_agent_session_id: replacementSession?.session_id ?? null,
             replace_agent_session_token: replacementSession?.session_token ?? null,
           }),
@@ -303,6 +307,7 @@ export function registerAgentSessionTools(server: McpServer): void {
         });
       }
       scheduleCodexRuntimeStreamBridgeBind(session);
+      holdProcessConnection(session);
 
       return {
         content: [
@@ -450,6 +455,7 @@ export function registerAgentSessionTools(server: McpServer): void {
         result.agent_session && typeof result.agent_session === "object" && "ended_at" in result.agent_session
           ? String((result.agent_session as { ended_at?: unknown }).ended_at ?? new Date().toISOString())
           : new Date().toISOString();
+      releaseProcessConnection(targetSessionId);
       const endedLocalSession =
         localSession?.session_id === targetSessionId
           ? endStoredAgentSession(targetSessionId, endedAt, localSession.session_token)
