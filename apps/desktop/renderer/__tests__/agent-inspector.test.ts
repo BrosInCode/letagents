@@ -418,6 +418,35 @@ test("Inspector live announcements distinguish responding from idle Online", () 
   }), "GardenSignal: Status unavailable.");
 });
 
+test("Now shows a provider retry while the turn waits on it", () => {
+  const delivery = receipt("message_1", "awaiting_result", {
+    timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
+  });
+  const waiting = entry({
+    provider: "open-model",
+    activity: [
+      activity(3, { summary: "Checking the workspace" }),
+      activity(4, {
+        provider: "open-model",
+        kind: "provider_event",
+        method: "letagents/providerRetry",
+        summary: "The model provider returned an error. Retrying (attempt 1).",
+      }),
+      // Every other provider event stays out of Now.
+      activity(5, { provider: "open-model", kind: "provider_event", method: "letagents/turnAttention", summary: "guardrail" }),
+    ],
+    deliveryReceipts: [delivery],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: delivery.inboxItemId, sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  assert.equal(
+    projectAgentInspector(waiting, { roomId: "focus_1" })?.now?.summary,
+    "The model provider returned an error. Retrying (attempt 1).",
+  );
+});
+
 test("Now uses only sanitized activity observed after the exact turn_started event", () => {
   const delivery = receipt("message_1", "awaiting_result", {
     timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  OPEN_MODEL_PROVIDER_RETRY_METHOD,
   OpenCodeRuntimeGoneError,
   OpenModelProviderAdapter,
   type OpenCodePermissionObservation,
@@ -931,6 +932,71 @@ test("Open Model surfaces tool calls as neutral tool_lifecycle stream events, de
   assert.deepEqual({ tool: running.tool, callID: running.callID, status: running.status }, { tool: "bash", callID: "call-1", status: "running" });
   assert.equal(completed.status, "completed");
   assert.equal(completed.output, "file-a\nfile-b");
+});
+
+test("Open Model announces each provider retry, without provider text or a changed outcome", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const stream: ProviderStreamEvent[] = [];
+  adapter.onStream(handle, (event) => stream.push(event));
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([
+    (turnId) => [{ info: { id: "assistant-retrying", role: "assistant", parentID: turnId, time: { created: 10 } }, parts: [] }],
+    (turnId) => [assistantMessage(turnId, "assistant-retrying", 10, "Answer after the retries.")],
+  ]);
+  const retry = (attempt: number, next: number, message: string, sessionID = "session-open-model-1") => ({
+    type: "session.status",
+    properties: { sessionID, status: { type: "retry", attempt, message, next } },
+  });
+  harness.setStreamEvents([
+    { type: "session.status", properties: { sessionID: "session-open-model-1", status: { type: "busy" } } },
+    retry(1, 1_790_000_002_000, "Rate limit exceeded for key sk-or-v1-0123456789abcdef0123456789abcdef, see https://provider.example/limits"),
+    // A repeat of the same scheduled retry, which 1.18.20 does not send, is ignored.
+    retry(1, 1_790_000_002_000, "Rate limit exceeded"),
+    retry(2, 1_790_000_006_000, "Rate limit exceeded"),
+    // Another session's retry is not this agent's.
+    retry(3, 1_790_000_014_000, "Rate limit exceeded", "session-of-another-agent"),
+    // A later step of the same turn fails and its attempts start again.
+    retry(1, 1_790_000_030_000, "Overloaded"),
+    { type: "session.status", properties: { sessionID: "session-open-model-1", status: { type: "retry", attempt: "2", message: "x", next: 1 } } },
+    { type: "session.idle", properties: { sessionID: "session-open-model-1" } },
+  ]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-retry-notice",
+    sourceMessage: { text: "hello" },
+    activation: { decision: "activate" },
+    actionId: "retry-notice",
+  });
+
+  assert.equal(result.outcome, "reply", "a retry notice never changes how the turn ends");
+  assert.equal(result.text, "Answer after the retries.");
+  const notices = stream.filter((event) => event.method === OPEN_MODEL_PROVIDER_RETRY_METHOD);
+  assert.deepEqual(notices.map((event) => event.summary), [
+    "The model provider returned an error. Retrying (attempt 1).",
+    "The model provider returned an error. Retrying (attempt 2).",
+    "The model provider returned an error. Retrying (attempt 1).",
+  ]);
+  for (const notice of notices) {
+    // The daemon reads a provider_event under a neutral method as ordinary work.
+    assert.equal(notice.kind, "provider_event");
+    assert.doesNotMatch(notice.method, /^(?:result|turn|thread|item)(?:\/|$)/i);
+    assert.doesNotMatch(notice.method, /(?:failed|systemError|error_during_execution|completed|finished|idle|stopped|interrupted)$/i);
+    assert.equal(notice.nativeEventId, undefined);
+    assert.equal(notice.nativeLifecyclePhase, undefined);
+    assert.equal(notice.lifecycleProjectionOnly, undefined);
+    const payload = notice.payload as Record<string, unknown>;
+    for (const operationalKey of ["status", "subtype", "threadStatus", "turnStatus", "turn", "thread", "item"]) {
+      assert.equal(operationalKey in payload, false, `${operationalKey} would be read as lifecycle state`);
+    }
+  }
+  const first = notices[0]!.payload as Record<string, unknown>;
+  assert.equal(first.attempt, 1);
+  assert.equal(first.nextRetryAt, new Date(1_790_000_002_000).toISOString());
+  assert.doesNotMatch(JSON.stringify(notices), /sk-or-v1-0123456789abcdef/, "the provider key is redacted everywhere");
+  assert.equal(notices[0]!.payloadRedacted, true, "a redacted payload says so");
+  assert.equal(notices[1]!.payloadRedacted, false);
+  assert.doesNotMatch(JSON.stringify(notices), /provider\.example/, "provider links are not passed on");
+  assert.match(String(first.message), /^Rate limit exceeded for key /);
 });
 
 test("Open Model waits for the session boundary and selects the final answer after tool-call children", async () => {
