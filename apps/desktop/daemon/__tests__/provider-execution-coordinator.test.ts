@@ -1319,6 +1319,30 @@ test("resume after a crashed generation names the frozen lifecycle authority of 
     "a daemon-inbox resume carries the typed birth instead of defaulting to typed_shadow");
 });
 
+test("a successful grant-bound resume resets scheduler retry budgets", async () => {
+  const runtime = ownedRecoveryHarness();
+  const crash = { ...terminal(returnedHandle), exitCode: 1, terminalCause: "crashed" as const };
+  for (const generation of runtime.executionGenerations) generation.terminal = runtime.options.terminalPayload(crash, "test");
+  runtime.setEntry({ ...runtime.entry(), observed_state: "failed", condition: "none", last_error: null });
+  runtime.options.provider.capabilities = async () => ({ deliveryModes: ["daemon_inbox"], resume: true,
+    midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true });
+  runtime.options.provider.attach = async () => null;
+  let resumes = 0;
+  runtime.options.provider.resume = async () => { resumes++; return returnedHandle; };
+  let cleared = 0;
+  runtime.options.host.clearSuccessfulRecovery = () => { cleared++; };
+  const grant = runtime.options.host.currentGrant(runtime.entry())!;
+  runtime.options.host.mintAuthorization = async () => ({ agentSessionId: "session-1", bearer: "test-only", bearerId: "bearer-1",
+    expiresAt: grant.expiresAt, apiUrl: grant.apiUrl,
+    authority: { entryId: "agent-1", roomId: "room-1", workAttemptId: "attempt-1", grant } });
+  runtime.options.host.recordMintedSession = async (_entry, id, minted) => ({ ...minted, executionGenerationId: id });
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.equal(resumes, 1, "the saved continuation was resumed");
+  assert.equal(cleared, 1, "a live handle on the grant path counts as a successful launch");
+});
+
 test("a healthy processless Cursor lane remains idle and delivery-capable", async () => {
   const runtime = ownedRecoveryHarness();
   runtime.binding.execution_generation_id = "generation-2";

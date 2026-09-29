@@ -936,6 +936,47 @@ test("bootstrap diagnostics distinguish observed progress at the appropriate bou
   assert.equal(new Set(diagnostics).size, 3, "progress categories survive without relying on elapsed-time differences");
 });
 
+for (const [apiError, expected] of [
+  ["rate_limit", { providerQuotaExhausted: true, transientProviderStart: undefined }],
+  ["overloaded", { providerQuotaExhausted: undefined, transientProviderStart: true }],
+  ["server_error", { providerQuotaExhausted: undefined, transientProviderStart: true }],
+  ["authentication_failed", { providerQuotaExhausted: undefined, transientProviderStart: undefined }],
+] as const) {
+  test(`a bootstrap turn Claude rejects with ${apiError} is classified for the scheduler`, async () => {
+    const harness = createHarness({
+      bootstrapResultSubtype: "success",
+      bootstrapMessages: sessionId => [{ type: "assistant", session_id: sessionId, error: apiError,
+        message: { content: [{ type: "text", text: "limit" }] } }],
+    });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, new RegExp(`\\(failed_response\\).*assistant_error=${apiError}`));
+      const flags = error as { providerQuotaExhausted?: true; transientProviderStart?: true };
+      assert.equal(flags.providerQuotaExhausted, expected.providerQuotaExhausted);
+      assert.equal(flags.transientProviderStart, expected.transientProviderStart);
+      return true;
+    });
+  });
+}
+
+test("a bootstrap deadline stays unretried even after Claude reported a rate-limit retry", async () => {
+  const harness = createHarness({
+    omitBootstrapResult: true,
+    bootstrapMessages: sessionId => [{ type: "system", subtype: "api_retry", session_id: sessionId,
+      error: "rate_limit", error_status: 429, attempt: 1, retry_delay_ms: 1000 }],
+  });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+  await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /\(deadline\)/);
+    const flags = error as { providerQuotaExhausted?: true; transientProviderStart?: true };
+    assert.equal(flags.providerQuotaExhausted, undefined, "a stalled resume can cost tokens; only an explicit rejection retries");
+    assert.equal(flags.transientProviderStart, undefined);
+    return true;
+  });
+});
+
 test("post-init bootstrap diagnostics count a retry storm without changing the deadline", async () => {
   const harness = createHarness({ omitBootstrapResult: true });
   let emittedAfterInit = false;

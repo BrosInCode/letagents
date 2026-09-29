@@ -398,6 +398,9 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   if (/durable execution generation remains live without an attachable provider handle/i.test(detail)) {
     return "LetAgents is verifying whether the previous provider process is still running.";
   }
+  if (/daemon-safe bootstrap turn \(failed_response\).*assistant_error=rate_limit/i.test(detail)) {
+    return "Claude's usage limit was reached. LetAgents retries automatically once the limit resets.";
+  }
   if (/waiting for desktop credential handoff/i.test(detail)) {
     return "Waiting for the desktop app to restore this agent’s room access.";
   }

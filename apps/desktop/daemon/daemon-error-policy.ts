@@ -51,6 +51,17 @@ export function transientProviderStartFailure(error: unknown): boolean {
   return false;
 }
 
+/** The provider account's usage limit rejected the launch; it clears only when the limit resets. */
+export function providerQuotaExhaustedFailure(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if ((current as { providerQuotaExhausted?: unknown } | null)?.providerQuotaExhausted === true) return true;
+    if (!(current instanceof Error)) return false;
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** A saved provider runtime that is provably gone cannot be resumed. */
 export function providerRuntimeGoneFailure(error: unknown): boolean {
   let current: unknown = error;
