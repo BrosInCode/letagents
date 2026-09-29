@@ -62,8 +62,7 @@
     "@types/pg": "8.18.0",
     "drizzle-kit": "0.31.10",
     "tsx": "4.23.0",
-    "typescript": "5.9.3",
-    "ws": "8.21.0"
+    "typescript": "5.9.3"
   },
   "overrides": {
     "@hono/node-server": "2.0.10",
