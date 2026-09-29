@@ -17,6 +17,7 @@ const {
   openCodeAuthContent,
   openCodeConfig,
   seedOpenCodeConfigHome,
+  shieldOwnerInstructions,
 } = await import("../../dist-electron/main/agents/opencode-launch-contract.js");
 const { OPENCODE_RUNTIME_VERSION } = await import(
   "../../dist-electron/main/agents/opencode-runtime.js"
@@ -26,6 +27,8 @@ const { OpenCodeServerClient, eventReferencesSession, mintNativeUserMessageId, p
 );
 
 const CONTRACT_SENTINEL = "letagents-opencode-contract-secret";
+const OWNER_INSTRUCTIONS_SENTINEL = "letagents-owner-instructions-sentinel";
+const PROJECT_INSTRUCTIONS_SENTINEL = "letagents-project-instructions-sentinel";
 const TURN_TIMEOUT_MS = 30_000;
 
 function resolveBinary() {
@@ -172,6 +175,7 @@ async function startFixtureProvider() {
     credentialBoundaryObserved: false,
     unknownFinishRequests: 0,
     retriedRequests: 0,
+    isolationSystemPrompts: [],
     requestCount: 0,
     paths: [],
   };
@@ -186,6 +190,20 @@ async function startFixtureProvider() {
     const name = toolName(body);
     const serializedMessages = JSON.stringify(body.messages ?? []);
     const hasToolResult = (body.messages ?? []).some((message) => message?.role === "tool");
+    if (serializedMessages.includes("LETAGENTS_ISOLATION_FIXTURE")) {
+      // Only the agent turn carries tools, and with them the system prompt
+      // that lists instructions and skills.
+      if (name) {
+        state.isolationSystemPrompts.push((body.messages ?? [])
+          .filter((message) => message?.role === "system")
+          .map((message) => typeof message.content === "string"
+            ? message.content
+            : JSON.stringify(message.content))
+          .join("\n"));
+      }
+      assistantText(response, name ? "isolation-ok" : "contract-background-request-ok");
+      return;
+    }
     if (serializedMessages.includes("LETAGENTS_RETRY_FIXTURE")) {
       if (name) {
         state.retriedRequests += 1;
@@ -349,6 +367,116 @@ async function watchEvents(client, eventTypes) {
   }
 }
 
+function skillFile(name) {
+  return `---\nname: ${name}\ndescription: Planted by the contract smoke.\n---\n\nNothing to do.\n`;
+}
+
+// A second launch, from a planted home directory and project, shows what of
+// the owner's reaches the model. The first launch keeps the real home
+// directory so that it sees this machine as production would.
+async function observeOwnerIsolation({ binary, provider, registry, runtimeRoot, mcpPath, pluginPath }) {
+  const home = join(runtimeRoot, "isolation-home");
+  const project = join(runtimeRoot, "isolation-project");
+  const planted = [
+    [join(home, ".claude", "CLAUDE.md"), `${OWNER_INSTRUCTIONS_SENTINEL}\n`],
+    [join(home, ".claude", "skills", "owner-claude-skill", "SKILL.md"), skillFile("owner-claude-skill")],
+    [join(home, ".agents", "skills", "owner-agents-skill", "SKILL.md"), skillFile("owner-agents-skill")],
+    [join(project, "CLAUDE.md"), `${PROJECT_INSTRUCTIONS_SENTINEL}\n`],
+    [join(project, ".claude", "skills", "project-claude-skill", "SKILL.md"), skillFile("project-claude-skill")],
+    [join(project, ".opencode", "skills", "project-opencode-skill", "SKILL.md"), skillFile("project-opencode-skill")],
+  ];
+  for (const [path, content] of planted) {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, content, { encoding: "utf8" });
+  }
+  // Room agents work in Git worktrees, where OpenCode's search for project
+  // instruction files stops at the repository root. Without a repository it
+  // climbs to the file system root and picks up whatever lies on the way.
+  // Git's own variables would put the repository somewhere else.
+  const gitEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+  );
+  const initialized = spawnSync("git", ["init", "--quiet", project], {
+    encoding: "utf8",
+    env: gitEnvironment,
+  });
+  assert.equal(initialized.status, 0, `git init failed: ${initialized.error ?? initialized.stderr}`);
+  assert.deepEqual(
+    (await readdir(project)).filter((name) => name === ".git"),
+    [".git"],
+    "the planted project must be a Git repository",
+  );
+  // OpenCode installs its plugin SDK into a project's .opencode directory
+  // too. This one is marked provisioned, as the seed marks the runtime's own.
+  const dependencies = { "@opencode-ai/plugin": OPENCODE_RUNTIME_VERSION };
+  await mkdir(join(project, ".opencode", "node_modules"), { recursive: true });
+  await writeFile(join(project, ".opencode", "package.json"), JSON.stringify({ dependencies }));
+  await writeFile(join(project, ".opencode", "package-lock.json"), JSON.stringify({
+    name: "opencode",
+    lockfileVersion: 3,
+    requires: true,
+    packages: { "": { dependencies } },
+  }));
+
+  const auth = { username: OPENCODE_SERVER_USERNAME, password: randomBytes(24).toString("base64url") };
+  const port = await allocatePort();
+  const configHome = join(runtimeRoot, "isolation-config");
+  await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION);
+  await shieldOwnerInstructions(configHome);
+  const environment = minimalOpenCodeEnvironment({ ...process.env, HOME: home }, {
+    npm_config_registry: registry.url,
+    OPENCODE_SERVER_USERNAME: auth.username,
+    OPENCODE_SERVER_PASSWORD: auth.password,
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(openCodeConfig({
+      model: "contract-model",
+      baseUrl: provider.url,
+      pluginUrl: pathToFileURL(pluginPath).href,
+      cwd: project,
+      mcpCommand: [process.execPath, mcpPath],
+      mcpEnvironment: {},
+      permissionProfileId: "ask_before_write",
+    })),
+    OPENCODE_AUTH_CONTENT: openCodeAuthContent(CONTRACT_SENTINEL),
+    XDG_DATA_HOME: join(runtimeRoot, "isolation-data"),
+    XDG_CACHE_HOME: join(runtimeRoot, "cache"),
+    XDG_CONFIG_HOME: configHome,
+    XDG_STATE_HOME: join(runtimeRoot, "isolation-state"),
+  });
+  const output = { value: "" };
+  const child = spawn(binary, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+    cwd: project,
+    env: environment,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.on("data", (chunk) => { output.value += chunk; });
+  child.stderr.on("data", (chunk) => { output.value += chunk; });
+  let observation;
+  try {
+    const client = new OpenCodeServerClient(`http://127.0.0.1:${port}`, auth, fetch);
+    await waitForHealth(client, child, output);
+    const session = await client.createSession("LetAgents owner isolation");
+    assert.equal(typeof session.id, "string");
+    observation = await watchEvents(client, new Set());
+    await client.promptAsync(session.id, {
+      messageID: mintNativeUserMessageId(Date.now()),
+      model: { providerID: OPEN_MODEL_OPENCODE_PROVIDER_ID, modelID: "contract-model" },
+      parts: [{ type: "text", text: "LETAGENTS_ISOLATION_FIXTURE" }],
+    });
+    await observation.waitFor((event) => event.type === "session.idle"
+      && eventReferencesSession(event, session.id));
+    assert.equal(provider.state.isolationSystemPrompts.length, 1);
+    return provider.state.isolationSystemPrompts[0];
+  } finally {
+    await observation?.close().catch(() => {});
+    child.kill("SIGTERM");
+    await Promise.race([
+      new Promise((resolveExit) => child.once("exit", resolveExit)),
+      new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
+    ]);
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+}
+
 const binary = resolveBinary();
 const actualVersion = verifyVersion(binary);
 const provider = await startFixtureProvider();
@@ -378,6 +506,7 @@ const config = openCodeConfig({
 // so an attempted install is observed instead of inferred from a timeout.
 const configHome = join(runtimeRoot, "config");
 await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION);
+await shieldOwnerInstructions(configHome);
 const environment = minimalOpenCodeEnvironment(process.env, {
   npm_config_registry: registry.url,
   OPENCODE_SERVER_USERNAME: auth.username,
@@ -603,6 +732,23 @@ try {
   await assert.rejects(reattached.replyPermission(sessionId, pending[0], "once"),
     (error) => error?.outcome === "not_pending");
   assert.equal(permissionReplyPosts, 2, "disposal must not permit re-dispatch of lost or previously processed requests");
+
+  // A supervised agent takes its instructions from LetAgents and the project,
+  // not from what the owner keeps in their home directory for other tools.
+  // The two that must still arrive show that the prompt was the right one.
+  const systemPrompt = await observeOwnerIsolation({ binary, provider, registry, runtimeRoot, mcpPath, pluginPath });
+  assert.ok(systemPrompt.includes(PROJECT_INSTRUCTIONS_SENTINEL),
+    "a project's CLAUDE.md must still reach the model when it has no AGENTS.md");
+  assert.ok(systemPrompt.includes("project-opencode-skill"),
+    "a project's own OpenCode skills must still be listed");
+  assert.ok(!systemPrompt.includes(OWNER_INSTRUCTIONS_SENTINEL),
+    "the owner's ~/.claude/CLAUDE.md must not reach the model");
+  // OpenCode names the file each instruction came from.
+  assert.ok(!systemPrompt.includes("isolation-config"),
+    "the empty file that stands in for the owner's must add nothing to the prompt");
+  for (const skill of ["owner-claude-skill", "owner-agents-skill", "project-claude-skill"]) {
+    assert.ok(!systemPrompt.includes(skill), `the external skill ${skill} must not be listed`);
+  }
   assert.deepEqual(
     registry.requests,
     [],
@@ -618,6 +764,7 @@ try {
     npmRegistryRequests: registry.requests.length,
     unknownFinishEndsTurnAfterOneRequest: true,
     retryStatusReadAsActiveAndAborted: true,
+    ownerInstructionsAndExternalSkillsWithheld: true,
     credentialBoundaryObserved: true,
     reattachedWithoutRelaunch: true,
     nativeAbortAccepted: true,
