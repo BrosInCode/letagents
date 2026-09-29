@@ -343,6 +343,77 @@ test("entry validation and create replay preserve exact validation and convergen
   );
 });
 
+test("a new agent never shares a name with another agent saved for its room", async () => {
+  const state = harness([entry({ id: "agent-1", display_name: "FieldMeadow", provider: "codex" })]);
+
+  // A different provider used to be enough for the same name to be accepted.
+  const twin = await state.subject.putManifestEntry(
+    entry({ id: "agent-2", display_name: "fieldmeadow", provider: "claude-code" }),
+  );
+  assert.match(twin.display_name, /^[A-Za-z]+$/, "the assigned name is one mentionable word");
+  assert.notEqual(twin.display_name.toLowerCase(), "fieldmeadow");
+  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "agent-2")?.display_name, twin.display_name);
+  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "agent-1")?.display_name, "FieldMeadow",
+    "the holder is never renamed by a newcomer");
+
+  // The same name in another room names a different agent to different people.
+  const elsewhere = await state.subject.putManifestEntry(
+    entry({ id: "agent-3", room_id: "room-2", display_name: "FieldMeadow", provider: "codex" }),
+  );
+  assert.equal(elsewhere.display_name, "FieldMeadow");
+
+  // A free requested name is a suggestion the daemon accepts.
+  const free = await state.subject.putManifestEntry(
+    entry({ id: "agent-4", display_name: "CedarPeak", provider: "codex" }),
+  );
+  assert.equal(free.display_name, "CedarPeak");
+});
+
+test("a placeholder name is replaced, and no two replacements in a room collide", async () => {
+  const state = harness();
+  const names = new Set<string>();
+  for (const [index, placeholder] of ["Supervised agent", "Codex supervised agent", "open-model supervised agent"].entries()) {
+    const created = await state.subject.putManifestEntry(
+      entry({ id: `agent-${index}`, display_name: placeholder, provider: "codex" }),
+    );
+    assert.match(created.display_name, /^[A-Za-z]+$/);
+    assert.doesNotMatch(created.display_name, /supervised agent/i);
+    names.add(created.display_name.toLowerCase());
+  }
+  assert.equal(names.size, 3);
+
+  // A name a person chose is theirs, however it happens to end.
+  for (const chosen of ["QA supervised agent", "Research Supervised Agent"]) {
+    const created = await state.subject.putManifestEntry(
+      entry({ id: `agent-${chosen}`, display_name: chosen, provider: "codex" }),
+    );
+    assert.equal(created.display_name, chosen);
+  }
+});
+
+test("replaying a creation request returns the saved agent whatever name the replay carries", async () => {
+  const state = harness([entry({ id: "agent-1", display_name: "FieldMeadow", provider: "codex" })]);
+  const created = await state.subject.putManifestEntry(
+    entry({ id: "agent-2", display_name: "FieldMeadow", provider: "claude-code" }),
+  );
+  assert.notEqual(created.display_name, "FieldMeadow");
+
+  // The caller still holds the name it asked for; the room may also have
+  // assigned another since. Neither makes this a different request.
+  state.events.length = 0;
+  const replay = await state.subject.putManifestEntry(
+    entry({ id: "agent-2", display_name: "FieldMeadow", provider: "claude-code" }),
+  );
+  assert.equal(replay, created);
+  assert.equal(state.events.some((event) => event.startsWith("store:write")), false);
+
+  await assert.rejects(
+    state.subject.putManifestEntry(entry({ id: "agent-2", display_name: "FieldMeadow", provider: "claude-code", charter: "Other work" })),
+    /already bound to different agent parameters/,
+    "every other creation parameter still fences a replay",
+  );
+});
+
 test("manifest.put rejects caller-supplied polling custody before any write or convergence", async () => {
   for (const polling_contract of ["custodial_polling_v1", "unknown", null, undefined]) {
     const state = harness();

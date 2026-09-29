@@ -739,6 +739,75 @@ test("worker mint durably marks uncertainty before HTTP and exact public identit
   assert.equal(harness.clearedTimers, 1, "the paired supplied clear function receives the mint timer");
 });
 
+test("the name the room assigned replaces the name this machine requested", async () => {
+  const session = (displayName: string) => ({
+    session_id: "session-minted", session_token: "", room_id: "room-1", session_kind: "worker" as const,
+    runtime: "codex", actor_label: `${displayName} | Owner's agent | Codex`, agent_key: "owner/agent",
+    agent_instance_id: "daemon:agent-1", display_name: displayName, owner_label: "Owner", ide_label: "Codex",
+    created_at: new Date(now).toISOString(), updated_at: new Date(now).toISOString(),
+    last_seen_at: new Date(now).toISOString(), ended_at: null,
+  });
+  let assigned = "CedarPeak";
+  const harness = fixture({
+    createWorkerSession: async () => ({
+      sessionId: "session-minted", bearer: "minted-secret", bearerId: "bearer-id-minted",
+      expiresAt: new Date(now + 5 * 60_000).toISOString(), agentSession: session(assigned),
+    }),
+  });
+  harness.custody.installHostGrant(hostGrant());
+  const requested = harness.entry.display_name;
+  assert.notEqual(requested, assigned);
+
+  const minted = await harness.subject.mintHostWorkerAuthorization(harness.entry);
+  assert.equal(minted?.bearer, "minted-secret", "adoption never stands between a worker and its credential");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.manifestUpdates.at(-1)?.display_name, "CedarPeak");
+
+  // A room that returns the requested name leaves the manifest untouched.
+  const updates = harness.manifestUpdates.length;
+  assert.equal(harness.entry.display_name, "CedarPeak");
+  await harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.manifestUpdates.length, updates);
+
+  // The comparison is what decides: a different name is adopted again.
+  assigned = "MapleRidge";
+  await harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.manifestUpdates.length, updates + 1);
+  assert.equal(harness.entry.display_name, "MapleRidge");
+});
+
+test("name adoption never stands between a worker and its credential", async () => {
+  const session = (displayName: string) => ({
+    session_id: "session-minted", session_token: "", room_id: "room-1", session_kind: "worker" as const,
+    runtime: "codex", actor_label: `${displayName} | Owner's agent | Codex`, agent_key: "owner/agent",
+    agent_instance_id: "daemon:agent-1", display_name: displayName, owner_label: "Owner", ide_label: "Codex",
+    created_at: new Date(now).toISOString(), updated_at: new Date(now).toISOString(),
+    last_seen_at: new Date(now).toISOString(), ended_at: null,
+  });
+  const long = "A".repeat(100);
+  for (const scenario of [
+    { name: "the room returns no session", agentSession: undefined, entryName: "Agent One" },
+    { name: "the room returns the requested name cut to its 64-character limit", agentSession: session(long.slice(0, 64)), entryName: long },
+    { name: "the room returns a name longer than the manifest allows", agentSession: session("B".repeat(121)), entryName: "Agent One" },
+  ]) {
+    const harness = fixture({
+      createWorkerSession: async () => ({
+        sessionId: "session-minted", bearer: "minted-secret", bearerId: "bearer-id-minted",
+        expiresAt: new Date(now + 5 * 60_000).toISOString(),
+        ...(scenario.agentSession ? { agentSession: scenario.agentSession } : {}),
+      }),
+    });
+    harness.custody.installHostGrant(hostGrant());
+    harness.setEntry({ ...harness.entry, display_name: scenario.entryName });
+    const minted = await harness.subject.mintHostWorkerAuthorization(harness.entry);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(minted?.bearer, "minted-secret", scenario.name);
+    assert.equal(harness.entry.display_name, scenario.entryName, scenario.name);
+  }
+});
+
 test("cached worker authority is reused unless force-fresh explicitly remints", async () => {
   let calls = 0;
   const harness = fixture({

@@ -244,6 +244,7 @@ const required = [
     manifestPath: "Contents/Resources/app-update.yml",
   },
   ...[
+    "shared/agent-codenames.mjs",
     "shared/message-contracts.mjs",
     "shared/routing-aliases.mjs",
     "shared/sqlite-thread-routing.mjs",

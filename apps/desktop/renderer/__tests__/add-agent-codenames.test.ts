@@ -1,30 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { suggestSupervisedAgentCodename, supervisedAgentDisplayLabel, supervisedAgentShortTag } from "../src/domain/codenames";
+import { supervisedAgentDisplayLabel, supervisedAgentShortTag } from "../src/domain/codenames";
 
-test("sequential supervised creation requests receive distinct persisted display names", () => {
-  const firstRequestId = "e730326a-2d7d-4898-b1a6-bdf14c3448ea";
-  const secondRequestId = "cc9814d8-4dbd-419b-9db0-1b638e13e38e";
-  const firstDisplayName = suggestSupervisedAgentCodename([], firstRequestId);
-  const secondDisplayName = suggestSupervisedAgentCodename([firstDisplayName], secondRequestId);
-
-  assert.notEqual(firstRequestId, secondRequestId);
-  assert.notEqual(firstDisplayName, secondDisplayName);
-  assert.doesNotMatch(firstDisplayName, /supervised agent/i);
-  assert.doesNotMatch(secondDisplayName, /supervised agent/i);
-});
-
-test("concurrent codename collisions keep friendly labels while durable ids remain authoritative", () => {
-  // These seeds select the same friendly base candidate. The durable entry id,
-  // not the product label, separates simultaneous launches.
+test("names written by older versions project to the friendly label of their own entry only", () => {
   const firstRequestId = "request_00000005";
   const secondRequestId = "request_00000070";
-  const firstDisplayName = suggestSupervisedAgentCodename([], firstRequestId);
-  const secondDisplayName = suggestSupervisedAgentCodename([], secondRequestId);
 
-  assert.equal(firstDisplayName.split(" · ")[0], secondDisplayName.split(" · ")[0]);
-  assert.equal(firstDisplayName, secondDisplayName);
-  assert.doesNotMatch(firstDisplayName, /000000/);
   assert.equal(
     supervisedAgentDisplayLabel(`CloudHaven · ${firstRequestId}`, `supervised_${firstRequestId}`),
     "CloudHaven",
@@ -38,6 +19,13 @@ test("concurrent codename collisions keep friendly labels while durable ids rema
     `CloudHaven · ${firstRequestId}`,
     "only the exact entry-owned suffix is hidden",
   );
+});
+
+test("the renderer offers no way to choose an agent name", async () => {
+  // Naming needs the names already taken in the room. Only the background
+  // service that saves the agent can read them and claim one in one step.
+  const codenames = await import("../src/domain/codenames");
+  assert.deepEqual(Object.keys(codenames).sort(), ["supervisedAgentDisplayLabel", "supervisedAgentShortTag"]);
 });
 
 test("name projection preserves punctuation that is not owned by the exact durable entry", () => {
