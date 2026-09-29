@@ -1,3 +1,12 @@
+import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
+import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
+import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { isAbsolute } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
+import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import {
   launchCodexAppServer,
   resolveCodexAppServerUrl,
@@ -6,25 +15,37 @@ import {
   type CodexAppServerLaunch,
 } from "./codex-app-server.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { apiUrl as desktopApiUrl } from "../paths.js";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import {
   CodexRpcClient,
   type RpcNotification,
+  type RpcServerRequest,
   type ThreadReadResult,
   type ThreadReadTurn,
   type TurnStartResult,
 } from "./codex-rpc-client.js";
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
+import { LETAGENTS_MCP_RUNTIME_TREE_SHA256, resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
 import {
+  ProviderExecutionObserver,
+  nativeExecutionId,
+  nativeLifecycleCheckpoint,
+  type NativeLifecycleCheckpoint,
+} from "./provider-execution-observer.js";
+import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
+import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
 } from "./codex-runtime-reasoning.js";
-import { isActiveCodexTurnStatus } from "./codex-session-status.js";
+import { extractThreadStatus, extractTurnStatus, isActiveCodexTurnStatus } from "./codex-session-status.js";
 import { CodexTurnResultAccumulator } from "./codex-turn-result.js";
 import {
   buildCodexStartPrompt,
+  buildCustodialPollingPrompt,
   DEFAULT_CODEX_STOP_PHRASE,
   looksLikeInviteCode,
   makeCodexStopToken,
@@ -39,6 +60,8 @@ import {
   type ProviderConnectionRef,
   type ProviderContinuationRef,
   type ProviderHandle,
+  type CustodialPollingActivationRequest,
+  type CustodialPollingActivationOptions,
   type ProviderObservedState,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
@@ -69,7 +92,23 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-type CodexThreadResult = { thread?: { id?: string } };
+type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown };
+
+/**
+ * The reviewer Codex reports must be the one this launch named. The owner's
+ * own Codex settings can name another, and an older app-server can ignore the
+ * request; either would route approvals somewhere the access level did not
+ * choose. An app-server that reports no reviewer has none to route to.
+ */
+function assertCodexReviewerApplied(policy: Record<string, unknown>, result: CodexThreadResult): void {
+  if (policy.approvalsReviewer === "auto_review") {
+    if (result.approvalsReviewer === "auto_review") return;
+    throw new Error("Codex did not turn on automatic review. Update Codex, or choose another access level.");
+  }
+  if (result.approvalsReviewer !== undefined && result.approvalsReviewer !== null && result.approvalsReviewer !== "user") {
+    throw new Error("Codex would review approvals itself instead of asking you. Choose Auto to allow that, or remove the reviewer from your Codex settings.");
+  }
+}
 
 function isUnmaterializedEmptyThreadRead(error: unknown): boolean {
   const message = errorMessage(error).toLowerCase();
@@ -88,12 +127,33 @@ function escapeRegExp(value: string): string {
 
 export interface CodexAdapterRpc {
   connect(): Promise<void>;
-  request<T>(method: string, params?: unknown): Promise<T>;
+  request<T>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T>;
   close(): void;
   onDisconnect(listener: () => void): () => void;
+  currentConnectionId(): string | null;
+  listPendingRequests(): readonly RpcServerRequest[];
+  onPendingRequestsChanged(listener: () => void): () => void;
+  onRequestResolved(listener: (request: RpcServerRequest) => void): () => void;
+  respond(request: RpcServerRequest, result: unknown): void;
+}
+
+/** Native approval payloads stay host-ephemeral, outside execution facts and room projections. */
+export type CodexPermissionObservation =
+  | { type: "snapshot"; connectionId: string; requests: readonly RpcServerRequest[] }
+  | { type: "request_closed"; request: RpcServerRequest }
+  | { type: "degraded" }
+  | { type: "unavailable" };
+
+export class CodexPermissionReplyError extends Error {
+  constructor(readonly outcome: "not_dispatched" | "uncertain") {
+    super(`Codex permission decision ${outcome}.`);
+    this.name = "CodexPermissionReplyError";
+  }
 }
 
 export interface CodexProviderAdapterDependencies {
+  resolveMcpRuntime(devEntryPath?: string): LetAgentsMcpRuntime;
+  readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unknown>;
   resolveServerUrl(): Promise<string>;
   launchServer(
     serverUrl: string,
@@ -130,6 +190,10 @@ export interface CodexProviderAdapterOptions {
 }
 
 const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
+  execution: {
+    controlProbe: "rpc",
+    approvals: { kinds: ["command", "file_change", "network"], recovery: "connection_only", denyScope: "request" },
+  },
   deliveryModes: ["mcp_polling", "daemon_inbox"],
   // P0 task_28 did not prove native mid-turn injection or approval bridging.
   // Resume is populated per app-server after a protocol-level probe.
@@ -144,7 +208,8 @@ const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
   turnControl: "native_interrupt",
 };
 
-const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input"]);
+const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input", "sandbox"]);
+const PS_BIRTH_EVIDENCE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
 
 function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -156,10 +221,56 @@ function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
       throw new Error(`Codex launchPolicy cannot override reserved field '${key}'.`);
     }
   }
-  // Deliberately return the original values without mapping profile names or
-  // inventing LetAgents permission semantics. The Add Agent native policy is
-  // forwarded to app-server unchanged (plan v10 §4.8 / P0 cell h).
-  return policy;
+  const { sandboxPolicy, ...namedPolicy } = policy;
+  const reviewer = namedPolicy.approvalsReviewer ?? "user";
+  if (reviewer !== "user" && reviewer !== "auto_review") {
+    throw new Error("Codex launchPolicy names an unsupported approval reviewer.");
+  }
+  // Always name the reviewer, so the owner's own Codex settings cannot choose it.
+  const threadPolicy: Record<string, unknown> = { ...namedPolicy, approvalsReviewer: reviewer };
+  const sandbox = recordValue(sandboxPolicy);
+  // Codex reviews its own escalations only beneath project-only writes.
+  if (reviewer === "auto_review" && (sandbox?.type !== "workspaceWrite" || threadPolicy.approvalPolicy !== "on-request")) {
+    throw new Error("Codex launchPolicy names automatic review outside the Auto access level.");
+  }
+  if (sandboxPolicy === undefined) return threadPolicy;
+  if (sandbox?.type === "dangerFullAccess" && Object.keys(sandbox).length === 1) {
+    return { ...threadPolicy, sandbox: "danger-full-access" };
+  }
+  if (
+    sandbox?.type === "readOnly"
+    && sandbox.networkAccess === false
+    && Object.keys(sandbox).length === 2
+  ) {
+    return { ...threadPolicy, sandbox: "read-only" };
+  }
+  // Project-only writes exist solely beneath Codex's own approval review.
+  // The thread takes the owner's settings for network access; every turn
+  // restates this exact policy, and the turn's policy is the one Codex applies.
+  if (
+    sandbox?.type === "workspaceWrite"
+    && sandbox.networkAccess === false
+    && Object.keys(sandbox).length === 2
+    && reviewer === "auto_review"
+  ) {
+    return { ...threadPolicy, sandbox: "workspace-write" };
+  }
+  throw new Error("Codex launchPolicy contains an unsupported thread sandbox policy.");
+}
+
+function codexTurnPolicy(value: unknown): Readonly<Record<string, unknown>> {
+  normalizeLaunchPolicy(value);
+  const policy = value as Record<string, unknown>;
+  if (!["never", "on-request"].includes(String(policy.approvalPolicy)) || !recordValue(policy.sandboxPolicy)) {
+    throw new Error("Codex turn requires its exact applied approval and sandbox policy.");
+  }
+  return Object.freeze({
+    approvalPolicy: policy.approvalPolicy,
+    sandboxPolicy: Object.freeze(structuredClone(policy.sandboxPolicy as Record<string, unknown>)),
+    // Every turn restates the reviewer, so neither a resumed thread nor the
+    // owner's Codex settings can move approvals to another one.
+    approvalsReviewer: policy.approvalsReviewer ?? "user",
+  });
 }
 
 /**
@@ -171,14 +282,107 @@ export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
   return [`mcp_servers.letagents.cwd=${JSON.stringify(cwd)}`];
 }
 
+function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(process.execPath, [entryPath, "--letagents-runtime-contract"], {
+      encoding: "utf8", timeout: 8_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+      // The read-only contract probe needs neither user auth nor daemon authority.
+      env: { ELECTRON_RUN_AS_NODE: "1", ...(isLocalRoomApi(apiUrl) ? { LETAGENTS_API_URL: LOCAL_ROOM_API_ORIGIN } : {}) },
+    }, (error, stdout) => {
+      if (error) return reject(new Error("The verified LetAgents MCP runtime contract could not be read."));
+      try { resolve(JSON.parse(stdout)); }
+      catch { reject(new Error("The verified LetAgents MCP runtime contract is malformed.")); }
+    });
+    child.stdin?.end();
+  });
+}
+
+function custodialPollingTools(value: unknown): string[] {
+  const report = recordValue(value);
+  const profile = recordValue(recordValue(report?.profiles)?.supervised_mcp_polling);
+  const tools = profile?.tools;
+  if (report?.format !== 1 || profile?.contract !== "custodial_polling_v1"
+    || !Array.isArray(tools) || !tools.every((name) => typeof name === "string")
+    || !["wait_for_messages", "read_messages", "send_message"].every((name) => tools.includes(name))
+    || tools.some((name) => /^(?:register_agent_session|disconnect_agent_session|start_device_auth|poll_device_auth|clear_saved_auth|resume_room_session|rental_.*)$/.test(name))) {
+    throw new Error("The verified LetAgents MCP runtime does not support custodial_polling_v1.");
+  }
+  return tools;
+}
+
+const REQUIRED_ROOM_TOOLS = ["claim_task", "get_board", "read_messages", "send_message"] as const;
+
+function boundedCodexTools(value: unknown): string[] {
+  const report = recordValue(value);
+  const tools = recordValue(recordValue(report?.profiles)?.cursor_supervised_room_turn)?.tools;
+  if (report?.format !== 1 || !Array.isArray(tools) || !tools.every((name) => typeof name === "string")
+    || !REQUIRED_ROOM_TOOLS.every((name) => tools.includes(name))
+    || tools.some((name) => /^(?:wait_for_messages|register_agent_session|disconnect_agent_session|start_device_auth|poll_device_auth|clear_saved_auth|resume_room_session)$/.test(name))) {
+    throw new Error("The verified LetAgents MCP runtime does not support Codex supervised room tools.");
+  }
+  // The pinned runtime exposes its common bounded surface under Cursor's
+  // profile. Codex uses the same registration minus Cursor's completion hook.
+  return tools.filter((name) => name !== "complete_room_turn");
+}
+
+const boundedMcpEnvironment = {
+  LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+  LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+  LETAGENTS_TOKEN: "",
+  LETAGENTS_AGENT_SESSION_BEARER: "",
+  LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
+};
+
+function boundedLaunchContract(apiUrl: string, tools: string[]): string {
+  // Reuse the generated override: approval modes, filters, credentials and
+  // command semantics must change the identity too. Birth/workspace coordinates
+  // are independently fenced; replace only those variable launch values.
+  const override = custodialMcpOverride("<sealed-entry>", "<workspace>", {
+    ...boundedMcpEnvironment, LETAGENTS_API_URL: apiUrl,
+  }, [...tools].sort());
+  return createHash("sha256").update(JSON.stringify({
+    version: 1, provider: "codex", runtimeTree: LETAGENTS_MCP_RUNTIME_TREE_SHA256, override,
+  })).digest("hex");
+}
+
+function custodialMcpOverride(entryPath: string, cwd: string, environment: Record<string, string>, tools: string[]): string {
+  const env = Object.entries({ ...environment, ELECTRON_RUN_AS_NODE: "1" })
+    .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`).join(", ");
+  // Native config deep-merges even a parent-table CLI override. Pin each
+  // advertised tool so inherited prompt/approve rules cannot alter this policy.
+  const toolApprovalModes = tools.map((name) => {
+    // This verified bounded capability only records final-answer routing. It
+    // cannot choose a recipient or send text. Actual message tools remain writes.
+    const mode = environment.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn"
+      && name === "set_reply_thread" ? "approve" : "writes";
+    return `${JSON.stringify(name)} = { approval_mode = ${JSON.stringify(mode)} }`;
+  }).join(", ");
+  // Codex merges installed config beneath CLI overrides. Pin every authority
+  // coordinate and clear inherited credential names/tool filters explicitly.
+  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = "writes", tools = { ${toolApprovalModes} } }`;
+}
+
+function isCodexExecutionMethod(method: string): boolean {
+  return /^(?:item\/|command\/exec(?:\/|$))/i.test(method);
+}
+
 function streamKind(method: string): ProviderStreamEventKind {
   if (/(?:approval|requestApproval|guardian)/i.test(method)) return "approval";
+  // Preserve execution identity even when a command/tool reports failure.
+  // Runtime process errors still go through the error classifier below.
+  if (isCodexExecutionMethod(method)) {
+    if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
+    if (/(?:command|process|terminal)/i.test(method)) return "command_output";
+  }
+  // A failed turn is still turn lifecycle evidence. Keep its identity ahead of
+  // the generic error label so daemon policy cannot mistake it for app-server
+  // failure.
+  if (/^turn\//.test(method)) return "turn_lifecycle";
   if (/(?:error|warning|failed)/i.test(method)) return "error";
   if (/(?:usage|tokenUsage|rateLimit)/i.test(method)) return "usage";
   if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
   if (/(?:command|process|terminal)/i.test(method)) return "command_output";
   if (/(?:delta|transcript)/i.test(method)) return "text_delta";
-  if (/^turn\//.test(method)) return "turn_lifecycle";
   if (/^item\//.test(method)) return "item_lifecycle";
   return "provider_event";
 }
@@ -187,6 +391,106 @@ function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function terminalTurnOutcome(
+  method: string,
+  turn: Record<string, unknown> | null,
+): "completed" | "failed" | "interrupted" | null {
+  const terminal = /^turn\/(completed|failed|interrupted|cancelled|stopped)$/i.exec(method)?.[1]?.toLowerCase();
+  if (!terminal) return null;
+  if (terminal === "failed") return "failed";
+  if (terminal !== "completed") return "interrupted";
+  const status = extractTurnStatus(turn)?.trim().toLowerCase() ?? null;
+  if (status === "completed" || status === "failed") return status;
+  return /^(?:interrupted|cancelled|stopped)$/.test(status ?? "") ? "interrupted" : null;
+}
+
+function transcriptLifecycleTurn(value: unknown): { id: unknown; status: unknown } | null {
+  const turn = recordValue(value);
+  return turn ? { id: turn.id, status: turn.status } : null;
+}
+
+const permissionString = z.string().max(4096);
+const permissionSpecialPath = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("root") }),
+  z.strictObject({ kind: z.literal("minimal") }),
+  z.strictObject({ kind: z.literal("project_roots"), subpath: permissionString.nullable().optional() }),
+  z.strictObject({ kind: z.literal("tmpdir") }),
+  z.strictObject({ kind: z.literal("slash_tmp") }),
+  z.strictObject({ kind: z.literal("unknown"), path: permissionString, subpath: permissionString.nullable().optional() }),
+]);
+const permissionPath = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("path"), path: permissionString }),
+  z.strictObject({ type: z.literal("glob_pattern"), pattern: permissionString }),
+  z.strictObject({ type: z.literal("special"), value: permissionSpecialPath }),
+]);
+const permissionFileSystem = z.strictObject({
+  entries: z.array(z.strictObject({ access: z.enum(["read", "write", "deny"]), path: permissionPath })).max(128).nullable().optional(),
+  globScanMaxDepth: z.number().int().positive().max(4096).nullable().optional(),
+  read: z.array(permissionString).max(128).nullable().optional(),
+  write: z.array(permissionString).max(128).nullable().optional(),
+});
+const permissionProfileSchema = z.strictObject({
+  fileSystem: permissionFileSystem.nullable().optional(),
+  network: z.strictObject({ enabled: z.boolean().nullable().optional() }).nullable().optional(),
+});
+
+function permissionProfile(value: unknown): Record<string, unknown> | null {
+  if (!permissionProfileSchema.safeParse(value).success) return null;
+  try {
+    return Buffer.byteLength(JSON.stringify(value)) <= 24 * 1024 ? value as Record<string, unknown> : null;
+  } catch { return null; }
+}
+
+function permissionParams(request: RpcServerRequest): Record<string, unknown> | null {
+  if (request.method === "mcpServer/elicitation/request") {
+    const params = recordValue(request.params);
+    const metadata = recordValue(params?._meta);
+    // Codex uses an empty form for a single MCP tool approval. Data-entry and
+    // URL elicitations require a different interaction and cannot be accepted here.
+    const schema = z.strictObject({ type: z.literal("object"), properties: z.record(z.string(), z.never()),
+      required: z.array(z.never()).optional() });
+    if (!params || !nativeExecutionId(params.threadId) || !nativeExecutionId(params.turnId)
+      || params.mode !== "form" || !nativeExecutionId(params.serverName)
+      || typeof params.message !== "string" || !params.message.trim() || params.message.length > 8192
+      || metadata?.codex_approval_kind !== "mcp_tool_call" || !recordValue(metadata.tool_params)
+      || !schema.safeParse(params.requestedSchema).success) return null;
+    try { return Buffer.byteLength(JSON.stringify(params)) <= 24 * 1024 ? params : null; }
+    catch { return null; }
+  }
+  if (!["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"]
+    .includes(request.method)) return null;
+  const params = recordValue(request.params);
+  if (!params || !nativeExecutionId(params.threadId) || !nativeExecutionId(params.turnId)
+    || !nativeExecutionId(params.itemId) || !Number.isSafeInteger(params.startedAtMs)
+    || (params.startedAtMs as number) < 0) return null;
+  if (request.method !== "item/permissions/requestApproval") return params;
+  return typeof params.cwd === "string" && params.cwd.length <= 4096 && isAbsolute(params.cwd)
+    && permissionProfile(params.permissions)
+    && (params.reason == null || (typeof params.reason === "string" && params.reason.length <= 8192))
+    && (params.environmentId == null || (typeof params.environmentId === "string" && params.environmentId.length <= 512))
+    ? params : null;
+}
+
+function permissionFileChanges(value: unknown): CodexPermissionFileChange[] | null {
+  if (!Array.isArray(value) || !value.length || value.length > 128) return null;
+  const path = (input: unknown): input is string => typeof input === "string" && input.trim().length > 0
+    && input.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(input);
+  const changes: CodexPermissionFileChange[] = [];
+  for (const entry of value) {
+    const item = recordValue(entry); const kind = recordValue(item?.kind);
+    if (!item || Object.keys(item).length !== 3 || !path(item.path) || typeof item.diff !== "string"
+      || item.diff.length > 24 * 1024 || !kind) return null;
+    if (kind.type === "add" || kind.type === "delete") {
+      if (Object.keys(kind).length !== 1) return null;
+      changes.push({ path: item.path, kind: { type: kind.type }, diff: item.diff });
+    } else if (kind.type === "update" && Object.keys(kind).length === 2
+      && (kind.move_path === null || path(kind.move_path))) {
+      changes.push({ path: item.path, kind: { type: "update", move_path: kind.move_path }, diff: item.diff });
+    } else return null;
+  }
+  return Buffer.byteLength(JSON.stringify(changes)) <= 24 * 1024 ? changes : null;
 }
 
 function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | null {
@@ -214,6 +518,18 @@ function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | n
   return null;
 }
 
+function hasExplicitCodexSystemError(value: unknown): boolean {
+  const root = recordValue(value);
+  if (!root) return false;
+  const candidates = [root.status, root.threadStatus, recordValue(root.thread)?.status]
+    .flatMap((candidate) => {
+      const nested = recordValue(candidate);
+      return [candidate, nested?.type, nested?.status];
+    });
+  return candidates.some((candidate) => typeof candidate === "string"
+    && /^(?:systemError|error_during_execution)$/i.test(candidate));
+}
+
 function notificationTurnId(value: unknown): string | null {
   const root = recordValue(value);
   const nested = recordValue(root?.turn);
@@ -232,11 +548,13 @@ function exactTurnKey(threadId: string, turnId: string): string {
   return `${threadId}\u0000${turnId}`;
 }
 
+function exactPermissionItemKey(threadId: string, turnId: string, itemId: string): string {
+  return JSON.stringify([threadId, turnId, itemId]);
+}
+
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
-    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
-    `Your durable charter: ${request.charter?.trim() || "Help thoughtfully within the room."}`,
-    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     "If no response should be published, return exactly LETAGENTS_NO_ROOM_REPLY with no other text.",
@@ -304,7 +622,53 @@ async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void>
   }
 }
 
+class CodexRoomToolsUnavailableError extends Error {
+  readonly providerFailureCode = "provider_room_tools_unavailable";
+
+  constructor(detail: string) {
+    super(`${detail} No model turn was started. Retry the message.`);
+    this.name = "CodexRoomToolsUnavailableError";
+  }
+}
+
+const ROOM_READINESS_URI = "letagents://runtime/readiness";
+const roomReadinessSchema = z.strictObject({
+  format: z.literal(1),
+  profile: z.literal("supervised_room_turn"),
+  provider: z.literal("codex"),
+  tools: z.array(z.string().min(1).max(128)).max(256),
+});
+
+/** Read this thread's server directly; aggregate inventory starts unrelated MCPs. */
+async function requireLetAgentsRoomTools(client: CodexAdapterRpc, threadId: string): Promise<void> {
+  let response: Record<string, unknown> | null;
+  try {
+    response = recordValue(await client.request("mcpServer/resource/read", {
+      threadId, server: "letagents", uri: ROOM_READINESS_URI,
+    }));
+  } catch (error) {
+    if (isMissingContinuation(error, threadId)) throw new ProviderContinuationMissingError(threadId);
+    throw new CodexRoomToolsUnavailableError(/(?:timed?\s*out|timeout)/i.test(errorMessage(error))
+      ? "Room tool discovery timed out."
+      : "Codex could not read this conversation's room readiness.");
+  }
+  const contents = response?.contents;
+  const resource = Array.isArray(contents) && contents.length === 1 ? recordValue(contents[0]) : null;
+  let payload: unknown;
+  if (resource?.uri === ROOM_READINESS_URI && resource.mimeType === "application/json"
+    && typeof resource.text === "string" && Buffer.byteLength(resource.text, "utf8") <= 64 * 1024) {
+    try { payload = JSON.parse(resource.text); } catch { /* Reject malformed readiness below. */ }
+  }
+  const readiness = roomReadinessSchema.safeParse(payload);
+  if (!readiness.success) throw new CodexRoomToolsUnavailableError("LetAgents returned invalid room readiness.");
+  if (!REQUIRED_ROOM_TOOLS.every(name => readiness.data.tools.includes(name))) {
+    throw new CodexRoomToolsUnavailableError("Required LetAgents room tools are missing from this conversation.");
+  }
+}
+
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
+  resolveMcpRuntime: (devEntryPath) => resolveLetAgentsMcpRuntime({ devEntryPath, env: desktopRuntimeEnvironment() }),
+  readMcpRuntimeContract,
   resolveServerUrl: () => resolveCodexAppServerUrl(null, { dedicated: true }),
   launchServer: (serverUrl, codexBin, options) =>
     launchCodexAppServer(serverUrl, codexBin, options),
@@ -319,7 +683,18 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   sleep: delay,
 };
 
+function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
+  return state === "failed" || state === "stopping" || state === "stopped";
+}
+
 class CodexProviderHandle implements ProviderHandle {
+  subscriptionAfterMaterialization = false;
+  custodyLaunchAgentSessionId?: string;
+  managedLaunchContract?: string;
+  readonly execution: ProviderExecutionObserver;
+  readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
+  readonly nativeActiveOperations = new Map<string, Extract<NativeExecutionFact, { domain: "execution" }>>();
+  nativeRuntimeUnavailable: HardControlEvidence | null = null;
   state: ProviderObservedState = "starting";
   stopRequested = false;
   protocolError = false;
@@ -327,10 +702,21 @@ class CodexProviderHandle implements ProviderHandle {
   readonly exitListeners = new Set<(payload: ProviderTerminalPayload) => void>();
   readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
   readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
+  readonly permissionInvalidationListeners = new Set<() => void>();
+  /** Exact native proposals only; never persisted or projected outside this host process. */
+  readonly permissionFileChangeProposals = new Map<string, {
+    connectionId: string;
+    threadId: string;
+    turnId: string;
+    changes: readonly CodexPermissionFileChange[];
+  }>();
   streamSequence = 0;
   /** At most one terminal fact per recent native turn; never infer a latest turn. */
   readonly terminalTurns = new Map<string, string>();
   readonly turnWaiters = new Map<string, { owner: symbol; resolve: (status: string) => void; reject: (error: Error) => void }>();
+  threadIdleEpoch = 0;
+  threadIdleReconciledEpoch = 0;
+  threadIdleReconciliation: Promise<void> | null = null;
   readonly roomTurnResults = new CodexTurnResultAccumulator();
   providerContinuationId: string;
 
@@ -339,20 +725,62 @@ class CodexProviderHandle implements ProviderHandle {
     readonly pid: number | null,
     providerContinuationId: string,
     readonly providerConnection: ProviderConnectionRef,
+    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
     readonly client: CodexAdapterRpc,
     readonly launch: CodexAppServerLaunch,
+    now: () => string,
+    private turnPolicy: Readonly<Record<string, unknown>> | null,
   ) {
     this.providerContinuationId = providerContinuationId;
+    this.execution = new ProviderExecutionObserver(now);
+    client.onDisconnect(() => {
+      this.permissionFileChangeProposals.clear();
+      if (this.nativeRuntimeUnavailable) return;
+      this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+        providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined);
+    });
+  }
+
+  requireTurnPolicy(): Readonly<Record<string, unknown>> {
+    if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
+    return this.turnPolicy;
+  }
+
+  /** The policy this runtime was launched under, when it is known. */
+  appliedTurnPolicy(): Readonly<Record<string, unknown>> | null {
+    return this.turnPolicy;
+  }
+
+  bindTurnPolicy(policy: unknown): void {
+    // Observation-only recovery may attach before the daemon supplies the
+    // applied configuration. Bind once; later settings cannot change this birth.
+    if (this.turnPolicy === null && policy !== undefined) this.turnPolicy = codexTurnPolicy(policy);
   }
 
   replaceContinuation(providerContinuationId: string): void {
     if (this.turnWaiters.size) {
       throw new Error("Codex continuation repair cannot replace a thread while a turn observer is active.");
     }
+    if (!this.setLiveState("idle")) {
+      throw new Error("Codex continuation repair cannot replace a thread on an unavailable runtime.");
+    }
     this.terminalTurns.clear();
     this.roomTurnResults.clearAll();
     this.providerContinuationId = providerContinuationId;
-    this.state = "idle";
+    this.invalidatePermissions();
+  }
+
+  setLiveState(state: "idle" | "working"): boolean {
+    if (isCodexRuntimeUnavailable(this.state)) return false;
+    this.state = state;
+    return true;
+  }
+
+  invalidatePermissions(): void {
+    this.permissionFileChangeProposals.clear();
+    for (const listener of this.permissionInvalidationListeners) {
+      try { listener(); } catch { /* Observation never controls native work. */ }
+    }
   }
 
   observedState(): ProviderObservedState {
@@ -367,6 +795,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly handles = new Map<string, CodexProviderHandle>();
+  private readonly pollingLaunches = new WeakMap<CodexProviderHandle, { roomId: string; cwd: string; configurationRevision: number | undefined; agentSessionId: string }>();
+  private readonly pollingDispatches = new WeakSet<CodexProviderHandle>();
+  private readonly nonPollingLaunches = new WeakSet<CodexProviderHandle>();
   private readonly pendingAttaches = new Map<string, {
     ref: ProviderContinuationRef;
     promise: Promise<CodexProviderHandle | ProviderAttachTerminal | null>;
@@ -380,7 +811,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private resumeSupported = true;
 
   constructor(options: CodexProviderAdapterOptions = {}) {
-    this.codexBin = options.codexBin || resolveCodexExecutable();
+    this.codexBin = options.codexBin || resolveCodexExecutable({ env: desktopRuntimeEnvironment() });
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
@@ -394,20 +825,42 @@ export class CodexProviderAdapter implements ProviderAdapter {
     };
   }
 
+  async describeManagedLaunchContract(input: { apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null> {
+    // Mutable development trees have no release seal and require explicit recovery.
+    if (input.devMcpServerEntryPath) return null;
+    const runtime = this.deps.resolveMcpRuntime();
+    const tools = boundedCodexTools(await this.deps.readMcpRuntimeContract(runtime.entryPath, input.apiUrl));
+    return boundedLaunchContract(input.apiUrl, tools);
+  }
+
+  async preflightCustodialPolling(input: { devMcpServerEntryPath?: string }): Promise<void> {
+    await this.resolveCustodialPollingRuntime(input.devMcpServerEntryPath);
+  }
+
+  private async resolveCustodialPollingRuntime(devEntryPath?: string): Promise<{ runtime: LetAgentsMcpRuntime; tools: string[] }> {
+    const runtime = this.deps.resolveMcpRuntime(devEntryPath);
+    const tools = custodialPollingTools(await this.deps.readMcpRuntimeContract(runtime.entryPath));
+    return { runtime, tools };
+  }
+
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
     return this.start(req, null);
   }
 
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
+    ref = { ...ref, ...(ref.launchPolicy === undefined ? {} : { launchPolicy: codexTurnPolicy(ref.launchPolicy) }) };
+    const authorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
     const handle = this.handles.get(ref.workAttemptId);
     if (
       !handle ||
       handle.terminal ||
+      handle.lifecycleAuthorityMode !== authorityMode ||
       handle.providerContinuationId !== ref.providerContinuationId ||
       !sameProviderConnectionIdentity(handle.providerConnection, ref.providerConnection)
     ) {
       if (handle) return null;
     } else {
+      handle.bindTurnPolicy(ref.launchPolicy);
       return handle;
     }
     const connection = ref.providerConnection;
@@ -418,9 +871,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (pending) {
       if (
         pending.ref.providerContinuationId !== ref.providerContinuationId
+        || (pending.ref.lifecycleAuthorityMode ?? "typed_shadow") !== authorityMode
         || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)
       ) return null;
-      return pending.promise;
+      const attached = await pending.promise;
+      if (attached instanceof CodexProviderHandle) attached.bindTurnPolicy(ref.launchPolicy);
+      return attached;
     }
     const attaching = this.attachRunning(ref, connection).finally(() => {
       if (this.pendingAttaches.get(ref.workAttemptId)?.promise === attaching) {
@@ -445,6 +901,202 @@ export class CodexProviderAdapter implements ProviderAdapter {
     throw new Error("Codex mid-turn injection is not enabled: P0 proved room delivery, not native poke.");
   }
 
+  private permissionAuthority(
+    handle: CodexProviderHandle, continuation: string, connection: ProviderConnectionRef, rpcConnection: string | null,
+  ): "current" | "degraded" | "unavailable" {
+    if (handle.terminal || handle.stopRequested || handle.protocolError || this.handles.get(handle.workAttemptId) !== handle
+      || handle.providerContinuationId !== continuation || !sameProviderConnectionIdentity(handle.providerConnection, connection)
+      || !rpcConnection || handle.client.currentConnectionId() !== rpcConnection) return "unavailable";
+    if (handle.pid === null || handle.pid !== connection.pid || !connection.processIdentity) return "degraded";
+    try {
+      const actual = this.deps.getProcessIdentity(handle.pid);
+      if (actual === undefined) return "degraded";
+      return typeof actual === "string" && sameProcessBirthIdentity(actual, connection.processIdentity) ? "current" : "unavailable";
+    } catch { return "degraded"; }
+  }
+
+  /** Connection-only observation: disconnect loses pending authority, never reconnects or replays it. */
+  async observePermissions(
+    rawHandle: ProviderHandle, listener: (event: CodexPermissionObservation) => void, signal: AbortSignal,
+  ): Promise<void> {
+    const handle = this.requireHandle(rawHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const rpcConnection = handle.client.currentConnectionId();
+    if (signal.aborted) return;
+    await new Promise<void>(resolve => {
+      let disposed = false;
+      const finish = () => {
+        if (disposed) return;
+        disposed = true;
+        unsubscribe();
+        unsubscribeResolved();
+        handle.permissionInvalidationListeners.delete(refresh);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const refresh = () => {
+        if (disposed || signal.aborted) return;
+        const authority = this.permissionAuthority(handle, continuation, connection, rpcConnection);
+        const event: CodexPermissionObservation = authority === "current"
+          ? { type: "snapshot", connectionId: rpcConnection!, requests: handle.client.listPendingRequests().filter(request =>
+            request.connectionId === rpcConnection && permissionParams(request)?.threadId === continuation) }
+          : { type: authority };
+        try { listener(event); } catch { /* Observation never controls native work. */ }
+        if (authority === "unavailable") finish();
+      };
+      const unsubscribe = handle.client.onPendingRequestsChanged(refresh);
+      const unsubscribeResolved = handle.client.onRequestResolved(request => {
+        if (disposed || signal.aborted || request.connectionId !== rpcConnection
+          || permissionParams(request)?.threadId !== continuation
+          || this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current") return;
+        try { listener({ type: "request_closed", request }); } catch { /* Observation only. */ }
+      });
+      handle.permissionInvalidationListeners.add(refresh);
+      signal.addEventListener("abort", finish, { once: true });
+      refresh();
+    });
+  }
+
+  /** Read the exact live proposed edits; historical thread items are not pending-edit evidence. */
+  async inspectPermissionFileChanges(rawHandle: ProviderHandle, request: RpcServerRequest): Promise<readonly CodexPermissionFileChange[] | null> {
+    try {
+      const handle = this.handles.get(rawHandle.workAttemptId);
+      if (!handle || handle !== rawHandle || request.method !== "item/fileChange/requestApproval") return null;
+      const params = permissionParams(request);
+      const continuation = handle.providerContinuationId;
+      const connection = { ...handle.providerConnection };
+      const rpcConnection = handle.client.currentConnectionId();
+      const current = () => this.permissionAuthority(handle, continuation, connection, rpcConnection) === "current"
+        && request.connectionId === rpcConnection && handle.client.listPendingRequests().includes(request)
+        && !handle.terminalTurns.has(exactTurnKey(continuation, params!.turnId as string));
+      if (!params || params.threadId !== continuation || !current()) return null;
+      const response = recordValue(await handle.client.request("thread/turns/list", {
+        threadId: continuation, limit: 1, sortDirection: "desc", itemsView: "full",
+      }));
+      if (!current() || !Array.isArray(response?.data) || response.data.length !== 1) return null;
+      const turn = recordValue(response.data[0]);
+      if (!turn || turn.id !== params.turnId || turn.status !== "inProgress" || turn.itemsView !== "full" || !Array.isArray(turn.items)) return null;
+      const matches = turn.items.filter(item => recordValue(item)?.id === params.itemId);
+      if (matches.length === 0) {
+        const cached = handle.permissionFileChangeProposals.get(exactPermissionItemKey(
+          continuation,
+          params.turnId as string,
+          params.itemId as string,
+        ));
+        return cached?.connectionId === rpcConnection ? permissionFileChanges(cached.changes) : null;
+      }
+      const item = recordValue(matches[0]);
+      if (matches.length !== 1 || !item || item.type !== "fileChange" || item.status !== "inProgress") return null;
+      return permissionFileChanges(item.changes);
+    } catch { return null; }
+  }
+
+  async inspectPermissionProfile(rawHandle: ProviderHandle, request: RpcServerRequest): Promise<Record<string, unknown> | null> {
+    const handle = this.handles.get(rawHandle.workAttemptId);
+    const continuation = handle?.providerContinuationId;
+    const connection = handle ? { ...handle.providerConnection } : null;
+    const rpcConnection = handle?.client.currentConnectionId() ?? null;
+    const params = request?.method === "item/permissions/requestApproval" ? permissionParams(request) : null;
+    const profile = params ? permissionProfile(params.permissions) : null;
+    if (!handle || handle !== rawHandle || !continuation || !connection || !rpcConnection || !params || !profile
+      || params.threadId !== continuation || request.connectionId !== rpcConnection
+      || !handle.client.listPendingRequests().includes(request)
+      || handle.terminalTurns.has(exactTurnKey(continuation, params.turnId as string))
+      || this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current") return null;
+    return structuredClone(profile);
+  }
+
+  async inspectPermissionMcpToolCall(rawHandle: ProviderHandle, request: RpcServerRequest): Promise<Record<string, unknown> | null> {
+    const handle = this.handles.get(rawHandle.workAttemptId);
+    const params = request.method === "mcpServer/elicitation/request" ? permissionParams(request) : null;
+    if (!handle || handle !== rawHandle || !params || params.threadId !== handle.providerContinuationId
+      || request.connectionId !== handle.client.currentConnectionId() || !handle.client.listPendingRequests().includes(request)
+      || handle.terminalTurns.has(exactTurnKey(handle.providerContinuationId, params.turnId as string))
+      || this.permissionAuthority(handle, handle.providerContinuationId, { ...handle.providerConnection },
+        handle.client.currentConnectionId()) !== "current") return null;
+    return structuredClone(params);
+  }
+
+  /** Host-only dispatch. A successful WebSocket send is NOT evidence that Codex applied the decision. */
+  async replyPermission(rawHandle: ProviderHandle, expectedRequest: RpcServerRequest, reply: "once" | "reject",
+    options?: ProviderPermissionDispatchOptions):
+    Promise<{ outcome: "sent"; scope: "request" }> {
+    const handle = this.handles.get(rawHandle.workAttemptId);
+    if (!handle || handle !== rawHandle) throw new CodexPermissionReplyError("not_dispatched");
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const rpcConnection = handle.client.currentConnectionId();
+    const params = expectedRequest && permissionParams(expectedRequest);
+    const fileChange = expectedRequest?.method === "item/fileChange/requestApproval";
+    const genericPermission = expectedRequest?.method === "item/permissions/requestApproval";
+    const mcpToolCall = expectedRequest?.method === "mcpServer/elicitation/request";
+    const expectedMcpParams = mcpToolCall && params ? structuredClone(params) : null;
+    const expectedChanges = fileChange ? permissionFileChanges(options?.expectedFileChanges) : null;
+    const requestedPermissions = genericPermission ? structuredClone(permissionProfile(params?.permissions)) : null;
+    const decision = reply === "once" ? "accept" : reply === "reject" ? "decline" : null;
+    if (!params || params.threadId !== continuation || !decision || (fileChange && !expectedChanges)
+      || (genericPermission && !requestedPermissions)
+      || (decision === "accept" && expectedRequest.method === "item/fileChange/requestApproval" && params.grantRoot != null)
+      || (params.availableDecisions != null && (!Array.isArray(params.availableDecisions) || !params.availableDecisions.includes(decision)))) {
+      throw new CodexPermissionReplyError("not_dispatched");
+    }
+    const assertCurrent = () => {
+      if (this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current"
+        || expectedRequest.connectionId !== rpcConnection || !handle.client.listPendingRequests().includes(expectedRequest)
+        || handle.terminalTurns.has(exactTurnKey(continuation, params.turnId as string))) {
+        throw new CodexPermissionReplyError("not_dispatched");
+      }
+    };
+    assertCurrent();
+    if (fileChange) {
+      if (!isDeepStrictEqual(await this.inspectPermissionFileChanges(handle, expectedRequest), expectedChanges)) {
+        throw new CodexPermissionReplyError("not_dispatched");
+      }
+    } else {
+      // A resumed history may retain an in-progress turn from a dead process.
+      // Pending requests belong to this connection's exact latest native turn;
+      // historical discovery cannot establish their dispatch authority.
+      let response: Record<string, unknown> | null;
+      try {
+        response = recordValue(await handle.client.request("thread/turns/list", {
+          threadId: continuation, limit: 1, sortDirection: "desc", itemsView: "full",
+        }));
+      } catch { throw new CodexPermissionReplyError("not_dispatched"); }
+      const turn = Array.isArray(response?.data) && response.data.length === 1 ? recordValue(response.data[0]) : null;
+      if (!turn || turn.id !== params.turnId || turn.status !== "inProgress" || turn.itemsView !== "full") {
+        throw new CodexPermissionReplyError("not_dispatched");
+      }
+    }
+    assertCurrent();
+    if (options) await options.beforeNativeDispatch();
+    if (fileChange && !isDeepStrictEqual(await this.inspectPermissionFileChanges(handle, expectedRequest), expectedChanges)) {
+      throw new CodexPermissionReplyError("not_dispatched");
+    }
+    if (genericPermission && !isDeepStrictEqual(permissionProfile(params.permissions), requestedPermissions)) {
+      throw new CodexPermissionReplyError("not_dispatched");
+    }
+    if (mcpToolCall && !isDeepStrictEqual(permissionParams(expectedRequest), expectedMcpParams)) {
+      throw new CodexPermissionReplyError("not_dispatched");
+    }
+    // No await or observer callback between the final fence and native response.
+    assertCurrent();
+    options?.assertNativeDispatch?.();
+    const result = mcpToolCall
+      ? { action: decision, content: reply === "once" ? {} : null, _meta: null }
+      : genericPermission
+      ? reply === "once"
+        ? { permissions: requestedPermissions, scope: "turn", strictAutoReview: true }
+        : { permissions: {}, scope: "turn" }
+      : { decision };
+    try { handle.client.respond(expectedRequest, result); }
+    catch { throw new CodexPermissionReplyError("uncertain"); }
+    if (this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current") {
+      throw new CodexPermissionReplyError("uncertain");
+    }
+    return { outcome: "sent", scope: "request" };
+  }
+
   async controlTurn(
     providerHandle: ProviderHandle,
     correction?: string | null,
@@ -452,11 +1104,19 @@ export class CodexProviderAdapter implements ProviderAdapter {
   ): Promise<ProviderTurnControlResult> {
     const handle = this.requireHandle(providerHandle);
     if (handle.terminal) throw new Error("Codex continuation is terminal; no turn can be controlled.");
+    const assertRuntimeAvailable = () => {
+      if (isCodexRuntimeUnavailable(handle.state)) {
+        throw new ProviderTurnControlError("Codex turn control lost live runtime authority.", "uncertain");
+      }
+    };
+    assertRuntimeAvailable();
     const text = correction?.trim() || null;
+    const turnPolicy = text ? handle.requireTurnPolicy() : null;
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
       includeTurns: true,
     });
+    assertRuntimeAvailable();
     if (read.thread?.id !== handle.providerContinuationId) {
       throw new Error("Codex turn control resolved a different continuation thread.");
     }
@@ -484,7 +1144,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (turnId && !active && !terminal) {
       throw new Error("Codex returned an unknown latest-turn state; refusing ambiguous turn control.");
     }
-    if (turnId) await options.checkpointTurnStarted?.(turnId);
+    if (turnId) {
+      await options.checkpointTurnStarted?.(turnId);
+      assertRuntimeAvailable();
+    }
     if (newerActiveTurnExists) {
       if (text) {
         throw new ProviderTurnControlError(
@@ -496,10 +1159,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     if (active) {
       await options.markDispatched?.();
+      assertRuntimeAvailable();
       const dispatchRead = await handle.client.request<ThreadReadResult>("thread/read", {
         threadId: handle.providerContinuationId,
         includeTurns: true,
       });
+      assertRuntimeAvailable();
       const dispatchTurn = dispatchRead.thread?.turns?.find((candidate) => candidate.id === turnId);
       const dispatchStatus = typeof dispatchTurn?.status === "string"
         ? dispatchTurn.status
@@ -514,18 +1179,27 @@ export class CodexProviderAdapter implements ProviderAdapter {
         threadId: handle.providerContinuationId,
         turnId,
       });
+      assertRuntimeAvailable();
       await this.waitForTurnBoundary(handle, turnId!);
-      handle.state = "idle";
+      assertRuntimeAvailable();
+      handle.setLiveState("idle");
     }
     if (text) {
-      if (!active) await options.markDispatched?.();
+      if (!active) {
+        await options.markDispatched?.();
+        assertRuntimeAvailable();
+      }
       const turn = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
         threadId: handle.providerContinuationId,
         input: [{ type: "text", text, text_elements: [] }],
       });
+      assertRuntimeAvailable();
       if (!turn.turn?.id) throw new Error("Codex did not acknowledge the redirected turn.");
-      handle.state = "working";
+      await this.subscribeMaterializedThread(handle);
+      handle.setLiveState("working");
     }
+    assertRuntimeAvailable();
     return {
       capability: "native_interrupt",
       interrupted: active,
@@ -548,6 +1222,136 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (!turn || !status) return "unknown";
     if (isActiveCodexTurnStatus(status)) return "active";
     return /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(status)) ? "terminal" : "unknown";
+  }
+
+  /** Discovery only: MCP waiting is still an active turn, never an idle boundary. */
+  async inspectTurnBoundary(providerHandle: ProviderHandle): Promise<NativeTurnBoundary> {
+    const handle = this.requireHandle(providerHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const identity = connection.processIdentity;
+    const current = () => {
+      if (handle.terminal || this.handles.get(handle.workAttemptId) !== handle
+        || handle.providerContinuationId !== continuation
+        || !sameProviderConnectionIdentity(connection, handle.providerConnection)
+        || handle.pid === null || handle.pid !== connection.pid || !identity) return false;
+      const actual = this.deps.getProcessIdentity(handle.pid);
+      return typeof actual === "string" && sameProcessBirthIdentity(actual, identity);
+    };
+    try {
+      if (!nativeExecutionId(continuation) || !identity || !current()) return { state: "unknown" };
+      // This may read a large history: it is explicit reconciliation, not a heartbeat.
+      const read = await handle.client.request<ThreadReadResult>("thread/read", {
+        threadId: continuation, includeTurns: true,
+      });
+      if (!current() || read?.thread?.id !== continuation || !Array.isArray(read.thread.turns)) return { state: "unknown" };
+      let active: string | null = null;
+      let latest: string | null = null;
+      const seen = new Set<string>();
+      for (const turn of read.thread.turns) {
+        const id = turn?.id;
+        const status = extractTurnStatus(turn);
+        if (!nativeExecutionId(id) || seen.has(id)) return { state: "unknown" };
+        seen.add(id);
+        latest = id;
+        if (isActiveCodexTurnStatus(status)) {
+          if (active) return { state: "unknown" };
+          active = id;
+        } else if (!/^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(status ?? "")) {
+          return { state: "unknown" };
+        }
+      }
+      if (active) return { state: "active", providerContinuationId: continuation, nativeProcessIdentity: identity, providerTurnId: active };
+      // A cached handle state or an active thread with no visible turn cannot
+      // certify idle. Even a valid empty list requires native idle as well.
+      if (extractThreadStatus(read.thread) !== "idle") return { state: "unknown" };
+      return { state: "idle", providerContinuationId: continuation, nativeProcessIdentity: identity, latestProviderTurnId: latest };
+    } catch {
+      // Timeouts and unavailable snapshots are uncertainty, not runtime failure.
+      return { state: "unknown" };
+    }
+  }
+
+  async inspectCustodialPollingActivation(providerHandle: ProviderHandle, providerTurnId: string):
+    Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }> {
+    const handle = this.requireHandle(providerHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = structuredClone(handle.providerConnection);
+    const current = () => {
+      const actual = handle.pid === null ? undefined : this.deps.getProcessIdentity(handle.pid);
+      return !handle.terminal && this.handles.get(handle.workAttemptId) === handle
+        && handle.providerContinuationId === continuation && sameProviderConnectionIdentity(connection, handle.providerConnection)
+        && handle.pid === connection.pid && typeof actual === "string" && Boolean(connection.processIdentity)
+        && sameProcessBirthIdentity(actual, connection.processIdentity!);
+    };
+    try {
+      if (!nativeExecutionId(providerTurnId) || !current()) return { state: "unknown" };
+      const read = await handle.client.request<ThreadReadResult>("thread/read", { threadId: continuation, includeTurns: true });
+      if (!current() || read?.thread?.id !== continuation || !Array.isArray(read.thread.turns)) return { state: "unknown" };
+      const matches = read.thread.turns.filter(turn => turn?.id === providerTurnId);
+      if (matches.length !== 1) return { state: "unknown" };
+      const status = extractTurnStatus(matches[0])?.toLowerCase();
+      if (isActiveCodexTurnStatus(status)) return { state: "active" };
+      if (status === "completed" || status === "failed") return { state: "terminal", outcome: status };
+      if (status === "interrupted" || status === "cancelled" || status === "stopped") return { state: "terminal", outcome: "interrupted" };
+      return { state: "unknown" };
+    } catch { return { state: "unknown" }; }
+  }
+
+  async activateCustodialPolling(providerHandle: ProviderHandle, request: CustodialPollingActivationRequest,
+    options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }> {
+    const handle = this.requireHandle(providerHandle);
+    const turnPolicy = handle.requireTurnPolicy();
+    const input = structuredClone(request);
+    const receipt = input.launchReceipt;
+    const launch = this.pollingLaunches.get(handle);
+    const continuation = handle.providerContinuationId;
+    const connection = structuredClone(handle.providerConnection);
+    const bounded = (value: unknown, limit = 512): value is string => typeof value === "string"
+      && value.trim().length > 0 && value.length <= limit && !/[\u0000-\u001f\u007f]/.test(value);
+    if (![input.operationId, input.roomId, input.agentDisplayName, input.workerSession?.agentSessionId].every(value => bounded(value))
+      || !bounded(input.cwd, 4096) || !/^(?:msg_)?\d+$/.test(input.workerSession?.roomCursor ?? "")
+      || input.workerSession.roomCursor.length > 512 || !receipt || receipt.contract !== "custodial_polling_v1"
+      || !Number.isSafeInteger(receipt.configurationRevision) || receipt.configurationRevision < 1
+      || receipt.workAttemptId !== handle.workAttemptId || receipt.providerContinuationId !== continuation
+      || receipt.agentSessionId !== input.workerSession.agentSessionId
+      || !sameProviderConnectionIdentity(receipt.providerConnection, connection)
+      || (launch && (launch.roomId !== input.roomId || launch.cwd !== input.cwd || launch.agentSessionId !== input.workerSession.agentSessionId
+        || launch.configurationRevision !== receipt.configurationRevision))
+      || typeof options.beforeNativeDispatch !== "function" || typeof options.checkpointTurnStarted !== "function") {
+      throw new Error("Custodial polling activation requires exact applied launch authority.");
+    }
+    // A recovered handle cannot rediscover launch env from thread/read. The
+    // privileged daemon supplies the durable receipt, revalidated in its
+    // beforeNativeDispatch transaction. A known noncustodial launch is rejected.
+    if (this.nonPollingLaunches.has(handle)) throw new Error("This runtime was not launched for custodial polling.");
+    const assertCurrent = () => {
+      const actual = handle.pid === null ? undefined : this.deps.getProcessIdentity(handle.pid);
+      if (options.detachSignal?.aborted || handle.terminal || this.handles.get(handle.workAttemptId) !== handle
+        || handle.providerContinuationId !== continuation || !sameProviderConnectionIdentity(handle.providerConnection, connection)
+        || handle.pid !== connection.pid || !connection.processIdentity || typeof actual !== "string"
+        || !sameProcessBirthIdentity(actual, connection.processIdentity)) throw new Error("Custodial polling activation lost its exact native runtime.");
+    };
+    assertCurrent();
+    if (this.pollingDispatches.has(handle)) throw new Error("Custodial polling activation is already in progress.");
+    this.pollingDispatches.add(handle);
+    try {
+      const boundary = await this.inspectTurnBoundary(handle);
+      assertCurrent();
+      if (boundary.state !== "idle") throw new Error("Custodial polling activation requires native idle evidence.");
+      await options.beforeNativeDispatch();
+      assertCurrent();
+      const result = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
+        threadId: continuation, cwd: input.cwd,
+        input: [{ type: "text", text: buildCustodialPollingPrompt(input) }],
+      });
+      const id = result?.turn?.id;
+      if (!nativeExecutionId(id)) throw new Error("Custodial polling activation returned no exact native turn ID.");
+      await options.checkpointTurnStarted(id);
+      await this.subscribeMaterializedThread(handle);
+      return { providerTurnId: id };
+    } finally { this.pollingDispatches.delete(handle); }
   }
 
   /**
@@ -610,7 +1414,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     assertAttached();
     await handle.client.request("turn/interrupt", { threadId: handle.providerContinuationId, turnId });
     await this.waitForTurnBoundary(handle, turnId, options.detachSignal);
-    handle.state = "idle";
+    handle.setLiveState("idle");
     return { outcome: "interrupt_dispatched", targetTurnId: turnId };
   }
 
@@ -621,13 +1425,29 @@ export class CodexProviderAdapter implements ProviderAdapter {
     options: ProviderRoomTurnOptions = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
-    if (handle.terminal) throw new Error("Codex continuation is terminal; no bounded room turn can run.");
     if (!request.inboxItemId.trim() || !request.actionId.trim()) throw new Error("Bounded Codex room turn requires durable inbox and action ids.");
+    const turnPolicy = handle.requireTurnPolicy();
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const rpcConnection = handle.client.currentConnectionId();
+    const assertRuntimeAvailable = () => {
+      if (options.detachSignal?.aborted || handle.terminal || isCodexRuntimeUnavailable(handle.state)
+        || this.handles.get(handle.workAttemptId) !== handle || handle.providerContinuationId !== continuation
+        || !sameProviderConnectionIdentity(handle.providerConnection, connection)
+        || handle.client.currentConnectionId() !== rpcConnection) {
+        throw new Error("Codex runtime is unavailable; no bounded room turn can start.");
+      }
+    };
+    assertRuntimeAvailable();
+    await requireLetAgentsRoomTools(handle.client, continuation);
+    assertRuntimeAvailable();
     await options.beforeNativeDispatch?.();
+    assertRuntimeAvailable();
     handle.roomTurnResults.beginTurnStart(handle.providerContinuationId);
     let started: TurnStartResult;
     try {
       started = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
         threadId: handle.providerContinuationId,
         input: [{ type: "text", text: boundedRoomTurnPrompt(request), text_elements: [] }],
       });
@@ -654,18 +1474,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw error;
     }
-    handle.state = "working";
+    handle.setLiveState("working");
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
-    handle.state = terminal.status === "failed" ? "failed" : "idle";
-    if (terminal.status !== "completed") {
-      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
-      throw new Error(`Codex bounded room turn ${turnId} ended ${terminal.status}.`);
-    }
-    const result = handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, terminal.turn);
-    const terminalResult = { turnId, ...result };
-    await options.checkpointTerminalResult?.(terminalResult);
-    handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
-    return terminalResult;
+    return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
   }
 
   /** Reattach only the durable exact turn; never issue a second turn/start. */
@@ -694,7 +1505,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
     }
-    handle.state = "working";
+    handle.setLiveState("working");
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
     return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
   }
@@ -727,7 +1538,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         throw new CodexRoomTurnObservationDetachedError("Codex continuation repair detached.");
       }
       if (handle.terminal || this.handles.get(handle.workAttemptId) !== handle
-        || handle.providerContinuationId !== expected) {
+        || handle.providerContinuationId !== expected || isCodexRuntimeUnavailable(handle.state)) {
         throw new Error("Codex continuation repair lost exact provider authority.");
       }
     };
@@ -735,7 +1546,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // Probe at absolute offsets 0s, 1s, 3s, and 7s. The waits are therefore
     // the differences between offsets, not 1s + 3s + 7s (which would turn the
     // advertised seven-second grace into eleven seconds).
-    const policy = normalizeLaunchPolicy(request.launchPolicy);
+    // A stored policy can predate the access level it was launched under. The
+    // policy bound to this runtime is the one a replacement thread must keep.
+    const policy = normalizeLaunchPolicy({ ...(recordValue(request.launchPolicy) ?? {}), ...(handle.appliedTurnPolicy() ?? {}) });
     const probeDelays = [0, 1_000, 2_000, 4_000];
     const probe = async (threadId: string): Promise<boolean> => {
       for (const waitMs of probeDelays) {
@@ -754,6 +1567,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
           });
           assertAttached();
+          assertCodexReviewerApplied(policy, resumed);
           if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
         } catch (error) {
@@ -799,9 +1613,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
       cwd: request.cwd,
       ...policy,
+      historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
       ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
     });
+    assertCodexReviewerApplied(policy, started);
     const replacement = started.thread?.id?.trim();
     if (!replacement || replacement === expected) {
       throw new Error("Codex continuation repair did not return a distinct replacement thread.");
@@ -819,6 +1635,85 @@ export class CodexProviderAdapter implements ProviderAdapter {
     };
   }
 
+  async stopRef(
+    ref: ProviderContinuationRef,
+    options: ProviderStopOptions = {},
+  ): Promise<ProviderTerminalPayload> {
+    ref = { ...ref, providerConnection: ref.providerConnection && { ...ref.providerConnection } };
+    const connection = ref.providerConnection;
+    const graceMs = options.graceMs ?? DEFAULT_STOP_GRACE_MS;
+    const force = options.force === true;
+    if (!ref.workAttemptId?.trim() || !ref.providerContinuationId?.trim()
+      || connection?.kind !== "codex_app_server" || !connection.url?.trim()
+      || !Number.isSafeInteger(connection.pid) || connection.pid! <= 0
+      || typeof connection.processIdentity !== "string" || !PS_BIRTH_EVIDENCE.test(connection.processIdentity.trim())
+      || !Number.isFinite(graceMs) || graceMs < 0) {
+      throw new Error("Codex exact-reference stop requires an exact continuation and process birth.");
+    }
+    const pid = connection.pid!;
+    const birth = connection.processIdentity;
+    const isGone = () => {
+      const current = this.deps.getProcessIdentity(pid);
+      if (current === null) return true;
+      // Unequal malformed ps output is uncertainty, not PID-reuse evidence.
+      if (typeof current !== "string" || !PS_BIRTH_EVIDENCE.test(current.trim())) {
+        throw new Error("Codex exact-reference stop is ambiguous because process birth cannot be verified.");
+      }
+      return !sameProcessBirthIdentity(current, birth);
+    };
+    const terminal = (): ProviderTerminalPayload => ({
+      ...synthesizeTerminalPayload({
+        endedAt: this.deps.now(), exitCode: null, signal: null,
+        providerContinuationId: ref.providerContinuationId, stopRequested: true,
+      }),
+      nativeRuntimeDeath: { kind: "codex_app_server", pid, processIdentity: birth },
+    });
+    if (isGone()) return terminal();
+    const known = [...this.handles.values()].find((handle) => handle.pid === pid
+      && handle.providerConnection.processIdentity
+      && sameProcessBirthIdentity(handle.providerConnection.processIdentity, birth));
+    if (known && (known.workAttemptId !== ref.workAttemptId
+      || known.providerContinuationId !== ref.providerContinuationId
+      || !sameProviderConnectionIdentity(known.providerConnection, connection))) {
+      throw new Error("Codex exact-reference stop conflicts with the known native process owner.");
+    }
+    if (known) { known.stopRequested = true; known.state = "stopping"; known.invalidatePermissions(); }
+    const awaitAbsence = async () => {
+      const deadline = Date.now() + graceMs;
+      for (;;) {
+        if (isGone()) return true;
+        if (Date.now() >= deadline) return false;
+        await delay(Math.min(25, deadline - Date.now()));
+      }
+    };
+    this.deps.signalProcess(pid, force ? "SIGKILL" : "SIGTERM");
+    if (await awaitAbsence()) return terminal();
+    if (!force) {
+      // Never escalate into a reused PID, nor accept a cached protocol error.
+      if (isGone()) return terminal();
+      this.deps.signalProcess(pid, "SIGKILL");
+      if (await awaitAbsence()) return terminal();
+    }
+    throw new Error("Codex exact-reference stop has not yet proved the recorded process birth is gone.");
+  }
+
+  /** The final reservation check and native signal run without an intervening await. */
+  async stopIdle(rawHandle: ProviderHandle, assertCurrent: () => void): Promise<ProviderTerminalPayload> {
+    const handle = this.requireHandle(rawHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const rpcConnection = handle.client.currentConnectionId();
+    const boundary = await this.inspectTurnBoundary(handle);
+    if (boundary.state !== "idle" || boundary.providerContinuationId !== continuation
+      || boundary.nativeProcessIdentity !== connection.processIdentity
+      || this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current"
+      || handle.observedState() !== "idle" || handle.client.listPendingRequests().length > 0) {
+      throw Object.assign(new Error("Codex is not provably idle for configuration replacement."), { code: "MANAGED_RUNTIME_REFRESH_DEFERRED" });
+    }
+    assertCurrent();
+    return this.stop(handle);
+  }
+
   async stop(
     providerHandle: ProviderHandle,
     options: ProviderStopOptions = {},
@@ -828,16 +1723,27 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (handle.pid === null) {
       throw new Error("Cannot stop a Codex app-server without an observed process id.");
     }
+    const pid = handle.pid;
+    const processIdentity = handle.providerConnection.processIdentity;
+    const assertProcessIdentity = () => {
+      const currentIdentity = this.deps.getProcessIdentity(pid);
+      if (!processIdentity || typeof currentIdentity !== "string"
+        || !sameProcessBirthIdentity(currentIdentity, processIdentity)) {
+        throw new Error("Cannot stop the Codex app-server because its exact process birth cannot be verified.");
+      }
+    };
 
+    assertProcessIdentity();
     handle.stopRequested = true;
     handle.state = "stopping";
+    handle.invalidatePermissions();
     const exitPromise = this.requireExitPromise(handle);
     if (options.force) {
-      this.deps.signalProcess(handle.pid, "SIGKILL");
+      this.deps.signalProcess(pid, "SIGKILL");
       return exitPromise;
     }
 
-    this.deps.signalProcess(handle.pid, "SIGTERM");
+    this.deps.signalProcess(pid, "SIGTERM");
     const graceMs = options.graceMs ?? DEFAULT_STOP_GRACE_MS;
     const graceful = await Promise.race([
       exitPromise.then((payload) => ({ payload })),
@@ -845,7 +1751,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ]);
     if (graceful) return graceful.payload;
 
-    this.deps.signalProcess(handle.pid, "SIGKILL");
+    // A PID observed before the grace period may now belong to another child.
+    assertProcessIdentity();
+    this.deps.signalProcess(pid, "SIGKILL");
     return exitPromise;
   }
 
@@ -880,10 +1788,59 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
+  onExecution(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription {
+    return this.requireHandle(handle).execution.subscribe(listener);
+  }
+
+  async probeControl(providerHandle: ProviderHandle): Promise<ControlProbeResult> {
+    const handle = this.requireHandle(providerHandle);
+    if (handle.nativeRuntimeUnavailable) {
+      return { state: "lost", controlEvidence: handle.nativeRuntimeUnavailable };
+    }
+    const proof = (): ControlProbeResult | null => {
+      const expected = handle.providerConnection.processIdentity;
+      if (handle.pid === null || !expected) return { state: "degraded" };
+      const actual = this.deps.getProcessIdentity(handle.pid);
+      if (actual === undefined) return { state: "degraded" };
+      if (actual === null) return { state: "lost", controlEvidence: "process_exit" };
+      if (!sameProcessBirthIdentity(actual, expected)) return { state: "lost", controlEvidence: "process_birth_changed" };
+      return null;
+    };
+    let result = proof();
+    if (!result) {
+      try {
+        // Pinned 0.144.1 has no ping. A single loaded-ID page is a cheap RPC
+        // round trip, unlike thread/read which can serialize a whole history.
+        const response = await handle.client.request<unknown>("thread/loaded/list", { limit: 1 }, { timeoutMs: 2_000 });
+        const data = recordValue(response);
+        result = proof() ?? (Array.isArray(data?.data) && data.data.length <= 1 && data.data.every(nativeExecutionId)
+          ? { state: "responsive" } : { state: "degraded" });
+      } catch (error) {
+        result = proof() ?? { state: isMethodNotFound(error) ? "unprobeable" : "degraded" };
+      }
+    }
+    if (handle.nativeRuntimeUnavailable) {
+      return { state: "lost", controlEvidence: handle.nativeRuntimeUnavailable };
+    }
+    handle.execution.emit({ domain: "control", kind: "state_changed", sideEffects: "none", ...result },
+      handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
+    return result;
+  }
+
   private async start(
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CodexProviderHandle> {
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
+    if (lifecycleAuthorityMode === "typed" && req.deliveryMode !== "daemon_inbox") {
+      throw new Error("Typed Codex lifecycle authority requires daemon-inbox delivery.");
+    }
+    if (req.pollingContract !== undefined && req.pollingContract !== "custodial_polling_v1") {
+      throw new Error("Unsupported Codex polling contract.");
+    }
+    const custodialPolling = req.pollingContract === "custodial_polling_v1";
+    req = { ...req, supervisorWorkerSession: req.supervisorWorkerSession && { ...req.supervisorWorkerSession } };
+    resumeRef = resumeRef && { ...resumeRef };
     const current = this.handles.get(req.workAttemptId);
     if (current && !current.terminal) {
       throw new Error(`Codex work attempt '${req.workAttemptId}' already has a live process.`);
@@ -892,7 +1849,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex spawn requires the durable agent display name from the manifest.");
     }
 
-    const policy = normalizeLaunchPolicy(attestProviderSpawnPolicy("codex", req));
+    const attestedPolicy = attestProviderSpawnPolicy("codex", req);
+    const policy = normalizeLaunchPolicy(attestedPolicy);
+    const turnPolicy = codexTurnPolicy(attestedPolicy);
     const supervisorCoordinates = [
       req.supervisorEntryId,
       req.supervisorSocketPath,
@@ -902,6 +1861,28 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const hasCompleteSupervisorCoordinates = supervisorCoordinates.every((value) => Boolean(value?.trim()));
     if (hasSupervisorCoordinate && !hasCompleteSupervisorCoordinates) {
       throw new Error("Codex supervisor bridge coordinates are incomplete.");
+    }
+    const boundedMcp = req.deliveryMode === "daemon_inbox" && hasCompleteSupervisorCoordinates;
+    let custodialRuntime: LetAgentsMcpRuntime | null = null;
+    let custodialTools: string[] = [];
+    let custodialApiUrl: string | null = null;
+    if (custodialPolling) {
+      if (req.deliveryMode !== "mcp_polling" || !hasCompleteSupervisorCoordinates
+        || !req.roomId.trim() || !req.workAttemptId.trim() || !req.supervisorWorkerSession?.agentSessionId.trim()
+        || !req.supervisorWorkerSession.apiUrl?.trim()) {
+        throw new Error("Custodial polling requires exact supervisor, worker, room and API coordinates.");
+      }
+      try {
+        const apiUrl = new URL(req.supervisorWorkerSession.apiUrl);
+        if (apiUrl.username || apiUrl.password || apiUrl.search || apiUrl.hash || apiUrl.pathname !== "/"
+          || (apiUrl.protocol !== "https:" && !(apiUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(apiUrl.hostname)))) throw new Error();
+        custodialApiUrl = apiUrl.origin;
+      } catch { throw new Error("Custodial polling requires an exact safe worker API origin."); }
+      ({ runtime: custodialRuntime, tools: custodialTools } = await this.resolveCustodialPollingRuntime(req.devMcpServerEntryPath));
+    }
+    if (boundedMcp) {
+      custodialRuntime = this.deps.resolveMcpRuntime(req.devMcpServerEntryPath);
+      custodialTools = boundedCodexTools(await this.deps.readMcpRuntimeContract(custodialRuntime.entryPath, req.supervisorWorkerSession?.apiUrl));
     }
     if (hasCompleteSupervisorCoordinates) {
       await this.deps.writeSupervisorBridgeContext(req.cwd, {
@@ -915,15 +1896,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
         } : {}),
       });
     }
-    const devOverrides = req.devMcpServerEntryPath
+    const devOverrides = !custodialRuntime && req.devMcpServerEntryPath
       ? await buildCodexDevMcpEntryOverrides(req.devMcpServerEntryPath)
       : [];
-    const serverUrl = await this.deps.resolveServerUrl();
-    const launch = this.deps.launchServer(serverUrl, this.codexBin, {
-      trustedProjectPath: req.cwd,
-      configOverrides: [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
-      ...(req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId ? {
-        env: {
+    const supervisorEnvironment: Record<string, string> | undefined = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
+      ? {
           LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
           LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
           LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
@@ -937,14 +1914,33 @@ export class CodexProviderAdapter implements ProviderAdapter {
             } : {}),
           } : {}),
           ...(req.deliveryMode === "daemon_inbox" ? {
-            LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
-            LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+            ...boundedMcpEnvironment,
             ...(req.supervisorEntryId.startsWith("supervised_rental_") ? {
               [rentalCredentialIsolationMarker]: "1",
             } : {}),
-          } : { LETAGENTS_EXECUTION_PROFILE: "interactive_desktop" }),
-        },
-      } : {}),
+          } : { LETAGENTS_EXECUTION_PROFILE: custodialPolling ? "supervised_mcp_polling" : "interactive_desktop" }),
+          ...(custodialPolling ? {
+            LETAGENTS_API_URL: custodialApiUrl!,
+            LETAGENTS_SUPERVISED_BOUNDED_TURNS: "",
+            LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
+            LETAGENTS_TOKEN: "",
+            LETAGENTS_AGENT_SESSION_BEARER: "",
+          } : {}),
+        } : undefined;
+    const managedLaunchContract = boundedMcp && !req.devMcpServerEntryPath
+      ? boundedLaunchContract(req.supervisorWorkerSession?.apiUrl || desktopApiUrl, custodialTools)
+      : undefined;
+    const serverUrl = await this.deps.resolveServerUrl();
+    const launch = this.deps.launchServer(serverUrl, this.codexBin, {
+      trustedProjectPath: req.cwd,
+      configOverrides: custodialRuntime
+        ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {
+            ...supervisorEnvironment!,
+            ...(boundedMcp ? { LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
+              LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
+          }, custodialTools)]
+        : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
+      ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -1010,10 +2006,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
           cwd: req.cwd,
           ...policy,
+          historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
           ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
         });
       }
+      assertCodexReviewerApplied(policy, threadResult);
       const threadId = threadResult.thread?.id;
       if (!threadId) {
         throw new Error("Codex app-server did not return a thread id.");
@@ -1027,10 +2025,27 @@ export class CodexProviderAdapter implements ProviderAdapter {
         launch.pid,
         threadId,
         { kind: "codex_app_server", url: serverUrl, pid: launch.pid, processIdentity },
+        lifecycleAuthorityMode,
         client,
         observedLaunch,
+        this.deps.now,
+        turnPolicy,
       );
+      handle.managedLaunchContract = managedLaunchContract;
+      handle.setLiveState("idle");
+      this.emitNativeExecution(handle, {
+        domain: "runtime",
+        kind: "state_changed",
+        state: "ready",
+        sideEffects: "none",
+      });
       this.handles.set(req.workAttemptId, handle);
+      if (custodialPolling) {
+        handle.custodyLaunchAgentSessionId = req.supervisorWorkerSession!.agentSessionId;
+        this.pollingLaunches.set(handle, { roomId: req.roomId, cwd: req.cwd, configurationRevision: req.configurationRevision,
+          agentSessionId: req.supervisorWorkerSession!.agentSessionId });
+      }
+      else this.nonPollingLaunches.add(handle);
       const exitPromise = observedLaunch.exited.then((exit) => this.observeExit(handle!, exit));
       this.exitPromises.set(handle, exitPromise);
       for (const notification of pendingNotifications.splice(0)) {
@@ -1044,10 +2059,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         await this.emitTranscriptTail(handle);
       }
 
-      // Daemon-inbox Codex starts only an idle app-server/thread.  The daemon
-      // begins the first native turn after its durable inbox claim exists.
-      if (req.deliveryMode === "daemon_inbox") {
-        handle.state = "idle";
+      // Both custodial profiles return idle. Daemon-inbox starts work only
+      // after its inbox claim; custodial polling activation is a later action.
+      if (req.deliveryMode === "daemon_inbox" || custodialPolling) {
+        handle.setLiveState("idle");
         return handle;
       }
 
@@ -1066,6 +2081,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           : {}),
       });
       const turn = await client.request<TurnStartResult>("turn/start", {
+        ...handle.requireTurnPolicy(),
         threadId,
         cwd: req.cwd,
         input: [{ type: "text", text: prompt, text_elements: [] }],
@@ -1073,7 +2089,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (!turn.turn?.id) {
         throw new Error("Codex app-server did not return a turn id.");
       }
-      handle.state = "working";
+      handle.setLiveState("working");
       void this.emitTranscriptTail(handle);
       return handle;
     } catch (error) {
@@ -1088,6 +2104,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ref: ProviderContinuationRef,
     connection: Extract<ProviderConnectionRef, { kind: "codex_app_server" }>,
   ): Promise<CodexProviderHandle | ProviderAttachTerminal | null> {
+    const turnPolicy = ref.launchPolicy === undefined ? null : codexTurnPolicy(ref.launchPolicy);
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
         "Codex app-server attach is ambiguous; refusing to launch a second writer: the durable endpoint has no verified process identity.",
@@ -1108,6 +2125,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           signal: null,
           terminalCause: "crashed",
           providerContinuationId: ref.providerContinuationId,
+          nativeRuntimeDeath: { kind: "codex_app_server", pid: connection.pid, processIdentity: connection.processIdentity },
         },
       };
     }
@@ -1123,6 +2141,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       await requireLetAgentsWorkplace(client);
       let read: ThreadReadResult;
       let continuationMissing = false;
+      let exactEmptyFallback = false;
       try {
         read = await client.request<ThreadReadResult>("thread/read", {
           threadId: ref.providerContinuationId,
@@ -1145,6 +2164,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             threadId: ref.providerContinuationId,
             includeTurns: false,
           });
+          exactEmptyFallback = true;
         }
       }
       if (read.thread?.id !== ref.providerContinuationId) {
@@ -1160,6 +2180,27 @@ export class CodexProviderAdapter implements ProviderAdapter {
       }
       if (currentIdentity === null || !sameProcessBirthIdentity(currentIdentity, connection.processIdentity)) {
         throw new Error("durable endpoint process identity no longer matches its recorded birth");
+      }
+      const loadedThread = ["idle", "active", "systemError"].includes(String(recordValue(read.thread?.status)?.type));
+      if (!continuationMissing && !exactEmptyFallback && loadedThread) {
+        // thread/read verifies identity but does not subscribe this connection
+        // to turn items or approval requests. Resume the exact existing thread
+        // without configuration overrides or starting/replaying a turn.
+        const subscribed = await client.request<CodexThreadResult>("thread/resume", {
+          threadId: ref.providerContinuationId,
+        });
+        if (subscribed.thread?.id !== ref.providerContinuationId) {
+          throw new Error("Codex subscription resolved a different durable continuation thread.");
+        }
+        // A turn can finish between the first read and subscription without
+        // sending this connection a notification. Reconstruct from a fresh
+        // snapshot after subscribing so that gap cannot retain a stale turn.
+        read = await client.request<ThreadReadResult>("thread/read", {
+          threadId: ref.providerContinuationId, includeTurns: true,
+        });
+        if (read.thread?.id !== ref.providerContinuationId) {
+          throw new Error("Codex subscription snapshot resolved a different durable continuation thread.");
+        }
       }
       const observedExit = this.deps.observeProcessExit(
         connection.pid,
@@ -1178,17 +2219,33 @@ export class CodexProviderAdapter implements ProviderAdapter {
         connection.pid,
         ref.providerContinuationId,
         connection,
+        ref.lifecycleAuthorityMode ?? "typed_shadow",
         client,
         launch,
+        this.deps.now,
+        turnPolicy,
       );
-      handle.state = continuationMissing ? "idle" : "working";
+      handle.setLiveState(continuationMissing ? "idle" : "working");
+      handle.subscriptionAfterMaterialization = exactEmptyFallback;
       this.handles.set(ref.workAttemptId, handle);
       this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
-      for (const notification of pendingNotifications.splice(0)) {
-        this.consumeNotification(handle, notification);
-      }
+      const queuedTurnLifecycle = pendingNotifications.some(notification =>
+        this.queuedTurnLifecycleIsAmbiguous(handle!, notification));
+      this.reconstructAttachedExecution(
+        handle,
+        continuationMissing ? null : read,
+        exactEmptyFallback,
+        queuedTurnLifecycle,
+      );
       if (!continuationMissing) {
-        this.publishStream(handle, "thread/read", read, "transcript_snapshot");
+        this.publishStream(handle, "thread/read", {
+          threadId: handle.providerContinuationId,
+          threadStatus: read.thread?.status,
+          latestTurn: transcriptLifecycleTurn(read.thread?.turns?.at(-1)),
+        }, "transcript_snapshot");
+      }
+      for (const notification of pendingNotifications.splice(0)) {
+        this.consumeNotification(handle, notification, false);
       }
       return handle;
     } catch (error) {
@@ -1211,6 +2268,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             signal: null,
             terminalCause: "crashed",
             providerContinuationId: ref.providerContinuationId,
+            nativeRuntimeDeath: { kind: "codex_app_server", pid: connection.pid, processIdentity: connection.processIdentity },
           },
         };
       }
@@ -1220,10 +2278,122 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
+  /**
+   * Rebuild only the bounded native boundary returned by the exact attach
+   * read. The daemon still owns turn identity: it accepts this candidate only
+   * when it matches an already-durable provider-turn binding.
+   */
+  private reconstructAttachedExecution(
+    handle: CodexProviderHandle,
+    read: ThreadReadResult | null,
+    exactEmptyFallback: boolean,
+    queuedTurnLifecycle: boolean,
+  ): void {
+    this.emitNativeExecution(handle, {
+      domain: "runtime",
+      kind: "state_changed",
+      state: "ready",
+      sideEffects: "none",
+    });
+    if (queuedTurnLifecycle) {
+      // The app-server protocol gives notifications no ordering token relative
+      // to thread/read. Coexisting snapshot and lifecycle evidence is therefore
+      // ambiguous even when both shapes are individually readable.
+      handle.execution.markUnavailable();
+      return;
+    }
+    if (read === null) {
+      // A proven-missing continuation has no native turn to reconstruct. Keep
+      // this source recoverable: same-process continuation repair replaces the
+      // thread on this handle and must not inherit a permanent observation gap.
+      return;
+    }
+    if (exactEmptyFallback) return;
+    const turns = read.thread?.turns;
+    if (!Array.isArray(turns)) {
+      handle.execution.markUnavailable();
+      return;
+    }
+    const turn = turns.at(-1);
+    if (!turn) return;
+    const providerTurnId = turn?.id;
+    const status = extractTurnStatus(turn)?.trim().toLowerCase() ?? null;
+    if (!nativeExecutionId(providerTurnId) || !status) {
+      handle.execution.markUnavailable();
+      return;
+    }
+    const identity = {
+      providerContinuationId: handle.providerContinuationId,
+      providerTurnId,
+    };
+    if (isActiveCodexTurnStatus(status)) {
+      this.emitNativeExecution(handle, {
+        ...identity,
+        domain: "turn",
+        kind: "state_changed",
+        state: "active",
+        sideEffects: "none",
+      });
+      return;
+    }
+    const outcome = status === "completed" || status === "failed"
+      ? status
+      : /^(?:interrupted|cancelled|stopped)$/.test(status) ? "interrupted" : null;
+    if (!outcome) {
+      handle.execution.markUnavailable();
+      return;
+    }
+    handle.setLiveState("idle");
+    this.emitNativeExecution(handle, {
+      ...identity,
+      domain: "turn",
+      kind: "state_changed",
+      state: "terminal",
+      turnOutcome: outcome,
+      sideEffects: "none",
+    });
+  }
+
+  private queuedTurnLifecycleIsAmbiguous(
+    handle: CodexProviderHandle,
+    notification: RpcNotification,
+  ): boolean {
+    if (!(notification.method === "turn/started"
+      || /^turn\/(?:completed|failed|interrupted|cancelled|stopped)$/i.test(notification.method))) return false;
+    const params = recordValue(notification.params);
+    if (!params || !nativeExecutionId(params.threadId)) return true;
+    return params.threadId === handle.providerContinuationId;
+  }
+
+  private emitNativeExecution(handle: CodexProviderHandle, fact: NativeExecutionFact): void {
+    if (handle.nativeRuntimeUnavailable) return;
+    if (fact.domain === "execution") {
+      const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId, fact.executionId]);
+      if (fact.kind === "completed") handle.nativeActiveOperations.delete(key);
+      else handle.nativeActiveOperations.set(key, fact);
+    } else if (fact.domain === "turn") {
+      const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId]);
+      if (fact.state === "active") {
+        handle.nativeActiveTurns.set(key, {
+          providerContinuationId: fact.providerContinuationId,
+          providerTurnId: fact.providerTurnId,
+        });
+      } else handle.nativeActiveTurns.delete(key);
+    }
+    handle.execution.emit(
+      fact,
+      handle.providerConnection.processIdentity ?? undefined,
+      handle.providerConnection.pid ?? undefined,
+    );
+  }
+
   private consumeNotification(
     handle: CodexProviderHandle,
     notification: RpcNotification,
+    correlateLifecycle = true,
   ): void {
+    this.observePermissionFileChangeProposal(handle, notification);
+    const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
     handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
@@ -1231,20 +2401,42 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // Record the durable in-memory terminal edge first. Stream/activity
     // observers are best-effort and must never suppress exact turn settlement.
     if (exactTurnId && exactThreadId === handle.providerContinuationId && terminalMatch) {
-      this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalMatch[1]!.toLowerCase());
+      const nativeStatus = recordValue(recordValue(notification.params)?.turn)?.status;
+      const terminalStatus = typeof nativeStatus === "string"
+        && /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(nativeStatus)
+        ? nativeStatus.toLowerCase()
+        : terminalMatch[1]!.toLowerCase();
+      this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalStatus);
+    }
+    const threadStatus = recordValue(recordValue(notification.params)?.status)?.type
+      ?? recordValue(notification.params)?.status;
+    if (notification.method === "thread/status/changed"
+      && exactThreadId === handle.providerContinuationId
+      && String(threadStatus ?? "").toLowerCase() === "idle") {
+      handle.threadIdleEpoch += 1;
+      this.reconcileExactTurnTerminalsAfterIdle(handle);
     }
     // Build the readable summary once and attach the same value to both the
     // ordered stream and the compact activity event. In particular, Codex's
     // approved summaryTextDelta stream is accumulated here; raw reasoning
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
     const summary = summarizeCodexRuntimeNotification(notification);
-    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary);
-    const lifecycle = /(?:^|\/)(?:failed|systemError)$/i.test(notification.method)
+    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary,
+      nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
+    // Execution status belongs to the item, never to the reusable app-server.
+    // Exact turn settlement above remains independent of this runtime state.
+    const lifecycle = isCodexExecutionMethod(notification.method) ? null
+      : terminalMatch ? "idle"
+      : /(?:^|\/)(?:failed|systemError)$/i.test(notification.method)
       ? "failed"
       : codexLifecycleStatus(notification.params)
         ?? (/^(?:turn|thread)\/(?:completed|interrupted|stopped)$/i.test(notification.method) ? "idle" : null)
         ?? (/^(?:turn|thread)\/(?:started|resumed)$/i.test(notification.method) ? "working" : null);
-    if (lifecycle && (handle.state !== "failed" || lifecycle === "failed")) handle.state = lifecycle;
+    if (handle.lifecycleAuthorityMode === "typed") {
+      if (nativeLifecycle?.phase === "turn_active") handle.setLiveState("working");
+      else if (nativeLifecycle?.phase === "turn_terminal") handle.setLiveState("idle");
+    } else if (lifecycle === "failed") handle.state = "failed";
+    else if (lifecycle) handle.setLiveState(lifecycle);
     this.publishActivity(handle, {
       source: "native_harness",
       method: notification.method,
@@ -1253,6 +2445,167 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (/^(turn\/completed|item\/completed)$/.test(notification.method)) {
       void this.emitTranscriptTail(handle);
     }
+  }
+
+  private observePermissionFileChangeProposal(
+    handle: CodexProviderHandle,
+    notification: RpcNotification,
+  ): void {
+    const params = recordValue(notification.params);
+    const threadId = notificationThreadId(params);
+    const turnId = notificationTurnId(params);
+    if (!params || threadId !== handle.providerContinuationId || !turnId) return;
+    if (/^turn\/(?:completed|interrupted|failed|cancelled|stopped)$/i.test(notification.method)) {
+      for (const [key, proposal] of handle.permissionFileChangeProposals) {
+        if (proposal.threadId === threadId && proposal.turnId === turnId) {
+          handle.permissionFileChangeProposals.delete(key);
+        }
+      }
+      return;
+    }
+    if (notification.method !== "item/started" && notification.method !== "item/completed") return;
+    const item = recordValue(params.item);
+    if (!item || !nativeExecutionId(item.id)) return;
+    const key = exactPermissionItemKey(threadId, turnId, item.id);
+    if (notification.method === "item/completed") {
+      handle.permissionFileChangeProposals.delete(key);
+      return;
+    }
+    const connectionId = handle.client.currentConnectionId();
+    const changes = item.type === "fileChange" && item.status === "inProgress"
+      ? permissionFileChanges(item.changes)
+      : null;
+    if (connectionId && changes) {
+      handle.permissionFileChangeProposals.set(key, { connectionId, threadId, turnId, changes });
+    }
+    else handle.permissionFileChangeProposals.delete(key);
+  }
+
+  private observeNativeExecution(
+    handle: CodexProviderHandle,
+    notification: RpcNotification,
+    correlateLifecycle = true,
+  ): NativeLifecycleCheckpoint | null {
+    if (handle.nativeRuntimeUnavailable) return null;
+    const params = recordValue(notification.params);
+    const explicitRuntimeFailure = notification.method === "process/systemError"
+      || (notification.method === "thread/status/changed"
+        && params?.threadId === handle.providerContinuationId
+        && hasExplicitCodexSystemError(params));
+    if (explicitRuntimeFailure) {
+      this.emitNativeRuntimeUnavailable(handle, "native_session_terminated");
+      return null;
+    }
+    if (!params || params.threadId !== handle.providerContinuationId || !nativeExecutionId(params.threadId)) return null;
+    const terminalMethod = /^turn\/(?:completed|failed|interrupted|cancelled|stopped)$/i.test(notification.method);
+    const turn = recordValue(params.turn);
+    if (params.turnId !== undefined && turn?.id !== undefined && params.turnId !== turn.id) {
+      if (terminalMethod) this.markNativeExecutionUnavailable(handle);
+      return null;
+    }
+    const providerTurnId = params.turnId ?? turn?.id;
+    if (!nativeExecutionId(providerTurnId)) {
+      if (terminalMethod) this.markNativeExecutionUnavailable(handle);
+      return null;
+    }
+    const identity = { providerContinuationId: params.threadId, providerTurnId };
+    const emit = (fact: NativeExecutionFact) => this.emitNativeExecution(handle, fact);
+    if (notification.method === "turn/started") {
+      const nativeLifecycle = correlateLifecycle ? nativeLifecycleCheckpoint({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_active",
+        providerContinuationId: params.threadId,
+        providerTurnId,
+        nativeProcessPid: handle.providerConnection.pid ?? undefined,
+        nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
+      }) : null;
+      emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
+      emit({ ...identity, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+        ...(nativeLifecycle ? { nativeEventId: nativeLifecycle.nativeEventId } : {}) });
+      return nativeLifecycle;
+    }
+    if (terminalMethod) {
+      const outcome = terminalTurnOutcome(notification.method, turn);
+      if (outcome) {
+        const nativeLifecycle = correlateLifecycle ? nativeLifecycleCheckpoint({
+          provider: this.id,
+          workAttemptId: handle.workAttemptId,
+          phase: "turn_terminal",
+          providerContinuationId: params.threadId,
+          providerTurnId,
+          nativeProcessPid: handle.providerConnection.pid ?? undefined,
+          nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
+          terminalDiscriminator: outcome,
+        }) : null;
+        emit({ ...identity, domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
+          sideEffects: "none", ...(nativeLifecycle ? { nativeEventId: nativeLifecycle.nativeEventId } : {}) });
+        return nativeLifecycle;
+      }
+      this.markNativeExecutionUnavailable(handle);
+      return null;
+    }
+    if (notification.method === "item/commandExecution/outputDelta") {
+      if (nativeExecutionId(params.itemId) && typeof params.delta === "string" && params.delta.length > 0) {
+        emit({ ...identity, domain: "execution", executionId: params.itemId, operation: "command", kind: "output", outputBytes: Buffer.byteLength(params.delta), sideEffects: "possible" });
+      }
+      return null;
+    }
+    if (notification.method !== "item/started" && notification.method !== "item/completed") return null;
+    const item = recordValue(params.item);
+    if (!item || !nativeExecutionId(item.id)) return null;
+    const operation = item.type === "commandExecution" ? "command"
+      : item.type === "fileChange" ? "file_change" : item.type === "mcpToolCall" ? "other" : null;
+    if (!operation) return null;
+    const base = { ...identity, domain: "execution" as const, executionId: item.id, operation } as const;
+    if (notification.method === "item/started") {
+      // item/started can precede requestApproval. Only an actual PTY process
+      // proves command start here; other items remain terminal-only evidence.
+      if (operation === "command" && item.status === "inProgress" && nativeExecutionId(item.processId)) {
+        emit({ ...base, kind: "started", sideEffects: "possible" });
+      }
+      return null;
+    }
+    if (item.status === "declined" && (operation === "command" || operation === "file_change")) {
+      emit({ ...base, kind: "completed", outcome: "denied_before_start", sideEffects: "none" });
+    } else if (item.status === "completed" || item.status === "failed") {
+      const exitCode = operation === "command" && Number.isInteger(item.exitCode)
+        && Number(item.exitCode) >= -2147483648 && Number(item.exitCode) <= 2147483647 ? Number(item.exitCode) : undefined;
+      emit({ ...base, kind: "completed", outcome: item.status === "failed" || (exitCode !== undefined && exitCode !== 0) ? "failed" : "succeeded",
+        sideEffects: operation === "file_change" && item.status === "completed" ? "observed" : "possible",
+        ...(exitCode !== undefined ? { exitCode } : {}) });
+    }
+    return null;
+  }
+
+  private markNativeExecutionUnavailable(handle: CodexProviderHandle): void {
+    handle.execution.markUnavailable();
+    handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+      handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
+  }
+
+  private emitNativeRuntimeUnavailable(
+    handle: CodexProviderHandle,
+    controlEvidence: "process_exit" | "native_session_terminated",
+  ): void {
+    if (handle.nativeRuntimeUnavailable) return;
+    handle.nativeRuntimeUnavailable = controlEvidence;
+    handle.permissionFileChangeProposals.clear();
+    handle.state = "failed";
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
+      handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
+    for (const fact of handle.nativeActiveOperations.values()) {
+      emit({ domain: "execution", kind: "completed", executionId: fact.executionId, operation: fact.operation,
+        providerContinuationId: fact.providerContinuationId, providerTurnId: fact.providerTurnId,
+        outcome: "lost_after_start", sideEffects: fact.sideEffects });
+    }
+    handle.nativeActiveOperations.clear();
+    for (const turn of handle.nativeActiveTurns.values()) {
+      emit({ ...turn, domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none" });
+    }
+    handle.nativeActiveTurns.clear();
+    emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence, sideEffects: "none" });
+    emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence, sideEffects: "none" });
   }
 
   private async emitTranscriptTail(handle: CodexProviderHandle): Promise<void> {
@@ -1265,7 +2618,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       this.publishStream(handle, "thread/read", {
         threadId: handle.providerContinuationId,
         threadStatus: read.thread?.status,
-        latestTurn,
+        latestTurn: transcriptLifecycleTurn(latestTurn),
       }, "transcript_snapshot");
       const snapshot = summarizeCodexRuntimeSnapshot({
         threadStatus: typeof read.thread?.status === "string"
@@ -1303,12 +2656,30 @@ export class CodexProviderAdapter implements ProviderAdapter {
     throw new Error("Codex did not prove the active turn reached an interrupted boundary.");
   }
 
+  private async subscribeMaterializedThread(handle: CodexProviderHandle): Promise<boolean> {
+    if (!handle.subscriptionAfterMaterialization) return false;
+    const threadId = handle.providerContinuationId;
+    const subscribed = await handle.client.request<CodexThreadResult>("thread/resume", { threadId });
+    if (subscribed.thread?.id !== threadId) throw new Error("Codex subscription resolved a different materialized thread.");
+    handle.subscriptionAfterMaterialization = false;
+    return true;
+  }
+
   /** Terminal correlation is event-driven and deliberately thread+turn exact. */
   private async waitForExactRoomTurnTerminal(
     handle: CodexProviderHandle,
     turnId: string,
     detachSignal?: AbortSignal,
   ): Promise<{ status: string; turn: ThreadReadTurn }> {
+    if (await this.subscribeMaterializedThread(handle)) {
+      const snapshot = await handle.client.request<ThreadReadResult>("thread/read", {
+        threadId: handle.providerContinuationId, includeTurns: true,
+      });
+      if (snapshot.thread?.id !== handle.providerContinuationId) throw new Error("Codex materialized snapshot resolved a different thread.");
+      const turn = snapshot.thread.turns?.find(turn => turn.id === turnId);
+      const status = typeof turn?.status === "string" ? turn.status : turn?.status?.status;
+      if (turn && status && /^(?:completed|failed|interrupted|cancelled|stopped)$/i.test(status)) return { status, turn };
+    }
     const status = await this.waitForExactTurnNotification(handle, exactTurnKey(handle.providerContinuationId, turnId), detachSignal);
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
@@ -1333,12 +2704,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     turn: ThreadReadTurn,
     checkpointTerminalResult?: ProviderRoomTurnOptions["checkpointTerminalResult"],
   ): Promise<ProviderRoomTurnResult> {
-    if (status !== "completed") {
-      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
-      throw new CodexRoomTurnRecoveryError(`Codex bounded room turn ${turnId} ended ${status}.`);
-    }
-    const result = handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, turn);
-    const terminalResult = { turnId, ...result };
+    // A terminal native turn leaves the reusable app-server at an idle turn
+    // boundary even when that turn failed or was interrupted.
+    handle.setLiveState("idle");
+    const terminalResult: ProviderRoomTurnResult = status === "completed"
+      ? { turnId, ...handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, turn) }
+      : { turnId, providerContinuationId: handle.providerContinuationId,
+        outcome: status === "failed" ? "failed" : "interrupted", text: null, evidence: "transcript",
+        error: String(safeStreamPayload(turn.error?.message || `Codex bounded room turn ended ${status}.`).payload).slice(0, 2000) };
     await checkpointTerminalResult?.(terminalResult);
     handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
     return terminalResult;
@@ -1369,7 +2742,42 @@ export class CodexProviderAdapter implements ProviderAdapter {
       };
       handle.turnWaiters.set(key, waiter);
       detachSignal?.addEventListener("abort", onDetach, { once: true });
+      this.reconcileExactTurnTerminalsAfterIdle(handle);
     });
+  }
+
+  private reconcileExactTurnTerminalsAfterIdle(handle: CodexProviderHandle): void {
+    if (!handle.turnWaiters.size
+      || handle.threadIdleReconciliation
+      || handle.threadIdleEpoch <= handle.threadIdleReconciledEpoch) return;
+    const observedEpoch = handle.threadIdleEpoch;
+    handle.threadIdleReconciliation = (async () => {
+      try {
+        const read = await handle.client.request<ThreadReadResult>("thread/read", {
+          threadId: handle.providerContinuationId,
+          includeTurns: true,
+        });
+        if (handle.terminal
+          || this.handles.get(handle.workAttemptId) !== handle
+          || read.thread?.id !== handle.providerContinuationId) return;
+        for (const turn of read.thread.turns ?? []) {
+          if (!turn.id) continue;
+          const key = exactTurnKey(handle.providerContinuationId, turn.id);
+          if (!handle.turnWaiters.has(key)) continue;
+          const status = String(extractTurnStatus(turn) ?? "").toLowerCase();
+          if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
+            this.noteExactTurnTerminal(handle, key, status);
+          }
+        }
+      } catch {
+        // Thread-idle is only an invalidation signal. A failed read proves
+        // nothing about the exact turn, so keep waiting for native evidence.
+      } finally {
+        handle.threadIdleReconciledEpoch = Math.max(handle.threadIdleReconciledEpoch, observedEpoch);
+        handle.threadIdleReconciliation = null;
+        if (handle.threadIdleEpoch > observedEpoch) this.reconcileExactTurnTerminalsAfterIdle(handle);
+      }
+    })();
   }
 
   private noteExactTurnTerminal(handle: CodexProviderHandle, key: string, status: string): void {
@@ -1389,6 +2797,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     providerPayload: unknown,
     kind: ProviderStreamEventKind,
     summary: string | null = null,
+    nativeEventId: string | null = null,
+    nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
   ): void {
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
@@ -1399,6 +2809,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
       provider: this.id,
       kind,
       method,
+      ...(nativeEventId ? { nativeEventId } : {}),
+      ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
       summary,
       ...safe,
       durablePayloadRef: null,
@@ -1437,6 +2849,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle: CodexProviderHandle,
     exit: CodexAppServerExit,
   ): ProviderTerminalPayload {
+    if (exit.type === "exit") {
+      this.emitNativeRuntimeUnavailable(handle, "process_exit");
+    } else if (!handle.nativeRuntimeUnavailable) {
+      handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+        handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
+    }
     const terminal = exit.type === "error"
       ? {
         ...synthesizeTerminalPayload({
@@ -1455,6 +2873,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         providerContinuationId: handle.providerContinuationId,
         stopRequested: handle.stopRequested,
       });
+    if (exit.type === "exit" && handle.providerConnection.pid && handle.providerConnection.processIdentity) {
+      (terminal as ProviderTerminalPayload).nativeRuntimeDeath = { kind: "codex_app_server",
+        pid: handle.providerConnection.pid, processIdentity: handle.providerConnection.processIdentity };
+    }
     if (handle.protocolError) terminal.terminalCause = "protocol_error";
     handle.terminal = terminal;
     handle.state = terminal.terminalCause === "exited" || terminal.terminalCause === "stopped"
@@ -1467,6 +2889,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle.turnWaiters.clear();
     handle.terminalTurns.clear();
     handle.roomTurnResults.clearAll();
+    handle.permissionFileChangeProposals.clear();
     if (this.handles.get(handle.workAttemptId) === handle) {
       this.handles.delete(handle.workAttemptId);
     }

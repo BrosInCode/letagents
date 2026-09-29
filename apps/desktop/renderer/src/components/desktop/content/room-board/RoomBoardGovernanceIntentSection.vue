@@ -1,6 +1,6 @@
 <template>
   <section class="desktop-board-governance-section">
-    <p v-if="!governance.pendingIntents.length">No pending board intents.</p>
+    <p v-if="!governance.pendingIntents.length">No pending requests.</p>
     <article
       v-for="intent in governance.pendingIntents"
       :key="intent.id"

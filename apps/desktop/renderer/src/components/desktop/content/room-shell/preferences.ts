@@ -14,14 +14,6 @@ export function readNotificationsEnabled(): boolean {
   }
 }
 
-export function readLiquidGlassEnabled(): boolean {
-  try {
-    return window.localStorage.getItem("letagents-desktop:liquid-glass") !== "off";
-  } catch {
-    return true;
-  }
-}
-
 const githubEventsVisibilityStorageKey = "letagents-desktop:github-events-inline-visible";
 const environmentPanelOpenStorageKey = "letagents-desktop:environment-panel-open";
 

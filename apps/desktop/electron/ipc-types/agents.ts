@@ -1,5 +1,6 @@
 import type { DesktopGitRoomInfo } from "./room.js";
 import type { DesktopMcpInstallTargetId } from "./setup.js";
+import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
 
 export type DesktopAgentProviderId =
   | "claude-code"
@@ -47,6 +48,10 @@ export interface DesktopAgentProvider {
    */
   supervisedDeliveryMode?: Extract<DesktopManagedAgentDeliveryMode, "mcp_polling" | "daemon_inbox"> | null;
   runtimeCommand: string | null;
+  /** Official user-run install command for an external provider runtime. */
+  runtimeInstallCommand?: string | null;
+  /** Official provider documentation for installing an external runtime. */
+  runtimeInstallUrl?: string | null;
   /** External MCP-install target. Null when the supervised runtime injects its own bridge. */
   mcpTargetId: DesktopMcpInstallTargetId | null;
   permissionProfiles: DesktopManagedAgentPermissionProfile[];
@@ -57,6 +62,9 @@ export interface DesktopAgentProviderPreflightInput {
   roomIdentifier?: string | null;
   roomGitRoom?: DesktopGitRoomInfo | null;
   repoRootPath?: string | null;
+  /** The room is genuinely repo-less: skip the "choose a repo" gate and let the
+   * agent start in a private, daemon-provisioned scratch workspace. */
+  roomOnly?: boolean | null;
   launchMode?: "legacy" | "supervised" | null;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
@@ -64,6 +72,8 @@ export interface DesktopAgentProviderPreflightInput {
   modelSource?: DesktopAgentProviderModelSource | null;
   effort?: DesktopManagedAgentEffort | null;
   refreshModels?: boolean | null;
+  /** Re-import the user's terminal PATH before checking provider commands. */
+  refreshEnvironment?: boolean | null;
 }
 
 export interface DesktopAgentProviderPreflight {
@@ -72,7 +82,7 @@ export interface DesktopAgentProviderPreflight {
   canStart: boolean;
   message: string;
   detail: string | null;
-  nextAction: DesktopAgentProviderSetupAction | "authenticate" | "choose_repo" | "choose_worktree" | null;
+  nextAction: DesktopAgentProviderSetupAction | "install_external_runtime" | "authenticate" | "choose_repo" | "choose_worktree" | null;
   version: string | null;
   mcpStatus: "not_installed" | "installed" | "needs_attention" | null;
   branchMismatch?: {
@@ -173,6 +183,7 @@ export interface DesktopManagedAgentActiveWork {
 export type DesktopManagedAgentPermissionProfileId =
   | "read_only"
   | "ask_before_write"
+  | "auto_review"
   | "sandboxed_write"
   | "full_access"
   | (string & {});
@@ -364,14 +375,35 @@ export interface DesktopManagedAgentInspectResult {
 export type DesktopSupervisorDesiredState = "running" | "paused" | "stopped";
 export type DesktopSupervisorObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type DesktopSupervisorCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
+export type DesktopLifecycleProjectionProvider = "codex" | "claude-code" | "cursor" | "open-model";
+export type DesktopLifecycleCaptureAdmissionStatus = "pending" | "ready" | "unavailable";
+export interface DesktopLifecycleProjectionDiagnostics {
+  available: boolean;
+  providers: Record<DesktopLifecycleProjectionProvider, {
+    comparedSegments: number;
+    matched: number;
+    missingInTyped: number;
+    missingInLegacy: number;
+    pairedButDifferent: number;
+    conflicts: number;
+    observationUnavailable: number;
+  }>;
+}
 
 export interface DesktopSupervisorDaemonStatus {
+  maintenanceHoldId?: string | null;
   healthy: boolean;
   protocolVersion: number;
   implementationVersion: string;
   generation: number;
   pid: number;
   startedAt: string;
+  recoveryDiagnostics: {
+    daemonInboxWaitEvidenceDependency: number;
+    lifecycleProjection: DesktopLifecycleProjectionDiagnostics;
+    lifecycleCaptureAdmission: Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus>;
+    lifecycleLocalConformanceEligible: Record<DesktopLifecycleProjectionProvider, boolean>;
+  } | null;
   capabilities: {
     roomDeliveryRetry: boolean;
     providerContinuationRepair: boolean;
@@ -381,6 +413,7 @@ export interface DesktopSupervisorDaemonStatus {
     agentRoomMove: boolean;
     agentLifecycle: boolean;
     agentRuntimeRecovery?: boolean;
+    agentRuntimeRecoveryV2?: boolean;
     agentStateSubscription: boolean;
     agentActivityStream?: boolean;
   };
@@ -391,6 +424,41 @@ export interface DesktopSupervisorStateSnapshot {
   daemonGeneration: number;
   sequence: number;
   entries: DesktopSupervisorManifestEntry[];
+}
+
+/** One human retirement request. The renderer supplies the stable operation
+ * id before dispatch so a completion event cannot race ahead of correlation. */
+export interface DesktopSupervisorRetirementInput {
+  operationId: string;
+  entryId: string;
+  daemonGeneration: number;
+}
+
+/** Submission acknowledges only that Electron accepted responsibility for
+ * completing the durable retirement; it does not pretend cleanup is done. */
+export interface DesktopSupervisorRetirementReceipt {
+  operationId: string;
+  entryId: string;
+  daemonGeneration: number;
+  status: "accepted";
+}
+
+/** Explicit completion signal for the cross-process retirement operation. */
+export interface DesktopSupervisorRetirementEvent {
+  operationId: string;
+  entryId: string;
+  daemonGeneration: number;
+  status: "completed" | "failed";
+  error: string | null;
+  occurredAt: string;
+}
+
+/** Restart/missed-event fallback derived from the daemon's durable lifecycle
+ * and Electron's encrypted grant registry. */
+export interface DesktopSupervisorRetirementStatus {
+  entryId: string;
+  daemonGeneration: number;
+  status: "pending" | "completed";
 }
 
 /** Revisioned, daemon-owned Inspector configuration. Provider never changes after creation. */
@@ -420,6 +488,16 @@ export type DesktopSupervisorAgentConfigurationUpdateResult =
   | { outcome: "updated"; configuration: DesktopSupervisorAgentConfiguration }
   | { outcome: "conflict"; configuration: DesktopSupervisorAgentConfiguration }
   | { outcome: "invalid"; error: string };
+
+export interface DesktopSupervisorAgentConfigurationApplyInput {
+  entryId: string;
+  daemonGeneration: number;
+  expectedConfigurationRevision: number;
+}
+
+export type DesktopSupervisorAgentConfigurationApplyResult = {
+  outcome: "already_applied" | "restarting" | "busy_active_turn" | "conflict" | "unsupported";
+};
 
 export type DesktopSupervisorRoomMovePhase = "prepared" | "waiting_for_current_turn" | "joining_destination" | "membership_committed" | "rotating_credentials" | "bootstrapping_destination_tail" | "active" | "failed" | "rollback_required";
 export interface DesktopSupervisorRoomMove {
@@ -498,6 +576,7 @@ export type DesktopRoomAgentReceiptState =
   | "publishing"
   | "acknowledged"
   | "acknowledged_no_reply"
+  | "acknowledged_failed"
   | "retryable"
   | "blocked"
   | "restoring_conversation"
@@ -506,6 +585,7 @@ export type DesktopRoomAgentReceiptState =
   | "queued_behind_blocked";
 
 export interface DesktopRoomAgentCausalEvent {
+  sequence: number;
   phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled";
   observedAt: string;
   detail: string | null;
@@ -514,6 +594,8 @@ export interface DesktopRoomAgentCausalEvent {
 export interface DesktopRoomAgentDeliveryReceipt {
   inboxItemId: string;
   sourceMessageId: string;
+  /** Durable order of this receipt within the agent's inbox. */
+  fifoSequence: number;
   /** Deterministic daemon publication identity for this exact reply. */
   replyClientMessageId: string;
   /** Exact room message created by this supervised reply, when one exists. */
@@ -562,8 +644,16 @@ export interface DesktopRoomAgentStateProjection {
 }
 
 export interface DesktopSupervisorManifestEntry {
+  /** Opaque exact native process birth, used only to fence cached read evidence. */
+  runtimeGenerationId?: string | null;
+  runtimeRecovery?: {
+    operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
+    mode: "resume" | "fresh"; phase: "prepared" | "stopped";
+  } | null;
   id: string;
   roomId: string;
+  /** Pinned local storage identity; omitted for cloud agents. */
+  localRoomId?: string;
   displayName: string;
   /** Canonical server-owned room identity. This is routing metadata, never a credential. */
   agentKey?: string | null;
@@ -578,8 +668,12 @@ export interface DesktopSupervisorManifestEntry {
   permissionProfileId: string | null;
   /** Durable room-ingress owner for this supervised provider. */
   deliveryMode: DesktopManagedAgentDeliveryMode;
+  /** Read-only daemon-owned custody; selecting delivery mode cannot enable it. */
+  pollingContract?: "custodial_polling_v1" | null;
   createdBy: string;
   createdAt: string;
+  /** User-selected source checkout. Distinct from the daemon's private work-attempt workspace. */
+  sourceRepoPath?: string | null;
   workspacePath: string | null;
   workAttemptId: string | null;
   /** Exact current or last-verified room worker used for control routing. */
@@ -591,6 +685,8 @@ export interface DesktopSupervisorManifestEntry {
   providerPid: number | null;
   workplaceLiveness: DesktopSupervisorLivenessAxis;
   nativeLiveness: DesktopSupervisorLivenessAxis;
+  /** Ephemeral native compaction; not a readiness or room-turn claim. */
+  providerProgress?: { state: "compacting"; startedAt: string } | null;
   /** First time this entry reached ready (bound + reachable + running +
    * unblocked); set once, never cleared. Null/absent if it never reached ready. */
   readyReachedAt?: string | null;
@@ -629,6 +725,8 @@ export interface DesktopSupervisorManifestEntry {
 }
 
 export interface DesktopSupervisorCreateInput {
+  /** Main-process resolved storage identity. Renderer values are ignored. */
+  localRoomId?: string;
   /** Stable across retries of one Start action; a new intentional agent gets a new id. */
   creationRequestId?: string | null;
   roomIdentifier: string;
@@ -683,6 +781,13 @@ export interface DesktopSupervisorReconnectInput {
 /** Replace only a provider runtime that the daemon has durably proved absent. */
 export interface DesktopSupervisorRuntimeRecoveryInput {
   entryId: string;
+  recovery?: {
+    mode: "reconnect" | "resume" | "fresh";
+    operationId: string;
+    roomId: string;
+    executionGenerationId: string;
+    runtimeGenerationId: string;
+  };
 }
 
 export interface DesktopSupervisorTurnControlResult {
@@ -727,7 +832,21 @@ export interface DesktopSupervisorContinuationRepair {
   attempt_count: number; last_error: string | null; created_at: string; updated_at: string;
 }
 export interface DesktopSupervisorAgentInspectorDetail {
+  /** Optional on older supervisors; bounded room text captured before native dispatch. */
+  prepared_context?: import("../../shared/message-outcome.js").PreparedRoomContext | null;
+  latest_intervention?: import("../../shared/message-outcome.js").MessageIntervention | null;
   availability: "available" | "pruned" | "not_loaded";
+  /** Optional for older supervisors; recorded evidence, never live authority. */
+  recorded_execution?: RetainedExecutionDetail;
+  /** Optional for older supervisors; exact current observer health, not work completion. */
+  runtime_control?: {
+    runtime_generation_id?: string;
+    control_state: "connecting" | "responsive" | "degraded" | "lost" | "unprobeable";
+    runtime_state: "starting" | "ready" | "stopping" | "exited";
+    observed_at: string | null;
+    execution_generation_id: string;
+    daemon_generation_id: string;
+  } | null;
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: Record<string, unknown> | null } | null;
   receipt: { state: DesktopRoomAgentReceiptState; attempt_count: number; provider_turn_id: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;

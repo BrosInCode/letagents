@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { ProviderContinuationMissingError } from "./provider-adapter.js";
 
@@ -28,6 +29,44 @@ export type OpenCodeRuntimeAuth = {
   username: string;
   password: string;
 };
+export type OpenCodePermissionRequest = {
+  id: string;
+  sessionID: string;
+  permission: string;
+  patterns: string[];
+  metadata: JsonRecord;
+  always: string[];
+  tool?: { messageID: string; callID: string };
+};
+export type OpenCodePermissionTurnCorrelation =
+  | { outcome: "correlation_unproven" }
+  | {
+    outcome: "correlated";
+    requestId: string;
+    providerContinuationId: string;
+    providerTurnId: string;
+    assistantMessageId: string;
+    callId: string;
+  };
+export type OpenCodePermissionEvent =
+  | { type: "permission.asked"; properties: OpenCodePermissionRequest }
+  | { type: "permission.replied"; properties: { sessionID: string; requestID: string; reply: "once" | "always" | "reject" } };
+export type OpenCodeControlProbeResult =
+  | { state: "responsive"; version: string }
+  | { state: "degraded"; reason: "timeout" | "aborted" | "authentication_failed" | "http_error" | "invalid_response" | "transport_refused" | "transport_error" };
+
+export class OpenCodePermissionReplyError extends Error {
+  constructor(readonly outcome: "not_dispatched" | "not_pending" | "request_changed" | "uncertain") {
+    super(outcome === "not_dispatched"
+      ? "The OpenCode permission decision was not sent because its provider instance could not be verified."
+      : outcome === "not_pending"
+      ? "The OpenCode permission request is no longer pending."
+      : outcome === "request_changed"
+        ? "The OpenCode permission request changed before the decision was sent."
+        : "The OpenCode permission decision could not be confirmed; do not resend it without reconciliation.");
+    this.name = "OpenCodePermissionReplyError";
+  }
+}
 
 export type OpenCodeFetch = (
   input: string,
@@ -40,14 +79,68 @@ export function record(value: unknown): JsonRecord | null {
     : null;
 }
 
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function stringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function permissionRequest(value: unknown): OpenCodePermissionRequest {
+  const request = record(value);
+  const tool = record(request?.tool);
+  if (!request || !nonEmptyString(request.id) || !nonEmptyString(request.sessionID)
+    || !nonEmptyString(request.permission) || !stringArray(request.patterns)
+    || !record(request.metadata) || !stringArray(request.always)
+    || (request.tool !== undefined && (!tool || !nonEmptyString(tool.messageID) || !nonEmptyString(tool.callID)))) {
+    throw new Error("OpenCode returned a malformed permission request.");
+  }
+  return {
+    id: request.id,
+    sessionID: request.sessionID,
+    permission: request.permission,
+    patterns: [...request.patterns],
+    metadata: request.metadata as JsonRecord,
+    always: [...request.always],
+    ...(tool ? { tool: { messageID: tool.messageID as string, callID: tool.callID as string } } : {}),
+  };
+}
+
+/** Unknown events stay with their own parser; recognized malformed approvals fail closed. */
+export function parseOpenCodePermissionEvent(event: OpenCodeEvent): OpenCodePermissionEvent | null {
+  if (event.type === "permission.asked") {
+    return { type: event.type, properties: permissionRequest(event.properties) };
+  }
+  if (event.type !== "permission.replied") return null;
+  const properties = record(event.properties);
+  if (!properties || !nonEmptyString(properties.sessionID) || !nonEmptyString(properties.requestID)
+    || typeof properties.reply !== "string" || !["once", "always", "reject"].includes(properties.reply)) {
+    throw new Error("OpenCode returned a malformed permission reply event.");
+  }
+  return {
+    type: event.type,
+    properties: {
+      sessionID: properties.sessionID,
+      requestID: properties.requestID,
+      reply: properties.reply as "once" | "always" | "reject",
+    },
+  };
+}
+
 /**
- * OpenCode orders messages by raw string comparison of their IDs, and its
- * agentic loop only exits once the newest user message sorts BELOW the newest
- * assistant message. It accepts caller-supplied user message IDs verbatim, so
- * a caller ID outside its ascending scheme ("msg_" + 12 lowercase-hex chars of
- * unix-ms * 0x1000 + 14 base62 chars) permanently reads as "an unanswered user
- * message newer than every reply" and the model is re-invoked until an
- * external bound aborts the turn.
+ * OpenCode accepts caller-supplied user message IDs verbatim, and up to
+ * 1.18.14 its agentic loop only exited once the newest user message sorted
+ * BELOW the newest assistant message by raw string comparison. A caller ID
+ * outside its ascending scheme ("msg_" + 12 lowercase-hex chars of
+ * unix-ms * 0x1000 + 14 base62 chars) permanently read as "an unanswered user
+ * message newer than every reply" and the model was re-invoked until an
+ * external bound aborted the turn.
+ *
+ * From 1.18.15 the loop exits when the newest assistant message answers the
+ * newest user message, and messages order by creation time with the ID as
+ * tiebreak. Native IDs remain the contract: they keep that tiebreak correct
+ * and keep sessions created under an older runtime readable.
  */
 const NATIVE_ASCENDING_MESSAGE_ID = /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 
@@ -177,10 +270,19 @@ export function eventReferencesSession(
   ].some((value) => value === sessionId);
 }
 
-function serverStatus(value: unknown, sessionId: string): string {
-  const statuses = record(value);
-  const status = record(statuses?.[sessionId]);
-  return typeof status?.type === "string" ? status.type : "idle";
+/**
+ * OpenCode lists only sessions that are not idle. A listed session is either
+ * running its turn ("busy") or waiting out a backoff before it re-sends a
+ * failed model request ("retry"). Both are an active turn: a retrying session
+ * resumes by itself and can still produce an answer, so reading it as a turn
+ * boundary would drop a Stop and settle a turn that is still running.
+ */
+function serverStatus(value: unknown, sessionId: string): "busy" | "idle" {
+  const listed = record(value)?.[sessionId];
+  if (listed === undefined || listed === null) return "idle";
+  // An entry this client cannot read is still a listed session, so it fails
+  // towards an active turn rather than towards a turn boundary.
+  return record(listed)?.type === "idle" ? "idle" : "busy";
 }
 
 function eventData(block: string): string | null {
@@ -227,14 +329,152 @@ export class OpenCodeServerClient {
     }
   }
 
+  /** Control responsiveness only: even a refused connection cannot prove runtime death. */
+  async probeControl(signal?: AbortSignal): Promise<OpenCodeControlProbeResult> {
+    const timeout = AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS);
+    const bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    let detach = (): void => {};
+    const aborted = new Promise<OpenCodeControlProbeResult>((resolve) => {
+      const listener = (): void => resolve({ state: "degraded", reason: timeout.aborted ? "timeout" : "aborted" });
+      detach = () => bounded.removeEventListener("abort", listener);
+      bounded.addEventListener("abort", listener, { once: true });
+      if (bounded.aborted) listener();
+    });
+    const request = async (): Promise<OpenCodeControlProbeResult> => {
+      if (bounded.aborted) return { state: "degraded", reason: timeout.aborted ? "timeout" : "aborted" };
+      try {
+        const response = await this.fetchImpl(`${this.url}/global/health`, this.authInit({ signal: bounded }));
+        if (response.status === 401 || response.status === 403) return { state: "degraded", reason: "authentication_failed" };
+        if (!response.ok) return { state: "degraded", reason: "http_error" };
+        const body = record(await response.json().catch(() => null));
+        return body?.healthy === true && nonEmptyString(body.version)
+          ? { state: "responsive", version: body.version }
+          : { state: "degraded", reason: "invalid_response" };
+      } catch (error) {
+        if (bounded.aborted) return { state: "degraded", reason: timeout.aborted ? "timeout" : "aborted" };
+        const failure = record(error);
+        const cause = record(failure?.cause);
+        return {
+          state: "degraded",
+          reason: failure?.code === "ECONNREFUSED" || cause?.code === "ECONNREFUSED" ? "transport_refused" : "transport_error",
+        };
+      }
+    };
+    try {
+      return await Promise.race([request(), aborted]);
+    } finally {
+      detach();
+    }
+  }
+
+  async listPendingPermissions(sessionId: string, signal?: AbortSignal): Promise<OpenCodePermissionRequest[]> {
+    if (!nonEmptyString(sessionId)) throw new Error("An exact OpenCode session is required for permission lookup.");
+    const value = await this.requestJson<unknown>("/permission", {
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(CONTROL_REQUEST_TIMEOUT_MS)]) : undefined,
+    });
+    if (!Array.isArray(value)) throw new Error("OpenCode returned a malformed pending permission list.");
+    const requests = value.map(permissionRequest);
+    if (new Set(requests.map((request) => request.id)).size !== requests.length) {
+      throw new Error("OpenCode returned duplicate pending permission identities.");
+    }
+    return requests.filter((request) => request.sessionID === sessionId);
+  }
+
+  /** Historical linkage only: this never proves the request is still pending or authorizes a reply. */
+  async correlatePermissionTurn(
+    sessionId: string,
+    expectedRequest: OpenCodePermissionRequest,
+    assertCurrentInstance?: () => void,
+  ): Promise<OpenCodePermissionTurnCorrelation> {
+    const unproven = { outcome: "correlation_unproven" } as const;
+    try {
+      const expected = structuredClone(permissionRequest(expectedRequest));
+      if (!nonEmptyString(sessionId) || expected.sessionID !== sessionId || !expected.tool) return unproven;
+      const { messageID, callID } = expected.tool;
+      assertCurrentInstance?.();
+      const assistant = await this.permissionMessage(sessionId, messageID);
+      assertCurrentInstance?.();
+      const info = record(assistant?.info);
+      if (info?.id !== messageID || info.sessionID !== sessionId || info.role !== "assistant"
+        || !nonEmptyString(info.parentID) || info.parentID === messageID || !Array.isArray(assistant?.parts)) return unproven;
+      const calls = assistant.parts.map(record).filter((part) => part?.type === "tool" && part.callID === callID);
+      if (calls.length !== 1 || !nonEmptyString(calls[0]?.id)
+        || calls[0]?.sessionID !== sessionId || calls[0]?.messageID !== messageID) return unproven;
+      const parentId = info.parentID;
+      const parent = await this.permissionMessage(sessionId, parentId);
+      assertCurrentInstance?.();
+      const user = record(parent?.info);
+      if (user?.id !== parentId || user.sessionID !== sessionId || user.role !== "user") return unproven;
+      return {
+        outcome: "correlated", requestId: expected.id, providerContinuationId: sessionId,
+        providerTurnId: parentId, assistantMessageId: messageID, callId: callID,
+      };
+    } catch {
+      // Missing messages, transport uncertainty, and stale instance fences are
+      // lookup failures, never continuation-loss or execution-lifecycle facts.
+      return unproven;
+    }
+  }
+
+  private async permissionMessage(sessionId: string, messageId: string): Promise<OpenCodeMessage | null> {
+    // Do not use requestJson: its session-route 404 policy would turn a missing
+    // message into ProviderContinuationMissingError and invite session repair.
+    const response = await this.fetchImpl(
+      `${this.url}/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`,
+      this.authInit({ signal: AbortSignal.timeout(CONTROL_REQUEST_TIMEOUT_MS) }),
+    );
+    return response.ok ? record(await response.json()) as OpenCodeMessage | null : null;
+  }
+
+  async replyPermission(
+    sessionId: string,
+    expectedRequest: OpenCodePermissionRequest,
+    reply: "once" | "reject",
+    assertCurrentInstance?: () => void,
+    beforeNativeDispatch?: () => Promise<void>,
+  ): Promise<{ outcome: "processed"; nativeScope: "request" | "session_pending" }> {
+    const expected = structuredClone(permissionRequest(expectedRequest));
+    if (!nonEmptyString(sessionId) || expected.sessionID !== sessionId || (reply !== "once" && reply !== "reject")) {
+      throw new Error("The OpenCode permission decision must target its exact session and use once or reject.");
+    }
+    const current = (await this.listPendingPermissions(sessionId)).find((request) => request.id === expected.id);
+    if (!current) throw new OpenCodePermissionReplyError("not_pending");
+    if (!isDeepStrictEqual(current, expected)) throw new OpenCodePermissionReplyError("request_changed");
+    // The native endpoint has no session or conditional hash parameter. The
+    // adapter's synchronous instance fence follows the awaited re-list, with
+    // no await between the fence and POST dispatch. A refusal is not uncertain.
+    if (beforeNativeDispatch) await beforeNativeDispatch();
+    assertCurrentInstance?.();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.url}/permission/${encodeURIComponent(expected.id)}/reply`, this.authInit({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reply }),
+        signal: AbortSignal.timeout(CONTROL_REQUEST_TIMEOUT_MS),
+      }));
+    } catch {
+      throw new OpenCodePermissionReplyError("uncertain");
+    }
+    if (response.status === 404) throw new OpenCodePermissionReplyError("not_pending");
+    if (!response.ok || await response.json().catch(() => null) !== true) throw new OpenCodePermissionReplyError("uncertain");
+    // OpenCode reject also rejects every other pending request in this session.
+    return { outcome: "processed", nativeScope: reply === "reject" ? "session_pending" : "request" };
+  }
+
   listSessions(): Promise<JsonRecord[]> {
     return this.requestJson<JsonRecord[]>("/session");
   }
 
-  createSession(title: string): Promise<JsonRecord> {
+  /**
+   * The first session on a fresh server bootstraps the whole OpenCode
+   * instance, so a launch passes its own remaining budget as `signal`.
+   */
+  createSession(title: string, signal?: AbortSignal): Promise<JsonRecord> {
     return this.requestJson<JsonRecord>("/session", {
       method: "POST",
       body: JSON.stringify({ title }),
+      signal,
     });
   }
 
@@ -249,7 +489,7 @@ export class OpenCodeServerClient {
     );
   }
 
-  async status(sessionId: string): Promise<string> {
+  async status(sessionId: string): Promise<"busy" | "idle"> {
     return serverStatus(
       await this.requestJson<unknown>("/session/status"),
       sessionId,

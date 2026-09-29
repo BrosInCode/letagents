@@ -49,8 +49,13 @@ export function createRoomAccess(
   };
 }
 
-function roomInfoCacheKey(value: string | null | undefined): string | null {
-  const normalized = value?.trim().toLowerCase();
+export function roomInfoCacheKey(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const focusLocator = /^(github\.com\/[^/]+\/[^/]+\/focus\/)(.+)$/i.exec(trimmed);
+  const normalized = focusLocator
+    ? `${focusLocator[1].toLowerCase()}${focusLocator[2]}`
+    : trimmed.toLowerCase();
   return normalized || null;
 }
 
@@ -58,17 +63,27 @@ export function rememberJoinedRoomInfo(
   requestedRoomIdentifier: string,
   payload: RoomInfoPayload,
 ): void {
-  const keys = [
-    requestedRoomIdentifier,
-    payload.room_id,
-    payload.name,
-    payload.code,
-  ]
+  const keys = roomInfoCacheKeys(requestedRoomIdentifier, payload)
     .map(roomInfoCacheKey)
     .filter((key): key is string => Boolean(key));
   for (const key of keys) {
     joinedRoomInfoCache.set(key, payload);
   }
+}
+
+export function roomInfoCacheKeys(
+  requestedRoomIdentifier: string,
+  payload: RoomInfoPayload,
+): string[] {
+  return [requestedRoomIdentifier, payload.room_id]
+    .filter((value): value is string => Boolean(value?.trim()));
+}
+
+export function canonicalJoinedRoomIdentifier(
+  requestedRoomIdentifier: string,
+  payload: RoomInfoPayload,
+): string {
+  return payload.room_id?.trim() || requestedRoomIdentifier.trim();
 }
 
 export async function getJoinedRoomInfo(
@@ -92,7 +107,7 @@ export function mapDesktopRoomInfoPayload(
   requestedRoomIdentifier: string,
   payload: RoomInfoPayload,
 ): DesktopRoomInfo {
-  const canonicalIdentifier = payload.room_id || requestedRoomIdentifier;
+  const canonicalIdentifier = canonicalJoinedRoomIdentifier(requestedRoomIdentifier, payload);
   const focusSettings = normalizeRoomFocusSettings(payload);
   return {
     identifier: canonicalIdentifier,

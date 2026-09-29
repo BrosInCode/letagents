@@ -1,10 +1,221 @@
+import { applyManagedLaunchContractSchema, validateManagedLaunchContractSchema } from "./managed-launch-contract.js";
+import { applyHostToolRuleSchema, validateHostToolRuleSchema } from "./host-tool-rules.js";
+import { applyPreparedRoomContextSchema, validatePreparedRoomContextSchema } from "./prepared-room-context.js";
+import { validateRoomWorkspaceSchema, validateRoomWorkspaceReviewSchema } from "./room-workspace-store.js";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
+import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20,
+  migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23,
+  migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25,
+  validateExecutionStorageSchema, validateRuntimeFailureEffectMigrationSource,
+  type ExecutionStorageSchemaVersion } from "./execution-storage-schema.js";
+import { compactSupervisedTerminalHistory, readDurableNativeFailure } from "./supervised-agent-history-retention.js";
+import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
+import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "./room-work-publication-store.js";
+import { applyExecutionApprovalPublicationSchema, validateExecutionApprovalPublicationSchema } from "./execution-approval-publication-store.js";
+import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema,
+  validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
+import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
+import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
+import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
+import { applyApprovalRequestClosureSchema, validateApprovalRequestClosureSchema } from "./execution-approval-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 17;
+export const DAEMON_STATE_SCHEMA_VERSION = 48;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
+const workerExecutionBindingsSql = `CREATE TABLE worker_execution_bindings (
+  entry_id TEXT NOT NULL, room_id TEXT NOT NULL, api_url TEXT NOT NULL,
+  grant_id TEXT NOT NULL, work_attempt_id TEXT NOT NULL,
+  execution_generation_id TEXT NOT NULL, agent_session_id TEXT NOT NULL,
+  agent_key TEXT NOT NULL, recorded_at TEXT NOT NULL,
+  PRIMARY KEY(entry_id,execution_generation_id,agent_session_id,grant_id),
+  FOREIGN KEY(work_attempt_id) REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE
+) STRICT`;
+function validateWorkerExecutionBindings(database: DatabaseSync): void {
+  const actual = database.prepare("SELECT sql FROM sqlite_master WHERE name='worker_execution_bindings'").get();
+  const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+  if (normalize(String(actual?.sql ?? "")) !== normalize(workerExecutionBindingsSql)) {
+    throw new Error("Worker execution custody schema is invalid.");
+  }
+}
+function applyWorkerExecutionBindings(database: DatabaseSync): void {
+  if (!database.prepare("SELECT 1 FROM sqlite_master WHERE name='worker_execution_bindings'").get()) {
+    database.exec(workerExecutionBindingsSql);
+  }
+  validateWorkerExecutionBindings(database);
+}
+
+// SQLite appends rowid to ordinary index keys, so reverse traversal also
+// preserves the latest-repair tie breaker without a temporary sort.
+const daemonReadIndexes = {
+  provider_continuation_repairs_agent_created: "CREATE INDEX provider_continuation_repairs_agent_created ON provider_continuation_repairs(agent_id,created_at)",
+  provider_continuation_repairs_inbox_created: "CREATE INDEX provider_continuation_repairs_inbox_created ON provider_continuation_repairs(inbox_item_id,created_at)",
+  activity_events_summary: "CREATE INDEX activity_events_summary ON activity_events(agent_id,sequence,sort_order)",
+};
+function validateDaemonReadIndexes(database: DatabaseSync): void {
+  for (const [name, sql] of Object.entries(daemonReadIndexes)) {
+    const actual = database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(name);
+    if (!actual || normalizedTerminalSql(String(actual.sql)) !== normalizedTerminalSql(sql)) {
+      throw new Error(`Daemon read index ${name} is missing or invalid.`);
+    }
+  }
+}
+function applyDaemonReadIndexes(database: DatabaseSync): void {
+  for (const [name, sql] of Object.entries(daemonReadIndexes)) {
+    if (!database.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(name)) database.exec(sql);
+  }
+  validateDaemonReadIndexes(database);
+}
+function applyDaemonEfficiencyMigration(database: DatabaseSync): void {
+  applyDaemonReadIndexes(database);
+  for (const row of database.prepare("SELECT DISTINCT agent_id FROM supervised_agent_inbox").all()) {
+    compactSupervisedTerminalHistory(database, String(row.agent_id));
+  }
+}
+
+const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
+const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
+function quoteIdentifier(value: string): string { return `"${value.replaceAll('"', '""')}"`; }
+
+const TERMINAL_RESULTS_TABLE = "supervised_agent_terminal_results";
+const POLLING_CONTRACT_COLUMN = "polling_contract TEXT CHECK(polling_contract IS NULL OR (polling_contract='custodial_polling_v1' AND delivery_mode='mcp_polling'))";
+const CUSTODIAL_LAUNCH_SESSION_COLUMN = "custodial_launch_agent_session_id TEXT CHECK(custodial_launch_agent_session_id IS NULL OR length(trim(custodial_launch_agent_session_id))>0)";
+const TERMINAL_RESULTS_INDEX = "CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id)";
+function terminalResultsSql(version: 19 | 20, table = TERMINAL_RESULTS_TABLE): string {
+  return `CREATE TABLE ${table} (
+    inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable'${version === 20 ? ",'failed','interrupted'" : ""})),
+    normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
+    terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    ${version === 20 ? ",CHECK(outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))" : ""}
+  ) STRICT`;
+}
+
+function normalizedTerminalSql(sql: string): string {
+  // Preserve case-sensitive CHECK values; ALTER TABLE may quote identifiers.
+  return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map((part) => part.startsWith("'") ? part
+    : part.replace(/\bIF\s+NOT\s+EXISTS\s+/gi, "").replaceAll('"', "").replace(/\s+/g, "").toLowerCase())
+    .join("").replace(/;$/, "");
+}
+
+/** Custody is durable configuration: never repair a missing value or weakened contract. */
+function validatePollingContract(database: DatabaseSync): void {
+  const column = (database.prepare("PRAGMA table_xinfo(agent_configurations)").all() as Row[])
+    .find((entry) => entry.name === "polling_contract");
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_configurations'").get() as Row | undefined;
+  const sql = normalizedTerminalSql(String(definition?.sql ?? ""));
+  const declaration = `,${normalizedTerminalSql(POLLING_CONTRACT_COLUMN)}`;
+  if (!column || column.type !== "TEXT" || Number(column.notnull) !== 0 || column.dflt_value !== null
+    || Number(column.hidden) !== 0 || Number(column.pk) !== 0
+    || !(sql.includes(`${declaration},`) || sql.endsWith(`${declaration})strict`))) {
+    throw new Error("Daemon polling custody has an invalid or missing column definition.");
+  }
+  if (database.prepare(`SELECT 1 FROM agent_configurations WHERE polling_contract IS NOT NULL
+    AND (polling_contract <> 'custodial_polling_v1' OR delivery_mode IS NOT 'mcp_polling') LIMIT 1`).get()) {
+    throw new Error("Daemon polling custody contains invalid configuration.");
+  }
+}
+
+/** The immutable native launch environment cannot be reconstructed from a
+ * reminted worker binding. Existing runtimes deliberately retain NULL. */
+function validateCustodialLaunchSession(database: DatabaseSync): void {
+  const column = (database.prepare("PRAGMA table_xinfo(runtime_deployments)").all() as Row[])
+    .find(entry => entry.name === "custodial_launch_agent_session_id");
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_deployments'").get() as Row | undefined;
+  const sql = normalizedTerminalSql(String(definition?.sql ?? ""));
+  const declaration = `,${normalizedTerminalSql(CUSTODIAL_LAUNCH_SESSION_COLUMN)}`;
+  if (!column || column.type !== "TEXT" || Number(column.notnull) !== 0 || column.dflt_value !== null
+    || Number(column.hidden) !== 0 || Number(column.pk) !== 0
+    || !(sql.includes(`${declaration},`) || sql.endsWith(`${declaration})strict`))) {
+    throw new Error("Daemon custodial launch receipt has an invalid or missing column definition.");
+  }
+  if (database.prepare("SELECT 1 FROM runtime_deployments WHERE custodial_launch_agent_session_id IS NOT NULL AND length(trim(custodial_launch_agent_session_id))=0 LIMIT 1").get()) {
+    throw new Error("Daemon custodial launch receipt contains invalid authority.");
+  }
+}
+
+/** Terminal rows are authority: never repair a lost or weakened definition. */
+function validateTerminalResults(database: DatabaseSync, requiredVersion?: 20): 19 | 20 {
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(TERMINAL_RESULTS_TABLE) as Row | undefined;
+  const version = ([20, 19] as const).find((candidate) => (!requiredVersion || candidate === requiredVersion)
+    && definition && normalizedTerminalSql(String(definition.sql)) === normalizedTerminalSql(terminalResultsSql(candidate)));
+  if (!version) throw new Error("Daemon terminal-result authority has an invalid or missing table definition.");
+  const index = database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='supervised_agent_terminal_result_turn'").get() as Row | undefined;
+  const indexes = database.prepare("PRAGMA index_list(supervised_agent_terminal_results)").all() as Row[];
+  if (!index || normalizedTerminalSql(String(index.sql)) !== normalizedTerminalSql(TERMINAL_RESULTS_INDEX)
+    || indexes.length !== 2 || indexes.filter((entry) => entry.origin === "pk" && Number(entry.unique) === 1).length !== 1
+    || database.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name=?").get(TERMINAL_RESULTS_TABLE)) {
+    throw new Error("Daemon terminal-result authority has invalid indexes or triggers.");
+  }
+  for (const { name } of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Row[]) {
+    if ((database.prepare(`PRAGMA foreign_key_list(${quoteIdentifier(String(name))})`).all() as Row[])
+      .some((key) => key.table === TERMINAL_RESULTS_TABLE)) {
+      throw new Error("Daemon terminal-result authority has an unrecognized inbound dependency.");
+    }
+  }
+  if (database.prepare("PRAGMA foreign_key_check(supervised_agent_terminal_results)").get()
+    || database.prepare(`SELECT 1 FROM supervised_agent_terminal_results
+      WHERE outcome NOT IN ('reply','no_reply','unreadable'${version === 20 ? ",'failed','interrupted'" : ""})
+        OR evidence_source NOT IN ('transcript','stream','none')
+        OR (outcome IN ('failed','interrupted') AND (normalized_text IS NOT NULL OR evidence_source='none')) LIMIT 1`).get()) {
+    throw new Error("Daemon terminal-result authority contains invalid evidence.");
+  }
+  return version;
+}
+
+/** Read-only compatibility gate, also used before opening persistent WAL state. */
+export function assertDaemonStateVersionSupported(database: DatabaseSync): number {
+  const existingVersion = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+  const hasMetadata = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='manifest_metadata'").get();
+  const metadata = hasMetadata
+    ? database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get() as Row | undefined
+    : undefined;
+  const metadataVersion = metadata ? Number(metadata.schema_version) : undefined;
+  if (existingVersion > SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
+  if (metadataVersion !== undefined && metadataVersion > SCHEMA_VERSION) {
+    throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
+  }
+  if (existingVersion === 0 && metadataVersion !== undefined) {
+    throw new Error(`Daemon state version pair is inconsistent: user_version=0, metadata schema_version=${metadataVersion}.`);
+  }
+  if (existingVersion !== 0 && metadataVersion !== existingVersion) {
+    throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
+  }
+  if (existingVersion >= 44) validateHostToolRuleSchema(database);
+  if (existingVersion >= 39) validateRoomWorkspaceReviewSchema(database);
+  if (existingVersion >= 42) validateApprovalRequestClosureSchema(database, existingVersion < 45);
+  if (existingVersion >= 38) validateRoomWorkspaceSchema(database);
+  if (existingVersion >= 36) validateExecutionApprovalPublicationSchema(database);
+  if (existingVersion >= 27) validateRoomWorkPublicationSchema(database, existingVersion < 37);
+  if (existingVersion >= 28) {
+    if (existingVersion < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
+    else validateLifecycleProjectionLedgerSchema(database);
+  }
+  if (existingVersion >= 25) validatePollingOfferSchema(database, existingVersion >= 26 ? 26 : 25);
+  if (existingVersion >= 24) { validatePollingActivationSchema(database, existingVersion >= 26 ? 26 : 24); validateCustodialLaunchSession(database); }
+  if (existingVersion >= 23) validatePollingContract(database);
+  if (existingVersion >= 18) {
+    if (existingVersion === 30) validateRuntimeFailureEffectMigrationSource(database);
+    else validateExecutionStorageSchema(database,
+      existingVersion === 18 ? 18 : existingVersion < 21 ? 19 : existingVersion === 21 ? 20
+        : existingVersion < 30 ? 21 : existingVersion < 34 ? 23 : existingVersion < 35 ? 24 : 25);
+  }
+  if (existingVersion >= 17) validateTerminalResults(database, existingVersion >= 20 ? 20 : undefined);
+  if (existingVersion >= 20) {
+    // Reject inconsistent new terminal authority before legacy upgrade repair
+    // can relabel a missing binding as an old, unrecoverable no-reply turn.
+    for (const row of database.prepare(`SELECT i.inbox_item_id FROM supervised_agent_inbox i
+      LEFT JOIN supervised_agent_terminal_results t ON t.inbox_item_id=i.inbox_item_id
+      WHERE t.outcome IN ('failed','interrupted') OR i.state='acknowledged_failed'
+        OR CASE WHEN json_valid(i.outcome) THEN json_extract(i.outcome,'$.kind') END IN ('failed','interrupted')`).all() as Row[]) {
+      readDurableNativeFailure(database, String(row.inbox_item_id));
+    }
+  }
+  return existingVersion;
+}
 
 /** Owns the single daemon-state schema and all version transitions. */
 export class DaemonStateSchema {
@@ -19,20 +230,7 @@ export class DaemonStateSchema {
   ) {}
 
 createSchema(database: DatabaseSync): void {
-  const existingVersion = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
-  const metadataVersion = this.metadataSchemaVersion(database);
-  if (existingVersion > SCHEMA_VERSION) {
-    throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
-  }
-  if (metadataVersion !== undefined && metadataVersion > SCHEMA_VERSION) {
-    throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
-  }
-  if (existingVersion === 0 && metadataVersion !== undefined) {
-    throw new Error(`Daemon state version pair is inconsistent: user_version=0, metadata schema_version=${metadataVersion}.`);
-  }
-  if (existingVersion !== 0 && metadataVersion !== existingVersion) {
-    throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
-  }
+  const existingVersion = assertDaemonStateVersionSupported(database);
   if (existingVersion === 1) {
     this.migrateV1ToV2(database);
     return;
@@ -97,11 +295,92 @@ createSchema(database: DatabaseSync): void {
     this.migrateV16ToV17(database);
     return;
   }
+  if (existingVersion === 17) {
+    this.migrateV17ToV18(database);
+    return;
+  }
+  if (existingVersion === 18) {
+    this.migrateV18ToV19(database);
+    return;
+  }
+  if (existingVersion === 19) {
+    this.migrateV19ToV20(database);
+    return;
+  }
+  if (existingVersion === 20) {
+    this.migrateV20ToV21(database);
+    return;
+  }
+  if (existingVersion === 21) {
+    this.migrateV21ToV22(database);
+    return;
+  }
+  if (existingVersion === 22) {
+    this.migrateV22ToV23(database);
+    return;
+  }
+  if (existingVersion === 23) {
+    this.migrateV23ToV24(database);
+    return;
+  }
+  if (existingVersion === 24 || existingVersion === 25) {
+    this.migratePollingOfferStorage(database);
+    return;
+  }
+  if (existingVersion === 26) {
+    this.migrateRoomWorkPublicationStorage(database);
+    return;
+  }
+  if (existingVersion === 27) {
+    this.migrateLifecycleProjectionStorage(database);
+    return;
+  }
+  if (existingVersion === 28) {
+    this.migrateLegacyActiveRuntimeBirths(database);
+    return;
+  }
+  if (existingVersion === 29) {
+    this.migrateLifecycleEffectStorage(database);
+    return;
+  }
+  if (existingVersion === 30) {
+    this.migrateRuntimeFailureEffectStorage(database);
+    return;
+  }
+  if (existingVersion === 31) {
+    this.migrateLifecycleProjectionProviderSet(database);
+    return;
+  }
+  if (existingVersion === 32) {
+    this.migrateIncompatibleCodexRuntimeBirths(database);
+    return;
+  }
+  if (existingVersion === 33) {
+    this.migrateExecutionDelegationAuthorityStorage(database);
+    return;
+  }
+  if (existingVersion === 34) {
+    this.migrateExecutionApprovalProjectionStorage(database);
+    return;
+  }
+  if (existingVersion >= 35 && existingVersion <= 41) {
+    this.migrateExecutionApprovalPublicationStorage(database);
+    return;
+  }
+  if (existingVersion === 43 || existingVersion === 44 || existingVersion === 45 || existingVersion === 46 || existingVersion === 47) {
+    this.migrateHostToolRules(database);
+    return;
+  }
+  if (existingVersion === 42) {
+    this.migratePreparedRoomContext(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV17Shape(database);
+    this.validateLocalRoomMembershipShape(database);
+    this.repairAndValidateCurrentShape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -185,7 +464,8 @@ createSchema(database: DatabaseSync): void {
     ) STRICT;
     CREATE TABLE IF NOT EXISTS agent_room_memberships (
       agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
-      room_id TEXT NOT NULL
+      room_id TEXT NOT NULL,
+      local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id))
     ) STRICT;
     CREATE TABLE IF NOT EXISTS agent_configurations (
       agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
@@ -380,6 +660,7 @@ createSchema(database: DatabaseSync): void {
     ) STRICT;
     `);
     this.schemaInitializationHook?.(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
     if (version !== SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${version}.`);
@@ -393,9 +674,50 @@ createSchema(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
+    applyDaemonEfficiencyMigration(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+private migrateHostToolRules(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyHostToolRuleSchema(database);
+    applyApprovalRequestClosureSchema(database);
+    this.schemaInitializationHook?.(database);
+    validateHostToolRuleSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) { database.exec("ROLLBACK"); throw error; }
+}
+
+private migratePreparedRoomContext(database: DatabaseSync): void {
+  this.validateLocalRoomMembershipShape(database);
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyPreparedRoomContextSchema(database);
+    applyHostToolRuleSchema(database);
+    applyApprovalRequestClosureSchema(database);
+    this.schemaInitializationHook?.(database);
+    validatePreparedRoomContextSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
     throw error;
   }
 }
@@ -417,9 +739,15 @@ migrateV1ToV2(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     if (requiresScrub) this.completeV6SecretScrub(database);
@@ -442,9 +770,15 @@ migrateV2ToV3(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     if (requiresScrub) this.completeV6SecretScrub(database);
@@ -467,9 +801,15 @@ migrateV3ToV4(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     if (requiresScrub) this.completeV6SecretScrub(database);
@@ -531,9 +871,15 @@ migrateV4ToV5(database: DatabaseSync): void {
     // either version marker.
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     if (requiresScrub) this.completeV6SecretScrub(database);
@@ -582,9 +928,15 @@ migrateV5ToV6(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     // The old table contained a credential. secure_delete clears freed cells;
@@ -605,8 +957,14 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV6Shape(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -624,8 +982,14 @@ migrateV7ToV8(database: DatabaseSync): void {
   try {
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -641,8 +1005,14 @@ migrateV8ToV9(database: DatabaseSync): void {
   try {
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -657,8 +1027,14 @@ migrateV9ToV10(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -673,8 +1049,14 @@ migrateV10ToV11(database: DatabaseSync): void {
   try {
     if (this.tableColumns(database, "agent_purge_operations").size) this.rebuildPurgeOperationsV11(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -689,8 +1071,14 @@ migrateV11ToV12(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -714,8 +1102,17 @@ migrateV12ToV13(database: DatabaseSync): void {
     this.validateV16Shape(database);
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -737,8 +1134,17 @@ migrateV13ToV14(database: DatabaseSync): void {
     this.validateV16Shape(database);
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -758,8 +1164,17 @@ migrateV14ToV15(database: DatabaseSync): void {
     this.validateV16Shape(database);
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -777,8 +1192,17 @@ migrateV15ToV16(database: DatabaseSync): void {
     this.validateV16Shape(database);
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -794,14 +1218,740 @@ migrateV16ToV17(database: DatabaseSync): void {
   try {
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
     throw error;
   }
+}
+
+/** V18 reserves typed execution storage without changing legacy delivery decisions. */
+migrateV17ToV18(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V19 adds observer fencing and proof slots, never historical outcomes. */
+migrateV18ToV19(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV18Shape(database, 18);
+    migrateExecutionStorageV18ToV19(database);
+    migrateExecutionStorageV19ToV20(database);
+    migrateExecutionStorageV20ToV21(database);
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** Upgrade terminal constraints and observer provenance without reinterpreting evidence. */
+migrateV19ToV20(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV18Shape(database, 19);
+    migrateExecutionStorageV19ToV20(database);
+    migrateExecutionStorageV20ToV21(database);
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** Add nullable source provenance without resetting observer cursors or rebuilding tables. */
+migrateV20ToV21(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, 19);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV18Shape(database, 19);
+    migrateExecutionStorageV19ToV20(database);
+    migrateExecutionStorageV20ToV21(database);
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.validateV18Shape(database);
+    validateTerminalResults(database, 20);
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** Add native cutover witness slots without manufacturing authority for old rows. */
+migrateV21ToV22(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, 20);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV18Shape(database, 20);
+    migrateExecutionStorageV20ToV21(database);
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.validateV18Shape(database);
+    validateTerminalResults(database, 20);
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** Preserve all existing polling behavior; only a future exact cutover may select custody. */
+migrateV22ToV23(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Add only a dormant journal. No historical mode, cursor, or cutover starts work. */
+migrateV23ToV24(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Offers remain dormant. Old activations acquire no fabricated offer coverage. */
+migratePollingOfferStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Add empty publication provenance; never attribute previously captured work. */
+private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    applyRoomWorkPublicationSchema(database);
+    applyLifecycleProjectionLedgerSchema(database);
+    this.freezeLegacyActiveRuntimeBirths(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    validateRoomWorkPublicationSchema(database);
+    validateLifecycleProjectionLedgerSchema(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Add empty comparison evidence; never infer a historical projection pair. */
+private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    applyLifecycleProjectionLedgerSchema(database);
+    this.freezeLegacyActiveRuntimeBirths(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    validateLifecycleProjectionLedgerSchema(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Freeze only exact pre-B1 native births as legacy; never infer current policy. */
+private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.freezeLegacyActiveRuntimeBirths(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Add the effect journal and settle pre-journal facts without replaying them. */
+private migrateLifecycleEffectStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, 21);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Extend the existing effect journal without changing any retained disposition. */
+private migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, validateRuntimeFailureEffectMigrationSource(database));
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV22ToV23(database);
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Retire exact Codex births that cannot satisfy typed lifecycle authority. */
+private migrateIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Start a fresh comparator epoch when the admitted provider set changes. */
+private migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    validateLifecycleProjectionLedgerSchema(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Remove mutable aliases from the dormant local delegation authority key. */
+private migrateExecutionDelegationAuthorityStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, 23);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV23ToV24(database);
+    migrateExecutionStorageV24ToV25(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Add only the dormant, sanitized delegate-display projection journal. */
+private migrateExecutionApprovalProjectionStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, 24);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV24ToV25(database);
+    this.schemaInitializationHook?.(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Add an empty receipt journal; prior approval projections are never pinned retroactively. */
+private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, 25);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyExecutionApprovalPublicationSchema(database);
+    this.schemaInitializationHook?.(database);
+    validateExecutionApprovalPublicationSchema(database);
+    applyRoomWorkPublicationSchema(database);
+    applyManagedLaunchContractSchema(database);
+    applyWorkerExecutionBindings(database);
+    applyDaemonEfficiencyMigration(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    this.applyLocalRoomMembershipShape(database);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Existing memberships stay cloud-backed. Never reconstruct a missing current authority column. */
+private applyLocalRoomMembershipShape(database: DatabaseSync): void {
+  applyManagedLaunchContractSchema(database);
+  applyWorkerExecutionBindings(database);
+  applyHostToolRuleSchema(database);
+  applyRuntimeRecoverySchema(database);
+  applyApprovalRequestClosureSchema(database);
+  applyPreparedRoomContextSchema(database);
+  if (!this.tableColumns(database, "agent_room_memberships").has("local_room_id")) {
+    database.exec("ALTER TABLE agent_room_memberships ADD COLUMN local_room_id TEXT CHECK (local_room_id IS NULL OR (length(trim(local_room_id)) > 0 AND local_room_id = room_id))");
+  }
+  this.validateLocalRoomMembershipShape(database);
+}
+
+private validateLocalRoomMembershipShape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "agent_room_memberships").has("local_room_id")
+    || database.prepare("SELECT 1 FROM agent_room_memberships WHERE local_room_id IS NOT NULL AND (local_room_id != room_id OR length(trim(local_room_id)) = 0) LIMIT 1").get()) {
+    throw new Error("Daemon room transport identity is missing or invalid.");
+  }
+}
+
+/** Caller owns the migration transaction and has already installed current execution/configuration shape. */
+private freezeLegacyActiveRuntimeBirths(database: DatabaseSync): void {
+  const candidates = database.prepare(`SELECT
+      d.agent_id,
+      d.provider_execution_generation_id AS execution_generation_id,
+      d.provider_connection_kind AS connection_kind,
+      d.provider_connection_pid AS connection_pid,
+      d.provider_process_identity AS process_identity,
+      c.provider,
+      c.runtime_configuration_revision AS config_revision
+      FROM runtime_deployments d
+      JOIN agent_configurations c USING(agent_id)
+      JOIN work_attempt_executions w
+        ON w.work_attempt_id=d.provider_work_attempt_id
+       AND w.execution_generation_id=d.provider_execution_generation_id
+      WHERE d.provider_ref_present=1
+        AND d.work_attempt_id_present=1
+        AND d.work_attempt_id=d.provider_work_attempt_id
+        AND d.provider_work_attempt_id IS NOT NULL
+        AND d.provider_continuation_id IS NOT NULL
+        AND length(trim(d.provider_continuation_id))>0
+        AND d.provider_execution_generation_id IS NOT NULL
+        AND w.terminal_json IS NULL
+        AND d.provider_connection_pid>0
+        AND d.provider_process_identity_present=1
+        AND d.provider_process_identity IS NOT NULL
+        AND length(trim(d.provider_process_identity))>0
+        AND c.runtime_configuration_revision>=1
+        AND ((c.provider='codex' AND d.provider_connection_kind='codex_app_server')
+          OR (c.provider='claude-code' AND d.provider_connection_kind='claude_cli')
+          OR (c.provider='cursor' AND d.provider_connection_kind='cursor_cli')
+          OR (c.provider='open-model' AND d.provider_connection_kind='opencode_server'))
+      ORDER BY d.agent_id`).all() as Row[];
+  for (const candidate of candidates) {
+    const agentId = String(candidate.agent_id);
+    const executionGenerationId = String(candidate.execution_generation_id);
+    const connectionKind = String(candidate.connection_kind);
+    const connectionPid = Number(candidate.connection_pid);
+    const processIdentity = String(candidate.process_identity);
+    materializeRuntimeIdentity(database, {
+      agentId,
+      executionGenerationId,
+      runtimeGenerationId: executionRuntimeStorageIdentity(
+        agentId,
+        executionGenerationId,
+        connectionKind,
+        connectionPid,
+        processIdentity,
+      ),
+      provider: String(candidate.provider) as "codex" | "claude-code" | "cursor" | "open-model",
+      authorityMode: "legacy",
+      configRevision: Number(candidate.config_revision),
+      createdAtMs: 0,
+    });
+  }
+  for (const candidate of candidates) {
+    const runtimeGenerationId = executionRuntimeStorageIdentity(
+      String(candidate.agent_id),
+      String(candidate.execution_generation_id),
+      String(candidate.connection_kind),
+      Number(candidate.connection_pid),
+      String(candidate.process_identity),
+    );
+    const frozen = database.prepare(`SELECT provider,config_revision,authority_mode
+      FROM execution_runtime_generations
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?`).get(
+      String(candidate.agent_id),
+      String(candidate.execution_generation_id),
+      runtimeGenerationId,
+    ) as Row | undefined;
+    if (!frozen
+      || frozen.provider !== candidate.provider
+      || Number(frozen.config_revision) !== Number(candidate.config_revision)
+      || !["legacy", "typed_shadow", "typed"].includes(String(frozen.authority_mode))) {
+      throw new Error("Daemon runtime-birth migration could not verify exact frozen authority.");
+    }
+  }
+}
+
+/**
+ * A pre-typed Codex birth cannot be relabelled safely: its stream contract was
+ * fixed when the native process started. Fence it before daemon startup can
+ * attach, deliver, or restart work. Retirement keeps the manifest identity,
+ * inspector history, work attempt, and workspace; Electron's existing stopped
+ * entry reconciliation completes worker/grant revocation after the socket is up.
+ */
+private retireIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
+  const candidates = database.prepare(`SELECT
+      d.agent_id,
+      d.provider_execution_generation_id AS execution_generation_id,
+      d.provider_connection_kind AS connection_kind,
+      d.provider_connection_pid AS connection_pid,
+      d.provider_process_identity_present AS process_identity_present,
+      d.provider_process_identity AS process_identity,
+      c.delivery_mode,
+      c.runtime_configuration_revision AS config_revision
+    FROM runtime_deployments d
+    JOIN agent_configurations c USING(agent_id)
+    WHERE c.provider='codex' AND d.provider_ref_present=1
+      AND d.provider_work_attempt_id IS NOT NULL
+    ORDER BY d.agent_id`).all() as Row[];
+  const retiredAtMs = Date.now();
+  const retiredAt = new Date(retiredAtMs).toISOString();
+  for (const candidate of candidates) {
+    const agentId = String(candidate.agent_id);
+    const executionGenerationId = typeof candidate.execution_generation_id === "string"
+      && candidate.execution_generation_id.trim() ? candidate.execution_generation_id : null;
+    const connectionKind = candidate.connection_kind === "codex_app_server"
+      ? candidate.connection_kind : null;
+    const connectionPid = Number(candidate.connection_pid);
+    const processIdentity = Number(candidate.process_identity_present) === 1
+      && typeof candidate.process_identity === "string" && candidate.process_identity.trim()
+      ? candidate.process_identity : null;
+    const deliveryMode = candidate.delivery_mode;
+    if (deliveryMode !== "mcp_polling" && deliveryMode !== "desktop_events" && deliveryMode !== "daemon_inbox") {
+      throw new Error("Incompatible Codex birth has no valid durable delivery mode.");
+    }
+    const expectedAuthorityMode = lifecycleAuthorityModeForProvider("codex", deliveryMode);
+    const configRevision = Number(candidate.config_revision);
+    let compatible = false;
+    if (executionGenerationId && connectionKind && Number.isSafeInteger(connectionPid)
+      && connectionPid > 0 && processIdentity && Number.isSafeInteger(configRevision) && configRevision >= 1) {
+      const runtimeGenerationId = executionRuntimeStorageIdentity(
+        agentId,
+        executionGenerationId,
+        connectionKind,
+        connectionPid,
+        processIdentity,
+      );
+      const runtime = database.prepare(`SELECT provider,authority_mode,config_revision
+        FROM execution_runtime_generations
+        WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?`).get(
+        agentId,
+        executionGenerationId,
+        runtimeGenerationId,
+      ) as Row | undefined;
+      compatible = runtime?.provider === "codex"
+        && runtime.authority_mode === expectedAuthorityMode
+        && Number(runtime.config_revision) === configRevision;
+    }
+    if (compatible) continue;
+
+    const stopped = database.prepare("UPDATE agent_launch_intents SET desired_state='stopped' WHERE agent_id=?")
+      .run(agentId);
+    if (Number(stopped.changes) !== 1) {
+      throw new Error("Incompatible Codex birth has no durable launch intent to retire.");
+    }
+
+    database.prepare(`UPDATE execution_approval_decisions
+      SET dispatch_state='lost',
+        application_certainty=CASE WHEN dispatch_id IS NULL THEN 'impossible' ELSE 'unknown' END,
+        resolved_at_ms=MAX(decided_at_ms,?)
+      WHERE agent_id=? AND dispatch_state NOT IN ('acknowledged','lost')`).run(retiredAtMs, agentId);
+    database.prepare(`UPDATE execution_approval_requests
+      SET state='lost',application_certainty=COALESCE((
+        SELECT d.application_certainty FROM execution_approval_decisions d
+        WHERE d.request_id=execution_approval_requests.request_id
+          AND d.request_version=execution_approval_requests.request_version
+      ),'impossible')
+      WHERE agent_id=? AND state NOT IN ('resolved','superseded','lost')`).run(agentId);
+    database.prepare(`UPDATE execution_turns
+      SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+      WHERE agent_id=? AND state='active'`).run(retiredAtMs, agentId);
+    database.prepare(`UPDATE execution_message_attempts
+      SET state='lost',conclusion='lost',settled_at_ms=MAX(created_at_ms,?)
+      WHERE agent_id=? AND state='active'`).run(retiredAtMs, agentId);
+    database.prepare(`INSERT INTO supervised_agent_inbox_events
+        (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+      SELECT i.inbox_item_id,
+        COALESCE((SELECT MAX(e.event_sequence) FROM supervised_agent_inbox_events e
+          WHERE e.inbox_item_id=i.inbox_item_id),0)+1,
+        'v33_incompatible_codex_birth_retired','no_reply',?,
+        'Upgrade retired an incompatible Codex runtime birth; provider work was not replayed.'
+      FROM supervised_agent_inbox i
+      WHERE i.agent_id=?
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+        AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e
+          WHERE e.inbox_item_id=i.inbox_item_id
+            AND e.idempotency_key='v33_incompatible_codex_birth_retired')`).run(retiredAt, agentId);
+    database.prepare(`UPDATE supervised_agent_inbox
+      SET state='acknowledged_no_reply',outcome=NULL,failure_code=NULL,
+        terminal_reason='upgrade_authority_unavailable',
+        last_error='Upgrade retired this Codex runtime because its frozen lifecycle authority is incompatible; provider work was not replayed.',
+        blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,
+        updated_at=?,acknowledged_at=COALESCE(acknowledged_at,?)
+      WHERE agent_id=?
+        AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')`)
+      .run(retiredAt, retiredAt, agentId);
+  }
+}
+
+/** Every legacy caller advances directly to the current paired version. */
+private applyCurrentConfigurationShape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "agent_configurations").has("polling_contract")) {
+    database.exec(`ALTER TABLE agent_configurations ADD COLUMN ${POLLING_CONTRACT_COLUMN}`);
+  }
+  validatePollingContract(database);
+  if (!this.tableColumns(database, "runtime_deployments").has("custodial_launch_agent_session_id")) {
+    database.exec(`ALTER TABLE runtime_deployments ADD COLUMN ${CUSTODIAL_LAUNCH_SESSION_COLUMN}`);
+  }
+  validateCustodialLaunchSession(database);
+  if (this.tableColumns(database, "custodial_polling_activations").size
+    && !this.tableColumns(database, "custodial_polling_activations").has("compacted_through_offer_id")) {
+    applyPollingActivationSchema(database, 24);
+    applyPollingOfferSchema(database, 25);
+    migratePollingOffersV25ToV26(database);
+  } else {
+    applyPollingActivationSchema(database);
+    applyPollingOfferSchema(database);
+  }
+  applyRoomWorkPublicationSchema(database);
+  applyExecutionApprovalPublicationSchema(database);
+  applyLifecycleProjectionLedgerSchema(database);
+  this.freezeLegacyActiveRuntimeBirths(database);
+  this.retireIncompatibleCodexRuntimeBirths(database);
+}
+
+private applyV20Shape(database: DatabaseSync): void {
+  if (validateTerminalResults(database) === 20) return;
+  database.exec(`
+    ${terminalResultsSql(20, "supervised_agent_terminal_results_v20")};
+    INSERT INTO supervised_agent_terminal_results_v20(rowid,inbox_item_id,agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text,evidence_source,terminal_evidence_json,observed_at,updated_at)
+      SELECT rowid,inbox_item_id,agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text,evidence_source,terminal_evidence_json,observed_at,updated_at FROM supervised_agent_terminal_results;
+    DROP TABLE supervised_agent_terminal_results;
+    ALTER TABLE supervised_agent_terminal_results_v20 RENAME TO supervised_agent_terminal_results;
+    ${TERMINAL_RESULTS_INDEX};
+  `);
+  validateTerminalResults(database, 20);
 }
 
 private createPurgeOperationsV11(database: DatabaseSync): void {
@@ -1118,6 +2268,9 @@ private applyCurrentSchemaTail(database: DatabaseSync): void {
   this.validateV16Shape(database);
   this.applyV17Shape(database, true);
   this.validateV17Shape(database);
+  this.applyV18Shape(database);
+  this.validateV18Shape(database);
+  this.applyV20Shape(database);
 }
 
 private validateV12Shape(database: DatabaseSync): void {
@@ -1161,6 +2314,8 @@ private applyV13Shape(database: DatabaseSync): void {
   const inboxDefinition = database.prepare(
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'",
   ).get() as Row | undefined;
+  const retainedInboxStates = INBOX_STATE_CONSTRAINT.exec(String(inboxDefinition?.sql))?.[1]?.replace(/\s/g, "") === `${INBOX_STATES_V17},'acknowledged_failed'`
+    ? `${INBOX_STATES_V17},'acknowledged_failed'` : INBOX_STATES_V17;
   const hasCanonicalFailureCodeConstraint = /CHECK\s*\(\s*failure_code\s+IS\s+NULL\s+OR\s+failure_code\s*=\s*'provider_continuation_missing'\s*\)/i
     .test(String(inboxDefinition?.sql));
   if (hasFailureCode && hasRepairJournal && hasCanonicalFailureCodeConstraint) {
@@ -1209,6 +2364,7 @@ private applyV13Shape(database: DatabaseSync): void {
         AND lower(last_error) GLOB 'thread not found: ????????-????-????-????-????????????'
         THEN 'provider_continuation_missing' ELSE NULL END`;
 
+  const terminalVersion = validateTerminalResults(database);
   // A rolled-back version marker or interrupted legacy repair can retain the
   // current repair journal while temporarily rebuilding the older delivery
   // tables. Preserve those rows outside the foreign-key graph while the
@@ -1222,6 +2378,7 @@ private applyV13Shape(database: DatabaseSync): void {
     `);
     this.afterV13RepairJournalBackupHook?.();
   }
+  const restoreNativeTurnBindings = this.detachLaterInboxTables(database, ["supervised_agent_provider_turn_bindings", "supervised_agent_prepared_context"]);
   database.exec(`
     PRAGMA defer_foreign_keys = ON;
     ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_pre_v13;
@@ -1231,7 +2388,7 @@ private applyV13Shape(database: DatabaseSync): void {
       agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
       source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
       fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
-      state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')),
+      state TEXT NOT NULL CHECK (state IN (${retainedInboxStates})),
       attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
       action_id TEXT NOT NULL, reply_client_message_id TEXT NOT NULL,
       provider_turn_id TEXT, outcome TEXT, last_error TEXT,
@@ -1258,13 +2415,7 @@ private applyV13Shape(database: DatabaseSync): void {
     ) STRICT;
     INSERT INTO supervised_agent_inbox_events_v13 SELECT * FROM supervised_agent_inbox_events;
 
-    CREATE TABLE supervised_agent_terminal_results_v13 (
-      inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-      outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
-      normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
-      terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    ) STRICT;
+    ${terminalResultsSql(terminalVersion, "supervised_agent_terminal_results_v13")};
     INSERT INTO supervised_agent_terminal_results_v13 SELECT * FROM supervised_agent_terminal_results;
 
     CREATE TABLE supervised_agent_publications_v13 (
@@ -1323,6 +2474,7 @@ private applyV13Shape(database: DatabaseSync): void {
       DROP TABLE temp.provider_continuation_repairs_v13_backup;
     `);
   }
+  restoreNativeTurnBindings();
 }
 
 private validateV13Shape(database: DatabaseSync): void {
@@ -2023,6 +3175,177 @@ repairAndValidateV17Shape(database: DatabaseSync): void {
   }
 }
 
+private applyV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 25): void {
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'")
+    .get() as Row | undefined;
+  const sql = String(definition?.sql ?? "");
+  const states = INBOX_STATE_CONSTRAINT.exec(sql)?.[1]?.replace(/\s/g, "");
+  if (states !== `${INBOX_STATES_V17},'acknowledged_failed'`) {
+    if (states !== INBOX_STATES_V17) throw new Error("Daemon state v18 cannot upgrade an unknown inbox state constraint.");
+    // Every direct dependent must be saved before dropping the parent: SQLite
+    // rewrites foreign keys on RENAME, and DROP can cascade native-turn and
+    // publication authority away even with deferred constraint checking.
+    const children = [
+      "supervised_agent_inbox_events", "supervised_agent_terminal_results",
+      "supervised_agent_publications", "provider_continuation_repairs",
+      "supervised_agent_provider_turn_bindings",
+    ];
+    // Current-schema repair can rebuild an older physical inbox while
+    // keeping newer, already-retained context alongside its receipt.
+    if (this.tableColumns(database, "supervised_agent_prepared_context").size) children.push("supervised_agent_prepared_context");
+    const tables = ["supervised_agent_inbox", ...children];
+    for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Row[]) {
+      const table = String(row.name);
+      const referencesInbox = (database.prepare(`PRAGMA foreign_key_list(${quoteIdentifier(table)})`).all() as Row[])
+        .some((key) => key.table === "supervised_agent_inbox");
+      if (referencesInbox && !tables.includes(table)) {
+        throw new Error("Daemon state v18 found an unrecognized inbox dependency and cannot safely rebuild it.");
+      }
+    }
+    const definitions = tables.map((table) => {
+      const tableDefinition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as Row | undefined;
+      if (!tableDefinition?.sql) throw new Error("Daemon state v18 is missing an authoritative inbox dependency.");
+      const objects = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name")
+        .all(table) as Row[];
+      return { table, sql: String(tableDefinition.sql), objects: objects.map((object) => String(object.sql)) };
+    });
+    database.exec("PRAGMA defer_foreign_keys = ON");
+    for (const table of tables) {
+      database.exec(`CREATE TEMP TABLE ${quoteIdentifier(`v18_snapshot_${table}`)} AS SELECT * FROM ${quoteIdentifier(table)}`);
+    }
+    for (const table of children) database.exec(`DROP TABLE ${quoteIdentifier(table)}`);
+    database.exec("DROP TABLE supervised_agent_inbox");
+    for (const saved of definitions) {
+      database.exec(saved.table === "supervised_agent_inbox"
+        ? saved.sql.replace(INBOX_STATE_CONSTRAINT, `state TEXT NOT NULL CHECK(state IN (${INBOX_STATES_V17},'acknowledged_failed'))`)
+        : saved.sql);
+    }
+    for (const saved of definitions) {
+      database.exec(`INSERT INTO ${quoteIdentifier(saved.table)} SELECT * FROM temp.${quoteIdentifier(`v18_snapshot_${saved.table}`)}`);
+      database.exec(`DROP TABLE temp.${quoteIdentifier(`v18_snapshot_${saved.table}`)}`);
+      for (const object of saved.objects) database.exec(object);
+    }
+  }
+  applyExecutionStorageSchema(database, executionStorageVersion);
+}
+
+private validateV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 25): void {
+  this.validateV17Shape(database);
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
+  if (INBOX_STATE_CONSTRAINT.exec(String(definition?.sql))?.[1]?.replace(/\s/g, "") !== `${INBOX_STATES_V17},'acknowledged_failed'`) {
+    throw new Error("Daemon state v18 inbox is missing its reserved failed-delivery terminal state.");
+  }
+  validateExecutionStorageSchema(database, executionStorageVersion);
+  const expectedKeys: Record<string, string[]> = {
+    supervised_agent_inbox: ["blocked_by_inbox_item_id:inbox_item_id:NO ACTION"],
+    supervised_agent_inbox_events: ["inbox_item_id:inbox_item_id:CASCADE"],
+    supervised_agent_terminal_results: ["inbox_item_id:inbox_item_id:CASCADE"],
+    supervised_agent_publications: ["inbox_item_id:inbox_item_id:CASCADE|agent_id:agent_id:CASCADE|room_id:room_id:CASCADE"],
+    provider_continuation_repairs: ["inbox_item_id:inbox_item_id:CASCADE|agent_id:agent_id:CASCADE|room_id:room_id:CASCADE"],
+    supervised_agent_provider_turn_bindings: ["inbox_item_id:inbox_item_id:CASCADE", "inbox_item_id:inbox_item_id:CASCADE|agent_id:agent_id:CASCADE|room_id:room_id:CASCADE"],
+  };
+  for (const [table, expected] of Object.entries(expectedKeys)) {
+    const groups = new Map<number, Row[]>();
+    for (const key of database.prepare(`PRAGMA foreign_key_list(${quoteIdentifier(table)})`).all() as Row[]) {
+      if (key.table !== "supervised_agent_inbox" || key.on_update !== "NO ACTION") {
+        throw new Error(`Daemon state v18 table ${table} has an invalid inbox authority foreign key.`);
+      }
+      const group = groups.get(Number(key.id)) ?? [];
+      group.push(key); groups.set(Number(key.id), group);
+    }
+    const actual = [...groups.values()].map((group) => group.sort((a, b) => Number(a.seq) - Number(b.seq))
+      .map((key) => `${key.from}:${key.to}:${key.on_delete}`).join("|")).sort();
+    if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
+      throw new Error(`Daemon state v18 table ${table} has an invalid inbox authority foreign key.`);
+    }
+  }
+  if (database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v18 failed foreign-key validation.");
+}
+
+repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 19 | 20 | 21 | 22 | 23 | 24 | 25): void {
+  const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+  if (version >= 46) validateManagedLaunchContractSchema(database);
+  if (version >= 47) validateWorkerExecutionBindings(database);
+  const storageVersion = executionStorageVersion ?? (version >= 35 ? 25 : version >= 34 ? 24 : version >= 31 ? 23 : version >= 30 ? 22 : 21);
+  if (version >= 36) validateExecutionApprovalPublicationSchema(database);
+  if (version >= 28) {
+    if (version < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
+    else validateLifecycleProjectionLedgerSchema(database);
+  }
+  if (version >= 41) validateRuntimeRecoverySchema(database);
+  if (version >= 43) validatePreparedRoomContextSchema(database);
+  if (version >= 44) validateHostToolRuleSchema(database);
+  if (version >= 39) validateRoomWorkspaceReviewSchema(database);
+  if (version >= 38) validateRoomWorkspaceSchema(database);
+  if (version >= 27) validateRoomWorkPublicationSchema(database, version < 37);
+  if (version >= 25) validatePollingOfferSchema(database, version >= 26 ? 26 : 25);
+  if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 24) {
+    validatePollingActivationSchema(database, version >= 26 ? 26 : 24); validateCustodialLaunchSession(database);
+  }
+  if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 23) validatePollingContract(database);
+  if (!this.tableColumns(database, "supervised_agent_inbox_events").size
+    && database.prepare("SELECT 1 FROM supervised_agent_inbox LIMIT 1").get()) {
+    throw new Error("Daemon state is missing inbox retry history and cannot safely reconstruct consumed retry budgets.");
+  }
+  // Missing typed journals are lost authority, not permission to recreate an
+  // empty history. Check them before any predecessor's additive repair path.
+  validateExecutionStorageSchema(database, storageVersion);
+  validateTerminalResults(database, 20);
+  this.repairAndValidateV17Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV18Shape(database, storageVersion);
+    this.validateV18Shape(database, storageVersion);
+    validateTerminalResults(database, 20);
+    if (version >= 48) applyDaemonReadIndexes(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** Read-only validation for observers; never enter a predecessor repair path. */
+validateCurrentShape(database: DatabaseSync): void {
+  if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION) {
+    throw new Error("Daemon observation storage requires the already-current schema.");
+  }
+  this.validateLocalRoomMembershipShape(database);
+  validateDaemonReadIndexes(database);
+  validatePreparedRoomContextSchema(database);
+  if (this.hasPendingV6SecretScrub(database)) {
+    throw new Error("Daemon observation storage requires completed credential cleanup.");
+  }
+  this.validateV2Shape(database);
+  this.validateV3Shape(database);
+  this.validateV6Shape(database, false);
+  this.validateBoundedDeliveryV6Shape(database);
+  this.validateV7Shape(database);
+  this.validateV9Shape(database);
+  this.validateV18Shape(database);
+}
+
+/** Preserve later authority when repairing an older physical inbox shape. */
+private detachLaterInboxTables(database: DatabaseSync, names: string[]): () => void {
+  const saved = names.flatMap((table) => {
+    const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as Row | undefined;
+    if (!definition) return [];
+    const objects = (database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name")
+      .all(table) as Row[]).map((row) => String(row.sql));
+    database.exec(`CREATE TEMP TABLE ${quoteIdentifier(`inbox_repair_${table}`)} AS SELECT * FROM ${quoteIdentifier(table)}`);
+    database.exec(`DROP TABLE ${quoteIdentifier(table)}`);
+    return [{ table, sql: String(definition.sql), objects }];
+  });
+  return () => {
+    for (const item of saved) {
+      database.exec(item.sql);
+      database.exec(`INSERT INTO ${quoteIdentifier(item.table)} SELECT * FROM temp.${quoteIdentifier(`inbox_repair_${item.table}`)}`);
+      database.exec(`DROP TABLE temp.${quoteIdentifier(`inbox_repair_${item.table}`)}`);
+      for (const object of item.objects) database.exec(object);
+    }
+  };
+}
+
 private applyV8Shape(database: DatabaseSync): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS supervised_agent_publications (
@@ -2102,6 +3425,8 @@ repairAndValidateV8Shape(database: DatabaseSync): void {
  * collide across room moves for the same durable agent.
  */
 private applyV9Shape(database: DatabaseSync): void {
+  const terminalVersion = validateTerminalResults(database);
+  const restoreLaterAuthority = this.detachLaterInboxTables(database, ["provider_continuation_repairs", "supervised_agent_provider_turn_bindings", "supervised_agent_prepared_context"]);
   database.exec(`
     PRAGMA defer_foreign_keys = ON;
     ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v8;
@@ -2136,13 +3461,7 @@ private applyV9Shape(database: DatabaseSync): void {
     ) STRICT;
     INSERT INTO supervised_agent_inbox_events_v9 SELECT * FROM supervised_agent_inbox_events;
 
-    CREATE TABLE supervised_agent_terminal_results_v9 (
-      inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-      outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
-      normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
-      terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    ) STRICT;
+    ${terminalResultsSql(terminalVersion, "supervised_agent_terminal_results_v9")};
     INSERT INTO supervised_agent_terminal_results_v9 SELECT * FROM supervised_agent_terminal_results;
 
     CREATE TABLE supervised_agent_publications_v9 (
@@ -2198,6 +3517,7 @@ private applyV9Shape(database: DatabaseSync): void {
     DROP TABLE supervised_agent_history_boundaries_v8;
     CREATE INDEX supervised_agent_history_boundaries_updated ON supervised_agent_history_boundaries(agent_id,updated_at);
   `);
+  restoreLaterAuthority();
 }
 
 private validateV9Shape(database: DatabaseSync): void {
@@ -2823,6 +4143,7 @@ applyV6Shape(database: DatabaseSync): void {
 
 applyV7Shape(database: DatabaseSync): void {
   if (!this.tableColumns(database, "supervised_agent_terminal_results").size) {
+    const restoreContext = this.detachLaterInboxTables(database, ["supervised_agent_prepared_context"]);
     database.exec(`
       ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v6;
       CREATE TABLE supervised_agent_inbox (
@@ -2930,6 +4251,7 @@ applyV7Shape(database: DatabaseSync): void {
         updated_at TEXT NOT NULL
       ) STRICT;
     `);
+    restoreContext();
   }
   if (!this.tableColumns(database, "supervised_agent_inbox_events").size) {
     database.exec(`
@@ -3363,6 +4685,54 @@ validateV2Shape(database: DatabaseSync): void {
 
 }
 
+function configureDaemonStateConnection(database: DatabaseSync): void {
+  database.exec("PRAGMA foreign_keys = ON");
+  if (database.prepare("PRAGMA foreign_keys").get()?.foreign_keys !== 1) {
+    throw new Error("Daemon state requires foreign key enforcement.");
+  }
+  database.exec("PRAGMA synchronous = FULL");
+  // Temporary row snapshots must not spill a second plaintext copy to disk.
+  database.exec("PRAGMA temp_store = MEMORY");
+  // Deleted secret-bearing cells must not remain in reusable SQLite pages.
+  database.exec("PRAGMA secure_delete = ON");
+}
+
+/**
+ * Optional observation writer, opened only after protected migration while the
+ * caller holds the daemon singleton. No creation, repair, WAL conversion or retries.
+ */
+export function openDaemonStateObservationDatabase(path: string): DatabaseSync {
+  // A rejected read-write connection can checkpoint an existing WAL on close.
+  // Preflight read-only so even a future or malformed WAL remains untouched.
+  const inspection = new DatabaseSync(path, { readOnly: true });
+  try {
+    inspection.exec("PRAGMA busy_timeout = 0");
+    configureDaemonStateConnection(inspection);
+    new DaemonStateSchema().validateCurrentShape(inspection);
+    if (String(inspection.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase() !== "wal") {
+      throw new Error("Daemon observation storage requires existing WAL journal mode.");
+    }
+  } finally { inspection.close(); }
+
+  // SQLite's URI mode=rw excludes CREATE atomically; an existence check followed
+  // by the default constructor would recreate a database removed in between.
+  const uri = pathToFileURL(path);
+  uri.searchParams.set("mode", "rw");
+  const database = new DatabaseSync(uri.href);
+  try {
+    database.exec("PRAGMA busy_timeout = 0");
+    if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION
+      || String(database.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase() !== "wal") {
+      throw new Error("Daemon observation storage changed after validation.");
+    }
+    configureDaemonStateConnection(database);
+    return database;
+  } catch (error) {
+    try { database.close(); } catch { /* preserve the triggering error */ }
+    throw error;
+  }
+}
+
 /** Opens a daemon state connection with the non-negotiable durability settings. */
 export async function openDaemonStateDatabase(path: string, initializeSchema: (database: DatabaseSync) => void | Promise<void>): Promise<DatabaseSync> {
   const { chmod, mkdir } = await import("node:fs/promises");
@@ -3379,15 +4749,14 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
     try {
       database = new DatabaseSync(path);
       database.exec("PRAGMA busy_timeout = 5000");
+      // A newer daemon owns this schema. Reject before journal-mode conversion,
+      // checkpointing, or initialization can persist changes to its database.
+      assertDaemonStateVersionSupported(database);
       const mode = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (mode.toLowerCase() !== "wal") database.exec("PRAGMA journal_mode = WAL");
       const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
-      database.exec("PRAGMA foreign_keys = ON");
-      database.exec("PRAGMA synchronous = FULL");
-      // v6 can retire a formerly-secret column. Zero deleted cells so a
-      // successful migration does not leave its token in reusable SQLite pages.
-      database.exec("PRAGMA secure_delete = ON");
+      configureDaemonStateConnection(database);
       for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await chmod(candidate, 0o600); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
       await initializeSchema(database);
       return database;
@@ -3398,6 +4767,43 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
     }
   }
   throw new Error("Daemon state initialization retry loop exited unexpectedly.");
+}
+
+/**
+ * Opens an operational handle after the singleton owner completed the protected
+ * schema upgrade. Critical authority is still checked before the handle can be
+ * used, but the historical repair/validation chain is not repeated per store.
+ */
+export async function openPreparedDaemonStateDatabase(path: string): Promise<DatabaseSync> {
+  // The protected upgrade already created and migrated this file. Inspect it
+  // read-only first so a missing, replaced, or non-WAL database cannot be
+  // created or changed by an operational store racing after preparation.
+  const inspection = new DatabaseSync(path, { readOnly: true });
+  try {
+    inspection.exec("PRAGMA busy_timeout = 0");
+    if (assertDaemonStateVersionSupported(inspection) !== SCHEMA_VERSION) {
+      throw new Error("Daemon operational storage requires the already-current schema.");
+    }
+    if (String(inspection.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase() !== "wal") {
+      throw new Error("Daemon operational storage requires existing WAL journal mode.");
+    }
+  } finally { inspection.close(); }
+
+  const uri = pathToFileURL(path);
+  uri.searchParams.set("mode", "rw");
+  const database = new DatabaseSync(uri.href);
+  try {
+    database.exec("PRAGMA busy_timeout = 5000");
+    if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION
+      || String(database.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase() !== "wal") {
+      throw new Error("Daemon operational storage changed after preparation.");
+    }
+    configureDaemonStateConnection(database);
+    return database;
+  } catch (error) {
+    try { database.close(); } catch { /* preserve the triggering error */ }
+    throw error;
+  }
 }
 
 function isSqliteBusyOrLocked(error: unknown): boolean {

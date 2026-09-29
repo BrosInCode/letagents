@@ -1,3 +1,7 @@
+import { createLocalTaskStore } from "../../../shared/local-task-store.mjs";
+import { runWithLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
+import { withRegisteredWorkerStateFence } from "../../../shared/local-worker-state-fence.mjs";
+import { DaemonControlSocket } from "../../../apps/desktop/daemon/control-socket.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -48,12 +52,36 @@ const { toAgentReadableMessages } = await import("../server/runtime/messages.js"
 const {
   ensureLocalThreadRoutingProjectionSchema,
   ensureLocalThreadRoutingProjectionSchemaAsync,
+  ensureRequestedRootsProjected,
   getLocalThreadRoutingAgentKeysForRoots,
   projectLocalThreadRoutingMessage,
   runLocalSqliteWriteTransactionAsync,
   runLocalThreadRoutingBackfillBatch,
   scheduleLocalThreadRoutingBackfill,
 } = await import("../../../shared/sqlite-thread-routing.mjs");
+
+// Exercise the standalone client against a real socket with the shared owner store.
+const { getLocalKnowledgeDatabase } = await import("../local-state/local-chat.js");
+process.env.LETAGENTS_BOARD_SOCKET_PATH = join(tempDir, "board.sock");
+const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, request =>
+  runWithLocalBoardOwner(() => {}, async () => {
+    assert.equal(request.method, "local_board.mutate");
+    const input = request.params as { domain: string; operation: string; args: unknown[]; worker: unknown; statePath: string };
+    assert.equal(input.domain, "mcp");
+    let current: Record<string, unknown> | undefined;
+    const tasks = createLocalTaskStore({ getDb: getLocalKnowledgeDatabase,
+      currentWorkerCall: () => current as { session_id: string } | undefined,
+      withWorkerStateFence: callback => input.worker === null ? callback() :
+        withRegisteredWorkerStateFence(input.statePath, input.worker, session => {
+          current = session; try { return callback(); } finally { current = undefined; }
+        }),
+    });
+    const operation = tasks[input.operation as keyof typeof tasks] as (...args: unknown[]) => unknown;
+    return operation(...input.args);
+  }));
+await runWithLocalBoardOwner(() => {}, () => getLocalKnowledgeDatabase());
+await boardSocket.start();
+test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 type SendToolHandler = (
   input: Record<string, unknown>,
@@ -1066,8 +1094,15 @@ test("MCP local routing projection backfills an existing database idempotently",
     throw error;
   }
 
-  await ensureLocalThreadRoutingProjection(database as never);
-  await ensureLocalThreadRoutingProjection(database as never);
+  // Complete each backfill pass before checking its contents and idempotence.
+  // Foreground repair deadlines are exercised by the dedicated budget tests.
+  for (let pass = 0; pass < 2; pass += 1) {
+    await ensureLocalThreadRoutingProjection(database as never);
+    await ensureRequestedRootsProjected(database as never, room, [1], {
+      foregroundTimeBudgetMs: Number.POSITIVE_INFINITY,
+      scheduleOnTimeout: false,
+    });
+  }
   const membership = await getLocalChatThreadRoutingMembership(room, ["msg_1"], {
     actor_label: "Legacy old member | Test owner | Codex",
     agent_key: "test/legacy-old",
@@ -1189,6 +1224,40 @@ test("a new writer cannot advance local routing past an older unprojected reply"
     WHERE room_id = ? AND thread_root_number = 1
   `).get(room)?.through_message_number), 3);
   database.close();
+});
+
+test("lazy local routing returns a completed repair even when its final yield crosses the deadline", async (t) => {
+  const { DatabaseSync } = require("node:sqlite") as {
+    DatabaseSync: new (path: string) => ReturnType<typeof openSqliteDb> & { close(): void };
+  };
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE local_chat_messages (
+      room_id TEXT NOT NULL, number INTEGER NOT NULL, thread_root_number INTEGER,
+      sender TEXT NOT NULL, source TEXT, PRIMARY KEY (room_id, number)
+    );
+    CREATE INDEX local_chat_messages_thread_root_idx ON local_chat_messages (room_id, thread_root_number);
+    INSERT INTO local_chat_messages VALUES ('completed_root', 1, NULL, 'Human', 'browser');
+    INSERT INTO local_chat_messages VALUES ('completed_root', 2, 1, 'Agent', 'agent');
+  `);
+  ensureLocalThreadRoutingProjectionSchema(database as never);
+  const projected = database.prepare(`SELECT through_message_number FROM local_chat_thread_routing_root_state_v2
+    WHERE room_id = 'completed_root' AND thread_root_number = 1`);
+  let clockCrossedDeadline = false;
+  const clock = t.mock.method(performance, "now", () => {
+    if (Number(projected.get()?.through_message_number) >= 2) clockCrossedDeadline = true;
+    return clockCrossedDeadline ? 1000 : 0;
+  });
+  try {
+    const membership = await getLocalThreadRoutingAgentKeysForRoots(database as never, "completed_root", [1],
+      [{ agentKey: "test/agent", display_name: "Agent" }],
+      { foregroundTimeBudgetMs: 75, scheduleOnTimeout: false });
+    assert.equal(clockCrossedDeadline, true, "the final completed batch must cross the deadline");
+    assert.deepEqual([...membership.get(1) ?? []], ["test/agent"]);
+  } finally {
+    clock.mock.restore();
+    database.close();
+  }
 });
 
 test("lazy local routing yields and returns fail-closed within a foreground budget", async () => {
@@ -1544,7 +1613,7 @@ test("local participant lookup remains exact across a normalization and digest c
   database.close();
 });
 
-test("local routing lock retries back off and stop at a bounded deadline", async () => {
+test("local routing lock retries back off and stop at a bounded deadline", { timeout: 5_000 }, async (t) => {
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => ReturnType<typeof openSqliteDb> & { close(): void };
   };
@@ -1567,20 +1636,34 @@ test("local routing lock retries back off and stop at a bounded deadline", async
     },
   };
   writer.exec("BEGIN IMMEDIATE");
-  const startedAt = performance.now();
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
   try {
-    await assert.rejects(
+    const rejected = assert.rejects(
       ensureLocalThreadRoutingProjectionSchemaAsync(wrapped as never, {
         maxWaitMs: 300,
         random: () => 0,
       }),
       /database (?:is )?locked/i,
     );
-    const elapsed = performance.now() - startedAt;
-    assert.ok(elapsed >= 250 && elapsed < 600, `lock retry deadline was ${elapsed.toFixed(1)}ms`);
-    assert.ok(attempts >= 3 && attempts <= 8, `lock retry attempted ${attempts} times`);
+    assert.equal(attempts, 1, "the first lock attempt is immediate");
+    for (const delayMs of [5, 10, 20, 40, 80, 125, 20]) {
+      const before = attempts;
+      t.mock.timers.tick(delayMs - 1);
+      await flush();
+      assert.equal(attempts, before, "no lock retry occurs before its backoff elapses");
+      t.mock.timers.tick(1);
+      await flush();
+      assert.equal(attempts, before + 1, "exactly one lock retry follows each backoff");
+    }
+    await rejected;
+    assert.equal(Date.now(), 300, "the last backoff stops at the requested deadline");
+    t.mock.timers.tick(1_000);
+    await flush();
+    assert.equal(attempts, 8, "no retry remains scheduled after rejection");
     assert.equal(Number(contender.prepare("PRAGMA busy_timeout").get()?.timeout), 5_000);
   } finally {
+    t.mock.timers.reset();
     writer.exec("ROLLBACK");
     writer.close();
     contender.close();

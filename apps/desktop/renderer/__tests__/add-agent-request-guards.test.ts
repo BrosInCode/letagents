@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { computed, nextTick, ref } from "vue";
 import type {
+  DesktopGitRoomInfo,
   DesktopAgentProvider,
   DesktopAgentProviderModelsResult,
   DesktopAgentProviderPreflight,
+  DesktopAgentProviderPreflightInput,
 } from "../../electron/ipc-types";
 import { useAddAgentConfiguration } from "../src/components/desktop/content/add-agent/useAddAgentConfiguration";
 import { useAddAgentSetup } from "../src/components/desktop/content/add-agent/useAddAgentSetup";
@@ -30,15 +32,21 @@ function provider(id: "codex" | "cursor"): DesktopAgentProvider {
 test("provider switching invalidates an in-flight setup preflight", async () => {
   const oldPreflight = deferred<DesktopAgentProviderPreflight>();
   let preflightCalls = 0;
+  const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
   let laterPreflight: Promise<DesktopAgentProviderPreflight> | null = null;
+  let focusListener: (() => void) | undefined;
+  const launchMode = ref<"legacy" | "supervised">("legacy");
   Object.assign(globalThis, {
     window: {
       clearTimeout: () => undefined,
       setTimeout: () => 1,
+      addEventListener: (event: string, listener: () => void) => { if (event === "focus") focusListener = listener; },
       letagentsDesktop: {
+        supervisorGrant: { getStorageStatus: async () => ({ available: true }) },
         workers: {
-          runAgentProviderPreflight: (providerId: string) => {
+          runAgentProviderPreflight: (providerId: string, input: DesktopAgentProviderPreflightInput) => {
             preflightCalls += 1;
+            preflightInputs.push(input);
             if (preflightCalls === 1) return oldPreflight.promise;
             if (laterPreflight) return laterPreflight;
             return Promise.resolve({
@@ -56,6 +64,11 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
       },
     },
   });
+  const roomSnapshot = ref<{ path: string; git: DesktopGitRoomInfo }>({ path: "/repo", git: {
+    provider: "github", host: "github.com", repository: { id: null, fullName: "owner/repo", owner: "owner", name: "repo" },
+    ref: { type: "branch", name: "main", defaultBranch: "main", baseRef: null, headRef: null, headRepository: null },
+    visibility: "public", accessMode: "public", isDefault: true, source: "test",
+  } });
   let open = false;
   const setup = useAddAgentSetup();
   const selectedProvider = computed(() =>
@@ -64,8 +77,8 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   const actions = setup.bind({
     open: () => open,
     roomIdentifier: () => "room-1",
-    roomGitRoom: () => null,
-    repoRootPath: () => "/repo",
+    roomGitRoom: () => roomSnapshot.value.git,
+    repoRootPath: () => roomSnapshot.value.path,
     selectedProvider,
     selectedPermissionProfile: computed(() => null),
     expectedWorktreeBranch: computed(() => null),
@@ -75,7 +88,7 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
     selectedEffort: ref(""),
-    launchMode: ref("legacy"),
+    launchMode,
     loadOpenModelSettings: async () => undefined,
     loadProviderModels: async () => undefined,
     syncPermissionProfileSelection: () => undefined,
@@ -117,8 +130,14 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   laterPreflight = backgroundResult.promise;
   const stableSnapshot = setup.preflight.value;
   const backgroundCheck = actions.runPreflight();
-  assert.equal(setup.loadingPreflight.value, false, "revalidation must not replace an existing snapshot with loading UI");
+  assert.equal(setup.loadingPreflight.value, true, "revalidation keeps the snapshot but disables duplicate checks");
   assert.equal(setup.preflight.value, stableSnapshot);
+  const pendingCalls = preflightCalls;
+  for (let i = 0; i < 3; i++) {
+    roomSnapshot.value = { ...roomSnapshot.value, git: { ...roomSnapshot.value.git, ref: { ...roomSnapshot.value.git.ref } } };
+    await nextTick();
+  }
+  assert.equal(preflightCalls, pendingCalls, "equivalent snapshots preserve the pending check");
   backgroundResult.resolve({
     providerId: "cursor",
     status: "ready",
@@ -131,9 +150,56 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   });
   await backgroundCheck;
   assert.equal(setup.preflight.value?.message, "Still ready");
+  laterPreflight = null;
+  for (const change of [
+    () => { roomSnapshot.value.path = "/other-repo"; },
+    () => { roomSnapshot.value.git.ref.name = "feature"; },
+    () => { roomSnapshot.value.git.ref.type = "tag"; },
+  ]) {
+    const before = preflightCalls;
+    change();
+    await nextTick();
+    await Promise.resolve();
+    assert.equal(preflightCalls, before + 1, "actual repository/ref changes refresh setup");
+  }
+
   const sameProviderSnapshot = setup.preflight.value;
   actions.selectProvider("cursor");
   assert.equal(setup.preflight.value, sameProviderSnapshot, "clicking the selected provider is a no-op");
+
+  const retryResult = deferred<DesktopAgentProviderPreflight>();
+  laterPreflight = retryResult.promise;
+  const callsBeforeRetry = preflightCalls;
+  const retry = actions.retryProviderSetup();
+  await actions.retryProviderSetup();
+  assert.equal(preflightCalls, callsBeforeRetry + 1, "duplicate Check again clicks share one in-flight preflight");
+  retryResult.resolve({
+    providerId: "cursor",
+    status: "ready",
+    canStart: true,
+    message: "Refreshed",
+    detail: null,
+    nextAction: null,
+    version: "4",
+    mcpStatus: "installed",
+  });
+  await retry;
+  assert.equal(preflightInputs.at(-1)?.refreshEnvironment, true);
+  assert.equal(preflightInputs.at(-1)?.refreshModels, true);
+
+  launchMode.value = "supervised";
+  setup.secureStorageStatus.value = { available: false, detail: "Locked" } as never;
+  actions.armSecureStorageFocusRecheck();
+  const beforeFocus = preflightCalls;
+  assert.ok(focusListener);
+  focusListener();
+  await nextTick();
+  await Promise.resolve();
+  assert.equal(preflightCalls, beforeFocus + 1, "returning from storage unlock rechecks readiness");
+  assert.equal(preflightInputs.at(-1)?.refreshEnvironment, undefined,
+    "focus must not replace the service that owns live approvals");
+  focusListener();
+  assert.equal(preflightCalls, beforeFocus + 1, "the storage focus recheck is one-shot");
 });
 
 test("configuration invalidation rejects a stale model-catalog response", async () => {
@@ -157,6 +223,7 @@ test("configuration invalidation rejects a stale model-catalog response", async 
     repoRootPath: () => "/repo",
     selectedProviderId,
     selectedProvider,
+    selectedPermissionProfiles: computed(() => selectedProvider.value.permissionProfiles),
     selectedPermissionProfile: computed(() => null),
     showOpenModelConfig: computed(() => false),
     showModelSelector: computed(() => true),
@@ -184,9 +251,11 @@ test("configuration invalidation rejects a stale model-catalog response", async 
   assert.equal(configuration.providerModels.value, null);
 });
 
-test("Cursor keeps legacy read-only and supervised repo-write defaults independent", async () => {
+test("Cursor defaults to supervision and retains legacy permission compatibility", async () => {
   const configuration = useAddAgentConfiguration();
   const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("cursor");
+  const roomIdentifier = ref("room-1");
+  const repoRootPath = ref<string | null>("/repo");
   const profiles: DesktopAgentProvider["permissionProfiles"] = [
     {
       id: "read_only", label: "Read-only", description: "Inspect only.",
@@ -208,11 +277,12 @@ test("Cursor keeps legacy read-only and supervised repo-write defaults independe
   }));
   const actions = configuration.bind({
     open: () => true,
-    roomIdentifier: () => "room-1",
+    roomIdentifier: () => roomIdentifier.value,
     roomGitRoom: () => null,
-    repoRootPath: () => "/repo",
+    repoRootPath: () => repoRootPath.value,
     selectedProviderId,
     selectedProvider,
+    selectedPermissionProfiles: computed(() => profiles),
     selectedPermissionProfile: computed(() =>
       profiles.find((profile) => profile.id === configuration.selectedPermissionProfileId.value) ?? null
     ),
@@ -227,8 +297,9 @@ test("Cursor keeps legacy read-only and supervised repo-write defaults independe
     onMessage: () => undefined,
   });
 
+  assert.equal(configuration.launchMode.value, "supervised");
   actions.syncPermissionProfileSelection();
-  assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
+  assert.equal(configuration.selectedPermissionProfileId.value, "sandboxed_write");
 
   configuration.launchMode.value = "supervised";
   assert.equal(configuration.selectedPermissionProfileId.value, "sandboxed_write");
@@ -239,6 +310,113 @@ test("Cursor keeps legacy read-only and supervised repo-write defaults independe
   assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
   configuration.launchMode.value = "supervised";
   assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+
+  repoRootPath.value = null;
+  assert.equal(
+    configuration.selectedPermissionProfileId.value,
+    "read_only",
+    "a repo-backed broad selection never becomes the default authority in a repo-less room",
+  );
+
+  repoRootPath.value = "/repo";
+  assert.equal(
+    configuration.selectedPermissionProfileId.value,
+    "full_access",
+    "returning to the repo restores its independent remembered authority",
+  );
+
+  repoRootPath.value = null;
+  profiles[0]!.status = "gated";
+  actions.syncPermissionProfileSelection();
+  assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
+  assert.equal(
+    profiles.find((profile) => profile.id === configuration.selectedPermissionProfileId.value)?.status,
+    "gated",
+    "the existing start gate remains authoritative until the human chooses an available profile",
+  );
+  actions.selectPermissionProfile(profiles[2]!);
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+  actions.syncPermissionProfileSelection();
+  assert.equal(
+    configuration.selectedPermissionProfileId.value,
+    "full_access",
+    "catalog refresh retains the explicit available repo-less choice",
+  );
+
+  roomIdentifier.value = "room-2";
+  actions.resetTransientState();
+  assert.equal(
+    configuration.selectedPermissionProfileId.value,
+    "read_only",
+    "a new repo-less room is safe before its provider refresh resolves",
+  );
+});
+
+test("Codex keeps legacy and supervised ask-before-write selections independent", () => {
+  const configuration = useAddAgentConfiguration();
+  const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("codex");
+  const legacyProfiles: DesktopAgentProvider["permissionProfiles"] = [
+    {
+      id: "full_access", label: "Full access", description: "Trusted repo access.",
+      status: "available", risk: "high", detail: null, isDefault: true,
+    },
+    {
+      id: "ask_before_write", label: "Ask before writes", description: "Requires approval.",
+      status: "gated", risk: "medium", detail: "Supervised only.", isDefault: false,
+    },
+  ];
+  const selectedPermissionProfiles = computed(() => legacyProfiles.map((profile) =>
+    configuration.launchMode.value === "supervised" && profile.id === "ask_before_write"
+      ? { ...profile, status: "available" as const }
+      : profile
+  ));
+  const selectedProvider = computed<DesktopAgentProvider>(() => ({
+    ...provider("codex"),
+    permissionProfiles: legacyProfiles,
+    defaultPermissionProfileId: "full_access",
+  }));
+  const actions = configuration.bind({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomGitRoom: () => null,
+    repoRootPath: () => "/repo",
+    selectedProviderId,
+    selectedProvider,
+    selectedPermissionProfiles,
+    selectedPermissionProfile: computed(() =>
+      selectedPermissionProfiles.value.find(
+        (profile) => profile.id === configuration.selectedPermissionProfileId.value,
+      ) ?? null
+    ),
+    showOpenModelConfig: computed(() => false),
+    showModelSelector: computed(() => false),
+    showEffortSelector: computed(() => false),
+    providerModelOptions: computed(() => []),
+    selectedModel: computed(() => null),
+    selectedModelSource: computed(() => null),
+    requestPreflight: () => undefined,
+    runPreflight: async () => undefined,
+    onMessage: () => undefined,
+  });
+
+  actions.syncPermissionProfileSelection();
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+
+  configuration.launchMode.value = "supervised";
+  const supervisedAsk = selectedPermissionProfiles.value.find((profile) => profile.id === "ask_before_write");
+  assert.equal(supervisedAsk?.status, "available");
+  actions.selectPermissionProfile(supervisedAsk!);
+  assert.equal(configuration.selectedPermissionProfileId.value, "ask_before_write");
+
+  configuration.launchMode.value = "legacy";
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+  const legacyAsk = selectedPermissionProfiles.value.find((profile) => profile.id === "ask_before_write");
+  assert.equal(legacyAsk?.status, "gated");
+  actions.selectPermissionProfile(legacyAsk!);
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+
+  configuration.launchMode.value = "supervised";
+  assert.equal(configuration.selectedPermissionProfileId.value, "ask_before_write");
 });
 
 test("closing the modal does not unlock a second Open Model write", async () => {
@@ -280,6 +458,7 @@ test("closing the modal does not unlock a second Open Model write", async () => 
     repoRootPath: () => "/repo",
     selectedProviderId,
     selectedProvider,
+    selectedPermissionProfiles: computed(() => selectedProvider.value.permissionProfiles),
     selectedPermissionProfile: computed(() => null),
     showOpenModelConfig: computed(() => true),
     showModelSelector: computed(() => false),
@@ -367,4 +546,86 @@ test("closing the modal does not unlock duplicate provider setup side effects", 
   pendingSetup.resolve({ message: "Installed" });
   await first;
   assert.equal(setup.setupBusy.value, false);
+});
+
+test("successful secure-storage recovery clears only its own stale warning", async () => {
+  let storageAvailable = false;
+  Object.assign(globalThis, {
+    window: {
+      clearTimeout: () => undefined,
+      setTimeout: () => 1,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      letagentsDesktop: {
+        workers: {
+          runAgentProviderPreflight: async () => ({
+            providerId: "codex",
+            status: "ready",
+            canStart: true,
+            message: "Ready",
+            detail: null,
+            nextAction: null,
+            version: "1",
+            mcpStatus: "installed",
+          }),
+        },
+        supervisorGrant: {
+          getStorageStatus: async () => ({
+            available: storageAvailable,
+            detail: storageAvailable ? "Secure storage ready" : "Unlock your login Keychain",
+            canOpenCredentialStorage: !storageAvailable,
+          }),
+        },
+      },
+    },
+  });
+  let open = true;
+  const launchMode = ref<"legacy" | "supervised">("supervised");
+  const setup = useAddAgentSetup();
+  const selectedProvider = computed(() => provider("codex"));
+  const actions = setup.bind({
+    open: () => open,
+    roomIdentifier: () => "room-1",
+    roomGitRoom: () => null,
+    repoRootPath: () => "/repo",
+    selectedProvider,
+    selectedPermissionProfile: computed(() => null),
+    expectedWorktreeBranch: computed(() => null),
+    authCommand: computed(() => null),
+    externalJoinPrompt: computed(() => null),
+    selectedCursorMcpPolicy: ref("filter_letagents"),
+    selectedModel: computed(() => null),
+    selectedModelSource: computed(() => null),
+    selectedEffort: ref(""),
+    launchMode,
+    loadOpenModelSettings: async () => undefined,
+    loadProviderModels: async () => undefined,
+    syncPermissionProfileSelection: () => undefined,
+    syncDeliveryModeSelection: () => undefined,
+    invalidateConfigurationRequests: () => undefined,
+    resetConfigurationModelSelection: () => undefined,
+    resetConfigurationTransientState: () => undefined,
+    onDetectRecoverableLaunch: () => undefined,
+    onResetSupervisedLaunch: () => undefined,
+    onCleanupSupervisedLaunch: () => undefined,
+    onResetStartingAgent: () => undefined,
+    onChooseWorktree: () => undefined,
+  });
+  setup.providers.value = [provider("codex")];
+  setup.selectedProviderId.value = "codex";
+
+  await actions.runPreflight();
+  assert.equal(setup.secureStorageStatus.value?.available, false);
+  setup.setSecureStorageRecoveryMessage("Unlock, then return");
+  storageAvailable = true;
+  await actions.runPreflight();
+  assert.equal(setup.secureStorageStatus.value?.available, true);
+  assert.equal(setup.setupMessage.value, null);
+
+  setup.setSecureStorageRecoveryMessage("Unlock, then return");
+  setup.setSetupMessage("An unrelated provider warning", "error");
+  await actions.runPreflight();
+  assert.equal(setup.setupMessage.value, "An unrelated provider warning");
+  open = false;
+  actions.resetTransientState();
 });

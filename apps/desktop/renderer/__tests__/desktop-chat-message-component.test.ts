@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, h } from "vue";
+import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 import {
@@ -107,6 +107,76 @@ test("context-menu dismissal restores focus only for keyboard and copy actions",
   assert.deepEqual(calls, [{ preventScroll: true }]);
 });
 
+test("a mounted message reuses escaped Markdown while references and search remain reactive", async (t) => {
+  const originalWindow = globalThis.window;
+  Object.assign(globalThis, { window: { removeEventListener() {} } });
+  const text = "## **Original**\nSee msg_42, task_7, `msg_42` and <script>.";
+  const replacement = "## **Changed**\nSee msg_42 and <img>.";
+  let parses = 0;
+  const originalReplace = String.prototype.replace;
+  t.mock.method(String.prototype, "replace", function (this: string, pattern: RegExp, value: string) {
+    // The block parser starts by normalizing source newlines. Count the real
+    // parser entry without changing the production formatter or Vue cache.
+    if ((String(this) === text || String(this) === replacement) && pattern instanceof RegExp && pattern.source === "\\r\\n") parses++;
+    return originalReplace.call(this, pattern, value);
+  });
+  const props = reactive({
+    message: {
+      id: "msg_1", sender: "Oak", text, displayText: null, source: "agent",
+      timestamp: "2026-09-27T00:00:00Z", attachments: [], agentIdentity: null,
+    },
+    messageReferenceIds: new Set<string>(), taskReferenceIds: new Set<string>(),
+    highlightQuery: "", context: "timeline", deliveryReceipts: [],
+    threadSummary: { count: 0, unreadCount: 0, participants: [] },
+  });
+  let html = "";
+  const renderer = createRenderer<any, any>({
+    patchProp(_node, key, _previous, value) { if (key === "innerHTML") html = value; },
+    insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}),
+    setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null,
+  });
+  const app = renderer.createApp({
+    setup() {
+      const vm = (DesktopChatMessage as any).setup(props, { expose() {}, emit() {} });
+      return () => h("div", { innerHTML: vm.renderedText.value });
+    },
+  });
+  app.provide(ssrContextKey, { modules: new Set() });
+  try {
+    app.mount({});
+    assert.equal(parses, 1);
+    assert.match(html, /<h2><strong>Original<\/strong><\/h2>/);
+    assert.match(html, /&lt;script&gt;/);
+    assert.doesNotMatch(html, /data-message-reference-id|data-task-reference-id/);
+    props.messageReferenceIds = new Set(["msg_42"]);
+    props.taskReferenceIds.add("task_7");
+    await nextTick();
+    assert.equal(parses, 1, "history and task updates must not reparse existing message Markdown");
+    assert.match(html, /data-message-reference-id="msg_42"/);
+    assert.match(html, /data-task-reference-id="task_7"/);
+    assert.match(html, /<code>msg_42<\/code>/);
+    props.highlightQuery = "42";
+    await nextTick();
+    assert.equal(parses, 1, "search must only decorate the already escaped message");
+    assert.match(html, /msg_<mark class="message-search-hit">42<\/mark><\/button>/);
+    assert.match(html, /<code>msg_42<\/code>/);
+    props.messageReferenceIds.clear();
+    props.taskReferenceIds = new Set();
+    await nextTick();
+    assert.equal(parses, 1);
+    assert.doesNotMatch(html, /data-message-reference-id|data-task-reference-id/);
+    props.message.text = replacement;
+    await nextTick();
+    assert.equal(parses, 2, "edited message content must be reparsed");
+    assert.match(html, /<strong>Changed<\/strong>/);
+    assert.match(html, /&lt;img&gt;/);
+    assert.doesNotMatch(html, /<img|Original/);
+  } finally {
+    app.unmount();
+    Object.assign(globalThis, { window: originalWindow });
+  }
+});
+
 test("one room message groups delivery receipts for every activated agent", async () => {
   const app = createSSRApp({
     render: () => h(DesktopChatMessage as object, {
@@ -133,9 +203,12 @@ test("one room message groups delivery receipts for every activated agent", asyn
       highlightQuery: "",
       searchActive: false,
       deliveryReceipts: [
-        { agentId: "stone", agentName: "StoneRidge", state: "dispatching", blockedByMessageId: null },
-        { agentId: "dawn", agentName: "DawnPeak", state: "queued_behind_blocked", blockedByMessageId: "msg_blocked" },
-        { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null },
+        { agentId: "stone", agentName: "StoneRidge", state: "dispatching", blockedByMessageId: null, error: null },
+        { agentId: "dawn", agentName: "DawnPeak", state: "queued_behind_blocked", blockedByMessageId: "msg_blocked", error: null },
+        { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null,
+          error: "The provider rejected Authori\u200bzation: Be\u202earer super\u2060-secret\u00ad-token-123456789, so delivery stopped." },
+        { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", blockedByMessageId: null,
+          error: "Open Model request failed (HTTP 404): configured model is no longer available." },
       ],
     }),
   });
@@ -147,9 +220,19 @@ test("one room message groups delivery receipts for every activated agent", asyn
   assert.match(html, /aria-label="Waiting — DawnPeak needs attention on msg_blocked"/);
   assert.match(html, /Queued behind an issue/);
   assert.match(html, /View earlier message/);
+  const blockedReceipt = html.match(/<li[^>]*data-state="blocked"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(blockedReceipt);
+  assert.match(blockedReceipt, /aria-label="Oak: The provider rejected Authorization:\[redacted\], so delivery stopped\."/);
+  assert.match(blockedReceipt, /The provider rejected Authorization:\[redacted\], so delivery stopped\.<\/small>/);
+  assert.doesNotMatch(blockedReceipt, /super-secret-token|\u200b|\u2060|\u00ad|\u202e/);
   assert.match(html, /disabled aria-label="Retry delivery for Oak is unavailable"/);
   assert.match(html, />Retry unavailable<\/button>/);
   assert.match(html, /Retry will be available when delivery recovery is connected/);
+  const failedReceipt = html.match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(failedReceipt);
+  assert.match(failedReceipt, /aria-label="Ash: Open Model request failed \(HTTP 404\): configured model is no longer available\."/);
+  assert.match(failedReceipt, /Open Model request failed \(HTTP 404\): configured model is no longer available\.<\/small>/);
+  assert.doesNotMatch(failedReceipt, /<button|delivery-dots|Needs attention|replied|lucide-check/);
 });
 
 test("GitHub event task chips expose the shared Board navigation contract", async () => {
@@ -190,4 +273,28 @@ test("GitHub event task chips expose the shared Board navigation contract", asyn
   const html = await renderToString(app);
   assert.match(html, /<button[^>]*data-task-reference-id="task_42"/);
   assert.match(html, /title="Open task_42 on the Board"/);
+});
+
+
+test("board notification renders readable copy while keeping its canonical body intact", async () => {
+  const message = {
+    id: "msg_approval", sender: "letagents", source: "system",
+    text: "@agent:owner/lumen Board intent bi_123 was approved. Continue with board_intent_id.",
+    displayText: "@LumenRiver — Your request to claim task_19: “Tests and CI” was approved. You can continue.",
+    attachments: [], agentPromptKind: null, timestamp: "2026-09-07T00:00:00Z",
+    actorLabel: null, agentIdentity: null, threadRootId: "msg_approval", threadReplyToId: null,
+    thread: null, replyTo: null,
+  };
+  const html = await renderToString(createSSRApp({
+    render: () => h(DesktopChatMessage as object, {
+      message, threadSummary: { count: 0, unreadCount: 0, latest: null, latestPreview: null,
+        latestTimestamp: null, participants: [], hasPartialHistory: false, loadingEarlier: false },
+      activeThreadRoot: false, highlightQuery: "", searchActive: false, taskReferenceIds: new Set(["task_19"]),
+    }),
+  }));
+  assert.match(html, /mention-token[^>]*>@LumenRiver/);
+  assert.match(html, /data-task-reference-id="task_19"/);
+  assert.match(html, /Tests and CI/);
+  assert.doesNotMatch(html, /owner\/lumen|bi_123|board_intent_id/);
+  assert.match(message.text, /board_intent_id/);
 });

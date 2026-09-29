@@ -1,11 +1,18 @@
+import { waitForMessageRouting } from "./wait-for-routing.js";
 import type { Express } from "express";
+import {
+  ROOM_RESOURCE_AGENT_APPROVAL,
+  ROOM_RESOURCE_AGENT_WORK,
+  ROOM_RESOURCE_EXECUTION_DELEGATION,
+  ROOM_RESOURCE_INVALIDATION_CAPABILITY,
+} from "../../../../../shared/room-resource-invalidation.mjs";
 import {
   openSseConnection,
   type SseConnection,
 } from "../../../http/sse.js";
 import { getMessageStreamCheckpoint } from "../../../db.js";
 import { InvalidRoomAgentDeliverySessionError } from "../../../rooms/agent-delivery.js";
-import { isDesktopHumanClient } from "./request-identity.js";
+import { isAppSession } from "../../../request/app-session.js";
 import { toPublicGitHubRoomEvent } from "../events.js";
 import {
   rentalActivityPayload,
@@ -37,6 +44,28 @@ const runStreamCheckpoint = createBoundedExecutor({
   timeoutMs: 8_000,
 });
 
+const MAX_STREAM_CAPABILITY_VALUES = 16;
+const MAX_STREAM_CAPABILITY_BYTES = 512;
+
+function streamSupportsResourceInvalidation(req: AuthenticatedRequest): boolean {
+  const raw = req.query?.stream_capability;
+  const values = typeof raw === "string"
+    ? [raw]
+    : Array.isArray(raw) && raw.every((value) => typeof value === "string")
+      ? raw
+      : [];
+  if (values.length === 0 || values.length > MAX_STREAM_CAPABILITY_VALUES) return false;
+  let bytes = 0;
+  for (const value of values) {
+    bytes += Buffer.byteLength(value);
+    if (
+      bytes > MAX_STREAM_CAPABILITY_BYTES
+      || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)
+    ) return false;
+  }
+  return values.includes(ROOM_RESOURCE_INVALIDATION_CAPABILITY);
+}
+
 export function registerMessageStreamRoute(
   app: Express,
   deps: RoomMessageRouteDeps
@@ -46,6 +75,7 @@ export function registerMessageStreamRoute(
     if (!project) return;
 
     const projectId = project.id;
+    const supportsResourceInvalidation = streamSupportsResourceInvalidation(req);
     const accessRoomName = await (
       deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
     )(req, project);
@@ -58,7 +88,7 @@ export function registerMessageStreamRoute(
         project,
         accessRoomName,
         transport: "sse",
-        trackDelivery: !isDesktopHumanClient(req),
+        trackDelivery: !isAppSession(req),
         onSessionDisconnected: () => {
           streamClosed = true;
           void connection?.write(`event: session_disconnect\ndata: ${JSON.stringify({ room_id: projectId })}\n\n`)
@@ -124,6 +154,7 @@ export function registerMessageStreamRoute(
         () => (deps.getMessageStreamCheckpoint ?? getMessageStreamCheckpoint)(projectId, {
           requestedCursor,
           includePromptOnly,
+          waitForRouting: liveController.activationIdentity?.session_kind === "worker",
         }),
       );
       await writeEvent(roomSyncSseFrame({
@@ -179,8 +210,16 @@ export function registerMessageStreamRoute(
       const eventId = `id: ${envelope.cursor}\n`;
       const event = envelope.event;
       switch (event.kind) {
-        case "message_created": {
+        case "message_created":
+        case "message_routed": {
           try {
+            // Hold the frame (and its event cursor) until all preceding routing
+            // decisions commit. This also preserves later queued frames and
+            // reconnect replay without a second delivery acknowledgment.
+            if (liveController.activationIdentity?.session_kind === "worker" && !await waitForMessageRouting({
+              roomId: projectId, messageId: event.message.id, includePromptOnly,
+              closed: () => streamClosed, load: deps.getMessageStreamCheckpoint,
+            })) return;
             // Let every listener enter the shared per-event overlay batch.
             // A per-connection executor here would reject listeners before
             // their work can coalesce into the one bounded database plan.
@@ -200,6 +239,9 @@ export function registerMessageStreamRoute(
             await writeEvent(`${eventId}data: ${JSON.stringify({
               ...deliveryMessage,
               room_id: projectId,
+              // Marks a re-published message whose routing changed after commit
+              // so clients can pass their by-id replay dedupe for it.
+              ...(event.kind === "message_routed" ? { routing_pass: 2 } : {}),
             })}\n\n`);
           } catch (error) {
             console.error(`[room messages stream] failed to hydrate message for ${projectId}`, error);
@@ -253,6 +295,32 @@ export function registerMessageStreamRoute(
             message_ids: event.messageIds,
           })}\n\n`);
           return;
+        case "agent_work_invalidated":
+        case "agent_approval_invalidated":
+        case "execution_delegation_invalidated": {
+          const resource = event.kind === "agent_work_invalidated"
+            ? ROOM_RESOURCE_AGENT_WORK
+            : event.kind === "agent_approval_invalidated"
+              ? ROOM_RESOURCE_AGENT_APPROVAL
+              : ROOM_RESOURCE_EXECUTION_DELEGATION;
+          if (supportsResourceInvalidation) {
+            await writeEvent(`${eventId}event: ${ROOM_RESOURCE_INVALIDATION_CAPABILITY}\ndata: ${JSON.stringify({
+              room_id: projectId,
+              resource,
+            })}\n\n`);
+          } else {
+            // Preserve the broker cursor for older clients without exposing an
+            // event name they do not understand. A gap:false room_sync is an
+            // existing cursor-only no-op for both web and Desktop clients.
+            await writeEvent(`${eventId}${roomSyncSseFrame({
+              room_id: projectId,
+              checkpoint: null,
+              event_cursor: envelope.cursor,
+              gap: false,
+            })}`);
+          }
+          return;
+        }
         case "rental_activity_created": {
           if (event.activity.visibility !== "rental_visible") return;
           const payload = rentalActivityPayload(projectId, event.activity);

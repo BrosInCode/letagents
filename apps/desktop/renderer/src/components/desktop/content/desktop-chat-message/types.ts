@@ -5,6 +5,10 @@ export interface SenderIdentity {
 }
 
 export interface AgentModalTarget {
+  /** Exact activating message to select in the Work trajectory. */
+  workSourceMessageId?: string;
+  /** Optional exact room contribution to open in Workspace. */
+  workspaceSourceMessageId?: string;
   /** Exact room message whose participant affordance opened the Inspector. */
   messageId: string | null;
   /** Exact publisher idempotency identity for the selected room message. */
@@ -63,7 +67,6 @@ export type AgentInspectorSelection =
       kind: "unavailable";
       supervisorEntryId?: never;
       unavailableReason: "missing" | "ambiguous" | "load_error";
-      unavailableDetail?: string;
     });
 
 export interface GitHubEventPresentation {

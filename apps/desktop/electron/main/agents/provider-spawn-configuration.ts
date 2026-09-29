@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import { assertManagedAgentPermissionProfileAvailable } from "./managed-agent-permission-profiles.js";
+import { supervisedOpenCodePermissionPolicy, supervisedOpenCodePermissionProfileId } from "./opencode-launch-contract.js";
 
 /**
  * Shared final attestation used by every native adapter. The daemon has
@@ -13,21 +14,63 @@ export function attestProviderSpawnPolicy(
   request: ProviderSpawnRequest,
 ): Record<string, unknown> {
   if (!request.permissionProfileId) return plainPolicy(request.launchPolicy, provider);
-  const profile = assertManagedAgentPermissionProfileAvailable(provider, request.permissionProfileId as never).id;
+  const profile = assertManagedAgentPermissionProfileAvailable(
+    provider,
+    request.permissionProfileId as never,
+    "supervised",
+  ).id;
   const policy = plainPolicy(request.launchPolicy, provider);
   if (provider === "codex") {
-    requireMatch(policy, "approvalPolicy", "never", provider);
-    requireMatch(policy, "sandboxPolicy", { type: "dangerFullAccess" }, provider);
+    const authority = profile === "auto_review"
+      ? {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "workspaceWrite", networkAccess: false },
+        approvalsReviewer: "auto_review",
+      }
+      : profile === "ask_before_write"
+      ? {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
+      : {
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      };
+    // Only the Auto profile may hand approvals to a reviewer other than the host.
+    if (profile !== "auto_review" && Object.hasOwn(policy, "approvalsReviewer") && policy.approvalsReviewer !== "user") {
+      throw new Error(`${provider} launch does not attest permission-profile authority at 'approvalsReviewer'.`);
+    }
+    for (const [key, value] of Object.entries(authority)) {
+      requireMatch(policy, key, value, provider);
+    }
   } else if (provider === "open-model") {
-    requireMatch(policy, "permission", { "*": "allow" }, provider);
+    requireMatch(policy, "permission", supervisedOpenCodePermissionPolicy(supervisedOpenCodePermissionProfileId(profile)), provider);
   } else if (provider === "claude-code") {
     const authority = profile === "read_only"
-      ? { permissionMode: "plan", dangerouslySkipPermissions: false }
+      ? {
+        permissionMode: "dontAsk",
+        dangerouslySkipPermissions: false,
+        tools: ["Read", "Glob", "Grep"],
+        allowedTools: ["mcp__letagents__*"],
+        settingSources: "",
+      }
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
-        : { permissionMode: "acceptEdits", dangerouslySkipPermissions: false };
-    requireMatch(policy, "permissionMode", authority.permissionMode, provider);
-    requireMatch(policy, "dangerouslySkipPermissions", authority.dangerouslySkipPermissions, provider);
+        : {
+          permissionMode: profile === "auto_review" ? "auto" : "default", dangerouslySkipPermissions: false,
+          allowDangerouslySkipPermissions: false,
+          tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
+          allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+        };
+    if (profile === "ask_before_write" || profile === "auto_review") {
+      const authorityFlags = new Set(Object.keys(authority).map(key => key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)));
+      for (const key of Object.keys(policy)) {
+        if (key.includes("-") && authorityFlags.has(key)) throw new Error(`Claude approval profile cannot override '${key}'.`);
+      }
+    }
+    for (const [key, value] of Object.entries(authority)) {
+      requireMatch(policy, key, value, provider);
+    }
   } else if (profile === "read_only") {
     requireMatch(policy, "mode", "ask", provider);
     requireMatch(policy, "force", false, provider);

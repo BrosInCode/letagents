@@ -84,7 +84,7 @@ test("selectIntentEscalationAction gates auto-approval strictly", () => {
       auto_approvals_in_window: INTENT_AUTO_APPROVE_MAX_PER_WINDOW,
     }),
     "notify_humans",
-    "the rate cap blocks the next auto-approval"
+    "the automatic approval limit blocks the next auto-approval"
   );
 });
 
@@ -103,7 +103,7 @@ test("escalation texts name the proposer, title, wait, and cap", () => {
     waited_for_ms: 30 * 60_000,
     rate_capped: false,
   });
-  assert.ok(humanText.includes("task_close board intent"));
+  assert.ok(humanText.includes("request to close a task from"));
   assert.ok(humanText.includes("waited 30m"));
   assert.ok(humanText.includes("room admin"));
 
@@ -113,7 +113,7 @@ test("escalation texts name the proposer, title, wait, and cap", () => {
     waited_for_ms: 11 * 60_000,
     rate_capped: true,
   });
-  assert.ok(cappedText.includes("rate cap"));
+  assert.ok(cappedText.includes("automatic approval limit"));
 
   const requiredText = buildHumanEscalationText({
     intent: buildIntent(),
@@ -121,7 +121,7 @@ test("escalation texts name the proposer, title, wait, and cap", () => {
     waited_for_ms: 11 * 60_000,
     rate_capped: false,
   });
-  assert.ok(requiredText.includes("requires intent approval"));
+  assert.ok(requiredText.includes("requires a person to approve requests"));
 });
 
 interface FakeDepsOptions {
@@ -190,7 +190,7 @@ test("sweepOnce auto-approves a stuck task_create intent with the fence key", as
   assert.equal(summary.notified, 0);
   assert.equal(fake.autoApproveCalls.length, 1);
   assert.equal(fake.autoApproveCalls[0]?.clientMessageId, "board_intent_escalation:bi_stuck");
-  assert.ok(fake.autoApproveCalls[0]!.text.includes("auto-approving"));
+  assert.ok(fake.autoApproveCalls[0]!.text.includes("approved automatically"));
 });
 
 test("sweepOnce leaves intents alone while a reachable manager exists", async () => {
@@ -226,7 +226,7 @@ test("sweepOnce notifies humans for capped, non-create, and intent_required case
   const cappedSummary = await createIntentEscalationSweeper(capped.deps).sweepOnce();
   assert.equal(cappedSummary.auto_approved, 0);
   assert.equal(cappedSummary.notified, 1);
-  assert.ok(capped.notifyCalls[0]!.text.includes("rate cap"));
+  assert.ok(capped.notifyCalls[0]!.text.includes("automatic approval limit"));
 
   const close = buildFakeDeps({
     candidates: [candidate(buildIntent({ action_type: "task_close", payload: { kind: "task_close" } }))],

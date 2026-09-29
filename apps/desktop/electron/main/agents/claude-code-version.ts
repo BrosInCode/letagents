@@ -1,4 +1,15 @@
 export const MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION = "2.1.70";
+export const MINIMUM_CLAUDE_TOOL_APPROVAL_VERSION = "2.1.272";
+
+/** One executable authority shared by desktop setup checks and daemon launch. */
+export function resolveClaudeCodeExecutable(
+  env: Readonly<NodeJS.ProcessEnv>,
+  fallback = "claude",
+): string {
+  return env.LETAGENTS_CLAUDE_CODE_BIN?.trim()
+    || env.LETAGENTS_CLAUDE_BIN?.trim()
+    || fallback;
+}
 
 export type ClaudeCodeVersionReadiness = {
   version: string | null;
@@ -27,9 +38,17 @@ function compareVersions(left: ParsedVersion, right: ParsedVersion): number {
   return left.major - right.major || left.minor - right.minor || left.patch - right.patch;
 }
 
-export function inspectClaudeCodeVersion(output: string): ClaudeCodeVersionReadiness {
+/** Profiles whose approvals travel over the stdio prompt bridge. */
+export function claudeApprovalProfileLabel(permissionProfileId: string | null | undefined): string | null {
+  return permissionProfileId === "ask_before_write" ? "Ask before writes"
+    : permissionProfileId === "auto_review" ? "Auto"
+      : null;
+}
+
+export function inspectClaudeCodeVersion(output: string, approvalProfileLabel: string | null = null): ClaudeCodeVersionReadiness {
   const parsed = parseVersion(output.trim());
-  const minimum = parseVersion(MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION)!;
+  const requiredVersion = approvalProfileLabel ? MINIMUM_CLAUDE_TOOL_APPROVAL_VERSION : MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION;
+  const minimum = parseVersion(requiredVersion)!;
   if (!parsed) {
     return {
       version: null,
@@ -41,14 +60,14 @@ export function inspectClaudeCodeVersion(output: string): ClaudeCodeVersionReadi
     return {
       version: parsed.version,
       supported: false,
-      error: `Claude Code ${parsed.version} is too old for supervised room agents. Update to ${MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION} or newer with 'claude update', then try again.`,
+      error: `Claude Code ${parsed.version} is too old for ${approvalProfileLabel ?? "supervised room agents"}. Update to ${requiredVersion} or newer with 'claude update', then try again.`,
     };
   }
   return { version: parsed.version, supported: true, error: null };
 }
 
-export function requireSupportedClaudeCodeVersion(output: string): string {
-  const readiness = inspectClaudeCodeVersion(output);
+export function requireSupportedClaudeCodeVersion(output: string, approvalProfileLabel: string | null = null): string {
+  const readiness = inspectClaudeCodeVersion(output, approvalProfileLabel);
   if (!readiness.supported || !readiness.version) {
     throw new Error(readiness.error ?? "Claude Code is not supported.");
   }

@@ -1,6 +1,261 @@
-@import './styles/base.css';
-@import './styles/current-room.css';
-@import './styles/forms.css';
-@import './styles/lists.css';
-@import './styles/detail.css';
-@import './styles/responsive.css';
+.focus-rooms-panel {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 30px 32px 36px;
+  background: var(--bg, #0a0a0a);
+  color: var(--text, #fafafa);
+  overscroll-behavior: contain;
+}
+
+.focus-rooms-panel > .rooms-directory {
+  max-width: 1120px;
+  margin-inline: auto;
+}
+
+.focus-context-container {
+  max-width: 1000px;
+  margin-inline: auto;
+}
+
+.focus-context-header {
+  margin-bottom: 28px;
+}
+
+.focus-context-header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.focus-eyebrow {
+  margin: 0 0 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.focus-context-title h4 {
+  font-size: 25px;
+  font-weight: 650;
+  letter-spacing: -0.7px;
+  margin: 0;
+}
+
+.focus-context-title > p:last-child {
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.focus-metadata-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin-top: 18px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.focus-context-panels {
+  display: grid;
+  gap: 24px;
+}
+
+.focus-settings-form,
+.focus-share-form {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.focus-share-form {
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card, #141414);
+}
+
+.focus-panel-header,
+.focus-settings-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.focus-panel-header h4,
+.focus-settings-heading h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 550;
+}
+
+.focus-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.focus-settings-grid label,
+.focus-closeout-grid label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.focus-settings-grid small {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+}
+
+.focus-closeout-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.focus-result-textarea,
+.focus-closeout-grid input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg, #0a0a0a);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.focus-result-textarea {
+  min-height: 110px;
+  resize: vertical;
+}
+
+.focus-result-textarea:focus-visible,
+.focus-closeout-grid input:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 2px;
+}
+
+.focus-share-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.focus-share-footer p {
+  margin: 0;
+  max-width: 540px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.focus-primary,
+.focus-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 9px 13px;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    background 150ms ease-out,
+    transform 150ms ease-out;
+}
+
+.focus-primary {
+  background: var(--text);
+  color: var(--bg, #0a0a0a);
+  border-color: transparent;
+}
+
+.focus-rooms-panel button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.focus-rooms-panel button:focus-visible,
+.focus-rooms-panel summary:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 3px;
+}
+
+.focus-primary:not(:disabled):active,
+.focus-secondary:not(:disabled):active {
+  transform: scale(0.98);
+}
+
+.web-room-settings {
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.rooms-entry-details .web-room-settings {
+  margin-top: 20px;
+}
+
+.web-room-settings summary {
+  cursor: pointer;
+  font-weight: 550;
+}
+
+.web-room-settings form {
+  padding-top: 20px;
+}
+
+@media (max-width: 760px) {
+  .focus-rooms-panel {
+    padding: 22px 18px;
+  }
+  .focus-settings-grid {
+    grid-template-columns: 1fr;
+  }
+  .focus-context-header-top {
+    flex-wrap: wrap;
+  }
+  .focus-share-footer {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .focus-share-form {
+    padding: 18px;
+  }
+  .focus-closeout-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focus-rooms-panel *,
+  .focus-rooms-panel *::before,
+  .focus-rooms-panel *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+  .focus-rooms-panel button:active {
+    transform: none !important;
+  }
+}

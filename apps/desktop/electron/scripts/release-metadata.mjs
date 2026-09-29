@@ -48,6 +48,15 @@ export function desktopMetadataNames({ arch }) {
   };
 }
 
+export function createDesktopUpdaterConfig({ arch }) {
+  assertDesktopArchitecture(arch);
+  return {
+    provider: "generic",
+    url: `https://downloads.letagents.chat/desktop/feeds/${arch}/`,
+    updaterCacheDirName: "letagents-desktop-updater",
+  };
+}
+
 export function createElectronUpdaterMacManifest({
   version,
   arch,

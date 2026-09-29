@@ -1,9 +1,8 @@
 <template>
   <section class="desktop-add-agent-delivery desktop-add-agent-model" aria-label="Agent model">
     <div class="desktop-add-agent-section-heading">
-      <span>Model &amp; reasoning</span>
-      <button type="button" :disabled="loading" data-testid="desktop-add-agent-model-refresh" @click="emit('refresh')">
-        {{ loading ? "Loading..." : "Refresh models" }}
+      <button type="button" :disabled="loading" :aria-label="loading ? 'Refreshing models' : 'Refresh models'" title="Refresh models" data-testid="desktop-add-agent-model-refresh" @click="emit('refresh')">
+        <RefreshCw :size="14" aria-hidden="true" />
       </button>
     </div>
     <div class="desktop-add-agent-model-grid" :data-single="!showEffort">
@@ -33,7 +32,7 @@
         <DesktopSelectField
           :model-value="effort"
           :options="effortOptions"
-          label="Effort"
+          label="Reasoning effort"
           id="desktop-add-agent-effort-select"
           described-by="desktop-add-agent-effort-description"
           test-id="desktop-add-agent-effort-select"
@@ -43,6 +42,7 @@
       </div>
     </div>
     <p
+      v-if="catalogError"
       class="desktop-add-agent-model-catalog"
       :data-tone="catalogError ? 'error' : 'status'"
       :role="catalogError ? 'alert' : 'status'"
@@ -53,6 +53,7 @@
 </template>
 
 <script setup lang="ts">
+import { RefreshCw } from "@lucide/vue";
 import type { DesktopSelectOption } from "../../controls/DesktopSelectField.vue";
 import DesktopSelectField from "../../controls/DesktopSelectField.vue";
 import DesktopModelPicker from "../../controls/DesktopModelPicker.vue";

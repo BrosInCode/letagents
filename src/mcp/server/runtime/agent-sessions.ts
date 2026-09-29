@@ -20,8 +20,9 @@ import {
   detectAgentRuntimeLabel,
   ensureAgentIdentity,
 } from "./identity.js";
-import { isSupervisedBoundedTurn, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { hasSupervisedWorkerAuthority, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import { resolveCurrentSupervisedWorkerSession } from "./supervisor-bridge.js";
+import { getDaemonToolExecutionContext, getRuntimeWorkingDirectory } from "./daemon-tool-context.js";
 
 // A worker bearer already represents a server-side worker session. This local
 // marker lets the MCP tool contract stay session-shaped without persisting or
@@ -161,7 +162,12 @@ export async function resolveWorkerToolIdentity(input: {
 }): Promise<{ identity: StoredAgentIdentityState; agentSession: StoredAgentSessionState }> {
   const runtimeMode = requireValidWorkerBearerRuntime().mode;
   if (runtimeMode === "supervised") {
-    const agentSession = await resolveCurrentSupervisedWorkerSession(input.roomId);
+    const daemonContext = getDaemonToolExecutionContext();
+    const agentSession = daemonContext?.agentSession
+      ?? await resolveCurrentSupervisedWorkerSession(input.roomId);
+    if (input.roomId && input.roomId !== agentSession.room_id) {
+      throw new Error(`Daemon-supervised worker session is registered for ${agentSession.room_id}, not ${input.roomId}.`);
+    }
     if (
       input.agentSessionId
       && input.agentSessionId !== WORKER_BEARER_AGENT_SESSION_ID
@@ -206,7 +212,7 @@ export async function resolveWorkerToolIdentity(input: {
   }
   const agentSession = input.agentSessionId
     ? requireWorkerAgentSession(input.roomId, input.agentSessionId)
-    : input.roomId && !isSupervisedBoundedTurn() && await isLocalRoomStorageEnabled(input.roomId)
+    : input.roomId && !hasSupervisedWorkerAuthority() && await isLocalRoomStorageEnabled(input.roomId)
       ? await ensureLocalWorkerAgentSession(input.roomId)
       : requireWorkerAgentSession(input.roomId, input.agentSessionId);
   return {
@@ -257,7 +263,7 @@ export async function ensureLocalWorkerAgentSession(
 }
 
 export function getAgentSessionRepoBranch(cwd?: string | null): string | null {
-  const workingDir = cwd?.trim() || process.cwd();
+  const workingDir = cwd?.trim() || getRuntimeWorkingDirectory();
   return getGitCurrentBranch(workingDir);
 }
 

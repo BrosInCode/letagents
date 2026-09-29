@@ -202,3 +202,16 @@ test("listDesktopAccountRooms({includeArchived:false}) issues exactly one HTTP f
     recorder.restore();
   }
 });
+
+test("a cloud outage retains unpublished local rooms without treating cloud mirrors as authoritative", async () => {
+  const local = await createLocalRoom({ displayName: "Offline local QA" });
+  const mirrored = await createLocalRoom({ displayName: "Offline cloud mirror" });
+  await linkLocalRoomToCloud({ roomIdentifier: mirrored.roomIdentifier, cloudRoomIdentifier: "room_offline_mirror" });
+  const previous = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError("fetch failed"); };
+  try {
+    const rooms = await listDesktopAccountRooms({ includeArchived: false });
+    assert.ok(rooms.some(room => room.roomIdentifier === local.roomIdentifier));
+    assert.ok(!rooms.some(room => [mirrored.roomIdentifier, "room_offline_mirror"].includes(room.roomIdentifier)));
+  } finally { globalThis.fetch = previous; }
+});

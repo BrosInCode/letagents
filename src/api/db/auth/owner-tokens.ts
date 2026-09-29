@@ -56,3 +56,7 @@ export async function getOwnerTokenAccountByToken(token: string): Promise<OwnerT
 
   return ownerToken ?? null;
 }
+
+export async function deleteOwnerTokenById(tokenId: string): Promise<void> {
+  await db.delete(owner_tokens).where(eq(owner_tokens.token_id, tokenId));
+}

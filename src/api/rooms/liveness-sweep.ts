@@ -206,21 +206,21 @@ export function buildOfflineAnnouncementText(input: {
   // not a reflex.
   const staleNote =
     input.runtime_evidence === "stale"
-      ? ` The native execution-activity axis has also been quiet for ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)}, so the agent is suspect while the reconnect/probe grace runs; this is not terminal evidence.`
+      ? ` No activity has been reported by its agent app for ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)} either. This does not confirm that it has stopped.`
       : "";
-  const base = `[status] ${label}'s workplace-reachability axis has been stale for ${offlineFor}; it may still be working outside the room.${staleNote} This notice does not authorize taking over its work. Reassign only after a terminal payload or fenced supervisor verdict and lease handoff, or when a human explicitly directs the handoff.`;
+  const base = `[status] ${label} has not connected to the room for ${offlineFor} and may still be working.${staleNote} Do not take over its work based on this notice. Reassign only after the agent or its current supervisor confirms it has stopped and the task assignment has been transferred, or when a human explicitly directs the transfer.`;
   if (!input.is_board_manager) {
     return base;
   }
 
-  return `${base} ${label} holds the Board Manager role, so intent approvals and task creation are stalled until it returns or the role is reassigned.`;
+  return `${base} ${label} holds the Board Manager role, so approval requests and task creation are waiting until it returns or the role is reassigned.`;
 }
 
 export function buildRecoveryAnnouncementText(input: {
   session: Pick<RoomAgentDeliverySession, "actor_label" | "display_name">;
 }): string {
   const label = getAgentPrimaryLabel(input.session.actor_label) || input.session.display_name;
-  return `[status] ${label}'s workplace-reachability axis is fresh again.`;
+  return `[status] ${label} is connected to the room again.`;
 }
 
 export interface LivenessAnnouncementInput {

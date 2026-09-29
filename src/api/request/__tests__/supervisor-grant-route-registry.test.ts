@@ -6,6 +6,17 @@ import { isSupervisorGrantRouteAllowed } from "../supervisor-grant-route-registr
 test("supervisor grant registry is exact and default-deny", () => {
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/renew"), true);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/worker-sessions/session_1/end"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/worker-sessions/session_1/execution-approval-publications"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/worker-sessions/session_1/execution-approval-publications/publication_1/close"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/worker-sessions/session_1/execution-approval-publications/extra"), false);
+  assert.equal(isSupervisorGrantRouteAllowed("GET", "/supervisor-host-grants/grant_1/worker-sessions/session_1/execution-approval-publications/publication_1/close"), false);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/worker-sessions/session_1/execution-approval-publications/publication_1/close/extra"), false);
+  assert.equal(isSupervisorGrantRouteAllowed("GET", "/supervisor-host-grants/grant_1/execution-delegations"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("GET", "/supervisor-host-grants/grant_1/execution-delegations/delegation_1"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("GET", "/supervisor-host-grants/grant_1/execution-delegation-decisions"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("GET", "/supervisor-host-grants/grant_1/execution-delegation-decisions/decision_1"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/execution-delegation-decisions"), false);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/execution-delegations"), false);
   assert.equal(isSupervisorGrantRouteAllowed("DELETE", "/supervisor-host-grants/grant_1"), false);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/rooms/example/messages"), false);
 });

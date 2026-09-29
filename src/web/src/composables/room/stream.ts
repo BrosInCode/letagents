@@ -1,4 +1,10 @@
+import {
+  ROOM_RESOURCE_AGENT_APPROVAL,
+  ROOM_RESOURCE_INVALIDATION_CAPABILITY,
+  parseRoomResourceInvalidation,
+} from '../../../../../shared/room-resource-invalidation.mjs'
 import { publishMessageInfoInvalidation } from '../../components/room/messageInfoInvalidation'
+import { publishAgentApprovalInvalidation } from '../roomAgentApprovalInvalidation'
 import { roomPath } from './api'
 import { isVisibleRoomMessage } from './identity'
 import { playNotificationSound } from './sound'
@@ -259,6 +265,7 @@ export function createRoomStream(
             && streamGeneration === passStreamGeneration
             && passGeneration === fullReconcileRequestedGeneration
           ) {
+            publishAgentApprovalInvalidation(passRoom)
             if (replayBufferedGapEvents(passRoom)) {
               clearGapRepairRetry()
               commitPendingGapCursor(passRoom)
@@ -433,8 +440,11 @@ export function createRoomStream(
     handlers.setConnectionState('connecting')
 
     const eventCursor = eventCursors.get(roomIdentifier)
+    const streamParams = new URLSearchParams()
+    if (eventCursor) streamParams.set('event_cursor', eventCursor)
+    streamParams.append('stream_capability', ROOM_RESOURCE_INVALIDATION_CAPABILITY)
     const source = new EventSource(
-      `${roomPath(roomIdentifier)}/messages/stream${eventCursor ? `?event_cursor=${encodeURIComponent(eventCursor)}` : ''}`,
+      `${roomPath(roomIdentifier)}/messages/stream?${streamParams.toString()}`,
     )
     eventSource = source
     const isCurrentSource = () => eventSource === source
@@ -594,17 +604,41 @@ export function createRoomStream(
       try {
         const payload = JSON.parse(event.data)
         const roomId = typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier
-        if (!Array.isArray(payload?.message_ids) || payload.message_ids.some(
+        const messageIds = payload?.message_ids
+        if (messageIds !== null && (!Array.isArray(messageIds) || messageIds.some(
           (id: unknown) => typeof id !== 'string' || !id,
-        )) {
+        ))) {
           repairMalformedTypedEvent(roomIdentifier, event)
           return
         }
         rememberEventCursor(roomIdentifier, event)
-        const messageIds = payload.message_ids as string[]
         bufferOrApplyRoomEvent(roomIdentifier, () => {
+          // Null deliberately conceals message identities. The open info card
+          // refreshes through its authorized GET, without inventing per-id scope.
           publishMessageInfoInvalidation(roomId, messageIds)
         }, streamEventBytes(event))
+      } catch {
+        repairMalformedTypedEvent(roomIdentifier, event)
+      }
+    })
+
+    source.addEventListener(ROOM_RESOURCE_INVALIDATION_CAPABILITY, (event) => {
+      if (!isCurrentSource()) return
+      try {
+        const result = parseRoomResourceInvalidation(JSON.parse(event.data))
+        if (result.status === 'malformed' || result.pointer.room_id !== roomIdentifier) {
+          repairMalformedTypedEvent(roomIdentifier, event)
+          return
+        }
+        rememberEventCursor(roomIdentifier, event)
+        if (
+          result.status === 'supported'
+          && result.pointer.resource === ROOM_RESOURCE_AGENT_APPROVAL
+        ) {
+          bufferOrApplyRoomEvent(roomIdentifier, () => {
+            publishAgentApprovalInvalidation(roomIdentifier)
+          }, streamEventBytes(event))
+        }
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)
       }

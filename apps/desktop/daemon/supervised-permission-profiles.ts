@@ -20,100 +20,118 @@ export type SupervisedPermissionProfile = {
 const codexProfiles: readonly SupervisedPermissionProfile[] = [
   {
     id: "full_access", label: "Full access",
-    description: "Runs with the trusted local access policy already selected for this agent.",
+    description: "Can change files and run commands without asking.",
     status: "available", risk: "high",
-    detail: "Maps to approvalPolicy=never and sandboxPolicy=dangerFullAccess.", isDefault: true,
+    detail: "Commands can access files outside your project. Use only for work you trust.", isDefault: true,
   },
   {
     id: "ask_before_write", label: "Ask before writes",
-    description: "Requires a provider approval bridge before a background agent can ask safely.",
-    status: "gated", risk: "medium",
-    detail: "Codex supervised approval bridging is not available yet.", isDefault: false,
+    description: "Requires approval before Codex can run write-capable commands or apply file changes.",
+    status: "available", risk: "medium",
+    detail: "Starts with read-only file access and no network access. Requests approval when it needs more access.", isDefault: false,
+  },
+  {
+    id: "auto_review", label: "Auto",
+    description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
+    status: "available", risk: "high",
+    detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project.", isDefault: false,
   },
   {
     id: "sandboxed_write", label: "Sandboxed writes",
-    description: "Requires a verified supervised sandbox launch path.",
+    description: "Restricted file editing is unavailable for Codex here.",
     status: "gated", risk: "medium",
-    detail: "Codex supervised sandbox presets are not available yet.", isDefault: false,
+    detail: "Choose another available access level.", isDefault: false,
   },
   {
     id: "read_only", label: "Read-only",
-    description: "Requires a verified supervised read-only launch path.",
+    description: "Read-only access is unavailable for Codex here.",
     status: "gated", risk: "low",
-    detail: "Codex supervised read-only mode is not available yet.", isDefault: false,
+    detail: "Choose another available access level.", isDefault: false,
   },
 ];
 
 const claudeProfiles: readonly SupervisedPermissionProfile[] = [
   {
     id: "read_only", label: "Read-only",
-    description: "Lets Claude inspect and plan without broad workspace writes.",
+    description: "Can read and search files, and use LetAgents room tools.",
     status: "available", risk: "low",
-    detail: "Maps to Claude permissionMode=plan.", isDefault: true,
+    detail: "Cannot change files or run commands. Other Claude settings do not apply.", isDefault: true,
   },
   {
     id: "ask_before_write", label: "Ask before writes",
-    description: "Would require a live approval conversation between Claude and the desktop.",
-    status: "gated", risk: "medium",
-    detail: "Claude supervised prompt bridging is not available yet.", isDefault: false,
+    description: "Requires approval before Claude can change files or run write-capable commands.",
+    status: "available", risk: "medium",
+    detail: "Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available.", isDefault: false,
+  },
+  {
+    id: "auto_review", label: "Auto",
+    description: "Lets Claude check each action before it runs. Actions it judges safe run without asking.",
+    status: "available", risk: "high",
+    detail: "Claude blocks actions it judges risky. Anything a room message asks for counts as approved, including commands that reach outside your project. Other Claude settings do not apply.", isDefault: false,
   },
   {
     id: "full_access", label: "Full access",
-    description: "Lets Claude use broad local write and shell access in this trusted workspace.",
+    description: "Can change files and run commands on this Mac without asking.",
     status: "available", risk: "high",
-    detail: "Maps to Claude permissionMode=bypassPermissions.", isDefault: false,
+    detail: "Commands can access files outside your project. Use only for work you trust.", isDefault: false,
   },
   {
     id: "sandboxed_write", label: "Sandboxed writes",
-    description: "Claude does not expose a LetAgents-managed sandbox profile here.",
+    description: "Restricted file editing is unavailable for Claude Code here.",
     status: "unsupported", risk: "medium",
-    detail: "Choose Read-only or Full access for supervised Claude.", isDefault: false,
+    detail: "Choose another available access level.", isDefault: false,
   },
 ];
 
 const openModelProfiles: readonly SupervisedPermissionProfile[] = [
   {
     id: "full_access", label: "Full access",
-    description: "Runs OpenCode with broad local write and shell access in this trusted workspace.",
+    description: "Can change files and run commands without asking.",
     status: "available", risk: "high",
-    detail: "Maps to OpenCode permission=* allow. LetAgents still owns room delivery and credentials.", isDefault: true,
+    detail: "Commands can access files outside your project. LetAgents manages room messages and sign-in credentials separately.", isDefault: true,
   },
   {
     id: "ask_before_write", label: "Ask before writes",
-    description: "Requires a desktop-mediated OpenCode permission bridge.",
-    status: "gated", risk: "medium",
-    detail: "OpenCode supervised approval bridging is not available yet.", isDefault: false,
+    description: "Requires approval before OpenCode can run shell commands or change files.",
+    status: "available", risk: "medium",
+    detail: "Can read files and use LetAgents room tools without asking. Commands and file changes need approval.", isDefault: false,
+  },
+  {
+    id: "auto_review", label: "Auto",
+    description: "Lets LetAgents review each command before it runs. Routine commands and edits to project files run without asking.",
+    status: "available", risk: "high",
+    detail: "Each command is sent to LetAgents and to Jev, a decision model, for review. A command that deletes, publishes, installs, or reaches the network still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project.", isDefault: false,
   },
   {
     id: "sandboxed_write", label: "Sandboxed writes",
-    description: "Requires a verified supervised OpenCode sandbox profile.",
+    description: "Restricted file editing is unavailable for OpenCode here.",
     status: "gated", risk: "medium",
-    detail: "OpenCode supervised sandbox presets are not available yet.", isDefault: false,
+    detail: "Choose another available access level.", isDefault: false,
   },
   {
     id: "read_only", label: "Read-only",
-    description: "Requires a verified supervised OpenCode read-only profile.",
+    description: "Read-only access is unavailable for OpenCode here.",
     status: "gated", risk: "low",
-    detail: "OpenCode supervised read-only mode is not available yet.", isDefault: false,
+    detail: "Choose another available access level.", isDefault: false,
   },
 ];
 
 const cursorProfiles: readonly SupervisedPermissionProfile[] = [
   {
     id: "read_only", label: "Read-only", description: "Lets Cursor inspect and answer without editing the workspace.",
-    status: "available", risk: "low", detail: "Maps to Cursor mode=ask without --force.", isDefault: false,
+    status: "available", risk: "low", detail: "Can inspect project files without changing them.", isDefault: false,
   },
   {
-    id: "ask_before_write", label: "Ask before writes", description: "Requires prompt bridging and a supervised Cursor runtime.",
-    status: "gated", risk: "medium", detail: "Cursor supervised prompt bridging is not available yet.", isDefault: false,
+    id: "ask_before_write", label: "Ask before writes", description: "Unavailable because Cursor can edit ordinary workspace files without asking.",
+    status: "gated", risk: "medium", detail: "Cursor does not request approval for every workspace edit. Use Read-only to prevent edits, or Workspace writes to allow them.", isDefault: false,
   },
   {
-    id: "sandboxed_write", label: "Workspace writes", description: "Lets Cursor inspect, edit source files, and run repository tools in a private turn workspace.",
-    status: "available", risk: "medium", detail: "Cursor's native sandbox stays enabled. LetAgents reconciles conflict-checked, nonignored file edits after the turn; ignored dependencies stay read-only and project authority files stay protected.", isDefault: true,
+    id: "sandboxed_write", label: "Workspace writes", description: "Can inspect files, edit code, and run project tools in a separate copy of your project.",
+    status: "available", risk: "medium", detail: "Cursor restricts file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and project access settings stay protected.", isDefault: true,
   },
   {
-    id: "full_access", label: "Workspace writes (compatibility)", description: "Disables Cursor's inner sandbox for repository tool compatibility.",
-    status: "available", risk: "high", detail: "Disables Cursor's native sandbox inside the same private turn workspace. Direct host writes remain blocked; only conflict-checked, nonignored file edits are carried back.", isDefault: false,
+    id: "full_access", label: "Workspace writes (compatibility)", description: "Turns off Cursor’s own command restrictions so more project tools can run.",
+    status: "available", risk: "high", detail: "Cursor still works in a separate copy and cannot write directly to files on this Mac. LetAgents checks for conflicts before copying changes back. Files ignored by Git are not copied back.", isDefault: false,
   },
 ];
 

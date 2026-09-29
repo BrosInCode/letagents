@@ -1,5 +1,5 @@
-import type { ComputedRef, Ref } from "vue";
-import type { DesktopRoomSnapshot, WorkerSnapshot } from "../../../electron/ipc-types";
+import { getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
+import type { DesktopRoomAgentWork, DesktopRoomSnapshot, WorkerSnapshot } from "../../../electron/ipc-types";
 import {
   applyRoomLiveMetadata,
   mergeRoomSnapshotMessages,
@@ -11,14 +11,16 @@ import { shouldSkipPollTick } from "../domain/visibility-polling";
 import { desktopIpc } from "../ipc/index.js";
 
 interface DesktopRoomLiveSyncOptions {
+  accountId: ComputedRef<string | null>;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedRoomIdentifier: ComputedRef<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
+  sessionGeneration: Ref<number>;
   workers: Ref<WorkerSnapshot[]>;
 }
 
 /**
- * Cadence of the periodic poll-only metadata refresh. Presence/participants/
+ * Cadence of the periodic bounded room refresh. Presence/participants/
  * board-settings freshness is not latency-critical (everything actionable is
  * event-fed after PR #823), so a 15s tick is plenty and cuts steady-state room
  * traffic to a handful of light requests instead of a full ~10-request snapshot
@@ -31,11 +33,162 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let liveMetadataRefreshInterval: number | null = null;
   let liveMetadataRefreshIntervalRoomIdentifier: string | null = null;
   let liveMetadataRefreshSequence = 0;
-  let periodicMetadataRefreshInFlight = false;
+  let liveMetadataRefreshContext = 0;
+  let liveMetadataRefreshDisposed = false;
+  let periodicMetadataRefreshInFlight: number | null = null;
+  let fullSnapshotRefresh: { context: number; invalidated: boolean } | null = null;
+  let roomAgentWorkCursor: string | null = null;
+  let roomAgentWorkRefreshSequence = 0;
+  let roomAgentWorkInFlightSequence: number | null = null;
+  let roomAgentWorkInvalidationPending = false;
+  let roomAgentWorkInvalidationQueued = false;
+  let roomAgentWorkTrailingRefresh = false;
+  const roomAgentWork = ref<DesktopRoomAgentWork[]>([]);
+  const roomAgentWorkStatus = ref<"idle" | "loading" | "ready" | "stale" | "error" | "unavailable">("idle");
+  const roomAgentWorkTruncated = ref(false);
 
-  function isStaleRefresh(refreshSequence: number, roomIdentifier: string): boolean {
+  function clearSelectedRoomAgentWork(
+    status: "idle" | "error" | "unavailable" = "idle",
+  ): void {
+    roomAgentWorkRefreshSequence += 1;
+    roomAgentWorkInFlightSequence = null;
+    roomAgentWorkInvalidationPending = false;
+    roomAgentWorkInvalidationQueued = false;
+    roomAgentWorkTrailingRefresh = false;
+    roomAgentWorkCursor = null;
+    roomAgentWork.value = [];
+    roomAgentWorkTruncated.value = false;
+    roomAgentWorkStatus.value = status;
+  }
+
+  function roomAgentWorkRequestIsCurrent(
+    refreshSequence: number,
+    roomIdentifier: string,
+    sessionGeneration: number,
+    accountId: string | null,
+  ): boolean {
+    return refreshSequence === roomAgentWorkRefreshSequence
+      && sessionGeneration === options.sessionGeneration.value
+      && accountId === options.accountId.value
+      && normalizeRoomIdentifier(roomIdentifier) === normalizeRoomIdentifier(options.selectedRoomIdentifier.value);
+  }
+
+  async function refreshSelectedRoomAgentWork(): Promise<void> {
+    const roomIdentifier = options.selectedRoomIdentifier.value;
+    const accountId = options.accountId.value;
+    if (!roomIdentifier || (!accountId && options.selectedSnapshot.value?.storage.effectiveMode !== "local")) {
+      clearSelectedRoomAgentWork();
+      return;
+    }
+    if (!desktopIpc.room.pollAgentWork) {
+      clearSelectedRoomAgentWork("unavailable");
+      return;
+    }
+    if (roomAgentWorkInFlightSequence !== null) {
+      if (roomAgentWorkInvalidationPending) roomAgentWorkTrailingRefresh = true;
+      return;
+    }
+
+    roomAgentWorkInvalidationPending = false;
+
+    const sessionGeneration = options.sessionGeneration.value;
+    const refreshSequence = ++roomAgentWorkRefreshSequence;
+    roomAgentWorkInFlightSequence = refreshSequence;
+    if (!roomAgentWork.value.length) roomAgentWorkStatus.value = "loading";
+    try {
+      const result = await desktopIpc.room.pollAgentWork(roomIdentifier, roomAgentWorkCursor);
+      if (!roomAgentWorkRequestIsCurrent(refreshSequence, roomIdentifier, sessionGeneration, accountId)) return;
+      if (result.status === "ready") {
+        roomAgentWorkCursor = result.response.cursor;
+        if (result.response.changed) {
+          roomAgentWork.value = result.response.snapshot.work;
+          roomAgentWorkTruncated.value = result.response.snapshot.truncated;
+        }
+        roomAgentWorkStatus.value = "ready";
+        return;
+      }
+      clearSelectedRoomAgentWork(result.status === "invalid" ? "error" : "unavailable");
+    } catch {
+      if (!roomAgentWorkRequestIsCurrent(refreshSequence, roomIdentifier, sessionGeneration, accountId)) return;
+      roomAgentWorkStatus.value = roomAgentWork.value.length ? "stale" : "error";
+    } finally {
+      if (roomAgentWorkInFlightSequence === refreshSequence) {
+        roomAgentWorkInFlightSequence = null;
+      }
+      if (
+        roomAgentWorkTrailingRefresh
+        && roomAgentWorkRequestIsCurrent(refreshSequence, roomIdentifier, sessionGeneration, accountId)
+      ) {
+        roomAgentWorkTrailingRefresh = false;
+        roomAgentWorkInvalidationPending = true;
+        scheduleRoomAgentWorkInvalidationRefresh();
+      }
+    }
+  }
+
+  function scheduleRoomAgentWorkInvalidationRefresh(): void {
+    if (roomAgentWorkInvalidationQueued) return;
+    roomAgentWorkInvalidationQueued = true;
+    queueMicrotask(() => {
+      roomAgentWorkInvalidationQueued = false;
+      if (!roomAgentWorkInvalidationPending) return;
+      if (shouldSkipPollTick({ hidden: Boolean(window.document?.hidden) })) return;
+      void refreshSelectedRoomAgentWork().catch(() => undefined);
+    });
+  }
+
+  function invalidateSelectedRoomAgentWork(roomIdentifier: string): void {
+    if (
+      (!options.accountId.value && options.selectedSnapshot.value?.storage.effectiveMode !== "local")
+      || (
+        normalizeRoomIdentifier(roomIdentifier) !== normalizeRoomIdentifier(options.selectedRoomIdentifier.value)
+        && !snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)
+      )
+    ) return;
+    roomAgentWorkInvalidationPending = true;
+    scheduleRoomAgentWorkInvalidationRefresh();
+  }
+
+  watch(
+    () => [
+      normalizeRoomIdentifier(options.selectedRoomIdentifier.value),
+      options.sessionGeneration.value,
+      options.accountId.value,
+    ] as const,
+    () => clearSelectedRoomAgentWork(),
+    { flush: "sync" },
+  );
+
+  function invalidateMetadataRefresh(): void {
+    liveMetadataRefreshContext += 1;
+    fullSnapshotRefresh = null;
+    periodicMetadataRefreshInFlight = null;
+    clearLiveMetadataRefreshTimer();
+  }
+
+  watch([
+    () => normalizeRoomIdentifier(options.selectedRoomIdentifier.value),
+    () => options.sessionGeneration.value,
+    () => options.accountId.value,
+  ], invalidateMetadataRefresh, { flush: "sync" });
+
+  if (getCurrentScope()) onScopeDispose(() => {
+    liveMetadataRefreshDisposed = true;
+    invalidateMetadataRefresh();
+    clearLiveMetadataRefreshInterval();
+  });
+
+  function isStaleRefresh(
+    refreshSequence: number,
+    roomIdentifier: string,
+    sessionGeneration: number,
+    context: number,
+  ): boolean {
     return (
-      refreshSequence !== liveMetadataRefreshSequence
+      liveMetadataRefreshDisposed
+      || context !== liveMetadataRefreshContext
+      || refreshSequence !== liveMetadataRefreshSequence
+      || sessionGeneration !== options.sessionGeneration.value
       || normalizeRoomIdentifier(options.selectedRoomIdentifier.value) !== normalizeRoomIdentifier(roomIdentifier)
     );
   }
@@ -49,24 +202,43 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
    */
   async function refreshSelectedRoomSnapshotFromServer(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
-    if (!roomIdentifier) return;
+    if (!roomIdentifier || liveMetadataRefreshDisposed) return;
+    if (fullSnapshotRefresh) {
+      fullSnapshotRefresh.invalidated = true;
+      return;
+    }
+    const request = { context: liveMetadataRefreshContext, invalidated: false };
+    fullSnapshotRefresh = request;
+    const sessionGeneration = options.sessionGeneration.value;
     const refreshSequence = ++liveMetadataRefreshSequence;
-    const [snapshot, nextWorkers] = await Promise.all([
-      desktopIpc.room.getSnapshot(roomIdentifier),
-      desktopIpc.workers.list().catch(() => options.workers.value),
-    ]);
-    if (isStaleRefresh(refreshSequence, roomIdentifier)) return;
-    options.workers.value = nextWorkers;
-    options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot);
-    if (options.rootRoomSnapshot.value && roomSnapshotsMatch(options.rootRoomSnapshot.value, snapshot)) {
-      options.rootRoomSnapshot.value = mergeRoomSnapshotMessages(options.rootRoomSnapshot.value, snapshot);
+    try {
+      const [snapshot, nextWorkers] = await Promise.all([
+        desktopIpc.room.getSnapshot(roomIdentifier),
+        desktopIpc.workers.list().catch(() => options.workers.value),
+      ]);
+      if (request.invalidated || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, request.context)) return;
+      options.workers.value = nextWorkers;
+      options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot);
+      if (options.rootRoomSnapshot.value && roomSnapshotsMatch(options.rootRoomSnapshot.value, snapshot)) {
+        options.rootRoomSnapshot.value = mergeRoomSnapshotMessages(options.rootRoomSnapshot.value, snapshot);
+      }
+    } finally {
+      if (fullSnapshotRefresh === request) {
+        fullSnapshotRefresh = null;
+        // A scheduled debounce still owns its deadline. Otherwise, events
+        // received during this read need exactly one fresh trailing read.
+        if (request.invalidated && liveMetadataRefreshTimer === null) {
+          void refreshSelectedRoomSnapshotFromServer().catch(() => undefined);
+        }
+      }
     }
   }
 
   /**
-   * Periodic poll-only refresh — the interval tick. Fetches ONLY the metadata
+   * Periodic bounded refresh — the interval tick. Fetches the metadata
    * the server pushes no events for (focus rooms, participants, presence,
-   * recent activity, board settings) plus the cheap local `workers.list()`, and
+   * recent activity, board settings), the retained room-work replacement, and
+   * the cheap local `workers.list()`, then
    * applies them onto the current snapshot without touching event-fed sections
    * (messages, tasks, GitHub events, artifacts, reasoning).
    *
@@ -85,23 +257,28 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
    */
   async function refreshSelectedRoomLiveMetadata(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
-    if (!roomIdentifier) return;
+    if (!roomIdentifier || liveMetadataRefreshDisposed) return;
     if (shouldSkipPollTick({ hidden: Boolean(window.document?.hidden) })) return;
-    // Stale live bridge (preload predates this binding): skip the tick as a
-    // whole, workers.list() included — a partial tick that refreshed workers
-    // but never applied metadata would be misleading, and workers are still
-    // refreshed by every full-refresh pass (stream open, rentals, manual
-    // refresh) until the bridge is reloaded.
-    if (!desktopIpc.room.getLiveMetadata) return;
-    if (periodicMetadataRefreshInFlight) return;
-    periodicMetadataRefreshInFlight = true;
+    const roomAgentWorkRefresh = refreshSelectedRoomAgentWork();
+    // The retained-work poll is independent of the older live-metadata bridge:
+    // a stale preload may omit either optional binding without suppressing the
+    // other resource or causing a full-snapshot fallback.
+    // A full read already includes these sections. Starting a newer periodic
+    // sequence here would discard the required message/history backfill.
+    if (!desktopIpc.room.getLiveMetadata || periodicMetadataRefreshInFlight !== null || fullSnapshotRefresh) {
+      await roomAgentWorkRefresh;
+      return;
+    }
+    const sessionGeneration = options.sessionGeneration.value;
+    const context = liveMetadataRefreshContext;
     const refreshSequence = ++liveMetadataRefreshSequence;
+    periodicMetadataRefreshInFlight = refreshSequence;
     try {
       const [metadata, nextWorkers] = await Promise.all([
         desktopIpc.room.getLiveMetadata?.(roomIdentifier),
         desktopIpc.workers.list().catch(() => options.workers.value),
       ]);
-      if (!metadata || isStaleRefresh(refreshSequence, roomIdentifier)) return;
+      if (!metadata || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration, context)) return;
       options.workers.value = nextWorkers;
       options.selectedSnapshot.value = applyRoomLiveMetadata(options.selectedSnapshot.value, metadata);
       if (
@@ -111,12 +288,15 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
         options.rootRoomSnapshot.value = applyRoomLiveMetadata(options.rootRoomSnapshot.value, metadata);
       }
     } finally {
-      periodicMetadataRefreshInFlight = false;
+      if (periodicMetadataRefreshInFlight === refreshSequence) periodicMetadataRefreshInFlight = null;
     }
+    await roomAgentWorkRefresh;
   }
 
   function scheduleLiveMetadataRefresh(delayMs = 800): void {
-    if (liveMetadataRefreshTimer) {
+    if (liveMetadataRefreshDisposed) return;
+    if (fullSnapshotRefresh) fullSnapshotRefresh.invalidated = true;
+    if (liveMetadataRefreshTimer !== null) {
       window.clearTimeout(liveMetadataRefreshTimer);
     }
     liveMetadataRefreshTimer = window.setTimeout(() => {
@@ -126,7 +306,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   }
 
   function clearLiveMetadataRefreshTimer(): void {
-    if (!liveMetadataRefreshTimer) return;
+    if (liveMetadataRefreshTimer === null) return;
     window.clearTimeout(liveMetadataRefreshTimer);
     liveMetadataRefreshTimer = null;
   }
@@ -162,23 +342,36 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     roomIdentifier: string | null,
     afterMessageId?: string | null,
   ): Promise<void> {
-    if (!desktopIpc.room?.startStream) return;
+    if (liveMetadataRefreshDisposed || !desktopIpc.room?.startStream) return;
     if (!roomIdentifier) {
+      invalidateMetadataRefresh();
       clearLiveMetadataRefreshInterval();
+      clearSelectedRoomAgentWork();
       await desktopIpc.room.stopStream();
       return;
     }
     const latestMessageId = afterMessageId === undefined
       ? options.selectedSnapshot.value?.messages.at(-1)?.id || null
       : afterMessageId;
-    await desktopIpc.room.startStream(roomIdentifier, latestMessageId);
+    const shouldRefreshRoomAgentWork = roomAgentWorkStatus.value === "idle";
+    const streamReady = desktopIpc.room.startStream(roomIdentifier, latestMessageId);
+    const context = liveMetadataRefreshContext;
+    await streamReady;
+    if (liveMetadataRefreshDisposed || context !== liveMetadataRefreshContext
+      || normalizeRoomIdentifier(options.selectedRoomIdentifier.value) !== normalizeRoomIdentifier(roomIdentifier)) return;
     startLiveMetadataRefreshInterval(roomIdentifier);
+    if (shouldRefreshRoomAgentWork) void refreshSelectedRoomAgentWork();
   }
 
   return {
     clearLiveMetadataRefreshInterval,
     clearLiveMetadataRefreshTimer,
+    clearSelectedRoomAgentWork,
     refreshSelectedRoomLiveMetadata,
+    invalidateSelectedRoomAgentWork,
+    roomAgentWork,
+    roomAgentWorkStatus,
+    roomAgentWorkTruncated,
     scheduleLiveMetadataRefresh,
     syncSelectedRoomStream,
   };

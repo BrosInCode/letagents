@@ -176,6 +176,26 @@ test("a failure after connecting attributes to saving your agent", () => {
   assert.equal(view.recovery, "retry");
 });
 
+test("an unavailable login Keychain becomes a self-service blocked setup", () => {
+  const detail = "LetAgents needs access to your Mac login keychain to save this agent securely. Open Keychain Access, unlock the login keychain, then try again.";
+  const view = foldLaunchJourney({
+    events: [
+      evt("supervisor.connected"),
+      evt("launch.blocked", {
+        detail,
+        diagnostic: "macOS Keychain encryption is unavailable; host grant was not provisioned.",
+        recovery: "open_keychain",
+      }),
+    ],
+    provider: "codex",
+  });
+  assert.equal(view.status, "blocked");
+  assert.equal(stateOf(view, "saving_agent"), "failed");
+  assert.equal(view.headline, "Unlock Keychain to finish setup");
+  assert.equal(view.failureDetail, detail);
+  assert.equal(view.recovery, "open_keychain");
+});
+
 test("a user cancel is a cancelled journey, not a failure", () => {
   const view = foldLaunchJourney({
     events: [evt("supervisor.connected"), evt("agent.saved"), evt("launch.cancelled", { durable: true, detail: "You stopped this launch." })],
@@ -414,5 +434,25 @@ test("at most one step is in progress while launching", () => {
   ];
   for (const view of entries) {
     assert.ok(activeCount(view) <= 1, `expected <=1 active phase, got ${activeCount(view)}`);
+  }
+});
+
+
+test("actual Add Agent journey retains native compaction copy and clears it without advancing readiness", () => {
+  const compacting = entry({ provider: "claude-code", workspacePath: "/tmp/work",
+    providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+  const view = foldLaunchJourney({ entry: compacting });
+  assert.equal(view.headline, "Compacting conversation");
+  assert.equal(view.phases.find(phase => phase.state === "active")?.label, "Compacting conversation");
+  assert.match(view.joinHint!, /summarizing/);
+  assert.equal(view.ready, false);
+  assert.equal(view.currentPhaseId, "starting_provider");
+  assert.equal(view.status, "in_progress");
+  const cleared = foldLaunchJourney({ entry: { ...compacting, providerProgress: null } });
+  assert.equal(cleared.ready, false);
+  assert.notEqual(cleared.headline, view.headline);
+  assert.notEqual(cleared.phases.find(phase => phase.state === "active")?.label, "Compacting conversation");
+  for (const patch of [{ desiredState: "stopped", observedState: "stopped" }, { desiredState: "paused" }, { condition: "coordination_blocked", lastError: "bootstrap failed" }] as Partial<DesktopSupervisorManifestEntry>[]) {
+    assert.notEqual(foldLaunchJourney({ entry: { ...compacting, ...patch } }).headline, view.headline);
   }
 });

@@ -34,9 +34,18 @@ export interface DesktopMcpInstallResult {
   message: string;
 }
 
+export interface DesktopMcpInstallFailure {
+  targetId: DesktopMcpInstallTargetId | null;
+  targetName: string;
+  configPath: string | null;
+  configLabel: string | null;
+  message: string;
+}
+
 export interface DesktopMcpInstallManyResult {
   success: boolean;
   targets: DesktopMcpInstallTarget[];
   installState: DesktopMcpInstallState;
+  failures: DesktopMcpInstallFailure[];
   message: string;
 }

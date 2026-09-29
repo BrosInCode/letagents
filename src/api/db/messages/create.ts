@@ -1,3 +1,4 @@
+import { JEV_MAX_CANDIDATE_AGENTS } from "../../messages/jev-conversation-routing.js";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 
@@ -14,9 +15,14 @@ import {
   MESSAGE_SENDER_MAX_CODE_POINTS,
   MESSAGE_SENDER_MAX_UTF8_BYTES,
   isMessageSenderWithinBounds,
+  parseSupervisedReplySourceNumber,
 } from "../../../../shared/message-contracts.mjs";
 import {
+  isAgentDeliverySessionReachable,
+} from "../../../shared/agent-presence.js";
+import {
   createGlobalAgentAddressResolver,
+  humanConversationFallback,
   decideAgentMessageActivation,
   isUntrustedExternalActivationSource,
   isTaskOwnerFollowUpMessageText,
@@ -24,11 +30,12 @@ import {
 } from "../../../shared/activation-routing.js";
 import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
-import { message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
+import { rooms, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_delivery_sessions, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
   MessageAttachmentRow,
+  MessageMentionNotice,
   MessageRecipientAgentTarget,
   MessageRow,
 } from "../types.js";
@@ -41,11 +48,16 @@ import { hydrateMessageReplies } from "./history.js";
 import {
   createAccountRoutingTargetBudget,
   getBoundedActiveWorkLeaseOwners,
+  getRecentHumanConversationRecipient,
   getMessageAccountAgentRouting,
   MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES,
   MAX_ACCOUNT_ROUTING_TARGETS,
 } from "./account-agent-routing.js";
 import { getMessageThreadReadOverlays } from "./thread-read-overlays.js";
+import {
+  planJevRoutingMode,
+  type DeferredJevRoutingPlan,
+} from "./jev-routing-hint.js";
 import {
   getMessageThreadRoutingProjection,
   resolveMessageThreadRoutingProjection,
@@ -115,6 +127,7 @@ export type MessageCreateTransaction = Parameters<Parameters<(typeof db)["transa
 
 export interface AddMessageOptions {
   source?: string;
+  display_text?: string | null;
   agent_prompt_kind?: AgentPromptKind | null;
   reply_to_message_id?: string | null;
   thread_root_message_id?: string | null;
@@ -149,6 +162,32 @@ interface AddMessageTransactionResult {
   created: boolean;
   recipientAgentKeys: readonly string[];
   recipientAgentTargets: readonly MessageRecipientAgentTarget[];
+  mentionNotices?: readonly MessageMentionNotice[];
+}
+
+async function assertDesktopReplayMatches(
+  tx: MessageCreateTransaction, existing: MessageRow, sender: string, text: string, options: AddMessageOptions | undefined,
+): Promise<void> {
+  // Existing internal publishers intentionally replay by key alone. Desktop
+  // keys are public correlation IDs, so they must never grant another writer
+  // access to a previous writer's successful result.
+  if (!existing.client_message_id?.startsWith("desktop-send:")) return;
+  const replyNumber = options?.reply_to_message_id ? parseScopedId(options.reply_to_message_id, "msg") : null;
+  const rootNumber = options?.thread_root_message_id ? parseScopedId(options.thread_root_message_id, "msg") : null;
+  if (existing.publisher_account_id !== (options?.account_id?.trim() || null)
+    || existing.publisher_agent_key !== (options?.publisher_agent_key?.trim() || null)
+    || existing.publisher_agent_session_id !== (options?.publisher_agent_session_id?.trim() || null)
+    || existing.source !== (options?.source || null) || existing.sender !== sender || existing.text !== text
+    || existing.reply_to_number !== replyNumber
+    || (existing.thread_root_number ?? existing.number) !== (rootNumber ?? existing.number)
+    || existing.agent_prompt_kind !== (options?.agent_prompt_kind || null)) {
+    throw new RequestValidationError("Outgoing message identity was reused by another writer or with different content.");
+  }
+  const attached = await tx.select({ upload_id: message_attachments.upload_id }).from(message_attachments)
+    .where(and(eq(message_attachments.room_id, existing.room_id), eq(message_attachments.message_number, existing.number)));
+  if (attached.map(item => item.upload_id).sort().join("|") !== (options?.attachments || []).map(item => item.upload_id).sort().join("|")) {
+    throw new RequestValidationError("Outgoing message identity was reused with different attachments.");
+  }
 }
 
 export async function addMessageWithCreateStatus(
@@ -166,7 +205,10 @@ export async function addMessageWithCreateStatus(
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
-  const result = await db.transaction(async (tx): Promise<AddMessageTransactionResult> => {
+  // Conversation routing (Jev) never runs inside the send: the plan is
+  // captured in the transaction and executed after commit, so the human's
+  // send returns as fast as the deterministic ladder alone.
+  const result = await db.transaction(async (tx): Promise<AddMessageResult> => {
     // Transitional projection repair can inspect a legacy thread on the first
     // post-watermark reply. Bound that work—and every other statement in this
     // atomic send—so a pathological archive cannot wedge an API worker.
@@ -188,12 +230,13 @@ export async function addMessageWithCreateStatus(
         .limit(1);
 
       if (existingMessage) {
-        return {
+        await assertDesktopReplayMatches(tx, existingMessage, sender, text, options);
+        return hydrateCreatedMessage(roomId, {
           messageRow: existingMessage,
           created: false,
           recipientAgentKeys: [],
           recipientAgentTargets: [],
-        };
+        }, options, tx);
       }
     }
 
@@ -252,6 +295,7 @@ export async function addMessageWithCreateStatus(
       thread_root_number: threadRootNumber,
       sender,
       text,
+      display_text: options?.source === "system" ? options.display_text?.trim() || null : null,
       agent_prompt_kind: promptKind,
       source: options?.source ?? null,
       client_message_id: clientMessageId,
@@ -278,12 +322,13 @@ export async function addMessageWithCreateStatus(
         if (!existingMessage) {
           throw new Error("message idempotency conflict could not be resolved");
         }
-        return {
+        await assertDesktopReplayMatches(tx, existingMessage, sender, text, options);
+        return hydrateCreatedMessage(roomId, {
           messageRow: existingMessage,
           created: false,
           recipientAgentKeys: [],
           recipientAgentTargets: [],
-        };
+        }, options, tx);
       }
       createdMessage = insertedMessage;
     } else {
@@ -371,6 +416,7 @@ export async function addMessageWithCreateStatus(
 
     let replyToMessage: {
       sender: string;
+      text: string;
       source?: string;
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
@@ -380,6 +426,7 @@ export async function addMessageWithCreateStatus(
       const [foundReply] = await tx
         .select({
           sender: messages.sender,
+          text: messages.text,
           source: messages.source,
           publisher_agent_key: messages.publisher_agent_key,
           publisher_agent_session_id: messages.publisher_agent_session_id,
@@ -390,6 +437,7 @@ export async function addMessageWithCreateStatus(
         .limit(1);
       if (foundReply) replyToMessage = {
         sender: foundReply.sender,
+        text: foundReply.text,
         source: foundReply.source ?? undefined,
         publisher_agent_key: foundReply.publisher_agent_key,
         publisher_agent_session_id: foundReply.publisher_agent_session_id,
@@ -423,6 +471,17 @@ export async function addMessageWithCreateStatus(
     // querying just those keys/sessions avoids enumerating a large room twice
     // for an ordinary one-recipient continuation.
     const routingShape = createGlobalAgentAddressResolver([])(messageForRouting);
+    // Replying to a human's message (often your own, to nudge the room) does
+    // not address any agent: it stays in the untagged fallback lane instead
+    // of the reply-target lane, which has no agent to wake.
+    const replyToIsHuman = replyToMessage !== null
+      && !replyToMessage.publisher_agent_key
+      && replyToMessage.source !== "agent";
+    const humanConversationEligible = createdMessage.source === "browser"
+      && Boolean(createdMessage.publisher_account_id) && !createdMessage.publisher_agent_key
+      && !routingShape.broadcast && !routingShape.hasMention
+      && (createdMessage.reply_to_number === null || replyToIsHuman)
+      && createdMessage.thread_root_number === null;
     const candidateAgentKeys = new Set<string>();
     const candidateSessionIds = new Set<string>();
     if (replyToMessage?.publisher_agent_key && replyToMessage.publisher_account_id) {
@@ -437,7 +496,8 @@ export async function addMessageWithCreateStatus(
       if (lease.agent_session_id) candidateSessionIds.add(lease.agent_session_id);
       if (!lease.agent_key && !lease.agent_session_id) leaseNeedsCompletePopulation = true;
     }
-    const needsCompletePopulation = routingShape.broadcast
+    const needsCompletePopulation = humanConversationEligible
+      || routingShape.broadcast
       || routingShape.hasMention
       || createdMessage.thread_root_number !== null
       || (
@@ -504,6 +564,44 @@ export async function addMessageWithCreateStatus(
       throw new RequestValidationError("Room has too many active worker sessions to route a message safely.");
     }
 
+    const reachableAgentKeys = new Set<string>();
+    if (activeSessions.length > 0 && routingShape.hasMention) {
+      const activeDeliveryKeys = activeSessions.map((session) =>
+        `agent_session:${session.session_id}`);
+      const deliverySessions = await tx
+        .select({
+          agent_session_id: room_agent_delivery_sessions.agent_session_id,
+          active_connection_count: room_agent_delivery_sessions.active_connection_count,
+          updated_at: room_agent_delivery_sessions.updated_at,
+          reconnect_grace_expires_at: room_agent_delivery_sessions.reconnect_grace_expires_at,
+        })
+        .from(room_agent_delivery_sessions)
+        .where(and(
+          eq(room_agent_delivery_sessions.room_id, roomId),
+          // Probe the existing (room_id, delivery_key) primary key instead of
+          // scanning the unindexed agent_session_id column. Historical
+          // delivery summaries accumulate in long-lived rooms.
+          sql`${room_agent_delivery_sessions.delivery_key} IN (
+            SELECT value
+              FROM jsonb_array_elements_text(${JSON.stringify(activeDeliveryKeys)}::jsonb)
+          )`,
+        ));
+      const routingNow = Date.now();
+      const reachableSessionIds = new Set(deliverySessions
+        .filter((delivery) => isAgentDeliverySessionReachable({
+          activeConnectionCount: delivery.active_connection_count,
+          updatedAt: delivery.updated_at,
+          reconnectGraceExpiresAt: delivery.reconnect_grace_expires_at,
+        }, routingNow))
+        .map((delivery) => delivery.agent_session_id)
+        .filter((sessionId): sessionId is string => Boolean(sessionId)));
+      for (const session of activeSessions) {
+        if (reachableSessionIds.has(session.session_id)) {
+          reachableAgentKeys.add(session.agent_key);
+        }
+      }
+    }
+
     if (createdMessage.thread_root_number && activeSessions.length > 0) {
       threadRoutingProjection = await getMessageThreadRoutingProjection(
         tx,
@@ -526,6 +624,7 @@ export async function addMessageWithCreateStatus(
     let receiptCount = 0;
     let recipientAgentKeys: readonly string[] = [];
     let recipientAgentTargets: readonly MessageRecipientAgentTarget[] = [];
+    let mentionNotices: readonly MessageMentionNotice[] = [];
 
     if (activeSessions.length > 0) {
       // Resolve routing against every overlapping session identity first.
@@ -571,7 +670,31 @@ export async function addMessageWithCreateStatus(
       );
       const ownedSessionGroups = [...sessionsByAgentKey]
         .filter(([, group]) => group.ownerAccountIds.size === 1);
-      const globalAddresses = createGlobalAgentAddressResolver(allRoutingIdentities)(messageForRouting);
+      const ownerScopeByAgentKey = new Map(ownedSessionGroups.map(([agentKey, group]) => [
+        agentKey,
+        group.ownerAccountIds.values().next().value!,
+      ]));
+      const globalAddresses = createGlobalAgentAddressResolver(allRoutingIdentities, {
+        preferredExplicitMentionAgentKeys: reachableAgentKeys,
+        explicitMentionOwnerScopeByAgentKey: ownerScopeByAgentKey,
+      })(messageForRouting);
+      // An ambiguous mention wakes nobody. Say so on the sender's own
+      // acknowledgement, with a mention that reaches each candidate alone.
+      mentionNotices = globalAddresses.ambiguousMentions.map(({ handle, agentKeys }) => ({
+        reason: "ambiguous" as const,
+        handle,
+        detail: `@${handle} matches ${agentKeys.length} agents in this room, so the mention reached none of them. `
+          + "Resend with the exact mention of the agent you mean.",
+        candidates: agentKeys.flatMap((agentKey) => {
+          const session = sessionsByAgentKey.get(agentKey)?.sessions[0];
+          return session ? [{
+            agent_key: agentKey,
+            display_name: session.display_name,
+            actor_label: session.actor_label,
+            mention: `@agent:${agentKey}`,
+          }] : [];
+        }),
+      }));
       let exactReplySession: (typeof activeSessions)[number] | undefined;
       if (replyToMessage?.publisher_agent_key && replyToMessage.publisher_account_id) {
         globalAddresses.replyTargetKeys.clear();
@@ -586,6 +709,53 @@ export async function addMessageWithCreateStatus(
                 session.session_id === replyToMessage.publisher_agent_session_id)
             : undefined;
         }
+      }
+
+      const recentRecipient = humanConversationEligible && sessionsByAgentKey.size > 2
+        ? await getRecentHumanConversationRecipient(tx, roomId, {
+            number: createdMessage.number, timestamp: createdMessage.timestamp,
+            publisher_account_id: createdMessage.publisher_account_id!,
+          }) : null;
+      const heuristicFallback = humanConversationFallback({
+        source: createdMessage.source, publisherAccountId: createdMessage.publisher_account_id,
+        publisherAgentKey: createdMessage.publisher_agent_key,
+        explicitlyAddressed: !humanConversationEligible,
+        // Registration is durable; transport freshness must not change room size.
+        // Paused workers remain registered until their server session ends.
+        registeredAgentKeys: [...sessionsByAgentKey.keys()],
+        recentAgentKey: recentRecipient && ownerScopeByAgentKey.get(recentRecipient.agentKey) === recentRecipient.ownerAccountId
+          ? recentRecipient.agentKey : null,
+      });
+      // Jev only ever replaces the untagged fallback, and only in rooms of
+      // three or more agents; mentions, replies to agents, threads, and task
+      // ownership stay deterministic. Inference runs after commit: in active
+      // mode the fallback is withheld here and the deferred pass applies
+      // Jev's election (or this heuristic when Jev is unavailable); shadow
+      // mode applies the heuristic now and only compares afterwards.
+      const [routingRoom] = await tx.select({ enabled: rooms.jev_routing_enabled }).from(rooms).where(eq(rooms.id, roomId));
+      const jevMode = routingRoom?.enabled ? planJevRoutingMode() : null;
+      const jevEligible = jevMode !== null
+        && sessionsByAgentKey.size > 2
+        && sessionsByAgentKey.size <= JEV_MAX_CANDIDATE_AGENTS
+        && !taskOwnerFollowUp
+        && !createdMessageIsPromptOnly
+        && !routingShape.broadcast && !routingShape.hasMention
+        && createdMessage.thread_root_number === null
+        && (createdMessage.reply_to_number === null || replyToIsHuman)
+        && humanConversationEligible;
+      const jevDecides = jevMode === "active" && jevEligible;
+      const humanFallback = jevDecides ? null : heuristicFallback;
+      if (jevMode && jevEligible) {
+        const plan: DeferredJevRoutingPlan = {
+          mode: jevMode,
+          roomId,
+          message: {
+            number: createdMessage.number,
+            publisher_agent_key: createdMessage.publisher_agent_key ?? null,
+          },
+          heuristic: heuristicFallback,
+        };
+        await tx.insert(jev_routing_jobs).values({ room_id: roomId, message_number: createdMessage.number, plan });
       }
 
       // Receipts are keyed by durable agent identity: several live sessions
@@ -641,7 +811,12 @@ export async function addMessageWithCreateStatus(
             session: representative,
             activation: { decision: "activate", reason: "thread_participant", addressed: true },
           };
-        } else if (taskOwnerFollowUp) {
+        } else if (humanFallback?.agentKeys.includes(agentKey)) {
+          selectedActivation = {
+            session: representative,
+            activation: { decision: "activate", reason: humanFallback.reason, addressed: true },
+          };
+        } else if (!humanFallback && taskOwnerFollowUp) {
           selectedActivation = group.identities
             .map((identity, index) => ({
               session: group.sessions[index]!,
@@ -782,21 +957,38 @@ export async function addMessageWithCreateStatus(
       }
     }
 
-    return {
+    return hydrateCreatedMessage(roomId, {
       messageRow: createdMessage,
       created: true,
       recipientAgentKeys,
       recipientAgentTargets,
-    };
+      mentionNotices,
+    }, options, tx);
   });
   if (repliedReceiptTargets.size > 0) {
     // Dynamic import avoids a module cycle; room-level so the shared stream
     // never enumerates ids that may be concealed from some participants.
-    const { queueMessageInfoInvalidation } = await import("../../server/message-info-events.js");
-    queueMessageInfoInvalidation(roomId, null);
+    void import("../../server/message-info-events.js").then(({ queueMessageInfoInvalidation }) => {
+      queueMessageInfoInvalidation(roomId, null);
+    }).catch((error) => {
+      console.error(`[room messages] failed receipt invalidation for ${roomId}`, error);
+    });
   }
+  return result;
+}
+
+// Build the complete acknowledgement before commit: a failed attachment,
+// thread, or routing read must roll back the write rather than strand an
+// unpublished message that idempotent retries can no longer publish.
+async function hydrateCreatedMessage(
+  roomId: string,
+  result: AddMessageTransactionResult,
+  options: AddMessageOptions | undefined,
+  tx: MessageCreateTransaction,
+): Promise<AddMessageResult> {
   const [hydrated] = await hydrateMessageReplies(roomId, [result.messageRow], {
     accountId: null,
+    executor: tx,
   });
   const canonicalMessage = hydrated ?? toMessageWithReply(result.messageRow, null);
   let message = canonicalMessage;
@@ -807,10 +999,10 @@ export async function addMessageWithCreateStatus(
         ? getMessageThreadReadOverlays(roomId, [{
             root_message_id: canonicalMessage.thread.root_message_id,
             reply_count: canonicalMessage.thread.reply_count,
-          }], [accountId])
+          }], [accountId], tx)
         : Promise.resolve(new Map()),
       options?.account_agent_routing
-        ? getMessageAccountAgentRouting(db, roomId, accountId, [result.messageRow])
+        ? getMessageAccountAgentRouting(tx, roomId, accountId, [result.messageRow])
         : Promise.resolve(new Map()),
     ]);
     const readOverlay = canonicalMessage.thread
@@ -825,6 +1017,10 @@ export async function addMessageWithCreateStatus(
         ? { account_agent_routing: accountRouting.get(result.messageRow.number) ?? null }
         : {}),
     };
+  }
+  if (result.mentionNotices?.length) {
+    // Copy rather than annotate: the canonical message is the shared event.
+    message = { ...message, mention_notices: [...result.mentionNotices] };
   }
   return {
     message,
@@ -852,12 +1048,4 @@ export async function addMessage(
  * Only this exact shape identifies a reply target; arbitrary client ids never
  * influence receipt state.
  */
-export function parseSupervisedReplySourceNumber(clientMessageId: string | null): number | null {
-  if (!clientMessageId) return null;
-  const parts = clientMessageId.split(":");
-  if (parts[0] !== "supervised-room" || parts.at(-2) !== "reply" || parts.at(-1) !== "v1") return null;
-  const body = parts.slice(1, -2);
-  if (body.length !== 2 && body.length !== 3) return null;
-  const source = body.at(-1);
-  return source ? parseScopedId(source, "msg") : null;
-}
+export { parseSupervisedReplySourceNumber };

@@ -13,7 +13,26 @@ import {
   repoEnvironmentRoomRefLabel,
   shouldShowRepoEnvironmentForRoom,
 } from "../src/domain/repo-environment";
-import { repoWorkspaceSummary } from "../src/domain/repo-status";
+import { preserveRoomRepoStatistics, repoWorkspaceSummary } from "../src/domain/repo-status";
+
+test("room opening retains loaded statistics only for the same repository and branches", () => {
+  const delta = { branch: "feature/git-rooms", baseBranch: "main", filesChanged: 2, additions: 8, deletions: 3 };
+  const current = repoStatus({ branchDelta: delta, branchDeltas: [delta] });
+  const opening = repoStatus({ ahead: 3 });
+  assert.deepEqual(preserveRoomRepoStatistics(current, opening), {
+    ...opening, branchDelta: delta, branchDeltas: [delta],
+  });
+  for (const changed of [
+    repoStatus({ rootPath: "/another-repo" }),
+    repoStatus({ branch: "another-branch" }),
+    repoStatus({ defaultBranch: "another-default" }),
+    repoStatus({ isGitRepo: false }),
+    repoStatus({ branchDelta: { ...delta, additions: 0 }, branchDeltas: [] }),
+    null,
+  ]) {
+    assert.equal(preserveRoomRepoStatistics(current, changed), changed);
+  }
+});
 
 test("repo environment summarizes dirty and conflicted Git state", () => {
   const status = repoStatus({

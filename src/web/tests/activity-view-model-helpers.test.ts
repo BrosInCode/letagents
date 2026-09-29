@@ -15,6 +15,7 @@ import {
   reasoningCardSummary,
   reasoningStatusLabel,
 } from '../src/components/room/activity/displayHelpers'
+import { buildAgentThinkingEntry } from '../src/components/room/agentThinking'
 import {
   buildHistoryParticipant,
   buildHistoryRoomOptions,
@@ -23,6 +24,7 @@ import {
 } from '../src/components/room/activity/historyModel'
 import {
   buildAgentParticipant,
+  buildWorkSignal,
   buildHumanParticipant,
   groupAgentMessagesByActor,
 } from '../src/components/room/activity/liveParticipants'
@@ -96,6 +98,26 @@ test('live participant helpers build human participants from browser activity', 
   assert.equal(participant.messageCount, 1)
   assert.deepEqual(participant.currentTasks.map((item) => item.id), ['task-1'])
   assert.deepEqual(participant.createdTasks.map((item) => item.id), ['task-2'])
+})
+
+test('live work presentation uses public work language for notes and active streams', () => {
+  const workNote = buildAgentThinkingEntry(message({
+    id: 'work-note',
+    text: 'I am checking the restore path before editing it.',
+    source: 'agent',
+  }), { allowPlainAgentNotes: true })
+  assert.equal(workNote?.phaseLabel, 'Work note')
+
+  assert.deepEqual(buildWorkSignal({
+    status: null,
+    statusText: null,
+    currentTasks: [],
+    activeReasoning: [{}],
+  }), {
+    state: 'responding',
+    label: 'Responding',
+    detail: 'Live work stream active',
+  })
 })
 
 test('history helpers build room options and participant summaries', () => {

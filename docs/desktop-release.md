@@ -50,6 +50,12 @@ Verify a downloaded DMG or updater ZIP against GitHub's signed provenance record
 gh attestation verify /path/to/LetAgents-<version>-darwin-<arch>.<dmg-or-zip> --repo BrosInCode/letagents
 ```
 
+## Service-owned local board rollout
+
+The local board now requires the background service for writes. Before releasing a desktop build with daemon implementation `2.0.153` or later, publish the matching standalone `letagents` MCP package and update/restart independent clients that use local rooms. Versions through `0.12.23` write SQLite directly and cannot write after the upgraded service installs its writer guard. Do not ship this as a desktop-only upgrade while leaving those clients pinned to the old writer.
+
+The desktop's supervised room tools already enter its local service runtime; their sealed MCP transport does not need a new storage export. Validate one standalone local task edit and one desktop board subscription using the release candidates before publication. Healthy board subscriptions wait for committed task changes; reconnects load a fresh snapshot. No recurring board read timer is expected.
+
 ## Local packaging checks
 
 Run the unsigned path to verify bundle branding, the DMG layout, the update ZIP, and release metadata without Apple credentials:

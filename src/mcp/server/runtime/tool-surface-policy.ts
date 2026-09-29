@@ -11,6 +11,13 @@ export interface ExecutionProfileToolSurface {
 const TOOL_SURFACE_BY_PROFILE: Readonly<
   Record<LetAgentsExecutionProfile, Readonly<ExecutionProfileToolSurface>>
 > = {
+  supervised_mcp_polling: {
+    agentSessionLifecycle: false,
+    deliveryLoop: true,
+    onboarding: false,
+    rental: false,
+    roomResume: false,
+  },
   supervised_room_turn: {
     agentSessionLifecycle: false,
     deliveryLoop: false,

@@ -1,3 +1,5 @@
+import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
+import { getDesktopNeedsYou, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain } from "electron";
 
 import type {
@@ -20,6 +22,7 @@ import type {
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
   DesktopRoomLiveMetadata,
+  DesktopRoomAgentWorkPollResult,
   DesktopRoomDeliveryRepair,
   DesktopRoomMessage,
   DesktopRoomMessagesPage,
@@ -75,6 +78,7 @@ import {
   getDesktopGitHubEvents,
   getDesktopGitHubIntegrationStatus,
   getDesktopReasoningSession,
+  pollDesktopRoomAgentWork,
   getDesktopRoomArtifacts,
   getDesktopRoomLatestMessages,
   getDesktopRoomMessage,
@@ -107,6 +111,11 @@ import {
 import { desktopSmokeBoardGovernance, isDesktopSmokeCheck } from "../smoke.js";
 
 export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle("desktop:room:needs-you", (_event, includeUpdates) => getDesktopNeedsYou(includeUpdates === true));
+  targetIpcMain.handle("desktop:room:knowledge", (_event, room, type) => getDesktopKnowledge(room, type));
+  targetIpcMain.handle("desktop:room:knowledge-create", (_event, room, type, input) => createDesktopKnowledge(room, type, input));
+  targetIpcMain.handle("desktop:room:knowledge-revise", (_event, room, type, id, input) => reviseDesktopKnowledge(room, type, id, input));
+  targetIpcMain.handle("desktop:room:memory-history", (_event, room, id) => getDesktopMemoryHistory(room, id));
   targetIpcMain.handle(
     "desktop:room:list-account-rooms",
     async (
@@ -152,6 +161,15 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       _event,
       roomIdentifier: string,
     ): Promise<DesktopRoomLiveMetadata> => fetchRoomLiveMetadata(roomIdentifier),
+  );
+  targetIpcMain.handle(
+    "desktop:room:poll-agent-work",
+    async (
+      _event,
+      roomIdentifier: string,
+      afterCursor?: string | null,
+    ): Promise<DesktopRoomAgentWorkPollResult> =>
+      pollDesktopRoomAgentWork(roomIdentifier, afterCursor),
   );
   targetIpcMain.handle(
     "desktop:room:get-latest-messages",
@@ -282,9 +300,17 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
+      clientMessageId?: string | null,
+      messageNamespace?: string | null,
     ): Promise<DesktopSendRoomMessageResult> => {
-      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId);
-      await deliverDesktopRoomMessageToManagedAgents(roomIdentifier, result.message);
+      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId, messageNamespace);
+      // Local dispatch is secondary to the saved message acknowledgement.
+      // Keep its routing/retry path running without making the user resend.
+      void Promise.resolve().then(() =>
+        deliverDesktopRoomMessageToManagedAgents(roomIdentifier, result.message),
+      ).catch((error) => {
+        console.error(`[room messages] failed managed delivery for ${roomIdentifier}/${result.message.id}`, error);
+      });
       return result;
     },
   );
@@ -304,6 +330,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       roomIdentifier: string,
       taskId: string,
       updates: {
+        title?: string;
+        description?: string;
+        expected_content?: { title?: string; description?: string };
         status?: string;
         assignee?: string | null;
         pr_url?: string | null;
@@ -399,6 +428,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     ): Promise<DesktopFocusRoomMutationResult> =>
       createDesktopAdHocFocusRoom(roomIdentifier, title),
   );
+  targetIpcMain.handle("desktop:room:get-conversation-routing", (_event, roomIdentifier: string) => getDesktopConversationRouting(roomIdentifier));
+  targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
   targetIpcMain.handle(
     "desktop:room:update-focus-room-settings",
     async (

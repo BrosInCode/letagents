@@ -272,12 +272,10 @@ test("a rebind without a terminal attestation is rejected", { skip: requiresData
   assert.equal((await leaseRow(s.lease.id)).agent_session_id, s.from.session_id, "lease stayed with the predecessor");
 });
 
-test("an attestation authored at a stale grant generation is rejected", { skip: requiresDatabase }, async () => {
-  // The attestation binds to the grant generation that authored it. A rebind
-  // presenting the CURRENT fence must reject an attestation minted at a
-  // different generation — otherwise a rotated-out supervisor's stale proof
-  // could still move a lease. (The row is force-inserted: the accessor refuses
-  // to author such evidence, but rebind must reject it however it arrived.)
+test("an attestation authored at a future grant generation is rejected", { skip: requiresDatabase }, async () => {
+  // Historical evidence is usable only from this grant's actual past. A
+  // future generation could not have authored evidence under the current
+  // authority. The row is force-inserted to prove default denial.
   const s = await seed({ recordAttestation: false });
   const stale = await insertAttestationRow({
     room_id: s.room.id, lease_id: s.lease.id, epoch: 0, from_agent_session_id: s.from.session_id,
@@ -801,4 +799,38 @@ test("a stale-epoch lease-action cannot release the successor's rebound lease, b
   });
   assert.equal(current.conflict, null);
   assert.equal(current.released_lease?.id, lease.id);
+});
+
+test("a current supervisor resumes an interrupted rebind using unchanged historical death evidence", { skip: requiresDatabase }, async () => {
+  const s = await seed();
+  const before = await attestationRow(s.attestation!.id);
+  // The original supervisor recorded death, then disappeared before rebind.
+  const advanced = await db!.advanceSupervisorHostGrantGeneration({ grant_id: s.grant.grant_id,
+    expected_generation: s.fence.generation, expected_token_version: s.fence.token_version });
+  assert.ok(advanced);
+  const currentFence = { grant_id: s.grant.grant_id, generation: advanced.grant.current_generation,
+    token_version: advanced.grant.token_version };
+  const attestationInput = { lease_id: s.lease.id, epoch: 0, from_agent_session_id: s.from.session_id,
+    supervisor_grant_fence: currentFence, work_attempt_id: s.workAttemptId,
+    execution_generation_id: s.executionGenerationId, cause: "crashed" };
+  const staleCaller = await recordRebindAttestation({ ...attestationInput, supervisor_grant_fence: s.fence });
+  assert.deepEqual(staleCaller, { ok: false, reason: "grant_fence_stale" });
+  assert.deepEqual(await rebindTaskLease(rebindArgs(s)), { ok: false, reason: "grant_fence_stale" });
+  const changedEvidence = await recordRebindAttestation({ ...attestationInput, cause: "killed" });
+  assert.deepEqual(changedEvidence, { ok: false, reason: "evidence_conflict" });
+  const resumed = await recordRebindAttestation(attestationInput);
+  assert.equal(resumed.ok, true, "handoff must not leave exact evidence permanently unusable");
+  if (!resumed.ok) throw new Error(resumed.reason);
+  assert.equal(resumed.created, false);
+  assert.deepEqual(resumed.attestation, before, "reading historical evidence never rewrites its authoring generation or timestamps");
+  const rebound = await rebindTaskLease(rebindArgs(s, { supervisor_grant_fence: currentFence }));
+  assert.equal(rebound.ok, true);
+  assert.equal((await leaseRow(s.lease.id)).agent_session_id, s.to.session_id);
+  assert.equal((await leaseRow(s.lease.id)).epoch, 1);
+  assert.deepEqual(await rebindTaskLease(rebindArgs(s, { supervisor_grant_fence: currentFence })), { ok: false, reason: "lost_race" });
+  assert.deepEqual(await recordRebindAttestation(attestationInput), { ok: false, reason: "lease_mismatch" });
+  const consumed = await attestationRow(s.attestation!.id);
+  assert.equal(consumed.supervisor_generation, before.supervisor_generation);
+  assert.equal(consumed.attested_at, before.attested_at);
+  assert.equal(consumed.consumed_by_epoch, 1);
 });

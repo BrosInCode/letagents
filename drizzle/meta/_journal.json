@@ -582,6 +582,132 @@
       "when": 1786838400000,
       "tag": "0082_due_time_liveness",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1786924800000,
+      "tag": "0083_desktop_release_high_water",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1787011200000,
+      "tag": "0084_canonical_focus_room_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1788199200000,
+      "tag": "0085_room_agent_work",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1788386747000,
+      "tag": "0086_execution_delegation_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1788476400000,
+      "tag": "0087_execution_delegation_decisions",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1788562800000,
+      "tag": "0088_execution_delegation_decision_inventory",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1788649200000,
+      "tag": "0089_execution_approval_publications",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1788721200000,
+      "tag": "0090_task_creation_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1788739200000,
+      "tag": "0091_message_display_text",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1788744906862,
+      "tag": "0092_workspace_review_payload",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1788866317796,
+      "tag": "0093_complete_workspace_reviews",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1788885000000,
+      "tag": "0094_mcp_workspace_publications",
+      "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1789390000000,
+      "tag": "0095_room_knowledge",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1789500000000,
+      "tag": "0096_room_agent_session_model_charter",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1789500100000,
+      "tag": "0097_message_agent_receipts_deferred_delivery",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1789850000000,
+      "tag": "0098_jev_room_routing",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1789944000000,
+      "tag": "0099_private_conversations",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1790030400000,
+      "tag": "0100_verified_worker_claim_intents",
+      "breakpoints": true
     }
   ]
 }

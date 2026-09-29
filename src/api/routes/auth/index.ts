@@ -1,11 +1,13 @@
 import crypto from "crypto";
 import type { Express } from "express";
+import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
 
 import {
   consumeAuthState,
   createOwnerToken,
   createSession,
   createAuthState,
+  deleteOwnerTokenById,
   deleteSessionByToken,
   refreshProviderAccessTokenForAccount,
   upsertAccount,
@@ -52,6 +54,16 @@ const DEVICE_AUTH_START_CLIENT_CACHE_MAX = 10_000;
 type DeviceAuthStartWindow = { count: number; resetAt: number };
 let deviceAuthGlobalStartWindow: DeviceAuthStartWindow | null = null;
 const deviceAuthClientStartWindows = new Map<string, DeviceAuthStartWindow>();
+
+export interface AuthLogoutRouteDeps {
+  deleteOwnerTokenById: typeof deleteOwnerTokenById;
+  deleteSessionByToken: typeof deleteSessionByToken;
+}
+
+const defaultAuthLogoutRouteDeps: AuthLogoutRouteDeps = {
+  deleteOwnerTokenById,
+  deleteSessionByToken,
+};
 
 function consumeWindow(
   current: DeviceAuthStartWindow | null,
@@ -405,6 +417,7 @@ export function registerAuthRoutes(app: Express): void {
 
     res.json({
       authenticated: true,
+      credential_type: req.authKind,
       account: {
         id: req.sessionAccount.account_id,
         provider: req.sessionAccount.provider,
@@ -416,10 +429,24 @@ export function registerAuthRoutes(app: Express): void {
     });
   });
 
+  registerAuthLogoutRoute(app);
+}
+
+export function registerAuthLogoutRoute(
+  app: Express,
+  deps: AuthLogoutRouteDeps = defaultAuthLogoutRouteDeps,
+): void {
   app.post("/auth/logout", async (req: AuthenticatedRequest, res) => {
     const cookies = parseCookies(req.headers.cookie);
     if (cookies.letagents_session) {
-      await deleteSessionByToken(cookies.letagents_session);
+      await deps.deleteSessionByToken(cookies.letagents_session);
+    }
+    const authorization = parseBearerAuthorization(req.headers.authorization);
+    if (req.authKind === "session" && authorization.kind === "token") {
+      await deps.deleteSessionByToken(authorization.token);
+    }
+    if (req.authKind === "owner_token" && req.sessionAccount && "token_id" in req.sessionAccount) {
+      await deps.deleteOwnerTokenById(req.sessionAccount.token_id);
     }
     clearSessionCookie(res);
     res.json({ success: true });

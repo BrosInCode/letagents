@@ -11,6 +11,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   resolve: {
+    dedupe: ["vue"],
     alias: {
       '@': resolve(__dirname, 'src'),
     },
@@ -19,6 +20,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': 'http://localhost:3001',
+      '/conversations': 'http://localhost:3001',
       '/auth': 'http://localhost:3001',
       '/downloads': 'http://localhost:3001',
       '/rooms': 'http://localhost:3001',

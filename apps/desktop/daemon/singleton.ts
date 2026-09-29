@@ -119,7 +119,7 @@ export class DaemonSingleton {
   }
 }
 
-export function defaultDaemonPaths(home = process.env.HOME ?? ""): { lockPath: string; socketPath: string; manifestPath: string; legacyManifestPath: string; auditPath: string; attemptsPath: string; attemptsRoot: string; workspaceRoot: string; workerBindingsPath: string } {
+export function defaultDaemonPaths(home = process.env.HOME ?? ""): { lockPath: string; socketPath: string; manifestPath: string; legacyManifestPath: string; auditPath: string; lifecycleLogPath: string; attemptsPath: string; attemptsRoot: string; workspaceRoot: string; workerBindingsPath: string } {
   const root = join(home, ".letagents");
   return {
     lockPath: join(root, "daemon.lock"),
@@ -127,6 +127,7 @@ export function defaultDaemonPaths(home = process.env.HOME ?? ""): { lockPath: s
     manifestPath: join(root, "daemon-state.sqlite"),
     legacyManifestPath: join(root, "daemon-manifest.json"),
     auditPath: join(root, "daemon-audit.jsonl"),
+    lifecycleLogPath: join(root, "daemon-lifecycle.jsonl"),
     attemptsPath: join(root, "attempts.json"),
     attemptsRoot: join(root, "attempt-data"),
     workspaceRoot: root,

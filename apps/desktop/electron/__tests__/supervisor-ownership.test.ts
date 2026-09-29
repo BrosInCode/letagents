@@ -18,18 +18,19 @@ test("supervisor list projects canonical agent keys for renderer mention routing
     ipcSource.indexOf('"desktop:supervisor:list-agents"'),
     ipcSource.indexOf('"desktop:supervisor:create-agent"'),
   );
-  assert.match(listHandler, /readDesktopSupervisorGrantAgentKeysForEntries/);
-  assert.match(listHandler, /agentKey:/);
+  assert.match(listHandler, /projectDesktopSupervisorAgentKeys\(entries\)/);
+  const pushBridge = ipcSource.slice(ipcSource.indexOf('if (!supervisorStateBridgeRegistered)'));
+  assert.match(pushBridge, /projectDesktopSupervisorAgentKeys\(snapshot.entries\)/);
 });
 
-test("supervisor creation admits available Cursor profiles before claiming durable ownership", () => {
+test("supervisor creation admits supervised profiles before claiming durable ownership", () => {
   const createHandler = ipcSource.slice(
     ipcSource.indexOf('"desktop:supervisor:create-agent"'),
     ipcSource.indexOf('"desktop:supervisor:resume-ownership-transfer"'),
   );
   assert.match(createHandler, /provider !== "cursor"/);
   assert.doesNotMatch(createHandler, /provider === "cursor" && input\.permissionProfileId !== "read_only"/);
-  assert.match(createHandler, /assertManagedAgentPermissionProfileAvailable\(provider, input\.permissionProfileId\)/);
+  assert.match(createHandler, /assertManagedAgentPermissionProfileAvailable\(provider, input\.permissionProfileId, "supervised"\)/);
   assert.ok(
     createHandler.indexOf("assertManagedAgentPermissionProfileAvailable")
       < createHandler.indexOf("createPausedAndInstall"),
@@ -46,7 +47,7 @@ test("paused launch recovery reuses guarded ownership without requiring a user C
   assert.match(resumeHandler, /listDesktopManagedAgentSessions\(entry\.roomId\)/);
   assert.match(resumeHandler, /stopDesktopManagedAgent/);
   assert.match(resumeHandler, /compareAndSetDesiredState\(manifest\.id, "paused", "running"\)/);
-  assert.match(resumeHandler, /supervisorGrantCoordinator\.prepareEntryForActivation\(entry\)/);
+  assert.match(resumeHandler, /supervisorGrantCoordinator\.activateEntry\(entry/);
   assert.doesNotMatch(resumeHandler, /refreshInstalledLetAgentsMcpServerAuth/);
 });
 
@@ -57,7 +58,9 @@ test("explicit provider recovery prepares authority without entering activation 
   );
   assert.match(recoveryHandler, /prepareEntryForRuntimeRecovery\(entry\)/);
   assert.doesNotMatch(recoveryHandler, /prepareEntryForActivation\(entry\)/);
-  assert.match(recoveryHandler, /recoverAgentRuntime\(entry\.id\)/);
+  assert.match(recoveryHandler, /input\.recovery\?\.mode === "reconnect"/);
+  assert.match(recoveryHandler, /reconnectEntry\(entry\)/);
+  assert.match(recoveryHandler, /recoverAgentRuntime\(entry\.id, input\.recovery\)/);
 });
 
 test("supervisor ownership claims before legacy teardown and activates last", async () => {

@@ -1,5 +1,12 @@
 <template>
-  <div class="room-shell" :data-theme="theme">
+  <RoomAuthGate
+    v-if="roomAccessState !== 'authorized'"
+    :checking="roomAccessState === 'checking'"
+    :loading="auth.isSigningIn.value"
+    @signIn="handleSignIn"
+  />
+
+  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :style="roomViewportStyle">
     <!-- Drawer -->
     <RoomDrawer
       :open="drawerOpen"
@@ -79,6 +86,8 @@
       :roomTitle="roomTitle"
       :focusParentAddress="focusParentAddress"
       :focusSettings="focusSettings"
+      :creation-error="creationError"
+      :created-room="createdRoom"
       :creatingFocusRoomTaskId="creatingFocusRoomTaskId"
       :creatingAdHocFocusRoom="creatingAdHocFocusRoom"
       :sharingFocusResult="sharingFocusResult"
@@ -92,6 +101,7 @@
       @toggleStalePromptMute="handleToggleStalePromptMute"
       @addTask="handleAddTask"
       @updateTask="handleUpdateTask"
+      @closeTask="clearBoardTask"
       @leaseAction="handleTaskLeaseAction"
       @reviewLeaseAction="handleTaskReviewLeaseAction"
       @focusTask="handleFocusTask"
@@ -100,6 +110,7 @@
       @createAdHocFocusRoom="handleCreateAdHocFocusRoom"
       @openFocusRoom="handleOpenFocusRoom"
       @openParentRoom="handleOpenParentRoom"
+      @retryCreatedRoom="retryCreatedRoom"
       @shareResults="handleShareFocusResults"
       @updateFocusSettings="handleUpdateFocusSettings"
     />
@@ -141,7 +152,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
@@ -151,8 +162,10 @@ import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
 import { messageThreadParentId } from '@/components/room/messageThreading'
 import RoomConnectionError from './room/RoomConnectionError.vue'
+import RoomAuthGate from './room/RoomAuthGate.vue'
 import RoomMobileNav from './room/RoomMobileNav.vue'
 import RoomTabPanels from './room/RoomTabPanels.vue'
+import { resolveRoomAccessState } from './room/roomAuth'
 import Composer from '@/components/room/Composer.vue'
 import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
@@ -209,6 +222,7 @@ const {
   shareFocusRoomResult,
   updateFocusRoomSettings,
   restoreSession,
+  leaveRoom,
   renameRoom,
   loadOlderMessages,
   loadActivityHistory,
@@ -222,10 +236,44 @@ const {
 } = useRoom()
 const auth = useAuth()
 const toast = useToast()
+const roomSessionValidated = ref(false)
+const roomAuthLifecycleReady = ref(false)
+
+const roomAccessState = computed(() => resolveRoomAccessState({
+  hasCheckedSession: roomSessionValidated.value && auth.hasCheckedSession.value,
+  isCheckingSession: auth.isCheckingSession.value,
+  isSignedIn: auth.isSignedIn.value,
+}))
 
 const drawerOpen = ref(false)
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
+const roomViewportStyle = ref<Record<string, string>>({})
+const compactViewport = ref(false)
+
+function syncRoomViewport() {
+  const viewport = window.visualViewport
+  // The software keyboard can resize only the visual viewport. Keep the
+  // composer above it without reflowing the room during pinch-to-zoom.
+  if (!viewport || viewport.scale !== 1) return
+  compactViewport.value = viewport.height < 360
+  roomViewportStyle.value = {
+    '--room-viewport-height': `${viewport.height}px`,
+    '--room-viewport-top': `${viewport.offsetTop}px`,
+  }
+}
+
+onMounted(() => {
+  syncRoomViewport()
+  window.visualViewport?.addEventListener('resize', syncRoomViewport)
+  window.visualViewport?.addEventListener('scroll', syncRoomViewport)
+})
+
+onUnmounted(() => {
+  window.visualViewport?.removeEventListener('resize', syncRoomViewport)
+  window.visualViewport?.removeEventListener('scroll', syncRoomViewport)
+})
+
 const searchQuery = ref('')
 const roomTabPanelsRef = ref<InstanceType<typeof RoomTabPanels> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
@@ -267,6 +315,10 @@ function openBoardTask(taskId: string) {
     },
   })
 }
+
+function clearBoardTask() {
+  if (route.query.task) void router.replace({ query: { ...route.query, task: undefined } })
+}
 const {
   senderName,
   roomTitle,
@@ -289,6 +341,9 @@ const {
 const {
   focusDraftTaskId,
   creatingFocusRoomTaskId,
+  creationError,
+  createdRoom,
+  retryCreatedRoom,
   creatingAdHocFocusRoom,
   sharingFocusResult,
   updatingFocusSettings,
@@ -369,6 +424,14 @@ async function handleSignIn() {
 
 onMounted(async () => {
   await auth.checkSession()
+  roomSessionValidated.value = true
+
+  if (!auth.isSignedIn.value) {
+    leaveRoom()
+    roomAuthLifecycleReady.value = true
+    return
+  }
+
   const roomId = route.params.roomId as string
   if (roomId) {
     await joinRoom(roomId)
@@ -376,16 +439,42 @@ onMounted(async () => {
     await restoreSession()
   }
 
-  applyRouteTab(route.query.view)
+  if (auth.isSignedIn.value) {
+    applyRouteTab(route.query.view)
+  } else {
+    leaveRoom()
+  }
+  roomAuthLifecycleReady.value = true
 })
 
 watch(() => route.params.roomId, async (newId) => {
   selectedReply.value = null
+  if (!auth.isSignedIn.value) return
+
   if (newId) {
     await joinRoom(newId as string)
   }
 
   applyRouteTab(route.query.view)
+})
+
+watch(() => auth.isSignedIn.value, async (signedIn, wasSignedIn) => {
+  if (!roomAuthLifecycleReady.value || !auth.hasCheckedSession.value || signedIn === wasSignedIn) return
+
+  if (!signedIn) {
+    drawerOpen.value = false
+    rulesBoardOpen.value = false
+    selectedReply.value = null
+    leaveRoom()
+    return
+  }
+
+  const roomId = route.params.roomId as string
+  if (roomId) {
+    await joinRoom(roomId)
+  } else {
+    await restoreSession()
+  }
 })
 
 watch(activeTab, async (tab) => {
@@ -424,14 +513,20 @@ watch(activeTab, async (tab) => {
 
 <style scoped>
 .room-shell {
+  position: fixed;
+  top: var(--room-viewport-top, 0px);
+  inset-inline: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   height: 100vh;
+  height: var(--room-viewport-height, 100dvh);
   background: var(--bg-0, #09090b);
   color: var(--text, #fafafa);
 }
 
-@media (max-width: 768px) {
-  .room-shell { height: 100dvh; }
-}
+.room-shell[data-compact-viewport="true"] :deep(.chat-header) { height: 44px; }
+.room-shell[data-compact-viewport="true"] :deep(.chat-title p) { display: none; }
+.room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
+
 </style>

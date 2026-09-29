@@ -12,13 +12,15 @@ import type {
   DesktopSendRoomMessageResult,
 } from "../../ipc-types.js";
 import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
-import { apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
+import { agentApiFetch, apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
 import {
-  consumeLocalStagedAttachments,
+  readLocalStagedAttachments,
+  releaseLocalStagedAttachments,
   publishLocalAttachmentPayload,
 } from "../attachments.js";
 import {
   addLocalChatMessage,
+  getLocalChatMessageByClientId,
   claimUnsyncedLocalChatMessages,
   getLatestLocalChatMessages,
   getLocalChatMessagesBefore,
@@ -64,16 +66,7 @@ import {
 
 export { mapCloudRoomMessagePayload, mapRoomMessagePayload, type RoomMessagePayload };
 
-export function desktopMessageAccountRoutingRequest(
-  headers: Record<string, string> = {},
-): { headers: Record<string, string> } {
-  return {
-    headers: {
-      ...headers,
-      "X-LetAgents-Desktop-Client": "1",
-    },
-  };
-}
+
 
 type RoomThreadInboxPayload = {
   threads: Array<{
@@ -90,9 +83,15 @@ export async function sendDesktopRoomMessage(
   replyTo?: string | null,
   attachments: Array<{ upload_id: string }> = [],
   threadRootId?: string | null,
+  clientMessageId?: string | null,
+  messageNamespace?: string | null,
 ): Promise<DesktopSendRoomMessageResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedText = text.trim();
+  const clientId = clientMessageId?.trim() || null;
+  if (clientId && !/^desktop-send:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientId)) {
+    throw new Error("Invalid outgoing message identity.");
+  }
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before sending a message.");
   }
@@ -104,12 +103,25 @@ export async function sendDesktopRoomMessage(
   const sender =
     storedAuth.account?.displayName || storedAuth.account?.login || "Desktop";
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (messageNamespace && messageNamespace !== [trimmedRoomIdentifier, storage.effectiveMode, storage.localRoom?.roomIdentifier || "cloud"].join(":")) {
+    throw new Error("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
+  }
   if (storage.effectiveMode === "local") {
     const localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
       trimmedRoomIdentifier,
     );
-    const localAttachments = consumeLocalStagedAttachments(
+    const readerKey = await resolveLocalThreadReaderKey(storedAuth);
+    const existing = clientId ? await getLocalChatMessageByClientId(localRoomIdentifier, clientId, { readerKey }) : null;
+    if (existing) {
+      if (existing.sender !== sender || existing.source !== "browser" || existing.text !== trimmedText || (existing.thread_reply_to_id || null) !== (replyTo || null)
+        || (threadRootId && existing.thread_root_id !== threadRootId)
+        || existing.attachments?.map(item => item.id).sort().join("|") !== attachments.map(item => item.upload_id).sort().join("|")) {
+        throw new Error("Outgoing message identity was reused with different content.");
+      }
+      return { message: mapRoomMessagePayload(existing) };
+    }
+    const localAttachments = readLocalStagedAttachments(
       localRoomIdentifier,
       attachments,
     );
@@ -120,8 +132,10 @@ export async function sendDesktopRoomMessage(
       thread_root_id: threadRootId || null,
       source: "browser",
       attachments: localAttachments,
-      readerKey: await resolveLocalThreadReaderKey(storedAuth),
+      readerKey,
+      idempotency_key: clientId,
     });
+    releaseLocalStagedAttachments(localRoomIdentifier, attachments);
     return {
       message: mapRoomMessagePayload(message),
     };
@@ -135,15 +149,14 @@ export async function sendDesktopRoomMessage(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
       method: "POST",
-      ...desktopMessageAccountRoutingRequest({
-        "Content-Type": "application/json",
-      }),
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sender,
         text: trimmedText,
         reply_to: replyTo || null,
         thread_root_id: threadRootId || null,
         attachments,
+        ...(clientId ? { client_message_id: clientId } : {}),
       }),
     },
   );
@@ -201,7 +214,6 @@ export async function getDesktopRoomThread(
     has_older?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedThreadRootId)}/thread?${params.toString()}`,
-    desktopMessageAccountRoutingRequest(),
   );
   const summary = mapRoomMessageThreadSummary(
     page.summary ?? page.root.thread ?? null,
@@ -274,8 +286,7 @@ export async function getDesktopRoomThreads(
   try {
     const page = await apiFetch<RoomThreadInboxPayload>(
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/threads?${params.toString()}`,
-      desktopMessageAccountRoutingRequest(),
-    );
+      );
     return mapThreadInboxPayload(page);
   } catch (error) {
     if (isMissingThreadRouteError(error)) {
@@ -378,7 +389,7 @@ export async function markDesktopRoomThreadRead(
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify({ message_id: trimmedMessageId }),
     },
@@ -432,7 +443,6 @@ export async function getDesktopRoomMessagesBefore(
     has_more?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages?limit=${encodeURIComponent(String(limit))}&before=${encodeURIComponent(trimmedBeforeMessageId)}`,
-    desktopMessageAccountRoutingRequest(),
   );
 
   return {
@@ -476,7 +486,6 @@ export async function getDesktopRoomMessage(
   );
   const response = await apiFetch<{ message?: RoomMessagePayload | null }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}`,
-    desktopMessageAccountRoutingRequest(),
   );
   return response.message ? mapRoomMessagePayload(response.message) : null;
 }
@@ -594,7 +603,7 @@ async function registerLocalPublisherForCloudSync(
   ) {
     throw new Error("Local publisher session is no longer authoritative.");
   }
-  const created = await apiFetch<{
+  const created = await agentApiFetch<{
     session_id?: string;
     session_token?: string;
     agent_key?: string | null;
@@ -634,7 +643,7 @@ async function disconnectCloudSyncWorkerSession(
   cloudRoomIdentifier: string,
   session: CloudSyncWorkerSession,
 ): Promise<void> {
-  await apiFetch(
+  await agentApiFetch(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions/${encodeURIComponent(session.session_id)}/disconnect`,
     {
       method: "POST",
@@ -759,13 +768,12 @@ export async function syncDesktopLocalChatRoom(
       continue;
     }
 
-    const cloudMessage = await apiFetch<RoomMessagePayload>(
+    const cloudMessage = await (publishAsWorker ? agentApiFetch : apiFetch)<RoomMessagePayload>(
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(publishAsHuman ? { "X-LetAgents-Desktop-Client": "1" } : {}),
         },
         body: JSON.stringify({
           sender: localMessage.sender,
@@ -773,7 +781,11 @@ export async function syncDesktopLocalChatRoom(
           reply_to: replyToCloudId,
           thread_root_id: threadRootCloudId,
           attachments,
-          client_message_id: localMessage.sync_key,
+          // Local publication re-stages attachments after an uncertain upload.
+          // Keep its established key-only replay contract separate from the
+          // renderer's immutable direct-send payload identity.
+          client_message_id: localMessage.sync_key.startsWith("desktop-send:")
+            ? `local-chat:${localMessage.sync_key}` : localMessage.sync_key,
           ...(publishAsWorker && effectivePublisherSession ? {
             agent_session_id: effectivePublisherSession.session_id,
             agent_session_token: effectivePublisherSession.session_token,
@@ -940,11 +952,11 @@ async function patchCloudTask(
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify({
         ...patch,
-        desktop_human_client: true,
+
       }),
     },
   );
@@ -971,7 +983,7 @@ async function syncLocalRoomTasks(input: {
         description: task.description,
         created_by: task.createdBy || "human",
         source_message_id: clientTaskId,
-        desktop_human_client: true,
+
         client_task_id: clientTaskId,
       };
       let syncedCloudTaskId = cloudTaskId;
@@ -987,7 +999,7 @@ async function syncLocalRoomTasks(input: {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "X-LetAgents-Desktop-Client": "1",
+
             },
             body: JSON.stringify(createBody),
           },

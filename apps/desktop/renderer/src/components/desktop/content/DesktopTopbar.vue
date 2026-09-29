@@ -1,5 +1,5 @@
 <template>
-  <header class="app-topbar" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-topbar">
+  <header class="app-topbar" :data-room-entry="activeEntry.type === 'room'" :data-inbox-entry="activeEntry.type === 'inbox'" data-testid="desktop-topbar">
     <button
       v-if="sidebarMode === 'hidden'"
       class="ghost-button sidebar-reveal-button"
@@ -24,6 +24,7 @@
         System
       </button>
       <button
+        v-if="activeEntry.type !== 'inbox'"
         class="primary-button"
         type="button"
         :disabled="loading"

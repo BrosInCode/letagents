@@ -2,18 +2,24 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import {
   createRenderer,
   defineComponent,
+  effectScope,
   h,
   isReadonly,
   nextTick,
   ref,
+  reactive,
+  watch,
   type App,
 } from "vue";
 import type {
   DesktopRoomMessage,
   DesktopRoomThreadInboxPage,
+  DesktopSupervisorStateSnapshot,
 } from "../../electron/ipc-types";
 import {
   normalizeExactGitHubUrl,
@@ -23,30 +29,23 @@ import {
   shouldRefreshEventsForMessage,
   useDesktopRoomGitHubEvents,
 } from "../src/components/desktop/content/room-shell/useDesktopRoomGitHubEvents";
-import {
-  mergeThreadInboxPages,
-  useDesktopRoomInbox,
-} from "../src/components/desktop/content/room-shell/useDesktopRoomInbox";
+import { mergeThreadInboxPages } from "../src/composables/useNeedsYou";
 
 const shellSource = read("../src/components/desktop/content/DesktopRoomShell.vue");
-const inboxSource = read("../src/components/desktop/content/room-shell/useDesktopRoomInbox.ts");
 const githubEventsSource = read("../src/components/desktop/content/room-shell/useDesktopRoomGitHubEvents.ts");
 
-test("the desktop room shell composes bounded inbox and GitHub event owners", () => {
+test("the desktop room shell keeps GitHub events and no longer owns an inbox", () => {
   assert.ok(shellSource.split("\n").length < 3_000);
-  assert.match(shellSource, /useDesktopRoomInbox\(/);
+  assert.doesNotMatch(shellSource, /useDesktopRoomInbox|RoomInboxView|id: "inbox"/);
   assert.match(shellSource, /useDesktopRoomGitHubEvents\(/);
   assert.doesNotMatch(shellSource, /desktopIpc\.room\.getThreads/);
   assert.doesNotMatch(shellSource, /desktopIpc\.room\.getGitHubEvents/);
   assert.doesNotMatch(shellSource, /letagents-desktop:room-inbox-seen/);
-  assert.match(inboxSource, /roomApi\.getThreads/);
-  assert.match(inboxSource, /letagents-desktop:room-inbox-seen/);
   assert.match(githubEventsSource, /desktopIpc\.room\.getGitHubEvents/);
   assert.match(githubEventsSource, /parseGitHubEvent/);
 });
 
 test("extracted room shell domains do not import the shell component", () => {
-  assert.doesNotMatch(inboxSource, /DesktopRoomShell/);
   assert.doesNotMatch(githubEventsSource, /DesktopRoomShell/);
 });
 
@@ -85,67 +84,6 @@ test("GitHub room and event routing keeps exact and object URL identities distin
   assert.equal(shouldPreviewComposerEvent(githubMessage, Date.parse("2026-08-12T12:00:30.000Z")), false);
 });
 
-test("mounted inbox fences stale room loads and releases subscriptions and timers", async () => {
-  const first = deferred<DesktopRoomThreadInboxPage>();
-  const second = deferred<DesktopRoomThreadInboxPage>();
-  const calls: string[] = [];
-  let rentalUnsubscribes = 0;
-  const clearedTimers: unknown[] = [];
-  installWindow({
-    room: {
-      getThreads: async (roomIdentifier: string) => {
-        calls.push(roomIdentifier);
-        return roomIdentifier === "room-a" ? first.promise : second.promise;
-      },
-    },
-    rental: {
-      getProviderDashboard: async () => ({ pendingRequests: [] }),
-      onProviderEvent: () => () => { rentalUnsubscribes += 1; },
-    },
-  }, clearedTimers);
-
-  const room = ref({ identifier: "room-a" } as never);
-  const namespace = ref("room-a:cloud");
-  const activeTab = ref<"chat" | "inbox">("chat");
-  let inbox!: ReturnType<typeof useDesktopRoomInbox>;
-  const mounted = mountHarness(() => {
-    inbox = useDesktopRoomInbox({
-      room,
-      namespace,
-      activeTab,
-      tasks: ref([]),
-      githubEvents: ref(null),
-      reasoningSessions: ref([]),
-      presence: ref([]),
-      sourceStates: ref(null),
-      fallbackRepository: ref(null),
-      openThread: () => undefined,
-      openBoardTask: () => undefined,
-      openGitHubEvent: () => undefined,
-      refreshRoom: () => undefined,
-    });
-  });
-  await nextTick();
-  assert.deepEqual(calls, ["room-a"]);
-
-  room.value = { identifier: "room-b" } as never;
-  namespace.value = "room-b:cloud";
-  await nextTick();
-  assert.deepEqual(calls, ["room-a", "room-b"]);
-  second.resolve(threadPage("room-b-message"));
-  await nextTick();
-  await nextTick();
-  first.resolve(threadPage("room-a-message"));
-  await nextTick();
-  await nextTick();
-  assert.equal(inbox.inboxItems.value[0]?.id, "thread:room-b-message");
-
-  inbox.scheduleInboxRefresh(60_000);
-  mounted.unmount();
-  assert.equal(rentalUnsubscribes, 1);
-  assert.ok(clearedTimers.length >= 1, "unmount clears its pending inbox timer");
-});
-
 test("mounted GitHub events owns readonly selection and resets it on room change", async () => {
   installWindow({ room: {} }, []);
   const room = ref({ identifier: "github.com/a/one" } as never);
@@ -178,30 +116,149 @@ test("mounted GitHub events owns readonly selection and resets it on room change
   mounted.unmount();
 });
 
+test("supervisor room subscriptions reject detached callbacks and queued frames through A to B to A", () => {
+  const fixture = supervisorSubscriptionFixture();
+  try {
+    fixture.controls.mount();
+    const firstA = fixture.subscriptions[0]!;
+    assert.equal(firstA.roomIdentifier, "room-a");
+    firstA.callback(stateSnapshot(4));
+    const staleFrame = fixture.controls.state().frame!;
+    fixture.controls.navigate("room-b");
+    assert.equal(firstA.stops, 1);
+    assert.ok(fixture.cancelledFrames.has(staleFrame));
+    assert.equal(fixture.controls.state().pending, null);
+    assert.equal(fixture.controls.state().lastSnapshot, null);
+    firstA.callback(stateSnapshot(50));
+    assert.equal(fixture.controls.state().lastSnapshot, null, "old callback cannot mark a new room fresh");
+
+    const roomB = fixture.subscriptions[1]!;
+    assert.equal(roomB.roomIdentifier, "room-b");
+    const snapshotB = stateSnapshot(5);
+    roomB.callback(snapshotB);
+    const frameB = fixture.controls.state().frame!;
+    fixture.frames.get(staleFrame)!();
+    assert.equal(fixture.controls.state().frame, frameB, "canceled old frame cannot clear the new frame");
+    assert.equal(fixture.controls.state().pending, snapshotB);
+    fixture.frames.get(frameB)!();
+    assert.deepEqual(fixture.accepted, [snapshotB]);
+
+    fixture.controls.navigate("room-a");
+    firstA.callback(stateSnapshot(100));
+    roomB.callback(stateSnapshot(101));
+    assert.equal(fixture.controls.state().pending, null, "same-room return does not revive an old subscription");
+    assert.equal(fixture.controls.state().lastSnapshot, null);
+    assert.equal(fixture.subscriptions.filter((subscription) => subscription.stops === 0).length, 1);
+    const currentA = stateSnapshot(6);
+    fixture.subscriptions[2]!.callback(currentA);
+    fixture.frames.get(fixture.controls.state().frame!)!();
+    assert.deepEqual(fixture.accepted, [snapshotB, currentA]);
+  } finally { fixture.dispose(); }
+});
+
+test("supervisor scoped subscription preserves queue ordering, empty updates and unmount cleanup", () => {
+  const fixture = supervisorSubscriptionFixture();
+  fixture.controls.mount();
+  const subscription = fixture.subscriptions[0]!;
+  subscription.callback(stateSnapshot(10));
+  const frame = fixture.controls.state().frame!;
+  subscription.callback(stateSnapshot(9));
+  subscription.callback({ ...stateSnapshot(100), daemonGeneration: 6 });
+  assert.equal(fixture.controls.state().pending?.sequence, 10);
+  const nextGeneration = { ...stateSnapshot(1), daemonGeneration: 8 };
+  subscription.callback(nextGeneration);
+  assert.equal(fixture.controls.state().frame, frame);
+  fixture.frames.get(frame)!();
+  assert.deepEqual(fixture.accepted, [nextGeneration], "new generation and empty entries are not suppressed");
+
+  subscription.callback(stateSnapshot(100));
+  fixture.frames.get(fixture.controls.state().frame!)!();
+  subscription.callback({ ...stateSnapshot(0), daemonGeneration: 8 });
+  fixture.frames.get(fixture.controls.state().frame!)!();
+  assert.deepEqual(fixture.accepted, [nextGeneration], "accepted generation/sequence cannot regress after a frame commits");
+
+  subscription.callback({ ...stateSnapshot(2), daemonGeneration: 8 });
+  const pendingFrame = fixture.controls.state().frame!;
+  fixture.dispose();
+  assert.ok(fixture.cancelledFrames.has(pendingFrame));
+  assert.equal(subscription.stops, 1);
+  assert.equal(fixture.controls.state().active, false);
+  assert.equal(fixture.controls.state().pending, null);
+  assert.equal(fixture.controls.state().lastSnapshot, null);
+  subscription.callback({ ...stateSnapshot(3), daemonGeneration: 8 });
+  fixture.frames.get(pendingFrame)!();
+  fixture.controls.navigate("room-b");
+  assert.equal(fixture.subscriptions.length, 1);
+  assert.deepEqual(fixture.accepted, [nextGeneration]);
+});
+
+function stateSnapshot(sequence: number): DesktopSupervisorStateSnapshot {
+  return { daemonGeneration: 7, sequence, entries: [] };
+}
+
+/** Execute the shell's actual subscription/queue code with inert bridge and RAF
+ * boundaries, without importing its application services or mounting a UI. */
+function supervisorSubscriptionFixture() {
+  const script = shellSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)![1]!;
+  const parsed = ts.createSourceFile("DesktopRoomShell.ts", script, ts.ScriptTarget.Latest, true);
+  const variableNames = new Set([
+    "unsubscribeSupervisorState", "supervisorStateSubscriptionMounted", "supervisorStateSubscriptionEpoch",
+    "supervisorStateSubscriptionActive", "supervisorStateLastSnapshotAtMs", "pendingSupervisorStateSnapshot", "supervisorStateFrame",
+    "supervisorStateDaemonGeneration", "supervisorStateSequence", "supervisorEntriesMutationVersion",
+  ]);
+  const functionNames = new Set(["stopSupervisorStateSubscription", "syncSupervisorStateSubscription", "queueSupervisorStateSnapshot", "acceptSupervisorStateSnapshot"]);
+  const source = parsed.statements.filter((statement) =>
+    (ts.isVariableStatement(statement) && statement.declarationList.declarations.some((declaration) => variableNames.has(declaration.name.getText(parsed))))
+    || (ts.isFunctionDeclaration(statement) && functionNames.has(statement.name?.text ?? ""))
+    || (ts.isExpressionStatement(statement) && /^watch\(\(\) => props\.room\.identifier, syncSupervisorStateSubscription,/.test(statement.getText(parsed)))
+  ).map((statement) => statement.getText(parsed)).join("\n");
+  assert.match(source, /flush: "sync"/);
+  assert.match(shellSource, /onMounted\([\s\S]*?supervisorStateSubscriptionMounted = true;\s+syncSupervisorStateSubscription\(\)/);
+  assert.match(shellSource, /onBeforeUnmount\([\s\S]*?supervisorStateSubscriptionMounted = false;\s+stopSupervisorStateSubscription\(\)/);
+  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const subscriptions: Array<{ roomIdentifier?: string; callback: (snapshot: DesktopSupervisorStateSnapshot) => void; stops: number }> = [];
+  const frames = new Map<number, () => void>();
+  const cancelledFrames = new Set<number>();
+  const accepted: DesktopSupervisorStateSnapshot[] = [];
+  const scope = effectScope();
+  const controls = scope.run(() => runInNewContext(`${compiled}
+    ({
+      mount() { supervisorStateSubscriptionMounted = true; syncSupervisorStateSubscription(); },
+      navigate(roomIdentifier) { props.room.identifier = roomIdentifier; },
+      unmount() { supervisorStateSubscriptionMounted = false; stopSupervisorStateSubscription(); },
+      state() { return { active: supervisorStateSubscriptionActive, lastSnapshot: supervisorStateLastSnapshotAtMs, pending: pendingSupervisorStateSnapshot, frame: supervisorStateFrame }; }
+    });`, {
+    props: reactive({ room: { identifier: "room-a" } }),
+    watch,
+    desktopIpc: { supervisor: { onState(callback: (snapshot: DesktopSupervisorStateSnapshot) => void, roomIdentifier?: string) {
+      const subscription = { callback, roomIdentifier, stops: 0 };
+      subscriptions.push(subscription);
+      return () => { subscription.stops += 1; };
+    } } },
+    window: {
+      requestAnimationFrame(callback: () => void) { const id = frames.size + 1; frames.set(id, callback); return id; },
+      cancelAnimationFrame(id: number) { cancelledFrames.add(id); },
+    },
+    supervisorStatus: { value: { generation: 7 } },
+    supervisorEntries: { value: [] },
+    supervisorEntriesHaveLoaded: { value: false },
+    supervisorEntriesUpdatedAt: { value: null },
+    supervisorEntriesState: { value: "loading" },
+    supervisorEntriesError: { value: null },
+    selectedAgentDetailTarget: { value: null },
+    mergeSupervisorStateSnapshotEntries: (_current: unknown, next: unknown) => next,
+    refreshSupervisorStatus: async () => undefined,
+    refreshOpenAgentInspectorRuntimeControl: () => undefined,
+    reconcilePendingRetirementFromDurableState: (snapshot: DesktopSupervisorStateSnapshot) => accepted.push(snapshot),
+  })) as {
+    mount(): void; navigate(roomIdentifier: string): void; unmount(): void;
+    state(): { active: boolean; lastSnapshot: number | null; pending: DesktopSupervisorStateSnapshot | null; frame: number | null };
+  };
+  return { controls, subscriptions, frames, cancelledFrames, accepted, dispose() { controls.unmount(); scope.stop(); } };
+}
+
 function thread(id: string, text: string) {
   return { root: { id, text }, summary: { unreadCount: 1 } };
-}
-
-function threadPage(id: string): DesktopRoomThreadInboxPage {
-  return {
-    threads: [{
-      root: {
-        id,
-        text: id,
-        sender: "Emmy",
-        timestamp: "2026-08-12T12:00:00.000Z",
-      },
-      summary: { unreadCount: 1, hasUnread: true, latestReply: null },
-    }],
-    hasMore: false,
-    unreadThreadCount: 1,
-  } as unknown as DesktopRoomThreadInboxPage;
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
 }
 
 interface HostNode { parent: HostNode | null; children: HostNode[] }

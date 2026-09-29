@@ -2,6 +2,16 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopApi } from "./ipc-types.js";
 
 const api: DesktopApi = {
+  conversations: {
+    list: () => ipcRenderer.invoke("desktop:conversations:list"),
+    people: query => ipcRenderer.invoke("desktop:conversations:people", query),
+    create: (ids, from) => ipcRenderer.invoke("desktop:conversations:create", ids, from),
+    messages: (id, cursor) => ipcRenderer.invoke("desktop:conversations:messages", id, cursor),
+    send: (id, text, clientId) => ipcRenderer.invoke("desktop:conversations:send", id, text, clientId),
+    update: (id, changes) => ipcRenderer.invoke("desktop:conversations:update", id, changes),
+    block: (id, blocked) => ipcRenderer.invoke("desktop:conversations:block", id, blocked),
+    changes: after => ipcRenderer.invoke("desktop:conversations:changes", after),
+  },
   ui: {
     onOpenSettings: (callback) => {
       const listener = () => callback();
@@ -34,9 +44,15 @@ const api: DesktopApi = {
     },
   },
   app: {
+    readWorkspaceReviewPage: input => ipcRenderer.invoke("desktop:app:read-workspace-review-page", input),
+    closeWorkspaceReview: input => ipcRenderer.invoke("desktop:app:close-workspace-review", input),
+    readWorkspaceReview: input => ipcRenderer.invoke("desktop:app:read-workspace-review", input),
+    resolveWorkspaceFiles: input => ipcRenderer.invoke("desktop:app:resolve-workspace-files", input),
+    openWorkspaceFile: input => ipcRenderer.invoke("desktop:app:open-workspace-file", input),
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
     openGitHubUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-github-url", url),
     openExternalUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-external-url", url),
+    openCredentialStorage: () => ipcRenderer.invoke("desktop:app:open-credential-storage"),
     getGitHubPullRequestStats: (url: string) =>
       ipcRenderer.invoke("desktop:app:get-github-pull-request-stats", url),
   },
@@ -67,6 +83,11 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:open-model:save-settings", input),
   },
   room: {
+    getNeedsYou: (includeUpdates = false) => ipcRenderer.invoke("desktop:room:needs-you", includeUpdates),
+    getKnowledge: (room, type) => ipcRenderer.invoke("desktop:room:knowledge", room, type),
+    createKnowledge: (room, type, input) => ipcRenderer.invoke("desktop:room:knowledge-create", room, type, input),
+    reviseKnowledge: (room, type, id, input) => ipcRenderer.invoke("desktop:room:knowledge-revise", room, type, id, input),
+    getMemoryHistory: (room, id) => ipcRenderer.invoke("desktop:room:memory-history", room, id),
     listAccountRooms: (options) => ipcRenderer.invoke("desktop:room:list-account-rooms", options ?? {}),
     updateAccountRoom: (roomIdentifier: string, updates) =>
       ipcRenderer.invoke("desktop:room:update-account-room", roomIdentifier, updates),
@@ -77,6 +98,8 @@ const api: DesktopApi = {
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
     getLiveMetadata: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:get-live-metadata", roomIdentifier),
+    pollAgentWork: (roomIdentifier: string, afterCursor?: string | null) =>
+      ipcRenderer.invoke("desktop:room:poll-agent-work", roomIdentifier, afterCursor ?? null),
     getLatestMessages: (roomIdentifiers: string[]) =>
       ipcRenderer.invoke("desktop:room:get-latest-messages", roomIdentifiers),
     getMessage: (roomIdentifier: string, messageId: string) =>
@@ -116,8 +139,10 @@ const api: DesktopApi = {
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
+      clientMessageId?: string | null,
+      messageNamespace?: string | null,
     ) =>
-      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null),
+      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null, clientMessageId ?? null, messageNamespace ?? null),
     addTask: (roomIdentifier: string, input) =>
       ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>
@@ -144,6 +169,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:create-task-focus-room", roomIdentifier, taskId),
     createAdHocFocusRoom: (roomIdentifier: string, title: string) =>
       ipcRenderer.invoke("desktop:room:create-ad-hoc-focus-room", roomIdentifier, title),
+    getConversationRouting: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-conversation-routing", roomIdentifier),
+    setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
     updateFocusRoomSettings: (roomIdentifier: string, focusKey: string, settings) =>
       ipcRenderer.invoke("desktop:room:update-focus-room-settings", roomIdentifier, focusKey, settings),
     concludeFocusRoom: (roomIdentifier: string, focusKey: string, summary: string, details, quickClose) =>
@@ -229,11 +256,13 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:auth:start-device-flow", roomIdentifier ?? null),
     pollDeviceFlow: (requestId?: string | null) =>
       ipcRenderer.invoke("desktop:auth:poll-device-flow", requestId ?? null),
+    cancelDeviceFlow: () => ipcRenderer.invoke("desktop:auth:cancel-device-flow"),
     openVerification: (url: string) => ipcRenderer.invoke("desktop:auth:open-verification", url),
     signOut: () => ipcRenderer.invoke("desktop:auth:sign-out"),
   },
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),
+    getStorageStatus: () => ipcRenderer.invoke("desktop:supervisor-grant:get-storage-status"),
     provision: (input) => ipcRenderer.invoke("desktop:supervisor-grant:provision", input),
     revoke: () => ipcRenderer.invoke("desktop:supervisor-grant:revoke"),
   },
@@ -258,6 +287,11 @@ const api: DesktopApi = {
     },
     openRoom: (rootPath) => ipcRenderer.invoke("desktop:repos:open-room", rootPath),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
+    listProjectBindings: () => ipcRenderer.invoke("desktop:repos:list-project-bindings"),
+    migrateProjectBindings: (candidates) =>
+      ipcRenderer.invoke("desktop:repos:migrate-project-bindings", candidates),
+    connectProject: (context) =>
+      ipcRenderer.invoke("desktop:repos:connect-project", context),
     createWorktree: (repoRoot, branch) =>
       ipcRenderer.invoke("desktop:repos:create-worktree", repoRoot, branch),
   },
@@ -292,7 +326,15 @@ const api: DesktopApi = {
     runAgentProviderSetup: (providerId, input) =>
       ipcRenderer.invoke("desktop:workers:run-agent-provider-setup", providerId, input),
   },
+  maintenance: process.platform === "darwin" ? {
+    getStatus: () => ipcRenderer.invoke("desktop:maintenance:status"),
+    restart: resume => ipcRenderer.invoke("desktop:maintenance:restart", resume),
+  } : undefined,
   supervisor: {
+    listHostToolRules: agentId => ipcRenderer.invoke("desktop:supervisor:list-host-tool-rules", agentId),
+    revokeHostToolRule: input => ipcRenderer.invoke("desktop:supervisor:revoke-host-tool-rule", input),
+    listHostApprovals: roomIdentifier => ipcRenderer.invoke("desktop:supervisor:list-host-approvals", roomIdentifier),
+    decideHostApproval: input => ipcRenderer.invoke("desktop:supervisor:decide-host-approval", input),
     getStatus: () => ipcRenderer.invoke("desktop:supervisor:get-status"),
     listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
     createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
@@ -309,21 +351,40 @@ const api: DesktopApi = {
     getAgentInspectorDetail: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-inspector-detail", input),
     getAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-configuration", input),
     updateAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:update-agent-configuration", input),
+    applyAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:apply-agent-configuration", input),
     prepareRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:prepare-room-move", input),
     commitRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:commit-room-move", input),
     getRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-room-move", input),
     getCurrentRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-current-room-move", input),
     retireAgent: (input) => ipcRenderer.invoke("desktop:supervisor:retire-agent", input),
+    getRetirementStatus: (input) => ipcRenderer.invoke("desktop:supervisor:get-retirement-status", input),
     purgeAgent: (input) => ipcRenderer.invoke("desktop:supervisor:purge-agent", input),
     onActivity: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
       ipcRenderer.on("desktop:supervisor:activity", listener);
       return () => ipcRenderer.off("desktop:supervisor:activity", listener);
     },
-    onState: (callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+    onState: (callback, roomIdentifier) => {
+      let active = true;
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+        if (!active) return;
+        // Filter before contextBridge copies the callback argument. Empty room
+        // snapshots still carry removals and the subscription heartbeat.
+        callback(roomIdentifier === undefined ? payload : {
+          ...payload,
+          entries: payload.entries.filter((entry) => entry.roomId === roomIdentifier),
+        });
+      };
       ipcRenderer.on("desktop:supervisor:state", listener);
-      return () => ipcRenderer.off("desktop:supervisor:state", listener);
+      return () => {
+        active = false;
+        ipcRenderer.off("desktop:supervisor:state", listener);
+      };
+    },
+    onRetirement: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:supervisor:retirement", listener);
+      return () => ipcRenderer.off("desktop:supervisor:retirement", listener);
     },
     onLaunchEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

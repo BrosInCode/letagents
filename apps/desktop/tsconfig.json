@@ -9,9 +9,12 @@
     "isolatedModules": true,
     "esModuleInterop": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "paths": { "vue": ["./node_modules/vue"] }
   },
   "include": [
+    "demos/board/**/*.ts",
+    "demos/board/**/*.vue",
     "renderer/src/**/*.ts",
     "renderer/src/**/*.d.ts",
     "renderer/src/**/*.tsx",

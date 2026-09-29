@@ -21,9 +21,15 @@ export interface DesktopUpdateStatus {
   availableVersion: string | null;
   releaseName: string | null;
   releaseNotes: string | null;
+  /** Signed full-archive size from the release manifest. */
+  updateSize: number | null;
+  /** Current network transfer. This can be smaller than updateSize for differential updates. */
   downloadProgress: DesktopUpdateProgress | null;
   lastCheckedAt: string | null;
   error: string | null;
+  failureStage: "check" | "download" | "install" | null;
+  downloadAttempt: number | null;
+  downloadAttemptLimit: number | null;
   unsupportedReason: string | null;
   canCheck: boolean;
   canInstall: boolean;

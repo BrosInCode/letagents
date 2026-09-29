@@ -42,14 +42,6 @@ export function restartBackoffMs(consecutiveFailures: number): number {
   return Math.min(MAX_BACKOFF_MS, 1_000 * 2 ** Math.max(0, consecutiveFailures - 1));
 }
 
-/** A slow turn alone must never be treated as a dead worker. */
-export function watchdogShouldEscalate(snapshot: Pick<ReconcilerSnapshot, "nowMs" | "lastPollAtMs" | "addressedMessagesWaiting" | "pokeIgnored">, thresholdMs: number): boolean {
-  return snapshot.lastPollAtMs !== null
-    && snapshot.nowMs - snapshot.lastPollAtMs >= thresholdMs
-    && snapshot.addressedMessagesWaiting > 0
-    && snapshot.pokeIgnored;
-}
-
 export function decideReconciliation(snapshot: ReconcilerSnapshot, watchdogThresholdMs: number): ReconcilerDecision {
   if (snapshot.desiredState === "stopped") {
     if (["stopped", "failed", "absent"].includes(snapshot.observedState)) {
@@ -63,7 +55,7 @@ export function decideReconciliation(snapshot: ReconcilerSnapshot, watchdogThres
   }
 
   const needsRecovery = snapshot.desiredState === "running"
-    && (snapshot.observedState === "failed" || snapshot.observedState === "stopped" || snapshot.observedState === "absent" || watchdogShouldEscalate(snapshot, watchdogThresholdMs));
+    && (snapshot.observedState === "failed" || snapshot.observedState === "stopped" || snapshot.observedState === "absent");
   if (needsRecovery) {
     // A prompt/session rotation cannot cross a lease authorization boundary.
     if (snapshot.activeLease && !snapshot.fencedRebindProven) {

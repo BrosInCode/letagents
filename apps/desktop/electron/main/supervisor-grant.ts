@@ -6,7 +6,11 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { apiFetch, DesktopApiError } from "./auth.js";
-import type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "../ipc-types/supervisor-grant.js";
+import type {
+  DesktopProvisionSupervisorGrantInput,
+  DesktopSecureStorageStatus,
+  DesktopSupervisorGrantMetadata,
+} from "../ipc-types/supervisor-grant.js";
 
 const require = createRequire(import.meta.url);
 
@@ -29,9 +33,27 @@ type StoredGrant = DesktopSupervisorGrantMetadata & {
    * rewrites the grant through the ownership-aware lifecycle.
    */
   credentialLifecycle: "tracked" | "unknown";
+  /** Server-authenticated stable owner fence; absent on legacy/rental grants. */
+  ownerAccountId?: string;
+  /** Server-authenticated stable grant scope; absent on legacy/rental grants. */
+  scopeKey?: string;
   encryptedToken: string;
 };
 type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: string };
+
+/**
+ * The supervisor bearer is intentionally never persisted without OS-backed
+ * encryption. Callers use this typed failure to offer a self-service macOS
+ * Keychain recovery instead of reducing it to a generic launch error.
+ */
+export class DesktopSecureStorageUnavailableError extends Error {
+  readonly code = "desktop_secure_storage_unavailable";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "DesktopSecureStorageUnavailableError";
+  }
+}
 /**
  * The entry map is intentionally separate from the encrypted bearer records:
  * it is durable, non-secret identity metadata used to recover a daemon-inbox
@@ -78,6 +100,11 @@ const agentLifecycleTails = new Map<string, Promise<void>>();
 
 export type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "../ipc-types/supervisor-grant.js";
 
+export type DesktopSupervisorGrantAuthority = {
+  ownerAccountId: string;
+  scopeKey: string;
+};
+
 function getStorage(): SecretStorage {
   try {
     const electron = require("electron") as { safeStorage?: SecretStorage };
@@ -105,9 +132,48 @@ function storePath(): string {
 // passed through main-process functions and is never put in IPC return values.
 export function encryptSupervisorGrantForStorage(token: string, storage = getStorage()): string {
   if (!storage.isEncryptionAvailable()) {
-    throw new Error("macOS Keychain encryption is unavailable; host grant was not stored.");
+    throw new DesktopSecureStorageUnavailableError(
+      "macOS Keychain encryption is unavailable; host grant was not stored.",
+    );
   }
-  return `safe:${storage.encryptString(token).toString("base64")}`;
+  try {
+    return `safe:${storage.encryptString(token).toString("base64")}`;
+  } catch {
+    throw new DesktopSecureStorageUnavailableError(
+      "OS-backed encryption became unavailable while saving the host grant.",
+    );
+  }
+}
+
+/**
+ * Exercise the same encrypt/decrypt path used for a real supervisor bearer.
+ * `isEncryptionAvailable()` alone can report a false positive while the macOS
+ * login Keychain is locked or its password is out of sync.
+ */
+export function getDesktopSupervisorGrantStorageStatus(
+  storage = getStorage(),
+  platform = process.platform,
+): DesktopSecureStorageStatus {
+  const unavailable = (): DesktopSecureStorageStatus => ({
+    available: false,
+    detail: platform === "darwin"
+      ? "Unlock your macOS login Keychain, then check again."
+      : "Secure credential storage is unavailable. Unlock it, then check again.",
+    canOpenCredentialStorage: platform === "darwin",
+  });
+  if (!storage.isEncryptionAvailable()) return unavailable();
+  try {
+    const probe = `letagents-secure-storage-probe:${randomUUID()}`;
+    const encrypted = storage.encryptString(probe);
+    if (storage.decryptString(encrypted) !== probe) return unavailable();
+    return {
+      available: true,
+      detail: "Agent credentials can be stored securely on this computer.",
+      canOpenCredentialStorage: false,
+    };
+  } catch {
+    return unavailable();
+  }
 }
 
 export function decryptSupervisorGrantFromStorage(value: string, storage = getStorage()): string | null {
@@ -124,6 +190,32 @@ function toMetadata(response: {
     allowedRoomIds: response.allowed_room_ids, allowedAgentKeys: response.allowed_agent_keys,
     generation: response.current_generation, expiresAt: response.expires_at,
   };
+}
+
+function authorityFromResponse(response: {
+  owner_account_id: string;
+  scope_key: string;
+}): DesktopSupervisorGrantAuthority {
+  const ownerAccountId = response.owner_account_id.trim();
+  const scopeKey = response.scope_key.trim();
+  if (!ownerAccountId || !scopeKey) {
+    throw new Error("Supervisor grant authority provenance is incomplete.");
+  }
+  return { ownerAccountId, scopeKey };
+}
+
+function authorityFromStored(stored: Pick<StoredGrant, "ownerAccountId" | "scopeKey">): DesktopSupervisorGrantAuthority | null {
+  const ownerAccountId = stored.ownerAccountId?.trim() ?? "";
+  const scopeKey = stored.scopeKey?.trim() ?? "";
+  return ownerAccountId && scopeKey ? { ownerAccountId, scopeKey } : null;
+}
+
+function normalizeAuthority(authority: DesktopSupervisorGrantAuthority | null): DesktopSupervisorGrantAuthority | null {
+  if (!authority) return null;
+  const ownerAccountId = authority.ownerAccountId.trim();
+  const scopeKey = authority.scopeKey.trim();
+  if (!ownerAccountId || !scopeKey) throw new Error("Supervisor grant authority provenance is incomplete.");
+  return { ownerAccountId, scopeKey };
 }
 
 /** Stable local key for a provider agent identity; never use a display name. */
@@ -143,6 +235,8 @@ function metadataOf(stored: StoredGrant): DesktopSupervisorGrantMetadata {
     entryId: _entryId,
     lastInstalledDaemonGeneration: _daemonGeneration,
     credentialLifecycle: _credentialLifecycle,
+    ownerAccountId: _ownerAccountId,
+    scopeKey: _scopeKey,
     encryptedToken: _secret,
     ...metadata
   } = stored;
@@ -222,8 +316,11 @@ function registryFrom(value: unknown): StoredGrantRegistry | null {
     for (const [storedKey, grant] of Object.entries(legacy.grants)) {
       if (!grant?.grantId?.trim() || !grant.encryptedToken?.trim()) continue;
       const exactJournal = credentialRevocations[grant.grantId];
+      const { ownerAccountId: _ownerAccountId, scopeKey: _scopeKey, ...grantWithoutAuthority } = grant;
+      const authority = authorityFromStored(grant);
       grants[storedKey] = {
-        ...grant,
+        ...grantWithoutAuthority,
+        ...(authority ?? {}),
         credentialLifecycle: (registryVersion >= 6 && grant.credentialLifecycle === "tracked")
           || (exactJournal?.grantId === grant.grantId
             && exactJournal.sessionOwnerGrantId === grant.grantId
@@ -317,11 +414,14 @@ export interface DesktopSupervisorGrantLifecycleInput {
   roomScopes: Array<{ requestedRoomId: string; canonicalRoomId: string }>;
   ttlMs?: number;
   lastInstalledDaemonGeneration?: number | null;
+  /** Stable owner/scope tuple an authenticated replacement must preserve. */
+  expectedAuthority?: DesktopSupervisorGrantAuthority;
 }
 
 type SupervisorGrantApiResponse = {
   grant_id: string; host_id: string; installation_id: string; allowed_room_ids: string[];
   allowed_agent_keys: string[]; current_generation: number; expires_at: string; supervisor_grant: string;
+  owner_account_id: string; scope_key: string;
 };
 
 type GrantStorageOptions = { storage?: SecretStorage; apiFetch?: typeof apiFetch };
@@ -353,8 +453,10 @@ export async function provisionDesktopSupervisorGrant(
   options: GrantStorageOptions = {},
 ): Promise<DesktopSupervisorGrantMetadata> {
   const storage = options.storage ?? getStorage();
-  if (!storage.isEncryptionAvailable()) {
-    throw new Error("macOS Keychain encryption is unavailable; host grant was not provisioned.");
+  if (!getDesktopSupervisorGrantStorageStatus(storage).available) {
+    throw new DesktopSecureStorageUnavailableError(
+      "macOS Keychain encryption is unavailable; host grant was not provisioned.",
+    );
   }
   const request = options.apiFetch ?? apiFetch;
   return withRegistryMutation(async () => {
@@ -370,6 +472,7 @@ export async function provisionDesktopSupervisorGrant(
       body: JSON.stringify({ host_id: input.hostId, installation_id: input.installationId, allowed_room_ids: input.allowedRoomIds, allowed_agent_keys: input.allowedAgentKeys, ttl_ms: input.ttlMs }),
     });
     const metadata = toMetadata(response);
+    const authority = authorityFromResponse(response);
     try {
       if (metadata.allowedAgentKeys.length !== 1) {
         throw new Error("A per-agent desktop grant must be scoped to exactly one agent identity.");
@@ -378,7 +481,7 @@ export async function provisionDesktopSupervisorGrant(
       const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant, storage);
       await writeRegistry({
         version: 7,
-        grants: { [agentKey]: { ...metadata, agentKey, credentialLifecycle: "tracked", encryptedToken } },
+        grants: { [agentKey]: { ...metadata, ...authority, agentKey, credentialLifecycle: "tracked", encryptedToken } },
         entryAgentKeys: registry?.entryAgentKeys ?? {},
         credentialRevocations: registry?.credentialRevocations ?? {},
         purgeRevocationReceipts: registry?.purgeRevocationReceipts ?? {},
@@ -410,6 +513,7 @@ export async function readDesktopSupervisorGrantToken(): Promise<string | null> 
 /** Main-process only. Renderer IPC intentionally exposes metadata, never this value. */
 export async function readDesktopSupervisorGrantForAgent(agentKey: string, options: GrantStorageOptions = {}): Promise<{
   metadata: DesktopSupervisorGrantMetadata;
+  authority: DesktopSupervisorGrantAuthority | null;
   token: string;
   entryId: string | null;
   lastInstalledDaemonGeneration: number | null;
@@ -419,7 +523,7 @@ export async function readDesktopSupervisorGrantForAgent(agentKey: string, optio
   const stored = registry?.grants[canonicalSupervisorGrantAgentKey(agentKey)];
   const token = stored && decryptSupervisorGrantFromStorage(stored.encryptedToken, options.storage);
   return stored && token ? {
-    metadata: metadataOf(stored), token,
+    metadata: metadataOf(stored), authority: authorityFromStored(stored), token,
     entryId: stored.entryId?.trim() || null,
     lastInstalledDaemonGeneration: stored.lastInstalledDaemonGeneration ?? null,
     credentialLifecycle: stored.credentialLifecycle,
@@ -433,11 +537,13 @@ export async function readDesktopSupervisorGrantForAgent(agentKey: string, optio
 export async function replaceDesktopSupervisorGrantForAgent(input: {
   agentKey: string;
   metadata: DesktopSupervisorGrantMetadata;
+  authority?: DesktopSupervisorGrantAuthority | null;
   token: string;
   entryId?: string;
   lastInstalledDaemonGeneration?: number | null;
 }, options: GrantStorageOptions = {}): Promise<void> {
   const agentKey = canonicalSupervisorGrantAgentKey(input.agentKey);
+  const authority = normalizeAuthority(input.authority ?? null);
   if (!input.token.trim()) throw new Error("A supervisor grant is required.");
   if (input.metadata.allowedAgentKeys.length !== 1
     || canonicalSupervisorGrantAgentKey(input.metadata.allowedAgentKeys[0]!) !== agentKey) {
@@ -493,6 +599,7 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
     }
     registry.grants[agentKey] = {
       ...input.metadata,
+      ...(authority ?? {}),
       agentKey,
       entryId,
       lastInstalledDaemonGeneration: installedGeneration,
@@ -503,7 +610,7 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
   });
 }
 
-function reusableDesktopSupervisorGrant(input: {
+function matchingDesktopSupervisorGrantScope(input: {
   existing: Awaited<ReturnType<typeof readDesktopSupervisorGrantForAgent>>;
   agentKey: string;
   entryId: string;
@@ -515,8 +622,6 @@ function reusableDesktopSupervisorGrant(input: {
   if (!existing || existing.entryId !== input.entryId) return false;
   const metadata = existing.metadata;
   if (metadata.hostId !== input.hostId || metadata.installationId !== input.installationId) return false;
-  if (!Number.isFinite(new Date(metadata.expiresAt).getTime())
-    || new Date(metadata.expiresAt).getTime() <= Date.now()) return false;
   if (metadata.allowedAgentKeys.length !== 1) return false;
   try {
     if (canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== input.agentKey) return false;
@@ -532,6 +637,7 @@ function reusableDesktopSupervisorGrant(input: {
 export async function storeDesktopSupervisorGrantForAgent(input: {
   agentKey: string;
   metadata: DesktopSupervisorGrantMetadata;
+  authority?: DesktopSupervisorGrantAuthority | null;
   token: string;
   entryId?: string;
   lastInstalledDaemonGeneration?: number | null;
@@ -605,16 +711,35 @@ async function ensureExactWorkerSessionAndGrantRevoked(input: {
       throw new Error(`Cannot revoke ${entryId}: the worker session belongs to another grant without a complete durable acknowledgement.`);
     }
   } else if (!progress.sessionEndedAt) {
-    const ended = await request<Record<string, unknown>>(
-      `/supervisor-host-grants/${encodeURIComponent(progress.grantId)}/worker-sessions/${encodeURIComponent(agentSessionId)}/end`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${input.grant.token}` },
-        body: JSON.stringify({ generation: input.grant.metadata.generation }),
-      },
-    );
-    if (ended.session_id !== agentSessionId || typeof ended.ended_at !== "string" || !ended.ended_at.trim()) {
-      throw new Error(`Worker-session termination for ${entryId} returned an invalid exact-session acknowledgement.`);
+    let endedAt: string;
+    let ownerCascadeRevokedAt: string | null = null;
+    try {
+      const ended = await request<Record<string, unknown>>(
+        `/supervisor-host-grants/${encodeURIComponent(progress.grantId)}/worker-sessions/${encodeURIComponent(agentSessionId)}/end`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${input.grant.token}` },
+          body: JSON.stringify({ generation: input.grant.metadata.generation }),
+        },
+      );
+      if (ended.session_id !== agentSessionId || typeof ended.ended_at !== "string" || !ended.ended_at.trim()) {
+        throw new Error(`Worker-session termination for ${entryId} returned an invalid exact-session acknowledgement.`);
+      }
+      endedAt = ended.ended_at;
+    } catch (error) {
+      if (!authoritativeProvisionFailure(error)) throw error;
+      // A stopped agent can retain a worker longer than its short-lived host
+      // grant. Owner revocation is the recovery authority: the server revokes
+      // the grant fence first and then ends every worker session owned by it.
+      // A 404 on retry is authoritative because that cascade is the only path
+      // that removes an owner-visible grant.
+      try {
+        await request(`/supervisor-host-grants/${encodeURIComponent(progress.grantId)}`, { method: "DELETE" });
+      } catch (revokeError) {
+        if (!(revokeError instanceof DesktopApiError && revokeError.status === 404)) throw revokeError;
+      }
+      ownerCascadeRevokedAt = new Date().toISOString();
+      endedAt = ownerCascadeRevokedAt;
     }
     await withRegistryMutation(async () => {
       const registry = await readRegistry();
@@ -626,7 +751,8 @@ async function ensureExactWorkerSessionAndGrantRevoked(input: {
         || current.agentSessionId !== agentSessionId) {
         throw new Error(`Worker-session termination for ${entryId} succeeded, but its durable acknowledgement journal changed.`);
       }
-      current.sessionEndedAt = ended.ended_at as string;
+      current.sessionEndedAt = endedAt;
+      if (ownerCascadeRevokedAt) current.grantRevokedAt = ownerCascadeRevokedAt;
       await writeRegistry(registry);
     });
     progress = (await readRegistry())?.credentialRevocations[grantId];
@@ -712,13 +838,16 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   options: GrantStorageOptions = {},
 ): Promise<{
   metadata: DesktopSupervisorGrantMetadata;
+  authority: DesktopSupervisorGrantAuthority | null;
   token: string;
   entryId: string;
   lastInstalledDaemonGeneration: number | null;
 }> {
   const storage = options.storage ?? getStorage();
-  if (!storage.isEncryptionAvailable()) {
-    throw new Error("macOS Keychain encryption is unavailable; host grant was not provisioned.");
+  if (!getDesktopSupervisorGrantStorageStatus(storage).available) {
+    throw new DesktopSecureStorageUnavailableError(
+      "macOS Keychain encryption is unavailable; host grant was not provisioned.",
+    );
   }
   const agentKey = canonicalSupervisorGrantAgentKey(input.agentKey);
   const entryId = input.entryId.trim();
@@ -731,11 +860,14 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   // being repaired.
   return withAgentGrantLifecycle(entryId, async () => {
     const existing = await readDesktopSupervisorGrantForAgent(agentKey, { storage });
-    if (!input.forceReprovision && existing && reusableDesktopSupervisorGrant({
+    const sameScope = matchingDesktopSupervisorGrantScope({
       existing, agentKey, entryId, hostId, installationId, allowedRoomIds,
-    })) {
+    });
+    if (!input.forceReprovision && !input.sourceAgentSessionId && existing && sameScope
+      && Date.parse(existing.metadata.expiresAt) > Date.now()) {
       return {
         metadata: existing.metadata,
+        authority: existing.authority,
         token: existing.token,
         entryId,
         lastInstalledDaemonGeneration: existing.lastInstalledDaemonGeneration,
@@ -751,7 +883,7 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
         await ensureExactWorkerSessionAndGrantRevoked({
           entryId, agentKey, grant: existing, agentSessionId: input.sourceAgentSessionId,
         }, { ...options, storage, apiFetch: request });
-      } else {
+      } else if (!sameScope) {
         // Preserve the old encrypted mapping until a validated replacement is
         // durably written. A crash after DELETE therefore retries the exact
         // scope and recovers an upserted grant instead of wedging on 409.
@@ -763,6 +895,9 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
       }
     }
 
+    // Exact-scope owner provisioning already rotates the grant in place,
+    // including after expiry or a lost handoff response. Revoking it first
+    // would end the live worker session and strand its task/review leases.
     const response = await provisionWithLostResponseRecovery(request, {
       host_id: hostId,
       installation_id: installationId,
@@ -771,21 +906,36 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
       ttl_ms: input.ttlMs,
     });
     const metadata = toMetadata(response);
+    const authority = authorityFromResponse(response);
     try {
-      if (metadata.installationId !== installationId || metadata.allowedAgentKeys.length !== 1
+      if (metadata.hostId !== hostId || metadata.installationId !== installationId
+        || metadata.allowedAgentKeys.length !== 1
         || canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== agentKey) {
         throw new Error("The provisioned desktop grant was not scoped to the requested agent entry.");
       }
+      const expected = input.expectedAuthority ?? (sameScope ? existing?.authority : null);
+      const expectedAuthority = expected
+        ? normalizeAuthority(expected)
+        : null;
+      if (expectedAuthority
+        && (authority.ownerAccountId !== expectedAuthority.ownerAccountId
+          || authority.scopeKey !== expectedAuthority.scopeKey)) {
+        throw new Error("The provisioned desktop grant changed its stable owner authority coordinates.");
+      }
       await replaceDesktopSupervisorGrantForAgent({
-        agentKey, metadata, token: response.supervisor_grant, entryId,
+        agentKey, metadata, authority, token: response.supervisor_grant, entryId,
         lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
       }, { storage });
       return {
-        metadata, token: response.supervisor_grant, entryId,
+        metadata, authority, token: response.supervisor_grant, entryId,
         lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
       };
     } catch (error) {
-      await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
+      // A failed Keychain write must leave an existing recovered grant
+      // recoverable by another exact-scope POST, not terminate its worker.
+      if (response.grant_id !== existing?.metadata.grantId) {
+        await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
+      }
       throw error;
     }
   });
@@ -812,6 +962,38 @@ export async function readDesktopSupervisorGrantAgentKeysForEntries(
     }
   }
   return result;
+}
+
+/** Both list reads and live snapshots need the same durable renderer identity. */
+export async function projectDesktopSupervisorAgentKeys<T extends { id: string; agentKey?: string | null; localRoomId?: string }>(
+  entries: readonly T[],
+): Promise<Array<T & { agentKey: string | null }>> {
+  const agentKeys = await readDesktopSupervisorGrantAgentKeysForEntries(entries.filter(entry => !entry.localRoomId).map(entry => entry.id))
+    .catch(() => new Map<string, string>());
+  return entries.map(entry => ({ ...entry, agentKey: entry.localRoomId ? `local/supervised/${entry.id}` : entry.agentKey ?? agentKeys.get(entry.id) ?? null }));
+}
+
+/**
+ * Return durable proof that this exact entry's remote host authority was
+ * revoked. Missing registry state is deliberately not proof: only the
+ * persisted DELETE acknowledgement, with no replacement authority beside it,
+ * can close a daemon-inbox retirement after a renderer missed its event.
+ */
+export async function readDesktopSupervisorGrantRevocationAttestationForEntry(
+  entryId: string,
+): Promise<"exact" | "none" | null> {
+  const normalizedEntryId = entryId.trim();
+  if (!normalizedEntryId) return null;
+  const registry = await readRegistry();
+  if (!registry) return null;
+  const receipt = registry.purgeRevocationReceipts[normalizedEntryId];
+  if (!receipt) return null;
+  const hasReplacementAuthority = Boolean(
+    registry.entryAgentKeys[normalizedEntryId]
+    || registry.grants[receipt.agentKey]
+    || Object.values(registry.grants).some((grant) => grant.entryId?.trim() === normalizedEntryId),
+  );
+  return hasReplacementAuthority ? null : receipt.workerSessionAttestation;
 }
 
 /** Owner-authenticated purge fence: exact worker end, then grant revoke, then one durable receipt. */
@@ -857,6 +1039,7 @@ export async function revokeDesktopSupervisorGrantForEntry(
       agentKey,
       grant: {
         metadata: metadataOf(stored),
+        authority: authorityFromStored(stored),
         token,
         entryId: normalizedEntryId,
         lastInstalledDaemonGeneration: stored.lastInstalledDaemonGeneration ?? null,
@@ -909,10 +1092,27 @@ export async function revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(
     }
     const receipt = registry.purgeRevocationReceipts[normalizedEntryId];
     if (receipt) {
-      if (receipt.workerSessionAttestation !== "none" || receipt.agentSessionId !== null || receipt.sessionEndedAt !== null) {
-        throw new Error(`Cannot attest grant-only revocation for ${normalizedEntryId}: its durable receipt belongs to a worker-session purge.`);
+      const hasReplacementAuthority = Boolean(
+        registry.entryAgentKeys[normalizedEntryId]
+        || Object.values(registry.grants).some((grant) => grant.entryId?.trim() === normalizedEntryId),
+      );
+      if (hasReplacementAuthority) {
+        throw new Error(`Cannot attest grant-only revocation for ${normalizedEntryId}: replacement authority exists beside its durable receipt.`);
       }
-      return;
+      if (receipt.workerSessionAttestation === "none"
+        && receipt.agentSessionId === null && receipt.sessionEndedAt === null) {
+        return;
+      }
+      // Exact retirement is stronger than the later no-session observation:
+      // it proves both the worker END and parent-grant DELETE were durable.
+      // Resume/replacement clears this entry receipt before installing fresh
+      // authority, so an orphaned exact receipt is safe for restart or purge.
+      if (receipt.workerSessionAttestation === "exact"
+        && typeof receipt.agentSessionId === "string" && receipt.agentSessionId.trim()
+        && typeof receipt.sessionEndedAt === "string" && receipt.sessionEndedAt.trim()) {
+        return;
+      }
+      throw new Error(`Cannot attest grant-only revocation for ${normalizedEntryId}: its durable receipt is inconsistent.`);
     }
     const agentKey = registry.entryAgentKeys[normalizedEntryId];
     if (!agentKey) {

@@ -8,10 +8,11 @@ import { createTaskLeaseRow, type CreateTaskLeaseRowInput } from "./lease-rows.j
 
 export async function expireStaleTaskLeases(
   roomId: string,
-  at: Date = new Date()
+  at: Date = new Date(),
+  executor: Pick<typeof db, "update"> = db
 ): Promise<number> {
   const now = at.toISOString();
-  const expired = await db
+  const expired = await executor
     .update(task_leases)
     .set({
       status: "expired",

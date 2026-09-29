@@ -5,12 +5,22 @@ import {
   assertDesktopArchitecture,
   assertDesktopVersion,
   createDesktopReleaseManifest,
+  createDesktopUpdaterConfig,
   createElectronUpdaterMacManifest,
   createSquirrelMacReleaseManifest,
   desktopAssetNames,
   desktopMetadataNames,
   normalizeReleaseBaseUrl,
 } from "./release-metadata.mjs";
+
+test("packaged updater configuration selects the architecture feed and stable cache", () => {
+  assert.deepEqual(createDesktopUpdaterConfig({ arch: "arm64" }), {
+    provider: "generic",
+    url: "https://downloads.letagents.chat/desktop/feeds/arm64/",
+    updaterCacheDirName: "letagents-desktop-updater",
+  });
+  assert.throws(() => createDesktopUpdaterConfig({ arch: "ia32" }), /support arm64 or x64/);
+});
 
 test("release assets are immutable and architecture-specific", () => {
   assert.deepEqual(desktopAssetNames({ version: "0.1.0", arch: "arm64" }), {

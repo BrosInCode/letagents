@@ -20,8 +20,8 @@ export interface GitRoomContext {
   repoRoom: string | null;
   currentBranch: string | null;
   defaultBranch: string | null;
-  activeRefRoom: string | null;
-  activeRoom: string | null;
+  activeRefRoomLocator: string | null;
+  activeRoomLocator: string | null;
   activeRoomKind: "repo" | "branch" | null;
 }
 
@@ -105,7 +105,7 @@ function isLikelyDefaultBranchName(branchName: string | null): boolean {
   return branchName === "main" || branchName === "master" || branchName === "trunk";
 }
 
-export function buildGitRefRoomIdentity(input: {
+export function buildGitRefRoomLocator(input: {
   repoRoom: string;
   refType: GitRefRoomType;
   refName: string;
@@ -116,7 +116,7 @@ export function buildGitRefRoomIdentity(input: {
     return null;
   }
 
-  return `git-room:github.com:${repositoryFullName.toLowerCase()}:${input.refType}:${encodeRefForRoomId(refName)}`;
+  return `github.com/${repositoryFullName.toLowerCase()}/focus/git:${input.refType}:${encodeRefForRoomId(refName)}`;
 }
 
 export function getGitCurrentBranch(cwd?: string): string | null {
@@ -149,9 +149,9 @@ export function buildActiveGitRoomContext(input: {
         : !isLikelyDefaultBranchName(currentBranch)
     )
   );
-  const activeRefRoom =
+  const activeRefRoomLocator =
     input.repoRoom && currentBranch && shouldUseBranchRoom
-      ? buildGitRefRoomIdentity({
+      ? buildGitRefRoomLocator({
           repoRoom: input.repoRoom,
           refType: "branch",
           refName: currentBranch,
@@ -162,9 +162,9 @@ export function buildActiveGitRoomContext(input: {
     repoRoom: input.repoRoom,
     currentBranch,
     defaultBranch,
-    activeRefRoom,
-    activeRoom: activeRefRoom ?? input.repoRoom,
-    activeRoomKind: activeRefRoom ? "branch" : input.repoRoom ? "repo" : null,
+    activeRefRoomLocator,
+    activeRoomLocator: activeRefRoomLocator ?? input.repoRoom,
+    activeRoomKind: activeRefRoomLocator ? "branch" : input.repoRoom ? "repo" : null,
   };
 }
 

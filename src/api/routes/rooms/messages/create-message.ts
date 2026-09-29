@@ -1,3 +1,4 @@
+import { isHumanAppWrite } from "../../../request/app-session.js";
 import type { Express } from "express";
 
 import {
@@ -10,7 +11,6 @@ import { parseCreateMessageBody } from "../../../messages/inputs.js";
 import {
   hasAgentSessionCredentials,
   isAgentLikeSender,
-  isDesktopHumanWrite,
 } from "./request-identity.js";
 import { resolveParticipantRoom } from "./helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
@@ -33,7 +33,7 @@ export function registerCreateMessageRoute(
       const replyToMessageId = deps.parseOptionalReplyToMessageId(body.reply_to);
       const threadRootMessageId = deps.parseOptionalThreadRootMessageId(body.thread_root_id);
       const attachments = normalizeMessageAttachmentReferences(body.attachments);
-      const desktopHumanWrite = isDesktopHumanWrite(req, sessionCredentials);
+      const desktopHumanWrite = isHumanAppWrite(req, sessionCredentials);
       const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
         || req.authKind === "agent_session"
         || hasAgentSessionCredentials(sessionCredentials)
@@ -85,19 +85,27 @@ export function registerCreateMessageRoute(
           ?? null,
         account_agent_routing: desktopHumanWrite,
       });
-      await deps.rememberRoomParticipantFromMessage({
+      // The message and routing receipts are already saved. Bookkeeping must
+      // not turn that success into a failed send or delay its acknowledgement.
+      void Promise.resolve().then(() => deps.rememberRoomParticipantFromMessage({
         projectId: project.id,
         sender: normalizedSender,
+        agentKey: workerIdentity?.agent_key ?? null,
         source,
         sessionAccount: req.sessionAccount,
         timestamp: message.timestamp,
+      })).catch((error) => {
+        console.error(`[room messages] failed to remember participant for ${project.id}`, error);
       });
       if (req.sessionAccount && (source === "browser" || source === "agent")) {
-        await deps.rememberAccountRoom({
-          accountId: req.sessionAccount.account_id,
+        const accountId = req.sessionAccount.account_id;
+        void Promise.resolve().then(() => deps.rememberAccountRoom({
+          accountId,
           roomId: project.id,
           displayName: project.display_name,
           source: "open_room",
+        })).catch((error) => {
+          console.error(`[room messages] failed to remember account room for ${project.id}`, error);
         });
       }
       const { account_agent_routing: createdRouting, ...responseMessage } = message;

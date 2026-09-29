@@ -54,11 +54,11 @@
           v-else-if="thinkingCard"
           :card="thinkingCard"
           compact
-          kicker="Thinking update"
+          kicker="Work update"
         />
         <LongMessageContent
           v-else-if="message.text"
-          :text="message.text || ''"
+          :text="visibleText"
           :html="renderedContent"
           :messageId="message.id"
           @taskReferenceClick="emit('openTask', $event)"
@@ -126,6 +126,7 @@ import StalePromptActions from './chat-message/StalePromptActions.vue'
 import ThreadMarker from './chat-message/ThreadMarker.vue'
 import {
   formatMessageTime,
+  messageDisplayText,
   isAmbientSystemMessage,
   renderMessageContent,
   stripStatusPrefix,
@@ -203,7 +204,7 @@ function closeContextMenu(restoreFocus = false) {
 async function copyMessageFromMenu() {
   closeContextMenu(true)
   try {
-    await navigator.clipboard.writeText(props.message.text || '')
+    await navigator.clipboard.writeText(visibleText.value)
   } catch {
     // Clipboard may be unavailable; text remains selectable.
   }
@@ -263,7 +264,7 @@ const identity = computed(() => resolveAgentIdentity(props.message.sender, props
 const displayName = computed(() => identity.value.displayName || 'anonymous')
 const isSystem = computed(() => ['letagents', 'system'].includes((props.message.sender || '').toLowerCase()))
 const isAmbientSystem = computed(() =>
-  isAmbientSystemMessage(props.message.sender, props.message.text || '')
+  isAmbientSystemMessage(props.message.sender, visibleText.value)
 )
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
@@ -327,7 +328,7 @@ const threadActionLabel = computed(() => `Open ${threadLabel.value}`)
 const reasoningTitle = computed(() =>
   props.reasoningSession?.title
   || props.reasoningSession?.summary
-  || 'Open the current reasoning stream'
+  || 'Open the current work stream'
 )
 const reasoningSummary = computed(() =>
   props.reasoningSession?.latest_payload?.checking
@@ -349,11 +350,12 @@ const provenanceBadge = computed<ProvenanceBadge | null>(() => {
   return null
 })
 
+const visibleText = computed(() => messageDisplayText(props.message))
 const formattedTime = computed(() => formatMessageTime(props.message.timestamp))
 const renderedContent = computed(() => renderMessageContent(
   isAmbientSystem.value
-    ? stripStatusPrefix(props.message.text || '')
-    : props.message.text || '',
+    ? stripStatusPrefix(visibleText.value)
+    : visibleText.value,
   props.taskReferenceIds,
 ))
 </script>

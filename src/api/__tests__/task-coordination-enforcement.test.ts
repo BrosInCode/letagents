@@ -342,7 +342,7 @@ test("enforceTaskAdmissionPreconditions records active room lock denials", async
   assert.equal(harness.events[0]?.lock_id, "lock_1");
 });
 
-test("enforceTaskAdmissionPreconditions blocks duplicate task-create intents", async () => {
+test("enforceTaskAdmissionPreconditions allows separate tasks from the same message", async () => {
   const harness = createHarness();
   harness.tasks.push(task({
     id: "task_41",
@@ -353,17 +353,117 @@ test("enforceTaskAdmissionPreconditions blocks duplicate task-create intents", a
 
   const result = await service.enforceTaskAdmissionPreconditions({
     projectId: "focus_5",
-    title: "Investigate board manager delivery",
+    title: "Fix manager permissions",
     sourceMessageId: "msg_existing",
     actorLabel,
     actorKey,
     actorInstanceId: "instance:dawn",
   });
 
-  assert.equal(result.kind, "deny");
-  assert.equal(result.code, "coordination_duplicate_work");
-  assert.match(result.error, /Duplicate work intent matched source_message on task_41/);
-  assert.equal(harness.events[0]?.event_type, "task_admit");
-  assert.equal(harness.events[0]?.decision, "deny");
-  assert.equal(harness.events[0]?.reason, result.error);
+  assert.deepEqual(result, { kind: "allow" });
+  assert.equal(harness.events.length, 0);
+});
+
+function workerClaimInput() {
+  return {
+    req: { authKind: "agent_session", agentSession: {
+      agent_session_id: "agent_session_1207", agent_key: actorKey,
+      room_id: "focus_5", actor_label: actorLabel, agent_instance_id: "daemon:worker",
+    } } as AuthenticatedRequest,
+    projectId: "focus_5",
+    task: task({ status: "accepted", assignee: null }),
+    taskOwnership: { status: "accepted", assignee: null, assignee_agent_key: null } as TaskOwnershipState,
+    updates: { status: "assigned" } as const,
+    actorLabel, actorKey, actorInstanceId: "daemon:worker", actorSessionId: "agent_session_1207",
+  };
+}
+
+test("worker claim creates session-bound work authority for subsequent updates", async () => {
+  const harness = createHarness({ getAgentIdentityByCanonicalKey: async () => { throw new Error("worker must not require owner-token validation"); } });
+  const service = createTaskCoordinationEnforcement(harness.deps);
+  const input = workerClaimInput();
+  const result = await service.enforceTaskCoordinationMutation(input);
+  assert.equal(result.kind, "allow");
+  if (result.kind !== "allow") return;
+  assert.equal(result.workLeaseCreation?.agent_session_id, input.actorSessionId);
+  assert.equal(result.workLeaseCreation?.agent_key, actorKey);
+  harness.activeLeases.push(lease({ agent_session_id: input.actorSessionId, epoch: 0 }));
+  const next = await service.enforceTaskCoordinationMutation({ ...input, task: task(), updates: { status: "in_progress" } });
+  assert.equal(next.kind, "allow");
+  if (next.kind === "allow") assert.equal(next.leaseFence?.agent_session_id, input.actorSessionId);
+  const stale = await service.enforceTaskCoordinationMutation({ ...input, actorSessionId: "other_session", updates: { status: "in_progress" } });
+  assert.equal(stale.kind, "deny", "updates from another session still fail closed");
+});
+
+test("worker claims retain board approval, locks and conflicting lease checks", async () => {
+  const input = workerClaimInput();
+  const gated = createHarness({ shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async () => ({ kind: "deny", code: "approval_required", error: "Needs approval" }) });
+  assert.equal((await createTaskCoordinationEnforcement(gated.deps).enforceTaskCoordinationMutation(input)).kind, "deny");
+  for (const restriction of ["lock", "other_lease"] as const) {
+    const harness = createHarness();
+    if (restriction === "lock") harness.activeLocks.push(lock());
+    else harness.activeLeases.push(lease({ agent_key: "other/worker", actor_label: "Other", agent_session_id: "other_session" }));
+    assert.equal((await createTaskCoordinationEnforcement(harness.deps).enforceTaskCoordinationMutation(input)).kind, "deny", restriction);
+  }
+  const approved = createHarness({ shouldRequireBoardIntent: async () => true });
+  const result = await createTaskCoordinationEnforcement(approved.deps).enforceTaskCoordinationMutation({ ...input, boardIntentId: "intent", boardApprovalToken: "approval" });
+  assert.equal(result.kind, "allow");
+  if (result.kind === "allow") assert.ok(result.workLeaseCreation);
+});
+
+test("worker claims reject missing or mismatched bearer session and room identities", async () => {
+  for (const patch of [{ actorSessionId: null }, { actorSessionId: "different" }, { actorKey: "other/key" }, { projectId: "other-room" }]) {
+    const harness = createHarness();
+    const result = await createTaskCoordinationEnforcement(harness.deps).enforceTaskCoordinationMutation({ ...workerClaimInput(), ...patch });
+    assert.equal(result.kind, "deny");
+  }
+});
+
+test("assigned worker recovers a missing lease through the normal approved claim", async () => {
+  const base = workerClaimInput();
+  const input = { ...base, task: task(), taskOwnership: {
+    status: "assigned", assignee: actorLabel, assignee_agent_key: actorKey,
+  } as TaskOwnershipState };
+  const checks: Array<Record<string, unknown>> = [];
+  const harness = createHarness({ shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async (check) => { checks.push(check); return check.intent_id
+      ? { kind: "allow", intent: { id: check.intent_id } }
+      : { kind: "deny", code: "board_intent_required", error: "Approval required" }; } });
+  const service = createTaskCoordinationEnforcement(harness.deps);
+  assert.equal((await service.enforceTaskCoordinationMutation(input)).kind, "deny");
+  const recovery = await service.enforceTaskCoordinationMutation({ ...input, boardIntentId: "bi_recovery" });
+  assert.equal(recovery.kind, "allow");
+  if (recovery.kind !== "allow") return;
+  assert.equal(recovery.workLeaseCreation?.agent_session_id, input.actorSessionId);
+  assert.deepEqual(checks.at(-1)?.trusted_worker, { agent_session_id: input.actorSessionId, agent_key: actorKey });
+  assert.deepEqual((recovery.boardIntentApproval as Record<string, unknown>).trusted_worker, checks.at(-1)?.trusted_worker);
+  for (const changed of [
+    { taskOwnership: { ...input.taskOwnership, assignee: "Someone else", assignee_agent_key: "other/key" } },
+    { task: task({ status: "in_progress" }) },
+  ]) assert.equal((await service.enforceTaskCoordinationMutation({ ...input, ...changed, boardIntentId: "bi_recovery" })).kind, "deny");
+});
+
+test("retrying an assigned claim reuses only the current session lease without another approval", async () => {
+  const base = workerClaimInput();
+  const input = { ...base, task: task(), taskOwnership: {
+    status: "assigned", assignee: actorLabel, assignee_agent_key: actorKey,
+  } as TaskOwnershipState };
+  const harness = createHarness({ shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async () => assert.fail("an existing claim must not consume another approval") });
+  harness.activeLeases.push(lease({ agent_session_id: input.actorSessionId, epoch: 3 }));
+  const result = await createTaskCoordinationEnforcement(harness.deps).enforceTaskCoordinationMutation(input);
+  assert.equal(result.kind, "allow");
+  if (result.kind === "allow") {
+    assert.equal(result.workLeaseCreation, undefined);
+    assert.equal(result.leaseFence?.expected_epoch, 3);
+    assert.equal(result.leaseFence?.agent_session_id, input.actorSessionId);
+  }
+  harness.activeLocks.push(lock());
+  // A retry cannot bypass a coordination lock or a successor's lease.
+  harness.deps.verifyBoardIntentApproval = async () => ({ kind: "allow" });
+  assert.equal((await createTaskCoordinationEnforcement(harness.deps).enforceTaskCoordinationMutation(input)).kind, "deny");
+  harness.activeLocks.length = 0;
+  harness.activeLeases[0]!.agent_session_id = "successor";
+  assert.equal((await createTaskCoordinationEnforcement(harness.deps).enforceTaskCoordinationMutation(input)).kind, "deny");
 });

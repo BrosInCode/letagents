@@ -2,7 +2,7 @@ import type {
   DesktopManagedAgentPublicChangeSummary,
   DesktopRoomStorageState,
 } from "../../ipc-types.js";
-import { apiFetch } from "../auth.js";
+import { agentApiFetch as apiFetch } from "../auth.js";
 import {
   cloudRoomIdentifierForStorage,
   localRoomIdentifierForStorage,

@@ -44,13 +44,18 @@ jobs:
         run: npm run verify:dependency-age
 
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         run: npm audit signatures
 
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+
       - name: Audit dependency advisories
-        run: npm audit --audit-level=low
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
@@ -68,13 +73,13 @@ jobs:
         run: npm run test:package-runtime
 
       - name: Install Vue dependencies without lifecycle scripts
-        run: cd src/web && npm ci --ignore-scripts
+        run: cd src/web && npm ci --ignore-scripts --no-audit
 
       - name: Verify Vue dependency signatures
         run: cd src/web && npm audit signatures
 
       - name: Audit Vue dependency advisories
-        run: cd src/web && npm audit --audit-level=low
+        run: node scripts/verify-dependency-advisories.mjs src/web
 
       - name: Run verified Vue dependency lifecycle scripts
         run: cd src/web && npm rebuild
@@ -88,17 +93,20 @@ jobs:
       - name: Test public desktop download routes
         run: node --import tsx --test src/api/__tests__/desktop-download.test.ts
 
+      - name: Test automatic command review
+        run: node --import tsx --test src/api/__tests__/command-review.test.ts src/api/__tests__/jev-conversation-routing.test.ts
+
       - name: Build Vue app
         run: npm run build:web
 
       - name: Install desktop dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --prefix apps/desktop
+        run: npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
       - name: Verify desktop dependency signatures
         run: npm audit signatures --prefix apps/desktop
 
       - name: Audit desktop dependency advisories
-        run: npm audit --audit-level=low --prefix apps/desktop
+        run: node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents
 
       - name: Run verified desktop dependency lifecycle scripts
         run: npm rebuild --prefix apps/desktop
@@ -124,10 +132,72 @@ jobs:
       - name: Build desktop
         run: npm --prefix apps/desktop run build
 
+      # The pinned OpenCode runtime is exercised against loopback fixtures only
+      # when its pin, the adapter's OpenCode boundary, the smoke, or this
+      # workflow changes, so an unrelated change never waits on it. A change
+      # set that cannot be determined runs the smoke.
+      - name: Detect OpenCode runtime contract changes
+        id: opencode_contract
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=""
+          if [ -n "${BASE_REF}" ]; then
+            if git fetch --no-tags --depth=1 origin "${BASE_REF}"; then
+              base=$(git rev-parse FETCH_HEAD)
+            fi
+          elif [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            if git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"; then
+              base="${BEFORE_SHA}"
+            fi
+          fi
+          run=true
+          if [ -n "${base}" ]; then
+            # Renames are listed as a removal and an addition so a matching
+            # file cannot leave the set unnoticed, and paths are not quoted.
+            changed=$(git -c core.quotePath=false diff --no-renames --name-only "${base}" HEAD)
+            matched=0
+            grep -E -q '^(apps/desktop/package\.json|apps/desktop/tsconfig\.electron\.json|apps/desktop/electron/main/agents/(opencode-[^/]+|open-model-provider-adapter|provider-adapter)\.ts|apps/desktop/electron/scripts/opencode-runtime-contract-smoke\.mjs|\.github/workflows/ci\.yml)$' <<< "${changed}" || matched=$?
+            # grep exits 1 for no match; anything else is an error and keeps the smoke.
+            if [ "${matched}" -eq 1 ]; then
+              run=false
+            fi
+          fi
+          echo "run=${run}" >> "${GITHUB_OUTPUT}"
+
+      # Lifecycle scripts stay off, as for every other install in this job.
+      # The package's postinstall only links one platform binary into place.
+      # npm installs the baseline variant beside the regular one, so the
+      # binary is chosen by name rather than searched for.
+      - name: Install the pinned OpenCode runtime
+        if: steps.opencode_contract.outputs.run == 'true'
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          opencode_version=$(node -p "require('./apps/desktop/package.json').letagentsRuntime.openCodeVersion")
+          if ! [[ "${opencode_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "letagentsRuntime.openCodeVersion must be an exact version; received '${opencode_version}'." >&2
+            exit 1
+          fi
+          npm install --global --ignore-scripts --no-audit --prefix "${RUNNER_TEMP}/opencode" "opencode-ai@${opencode_version}"
+          opencode_binary="${RUNNER_TEMP}/opencode/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64/bin/opencode"
+          if ! [ -x "${opencode_binary}" ]; then
+            echo "The OpenCode platform binary is missing or not executable at ${opencode_binary}." >&2
+            exit 1
+          fi
+          echo "LETAGENTS_OPENCODE_BIN=${opencode_binary}" >> "${GITHUB_ENV}"
+
+      - name: Verify the OpenCode runtime contract
+        if: steps.opencode_contract.outputs.run == 'true'
+        timeout-minutes: 5
+        run: cd apps/desktop && node electron/scripts/opencode-runtime-contract-smoke.mjs
+
   # ── DB-backed integration tests ──
   integration-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16-alpine
@@ -157,16 +227,30 @@ jobs:
         run: npm run verify:dependency-age
 
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         run: npm audit signatures
 
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+
       - name: Audit dependency advisories
-        run: npm audit --audit-level=low
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
+
+      - name: Test private conversations and app credentials
+        run: node --import tsx --test src/api/__tests__/private-conversations-db.test.ts
+
+      - name: Test opt-in conversation routing and recovery
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/jev-room-routing-db.test.ts
+
+      - name: Test room memory and human request persistence
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-knowledge-routes.test.ts src/api/__tests__/room-knowledge-db.test.ts
 
       - name: Run message attachment tests
         run: >-
@@ -210,6 +294,8 @@ jobs:
           node
           --import ./node_modules/tsx/dist/loader.mjs
           --test
+          --test-concurrency=1
+          src/api/__tests__/canonical-focus-id-migration.test.ts
           src/api/__tests__/github-repo-migration.test.ts
 
       - name: Run workflow lookup tests
@@ -233,6 +319,13 @@ jobs:
           --test
           src/api/__tests__/liveness-sweep.test.ts
           src/api/__tests__/liveness-announcements-db.test.ts
+
+      - name: Run room agent presence tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/room-agent-presence.test.ts
 
       - name: Run board manager failover tests
         run: >-
@@ -278,6 +371,20 @@ jobs:
           --import ./node_modules/tsx/dist/loader.mjs
           --test
           src/api/__tests__/supervisor-host-grant-integration.test.ts
+
+      - name: Run execution delegation grant tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/execution-delegation-grants-integration.test.ts
+
+      - name: Run execution delegation decision tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/execution-delegation-decisions-integration.test.ts
 
       - name: Run task lease rebind tests
         run: >-
@@ -361,7 +468,7 @@ jobs:
 
       - name: Install dependencies without lifecycle scripts
         if: steps.version.outputs.publish == 'true'
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         if: steps.version.outputs.publish == 'true'
@@ -369,7 +476,7 @@ jobs:
 
       - name: Audit dependency advisories
         if: steps.version.outputs.publish == 'true'
-        run: npm audit --audit-level=low
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         if: steps.version.outputs.publish == 'true'

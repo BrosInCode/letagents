@@ -652,3 +652,33 @@ test(
     assert.equal(modeOnly.manager_failover, "announce");
   }
 );
+
+test("supervised manager custody survives quiet delivery but expires with its grant", skipOptions, async () => {
+  const { roomId, sessionA, account } = await seedRoomWithTwoWorkers();
+  const { grant } = await dbModule!.createSupervisorHostGrant({
+    owner_account_id: account.id, host_id: "host_manager", installation_id: "install_manager",
+    allowed_room_ids: [roomId], allowed_agent_keys: [sessionA.agent_key],
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await pool!.query("UPDATE room_agent_sessions SET supervisor_grant_id = $1 WHERE session_id = $2", [grant.grant_id, sessionA.session_id]);
+  await connectWorker(roomId, sessionA);
+  const manager = await dbModule!.assignBoardManager({ room_id: roomId, agent_session_id: sessionA.session_id, assigned_by: "EmmyMay" });
+  await pool!.query(`UPDATE room_agent_delivery_sessions SET active_connection_count = 0,
+    reconnect_grace_expires_at = now() - interval '10 minutes', updated_at = now() - interval '10 minutes'
+    WHERE room_id = $1 AND agent_session_id = $2`, [roomId, sessionA.session_id]);
+  const claim = async () => {
+    await pool!.query("UPDATE board_manager_assignments SET stall_check_at = now() - interval '1 minute' WHERE id = $1", [manager!.id]);
+    return (await dbModule!.listActiveBoardManagerAssignments({ now: Date.now(), limit: 1 }))[0]!;
+  };
+  const release = (entry: Awaited<ReturnType<typeof claim>>) => dbModule!.releaseBoardManagerAssignmentTx(db!, {
+    assignment_id: manager!.id, released_by: "letagents:manager_failover", reason: "automatic failover",
+    claimed_check_at: entry.claimed_check_at, require_unreachable_delivery: true,
+  });
+  const active = await claim();
+  assert.equal(active.delivery_candidate?.supervisor_managed, true);
+  assert.equal(await release(active), null, "the transactional fence also protects supervised custody");
+  await pool!.query("UPDATE supervisor_host_grants SET expires_at = now() - interval '1 minute' WHERE grant_id = $1", [grant.grant_id]);
+  const expired = await claim();
+  assert.equal(expired.delivery_candidate?.supervisor_managed, false);
+  assert.ok(await release(expired), "expired supervisor authority must not disable failover forever");
+});

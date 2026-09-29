@@ -1,3 +1,4 @@
+import { settledRoutingCondition } from "../routing-frontier.js";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../../client.js";
@@ -30,6 +31,7 @@ import {
 } from "./thread-summaries.js";
 
 interface MessageHydrationOptions {
+  executor?: Pick<typeof db, "select" | "execute">;
   accountId?: string | null;
   accountAgentRouting?: boolean;
   threadSummaries?: ReadonlyMap<number, MessageThreadSummary>;
@@ -41,6 +43,7 @@ type MessageHistoryOptions = {
   include_prompt_only?: boolean;
   account_id?: string | null;
   account_agent_routing?: boolean;
+  wait_for_routing?: boolean;
 };
 
 export async function getMessages(
@@ -49,7 +52,7 @@ export async function getMessages(
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
-  const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
+  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
 
   const rows = await db
     .select(messageRowSelection)
@@ -80,7 +83,7 @@ export async function getLatestMessages(
   options?: Omit<MessageHistoryOptions, "after">,
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
-  const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
+  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
 
   const rows = await db
     .select(messageRowSelection)
@@ -113,7 +116,7 @@ export async function getMessagesBefore(
   }
 
   const limit = clampLimit(options?.limit);
-  const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
+  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
 
   const rows = await db
     .select(messageRowSelection)
@@ -171,8 +174,9 @@ export async function hydrateMessageReplies(
   bounded: MessageRow[],
   options?: MessageHydrationOptions,
 ): Promise<Message[]> {
+  const executor = options?.executor ?? db;
   const accountRoutingPromise = options?.accountId && options.accountAgentRouting
-    ? getMessageAccountAgentRouting(db, roomId, options.accountId, bounded)
+    ? getMessageAccountAgentRouting(executor, roomId, options.accountId, bounded)
     : Promise.resolve(new Map());
   const replyToNumbers = Array.from(new Set(
     bounded
@@ -182,7 +186,7 @@ export async function hydrateMessageReplies(
 
   const replyMap = new Map<number, MessageReplyReference>();
   if (replyToNumbers.length > 0) {
-    const replyRows = await db
+    const replyRows = await executor
       .select(messageReplySelection)
       .from(messages)
       .where(and(eq(messages.room_id, roomId), inArray(messages.number, replyToNumbers)));
@@ -195,7 +199,7 @@ export async function hydrateMessageReplies(
   const messageNumbers = bounded.map((row) => row.number);
   const attachmentMap = new Map<number, MessageAttachment[]>();
   if (messageNumbers.length > 0) {
-    const attachmentRows = await db
+    const attachmentRows = await executor
       .select(messageAttachmentSelection)
       .from(message_attachments)
       .where(
@@ -217,6 +221,7 @@ export async function hydrateMessageReplies(
     roomId,
     Array.from(new Set(bounded.map((row) => row.thread_root_number ?? row.number))),
     options?.accountId ?? null,
+    executor,
   );
   const threadSummaries = new Map(materializedSummaries);
   const missingThreadRootNumbers = Array.from(new Set(
@@ -230,6 +235,7 @@ export async function hydrateMessageReplies(
       roomId,
       missingThreadRootNumbers,
       options?.accountId ?? null,
+      executor,
     );
     for (const [rootNumber, summary] of emptySummaries) {
       threadSummaries.set(rootNumber, summary);

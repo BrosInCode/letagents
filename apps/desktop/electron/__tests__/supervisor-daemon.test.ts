@@ -1,6 +1,9 @@
+import { createDaemonMaintenance, readDaemonMaintenance, daemonMaintenancePath } from "../../../../shared/daemon-maintenance.mjs";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { createCipheriv, createDecipheriv, createHash, createPrivateKey, randomBytes, sign as nativeSign } from "node:crypto";
 import { createServer, type Server } from "node:net";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+  SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT,
   type DaemonHandoffDiagnostic,
   type DaemonProcessIdentity,
   mapAgentInspectorDetail,
@@ -20,8 +24,11 @@ import {
   onSupervisorAgentStream,
   publishSupervisorActivity,
   setFocusedAgentStream,
+  supervisorStateWatchAcceptsStatus,
   supervisorStateWatchRetryDelay,
   supervisorDaemonSpawnEnvironment,
+  supervisorRuntimeEnvironmentFingerprint,
+  supervisorCompatibilityFingerprint,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
 import {
@@ -30,11 +37,873 @@ import {
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
 } from "../main/supervisor-grant.js";
 import { apiUrl as configuredApiUrl } from "../main/paths.js";
+import { createStateRecoveryKey, prepareSupervisorState } from "../main/supervisor-state-recovery.js";
+import { loadHostApprovalSigner } from "../main/host-approval-auth.js";
+import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
 const desktopPackagePath = join(dirname(fileURLToPath(import.meta.url)), "../../package.json");
 const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon.ts");
+
+function approvalStorage() {
+  const key = randomBytes(32);
+  return {
+    isEncryptionAvailable: () => true,
+    encryptString(value: string) {
+      const nonce = randomBytes(12); const cipher = createCipheriv("aes-256-gcm", key, nonce);
+      const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+      return Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]);
+    },
+    decryptString(value: Buffer) {
+      const cipher = createDecipheriv("aes-256-gcm", key, value.subarray(0, 12));
+      cipher.setAuthTag(value.subarray(12, 28));
+      return Buffer.concat([cipher.update(value.subarray(28)), cipher.final()]).toString("utf8");
+    },
+  };
+}
+
+function hostApprovalCandidate(): HostApprovalCandidate {
+  return { reference: { requestId: "request_1", requestVersion: 1, requestSha256: "a".repeat(64),
+    agentId: "agent_1", roomId: "room_1", executionGenerationId: "execution_1", runtimeGenerationId: "runtime_1",
+    turnId: "turn_1", providerContinuationId: "session_1", providerTurnId: "native_turn_1", connectionId: "connection_1", nativeRequestId: 1 },
+    presentation: { agentId: "agent_1", displayName: "GardenPoint", provider: "codex", title: "Run a command",
+      details: '{"command":"private-host-command"}', denyScope: "request" },
+    status: "pending", detail: null, recordedDecision: null };
+}
+
+test("host approval client authenticates raw presentations and restores exact recorded decisions after reopen and cache expiry", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey); const candidate = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  const decisions: HostApprovalDecision[] = []; let loseResponse = true; let loads = 0; let now = Date.now();
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope); assert.ok(authenticated, "raw presentation reads must also authenticate");
+    if (authenticated.operation === "list") { assert.deepEqual(authenticated.input, { roomId: "room_1" }); return [candidate]; }
+    const input = authenticated.input as HostApprovalDecision; decisions.push(input);
+    candidate.recordedDecision = { decisionId: input.decisionId, actorId: input.actorId,
+      decision: input.decision === "allow_always" ? "allow_once" : input.decision, projectionSha256: input.projectionSha256 };
+    candidate.status = "decision_recorded";
+    if (loseResponse) throw new Error("lost receipt after durable decision");
+    return "decision_recorded";
+  };
+  const options = { socketPath: env.socketPath, daemonScriptPath, now: () => new Date(now),
+    loadApprovalSigner: async () => { loads += 1; return signer; },
+    spawnDaemon: () => { assert.fail("viewing approvals cannot spawn the daemon"); } };
+  try {
+    const client = new SupervisorDaemonClient(options);
+    const first = await client.listHostApprovals("room_1"); assert.equal(first.available, true);
+    const view = first.approvals[0]!;
+    assert.deepEqual(Object.keys(view).sort(), ["detail", "id", "presentation", "retryDecision", "status"]);
+    assert.equal(view.presentation.details, candidate.presentation.details); assert.equal(view.retryDecision, null);
+    assert.equal((await client.listHostApprovals("room_1")).approvals[0]!.id, view.id);
+    assert.equal(loads, 1, "repeated polling reuses the already-unsealed main-process signer");
+    view.presentation.details = "renderer replacement";
+    const input = { id: view.id, decision: "allow_once" as const };
+    const pending = client.decideHostApproval(input);
+    Object.assign(input, { id: "renderer-replaced-id", decision: "deny" });
+    await assert.rejects(pending, /Could not confirm/);
+    assert.equal(decisions.length, 1); assert.equal(decisions[0]!.decision, "allow_once");
+    assert.deepEqual(decisions[0]!.expected, candidate.reference);
+    assert.equal(decisions[0]!.projectionSha256, createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"));
+    assert.equal(decisions[0]!.actorId, `host-${verifier.challenge()!.keyFingerprint}`);
+    await assert.rejects(client.decideHostApproval({ id: view.id, decision: "allow_once" }), /Refresh/);
+    const restarted = new SupervisorDaemonClient(options); const restored = await restarted.listHostApprovals("room_1");
+    assert.equal(restored.approvals[0]!.retryDecision, "allow_once");
+    await assert.rejects(restarted.decideHostApproval({ id: restored.approvals[0]!.id, decision: "deny" }), /Refresh|different decision/);
+    loseResponse = false;
+    await restarted.decideHostApproval({ id: restored.approvals[0]!.id, decision: "allow_once" });
+    assert.equal(decisions[1]!.decisionId, decisions[0]!.decisionId, "Electron restart cannot mint another decision");
+    now += 31 * 60 * 1000;
+    const expired = await client.listHostApprovals("room_1"); assert.notEqual(expired.approvals[0]!.id, view.id);
+    assert.equal(expired.approvals[0]!.retryDecision, "allow_once");
+    await client.decideHostApproval({ id: expired.approvals[0]!.id, decision: "allow_once" });
+    assert.equal(decisions[2]!.decisionId, decisions[0]!.decisionId);
+    for (const status of ["decision_sent", "uncertain", "resolved", "unavailable"] as const) {
+      candidate.status = status;
+      const current = await restarted.listHostApprovals("room_1"); assert.equal(current.approvals[0]!.retryDecision, null);
+      await assert.rejects(restarted.decideHostApproval({ id: current.approvals[0]!.id, decision: "allow_once" }), /Refresh/);
+    }
+    // Exact structural fallback from HostApprovalBroker.list after the native
+    // request disappears: retained dispatch uncertainty is not a new prompt.
+    candidate.status = "uncertain";
+    candidate.presentation.title = "Approval unavailable";
+    candidate.presentation.details = "The native request is no longer available to inspect on this connection.";
+    candidate.detail = "A dispatch was recorded. Missing native evidence is not confirmation that the decision was applied.";
+    for (const reader of [restarted, new SupervisorDaemonClient(options)]) {
+      for (let refresh = 0; refresh < 2; refresh += 1) {
+        const snapshot = await reader.listHostApprovals("room_1");
+        assert.equal(snapshot.available, true); assert.equal(snapshot.approvals.length, 1);
+        const retained = snapshot.approvals[0]!;
+        assert.equal(retained.status, "uncertain"); assert.equal(retained.retryDecision, null);
+        assert.equal(retained.presentation.title, "Approval unavailable");
+        assert.equal(retained.detail, candidate.detail);
+        assert.doesNotMatch(JSON.stringify(snapshot), /private-host-command|recordedDecision|projectionSha256/);
+        for (const decision of ["allow_once", "deny"] as const) {
+          await assert.rejects(reader.decideHostApproval({ id: retained.id, decision }), /Refresh/);
+        }
+      }
+    }
+    assert.equal(decisions.length, 3);
+    assert.ok(wire.requests.every(request => request.method.startsWith("supervisor.host_approval_")), "no startup, handoff, configuration, or native action RPCs");
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval client rejects stale recorded hashes, foreign actors, malformed candidates, and renderer authority fields", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey); const base = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge(); let candidates: unknown = [base]; let decisions = 0;
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "decide") { decisions += 1; return "resolved"; } return candidates;
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+  try {
+    const original = (await client.listHostApprovals("room_1")).approvals[0]!;
+    for (const title of ["Grant for this turn", "Run a tool"]) {
+      candidates = [{ ...base, presentation: { ...base.presentation, title } }];
+      const generic = await client.listHostApprovals("room_1");
+      assert.equal(generic.available, true); assert.equal(generic.approvals[0]!.presentation.title, title);
+    }
+    for (const extra of [{ projectionSha256: "f".repeat(64) }, { expected: base.reference }, { actorId: "renderer" }, { decisionId: "renderer" }, { key: "renderer" }]) {
+      await assert.rejects(client.decideHostApproval({ id: original.id, decision: "allow_once", ...extra }), /Invalid approval/);
+    }
+    const recorded = { decisionId: "durable-decision", actorId: `host-${verifier.challenge()!.keyFingerprint}`,
+      decision: "allow_once" as const, projectionSha256: createHash("sha256").update(JSON.stringify(base.presentation)).digest("hex") };
+    for (const decision of [null, { ...recorded, projectionSha256: null }, { ...recorded, projectionSha256: "b".repeat(64) }, { ...recorded, actorId: "other-host" }]) {
+      candidates = [{ ...base, status: "decision_recorded", recordedDecision: decision }];
+      const snapshot = await client.listHostApprovals("room_1"); assert.equal(snapshot.available, true);
+      assert.equal(snapshot.approvals[0]!.status, "unavailable"); assert.equal(snapshot.approvals[0]!.retryDecision, null);
+      await assert.rejects(client.decideHostApproval({ id: snapshot.approvals[0]!.id, decision: "allow_once" }), /Refresh/);
+    }
+    for (const invalid of [null, {}, { ...base, extra: "field" }, { ...base, status: "dispatching" },
+      { ...base, recordedDecision: undefined }, { ...base, recordedDecision: { ...recorded, projectionSha256: "bad" } },
+      { ...base, reference: null }, { ...base, reference: { ...base.reference, roomId: "foreign" } },
+      { ...base, reference: { ...base.reference, agentId: "foreign" } },
+      { ...base, reference: { ...base.reference, nativeRequestId: Number.MAX_SAFE_INTEGER + 1 } },
+      { ...base, reference: { ...base.reference, nativeRequestId: true } },
+      { ...base, reference: { ...base.reference, requestVersion: 0 } },
+      { ...base, presentation: { ...base.presentation, details: 1 } },
+      { ...base, presentation: { ...base.presentation, details: "x".repeat(33 * 1024) } },
+      { ...base, presentation: { ...base.presentation, title: "Approve everything" } },
+      { ...base, presentation: { ...base.presentation, title: "Approval unavailable" } },
+      { ...base, status: "uncertain", presentation: { ...base.presentation, title: "Approval unavailable" } },
+      { ...base, status: "uncertain", reference: null, recordedDecision: recorded, presentation: { ...base.presentation, title: "Approval unavailable" } },
+      { ...base, presentation: { ...base.presentation, denyScope: "session_pending" } },
+      { ...base, presentation: { ...base.presentation, provider: "unknown" } }]) {
+      candidates = [base]; const prior = (await client.listHostApprovals("room_1")).approvals[0]!;
+      candidates = [base, invalid];
+      const snapshot = await client.listHostApprovals("room_1"); assert.equal(snapshot.available, false); assert.deepEqual(snapshot.approvals, []);
+      await assert.rejects(client.decideHostApproval({ id: prior.id, decision: "allow_once" }), /Refresh/);
+    }
+    assert.equal(decisions, 0);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval client fences changed daemon challenges and sender revocation after awaits and at socket dispatch", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  let verifier = new HostApprovalVerifier(7, signer.publicKey); const candidate = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge(); let decisions = 0; const signed: string[] = [];
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "decide") { decisions += 1; return "resolved"; } return [candidate];
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => ({
+    publicKey: signer.publicKey, sign: (...args) => { signed.push(args[1]); return signer.sign(...args); },
+  }) });
+  try {
+    const original = (await client.listHostApprovals("room_1")).approvals[0]!;
+    verifier = new HostApprovalVerifier(8, signer.publicKey);
+    await assert.rejects(client.decideHostApproval({ id: original.id, decision: "allow_once" }), /background service changed/);
+    assert.equal(signed.includes("decide"), false);
+    const fresh = (await client.listHostApprovals("room_1")).approvals[0]!;
+    let trusted = true; let checks = 0;
+    const pending = client.decideHostApproval({ id: fresh.id, decision: "allow_once" }, () => {
+      checks += 1; if (!trusted) throw new Error("caller navigated away");
+    });
+    trusted = false;
+    await assert.rejects(pending, /navigated/); assert.equal(checks, 2); assert.equal(signed.includes("decide"), false);
+    checks = 0;
+    await assert.rejects(client.decideHostApproval({ id: fresh.id, decision: "allow_once" }, () => {
+      if (++checks === 3) throw new Error("caller revoked before socket write");
+    }), /Could not confirm/);
+    assert.equal(checks, 3); assert.equal(signed.filter(operation => operation === "decide").length, 1);
+    assert.equal(decisions, 0, "final connect fence prevents signed bytes reaching the daemon");
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval decisions survive unchanged polls but fence changed authority before dispatch", async (t) => {
+  const changes: Array<[string, (candidate: HostApprovalCandidate) => HostApprovalCandidate]> = [
+    ["unchanged", candidate => structuredClone(candidate)],
+    ["equivalent property order", candidate => ({ ...candidate, reference: Object.fromEntries(Object.entries(candidate.reference!).reverse()) as NonNullable<HostApprovalCandidate["reference"]> })],
+    ...Object.entries({ requestId: "request_2", requestVersion: 2, requestSha256: "b".repeat(64),
+      agentId: "agent_2", roomId: "room_2", executionGenerationId: "execution_2", runtimeGenerationId: "runtime_2",
+      turnId: "turn_2", providerContinuationId: "session_2", providerTurnId: "native_turn_2", connectionId: "connection_2", nativeRequestId: 2,
+    }).map(([key, value]): [string, (candidate: HostApprovalCandidate) => HostApprovalCandidate] => [key,
+      candidate => ({ ...candidate, reference: { ...candidate.reference!, [key]: value } })]),
+    ["presentation", candidate => ({ ...candidate, presentation: { ...candidate.presentation, details: "A different command" } })],
+    ["resolved", candidate => ({ ...candidate, status: "resolved" })],
+    ["uncertain", candidate => ({ ...candidate, status: "uncertain" })],
+    ["recorded decision", candidate => ({ ...candidate, recordedDecision: { decisionId: "other-decision", actorId: "other-host", decision: "deny", projectionSha256: "b".repeat(64) } })],
+  ];
+  for (const stage of ["challenge", "socket dispatch"] as const) {
+    for (const [label, change] of changes) {
+      await t.test(`${stage}: ${label}`, async () => {
+        const env = await fixture();
+        const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+        const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+        const verifier = new HostApprovalVerifier(7, signer.publicKey);
+        const originalCandidate = hostApprovalCandidate(); let candidate = originalCandidate;
+        const decisions: HostApprovalDecision[] = [];
+        const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+        wire.hostApprovals.challenge = () => verifier.challenge();
+        wire.hostApprovals.request = envelope => {
+          const authenticated = verifier.verify(envelope); assert.ok(authenticated);
+          if (authenticated.operation === "list") return [candidate];
+          decisions.push(authenticated.input as HostApprovalDecision); return "resolved";
+        };
+        const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+        // Hold a real request at its asynchronous boundary, then let the poll
+        // complete through the authenticated wire before resuming dispatch.
+        type RequestArgs = [method: string, params?: unknown, ...options: unknown[]];
+        const transport = client as unknown as { request: (...args: RequestArgs) => Promise<unknown> };
+        const request = transport.request.bind(client);
+        let release!: () => void; let entered!: () => void; let held = false;
+        const paused = new Promise<void>(resolve => { entered = resolve; });
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        try {
+          const view = (await client.listHostApprovals("room_1")).approvals[0]!;
+          transport.request = async (...args) => {
+            const envelope = args[1] as { payload?: string } | undefined;
+            const isDecision = args[0] === "supervisor.host_approval_request"
+              && envelope?.payload && JSON.parse(envelope.payload).operation === "decide";
+            if (!held && (stage === "challenge" ? args[0] === "supervisor.host_approval_challenge" : isDecision)) {
+              held = true; entered(); await gate;
+            }
+            return request(...args);
+          };
+          const pending = client.decideHostApproval({ id: view.id, decision: "allow_once" });
+          const result = pending.then(status => ({ status }), error => ({ error }));
+          await paused;
+          candidate = change(originalCandidate);
+          const refreshed = await client.listHostApprovals("room_1");
+          release();
+          const outcome = await result;
+          if (label === "unchanged") {
+            assert.equal(refreshed.approvals[0]?.id, view.id);
+            assert.deepEqual(outcome, { status: "resolved" });
+            assert.equal(decisions.length, 1);
+            assert.deepEqual(decisions[0]!.expected, originalCandidate.reference);
+            assert.equal(decisions[0]!.projectionSha256, createHash("sha256").update(JSON.stringify(originalCandidate.presentation)).digest("hex"));
+            await assert.rejects(client.decideHostApproval({ id: view.id, decision: "allow_once" }), /Refresh/);
+          } else {
+            assert.ok("error" in outcome);
+            assert.equal(decisions.length, 0, "changed approval authority must never reach the daemon");
+          }
+        } finally { release(); transport.request = request; await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+      });
+    }
+  }
+});
+
+test("host approval reads wait for scheduled startup preparation and daemon readiness without starting extra work", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(42, signer.publicKey);
+  let releasePreparation!: () => void;
+  const preparation = new Promise<void>(resolve => { releasePreparation = resolve; });
+  let didSpawn!: () => void;
+  const spawned = new Promise<void>(resolve => { didSpawn = resolve; });
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  let spawns = 0;
+  let signerLoads = 0;
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { spawns += 1; didSpawn(); return child; },
+    loadApprovalSigner: async () => { signerLoads += 1; return signer; },
+    signalDaemon: () => { assert.fail("approval reads must not retire a provider"); },
+  });
+  let wire: Awaited<ReturnType<typeof startWireDaemon>> | null = null;
+  const startup = client.ensureRunning(preparation);
+  let earlyReadSettled = false;
+  const earlyRead = client.listHostApprovals("room_1").then(result => { earlyReadSettled = true; return result; });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const beforePreparation = { settled: earlyReadSettled, spawns, signerLoads };
+    releasePreparation();
+    await spawned;
+    let bootstrapReadSettled = false;
+    const bootstrapRead = client.listHostApprovals("room_1").then(result => { bootstrapReadSettled = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const beforeReady = { settled: bootstrapReadSettled, spawns, signerLoads };
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
+    wire.hostApprovals.challenge = () => verifier.challenge();
+    wire.hostApprovals.request = envelope => {
+      const verified = verifier.verify(envelope);
+      assert.equal(verified?.operation, "list");
+      assert.deepEqual(verified?.input, { roomId: "room_1" });
+      return [hostApprovalCandidate()];
+    };
+    child.emit("message", { type: "state_recovery_ready" });
+    const [status, earlySnapshot, bootstrapSnapshot] = await Promise.all([startup, earlyRead, bootstrapRead]);
+    assert.deepEqual(beforePreparation, { settled: false, spawns: 0, signerLoads: 0 });
+    assert.deepEqual(beforeReady, { settled: false, spawns: 1, signerLoads: 0 });
+    assert.equal(status.generation, 42);
+    for (const snapshot of [earlySnapshot, bootstrapSnapshot]) {
+      assert.equal(snapshot.available, true);
+      assert.equal(snapshot.error, null);
+      assert.equal(snapshot.approvals[0]?.status, "pending");
+    }
+    assert.equal(spawns, 1);
+    assert.equal(signerLoads, 1);
+    assert.ok(wire.requests.every(request => ["daemon.negotiate", "supervisor.host_approval_challenge", "supervisor.host_approval_request"].includes(request.method)));
+  } finally {
+    releasePreparation();
+    child.emit("message", { type: "state_recovery_ready" });
+    await startup.catch(() => undefined);
+    await closeServer(wire?.server ?? null, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("host approval reads report failed startup and recover through passive polling", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(42, signer.publicKey);
+  let rejectPreparation!: (error: Error) => void;
+  const preparation = new Promise<void>((_resolve, reject) => { rejectPreparation = reject; });
+  let signerLoads = 0;
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { assert.fail("failed preparation and passive polling must not spawn a daemon"); },
+    loadApprovalSigner: async () => { signerLoads += 1; return signer; },
+  });
+  let wire: Awaited<ReturnType<typeof startWireDaemon>> | null = null;
+  try {
+    const startup = client.ensureRunning(preparation);
+    const failedStartup = assert.rejects(startup, /preparation failed/);
+    const pendingRead = client.listHostApprovals("room_1");
+    rejectPreparation(new Error("preparation failed: private diagnostic"));
+    await failedStartup;
+    const failedRead = await pendingRead;
+    assert.equal(failedRead.available, false);
+    assert.deepEqual(failedRead.approvals, []);
+    assert.match(failedRead.error!, /Could not load host approvals/);
+    assert.equal(failedRead.error!.includes("private diagnostic"), false);
+    assert.equal(signerLoads, 0);
+
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
+    wire.hostApprovals.challenge = () => verifier.challenge();
+    wire.hostApprovals.request = envelope => {
+      assert.equal(verifier.verify(envelope)?.operation, "list");
+      return [];
+    };
+    assert.deepEqual(await client.listHostApprovals("room_1"), { available: true, approvals: [], error: null });
+    assert.equal(signerLoads, 1);
+    assert.deepEqual(wire.requests.map(request => request.method), ["supervisor.host_approval_challenge", "supervisor.host_approval_request"]);
+  } finally {
+    await closeServer(wire?.server ?? null, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("host approval client reports unenrolled or absent daemon without startup or secure-storage side effects", async () => {
+  const env = await fixture(); let loads = 0;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath,
+    loadApprovalSigner: async () => { loads += 1; throw new Error("should not load"); },
+    spawnDaemon: () => { assert.fail("approval polling is passive"); } });
+  let wire: Awaited<ReturnType<typeof startWireDaemon>> | null = null;
+  try {
+    assert.equal((await client.listHostApprovals("room_1")).available, false);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+    const result = await client.listHostApprovals("room_1"); assert.equal(result.available, false);
+    assert.match(result.error!, /not enrolled.*Unlock.*restart/); assert.equal(loads, 0);
+    assert.deepEqual(wire.requests.map(request => request.method), ["supervisor.host_approval_challenge"]);
+  } finally { await closeServer(wire?.server ?? null, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval identity is OS-sealed, private, exclusive across creators, and stable on reopen", async () => {
+  const env = await fixture(); const path = join(env.root, "approval", "signing-key.sealed"); const storage = approvalStorage();
+  try {
+    const signers = await Promise.all(Array.from({ length: 8 }, () => loadHostApprovalSigner(path, storage)));
+    assert.equal(new Set(signers.map(signer => signer.publicKey)).size, 1);
+    assert.deepEqual(await readdir(dirname(path)), ["signing-key.sealed"]);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
+    const saved = await readFile(path, "utf8");
+    const plaintext = storage.decryptString(Buffer.from(JSON.parse(saved).sealedKey, "base64"));
+    assert.equal(saved.includes(plaintext), false); assert.doesNotMatch(saved, /PRIVATE KEY/);
+    const reopened = await loadHostApprovalSigner(path, storage);
+    assert.equal(reopened.publicKey, signers[0]!.publicKey);
+    assert.equal(await readFile(path, "utf8"), saved, "reading/signing never rewrites the enrolled identity");
+  } finally { await env.cleanup(); }
+});
+
+test("host approval key corruption, locked storage, unsafe paths, and plaintext backends never regenerate identity", async () => {
+  const env = await fixture(); const path = join(env.root, "signing-key.sealed"); const storage = approvalStorage();
+  try {
+    for (const unavailable of [
+      { ...storage, isEncryptionAvailable: () => false },
+      { ...storage, getSelectedStorageBackend: () => "basic_text" },
+      { ...storage, encryptString: () => { throw new Error("private-native-error"); } },
+      { ...storage, decryptString: () => "wrong-roundtrip" },
+    ]) {
+      await assert.rejects(loadHostApprovalSigner(path, unavailable), error => {
+        assert.doesNotMatch(String(error), /private-native-error/); return true;
+      });
+      await assert.rejects(stat(path), { code: "ENOENT" });
+    }
+    const signer = await loadHostApprovalSigner(path, storage); const saved = await readFile(path, "utf8");
+    await assert.rejects(loadHostApprovalSigner(path, { ...storage, decryptString: () => { throw new Error("locked"); } }), /unavailable/);
+    assert.equal(await readFile(path, "utf8"), saved);
+    await chmod(path, 0o644);
+    await assert.rejects(loadHostApprovalSigner(path, storage), /unavailable/);
+    await chmod(path, 0o600);
+    for (const invalid of ["broken-json", JSON.stringify({ version: 1, sealedKey: "invalid" }),
+      JSON.stringify({ version: 1, sealedKey: storage.encryptString("not-an-ed25519-key").toString("base64") })]) {
+      await writeFile(path, invalid);
+      await assert.rejects(loadHostApprovalSigner(path, storage), /unavailable/);
+      assert.equal(await readFile(path, "utf8"), invalid);
+    }
+    await writeFile(path, saved);
+    assert.equal((await loadHostApprovalSigner(path, storage)).publicKey, signer.publicKey);
+    const symbolic = join(env.root, "symbolic-key"); await symlink(path, symbolic);
+    await assert.rejects(loadHostApprovalSigner(symbolic, storage), /unavailable/);
+    const directoryLink = join(env.root, "symbolic-directory"); await symlink(env.root, directoryLink);
+    await assert.rejects(loadHostApprovalSigner(join(directoryLink, "new-key"), storage), /unavailable/);
+    await assert.rejects(stat(join(env.root, "new-key")), { code: "ENOENT" });
+  } finally { await env.cleanup(); }
+});
+
+test("host approval signatures bind closed operations and exact daemon birth without changing native ID types", async () => {
+  const env = await fixture(); const path = join(env.root, "signing-key.sealed"); const storage = approvalStorage();
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  try {
+    const signer = await loadHostApprovalSigner(path, storage); const verifier = new HostApprovalVerifier(7, signer.publicKey);
+    const challenge = verifier.challenge()!; const now = 1_000_000;
+    for (const operation of ["list", "decide"] as const) {
+      for (const requestId of [1, "1"]) {
+        const input = { requestId, agentId: "agent_1", decision: "allow_once" };
+        const envelope = signer.sign(challenge, operation, input, now);
+        assert.deepEqual(verifier.verify(envelope, now), { operation, input });
+        assert.equal(verifier.verify(envelope, now - 1), null, "future requests are not valid yet");
+        assert.equal(verifier.verify(envelope, now + 30_000), null);
+        assert.equal(new HostApprovalVerifier(7, signer.publicKey).verify(envelope, now), null, "same generation, different boot");
+        assert.equal(new HostApprovalVerifier(8, signer.publicKey).verify(envelope, now), null);
+        assert.equal(verifier.verify({ ...envelope, input: { requestId: "replacement" } }, now), null);
+        assert.equal(verifier.verify({ ...envelope, payload: envelope.payload.replace("agent_1", "agent_2") }, now), null);
+        assert.equal(verifier.verify({ ...envelope, signature: Buffer.alloc(64).toString("base64") }, now), null);
+        assert.equal(verifier.verify(JSON.parse(envelope.payload), now), null, "unsigned request is not authority");
+      }
+    }
+    assert.equal(new HostApprovalVerifier(7, null).challenge(), null);
+    assert.equal(new HostApprovalVerifier(7, "malformed-key").challenge(), null);
+    assert.throws(() => signer.sign({ ...challenge, keyFingerprint: "different" }, "list", {}, now), /unavailable/);
+    assert.throws(() => signer.sign(challenge, "execute" as "list", {}, now), /unavailable/);
+    const stored = JSON.parse(await readFile(path, "utf8"));
+    const privateKey = createPrivateKey({ key: Buffer.from(storage.decryptString(Buffer.from(stored.sealedKey, "base64")), "base64"), format: "der", type: "pkcs8" });
+    const base = JSON.parse(signer.sign(challenge, "list", {}, now).payload);
+    for (const mutation of [{ operation: "execute" }, { domain: "another-protocol" }, { version: 2 },
+      { expiresAt: now + 30_001 }, { issuedAt: now + 1 }, { unexpected: "extra" }, { input: undefined }]) {
+      const payload = JSON.stringify({ ...base, ...mutation });
+      assert.equal(verifier.verify({ payload, signature: nativeSign(null, Buffer.from(payload), privateKey).toString("base64") }, now), null);
+    }
+  } finally { await env.cleanup(); }
+});
+
+test("current-schema child privately enrolls host approval verifier before readiness; unavailable signing is nonfatal", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const keyModule = new URL("../../daemon/state-recovery-key.ts", import.meta.url).href;
+  const verifierModule = new URL("../../daemon/host-approval-auth.ts", import.meta.url).href;
+  const schemaModule = new URL("../../daemon/daemon-state-database.ts", import.meta.url).href;
+  try {
+    for (const mode of ["available", "locked", "unresponsive"] as const) {
+      const available = mode === "available";
+      const script = `
+        import assert from 'node:assert/strict';
+        import { DatabaseSync } from 'node:sqlite';
+        import { requestHostApprovalVerifier, withProtectedStateUpgrade, reportStateRecoveryReady } from ${JSON.stringify(keyModule)};
+        import { HostApprovalVerifier } from ${JSON.stringify(verifierModule)};
+        import { DaemonStateSchema } from ${JSON.stringify(schemaModule)};
+        const path = ${JSON.stringify(join(env.root, "current.sqlite"))};
+        const database = new DatabaseSync(path); new DaemonStateSchema().createSchema(database); database.close();
+        const publicKey = await requestHostApprovalVerifier();
+        const verifier = new HostApprovalVerifier(9, publicKey);
+        assert.equal(Boolean(verifier.challenge()), ${available});
+        if (${available}) {
+          const response = new Promise(resolve => process.once('message', resolve));
+          process.send({ type: 'host_approval_test_challenge', challenge: verifier.challenge() });
+          assert.deepEqual(verifier.verify(await response), { operation: 'decide', input: { requestId: 1 } });
+        }
+        await withProtectedStateUpgrade(path, async () => {}, {
+          getBackupKey: async () => { throw Error('current schema must not request backup key'); },
+          onPrepared: reportStateRecoveryReady,
+        });
+        assert.equal(process.connected, false);
+      `;
+      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      });
+      let output = ""; child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
+      const exit = new Promise<number | null>(resolve => child.once("exit", resolve));
+      child.on("message", (message: unknown) => {
+        const value = message as { type?: string; challenge?: Parameters<typeof signer.sign>[0] };
+        if (value.type === "host_approval_test_challenge") child.send(signer.sign(value.challenge!, "decide", { requestId: 1 }));
+      });
+      let requests = 0;
+      await prepareSupervisorState(child, () => { throw new Error("unexpected backup request"); }, 30_000, async () => {
+        requests += 1;
+        if (mode === "unresponsive") return new Promise<string>(() => {});
+        if (!available) throw new Error("private-keychain-exception");
+        return signer.publicKey;
+      });
+      assert.equal(await exit, 0, output); assert.equal(requests, 1);
+      assert.equal(output.includes("private-keychain-exception"), false);
+      for (const event of ["error", "disconnect"]) assert.equal(child.listenerCount(event), 0);
+    }
+  } finally { await env.cleanup(); }
+});
+
+test("recovery keys require functioning OS storage and reject plaintext backend", () => {
+  const storage = {
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => Buffer.from(`sealed:${value}`),
+    decryptString: (value: Buffer) => value.toString().slice(7),
+  };
+  const material = createStateRecoveryKey(storage);
+  assert.equal(material.key.length, 32);
+  assert.equal(storage.decryptString(Buffer.from(material.sealedKey, "base64")), material.key.toString("base64"));
+  material.key.fill(0);
+  assert.throws(() => createStateRecoveryKey({ ...storage, isEncryptionAvailable: () => false }), /OS-backed/);
+  assert.throws(() => createStateRecoveryKey({ ...storage, getSelectedStorageBackend: () => "basic_text" }), /OS-backed/);
+  assert.throws(() => createStateRecoveryKey({ ...storage, decryptString: () => "different" }), /could not protect/);
+  assert.throws(() => createStateRecoveryKey({ ...storage, encryptString: () => { throw new Error("sensitive provider message"); } }), (error: unknown) => {
+    assert.equal((error as Error).message.includes("sensitive"), false);
+    return true;
+  });
+});
+
+test("readiness without a verifier request does not touch recovery storage; bootstrap listeners are removed", async () => {
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  const prepared = prepareSupervisorState(child, () => { throw new Error("Keychain must not be touched"); });
+  child.emit("message", { type: "state_recovery_ready" });
+  await prepared;
+  for (const event of ["message", "error", "exit", "disconnect"]) assert.equal(child.listenerCount(event), 0);
+});
+
+test("secure bootstrap key is one-shot and parent disconnect fails closed", async () => {
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperty(child, "connected", { value: true });
+  const sent: unknown[] = [];
+  child.send = ((message: unknown, callback: (error: Error | null) => void) => { sent.push(message); callback(null); return true; }) as ChildProcess["send"];
+  const key = Buffer.alloc(32, 12);
+  const prepared = prepareSupervisorState(child, () => ({ key, sealedKey: "sealed" }));
+  const request = { type: "state_recovery_key_request", id: "00000000-0000-4000-8000-000000000000" };
+  child.emit("message", request);
+  child.emit("message", request);
+  assert.equal(sent.length, 1);
+  assert.equal(key.equals(Buffer.alloc(32)), true, "parent clears the raw key after handoff");
+  child.emit("disconnect");
+  await assert.rejects(prepared, /could not prepare/);
+});
+
+test("secure-storage failure reaches bootstrap caller without leaking original exception", async () => {
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperty(child, "connected", { value: true });
+  const sent: Array<Record<string, unknown>> = [];
+  child.send = ((message: Record<string, unknown>, callback: () => void) => { sent.push(message); callback(); return true; }) as ChildProcess["send"];
+  const prepared = prepareSupervisorState(child, () => { throw new Error("private material"); });
+  child.emit("message", { type: "state_recovery_key_request", id: "00000000-0000-4000-8000-000000000000" });
+  assert.equal(sent[0]?.error, "secure_storage_unavailable");
+  assert.equal(JSON.stringify(sent).includes("private material"), false);
+  // No acknowledgement from the child is needed to unblock the caller.
+  await assert.rejects(prepared, /Unlock it/);
+});
+
+test("silent bootstrap bounds caller wait without killing work and ignores late readiness", async () => {
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  child.kill = () => { assert.fail("a caller deadline cannot terminate migration"); };
+  const prepared = prepareSupervisorState(child, undefined, 5);
+  await assert.rejects(prepared, /may still be preparing.*has not been cancelled/);
+  for (const event of ["message", "error", "exit", "disconnect"]) assert.equal(child.listenerCount(event), 0);
+  child.emit("message", { type: "state_recovery_ready" });
+});
+
+test("a silent bootstrap retains child ownership across caller timeouts until later readiness", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let spawns = 0;
+  let spawned!: () => void;
+  const didSpawn = new Promise<void>((resolve) => { spawned = resolve; });
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  child.kill = () => { assert.fail("slow preparation must continue under its singleton"); };
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath, statePreparationWaitMs: 25, startTimeoutMs: 25,
+    spawnDaemon: () => { spawns++; spawned(); return child; },
+    signalDaemon: () => { assert.fail("slow preparation must not be signalled"); },
+  });
+  try {
+    const start = client.ensureRunning();
+    const startCheck = assert.rejects(start, /has not confirmed database preparation/);
+    await didSpawn;
+    const updateCheck = assert.rejects(client.prepareForApplicationUpdate(), /has not confirmed database preparation/);
+    await Promise.all([startCheck, updateCheck]);
+    // IPC disconnection is not process exit. Retrying before the socket opens
+    // must not launch a contender or let an update bypass the live child.
+    child.emit("disconnect");
+    const retry = client.ensureRunning();
+    assert.equal(client.ensureRunning(), retry, "concurrent callers share one bounded readiness wait");
+    await assert.rejects(retry, /Timed out waiting|has not confirmed database preparation/);
+    assert.equal(spawns, 1, "caller timeout must not release ownership of a living child");
+    await assert.rejects(client.prepareForApplicationUpdate(), /Timed out waiting/);
+    // Simulate the original child's slow migration finishing after the UI wait.
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
+    server = wire.server;
+    child.emit("message", { type: "state_recovery_ready" });
+    assert.equal((await client.ensureRunning()).generation, 42);
+    assert.equal(spawns, 1, "retry attaches to the original now-ready daemon");
+  } finally {
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("application update waits for post-database recovery beyond the old socket startup deadline", { timeout: 15_000 }, async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let spawns = 0;
+  let retiredAlive = true;
+  let spawned!: () => void;
+  const didSpawn = new Promise<void>((resolve) => { spawned = resolve; });
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { spawns++; spawned(); return child; },
+    inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+    signalDaemon: () => { assert.fail("slow recovery must finish without signalling the daemon"); },
+  });
+  const start = client.ensureRunning();
+  void start.catch(() => undefined);
+  let update: Promise<void> | undefined;
+  try {
+    await didSpawn;
+    // Database preparation finishes before interrupted-work recovery opens the
+    // socket. The update must wait for that recovery, then retire this child.
+    child.emit("message", { type: "state_recovery_ready" });
+    child.emit("disconnect");
+    update = client.prepareForApplicationUpdate();
+    void update.catch(() => undefined);
+    await assert.rejects(client.ensureRunning(), /startup is paused/);
+    await new Promise(resolve => setTimeout(resolve, 9_000));
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42, () => {
+      retiredAlive = false;
+      void closeServer(server, env.socketPath);
+    });
+    server = wire.server;
+    assert.equal((await start).generation, 42);
+    await update;
+    assert.equal(spawns, 1, "one child completes recovery and is handed off without a replacement");
+    assert.equal(retiredAlive, false, "installation waits for the serving daemon to retire");
+    assert.equal(wire.requests.filter(request => request.method === "daemon.prepare_handoff").length, 1);
+    await assert.rejects(client.ensureRunning(), /startup is paused/);
+  } finally {
+    await Promise.allSettled([start, update]);
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("socket readiness timeout preserves the original child and releases it only on exit", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  const children: ChildProcess[] = [];
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25,
+    spawnDaemon: () => {
+      const child = new EventEmitter() as ChildProcess;
+      children.push(child);
+      return child;
+    },
+    signalDaemon: () => { assert.fail("readiness timeout must not signal a daemon"); },
+  });
+  try {
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    assert.equal(children.length, 1, "socket delay is not permission to spawn another child");
+    children[0]!.emit("exit", 1, null);
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    assert.equal(children.length, 2, "an exited startup child permits one replacement");
+    // A late event from the predecessor cannot release its replacement.
+    children[0]!.emit("error", new Error("late predecessor error"));
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    assert.equal(children.length, 2);
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
+    server = wire.server;
+    assert.equal((await client.ensureRunning()).generation, 42);
+    assert.equal(children.length, 2);
+    await closeServer(server, env.socketPath);
+    server = null;
+    await assert.rejects(client.ensureRunning(), /ENOENT|ECONNREFUSED/);
+    await assert.rejects(client.prepareForApplicationUpdate(), /ENOENT|ECONNREFUSED/);
+    assert.equal(children.length, 2, "losing a ready child's socket still does not prove process exit");
+  } finally {
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a failed spawn without a PID releases startup ownership for a later retry", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let spawns = 0;
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25,
+    spawnDaemon: () => {
+      spawns += 1;
+      const child = new EventEmitter() as ChildProcess;
+      queueMicrotask(() => child.emit("error", new Error("spawn ENOENT")));
+      return child;
+    },
+  });
+  try {
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    await assert.rejects(client.ensureRunning(), /Timed out waiting/);
+    assert.equal(spawns, 2);
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("real child requests its recovery key over private IPC and disconnects after preparation", async () => {
+  const keyModule = new URL("../../daemon/state-recovery-key.ts", import.meta.url).href;
+  const script = `
+    import assert from 'node:assert/strict';
+    import { requestStateRecoveryKey, reportStateRecoveryReady } from ${JSON.stringify(keyModule)};
+    const material = await requestStateRecoveryKey();
+    assert.equal(material.key.length, 32);
+    assert.equal(material.sealedKey, 'test-sealed-key');
+    material.key.fill(0);
+    await reportStateRecoveryReady();
+    assert.equal(process.connected, false);
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+  });
+  let output = "";
+  child.stdout!.on("data", (data) => { output += data; });
+  child.stderr!.on("data", (data) => { output += data; });
+  const exit = new Promise<number | null>((resolve) => child.once("exit", resolve));
+  await prepareSupervisorState(child, () => ({ key: Buffer.alloc(32, 17), sealedKey: "test-sealed-key" }));
+  assert.equal(await exit, 0, output);
+  assert.equal(output.includes("test-sealed-key"), false);
+});
+
+test("real supervisor upgrades v17 through encrypted private bootstrap before socket admission", async () => {
+  const env = await fixture();
+  const statePath = join(env.root, "daemon-state.sqlite");
+  // Source-run contract test across the separately compiled Electron/daemon roots.
+  const schemaModule = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+  const backupModule = await import(new URL("../../daemon/state-recovery-backup.ts", import.meta.url).href);
+  const database = new DatabaseSync(statePath);
+  new schemaModule.DaemonStateSchema().createSchema(database);
+  database.exec("DROP TABLE custodial_polling_offers; DROP TABLE custodial_polling_activations; ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id");
+  database.exec("ALTER TABLE agent_configurations DROP COLUMN polling_contract");
+  database.exec("PRAGMA foreign_keys=OFF");
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all()) {
+    database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
+  }
+  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.exec("PRAGMA writable_schema=ON");
+  database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
+  database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
+    ",'failed','interrupted'",
+    ",CHECK(outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))",
+  );
+  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
+    UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
+  database.close();
+  await chmod(statePath, 0o600);
+  const mainModule = new URL("../../daemon/main.ts", import.meta.url).href;
+  const keyModule = new URL("../../daemon/state-recovery-key.ts", import.meta.url).href;
+  const script = `
+    import { SupervisorDaemon } from ${JSON.stringify(mainModule)};
+    import { reportStateRecoveryReady } from ${JSON.stringify(keyModule)};
+    const daemon = new SupervisorDaemon(${JSON.stringify({
+      manifestPath: statePath, socketPath: env.socketPath,
+      lockPath: join(env.root, "daemon.lock"), auditPath: join(env.root, "audit.jsonl"),
+    })}, 'darwin');
+    try { await daemon.start({ onPrepared: reportStateRecoveryReady }); }
+    finally { await daemon.stop(); }
+  `;
+  let child: ChildProcess | undefined;
+  try {
+    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    let output = "";
+    child.stdout!.on("data", (data) => { output += data; });
+    child.stderr!.on("data", (data) => { output += data; });
+    const exited = new Promise<number | null>((resolve) => child!.once("exit", resolve));
+    let keyRequests = 0;
+    try {
+      await prepareSupervisorState(child, () => {
+        keyRequests++;
+        return { key: Buffer.alloc(32, 17), sealedKey: "test-sealed-key" };
+      });
+    } catch (error) {
+      await exited;
+      assert.fail(`${String(error)}\n${output}`);
+    }
+    assert.equal(await exited, 0, output);
+    assert.equal(keyRequests, 1);
+    const current = new DatabaseSync(statePath, { readOnly: true });
+    try { assert.equal(current.prepare("PRAGMA user_version").get()!.user_version, schemaModule.DAEMON_STATE_SCHEMA_VERSION); }
+    finally { current.close(); }
+    const restored = await backupModule.decryptStateRecoveryBackup(`${statePath}.recovery.enc`, Buffer.alloc(32, 17));
+    try { assert.equal(restored.prepare("PRAGMA user_version").get()!.user_version, 17); }
+    finally { restored.close(); }
+    assert.equal(output.includes("test-sealed-key"), false);
+  } finally {
+    if (child?.exitCode === null) child.kill();
+    await env.cleanup();
+  }
+});
 
 function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
   return {
@@ -49,11 +918,11 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
       task: { state: "none", task_id: null, title: null },
     },
     delivery_receipts: [{
-      inbox_item_id: "inbox_1", source_message_id: "msg_1", state: "blocked", attempt_count: 3,
+      inbox_item_id: "inbox_1", source_message_id: "msg_1", fifo_sequence: 7, state: "blocked", attempt_count: 3,
       canonical_message_id: "msg_reply_1",
       reply_client_message_id: "supervised-room:agent_1:msg_1:reply:v1",
       provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
-      timeline: [{ phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
+      timeline: [{ event_sequence: 1, phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
     }],
   };
 }
@@ -116,6 +985,63 @@ test("daemon client maps an ordered full-state subscription snapshot", async () 
   }
 });
 
+test("daemon client reads large fragmented UTF-8 snapshots and validates the completed frame", async (context) => {
+  for (const mode of ["snapshot", "wrong_id", "error"] as const) {
+    await context.test(mode, async () => {
+      const env = await fixture();
+      const charter = "Review café 🌱\n".repeat(100_000);
+      const server = createServer(socket => {
+        let requestBuffer = "";
+        socket.setEncoding("utf8");
+        socket.on("error", () => {}); // The client deliberately closes after the first frame.
+        socket.on("data", chunk => {
+          requestBuffer += chunk;
+          if (!requestBuffer.includes("\n")) return;
+          const request = JSON.parse(requestBuffer.slice(0, requestBuffer.indexOf("\n")));
+          const response = Buffer.from(JSON.stringify({
+            version: SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+            id: mode === "wrong_id" ? "another-request" : request.id,
+            ok: mode !== "error",
+            error: mode === "error" ? "Fragmented daemon failure" : undefined,
+            result: { daemon_generation: 19, sequence: 7, entries: [{ ...wireEntryWithCausalProjection(), charter }] },
+          }));
+          let offset = 0;
+          const writeChunk = () => {
+            if (socket.destroyed) return;
+            if (offset === response.length) {
+              // The delimiter arrives separately. Bytes after it are not part
+              // of this request, even when they share its last socket chunk.
+              socket.end("\nnot-another-json-response\n");
+              return;
+            }
+            const end = Math.min(offset + 8_191, response.length);
+            const writable = socket.write(response.subarray(offset, end));
+            offset = end;
+            if (writable) setImmediate(writeChunk);
+            else socket.once("drain", writeChunk);
+          };
+          writeChunk();
+        });
+      });
+      try {
+        await new Promise<void>(resolve => server.listen(env.socketPath, resolve));
+        const client = new SupervisorDaemonClient({ socketPath: env.socketPath, requestTimeoutMs: 10_000 });
+        const pending = client.watchState({ afterDaemonGeneration: 19, afterSequence: 6, waitMs: 0 });
+        if (mode === "snapshot") {
+          const snapshot = await pending;
+          assert.equal(snapshot.entries[0]?.charter, charter);
+          assert.equal(snapshot.sequence, 7);
+        } else {
+          await assert.rejects(pending, mode === "wrong_id" ? /response id mismatch/ : /Fragmented daemon failure/);
+        }
+      } finally {
+        await closeServer(server, env.socketPath);
+        await env.cleanup();
+      }
+    });
+  }
+});
+
 test("state subscriptions observe an existing daemon without spawning one", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -139,12 +1065,250 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
       23,
     );
     try {
-      assert.equal((await client.connectIfRunning())?.generation, 23);
+      const olderStatus = await client.connectIfRunning();
+      assert.equal(olderStatus?.generation, 23);
+      assert.equal(olderStatus?.recoveryDiagnostics, null, "missing older-daemon diagnostics cannot pass the zero gate");
+      wire.statusRecoveryDiagnostics.value = { daemon_inbox_wait_evidence_dependency: 2 };
+      assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null,
+        "an older wait-only diagnostic cannot imply lifecycle conformance");
+
+      const cleanProjection = {
+        available: true,
+        providers: Object.fromEntries(["codex", "claude-code", "cursor", "open-model"].map((provider) => [provider, {
+          comparedSegments: 1,
+          matched: 1,
+          missingInTyped: 0,
+          missingInLegacy: 0,
+          pairedButDifferent: 0,
+          conflicts: 0,
+          observationUnavailable: 0,
+        }])),
+      };
+      const eligibility = { codex: true, "claude-code": true, cursor: true, "open-model": true };
+      const admissionReady = { codex: "ready", "claude-code": "ready", cursor: "ready", "open-model": "ready" };
+      wire.statusRecoveryDiagnostics.value = {
+        daemon_inbox_wait_evidence_dependency: 0,
+        lifecycle_projection: cleanProjection,
+        lifecycle_capture_admission: admissionReady,
+        lifecycle_local_conformance_eligible: eligibility,
+      };
+      assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
+        daemonInboxWaitEvidenceDependency: 0,
+        lifecycleProjection: cleanProjection,
+        lifecycleCaptureAdmission: admissionReady,
+        lifecycleLocalConformanceEligible: eligibility,
+      });
+      const unavailableProjection = { ...cleanProjection, available: false };
+      const unavailableEligibility = { codex: false, "claude-code": false, cursor: false, "open-model": false };
+      const admissionUnavailable = { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable" };
+      wire.statusRecoveryDiagnostics.value = {
+        daemon_inbox_wait_evidence_dependency: 0,
+        lifecycle_projection: unavailableProjection,
+        lifecycle_capture_admission: admissionUnavailable,
+        lifecycle_local_conformance_eligible: unavailableEligibility,
+      };
+      assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
+        daemonInboxWaitEvidenceDependency: 0,
+        lifecycleProjection: unavailableProjection,
+        lifecycleCaptureAdmission: admissionUnavailable,
+        lifecycleLocalConformanceEligible: unavailableEligibility,
+      }, "unavailable evidence remains visible but cannot imply eligibility");
+      for (const contradictory of [
+        {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: unavailableProjection,
+          lifecycle_capture_admission: admissionReady,
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+        {
+          daemon_inbox_wait_evidence_dependency: 1,
+          lifecycle_projection: cleanProjection,
+          lifecycle_capture_admission: admissionReady,
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+        {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: {
+            ...cleanProjection,
+            providers: {
+              ...cleanProjection.providers,
+              codex: { ...cleanProjection.providers.codex, missingInTyped: 1 },
+            },
+          },
+          lifecycle_capture_admission: admissionReady,
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+        {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: {
+            ...cleanProjection,
+            providers: {
+              ...cleanProjection.providers,
+              "open-model": { ...cleanProjection.providers["open-model"], comparedSegments: 0 },
+            },
+          },
+          lifecycle_capture_admission: admissionReady,
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+        {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: cleanProjection,
+          lifecycle_capture_admission: { ...admissionReady, codex: "pending" },
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+      ]) {
+        wire.statusRecoveryDiagnostics.value = contradictory;
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null,
+          "a positive eligibility claim must be supported by the projected evidence");
+      }
+      wire.statusRecoveryDiagnostics.value = {
+        daemon_inbox_wait_evidence_dependency: 0,
+        lifecycle_projection: cleanProjection,
+        lifecycle_capture_admission: { ...admissionReady, codex: "pending" },
+        lifecycle_local_conformance_eligible: { ...eligibility, codex: false },
+      };
+      assert.equal((await client.connectIfRunning())?.recoveryDiagnostics?.lifecycleLocalConformanceEligible.codex, false,
+        "a stricter false eligibility remains forward-compatible with additional daemon-side blockers");
+      for (const malformed of [
+        { daemon_inbox_wait_evidence_dependency: -1 },
+        { daemon_inbox_wait_evidence_dependency: 1.5 },
+        { daemon_inbox_wait_evidence_dependency: "0" },
+      ]) {
+        wire.statusRecoveryDiagnostics.value = malformed;
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
+      }
+      for (const key of [
+        "comparedSegments", "matched", "missingInTyped", "missingInLegacy",
+        "pairedButDifferent", "conflicts", "observationUnavailable",
+      ]) {
+        const malformedProjection = structuredClone(cleanProjection);
+        (malformedProjection.providers.codex as Record<string, unknown>)[key] = -1;
+        wire.statusRecoveryDiagnostics.value = {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: malformedProjection,
+          lifecycle_capture_admission: admissionReady,
+          lifecycle_local_conformance_eligible: eligibility,
+        };
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null, `${key} fails closed`);
+      }
+      for (const malformedEligibility of [
+        undefined,
+        { codex: true, "claude-code": true },
+        { codex: true, "claude-code": true, cursor: true },
+        { codex: true, "claude-code": true, cursor: true, "open-model": "true" },
+      ]) {
+        wire.statusRecoveryDiagnostics.value = {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: cleanProjection,
+          lifecycle_capture_admission: admissionReady,
+          lifecycle_local_conformance_eligible: malformedEligibility,
+        };
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
+      }
+      for (const malformedAdmission of [
+        undefined,
+        { codex: "ready", "claude-code": "ready" },
+        { codex: "ready", "claude-code": "ready", cursor: "ready" },
+        { codex: "ready", "claude-code": "ready", cursor: "ready", "open-model": "unknown" },
+      ]) {
+        wire.statusRecoveryDiagnostics.value = {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: cleanProjection,
+          lifecycle_capture_admission: malformedAdmission,
+          lifecycle_local_conformance_eligible: eligibility,
+        };
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
+      }
       assert.equal(spawnCount, 0);
     } finally {
       await closeServer(wire.server, env.socketPath);
     }
   } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("desktop records the exact exit of a spawned daemon", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const lifecycleLogPath = join(env.root, "daemon-lifecycle.jsonl");
+  let wireServer: Server | null = null;
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperty(child, "pid", { value: 77 });
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      lifecycleLogPath,
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 24)
+          .then((started) => { wireServer = started.server; });
+        return child;
+      },
+    });
+    assert.equal((await client.ensureRunning()).generation, 24);
+    assert.equal((await client.ensureRunning()).generation, 24);
+    child.emit("exit", null, "SIGKILL");
+    await closeServer(wireServer, env.socketPath);
+    wireServer = null;
+    assert.equal(await client.connectIfRunning(), null);
+
+    const deadline = Date.now() + 1_000;
+    let recorded = "";
+    while (Date.now() < deadline) {
+      recorded = await readFile(lifecycleLogPath, "utf8").catch(() => "");
+      if (recorded.includes('"event":"daemon_exited"')) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.match(recorded, /"event":"daemon_spawned"/);
+    assert.match(recorded, /"event":"daemon_exited"/);
+    assert.match(recorded, /"pid":77/);
+    assert.match(recorded, /"signal":"SIGKILL"/);
+    assert.doesNotMatch(recorded, /"event":"daemon_disappeared"/);
+  } finally {
+    await closeServer(wireServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a passive relaunched desktop records when its negotiated daemon abruptly disappears", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const lifecycleLogPath = join(env.root, "daemon-lifecycle.jsonl");
+  let wire: Awaited<ReturnType<typeof startWireDaemon>> | null = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 25);
+  let inspected: ReturnType<typeof fakeDaemonProcessIdentity> | null = fakeDaemonProcessIdentity();
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      lifecycleLogPath,
+      inspectDaemonProcess: () => inspected,
+      spawnDaemon: () => { throw new Error("an existing daemon must not be replaced"); },
+    });
+    assert.equal((await client.connectIfRunning())?.generation, 25);
+    inspected = null;
+    await closeServer(wire.server, env.socketPath);
+    wire = null;
+    assert.equal(await client.connectIfRunning(), null);
+
+    const deadline = Date.now() + 1_000;
+    let recorded = "";
+    while (Date.now() < deadline) {
+      recorded = await readFile(lifecycleLogPath, "utf8").catch(() => "");
+      if (recorded.includes('"event":"daemon_disappeared"')) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.match(recorded, /"event":"daemon_disappeared"/);
+    assert.match(recorded, /"pid":77/);
+    assert.match(recorded, /"generation":25/);
+  } finally {
+    await closeServer(wire?.server ?? null, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
@@ -159,6 +1323,15 @@ test("state-watch retry delay backs off exponentially and remains bounded", () =
   assert.equal(supervisorStateWatchRetryDelay(100), 30_000);
 });
 
+test("state watches reject an older implementation until handoff installs the current daemon", () => {
+  assert.equal(supervisorStateWatchAcceptsStatus({
+    implementationVersion: "2.0.105",
+  }), false);
+  assert.equal(supervisorStateWatchAcceptsStatus({
+    implementationVersion: SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+  }), true);
+});
+
 async function startWireDaemon(
   socketPath: string,
   version: number,
@@ -169,11 +1342,24 @@ async function startWireDaemon(
   unresponsiveAfterPrepare = false,
   agentLifecycleCapability = true,
   manifestListDelayMs = 0,
+  runtimeEnvironmentFingerprint?: string,
+  prepareHandoffResponseDelayMs = 0,
+  retireResponseDelayMs = 0,
+  configurationApplyResponseDelayMs = 0,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
   const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
+  const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
+  const runtimeRecoveryCapability = { v2: true };
+  const maintenance = { unresponsive: false, id: null as string | null };
+  const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
+  const capturedEnvironment = supervisorDaemonSpawnEnvironment();
+  const compatibilityFingerprint: { value: string | null } = {
+    value: capturedEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!,
+  };
   let handoffPrepared = false;
+  const handoff = { prepare: null as null | (() => Promise<void>) };
   const server = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -186,11 +1372,21 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        if (maintenance.unresponsive) return;
+        result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
+          ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
+        if (handoff.prepare) {
+          void handoff.prepare().then(
+            () => socket.end(`${JSON.stringify({ version, id: request.id, ok: true, result: { accepted: true } })}\n`),
+            error => socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: String(error) })}\n`),
+          );
+          return;
+        }
         result = { accepted: true };
         handoffPrepared = true;
-        setTimeout(() => onPrepare?.(), 5);
+        responseDelayMs = prepareHandoffResponseDelayMs;
+        setTimeout(() => onPrepare?.(), prepareHandoffResponseDelayMs + 5);
       } else if (request.method === "manifest.list") {
         result = entries;
         responseDelayMs = manifestListDelayMs;
@@ -236,6 +1432,16 @@ async function startWireDaemon(
         result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
       } else if (request.method === "supervisor.update_agent_configuration") {
         result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1 } };
+      } else if (request.method === "supervisor.apply_agent_configuration") {
+        responseDelayMs = configurationApplyResponseDelayMs;
+        result = { outcome: request.params!.entry_id === "agent_invalid" ? "invented" : "restarting" };
+      } else if (request.method === "supervisor.retire_agent") {
+        responseDelayMs = retireResponseDelayMs;
+        result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
+          ? { outcome: "retired" }
+          : request.params!.entry_id === "agent_grant_only"
+            ? { outcome: "revocation_required", revocation_kind: "grant_only" }
+            : { outcome: "revocation_required", revocation_kind: "worker_session", agent_session_id: "session_exact" };
       } else if (request.method === "supervisor.purge_agent") {
         result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
           ? { outcome: "purged", purged_work_attempt_id: "attempt-cleanup" }
@@ -283,8 +1489,17 @@ async function startWireDaemon(
         result = { accepted: true };
       } else if (request.method === "supervisor.install_host_grant") {
         result = { status: "installed" };
+      } else if (request.method === "supervisor.sync_execution_delegations") {
+        result = { status: "queued" };
       } else if (request.method === "supervisor.install_open_model_credential") {
         result = { status: "installed" };
+      } else if (request.method === "supervisor.bootstrap_room_ingress") {
+        result = { status: "bootstrapped" };
+      } else if (request.method === "supervisor.host_approval_challenge") {
+        result = hostApprovals.challenge();
+      } else if (request.method === "supervisor.host_approval_request") {
+        try { result = hostApprovals.request(request.params); }
+        catch (error) { socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: String(error) })}\n`); return; }
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
@@ -296,7 +1511,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests };
+  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -308,6 +1523,7 @@ async function closeServer(server: Server | null, socketPath: string): Promise<v
 async function runReleasedSocketHandoffScenario(input: {
   inspectAfterPrepare: (context: { signals: Array<"SIGTERM" | "SIGKILL">; inspection: number }) => Omit<DaemonProcessIdentity, "expectedScriptPath"> | null | undefined;
   implementationVersion?: string;
+  initialIdentity?: Omit<DaemonProcessIdentity, "expectedScriptPath">;
 }) {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -337,7 +1553,7 @@ async function runReleasedSocketHandoffScenario(input: {
       killTimeoutMs: 0,
       processPollIntervalMs: 1,
       inspectDaemonProcess: () => {
-        if (!prepared) return fakeDaemonProcessIdentity();
+        if (!prepared) return input.initialIdentity ?? fakeDaemonProcessIdentity();
         inspection += 1;
         return input.inspectAfterPrepare({ signals, inspection });
       },
@@ -394,16 +1610,49 @@ test("local supervisor activity subscribers receive only the canonical redacted 
 });
 
 test("causal manifest projection accepts a fully valid room state and receipt timeline", () => {
-  const projected = mapEntry(wireEntryWithCausalProjection());
+  const wire = wireEntryWithCausalProjection();
+  wire.source_repo_path = "/Users/test/project";
+  wire.workspace_path = "/Users/test/.letagents/worktrees/project/private-attempt";
+  const projected = mapEntry(wire);
+  assert.equal(projected.sourceRepoPath, "/Users/test/project");
+  assert.equal(projected.workspacePath, "/Users/test/.letagents/worktrees/project/private-attempt");
   assert.equal(projected.roomAgentState?.connection.state, "connected");
   assert.equal(projected.roomAgentState?.inbox.pendingCount, 2);
   assert.deepEqual(projected.deliveryReceipts, [{
-    inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
+    inboxItemId: "inbox_1", sourceMessageId: "msg_1", fifoSequence: 7, state: "blocked", attemptCount: 3,
     canonicalMessageId: "msg_reply_1",
     replyClientMessageId: "supervised-room:agent_1:msg_1:reply:v1",
     providerTurnId: null, blockedByMessageId: null, error: "failed", failureCode: null, terminalReason: null, updatedAt: "2026-01-01T00:00:00.000Z",
-    timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
+    timeline: [{ sequence: 1, phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
+  const settled = wireEntryWithCausalProjection();
+  settled.delivery_receipts![0]!.state = "acknowledged_failed";
+  settled.delivery_receipts![0]!.canonical_message_id = null;
+  const settledReceipt = mapEntry(settled).deliveryReceipts?.[0];
+  assert.equal(settledReceipt?.state, "acknowledged_failed");
+  assert.equal(settledReceipt?.canonicalMessageId, null);
+});
+
+test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
+  const legacy = wireEntryWithCausalProjection();
+  legacy.delivery_receipts![0]!.timeline = Array.from({ length: 64 }, (_, index) => ({
+    phase: index === 63 ? "conversation_restored" : "queued",
+    observed_at: "2026-01-01T00:00:00.000Z",
+    detail: null,
+  }));
+  assert.deepEqual(
+    mapEntry(legacy).deliveryReceipts,
+    [],
+    "a capped legacy array index is not the durable SQLite event sequence",
+  );
+
+  const withoutDurableReceiptOrder = wireEntryWithCausalProjection();
+  delete withoutDurableReceiptOrder.delivery_receipts![0]!.fifo_sequence;
+  assert.deepEqual(
+    mapEntry(withoutDurableReceiptOrder).deliveryReceipts,
+    [],
+    "a legacy array position is not the durable inbox FIFO sequence",
+  );
 });
 
 test("causal manifest projection synthesizes ingress only for an older daemon that omitted the axis", () => {
@@ -448,7 +1697,7 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
     receipt: { state: "acknowledged", attempt_count: 1, provider_turn_id: "turn_1", outcome: { kind: "reply", text: "done", evidence: "transcript" }, last_error: null, blocked_by_inbox_item_id: null, next_attempt_at_ms: null },
     terminal: { outcome: "reply", normalized_text: "done", evidence_source: "transcript", observed_at: "2026-01-01T00:00:01.000Z" },
     publication: { client_message_id: "client_1", canonical_message_id: "msg_2", room_id: "room_1" },
-    timeline: [{ phase: "published", observed_at: "2026-01-01T00:00:02.000Z", detail: "msg_2" }],
+    timeline: [{ event_sequence: 1, phase: "published", observed_at: "2026-01-01T00:00:02.000Z", detail: "msg_2" }],
     items: [{ source_message_id: "msg_1", inbox_item_id: "inbox_1", state: "acknowledged", attempt_count: 1, updated_at: "2026-01-01T00:00:02.000Z", sender: "Ada", text_preview: "ship it", created_at: "2026-01-01T00:00:00.000Z", outcome: { kind: "reply", text: "done" }, provider_turn_id: "turn_1", last_error: null, canonical_message_id: "msg_2" }],
     uncertain_effects: [{ effect_id: "effect_1", tool_name: "send_message", mcp_request_id: "request_1", error: "May have completed.", created_at: "2026-01-01T00:00:01.000Z", updated_at: "2026-01-01T00:00:02.000Z" }],
     history_boundary: { earliest_retained_observed_message_id: "msg_1", earliest_retained_inbox_message_id: "msg_1", earliest_retained_receipt_sequence: 1, pruned_before_message_id: null, pruned_at: null },
@@ -457,14 +1706,94 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.equal(mapped.requested_source_message_id, "msg_1");
   assert.equal(mapped.items[0]?.sender, "Ada");
   assert.equal(mapped.uncertain_effects[0]?.effect_id, "effect_1");
+  assert.equal(mapped.timeline[0]?.sequence, 1);
   assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
+  assert.equal(mapped.recorded_execution, undefined, "older supervisors remain compatible");
+  assert.equal(mapped.runtime_control, undefined, "older supervisors may omit control health");
+  assert.equal(mapped.prepared_context, null, "older supervisors have no captured room context");
+  const intervention = { actionId: "control-1", recordedAt: "2026-01-01T00:01:00.000Z",
+    hasCorrection: true, correctionText: "Keep the API unchanged", strategy: "native",
+    operatorResolution: null, status: "uncertain", interrupted: null, resumed: null };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, latest_intervention: intervention }, input).latest_intervention, intervention);
+  assert.equal(mapAgentInspectorDetail({ ...wire, latest_intervention: { ...intervention, status: "applied" } }, input).latest_intervention, null);
+  assert.equal(mapAgentInspectorDetail({ ...wire, availability: "pruned", inbox_item_id: null, source_message: null,
+    receipt: null, terminal: null, publication: null, timeline: [], latest_intervention: intervention }, input).latest_intervention, null);
+  const context = { preparedAt: "2026-01-01T00:00:00.000Z", totalMessages: 1, omittedMessages: 0,
+    messages: [{ id: "msg-0", sender: "Ada", text: "Keep the API unchanged", truncated: false }] };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, prepared_context: context }, input).prepared_context, context);
+  for (const invalid of [
+    { ...context, preparedAt: "invalid" }, { ...context, totalMessages: 2 }, { ...context, omittedMessages: -1 },
+    { ...context, totalMessages: 31, messages: Array(31).fill(context.messages[0]) },
+    { ...context, messages: [{ ...context.messages[0], text: "a".repeat(2_001) }] },
+    { ...context, messages: [{ ...context.messages[0], truncated: "false" }] },
+  ]) {
+    const result = mapAgentInspectorDetail({ ...wire, prepared_context: invalid }, input);
+    assert.equal(result.prepared_context, null);
+    assert.deepEqual(result.receipt, mapped.receipt, "malformed optional context cannot hide receipts");
+  }
+  assert.equal(mapAgentInspectorDetail({ ...wire, availability: "pruned", inbox_item_id: null, source_message: null,
+    receipt: null, terminal: null, publication: null, timeline: [], prepared_context: context }, input).prepared_context, null);
+  const runtimeControl = { control_state: "degraded", runtime_state: "ready", observed_at: "2026-01-01T00:00:03.000Z",
+    execution_generation_id: "generation-1", daemon_generation_id: "4" };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, runtime_control: runtimeControl }, input).runtime_control, runtimeControl);
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, runtime_control: { ...runtimeControl, runtime_generation_id: "opaque-birth" } }, input).runtime_control,
+    { ...runtimeControl, runtime_generation_id: "opaque-birth" });
+  for (const invalidBirth of [null, "", "   ", 42]) {
+    assert.deepEqual(mapAgentInspectorDetail({ ...wire, runtime_control: { ...runtimeControl, runtime_generation_id: invalidBirth } }, input).runtime_control, runtimeControl);
+  }
+  const malformedRuntimeControl = mapAgentInspectorDetail({ ...wire, runtime_control: { ...runtimeControl, control_state: "failed" } }, input);
+  assert.equal(malformedRuntimeControl.runtime_control, null, "malformed optional control evidence is isolated");
+  assert.deepEqual(malformedRuntimeControl.receipt, mapped.receipt);
+  const operation = { executionId: "command-1", operation: "command", outcome: "failed", startObserved: true, outputBytes: 50, sideEffects: "possible", exitCode: 1, signalNumber: null };
+  const turn = { turnId: "retained-turn-1", state: "terminal", outcome: "completed", operations: [operation] };
+  const execution = { availability: "available", truncated: false, evidenceIncomplete: true, turns: [turn] };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, recorded_execution: execution }, input).recorded_execution, execution);
+  const unverified = { ...execution, turns: [] };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, recorded_execution: unverified }, input).recorded_execution, unverified);
+  for (const availability of ["not_captured", "unavailable"]) {
+    assert.deepEqual(mapAgentInspectorDetail({ ...wire, recorded_execution: { availability } }, input).recorded_execution, { availability });
+  }
+  for (const invalid of [
+    null, { ...execution, rawOutput: "never display" }, { ...execution, evidenceIncomplete: false, turns: [] },
+    { ...execution, evidenceIncomplete: "false" }, { ...execution, turns: [turn, turn] },
+    { ...execution, turns: Array.from({ length: 33 }, (_, i) => ({ ...turn, turnId: `turn-${i}` })) },
+    { ...execution, turns: [{ ...turn, operations: Array.from({ length: 129 }, (_, i) => ({ ...operation, executionId: `op-${i}` })) }] },
+    { ...execution, turns: Array.from({ length: 2 }, (_, i) => ({ ...turn, turnId: `turn-${i}`, operations: Array.from({ length: 65 }, (_, j) => ({ ...operation, executionId: `op-${j}` })) })) },
+    { ...execution, turns: [{ ...turn, state: "active" }] },
+    { ...execution, turns: [{ ...turn, operations: [operation, operation] }] },
+    ...[
+      { ...operation, command: "not part of this projection" }, { ...operation, operation: "invented" },
+      { ...operation, executionId: "bad\nidentity" }, { ...operation, outputBytes: -1 },
+      { ...operation, outputBytes: Number.MAX_SAFE_INTEGER + 1 }, { ...operation, exitCode: 1.1 },
+      { ...operation, signalNumber: 0 }, { ...operation, outcome: null },
+      { ...operation, outcome: "denied_before_start" },
+    ].map((row) => ({ ...execution, turns: [{ ...turn, operations: [row] }] })),
+  ]) {
+    const result = mapAgentInspectorDetail({ ...wire, recorded_execution: invalid }, input);
+    assert.deepEqual(result.recorded_execution, { availability: "unavailable" });
+    assert.deepEqual(result.receipt, mapped.receipt, "optional evidence cannot take delivery receipts down");
+  }
+  for (const kind of ["failed", "interrupted"]) {
+    const settled = mapAgentInspectorDetail({ ...wire,
+      receipt: { ...wire.receipt, state: "acknowledged_failed", outcome: { kind } },
+      terminal: { ...wire.terminal, outcome: kind, normalized_text: null },
+      publication: null,
+      items: [{ ...wire.items[0], state: "acknowledged_failed", outcome: { kind }, canonical_message_id: null }],
+    }, input);
+    assert.equal(settled.receipt?.state, "acknowledged_failed");
+    assert.equal(settled.receipt?.outcome?.kind, kind);
+    assert.equal(settled.items[0]?.state, "acknowledged_failed");
+    assert.equal(settled.publication, null);
+  }
   assert.throws(() => mapAgentInspectorDetail({ ...wire, room_id: "room_2" }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, requested_source_message_id: "msg_other" }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, source_message: { ...wire.source_message, id: "msg_other" } }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail(wire, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }), /invalid or unfenced/);
   assert.doesNotThrow(() => mapAgentInspectorDetail({ ...wire, availability: "not_loaded", requested_source_message_id: null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [] }, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }));
+  assert.equal(mapAgentInspectorDetail({ ...wire, availability: "pruned", inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], recorded_execution: execution }, input).recorded_execution, undefined, "a missing exact source never displays nested execution evidence");
   assert.throws(() => mapAgentInspectorDetail({ ...wire, items: [{ ...wire.items[0], state: "invented" }] }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: Array.from({ length: 101 }, () => wire.timeline[0]) }, input), /invalid or unfenced/);
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: [{ ...wire.timeline[0], event_sequence: 0 }] }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, uncertain_effects: Array.from({ length: 33 }, () => wire.uncertain_effects[0]) }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, history_boundary: { ...wire.history_boundary, earliest_retained_receipt_sequence: -1 } }, input), /invalid or unfenced/);
 });
@@ -496,6 +1825,9 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
       // submit native flags through the public bridge.
       configuration: { model: null, reasoningEffort: null, charter: "help", permissionProfileId: "full_access", providerLaunchPolicy: { sandboxPolicy: "weakened" } } as never,
     });
+    assert.deepEqual(await client.applyAgentConfiguration({
+      entryId: "agent_1", daemonGeneration: 39, expectedConfigurationRevision: 2,
+    }), { outcome: "restarting" });
     const prepared = await client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: "request_1", daemonGeneration: 39 });
     assert.equal(prepared.phase, "prepared");
     const committed = await client.commitRoomMove({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39 });
@@ -514,8 +1846,47 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
       entry_id: "agent_1", daemon_generation: 39, expected_revision: 1,
       configuration: { model: null, reasoning_effort: null, charter: "help", permission_profile_id: "full_access" },
     }, "the renderer bridge must never forward native provider policy");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.apply_agent_configuration")?.params, {
+      entry_id: "agent_1", daemon_generation: 39, expected_configuration_revision: 2,
+    });
     await assert.rejects(() => client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: undefined as unknown as string, daemonGeneration: 39 }), /exact typed/);
     await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
+    await assert.rejects(() => client.applyAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedConfigurationRevision: 0 }), /exact typed/);
+    await assert.rejects(() => client.applyAgentConfiguration({ entryId: "agent_invalid", daemonGeneration: 39, expectedConfigurationRevision: 2 }), /invalid configuration apply result/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("configuration apply waits for the authority-bearing daemon result beyond the ordinary request deadline", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    39,
+    undefined,
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    true,
+    0,
+    undefined,
+    0,
+    0,
+    35,
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      requestTimeoutMs: 5,
+      spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
+    });
+    const startedAt = Date.now();
+    assert.deepEqual(await client.applyAgentConfiguration({
+      entryId: "agent_1",
+      daemonGeneration: 39,
+      expectedConfigurationRevision: 2,
+    }), { outcome: "restarting" });
+    assert.ok(Date.now() - startedAt >= 30, "configuration apply waits beyond the injected ordinary request deadline");
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
@@ -555,7 +1926,7 @@ test("runtime recovery sends exact daemon authority and returns the durable repl
       execution_generation_id: "execution_1",
     },
     workplace_liveness: { state: "unknown", observed_at: null, detail: null },
-    native_liveness: { state: "terminal", observed_at: null, detail: "Provider stopped." },
+    native_liveness: { state: "terminal", observed_at: null, detail: "Agent app stopped." },
     activity: [],
   });
   try {
@@ -568,8 +1939,80 @@ test("runtime recovery sends exact daemon authority and returns the durable repl
       entry_id: "agent_dead",
       daemon_generation: 40,
     });
+    for (const mode of ["reconnect", "resume", "fresh"] as const) {
+      await client.recoverAgentRuntime("agent_dead", { mode, operationId: `operation-${mode}`, roomId: "room_1",
+        executionGenerationId: "execution_1", runtimeGenerationId: "runtime_1" });
+      assert.deepEqual(wire.requests.filter(request => request.method === "supervisor.recover_agent_runtime").at(-1)?.params, {
+        entry_id: "agent_dead", daemon_generation: 40, mode, operation_id: `operation-${mode}`,
+        room_id: "room_1", execution_generation_id: "execution_1", runtime_generation_id: "runtime_1",
+      });
+    }
+    wire.runtimeRecoveryCapability.v2 = false;
+    const requestsBefore = wire.requests.filter(request => request.method === "supervisor.recover_agent_runtime").length;
+    await assert.rejects(() => client.recoverAgentRuntime("agent_dead", { mode: "fresh", operationId: "too-old", roomId: "room_1",
+      executionGenerationId: "execution_1", runtimeGenerationId: "runtime_1" }), /Update the background service/);
+    assert.equal(wire.requests.filter(request => request.method === "supervisor.recover_agent_runtime").length, requestsBefore);
     await assert.rejects(() => client.recoverAgentRuntime(" agent_dead"), /exact/);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("retirement RPC preserves exact worker-session and uncertain-mint grant revocation modes", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 40);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    assert.deepEqual(await client.retireAgent("agent_exact", 40), {
+      outcome: "revocation_required", revocationKind: "worker_session", agentSessionId: "session_exact",
+    });
+    assert.deepEqual(await client.retireAgent("agent_grant_only", 40), {
+      outcome: "revocation_required", revocationKind: "grant_only",
+    });
+    assert.deepEqual(await client.retireAgent("agent_exact", 40, "session_exact"), { outcome: "retired" });
+    assert.deepEqual(await client.retireAgent("agent_grant_only", 40, null, true), { outcome: "retired" });
+    assert.deepEqual(wire.requests.filter((request) => request.method === "supervisor.retire_agent").map((request) => request.params), [
+      { entry_id: "agent_exact", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: false },
+      { entry_id: "agent_grant_only", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: false },
+      { entry_id: "agent_exact", daemon_generation: 40, revoked_agent_session_id: "session_exact", grant_revoked_without_worker_session: false },
+      { entry_id: "agent_grant_only", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: true },
+    ]);
+    await assert.rejects(() => client.retireAgent("agent_exact", 40, "session_exact", true), /exact typed coordinates/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("retirement completion is not bound to the three-second control-request deadline", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    40,
+    undefined,
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    true,
+    0,
+    undefined,
+    0,
+    25,
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      requestTimeoutMs: 5,
+      spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
+    });
+    assert.deepEqual(await client.retireAgent("agent_exact", 40), {
+      outcome: "revocation_required", revocationKind: "worker_session", agentSessionId: "session_exact",
+    });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
 });
 
 test("purge RPC preserves exact worker-session and grant-only acknowledgement modes", async () => {
@@ -608,8 +2051,14 @@ test("production create durably proves no mint, grant-only purge survives restar
   const env = await fixture();
   const previousPlatformOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   const previousGrantStore = process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
+  const previousRuntimeFingerprint = process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  const previousCompatibilityFingerprint = process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
   process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = join(env.root, "supervisor-grants.json");
+  process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT =
+    supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+  process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT =
+    supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
     socketPath: env.socketPath,
@@ -743,6 +2192,10 @@ test("production create durably proves no mint, grant-only purge survives restar
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousPlatformOverride;
     if (previousGrantStore === undefined) delete process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
     else process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = previousGrantStore;
+    if (previousCompatibilityFingerprint === undefined) delete process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = previousCompatibilityFingerprint;
+    if (previousRuntimeFingerprint === undefined) delete process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+    else process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = previousRuntimeFingerprint;
     await env.cleanup();
   }
 });
@@ -802,12 +2255,22 @@ test("host grant install carries renewal ownership and expiry metadata to the ex
       entryId: "entry-1", roomId: "room-1", agentKey: "owner/agent", grantId: "grant-1",
       supervisorGrant: "secret-parent", grantGeneration: 4, daemonGeneration: 39,
       hostId: "host-1", installationId: "installation-1", expiresAt: "2026-07-22T12:00:00.000Z",
+      ownerAccountId: "account-1", scopeKey: "owner",
     }), "installed");
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.install_host_grant")?.params, {
       entry_id: "entry-1", room_id: "room-1", agent_key: "owner/agent", grant_id: "grant-1",
       supervisor_grant: "secret-parent", grant_generation: 4,
-      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2026-07-22T12:00:00.000Z",
+      host_id: "host-1", installation_id: "installation-1", owner_account_id: "account-1", scope_key: "owner",
+      grant_expires_at: "2026-07-22T12:00:00.000Z",
       api_url: configuredApiUrl, daemon_generation: 39, credential_only: false,
+    });
+    assert.equal(await client.syncExecutionDelegations("room-1"), "queued");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.sync_execution_delegations")?.params, {
+      room_id: "room-1", daemon_generation: 39,
+    });
+    assert.equal(await client.bootstrapRoomIngress("entry-1", 39, "join the room and say hi"), "bootstrapped");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.bootstrap_room_ingress")?.params, {
+      entry_id: "entry-1", daemon_generation: 39, initial_message: "join the room and say hi",
     });
   } finally {
     await closeServer(wire.server, env.socketPath);
@@ -960,6 +2423,9 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const created = await client.create(createInput);
     assert.deepEqual([created.desiredState, created.observedState, created.condition], ["paused", "absent", "none"]);
     assert.equal(created.deliveryMode, "daemon_inbox");
+    assert.equal(created.runtimeGenerationId, null);
+    wire.entries[0]!.runtime_generation_id = "opaque-birth";
+    assert.equal((await client.list(created.roomId)).find(candidate => candidate.id === created.id)?.runtimeGenerationId, "opaque-birth");
     assert.equal(wire.entries[0]?.last_worker_binding, null, "production creation durably attests that no worker session exists yet");
     const retried = await client.create(createInput);
     assert.equal(retried.id, created.id, "one Start request is idempotent across retries");
@@ -1073,16 +2539,118 @@ test("desktop and daemon implementation identities stay in lockstep", async () =
   assert.equal(daemonIdentity, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
 });
 
+test("a room-scoped list asks the daemon to scope and still filters what it gets back", async () => {
+  const env = await fixture();
+  // list() goes through ensureRunning(), which fences non-macOS hosts. Scope the
+  // established override to this test rather than the whole module.
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+  wire.entries.push(
+    { ...wireEntryWithCausalProjection(), id: "agent_here", room_id: "room_1" },
+    { ...wireEntryWithCausalProjection(), id: "agent_elsewhere", room_id: "room_2" },
+  );
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath });
+
+    const scoped = await client.list("room_1");
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: { room_id: "room_1" } });
+    // This wire daemon deliberately ignores the scope, so a correct answer here
+    // proves the client-side filter is still doing its job.
+    assert.deepEqual(scoped.map((entry) => entry.id), ["agent_here"]);
+
+    const everything = await client.list();
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: undefined });
+    assert.deepEqual(everything.map((entry) => entry.id).sort(), ["agent_elsewhere", "agent_here"]);
+
+    await client.list(null);
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: undefined });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("desktop and daemon agree on the state channel's activity summary limit", async () => {
+  const projection = await readFile(
+    join(dirname(fileURLToPath(import.meta.url)), "../../daemon/state-watch-projection.ts"),
+    "utf8",
+  );
+  const daemonLimit = projection.match(/STATE_WATCH_ACTIVITY_SUMMARY_LIMIT\s*=\s*(\d+)/)?.[1];
+  assert.equal(Number(daemonLimit), SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT);
+});
+
+test("the state subscription bounds activity even if a daemon answers with history", async () => {
+  const env = await fixture();
+  // The manifest.list comparison below goes through ensureRunning(), which
+  // fences non-macOS hosts. Scope the established override to this test.
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+  wire.entries.push({
+    ...wireEntryWithCausalProjection(),
+    activity: Array.from({ length: 200 }, (_unused, index) => ({
+      observed_at: `2026-01-01T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      sequence: 200 - index, // deliberately newest-first on the wire
+      provider: "codex",
+      kind: "notification",
+      method: "item/tool_call",
+      summary: `step ${200 - index}`,
+      status: "working" as const,
+      payload: { text: "x".repeat(2_000) },
+      payload_truncated: false,
+      payload_redacted: false,
+      durable_payload_ref: null,
+    })),
+  });
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath });
+    const snapshot = await client.watchState({ afterDaemonGeneration: 19, afterSequence: 6, waitMs: 10 });
+    const activity = snapshot.entries[0]!.activity;
+    assert.equal(activity.length, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT);
+    assert.equal(activity.at(-1)?.sequence, 200);
+    assert.ok(activity.every((event) => event.payload === null));
+    // Non-activity projection is untouched by the bound.
+    assert.equal(snapshot.entries[0]?.roomAgentState?.ingress.state, "observing");
+
+    // manifest.list stays the full-history read.
+    const listed = await client.list();
+    assert.equal(listed[0]?.activity.length, 200);
+    assert.notEqual(listed[0]?.activity.at(-1)?.payload, null);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches ignore inherited overrides", () => {
   const sourceRoot = '/tmp/LetAgents source "quoted"';
   const inherited = {
     LETAGENTS_API_URL: "https://letagents.chat",
     LETAGENTS_DEV_MCP_SERVER_ENTRY: "/tmp/unrelated-cwd/stale-cache/server.js",
+    LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY: "/tmp/untrusted/daemon-tool-executor.js",
+    LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256: "untrusted",
+    LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV: "1",
   };
 
   const packaged = supervisorDaemonSpawnEnvironment(inherited, sourceRoot);
   assert.equal(packaged.LETAGENTS_DEV_MCP_SERVER_ENTRY, undefined, "packaged launch keeps the installed MCP fallback");
+  assert.notEqual(packaged.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY, inherited.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY,
+    "packaged launch never trusts a caller-selected daemon executor");
+  assert.notEqual(packaged.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256, inherited.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256,
+    "daemon handoff fingerprints the Desktop-sealed runtime tree");
+  assert.equal(packaged.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV, undefined,
+    "a caller cannot disable the packaged runtime seal");
   assert.equal(packaged.LETAGENTS_API_URL, inherited.LETAGENTS_API_URL, "unrelated auth/runtime environment is preserved");
+  assert.equal(
+    packaged.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT,
+    supervisorRuntimeEnvironmentFingerprint(packaged),
+    "the daemon carries an opaque proof of the executable-selection environment it inherited",
+  );
 
   const development = supervisorDaemonSpawnEnvironment({
     ...inherited,
@@ -1093,6 +2661,13 @@ test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches i
     join(sourceRoot, "dist", "mcp", "server.js"),
     "dev launch derives the exact repo build instead of trusting inherited cwd or cache state",
   );
+  assert.equal(
+    development.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY,
+    join(sourceRoot, "dist", "mcp", "server", "daemon-tool-executor.js"),
+    "dev daemon execution uses the same exact rebuilt MCP runtime",
+  );
+  assert.equal(development.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV, "1",
+    "only the Desktop-derived development runtime is explicitly unsealed");
   assert.equal(development.ELECTRON_RUN_AS_NODE, "1");
 });
 
@@ -1107,6 +2682,210 @@ test("desktop development watches daemon builds and rejects a stale replacement 
   );
   assert.match(healthCheck, /status\.implementationVersion !== SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION/);
   assert.match(healthCheck, /Rebuild the desktop daemon and try again/);
+});
+
+test("ordinary reopen preserves a compatible daemon and pending approval across provider environment changes", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture();
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const candidate = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7,
+    () => assert.fail("passive reopen cannot hand off a compatible daemon"),
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, 0, false, true, 0, "earlier-provider-environment");
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  let decisions = 0;
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope); assert.ok(authenticated);
+    if (authenticated.operation === "list") return [candidate];
+    decisions += 1;
+    assert.deepEqual((authenticated.input as HostApprovalDecision).expected, candidate.reference);
+    return "resolved";
+  };
+  const options = { socketPath: env.socketPath, daemonScriptPath, loadApprovalSigner: async () => signer,
+    inspectDaemonProcess: () => fakeDaemonProcessIdentity(),
+    spawnDaemon: () => { assert.fail("provider environment drift cannot spawn a replacement"); } };
+  try {
+    const first = new SupervisorDaemonClient(options);
+    const before = await first.ensureRunning();
+    assert.equal((await first.listHostApprovals("room_1")).approvals[0]?.status, "pending");
+    const reopened = new SupervisorDaemonClient(options);
+    const after = await reopened.ensureRunning();
+    assert.equal(after.pid, before.pid);
+    assert.equal(after.generation, before.generation);
+    assert.equal(await reopened.isRuntimeEnvironmentCurrent(), false, "setup must report the retained older environment");
+    const approval = (await reopened.listHostApprovals("room_1")).approvals[0]!;
+    assert.equal(approval.status, "pending");
+    await reopened.decideHostApproval({ id: approval.id, decision: "allow_once" });
+    assert.equal(decisions, 1);
+    assert.ok(wire.requests.every(request => request.method !== "daemon.prepare_handoff"));
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("compatibility distinguishes storage and sealed runtime identity from provider resolution", () => {
+  const base = supervisorDaemonSpawnEnvironment();
+  const expected = supervisorCompatibilityFingerprint(base);
+  for (const key of ["PATH", "CODEX_INSTALL_DIR", "LETAGENTS_CODEX_BIN", "LETAGENTS_CLAUDE_BIN", "LETAGENTS_CLAUDE_CODE_BIN", "LETAGENTS_CURSOR_AGENT_BIN", "LETAGENTS_OPENCODE_BIN"]) {
+    const changed = { ...base, [key]: "changed" };
+    assert.equal(supervisorCompatibilityFingerprint(changed), expected, key);
+    assert.notEqual(supervisorRuntimeEnvironmentFingerprint(changed), supervisorRuntimeEnvironmentFingerprint(base), key);
+  }
+  for (const key of ["HOME", "LETAGENTS_API_URL", "LETAGENTS_STATE_PATH", "LETAGENTS_LOCAL_CHAT_DB", "LETAGENTS_LOCAL_FILES_DIR", "LETAGENTS_LOCAL_PROFILE_PATH", "LETAGENTS_CHAT_STORAGE_SETTINGS_PATH", "LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY", "LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256", "LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV"]) {
+    assert.notEqual(supervisorCompatibilityFingerprint({ ...base, [key]: "changed" }), expected, key);
+  }
+  const defaults = { HOME: "/users/test" };
+  const explicit = {
+    ...defaults,
+    LETAGENTS_API_URL: " https://letagents.chat ",
+    LETAGENTS_STATE_PATH: "/users/test/.letagents/mcp-state.json",
+    LETAGENTS_LOCAL_CHAT_DB: "/users/test/.letagents/local-chat.sqlite",
+    LETAGENTS_LOCAL_FILES_DIR: "/users/test/.letagents/local-files",
+    LETAGENTS_LOCAL_PROFILE_PATH: "/users/test/.letagents/local-profile.json",
+    LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: "/users/test/.letagents/chat-storage.json",
+  };
+  assert.equal(supervisorCompatibilityFingerprint(defaults), supervisorCompatibilityFingerprint(explicit));
+  assert.equal(supervisorRuntimeEnvironmentFingerprint(defaults), supervisorRuntimeEnvironmentFingerprint(explicit));
+  assert.notEqual(supervisorCompatibilityFingerprint(explicit),
+    supervisorCompatibilityFingerprint({ ...explicit, LETAGENTS_STATE_PATH: ` ${explicit.LETAGENTS_STATE_PATH} ` }),
+    "MCP reads a nonempty state path verbatim; whitespace is a different state identity");
+});
+
+test("explicit environment refresh is idempotent when the service already has the current environment", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+      spawnDaemon: () => { assert.fail("current environment must not replace the daemon"); } });
+    const refresh = client.restartForEnvironmentRefresh();
+    assert.equal(client.restartForEnvironmentRefresh(), refresh);
+    assert.equal(client.ensureRunning(), refresh, "ordinary startup joins the explicit refresh");
+    assert.equal((await refresh).generation, 7);
+    await client.restartForEnvironmentRefresh();
+    assert.equal(await client.isRuntimeEnvironmentCurrent(), true);
+    assert.ok(wire.requests.every(request => request.method === "daemon.negotiate"));
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+for (const reason of ["explicit provider refresh", "incompatible runtime", "missing compatibility proof"] as const)
+test(`desktop safely replaces a same-version daemon for ${reason}`, async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  const previousInstallDirectory = process.env.CODEX_INSTALL_DIR;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  process.env.CODEX_INSTALL_DIR = "/runtime/captured-before-handoff";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let retiredAlive = true;
+  let spawns = 0;
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    61,
+    () => {
+      process.env.CODEX_INSTALL_DIR = "/runtime/refreshed-during-handoff";
+      retiredAlive = false;
+      void closeServer(oldServer, env.socketPath);
+    },
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    true,
+    0,
+    "stale-provider-runtime-environment",
+  );
+  oldServer = old.server;
+  if (reason !== "explicit provider refresh") {
+    old.compatibilityFingerprint.value = reason === "incompatible runtime" ? "other-runtime" : null;
+  }
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      handoffTimeoutMs: 50,
+      spawnDaemon: (_scriptPath, _cwd, spawnEnvironment) => {
+        spawns += 1;
+        assert.equal(spawnEnvironment.CODEX_INSTALL_DIR, "/runtime/captured-before-handoff");
+        const capturedFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+        void startWireDaemon(
+          env.socketPath,
+          SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+          62,
+          undefined,
+          SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+          0,
+          false,
+          true,
+          0,
+          capturedFingerprint,
+        )
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+
+    const status = await (reason === "explicit provider refresh" ? client.restartForEnvironmentRefresh() : client.ensureRunning());
+
+    assert.equal(spawns, 1);
+    assert.equal(status.generation, 62);
+    assert.deepEqual(old.requests.slice(0, 2).map((request) => request.method), [
+      "daemon.negotiate",
+      "daemon.prepare_handoff",
+    ]);
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    if (previousInstallDirectory === undefined) delete process.env.CODEX_INSTALL_DIR;
+    else process.env.CODEX_INSTALL_DIR = previousInstallDirectory;
+    await env.cleanup();
+  }
+});
+
+test("cross-install daemon that does not retire is never signalled or raced by a replacement", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let prepared = false;
+  let spawns = 0;
+  const signals: Array<"SIGTERM" | "SIGKILL"> = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    81,
+    () => { prepared = true; },
+    "2.0.101",
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 10,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => fakeDaemonProcessIdentity({
+        command: `${process.execPath} /another/LetAgents.app/dist-daemon/main.js`,
+      }),
+      signalDaemon: (_pid, signal) => signals.push(signal),
+      spawnDaemon: () => { spawns += 1; return fakeChild(); },
+    });
+
+    await assert.rejects(client.ensureRunning(), /another installation did not retire/i);
+    assert.equal(prepared, true, "the existing LetAgents daemon receives the graceful handoff request");
+    assert.equal(spawns, 0, "the replacement never races an owner that retained the socket");
+    assert.deepEqual(signals, [], "a daemon at an unexpected path is never force-signalled");
+  } finally {
+    await closeServer(old.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
 });
 
 test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async () => {
@@ -1202,6 +2981,54 @@ test("application update handoff retires only the serving daemon and prevents re
   }
 });
 
+test("handoff drain is not abandoned at the ordinary control-request deadline", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let retiredAlive = true;
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    35,
+    () => {
+      retiredAlive = false;
+      void closeServer(server, env.socketPath);
+    },
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    true,
+    0,
+    undefined,
+    40,
+  );
+  server = wire.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      requestTimeoutMs: 5,
+      handoffTimeoutMs: 100,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      spawnDaemon: () => { throw new Error("application update must not spawn a replacement"); },
+    });
+    const startedAt = Date.now();
+    await client.prepareForApplicationUpdate();
+    assert.ok(Date.now() - startedAt >= 35, "handoff waits beyond the injected ordinary request deadline");
+    assert.deepEqual(wire.requests.slice(0, 2).map((request) => request.method), [
+      "daemon.negotiate",
+      "daemon.prepare_handoff",
+    ]);
+  } finally {
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("application update proceeds when no supervisor daemon owns the socket", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -1270,7 +3097,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.100");
+    assert.equal(status.implementationVersion, "2.0.201");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -1425,6 +3252,15 @@ test("free socket plus unverifiable PID proceeds with a loud diagnostic", async 
   assert.equal(result.diagnostics.some((entry) => entry.outcome === "unverifiable" && entry.authorityReleased), true);
 });
 
+test("packaged desktop accepts a graceful handoff from a daemon launched by another installation", async () => {
+  const result = await runReleasedSocketHandoffScenario({
+    initialIdentity: fakeDaemonProcessIdentity({ command: `${process.execPath} /another/LetAgents.app/dist-daemon/main.js` }),
+    inspectAfterPrepare: () => null,
+  });
+  assert.equal(result.status.generation, 42);
+  assert.deepEqual(result.signals, [], "a cross-install daemon retires itself and is never signalled");
+});
+
 test("daemon signal guard refuses PID reuse before TERM", async () => {
   const result = await runReleasedSocketHandoffScenario({
     inspectAfterPrepare: () => fakeDaemonProcessIdentity({ kernelStartTime: "Thu Jan  1 00:00:01 2026" }),
@@ -1503,6 +3339,8 @@ test("replacement cannot report healthy without acquiring a newer singleton gene
       },
     });
     await assert.rejects(client.ensureRunning(), /did not acquire a newer singleton generation/i);
+    await assert.rejects(client.ensureRunning(), /did not acquire a newer singleton generation/i,
+      "retry must retain the original launch's generation fence");
   } finally {
     await closeServer(replacementServer, env.socketPath);
     await closeServer(oldServer, env.socketPath);
@@ -1637,4 +3475,205 @@ test("closing and immediately reopening Live for the same agent discards the sta
     client.connectIfRunning = originalConnect;
     client.watchAgentStream = originalWatch;
   }
+});
+
+test("host approval client displays and signs one-time Claude tool decisions over the daemon socket", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const candidate = hostApprovalCandidate();
+  candidate.reference!.nativeRequestId = "claude-native-request";
+  candidate.presentation = { ...candidate.presentation, provider: "claude-code", title: "Run a tool",
+    details: '{"tool_name":"Write","input":{"file_path":"/tmp/qa","content":"proposed edit"}}' };
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  const decisions: HostApprovalDecision[] = [];
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "list") return [candidate];
+    decisions.push(request.input as HostApprovalDecision); return "decision_sent";
+  };
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+    const snapshot = await client.listHostApprovals("room_1");
+    assert.equal(snapshot.available, true); assert.equal(snapshot.approvals.length, 1);
+    const view = snapshot.approvals[0]!;
+    assert.equal(view.presentation.provider, "claude-code"); assert.equal(view.presentation.title, "Run a tool");
+    assert.equal(view.presentation.denyScope, "request"); assert.equal(view.status, "pending");
+    assert.equal(await client.decideHostApproval({ id: view.id, decision: "allow_once" }), "decision_sent");
+    assert.equal(decisions.length, 1); assert.equal(decisions[0]!.expected.nativeRequestId, "claude-native-request");
+    assert.equal(decisions[0]!.decision, "allow_once");
+    assert.equal(decisions[0]!.projectionSha256, createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"));
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("saved permission list and revoke use the real enrolled signer", async () => {
+  const env = await fixture();
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  const scope = { kind: "room_workspace" as const, version: 1 as const, agentId: "agent", accountId: "owner", roomId: "room",
+    workAttemptId: "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a", workspacePath: "/private/workspace", canonicalWorkspacePath: "/private/workspace",
+    provider: "claude-code" as const, toolId: "claude:Write", toolLabel: "Write", policySha256: "b".repeat(64) };
+  const rule = { id: "rule", revision: 1, ownerId: `host-${verifier.challenge().keyFingerprint}`, scope, createdAtMs: 1 };
+  const operations: unknown[] = [];
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope);
+    assert.ok(authenticated);
+    operations.push(authenticated);
+    if (authenticated.operation === "list_tool_rules") return [rule];
+    assert.equal(authenticated.operation, "revoke_tool_rule");
+    return null;
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, loadApprovalSigner: async () => signer });
+  try {
+    assert.deepEqual(await client.listHostToolRules("agent"), [rule]);
+    await client.revokeHostToolRule({ agentId: "agent", ruleId: "rule", revision: 1 });
+    assert.deepEqual(operations, [
+      { operation: "list_tool_rules", input: { agentId: "agent" } },
+      { operation: "revoke_tool_rule", input: { agentId: "agent", ruleId: "rule", revision: 1 } },
+    ]);
+    await assert.rejects(client.revokeHostToolRule({ agentId: "agent", ruleId: "rule", revision: 1 }, () => { throw new Error("Sender changed"); }), /Sender changed/);
+    assert.equal(operations.length, 2);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+
+for (const takeover of [false, true]) test(`provider-aware ${takeover ? "startup takeover" : "application update"} keeps approvals available and honors deferred handoff`, { timeout: 10_000 }, async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture();
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const candidate = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7,
+    undefined, takeover ? "older-implementation" : SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+  let entered!: () => void;
+  const draining = new Promise<void>(resolve => { entered = resolve; });
+  let defer!: () => void;
+  const timeout = new Promise<void>(resolve => { defer = resolve; });
+  wire.handoff.prepare = async () => { entered(); await timeout; throw new Error("Update deferred: current work has not completed."); };
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  let decisions = 0;
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope); assert.ok(authenticated);
+    if (authenticated.operation === "list") return [candidate];
+    assert.equal(authenticated.operation, "decide");
+    decisions += 1;
+    return "resolved";
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    loadApprovalSigner: async () => signer, inspectDaemonProcess: () => fakeDaemonProcessIdentity(),
+    signalDaemon: () => assert.fail("deferred handoff must not signal the daemon"),
+    spawnDaemon: () => { throw new Error("deferred handoff must not spawn a replacement"); } });
+  try {
+    if (!takeover) await client.ensureRunning();
+    const observation = (client as unknown as { attachedDaemonObservation: unknown }).attachedDaemonObservation;
+    let releaseStartup!: () => void;
+    const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+    const updating = assert.rejects(takeover ? client.ensureRunning(startup) : client.prepareForApplicationUpdate(), /Update deferred/);
+    const reading = client.listHostApprovals("room_1");
+    releaseStartup();
+    await draining;
+    const snapshot = await reading;
+    assert.equal(snapshot.available, true);
+    assert.equal(snapshot.approvals[0]?.status, "pending");
+    await client.decideHostApproval({ id: snapshot.approvals[0]!.id, decision: "allow_once" });
+    assert.equal(decisions, 1);
+    if (!takeover) assert.equal((client as unknown as { attachedDaemonObservation: unknown }).attachedDaemonObservation, observation,
+      "live observation remains attached while the current provider finishes");
+    defer();
+    await updating;
+    assert.equal((await client.listHostApprovals("room_1")).available, true);
+    assert.equal(wire.requests.filter(request => request.method === "daemon.prepare_handoff").length, 1);
+    if (!takeover) assert.equal((await client.ensureRunning()).generation, 7, "deferral restores the original daemon's admission");
+  } finally { defer(); await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+
+test("compaction projection is optional and accepts only finite structured progress", () => {
+  const wire = wireEntryWithCausalProjection();
+  assert.equal(mapEntry(wire).providerProgress, null);
+  const progress = { state: "compacting" as const, startedAt: "2026-09-24T00:00:00Z" };
+  assert.deepEqual(mapEntry({ ...wire, provider_progress: progress }).providerProgress, progress);
+  assert.equal(mapEntry({ ...wire, provider_progress: { ...progress, startedAt: "invalid" } }).providerProgress, null);
+});
+
+for (const scenario of ["refused", "unresponsive", "pending_handoff"] as const) test(`force maintenance restart handles ${scenario} without replay or duplicate spawn`, async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture(); const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+  let dead = false; const signals: string[] = [];
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    inspectDaemonProcess: () => dead ? null : fakeDaemonProcessIdentity(),
+    signalDaemon: (pid, signal) => { assert.equal(pid, 77); signals.push(signal);
+      void closeServer(wire.server, env.socketPath).then(() => { dead = true; }); },
+    spawnDaemon: () => { throw new Error("force-stop must relaunch Electron, not spawn under old producers"); },
+    requestTimeoutMs: 30, terminateTimeoutMs: 100, killTimeoutMs: 100, processPollIntervalMs: 1 });
+  try {
+    await client.connectIfRunning();
+    if (scenario === "refused") {
+      wire.handoff.prepare = async () => { throw new Error("custody retired"); };
+      await assert.rejects(client.prepareForApplicationUpdate(), /custody retired/);
+    }
+    let old: Promise<unknown> | undefined;
+    if (scenario === "pending_handoff") {
+      wire.handoff.prepare = () => new Promise(() => {});
+      old = client.prepareForApplicationUpdate(); void old.catch(() => undefined);
+      while (!wire.requests.some(r => r.method === "daemon.prepare_handoff")) await new Promise(r => setTimeout(r, 1));
+    }
+    if (scenario === "unresponsive") wire.maintenance.unresponsive = true;
+    const one = client.stopForMaintenance(); const two = client.stopForMaintenance(); assert.equal(one, two);
+    await assert.rejects(client.ensureRunning(), /maintenance/);
+    await one; if (old) await assert.rejects(old, /maintenance/);
+    assert.deepEqual(signals, ["SIGTERM"]);
+    assert.ok(await readDaemonMaintenance(daemonMaintenancePath(env.root)));
+    assert.equal(wire.requests.filter(r => r.method === "daemon.prepare_handoff").length, scenario === "unresponsive" ? 0 : 1);
+  } finally { if (!dead) await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("force maintenance resume requires the exact held service and preserves a mismatched hold", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture(); const hold = await createDaemonMaintenance(daemonMaintenancePath(env.root));
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 20);
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    inspectDaemonProcess: () => fakeDaemonProcessIdentity(), signalDaemon: () => assert.fail("must not signal for resume"),
+    spawnDaemon: () => assert.fail("must not spawn for resume") });
+  try {
+    assert.deepEqual(await client.getMaintenanceStatus(), { held: true, ready: false });
+    await assert.rejects(client.stopForMaintenance(true), /Force restart/);
+    assert.deepEqual(await readDaemonMaintenance(daemonMaintenancePath(env.root)), hold);
+    assert.equal(wire.requests.some(r => r.method === "daemon.prepare_handoff"), false);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("force maintenance held service suppresses ordinary generation wakes and resumes only after exit", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
+  const env = await fixture(); const hold = await createDaemonMaintenance(daemonMaintenancePath(env.root));
+  let dead = false; let generationWakes = 0;
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 20,
+    () => { void closeServer(wire.server, env.socketPath).then(() => { dead = true; }); });
+  wire.maintenance.id = hold.id;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    inspectDaemonProcess: () => dead ? null : fakeDaemonProcessIdentity(),
+    signalDaemon: () => assert.fail("held service shutdown must not signal"), terminateTimeoutMs: 100,
+    spawnDaemon: () => assert.fail("held service is already running") });
+  client.onGeneration(() => { generationWakes++; });
+  try {
+    assert.equal((await client.ensureRunning()).maintenanceHoldId, hold.id);
+    await Promise.resolve(); assert.equal(generationWakes, 0);
+    assert.deepEqual(await client.getMaintenanceStatus(), { held: true, ready: true });
+    await client.stopForMaintenance(true);
+    assert.equal(dead, true); assert.equal(await readDaemonMaintenance(daemonMaintenancePath(env.root)), null);
+    await assert.rejects(client.ensureRunning(), /maintenance/, "old Electron stays fenced until relaunch");
+  } finally { if (!dead) await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });

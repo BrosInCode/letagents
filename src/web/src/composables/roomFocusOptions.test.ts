@@ -10,7 +10,7 @@ import type { GitRoomInfo } from './room/types.js'
 
 function gitRoom(overrides: Partial<GitRoomInfo> = {}): GitRoomInfo {
   return {
-    room_id: 'git-room:github.com:brosincode/letagents:branch:Y29kZXgvZ2l0LXJvb21z',
+    room_id: 'focus_37',
     provider: 'github',
     host: 'github.com',
     repository: {

@@ -1,5 +1,13 @@
+import { join } from "node:path";
+const { DaemonControlSocket } = await import(new URL("../../daemon/control-socket.ts", import.meta.url).href);
+import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mjs";
+// These storage-domain fixtures run as the board owner. Cross-process calls use the socket below.
+registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { createElectronTestEnv } from "./harness.js";
 import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
@@ -7,7 +15,8 @@ import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-t
 // `paths.ts` reads LETAGENTS_API_URL once at module-eval time; the shared
 // harness pins it to an unroutable address so any un-stubbed fetch fails fast
 // instead of reaching prod. Every fetch in this suite is stubbed regardless.
-const env = createElectronTestEnv({ prefix: "room-stream-fallback-" });
+const env = createElectronTestEnv({ prefix: "room-stream-fallback-",
+  paths: ["state", "chatStorage", "localChatDb", "localProfile"] });
 env.resetState({});
 
 // Shrink the failed-catch-up retry cadence (default 20s) so the retry path is
@@ -53,13 +62,65 @@ mock.module("../main/agents/codex-supervisor.js", {
   },
 });
 
+// Delay only storage selection; keep the real resolver for the transport suite.
+const localStore = await import("../main/rooms/local-store.js");
+type RoomStorage = Awaited<ReturnType<typeof localStore.resolveLocalAwareRoomStorageMode>>;
+const deferredStorage = new Map<string, Promise<RoomStorage>>();
+const boardReads = new Map<string, number>();
+const deferredBoardReads = new Map<string, Promise<Awaited<ReturnType<typeof localStore.listLocalTasks>>>>();
+mock.module("../main/rooms/local-store.js", {
+  namedExports: {
+    ...localStore,
+    listLocalTasks: (roomId: string) => {
+      boardReads.set(roomId, (boardReads.get(roomId) ?? 0) + 1);
+      return deferredBoardReads.get(roomId) ?? localStore.listLocalTasks(roomId);
+    },
+    resolveLocalAwareRoomStorageMode: (roomIdentifier: string) =>
+      deferredStorage.get(roomIdentifier)
+      ?? localStore.resolveLocalAwareRoomStorageMode(roomIdentifier),
+  },
+});
+
+const localMessages = await import("../main/rooms/messages/local-store.js");
+const localPollRooms: string[] = [];
+mock.module("../main/rooms/messages/local-store.js", {
+  namedExports: {
+    ...localMessages,
+    getLocalChatMessages: (...args: Parameters<typeof localMessages.getLocalChatMessages>) => {
+      localPollRooms.push(args[0]);
+      return localMessages.getLocalChatMessages(...args);
+    },
+  },
+});
+
+function deferStorage(roomIdentifier: string) {
+  let resolve!: (storage: RoomStorage) => void;
+  let reject!: (error: Error) => void;
+  deferredStorage.set(roomIdentifier, new Promise<RoomStorage>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  }));
+  return { resolve, reject };
+}
+
 const {
   startDesktopRoomStream,
   stopDesktopRoomStream,
   getActiveRoomIdentifier,
   repairDesktopRoomStreamManagedDelivery,
+  setExecutionDelegationInvalidationHandler,
 } =
   await import("../main/room-stream.js");
+
+const boardService = await import("../main/rooms/local-board-service.js");
+process.env.LETAGENTS_BOARD_SOCKET_PATH = join(env.tempDir, "board.sock");
+const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
+  if (request.method === "local_board.watch") return boardService.watchLocalBoard(request.params, 1, signal);
+  if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
+  throw new Error("Unknown fixture request");
+});
+await boardSocket.start();
+test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 const ROOM = "focus_fallback_room";
 
@@ -310,10 +371,12 @@ function emittedMessage(id: string) {
 
 test.beforeEach(() => {
   emitted.length = 0;
+  localPollRooms.length = 0;
 });
 
 test.afterEach(async () => {
   await stopDesktopRoomStream();
+  deferredStorage.clear();
 });
 
 test("healthy SSE with an empty snapshot establishes the first cursor before reading live frames", async () => {
@@ -907,7 +970,62 @@ test("a semantically malformed typed frame gaps instead of committing its broker
   }
 });
 
-test("message-info invalidations advance without a room repair while malformed payloads gap", async () => {
+test("unknown well-formed frames advance without delivery or gap repair", async () => {
+  const router = installFetchRouter();
+  try {
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    initial.pushRoomSync("msg_1", false, "broker_known");
+    await starting;
+    const emittedCount = emitted.length;
+    const managedCount = managedEmitted.length;
+    initial.pushRaw("id: broker_future\nevent: future_room_event\ndata: {\"future_field\":true}\n\n");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(emitted.length, emittedCount, "unsupported events are not renderer events or repair requests");
+    assert.equal(managedEmitted.length, managedCount, "unsupported events cannot wake agents");
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_future");
+    reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("malformed or oversized unknown frames cannot advance the broker cursor", async (t) => {
+  for (const data of ["null", JSON.stringify({ oversized: "x".repeat(1024 * 1024) })]) {
+    await t.test(data === "null" ? "non-object payload" : "complete oversized frame", async () => {
+      const router = installFetchRouter();
+      try {
+        const initial = makeSse();
+        const reconnected = makeSse();
+        router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+        router.enqueueCatchUp([]);
+        const starting = startDesktopRoomStream(ROOM, "msg_1");
+        await waitUntil(() => router.streamCalls.length === 1);
+        initial.pushRoomSync("msg_1", false, "broker_known");
+        await starting;
+        const gapCount = emitted.filter((event) => event.type === "open" && event.gap && event.verified).length;
+        initial.pushRaw(`id: broker_bad_future\nevent: future_room_event\ndata: ${data}\n\n`);
+        await waitUntil(() => emitted.filter((event) => event.type === "open" && event.gap && event.verified).length > gapCount);
+        initial.error();
+        await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+        assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_known");
+        reconnected.close();
+      } finally {
+        await stopDesktopRoomStream();
+        router.restore();
+      }
+    });
+  }
+});
+
+for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.stringify(messageIds)} advances without repair while malformed payloads gap`, async () => {
   const router = installFetchRouter();
   try {
     const initial = makeSse();
@@ -915,17 +1033,25 @@ test("message-info invalidations advance without a room repair while malformed p
     router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
     router.enqueueCatchUp([]);
     router.enqueueCatchUp([]);
-    await startDesktopRoomStream(ROOM, "msg_1");
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    initial.pushRoomSync("msg_1", false, "broker_before_info");
+    await starting;
+    await new Promise((resolve) => setImmediate(resolve));
     const gapCount = emitted.filter(
       (event) => event.type === "open" && event.gap === true && event.verified === true,
     ).length;
+    const emittedCount = emitted.length;
+    const managedCount = managedEmitted.length;
     initial.pushRaw(
       `id: broker_info\nevent: message_info_updated\ndata: ${JSON.stringify({
         room_id: ROOM,
-        message_ids: ["msg_7"],
+        message_ids: messageIds,
       })}\n\n`,
     );
     await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(emitted.length, emittedCount, "Message Info remains fetched on demand, without new renderer events");
+    assert.equal(managedEmitted.length, managedCount, "an invalidation must not deliver work to managed agents");
     assert.equal(emitted.filter(
       (event) => event.type === "open" && event.gap === true && event.verified === true,
     ).length, gapCount);
@@ -940,6 +1066,93 @@ test("message-info invalidations advance without a room repair while malformed p
     ).length > gapCount);
     reconnected.close();
   } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("resource invalidations advance the broker cursor while only supported resources render", async () => {
+  const router = installFetchRouter();
+  const delegationRooms: string[] = [];
+  setExecutionDelegationInvalidationHandler((roomId) => { delegationRooms.push(roomId); });
+  try {
+    const canonicalRoom = `${ROOM}_canonical`;
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    assert.match(router.streamCalls[0]?.url || "", /stream_capability=resource_invalidation_v1/);
+    initial.pushRaw(
+      `event: room_sync\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        checkpoint: "msg_1",
+        gap: false,
+        event_cursor: "broker_before_work",
+      })}\n\n`,
+    );
+    await starting;
+    const emittedCount = emitted.length;
+    const managedCount = managedEmitted.length;
+    initial.pushRaw(
+      `id: broker_work\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        resource: "agent_work",
+      })}\n\n`,
+    );
+    await waitUntil(() => emitted.length > emittedCount);
+    assert.deepEqual(emitted.at(-1), {
+      type: "resource_invalidation",
+      roomIdentifier: canonicalRoom,
+      resource: "agent_work",
+    });
+    assert.equal(managedEmitted.length, managedCount);
+
+    initial.pushRaw(
+      `id: broker_delegation\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        resource: "execution_delegation",
+      })}\n\n`,
+    );
+    await waitUntil(() => delegationRooms.length === 1);
+    assert.deepEqual(delegationRooms, [canonicalRoom]);
+    assert.equal(emitted.length, emittedCount + 1, "delegation pointers stay main-process-only");
+    assert.equal(managedEmitted.length, managedCount);
+
+    const afterAgentWorkCount = emitted.length;
+    initial.pushRaw(
+      `id: broker_future_resource\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        resource: "agent_approval",
+      })}\n\n`,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(emitted.length, afterAgentWorkCount, "a future resource stays a renderer no-op");
+    assert.equal(managedEmitted.length, managedCount, "a future resource must not deliver managed work");
+
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_future_resource");
+    const invalidationCount = emitted.filter((event) => event.type === "resource_invalidation").length;
+    reconnected.pushRaw(
+      `id: broker_bad_work\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: "room_other",
+        resource: "agent_work",
+      })}\n\n`,
+    );
+    await waitUntil(() => emitted.some(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ));
+    assert.equal(
+      emitted.filter((event) => event.type === "resource_invalidation").length,
+      invalidationCount,
+      "a wrong-room pointer must repair without being delivered",
+    );
+    reconnected.close();
+  } finally {
+    setExecutionDelegationInvalidationHandler(null);
     await stopDesktopRoomStream();
     router.restore();
   }
@@ -1055,6 +1268,188 @@ test("a live broker gap repairs missed targeted messages and tasks exactly once"
     reconnected.close();
   } finally {
     router.restore();
+    await stopDesktopRoomStream();
+  }
+});
+
+
+test("a delayed local startup cannot attach to the replacement cloud room", async () => {
+  const router = installFetchRouter();
+  const localRoom = "local_stale_start";
+  const pending = deferStorage(localRoom);
+  try {
+    const startingLocal = startDesktopRoomStream(localRoom);
+    await startDesktopRoomStream(ROOM);
+    const eventCount = emitted.length;
+    const localStorage = await localStore.resolveLocalAwareRoomStorageMode(localRoom);
+    pending.resolve({ ...localStorage, effectiveMode: "local" });
+    await startingLocal;
+    assert.equal(getActiveRoomIdentifier(), ROOM);
+    assert.equal(router.streamCalls.length, 1);
+    assert.equal(emitted.length, eventCount);
+    assert.deepEqual(localPollRooms, []);
+    assert.ok(router.pollCalls.every((call) => call.url.includes(ROOM)));
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("stopping during storage selection prevents late transport and readiness events", async () => {
+  const router = installFetchRouter();
+  const pending = deferStorage(ROOM);
+  try {
+    const starting = startDesktopRoomStream(ROOM);
+    await Promise.resolve();
+    await stopDesktopRoomStream();
+    pending.resolve(await localStore.resolveLocalAwareRoomStorageMode(ROOM));
+    await starting;
+    await sleep(CATCH_UP_RETRY_MS + 20);
+    assert.equal(getActiveRoomIdentifier(), null);
+    assert.equal(router.streamCalls.length, 0);
+    assert.equal(router.pollCalls.length, 0);
+    assert.deepEqual(emitted, []);
+  } finally {
+    router.restore();
+  }
+});
+
+test("concurrent same-room starts share startup and readiness", async () => {
+  const router = installFetchRouter();
+  const pending = deferStorage(ROOM);
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    const first = startDesktopRoomStream(ROOM);
+    let secondReady = false;
+    const second = startDesktopRoomStream(ROOM).then(() => { secondReady = true; });
+    await Promise.resolve();
+    assert.equal(secondReady, false);
+    pending.resolve(await localStore.resolveLocalAwareRoomStorageMode(ROOM));
+    await waitUntil(() => router.streamCalls.length > 0);
+    assert.equal(secondReady, false);
+    sse.pushRoomSync(null);
+    await Promise.all([first, second]);
+    assert.equal(router.streamCalls.length, 1);
+    await stopDesktopRoomStream();
+    assert.ok(router.streamCalls.every((call) => call.signal.aborted));
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("concurrent different-room starts open only the latest transport", async () => {
+  const router = installFetchRouter();
+  try {
+    const first = startDesktopRoomStream("superseded_room");
+    const second = startDesktopRoomStream(ROOM);
+    await Promise.all([first, second]);
+    assert.equal(getActiveRoomIdentifier(), ROOM);
+    assert.equal(router.streamCalls.length, 1);
+    assert.ok(router.streamCalls[0]!.url.includes(ROOM));
+    await stopDesktopRoomStream();
+    assert.ok(router.streamCalls.every((call) => call.signal.aborted));
+    assert.ok(router.pollCalls.every((call) => call.signal.aborted));
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("failed storage selection cleans up startup and permits a same-room retry", async () => {
+  const router = installFetchRouter();
+  const pending = deferStorage(ROOM);
+  try {
+    const starting = startDesktopRoomStream(ROOM);
+    const sameRoom = startDesktopRoomStream(ROOM);
+    pending.reject(new Error("storage unavailable"));
+    await assert.rejects(starting, /storage unavailable/);
+    await sameRoom;
+    assert.equal(getActiveRoomIdentifier(), null);
+    deferredStorage.delete(ROOM);
+    await startDesktopRoomStream(ROOM);
+    assert.equal(router.streamCalls.length, 1);
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("local board follows cross-process commits with no idle, message, or other-room board reads", async () => {
+  const room = "local_board_events";
+  const otherRoom = "local_other_board";
+  const exec = promisify(execFile);
+  const mcpUrl = new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href;
+  const runMcp = (code: string) => exec(process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", `const m = await import(${JSON.stringify(mcpUrl)}); ${code}`],
+    { cwd: fileURLToPath(new URL("../../../../", import.meta.url)), env: { ...process.env } });
+  const updates = () => emitted.filter((event): event is Extract<DesktopRoomStreamEvent, { type: "task_update" }> =>
+    event.type === "task_update" && event.roomIdentifier === room);
+  try {
+    await startDesktopRoomStream(room);
+    await waitUntil(() => boardReads.get(room) === 1);
+    await sleep(1700); // crosses the existing local-message polling cadence
+    assert.equal(boardReads.get(room), 1, "unchanged board has no timer reads");
+    await localMessages.addLocalChatMessage(room, { sender: "human", text: "message only" });
+    await localStore.addLocalTask(otherRoom, { title: "Other room task" });
+    await sleep(100);
+    assert.equal(boardReads.get(room), 1, "unrelated SQLite writes do not read this board");
+
+    await runMcp(`await m.addLocalTask(${JSON.stringify(room)}, { title: 'Agent task' });`);
+    await waitUntil(() => updates().some(event => event.task.title === "Agent task"));
+    const id = updates().at(-1)!.task.id;
+    await runMcp(`await m.updateLocalTask(${JSON.stringify(room)}, ${JSON.stringify(id)}, { status: 'accepted' });`);
+    await waitUntil(() => updates().some(event => event.task.status === "accepted"));
+    assert.equal(managedEmitted.some(event => event.type === "task_update" && event.roomIdentifier === room), false,
+      "renderer catch-up does not replay task execution to agents");
+
+    const db = await localStore.getLocalTaskDatabase();
+    const beforeRollback = boardReads.get(room);
+    db.exec("BEGIN IMMEDIATE");
+    db.prepare("UPDATE local_tasks SET title='Rolled back' WHERE room_id=?").run(room);
+    db.exec("ROLLBACK");
+    await sleep(100);
+    assert.equal(boardReads.get(room), beforeRollback, "rollback never announces a changed board");
+
+    await stopDesktopRoomStream();
+    const stoppedReads = boardReads.get(room);
+    await runMcp(`await m.updateLocalTask(${JSON.stringify(room)}, ${JSON.stringify(id)}, { status: 'cancelled' });`);
+    await sleep(100);
+    assert.equal(boardReads.get(room), stoppedReads, "stopping closes the board subscription");
+    await startDesktopRoomStream(room);
+    await waitUntil(() => updates().some(event => event.task.status === "cancelled"));
+    assert.equal(boardReads.get(room), stoppedReads! + 1, "reconnect catches up exactly once");
+
+    const start = emitted.length;
+    db.prepare("DELETE FROM local_tasks WHERE room_id=?").run(room);
+    await waitUntil(() => emitted.slice(start).some(event => event.type === "task_remove" && event.taskId === id));
+  } finally {
+    await stopDesktopRoomStream();
+  }
+});
+
+test("switching rooms fences a board read already in flight", async () => {
+  const oldRoom = "local_board_stale_read";
+  const newRoom = "local_board_replacement";
+  const task = await localStore.addLocalTask(oldRoom, { title: "Old room task" });
+  let release!: (tasks: typeof task[]) => void;
+  deferredBoardReads.set(oldRoom, new Promise(resolve => { release = resolve; }));
+  try {
+    await startDesktopRoomStream(oldRoom);
+    await waitUntil(() => boardReads.get(oldRoom) === 1);
+    await startDesktopRoomStream(newRoom);
+    await waitUntil(() => boardReads.get(newRoom) === 1);
+    release([task]);
+    await sleep(100);
+    assert.equal(emitted.some(event => event.type === "task_update" && event.roomIdentifier === oldRoom), false);
+    await localStore.updateLocalTask(oldRoom, task.id, { status: "accepted" });
+    await sleep(100);
+    assert.equal(boardReads.get(oldRoom), 1);
+    assert.equal(boardReads.get(newRoom), 1);
+  } finally {
+    release([task]);
+    deferredBoardReads.delete(oldRoom);
     await stopDesktopRoomStream();
   }
 });

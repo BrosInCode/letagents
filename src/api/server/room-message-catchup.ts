@@ -36,9 +36,11 @@ export function getCanonicalRoomMessageCatchUp(input: {
   after?: string;
   limit?: number;
   includePromptOnly: boolean;
+  waitForRouting?: boolean;
   load: (roomId: string, after?: string, options?: {
     limit?: number;
     include_prompt_only?: boolean;
+    wait_for_routing?: boolean;
   }) => Promise<CanonicalMessageCatchUp>;
 }): Promise<CanonicalMessageCatchUp> {
   const key = JSON.stringify([
@@ -47,12 +49,14 @@ export function getCanonicalRoomMessageCatchUp(input: {
     input.after ?? null,
     input.limit ?? null,
     input.includePromptOnly,
+    Boolean(input.waitForRouting),
   ]);
   const existing = pending.get(key);
   if (existing) return existing;
   const work = runCatchUp(() => input.load(input.roomId, input.after, {
     limit: input.limit,
     include_prompt_only: input.includePromptOnly,
+    ...(input.waitForRouting ? { wait_for_routing: true } : {}),
   })).finally(() => {
     if (pending.get(key) === work) pending.delete(key);
   });

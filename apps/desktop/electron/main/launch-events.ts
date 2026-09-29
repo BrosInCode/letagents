@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 
 import { redactCredentialText } from "./agents/provider-evidence.js";
+import { DesktopSecureStorageUnavailableError } from "./supervisor-grant.js";
 import type {
   DesktopLaunchEvent,
   DesktopLaunchEventType,
@@ -153,6 +154,15 @@ export function classifyLaunchFailure(error: unknown): {
 } {
   if (error instanceof LaunchBlockedError) {
     return { type: "launch.blocked", recovery: error.recovery, detail: error.message, diagnostic: null };
+  }
+  if (error instanceof DesktopSecureStorageUnavailableError) {
+    const diagnostic = redactCredentialText(error.message).value.replace(/\s+/g, " ").trim().slice(0, 320);
+    return {
+      type: "launch.blocked",
+      recovery: "open_keychain",
+      detail: "LetAgents needs access to your Mac login keychain to save this agent securely. Open Keychain Access, unlock the login keychain, then try again.",
+      diagnostic: diagnostic || null,
+    };
   }
   // The daemon never hears about failures thrown between the durable claim
   // and activation, so this event is the only record the wizard can show.

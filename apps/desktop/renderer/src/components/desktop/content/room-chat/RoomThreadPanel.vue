@@ -61,7 +61,7 @@
         :delivery-retry-keys="deliveryRetryKeys"
         :continuation-repair-keys="continuationRepairKeys"
         :room-delivery-skip-keys="roomDeliverySkipKeys"
-        :provider-label="resolveMessageProviderLabel(parent, participants, presence, supervisorEntries)"
+        :provider-label="resolveProviderLabel(parent)"
         @quote-reply="quoteInThread(parent)"
         @message-info="(messageId, context) => $emit('message-info', messageId, context)"
         @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
@@ -76,11 +76,12 @@
         @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
       />
 
+      <RoomContribution v-for="work in contributionsFor(parent.id)" :key="work.attemptId" :work="work" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="$emit('open-agent', workspaceAgentTarget($event, participants))" />
       <div class="room-thread-divider">
         <span>Replies</span>
       </div>
 
-      <template v-for="reply in replies" :key="reply.id">
+      <template v-for="reply in replies" :key="reply.clientMessageId || reply.id">
         <div
           v-if="readState.firstUnreadReplyId === reply.id"
           class="room-thread-new-divider"
@@ -106,7 +107,7 @@
           :delivery-retry-keys="deliveryRetryKeys"
           :continuation-repair-keys="continuationRepairKeys"
           :room-delivery-skip-keys="roomDeliverySkipKeys"
-          :provider-label="resolveMessageProviderLabel(reply, participants, presence, supervisorEntries)"
+          :provider-label="resolveProviderLabel(reply)"
           @quote-reply="quoteInThread(reply)"
           @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
@@ -120,6 +121,7 @@
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         />
+        <RoomContribution v-for="work in contributionsFor(reply.id)" :key="work.attemptId" :work="work" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="$emit('open-agent', workspaceAgentTarget($event, participants))" />
       </template>
 
       <div v-if="!replies.length" class="room-thread-empty" data-testid="room-thread-empty">
@@ -146,7 +148,7 @@
         ref="textareaElement"
         v-model="draft"
         rows="2"
-        :disabled="sending || !roomIdentifier"
+        :disabled="!roomIdentifier"
         :placeholder="composerPlaceholder"
         role="combobox"
         aria-autocomplete="list"
@@ -216,18 +218,22 @@
 </template>
 
 <script setup lang="ts">
+import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
+import RoomContribution from "./RoomContribution.vue";
+import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
 import { computed, nextTick, ref, watch } from "vue";
 import { MessageSquarePlus, Paperclip, X } from "@lucide/vue";
 import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
   DesktopRoomMessage,
+  DesktopRoomAgentWork,
   DesktopRoomMessageThreadSummary,
   DesktopStagedAttachment,
   DesktopSupervisorManifestEntry,
 } from "../../../../../../electron/ipc-types";
 import { roomMentionCandidates } from "../../../../domain/participants";
-import { resolveMessageProviderLabel } from "../../../../domain/agent-provider";
+import { createMessageProviderLabelResolver } from "../../../../domain/agent-provider";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
@@ -242,7 +248,15 @@ import {
 } from "./thread-utils";
 import type { ThreadIndicatorSummary } from "./thread-utils";
 
+function contributionsFor(source: string) {
+  return (props.roomAgentWork ?? []).filter(work => {
+    const changes = contributionChanges(work);
+    return work.sourceMessageId === source && changes;
+  });
+}
 const props = defineProps<{
+  roomAgentWork?: DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
   parent: DesktopRoomMessage;
   initialThreadSummary: DesktopRoomMessageThreadSummary | null;
   replies: DesktopRoomMessage[];
@@ -250,6 +264,7 @@ const props = defineProps<{
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
   roomIdentifier: string | null;
+  messageNamespace?: string;
   sending: boolean;
   sendError: string | null;
   attaching: boolean;
@@ -262,7 +277,7 @@ const props = defineProps<{
   searchQuery: string;
   activeSearchMessageId: string | null;
   taskReferenceIds: ReadonlySet<string>;
-  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
@@ -275,7 +290,7 @@ const emit = defineEmits<{
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   close: [];
   "open-image": [imageId: string];
-  "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>];
+  "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
   "open-github-event": [url: string];
   "open-agent": [target: AgentModalTarget];
   "open-task": [taskId: string];
@@ -289,9 +304,12 @@ const emit = defineEmits<{
   "skip-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
-const draft = ref("");
-const quoteTarget = ref<DesktopRoomMessage | null>(null);
-const selectedQuoteText = ref<string | null>(null);
+const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
+  props.participants, props.presence, props.supervisorEntries,
+));
+const { text: draft, quote: quoteTarget, selectedQuoteText, captureSubmittedDraft } = useDesktopMessageDraft(
+  () => props.messageNamespace || props.roomIdentifier, () => props.parent.id,
+);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
 const bodyElement = ref<HTMLElement | null>(null);
@@ -351,9 +369,6 @@ watch(
 watch(
   () => props.parent.id,
   async () => {
-    draft.value = "";
-    quoteTarget.value = null;
-    selectedQuoteText.value = null;
     mentionQuery.value = null;
     await nextTick();
     panelElement.value?.focus({ preventScroll: true });
@@ -392,6 +407,14 @@ watch(
     bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
   },
 );
+
+watch(() => [props.parent.id, ...props.replies.map(reply => reply.id)]
+  .flatMap(source => contributionsFor(source).map(work => work.attemptId)).join('|'), async () => {
+  const body = bodyElement.value;
+  const following = body && body.scrollHeight - body.scrollTop - body.clientHeight < 96;
+  await nextTick();
+  if (following && bodyElement.value && !props.activeSearchMessageId) bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
+});
 
 function displayName(message: DesktopRoomMessage): string {
   return message.agentIdentity?.displayName || parseSenderIdentity(message).displayName;
@@ -448,6 +471,9 @@ function handleAttachmentDrop(event: DragEvent): void {
 function submitThreadReply(): void {
   const text = draft.value.trim();
   if ((!text && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
+  const clearSubmittedText = captureSubmittedDraft();
+  const roomIdentifier = props.roomIdentifier;
+  const parentId = props.parent.id;
   emit(
     "send-thread-message",
     selectedQuoteText.value
@@ -456,11 +482,14 @@ function submitThreadReply(): void {
     props.parent.id,
     quoteTarget.value?.id || props.parent.id,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
+    (sent) => {
+      if (!sent) return;
+      const cleared = clearSubmittedText();
+      if (props.roomIdentifier !== roomIdentifier || props.parent.id !== parentId) return;
+      if (cleared) mentionQuery.value = null;
+      void nextTick(() => textareaElement.value?.focus());
+    },
   );
-  draft.value = "";
-  quoteTarget.value = null;
-  selectedQuoteText.value = null;
-  mentionQuery.value = null;
 }
 
 function insertNewlineAtCursor(): void {
@@ -476,6 +505,7 @@ function insertNewlineAtCursor(): void {
 }
 
 function handleEnterKey(event: KeyboardEvent): void {
+  if (event.isComposing) return;
   event.preventDefault();
   if (mentionOpen.value) {
     const candidate = mentionCandidates.value[activeMentionIndex.value];

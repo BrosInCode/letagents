@@ -1,0 +1,530 @@
+import { assertDecisionToolRule, hostToolDecisionWasWithdrawn } from "./host-tool-rules.js";
+import type { DatabaseSync } from "node:sqlite";
+import { z } from "zod";
+import { executionIdentity, nativeRuntimeDeathSchema } from "./execution-protocol.js";
+import type { ApprovalState } from "./execution-reducer.js";
+import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeExecutionIdentity } from "./execution-shadow-store.js";
+import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
+import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
+import type { DaemonManifestEntry } from "./types.js";
+
+// Structural, host-only storage. These operations run inside ManifestStore's
+// fenced transaction; none invokes a provider or authenticates a UI caller.
+// The broker must prove native pendingness/ownership and produce a trusted
+// presentation before calling them. Optional shadow capture is not authority.
+const time = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const digest = z.string().regex(/^[a-f0-9]{64}$/);
+// Native process birth witnesses are ps lstart strings on macOS, not journal IDs.
+const processBirth = z.string().min(1).max(512);
+const connection = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("claude_cli"), pid: time.min(1), processIdentity: processBirth }),
+  z.strictObject({ kind: z.literal("codex_app_server"), url: z.string().min(1).max(4096), pid: time.min(1), processIdentity: processBirth }),
+  z.strictObject({ kind: z.literal("opencode_server"), url: z.string().min(1).max(4096), pid: time.min(1), processIdentity: processBirth, serverAuthPath: z.string().min(1).max(4096) }),
+]);
+const authority = z.strictObject({ inboxItemId: executionIdentity, workAttemptId: executionIdentity,
+  executionGenerationId: executionIdentity, provider: z.enum(["codex", "open-model", "claude-code"]),
+  providerConnection: connection, configurationRevision: time.min(1) });
+const reference = z.strictObject({
+  requestId: executionIdentity, requestVersion: time.min(1), requestSha256: digest,
+  agentId: executionIdentity, roomId: executionIdentity, executionGenerationId: executionIdentity,
+  runtimeGenerationId: executionIdentity, turnId: executionIdentity,
+  providerContinuationId: executionIdentity, providerTurnId: executionIdentity,
+  connectionId: executionIdentity, nativeRequestId: z.union([executionIdentity, z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)]),
+});
+const requestDetails = reference.extend({
+  kind: z.enum(["command", "file_change", "network"]), risk: z.enum(["low", "medium", "high"]),
+  recoveryBoundary: z.enum(["none", "connection", "runtime"]), createdAtMs: time, expiresAtMs: time,
+});
+const admission = requestDetails.refine(v => v.expiresAtMs > v.createdAtMs);
+const operationalAdmission = z.strictObject({
+  request: requestDetails.omit({ executionGenerationId: true, runtimeGenerationId: true, turnId: true })
+    .refine(v => v.expiresAtMs > v.createdAtMs), authority,
+});
+const selection = z.strictObject({
+  expected: reference, authority, decisionId: executionIdentity, actorId: executionIdentity,
+  decision: z.enum(["allow_once", "deny"]), projectionSha256: digest, atMs: time,
+});
+const dispatch = z.strictObject({
+  expected: reference, authority, decisionId: executionIdentity, dispatchId: executionIdentity,
+  projectionSha256: digest, atMs: time,
+});
+const outcome = z.strictObject({
+  expected: reference, decisionId: executionIdentity, dispatchId: executionIdentity,
+  evidence: z.enum(["sent_unacknowledged", "dispatch_uncertain", "native_processed", "exact_native_execution", "native_request_closed"]), atMs: time,
+});
+const loss = z.strictObject({ expected: reference, atMs: time });
+export type CloseExecutionApprovalRequest = z.infer<typeof loss>;
+export type ApprovalReference = z.infer<typeof reference>;
+export type AdmitExecutionApproval = z.infer<typeof admission>;
+export type ApprovalAuthority = z.infer<typeof authority>;
+export type AdmitOperationalExecutionApproval = z.infer<typeof operationalAdmission>;
+export type SelectHostApproval = z.infer<typeof selection>;
+export type DispatchExecutionApproval = z.infer<typeof dispatch>;
+export type RecordExecutionApprovalOutcome = z.infer<typeof outcome>;
+export type LoseExecutionApproval = z.infer<typeof loss>;
+type Certainty = "impossible" | "unknown" | null;
+export type ExecutionApprovalRecord = {
+  request: AdmitExecutionApproval & { delegatable: boolean; state: ApprovalState; applicationCertainty: Certainty; closedAtMs?: number | null };
+  decision: null | {
+    withdrawnBeforeSend?: true;
+    decisionId: string; actorId: string; decision: "allow_once" | "deny"; projectionSha256: string | null;
+    source: "host" | "delegate"; delegationInstanceId: string | null; delegationRevision: number | null;
+    delegationScopeSha256: string | null;
+    dispatchState: "not_dispatched" | "dispatching" | "uncertain" | "acknowledged" | "lost";
+    dispatchId: string | null; applicationCertainty: Certainty;
+    decidedAtMs: number; dispatchStartedAtMs: number | null; resolvedAtMs: number | null;
+  };
+};
+type Row = Record<string, unknown>;
+// Closing a provider prompt is independent of acknowledging the chosen decision.
+// Retain only exact structural identity; never retain the request payload.
+const legacyClosureSchema = `CREATE TABLE execution_approval_request_closures (
+  request_id TEXT NOT NULL,
+  request_version INTEGER NOT NULL,
+  decision_id TEXT NOT NULL REFERENCES execution_approval_decisions(decision_id) ON DELETE CASCADE,
+  dispatch_id TEXT NOT NULL,
+  observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+  PRIMARY KEY(request_id,request_version),
+  FOREIGN KEY(request_id,request_version) REFERENCES execution_approval_requests(request_id,request_version) ON DELETE CASCADE
+) STRICT`;
+const closureSchema = legacyClosureSchema.replace("decision_id TEXT NOT NULL", "decision_id TEXT")
+  .replace("dispatch_id TEXT NOT NULL", "dispatch_id TEXT");
+const normalizeClosureSql = (sql: string) => sql.replace(/IF NOT EXISTS /gi, "").replace(/\s+/g, " ").trim();
+export function applyApprovalRequestClosureSchema(db: DatabaseSync): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get();
+  if (row && normalizeClosureSql(String(row.sql)) === normalizeClosureSql(legacyClosureSchema)) {
+    // The caller owns the migration transaction. Preserve every historical receipt.
+    db.exec(`CREATE TEMP TABLE approval_closures_v44 AS SELECT * FROM execution_approval_request_closures;
+      DROP TABLE execution_approval_request_closures; ${closureSchema};
+      INSERT INTO execution_approval_request_closures SELECT * FROM approval_closures_v44;
+      DROP TABLE approval_closures_v44`);
+  } else db.exec(closureSchema.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+  validateApprovalRequestClosureSchema(db);
+}
+export function validateApprovalRequestClosureSchema(db: DatabaseSync, legacy = false): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_approval_request_closures'").get();
+  if (!row || normalizeClosureSql(String(row.sql)) !== normalizeClosureSql(legacy ? legacyClosureSchema : closureSchema)) {
+    throw new Error("Approval request closure storage is missing or invalid.");
+  }
+}
+export class ApprovalJournalError extends Error {
+  constructor(readonly code: "invalid_input" | "identity_mismatch" | "missing_turn" | "invalid_transition" | "decision_conflict" | "expired") {
+    super(`Approval journal rejected: ${code}.`); this.name = "ApprovalJournalError";
+  }
+}
+function parse<T>(schema: z.ZodType<T>, value: unknown): T {
+  const result = schema.safeParse(value);
+  if (!result.success) throw new ApprovalJournalError("invalid_input");
+  return result.data;
+}
+function reject(code: ApprovalJournalError["code"]): never { throw new ApprovalJournalError(code); }
+function requireForeignKeys(db: DatabaseSync): void {
+  if (db.prepare("PRAGMA foreign_keys").get()?.foreign_keys !== 1) reject("missing_turn");
+}
+function requestFromRow(row: Row): ExecutionApprovalRecord["request"] {
+  if (![0, 1].includes(Number(row.delegatable)) || !["command", "file_change", "network"].includes(String(row.kind))
+    || (row.delegatable === 1 && (row.kind !== "file_change" || row.risk !== "low"))) reject("identity_mismatch");
+  return {
+    requestId: String(row.request_id), requestVersion: Number(row.request_version), requestSha256: String(row.request_sha256),
+    agentId: String(row.agent_id), roomId: String(row.room_id), executionGenerationId: String(row.execution_generation_id),
+    runtimeGenerationId: String(row.runtime_generation_id), turnId: String(row.turn_id),
+    providerContinuationId: String(row.provider_continuation_id), providerTurnId: String(row.provider_turn_id),
+    connectionId: String(row.connection_id), nativeRequestId: row.native_request_id_type === "number" ? Number(row.native_request_id) : String(row.native_request_id),
+    kind: row.kind as AdmitExecutionApproval["kind"], risk: row.risk as AdmitExecutionApproval["risk"],
+    recoveryBoundary: row.recovery_boundary as AdmitExecutionApproval["recoveryBoundary"],
+    createdAtMs: Number(row.created_at_ms), expiresAtMs: Number(row.expires_at_ms),
+    delegatable: row.delegatable === 1,
+    state: row.state as ApprovalState, applicationCertainty: row.application_certainty as Certainty,
+  };
+}
+function read(db: DatabaseSync, id: string, version: number): ExecutionApprovalRecord | null {
+  const row = db.prepare("SELECT * FROM execution_approval_requests WHERE request_id=? AND request_version=?").get(id, version);
+  if (!row) return null;
+  const decision = db.prepare("SELECT * FROM execution_approval_decisions WHERE request_id=? AND request_version=?").get(id, version);
+  if (decision && !(
+    (decision.source === "host" && [0, 1].includes(Number(decision.request_delegatable))
+      && decision.delegation_instance_id === null && decision.delegation_revision === null
+      && decision.delegation_scope_sha256 === null)
+    || (decision.source === "delegate" && decision.request_delegatable === 1
+      && typeof decision.delegation_instance_id === "string" && Number.isSafeInteger(decision.delegation_revision)
+      && typeof decision.delegation_scope_sha256 === "string")
+  )) reject("identity_mismatch");
+  const closure = db.prepare("SELECT * FROM execution_approval_request_closures WHERE request_id=? AND request_version=?").get(id, version);
+  if (closure && (closure.decision_id !== (decision?.decision_id ?? null)
+    || closure.dispatch_id !== (decision?.dispatch_id ?? null)
+    || Number(closure.observed_at_ms) < Number(decision?.dispatch_started_at_ms ?? decision?.decided_at_ms ?? row.created_at_ms))) reject("identity_mismatch");
+  return { request: { ...requestFromRow(row), closedAtMs: closure ? Number(closure.observed_at_ms) : null }, decision: decision ? {
+    ...(hostToolDecisionWasWithdrawn(db, decision, row) ? { withdrawnBeforeSend: true as const } : {}),
+    decisionId: String(decision.decision_id), actorId: String(decision.actor_id), decision: decision.decision as "allow_once" | "deny",
+    source: decision.source as "host" | "delegate", delegationInstanceId: decision.delegation_instance_id as string | null,
+    delegationRevision: decision.delegation_revision as number | null,
+    delegationScopeSha256: decision.delegation_scope_sha256 as string | null,
+    projectionSha256: decision.projection_sha256 as string | null, dispatchState: decision.dispatch_state as NonNullable<ExecutionApprovalRecord["decision"]>["dispatchState"],
+    dispatchId: decision.dispatch_id as string | null, applicationCertainty: decision.application_certainty as Certainty,
+    decidedAtMs: Number(decision.decided_at_ms), dispatchStartedAtMs: decision.dispatch_started_at_ms as number | null,
+    resolvedAtMs: decision.resolved_at_ms as number | null,
+  } : null };
+}
+function exact(db: DatabaseSync, expected: ApprovalReference): ExecutionApprovalRecord {
+  const found = read(db, expected.requestId, expected.requestVersion);
+  if (!found || Object.entries(expected).some(([key, value]) => found.request[key as keyof ApprovalReference] !== value)) reject("identity_mismatch");
+  return found;
+}
+function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agentId" | "roomId" | "providerContinuationId" | "providerTurnId">, owned: ApprovalAuthority,
+  current: DaemonManifestEntry | undefined): { generation: string; runtimeId: string; turnId: string; sourceMessageId: string; createdAtMs: number } {
+  // Native pendingness comes from the broker's exact adapter callback. Storage
+  // authority comes from the operational checkpoint, never observer projections.
+  requireForeignKeys(db);
+  if (!current || current.id !== expected.agentId || current.room_id !== expected.roomId
+    || current.provider !== owned.provider || current.delivery_mode !== "daemon_inbox" || current.desired_state !== "running"
+    || current.work_attempt_id !== owned.workAttemptId || current.provider_ref?.work_attempt_id !== owned.workAttemptId
+    || current.provider_ref.execution_generation_id !== owned.executionGenerationId
+    || current.provider_ref.provider_continuation_id !== expected.providerContinuationId
+    || owned.providerConnection.kind !== (owned.provider === "codex" ? "codex_app_server" : owned.provider === "claude-code" ? "claude_cli" : "opencode_server")
+    || !sameProviderActionConnectionIdentity(current.provider_ref.provider_connection, owned.providerConnection)) reject("missing_turn");
+  const configuration = db.prepare("SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(expected.agentId);
+  if (configuration?.config_revision !== owned.configurationRevision || configuration.runtime_configuration_revision !== owned.configurationRevision
+    || !db.prepare("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=? AND terminal_json IS NULL")
+      .get(owned.executionGenerationId, owned.workAttemptId)) reject("missing_turn");
+  const head = db.prepare(`SELECT inbox_item_id,room_id,state,provider_turn_id,outcome,source_message_id,created_at
+    FROM supervised_agent_inbox WHERE agent_id=?
+    AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+    ORDER BY fifo_sequence LIMIT 1`).get(expected.agentId);
+  if (!head || head.inbox_item_id !== owned.inboxItemId || head.room_id !== expected.roomId
+    || !["dispatching", "awaiting_result", "result_recovery"].includes(String(head.state))
+    || head.provider_turn_id !== expected.providerTurnId || head.outcome !== null
+    || db.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(owned.inboxItemId)) reject("missing_turn");
+  const binding = db.prepare(`SELECT origin_execution_generation_id FROM supervised_agent_provider_turn_bindings
+    WHERE inbox_item_id=? AND agent_id=? AND room_id=? AND work_attempt_id=? AND provider_continuation_id=? AND provider_turn_id=?`)
+    .get(owned.inboxItemId, expected.agentId, expected.roomId, owned.workAttemptId, expected.providerContinuationId, expected.providerTurnId);
+  if (!binding || !db.prepare("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=?")
+    .get(String(binding.origin_execution_generation_id), owned.workAttemptId)) reject("missing_turn");
+  const generation = String(binding.origin_execution_generation_id);
+  const runtimeId = executionRuntimeStorageIdentity(expected.agentId, generation,
+    owned.providerConnection.kind, owned.providerConnection.pid, owned.providerConnection.processIdentity);
+  // Current durable reference attests this birth only in its own generation.
+  // Never retroactively invent an old birth after an uncaptured recovery.
+  if (generation !== owned.executionGenerationId && !db.prepare(`SELECT 1 FROM execution_runtime_generations
+    WHERE runtime_generation_id=? AND execution_generation_id=? AND agent_id=? AND provider=? AND config_revision=?`)
+    .get(runtimeId, generation, expected.agentId, owned.provider, owned.configurationRevision)) reject("missing_turn");
+  const createdAtMs = Date.parse(String(head.created_at));
+  if (!Number.isSafeInteger(createdAtMs) || createdAtMs < 0) reject("missing_turn");
+  return { generation, runtimeId, turnId: executionStorageIdentity("turn", expected.agentId, expected.providerContinuationId, expected.providerTurnId),
+    sourceMessageId: String(head.source_message_id), createdAtMs };
+}
+export function validateExecutionApprovalAuthority(db: DatabaseSync, expected: ApprovalReference, input: ApprovalAuthority,
+  current: DaemonManifestEntry | undefined): void {
+  const r = parse(reference, expected); const owned = parse(authority, input);
+  if (exact(db, r).request.closedAtMs != null) reject("invalid_transition");
+  const turn = eligibleTurn(db, r, owned, current);
+  if (r.executionGenerationId !== turn.generation || r.runtimeGenerationId !== turn.runtimeId || r.turnId !== turn.turnId) reject("missing_turn");
+}
+function liveSelection(db: DatabaseSync, record: ExecutionApprovalRecord, owned: ApprovalAuthority,
+  current: DaemonManifestEntry | undefined, atMs: number): void {
+  if (atMs < record.request.createdAtMs || atMs < (record.decision?.decidedAtMs ?? 0)) reject("invalid_input");
+  if (atMs >= record.request.expiresAtMs) reject("expired");
+  const expected = Object.fromEntries(Object.keys(reference.shape).map(key => [key, record.request[key as keyof ApprovalReference]])) as ApprovalReference;
+  validateExecutionApprovalAuthority(db, expected, owned, current);
+}
+
+export function getExecutionApproval(db: DatabaseSync, input: ApprovalReference): ExecutionApprovalRecord | null {
+  const expected = parse(reference, input);
+  return read(db, expected.requestId, expected.requestVersion) ? exact(db, expected) : null;
+}
+
+/** Internal broker recovery by its deterministic native-occurrence ID. */
+export function readLatestExecutionApproval(db: DatabaseSync, requestId: string): ExecutionApprovalRecord | null {
+  const id = parse(executionIdentity, requestId);
+  const row = db.prepare("SELECT request_version FROM execution_approval_requests WHERE request_id=? ORDER BY request_version DESC LIMIT 1").get(id);
+  return row ? read(db, id, Number(row.request_version)) : null;
+}
+
+/** Bounded structural recovery cards; absence from native pending lists is not a terminal outcome. */
+export function listExecutionApprovals(db: DatabaseSync, roomId: string, limit = 64): ExecutionApprovalRecord[] {
+  const room = parse(executionIdentity, roomId);
+  const count = parse(time.min(1).max(64), limit);
+  const rows = db.prepare(`SELECT request_id,request_version FROM execution_approval_requests r WHERE room_id=?
+    AND NOT EXISTS (SELECT 1 FROM execution_approval_requests newer WHERE newer.request_id=r.request_id AND newer.request_version>r.request_version)
+    ORDER BY created_at_ms DESC,request_id LIMIT ?`).all(room, count);
+  return rows.map(row => read(db, String(row.request_id), Number(row.request_version))!);
+}
+
+export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperationalExecutionApproval,
+  current: DaemonManifestEntry | undefined, delegatable: boolean): { created: boolean; approval: ExecutionApprovalRecord } {
+  if (typeof delegatable !== "boolean") reject("invalid_input");
+  const parsed = parse(operationalAdmission, input);
+  if (delegatable && parsed.authority.provider !== "codex") reject("invalid_input");
+  const prior = read(db, parsed.request.requestId, parsed.request.requestVersion);
+  if (prior) {
+    if (prior.request.delegatable !== delegatable
+      || Object.entries(parsed.request).some(([key, item]) => prior.request[key as keyof AdmitExecutionApproval] !== item)) reject("identity_mismatch");
+    return { created: false, approval: prior }; // Receipt only; never reopens a request.
+  }
+  const turn = eligibleTurn(db, parsed.request, parsed.authority, current);
+  const value = parse(admission, { ...parsed.request, executionGenerationId: turn.generation, runtimeGenerationId: turn.runtimeId, turnId: turn.turnId });
+  if (delegatable && (value.kind !== "file_change" || value.risk !== "low")) reject("invalid_input");
+  // A caller cannot alias one native callback under another logical request ID.
+  // The existing unique key has no occurrence/turn component: sequential reuse
+  // of a native ID in this connection is conservatively unsupported here.
+  const alias = db.prepare(`SELECT request_id FROM execution_approval_requests WHERE agent_id=? AND execution_generation_id=?
+    AND runtime_generation_id=? AND connection_id=? AND native_request_id_type=? AND native_request_id=? AND request_id<>? LIMIT 1`)
+    .get(value.agentId, value.executionGenerationId, value.runtimeGenerationId, value.connectionId, typeof value.nativeRequestId,
+      String(value.nativeRequestId), value.requestId);
+  if (alias) reject("identity_mismatch");
+  const latest = db.prepare("SELECT * FROM execution_approval_requests WHERE request_id=? ORDER BY request_version DESC LIMIT 1").get(value.requestId);
+  if (!latest && value.requestVersion !== 1) reject("invalid_transition");
+  if (latest) {
+    const old = read(db, value.requestId, Number(latest.request_version))!;
+    const bindingKeys = Object.keys(reference.shape).filter(key => !["requestVersion", "requestSha256"].includes(key));
+    if (bindingKeys.some(key => value[key as keyof ApprovalReference] !== old.request[key as keyof ApprovalReference])) reject("identity_mismatch");
+    const withdrawn = old.decision?.withdrawnBeforeSend === true && old.request.state === "lost"
+      && old.decision.dispatchState === "lost" && old.decision.applicationCertainty === "impossible";
+    if (value.requestVersion !== old.request.requestVersion + 1
+      || (!withdrawn && (value.requestSha256 === old.request.requestSha256
+        || !["requested", "decision_recorded"].includes(old.request.state)
+        || (old.decision && old.decision.dispatchState !== "not_dispatched")))) reject("invalid_transition");
+    if (value.createdAtMs < (old.decision?.decidedAtMs ?? old.request.createdAtMs)) reject("invalid_input");
+    if (!withdrawn) {
+      if (old.decision) db.prepare(`UPDATE execution_approval_decisions SET dispatch_state='lost',application_certainty='impossible',resolved_at_ms=?
+        WHERE decision_id=?`).run(value.createdAtMs, old.decision.decisionId);
+      db.prepare("UPDATE execution_approval_requests SET state='superseded' WHERE request_id=? AND request_version=?")
+        .run(value.requestId, old.request.requestVersion);
+    } // Proven-unsent withdrawals retain their original lost/impossible history.
+  }
+  const common = { agentId: value.agentId, roomId: value.roomId, executionGenerationId: turn.generation, createdAtMs: turn.createdAtMs };
+  materializeExecutionIdentity(db, {
+    runtime: { agentId: value.agentId, executionGenerationId: turn.generation, runtimeGenerationId: turn.runtimeId,
+      provider: parsed.authority.provider, authorityMode: lifecycleAuthorityModeForProvider(parsed.authority.provider, "daemon_inbox"),
+      configRevision: parsed.authority.configurationRevision, createdAtMs: turn.createdAtMs },
+    message: { ...common, sourceMessageId: turn.sourceMessageId, workspaceId: parsed.authority.workAttemptId },
+    turn: { ...common, turnId: turn.turnId, runtimeGenerationId: turn.runtimeId,
+      providerContinuationId: value.providerContinuationId, providerTurnId: value.providerTurnId },
+  });
+  db.prepare(`INSERT INTO execution_approval_requests
+    (request_id,request_version,agent_id,room_id,execution_generation_id,runtime_generation_id,turn_id,provider_continuation_id,provider_turn_id,
+      connection_id,native_request_id_type,native_request_id,kind,risk,delegatable,request_sha256,state,recovery_boundary,created_at_ms,expires_at_ms)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'requested',?,?,?)`).run(
+    value.requestId, value.requestVersion, value.agentId, value.roomId, value.executionGenerationId, value.runtimeGenerationId, value.turnId,
+    value.providerContinuationId, value.providerTurnId, value.connectionId, typeof value.nativeRequestId, String(value.nativeRequestId),
+    value.kind, value.risk, Number(delegatable), value.requestSha256, value.recoveryBoundary, value.createdAtMs, value.expiresAtMs);
+  return { created: true, approval: read(db, value.requestId, value.requestVersion)! };
+}
+
+export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval, entry: DaemonManifestEntry | undefined): ExecutionApprovalRecord {
+  const value = parse(selection, input); const current = exact(db, value.expected);
+  if (current.decision) {
+    const old = current.decision;
+    if (old.decisionId !== value.decisionId || old.actorId !== value.actorId || old.decision !== value.decision
+      || old.projectionSha256 !== value.projectionSha256) reject("decision_conflict");
+    return current;
+  }
+  if (current.request.closedAtMs != null || current.request.state !== "requested") reject("invalid_transition");
+  liveSelection(db, current, value.authority, entry, value.atMs);
+  const r = current.request;
+  db.prepare(`INSERT INTO execution_approval_decisions
+    (decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256,
+      decision,source,actor_id,dispatch_state,decided_at_ms,projection_sha256)
+    VALUES(?,?,?,?,?,?,?,?,?,?,'host',?,'not_dispatched',?,?)`).run(
+    value.decisionId, r.requestId, r.requestVersion, r.agentId, r.roomId, r.executionGenerationId, r.turnId,
+    Number(r.delegatable), r.requestSha256, value.decision, value.actorId, value.atMs, value.projectionSha256);
+  db.prepare("UPDATE execution_approval_requests SET state='decision_recorded' WHERE request_id=? AND request_version=?")
+    .run(r.requestId, r.requestVersion);
+  return exact(db, value.expected);
+}
+
+/** A true result is a first committed intent, not proof of current native authority. */
+export function beginExecutionApprovalDispatch(db: DatabaseSync, input: DispatchExecutionApproval, entry: DaemonManifestEntry | undefined): { dispatch: boolean; approval: ExecutionApprovalRecord } {
+  const value = parse(dispatch, input); const current = exact(db, value.expected); const d = current.decision;
+  if (!d || d.decisionId !== value.decisionId || !d.projectionSha256 || d.projectionSha256 !== value.projectionSha256) reject("identity_mismatch");
+  if (d.dispatchId) {
+    if (d.dispatchId !== value.dispatchId) reject("decision_conflict");
+    return { dispatch: false, approval: current }; // Restart/lost response is not a second dispatch permit.
+  }
+  if (current.request.closedAtMs != null || current.request.state !== "decision_recorded" || d.dispatchState !== "not_dispatched") reject("invalid_transition");
+  liveSelection(db, current, value.authority, entry, value.atMs);
+  assertDecisionToolRule(db, d.decisionId, entry);
+  db.prepare("UPDATE execution_approval_decisions SET dispatch_state='dispatching',dispatch_id=?,dispatch_started_at_ms=? WHERE decision_id=?")
+    .run(value.dispatchId, value.atMs, d.decisionId);
+  db.prepare("UPDATE execution_approval_requests SET state='dispatching' WHERE request_id=? AND request_version=?")
+    .run(value.expected.requestId, value.expected.requestVersion);
+  return { dispatch: true, approval: exact(db, value.expected) };
+}
+
+/** Exact Claude cancellation/completion closes the prompt independently of any decision. */
+export function closeExecutionApprovalRequest(db: DatabaseSync, input: CloseExecutionApprovalRequest): ExecutionApprovalRecord {
+  const value = parse(loss, input); const current = exact(db, value.expected); const d = current.decision;
+  const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
+    .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
+  if (provider !== "claude-code" || !["requested", "decision_recorded", "dispatching", "resolved"].includes(current.request.state)) reject("invalid_transition");
+  if (current.request.closedAtMs != null) return current;
+  if (value.atMs < (d?.dispatchStartedAtMs ?? d?.decidedAtMs ?? current.request.createdAtMs)) reject("invalid_input");
+  db.prepare(`INSERT INTO execution_approval_request_closures
+    (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`)
+    .run(value.expected.requestId, value.expected.requestVersion, d?.decisionId ?? null, d?.dispatchId ?? null, value.atMs);
+  return exact(db, value.expected);
+}
+
+/** Operational terminal evidence survives daemon restart and optional capture loss. */
+export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: string): ExecutionApprovalRecord[] {
+  parse(executionIdentity, agentId);
+  // A connection may be replaced while its native process survives. An applied
+  // exact-turn terminal closes old connection prompts without claiming their
+  // decisions were consumed. Projection-only or successor-process observations
+  // are not authority to settle an earlier native birth's requests.
+  const completedTurns = db.prepare(`SELECT DISTINCT r.request_id,r.request_version
+    FROM execution_approval_requests r
+    JOIN execution_turns t ON t.turn_id=r.turn_id AND t.agent_id=r.agent_id AND t.room_id=r.room_id
+      AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
+      AND t.provider_continuation_id=r.provider_continuation_id AND t.provider_turn_id=r.provider_turn_id
+    JOIN execution_runtime_generations g ON g.runtime_generation_id=r.runtime_generation_id
+      AND g.execution_generation_id=r.execution_generation_id AND g.agent_id=r.agent_id
+    JOIN execution_facts f ON f.turn_id=t.turn_id AND f.agent_id=r.agent_id
+      AND f.execution_generation_id=r.execution_generation_id AND f.runtime_generation_id=r.runtime_generation_id
+    JOIN execution_lifecycle_effects e ON e.fact_id=f.fact_id AND e.fact_sequence=f.sequence
+      AND e.agent_id=f.agent_id AND e.observer_epoch=f.observer_epoch
+      AND e.observer_execution_generation_id=r.execution_generation_id AND e.observer_runtime_generation_id=r.runtime_generation_id
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND t.state='terminal'
+      AND t.ended_at_ms>=r.created_at_ms AND f.domain='turn' AND f.kind='state_changed' AND f.state='terminal'
+      AND f.turn_outcome IN ('completed','failed','interrupted') AND f.observed_at_ms>=r.created_at_ms
+      AND e.subject_authority_mode='typed' AND e.observer_authority_mode='typed'
+      AND e.effect_kind='manifest_idle' AND e.state='applied'
+      AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
+  const rows = db.prepare(`SELECT DISTINCT r.request_id,r.request_version,r.execution_generation_id,
+      r.runtime_generation_id,r.provider_continuation_id,r.created_at_ms,g.provider,t.terminal_json
+    FROM execution_approval_requests r
+    JOIN execution_runtime_generations g ON g.runtime_generation_id=r.runtime_generation_id
+      AND g.execution_generation_id=r.execution_generation_id AND g.agent_id=r.agent_id
+    JOIN work_attempt_executions origin ON origin.execution_generation_id=r.execution_generation_id
+    JOIN work_attempt_executions t ON t.work_attempt_id=origin.work_attempt_id
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND t.terminal_json IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
+  // Explicit legacy recovery retains its independently verified death witness
+  // separately from the immutable old terminal. Reconcile completed recoveries
+  // as well, so restarting after that checkpoint cannot strand the old prompt.
+  const recovered = db.prepare(`SELECT r.request_id,r.request_version,r.execution_generation_id,
+      r.runtime_generation_id,r.provider_continuation_id,r.created_at_ms,g.provider,
+      origin.work_attempt_id,recovery.provider_ref_json,recovery.created_at
+    FROM execution_approval_requests r
+    JOIN execution_runtime_generations g ON g.runtime_generation_id=r.runtime_generation_id
+      AND g.execution_generation_id=r.execution_generation_id AND g.agent_id=r.agent_id
+    JOIN work_attempt_executions origin ON origin.execution_generation_id=r.execution_generation_id
+    JOIN agent_runtime_recoveries recovery ON recovery.agent_id=r.agent_id AND recovery.room_id=r.room_id
+      AND recovery.execution_generation_id=r.execution_generation_id AND recovery.runtime_generation_id=r.runtime_generation_id
+    WHERE r.agent_id=? AND g.provider IN ('claude-code','codex') AND recovery.phase='complete'
+      AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
+  for (const row of recovered) {
+    const ref = JSON.parse(String(row.provider_ref_json));
+    if (ref?.work_attempt_id !== row.work_attempt_id || ref.execution_generation_id !== row.execution_generation_id
+      || ref.provider_connection !== null) continue;
+    rows.push({ ...row, terminal_json: JSON.stringify({ ended_at: row.created_at,
+      provider_continuation_id: ref.provider_continuation_id, native_runtime_death: ref.native_runtime_death }) });
+  }
+  const matches = new Map<string, ExecutionApprovalRecord>();
+  for (const row of completedTurns) {
+    const record = read(db, String(row.request_id), Number(row.request_version))!;
+    matches.set(JSON.stringify([record.request.requestId, record.request.requestVersion]), record);
+  }
+  for (const row of rows) {
+    const terminal = JSON.parse(String(row.terminal_json));
+    const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
+    if (!death.success || death.data.kind !== (row.provider === "codex" ? "codex_app_server" : "claude_cli")
+      || terminal.provider_continuation_id !== row.provider_continuation_id
+      || !Number.isSafeInteger(Date.parse(terminal.ended_at))
+      || Date.parse(terminal.ended_at) < Number(row.created_at_ms)) continue;
+    // A recovered turn can retain its origin generation. Recompute the exact
+    // birth in each request's own generation, never substitute the successor.
+    if (executionRuntimeStorageIdentity(agentId, String(row.execution_generation_id), death.data.kind,
+      death.data.pid, death.data.processIdentity) !== row.runtime_generation_id) continue;
+    const record = read(db, String(row.request_id), Number(row.request_version))!;
+    matches.set(JSON.stringify([record.request.requestId, record.request.requestVersion]), record);
+  }
+  return [...matches.values()];
+}
+
+export function settleWitnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: string, nowMs: () => number): number {
+  requireForeignKeys(db);
+  if (!db.isTransaction) reject("invalid_transition");
+  const records = witnessedRuntimeApprovalClosures(db, agentId);
+  const insert = db.prepare(`INSERT INTO execution_approval_request_closures
+    (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`);
+  for (const { request, decision } of records) {
+    const atMs = parse(time, nowMs());
+    if (atMs < (decision?.dispatchStartedAtMs ?? decision?.decidedAtMs ?? request.createdAtMs)) reject("invalid_input");
+    insert.run(request.requestId, request.requestVersion, decision?.decisionId ?? null, decision?.dispatchId ?? null, atMs);
+  }
+  // Closure says only that this native prompt cannot remain actionable. Keep
+  // the selected decision and its application certainty exactly as recorded.
+  return records.length;
+}
+
+/** Evidence must come from the exact broker invocation, never a UI/provider narrative. */
+export function recordExecutionApprovalOutcome(db: DatabaseSync, input: RecordExecutionApprovalOutcome): ExecutionApprovalRecord {
+  const value = parse(outcome, input); const current = exact(db, value.expected); const d = current.decision;
+  if (!d || d.decisionId !== value.decisionId || d.dispatchId !== value.dispatchId || d.dispatchStartedAtMs === null) reject("identity_mismatch");
+  if (value.atMs < d.dispatchStartedAtMs) reject("invalid_input");
+  if (value.evidence === "native_request_closed") {
+    const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
+      .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
+    if (provider !== "codex" || !["dispatching", "resolved"].includes(current.request.state)) reject("invalid_transition");
+    db.prepare(`INSERT OR IGNORE INTO execution_approval_request_closures
+      (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`)
+      .run(value.expected.requestId, value.expected.requestVersion, d.decisionId, d.dispatchId, value.atMs);
+    return exact(db, value.expected);
+  }
+  if (value.evidence === "native_processed" || value.evidence === "exact_native_execution") {
+    // OpenCode confirms processing in its reply endpoint. Codex and Claude require a
+    // later exact tool execution fact; a socket send or serverRequest/resolved
+    // alone still proves no chosen decision.
+    const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
+      .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
+    if ((value.evidence === "native_processed" && provider !== "open-model")
+      || (value.evidence === "exact_native_execution" && provider !== "codex" && provider !== "claude-code")) reject("invalid_transition");
+    if (current.request.state === "resolved" && d.dispatchState === "acknowledged") return current;
+  }
+  if (current.request.state !== "dispatching" || !["dispatching", "uncertain"].includes(d.dispatchState)) reject("invalid_transition");
+  if (value.evidence === "native_processed" || value.evidence === "exact_native_execution") {
+    db.prepare("UPDATE execution_approval_decisions SET dispatch_state='acknowledged',resolved_at_ms=? WHERE decision_id=?").run(value.atMs, d.decisionId);
+    db.prepare("UPDATE execution_approval_requests SET state='resolved' WHERE request_id=? AND request_version=?")
+      .run(value.expected.requestId, value.expected.requestVersion);
+  } else db.prepare("UPDATE execution_approval_decisions SET dispatch_state='uncertain' WHERE decision_id=?").run(d.decisionId);
+  return exact(db, value.expected);
+}
+
+/** Call only for proven loss, not silence, timeout, or absence from a pending list. */
+export function loseExecutionApproval(db: DatabaseSync, input: LoseExecutionApproval): ExecutionApprovalRecord {
+  const value = parse(loss, input); const current = exact(db, value.expected); const d = current.decision;
+  if (current.request.state === "lost") return current;
+  if (!["requested", "decision_recorded", "dispatching"].includes(current.request.state)) reject("invalid_transition");
+  if (d && !["not_dispatched", "dispatching", "uncertain"].includes(d.dispatchState)) reject("invalid_transition");
+  if (value.atMs < (d?.dispatchStartedAtMs ?? d?.decidedAtMs ?? current.request.createdAtMs)) reject("invalid_input");
+  const certainty = d?.dispatchId ? "unknown" : "impossible";
+  if (d) db.prepare("UPDATE execution_approval_decisions SET dispatch_state='lost',application_certainty=?,resolved_at_ms=? WHERE decision_id=?")
+    .run(certainty, value.atMs, d.decisionId);
+  db.prepare("UPDATE execution_approval_requests SET state='lost',application_certainty=? WHERE request_id=? AND request_version=?")
+    .run(certainty, value.expected.requestId, value.expected.requestVersion);
+  return exact(db, value.expected);
+}
+
+/** All runtime-death closure callers share one fault-only retry policy. */
+export async function settleRuntimeApprovalRequests(entryId: string, ports: {
+  settle(): Promise<number>;
+  notifyChanged(): void;
+  isHandoffScheduled(): boolean;
+  assertCurrent(): Promise<void>;
+  scheduleRecovery(entryId: string, delayMs: number): void;
+}): Promise<void> {
+  try {
+    if (await ports.settle()) ports.notifyChanged();
+  } catch (error) {
+    if (!ports.isHandoffScheduled()) {
+      try {
+        await ports.assertCurrent();
+        ports.scheduleRecovery(entryId, 5_000);
+      } catch { /* A retired daemon cannot schedule its successor's work. */ }
+    }
+    throw error;
+  }
+}

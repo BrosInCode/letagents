@@ -39,12 +39,11 @@ const { toasts, dismiss } = useToast()
   border-radius: var(--radius-lg);
   font-size: 0.85rem;
   font-weight: 600;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   pointer-events: auto;
   cursor: pointer;
   box-shadow: var(--shadow-lg);
   max-width: 380px;
+  background: var(--bg-elevated);
 }
 
 .toast--success {

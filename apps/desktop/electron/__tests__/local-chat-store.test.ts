@@ -1,3 +1,7 @@
+import { observeLocalTaskCommits } from "../../../../shared/local-task-revisions.mjs";
+import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mjs";
+// These storage-domain fixtures run as the board owner. Cross-process calls use the socket below.
+registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
@@ -68,8 +72,10 @@ const {
   setLocalAwareRoomStorageMode,
   setLocalRoomArchived,
   setLocalRoomPinned,
+  updateLocalRoomDisplayName,
   updateLocalTask,
 } = await import("../main/rooms/local-store.js");
+const { updateDesktopRoomTask } = await import("../main/rooms/tasks.js");
 const {
   buildLocalRoomArtifactIdentityKey,
   getLocalRoomArtifacts,
@@ -80,7 +86,6 @@ const {
   executeManagedAgentContextRequest,
 } = await import("../main/agents/managed-agent-context.js");
 const {
-  desktopMessageAccountRoutingRequest,
   resolveLocalCloudPublishAuthority,
 } = await import("../main/rooms/messages.js");
 const {
@@ -140,20 +145,6 @@ function localRoutingWorker(input: {
   };
 }
 
-test("desktop message payload requests always opt into account routing authority", () => {
-  assert.deepEqual(desktopMessageAccountRoutingRequest(), {
-    headers: { "X-LetAgents-Desktop-Client": "1" },
-  });
-  assert.deepEqual(desktopMessageAccountRoutingRequest({
-    "Content-Type": "application/json",
-    "X-LetAgents-Desktop-Client": "0",
-  }), {
-    headers: {
-      "Content-Type": "application/json",
-      "X-LetAgents-Desktop-Client": "1",
-    },
-  });
-});
 
 test("local cloud sync preserves exact worker provenance and never promotes it to human control", () => {
   const worker = {
@@ -1122,35 +1113,54 @@ test("desktop cloud publisher correction invalidates a large root without foregr
     raw.close();
   }
 
-  let timerFired = false;
-  setTimeout(() => { timerFired = true; }, 0);
-  const startedAt = performance.now();
-  await importLocalChatMessages(room, [{
-    ...base,
-    agent_identity: {
-      actor_label: "Historical label",
-      agent_key: "owner/new-key",
-      agent_session_id: "new-session",
-    },
-  }]);
-  const correctionMs = performance.now() - startedAt;
-  const afterCorrection = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
-  const retainedProjection = afterCorrection.prepare(`
-    SELECT
-      (SELECT COUNT(*) FROM local_chat_thread_routing_aliases_v2
-        WHERE room_id = ? AND thread_root_number = 1) AS alias_count,
-      (SELECT COUNT(*) FROM local_chat_thread_routing_agents_v2
-        WHERE room_id = ? AND thread_root_number = 1) AS agent_count,
-      (SELECT COUNT(*) FROM local_chat_thread_routing_invalidated_roots_v2
-        WHERE room_id = ? AND thread_root_number = 1) AS invalidated_count
-  `).get(room, room, room);
-  afterCorrection.close();
-  assert.equal(Number(retainedProjection?.alias_count), 2000);
-  assert.equal(Number(retainedProjection?.agent_count), 2000);
-  assert.equal(Number(retainedProjection?.invalidated_count), 1);
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  assert.equal(timerFired, true, "the correction leaves the event loop available for async repair");
-  assert.ok(correctionMs < 100, `publisher correction touched historical projection rows (${correctionMs.toFixed(1)}ms)`);
+  // Guard the actual foreground write boundary instead of inferring historical
+  // work from wall time, which also includes pauses on a loaded runner.
+  const foregroundGuard = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  const guardNames: string[] = [];
+  try {
+    for (const projection of ["aliases", "agents"]) {
+      for (const operation of ["INSERT", "UPDATE", "DELETE"]) {
+        const name = `publisher_correction_${projection}_${operation.toLowerCase()}`;
+        const affectedRows = operation === "UPDATE" ? ["OLD", "NEW"]
+          : [operation === "INSERT" ? "NEW" : "OLD"];
+        const affectsRoot = affectedRows.map((row) =>
+          `(${row}.room_id = '${room}' AND ${row}.thread_root_number = 1)`
+        ).join(" OR ");
+        foregroundGuard.exec(`
+          CREATE TRIGGER ${name}
+          BEFORE ${operation} ON local_chat_thread_routing_${projection}_v2
+          WHEN ${affectsRoot}
+          BEGIN
+            SELECT RAISE(ABORT, 'publisher correction rewrote foreground projection rows');
+          END
+        `);
+        guardNames.push(name);
+      }
+    }
+    await importLocalChatMessages(room, [{
+      ...base,
+      agent_identity: {
+        actor_label: "Historical label",
+        agent_key: "owner/new-key",
+        agent_session_id: "new-session",
+      },
+    }]);
+    const retainedProjection = foregroundGuard.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM local_chat_thread_routing_aliases_v2
+          WHERE room_id = ? AND thread_root_number = 1) AS alias_count,
+        (SELECT COUNT(*) FROM local_chat_thread_routing_agents_v2
+          WHERE room_id = ? AND thread_root_number = 1) AS agent_count,
+        (SELECT COUNT(*) FROM local_chat_thread_routing_invalidated_roots_v2
+          WHERE room_id = ? AND thread_root_number = 1) AS invalidated_count
+    `).get(room, room, room);
+    assert.equal(Number(retainedProjection?.alias_count), 2000);
+    assert.equal(Number(retainedProjection?.agent_count), 2000);
+    assert.equal(Number(retainedProjection?.invalidated_count), 1);
+  } finally {
+    for (const name of guardNames) foregroundGuard.exec(`DROP TRIGGER ${name}`);
+    foregroundGuard.close();
+  }
 
   let membership: Awaited<ReturnType<typeof getLocalChatThreadRoutingAgentKeysForRoots>> | null = null;
   for (let attempt = 0; attempt < 100 && !membership; attempt += 1) {
@@ -1359,6 +1369,22 @@ test("desktop local Git rooms persist Git metadata for snapshots and account ent
   assert.throws(
     () => assertLocalRoomPublishable(room),
     /Local Git Rooms stay local/,
+  );
+
+  // Reopening a project supplies the folder name again. Preserve a name the
+  // user chose while still refreshing the repository metadata.
+  await updateLocalRoomDisplayName(room.roomIdentifier, "My project");
+  await setLocalRoomArchived(room.roomIdentifier, true);
+  const reopened = await createLocalRoom({
+    roomIdentifier: room.roomIdentifier,
+    displayName: "FBRF",
+    gitRoom: { ...gitRoom, ref: { ...gitRoom.ref, baseRef: "staging" } },
+  });
+  assert.equal(reopened.displayName, "My project");
+  assert.equal(reopened.gitRoom?.ref.baseRef, "staging");
+  assert.equal(
+    (await listLocalRoomEntries()).find((entry) => entry.roomIdentifier === room.roomIdentifier)?.displayName,
+    "My project",
   );
 });
 
@@ -1586,6 +1612,37 @@ test("desktop local profile id is stable across concurrent first reads", async (
   assert.equal(new Set(ids).size, 1);
 });
 
+test("desktop task content baselines preserve partial edits and reject stale edits atomically", async () => {
+  const room = "content_baseline_room";
+  await createLocalRoom({ roomIdentifier: room, displayName: "Content baseline" });
+  const task = await addLocalTask(room, { title: "Original", createdBy: "Emmy" });
+  await updateDesktopRoomTask(room, task.id, { status: "accepted" });
+  await Promise.all([
+    updateDesktopRoomTask(room, task.id, { title: "Renamed", expected_content: { title: task.title } }),
+    updateDesktopRoomTask(room, task.id, { description: "# Body", expected_content: { description: "" } }),
+  ]);
+  let current = (await getLocalTask(room, task.id))!;
+  assert.equal(current.title, "Renamed");
+  assert.equal(current.description, "# Body");
+  assert.equal(current.status, "accepted");
+  for (const field of ["title", "description"] as const) {
+    const results = await Promise.allSettled(["One", "Two"].map(value => updateDesktopRoomTask(room, task.id,
+      { [field]: value, expected_content: { [field]: current[field] ?? "" } })));
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    const failed = results.find(result => result.status === "rejected") as PromiseRejectedResult;
+    assert.equal(failed.reason.code, "task_content_conflict");
+    current = (await getLocalTask(room, task.id))!;
+  }
+  await assert.rejects(updateDesktopRoomTask(room, task.id, { title: "Stale", description: "No write", status: "cancelled",
+    expected_content: { title: "Original", description: current.description! } }), { code: "task_content_conflict" });
+  assert.deepEqual(await getLocalTask(room, task.id), current);
+  await updateDesktopRoomTask(room, task.id, { description: "", expected_content: { description: current.description! } });
+  assert.equal((await getLocalTask(room, task.id))!.description, "");
+  for (const expected_content of [null, [], {}, { title: null }, { description: "" }, { title: "One", extra: "Bad" }]) {
+    await assert.rejects(updateDesktopRoomTask(room, task.id, { title: "Invalid", expected_content } as never), /expected_content/);
+  }
+});
+
 test("desktop local room task store supports board create and lifecycle updates", async () => {
   await createLocalRoom({
     roomIdentifier: "task_room",
@@ -1622,6 +1679,21 @@ test("desktop local room task store supports board create and lifecycle updates"
   assert.equal(updated.assigneeAgentKey, "local/agent");
   assert.equal(updated.prUrl, "https://github.com/BrosInCode/letagents/pull/1");
   assert.equal(updated.workflowArtifacts?.[0]?.provider, "git");
+  const description = "# Local plan\n\n- [ ] Keep Markdown\n";
+  const { task: edited } = await updateDesktopRoomTask("task_room", task.id, { title: "  Edited local task  ", description });
+  assert.equal(edited.title, "Edited local task");
+  assert.equal(edited.description, description);
+  assert.equal(edited.status, updated.status);
+  assert.equal(edited.assignee, updated.assignee);
+  assert.deepEqual(edited.workflowArtifacts, updated.workflowArtifacts);
+  assert.equal((await getLocalTask("task_room", task.id))?.description, description);
+  await updateDesktopRoomTask("task_room", task.id, { description: "" });
+  assert.equal((await getLocalTask("task_room", task.id))?.description, "");
+  await assert.rejects(updateLocalTask("task_room", task.id, { title: "  " }), /nonblank/);
+  await assert.rejects(updateLocalTask("task_room", task.id, { description: null } as never), /must be a string/);
+  await assert.rejects(updateLocalTask("task_room", task.id, { title: "Worker edit" }, {
+    agent_key: "local/agent", session_id: "worker", actor_label: "Local Agent",
+  }), /only be edited by the desktop user/);
   assert.equal(
     (await getLocalRoomArtifacts("task_room", { taskId: task.id })).artifacts?.[0]?.identity_key,
     "git:commit:id:def456",
@@ -1713,7 +1785,7 @@ test("desktop local task reassignment clears stale agent session owner metadata"
       };
     };
   };
-  const raw = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB || "");
+  const raw = observeLocalTaskCommits(new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB || ""));
   try {
     raw
       .prepare(`
@@ -1972,4 +2044,22 @@ test("local chat stores keep quote-replies top-level across a process restart", 
       `store ${store.name} must not re-thread a quote-reply across restart`,
     );
   }
+});
+
+test("desktop outbox idempotency preserves attachments and rejects changed retry payload", async () => {
+  const { getLocalChatMessageByClientId } = await import("../main/rooms/messages/local-store.js");
+  const roomId = "local-outbox-idempotency";
+  const input = {
+    sender: "Desktop", text: "Look at this", source: "browser",
+    idempotency_key: "desktop-send:32571cb6-3fe9-48a1-9b3c-28f775bdc724",
+    attachments: [{ id: "local:upload-1", file_name: "note.txt", mime_type: "text/plain", size_bytes: 3, url: "file:///tmp/note.txt" }],
+  };
+  const first = await addLocalChatMessage(roomId, input);
+  const retried = await addLocalChatMessage(roomId, input);
+  assert.equal(first.id, retried.id);
+  assert.equal(retried.client_message_id, input.idempotency_key);
+  assert.equal(retried.attachments?.length, 1);
+  assert.equal((await getLocalChatMessageByClientId(roomId, input.idempotency_key))?.id, first.id);
+  await assert.rejects(addLocalChatMessage(roomId, { ...input, text: "Changed" }), /different content/);
+  await assert.rejects(addLocalChatMessage(roomId, { ...input, attachments: [] }), /different content/);
 });

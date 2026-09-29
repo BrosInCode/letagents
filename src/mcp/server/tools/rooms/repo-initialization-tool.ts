@@ -12,6 +12,7 @@ import {
   resolveGitRoot,
 } from "../../repo-context.js";
 import { jsonToolResponse } from "./response.js";
+import { getRuntimeWorkingDirectory } from "../../runtime/daemon-tool-context.js";
 
 export function registerRepoInitializationTool(server: McpServer): void {
   server.tool(
@@ -35,7 +36,7 @@ export function registerRepoInitializationTool(server: McpServer): void {
         ),
     },
     async ({ room, cwd: targetDir }) => {
-      const startDir = targetDir || process.cwd();
+      const startDir = targetDir || getRuntimeWorkingDirectory();
       const repoRoot = resolveGitRoot(startDir);
       if (!repoRoot) {
         return jsonToolResponse({

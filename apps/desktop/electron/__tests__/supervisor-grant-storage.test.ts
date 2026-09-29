@@ -7,13 +7,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   canonicalSupervisorGrantAgentKey,
+  projectDesktopSupervisorAgentKeys,
   decryptSupervisorGrantFromStorage,
   desktopSupervisorGrantInstallationId,
   encryptSupervisorGrantForStorage,
   getOrCreateDesktopSupervisorAgentIdentity,
   getOrProvisionDesktopSupervisorGrantForAgent,
+  getDesktopSupervisorGrantStorageStatus,
   provisionDesktopSupervisorGrant,
   readDesktopSupervisorGrantForAgent,
+  readDesktopSupervisorGrantRevocationAttestationForEntry,
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntry,
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
@@ -72,6 +75,44 @@ test("supervisor grant storage fails closed without Keychain encryption", () => 
   assert.equal(decryptSupervisorGrantFromStorage("plain:lashg_secret", unavailable), null);
 });
 
+test("a Keychain failure during encryption remains a typed recoverable storage failure", () => {
+  const locksBetweenCheckAndWrite = {
+    isEncryptionAvailable: () => true,
+    encryptString: (_value: string) => { throw new Error("errSecAuthFailed"); },
+    decryptString: (_value: Buffer) => "",
+  };
+  assert.throws(
+    () => encryptSupervisorGrantForStorage("lashg_secret", locksBetweenCheckAndWrite),
+    (error: unknown) => error instanceof Error
+      && error.name === "DesktopSecureStorageUnavailableError"
+      && !error.message.includes("lashg_secret"),
+  );
+});
+
+test("supervisor grant storage readiness performs the exact synchronous persistence round-trip", () => {
+  let encrypted = false;
+  const available = getDesktopSupervisorGrantStorageStatus({
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => {
+      encrypted = true;
+      return Buffer.from(`keychain:${value}`);
+    },
+    decryptString: (value: Buffer) => value.toString("utf8").replace("keychain:", ""),
+  }, "darwin");
+  assert.equal(encrypted, true);
+  assert.equal(available.available, true);
+  assert.equal(available.canOpenCredentialStorage, false);
+
+  const locked = getDesktopSupervisorGrantStorageStatus({
+    isEncryptionAvailable: () => true,
+    encryptString: () => { throw new Error("errSecAuthFailed"); },
+    decryptString: () => "",
+  }, "darwin");
+  assert.equal(locked.available, false);
+  assert.equal(locked.canOpenCredentialStorage, true);
+  assert.match(locked.detail, /login Keychain/);
+});
+
 test("supervisor grant registry keys are stable agent identities rather than display names", () => {
   assert.equal(canonicalSupervisorGrantAgentKey(" EmmyMay/Agent_8F31 "), "EmmyMay/Agent_8F31");
   assert.throws(() => canonicalSupervisorGrantAgentKey("  "), /identity is required/);
@@ -80,7 +121,8 @@ test("supervisor grant registry keys are stable agent identities rather than dis
 test("encrypted registry retains disjoint grants for two desktop-managed agents", async () => {
   await withRegistry(async (path) => {
     await replaceDesktopSupervisorGrantForAgent({
-      agentKey: "owner/agent-a", metadata: metadata("owner/agent-a", "a"), token: "lashg_secret_a",
+      agentKey: "owner/agent-a", metadata: metadata("owner/agent-a", "a"),
+      authority: { ownerAccountId: "account-a", scopeKey: "owner" }, token: "lashg_secret_a",
       entryId: "entry-a", lastInstalledDaemonGeneration: 3,
     }, { storage: keychain });
     await replaceDesktopSupervisorGrantForAgent({
@@ -92,12 +134,15 @@ test("encrypted registry retains disjoint grants for two desktop-managed agents"
     assert.equal(first?.token, "lashg_secret_a");
     assert.equal(first?.entryId, "entry-a");
     assert.equal(first?.lastInstalledDaemonGeneration, 3);
+    assert.deepEqual(first?.authority, { ownerAccountId: "account-a", scopeKey: "owner" });
+    assert.equal("ownerAccountId" in (first?.metadata ?? {}), false, "renderer-safe metadata excludes owner authority");
     assert.equal(second?.token, "lashg_secret_b");
     assert.equal(second?.metadata.allowedRoomIds[0], "room_b");
     const file = await readFile(path, "utf8");
     assert.doesNotMatch(file, /lashg_secret_a|lashg_secret_b/);
     assert.match(file, /entry-a/);
     assert.match(file, /entry-b/);
+    assert.match(file, /account-a/);
   });
 });
 
@@ -154,12 +199,38 @@ test("never-minted purge revokes only the parent grant and persists an idempoten
     assert.equal(registry.purgeRevocationReceipts[entryId]?.workerSessionAttestation, "none");
     assert.equal(registry.purgeRevocationReceipts[entryId]?.agentSessionId, null);
     assert.equal(registry.purgeRevocationReceipts[entryId]?.sessionEndedAt, null);
+    assert.equal(await readDesktopSupervisorGrantRevocationAttestationForEntry(entryId), "none");
 
     await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, {
       storage: keychain,
       apiFetch: (async () => { throw new Error("DELETE must not repeat after the durable receipt"); }) as never,
     });
     assert.deepEqual(calls, ["/supervisor-host-grants/grant_never-minted"]);
+
+    await provisionDesktopSupervisorGrant({
+      hostId: "desktop_host", installationId: "legacy-replacement", allowedRoomIds: ["room-replacement"],
+      allowedAgentKeys: [agentKey],
+    }, {
+      storage: keychain,
+      apiFetch: (async <T>(_requestPath: string, init?: { body?: string }) => {
+        const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+        return {
+          grant_id: "grant_legacy_replacement", host_id: body.host_id, installation_id: body.installation_id,
+          allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+          current_generation: 2, expires_at: new Date(Date.now() + 60_000).toISOString(),
+          supervisor_grant: "lashg_legacy_replacement",
+          owner_account_id: "account_1", scope_key: "owner",
+        } as T;
+      }) as never,
+    });
+    assert.equal(await readDesktopSupervisorGrantRevocationAttestationForEntry(entryId), null,
+      "a same-agent legacy grant without entryId is replacement authority beside the stale receipt");
+  });
+});
+
+test("missing grant recovery state never impersonates a completed grant-only retirement", async () => {
+  await withRegistry(async () => {
+    assert.equal(await readDesktopSupervisorGrantRevocationAttestationForEntry("entry-missing"), null);
   });
 });
 
@@ -323,6 +394,40 @@ test("an acknowledged already-revoked response records a durable idempotency rec
   });
 });
 
+test("retirement falls back to owner cascade when the saved worker grant is stale", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-stale-retirement";
+    const entryId = "entry-stale-retirement";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "stale-retirement"),
+      token: "lashg_stale_retirement",
+      entryId,
+    }, { storage: keychain });
+    const calls: string[] = [];
+    await revokeDesktopSupervisorGrantForEntry(entryId, "session-stale-retirement", {
+      storage: keychain,
+      apiFetch: (async <T>(requestPath: string) => {
+        calls.push(requestPath);
+        if (requestPath.endsWith("/end")) {
+          throw new DesktopApiError(409, { error: "Supervisor grant fence is stale." });
+        }
+        return {} as T;
+      }) as never,
+    });
+    assert.deepEqual(calls, [
+      "/supervisor-host-grants/grant_stale-retirement/worker-sessions/session-stale-retirement/end",
+      "/supervisor-host-grants/grant_stale-retirement",
+    ]);
+    assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }), null);
+    const registry = JSON.parse(await readFile(path, "utf8")) as {
+      purgeRevocationReceipts: Record<string, { agentSessionId: string; sessionEndedAt: string; acknowledgedAt: string }>;
+    };
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.agentSessionId, "session-stale-retirement");
+    assert.ok(Number.isFinite(Date.parse(registry.purgeRevocationReceipts[entryId]!.sessionEndedAt)));
+  });
+});
+
 test("a restart retry consumes the durable revoke receipt without repeating DELETE", async () => {
   await withRegistry(async (path) => {
     const agentKey = "owner/agent-restart-retry";
@@ -350,6 +455,13 @@ test("a restart retry consumes the durable revoke receipt without repeating DELE
     await revokeDesktopSupervisorGrantForEntry(entryId, "session-restart-retry", {
       storage: keychain,
       apiFetch: (async () => { requests += 1; throw new Error("DELETE must not repeat after a durable acknowledgement"); }) as never,
+    });
+    // After daemon retirement removes the exact local session, both startup
+    // reconciliation and a later explicit purge request grant-only cleanup.
+    // The stronger exact receipt must satisfy that retry without network I/O.
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, {
+      storage: keychain,
+      apiFetch: (async () => { requests += 1; throw new Error("retire-to-purge must consume the exact receipt"); }) as never,
     });
     assert.equal(requests, 2);
   });
@@ -426,6 +538,7 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
         grant_id: `grant_${index}`, host_id: body.host_id, installation_id: body.installation_id,
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: [agentKey], current_generation: 1,
         expires_at: new Date(Date.now() + 60_000).toISOString(), supervisor_grant: `lashg_secret_${index}`,
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const [first, second] = await Promise.all([
@@ -446,6 +559,8 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
     assert.deepEqual(requestedAgentKeys, ["owner/agent-a", "owner/agent-b"]);
     assert.notEqual(requests[0]!.installation_id, requests[1]!.installation_id);
     assert.notEqual(first.token, second.token, "independent concurrent provisions receive distinct grants");
+    assert.deepEqual(first.authority, { ownerAccountId: "account_1", scopeKey: "owner" });
+    assert.deepEqual(second.authority, first.authority);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, first.token);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, second.token);
 
@@ -458,7 +573,9 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
     };
     await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent({
       hostId: "desktop_host", entryId: "entry-c", agentKey: "owner/agent-c", roomScopes: [roomScope("room-c")],
-    }, { storage: failingStorage, apiFetch }), /Keychain write failed/);
+    }, { storage: failingStorage, apiFetch }), (error: unknown) => error instanceof Error
+      && error.name === "DesktopSecureStorageUnavailableError"
+      && /OS-backed encryption became unavailable/.test(error.message));
     assert.deepEqual(revokedPaths, ["/supervisor-host-grants/grant_3"]);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, first.token);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, second.token);
@@ -482,6 +599,7 @@ test("concurrent same-agent get-or-provision performs one POST and returns one c
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_same_secret",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const input = {
@@ -513,6 +631,7 @@ test("different aliases resolving to the same canonical room reuse one grant", a
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_alias",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const base = { hostId: "desktop_host", entryId: "entry-alias", agentKey: "owner/agent-alias" };
@@ -541,6 +660,7 @@ test("narrowing the canonical room set rotates away excess authority", async () 
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: `lashg_scope_${posts}`,
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const base = { hostId: "desktop_host", entryId: "entry-scope", agentKey: "owner/agent-scope" };
@@ -556,7 +676,82 @@ test("narrowing the canonical room set rotates away excess authority", async () 
   });
 });
 
-test("stale or under-scoped cached grant is revoked and reprovisioned", async () => {
+for (const expired of [false, true]) {
+  test(`same-scope credential recovery preserves the grant after ${expired ? "expiry" : "a lost handoff response"}`, async () => {
+    await withRegistry(async () => {
+      const agentKey = "owner/agent-continuity";
+      const entryId = "entry-continuity";
+      const saved = {
+        ...metadata(agentKey, "continuity"),
+        installationId: desktopSupervisorGrantInstallationId("desktop_host", entryId),
+        allowedRoomIds: ["room-continuity"],
+        expiresAt: new Date(Date.now() + (expired ? -1_000 : 60_000)).toISOString(),
+      };
+      await replaceDesktopSupervisorGrantForAgent({
+        agentKey, metadata: saved, authority: { ownerAccountId: "account_1", scopeKey: "owner" },
+        token: "lashg_previous", entryId,
+      }, { storage: keychain });
+      const calls: string[] = [];
+      const apiFetch = (async <T>(path: string, init?: { method?: string; body?: string }) => {
+        calls.push(`${init?.method} ${path}`);
+        assert.equal(init?.method, "POST", "credential recovery must not end the worker session");
+        if (calls.length === 1) throw new Error("response lost after credential rotation");
+        const body = JSON.parse(init!.body!) as Record<string, unknown>;
+        return {
+          grant_id: saved.grantId, host_id: body.host_id, installation_id: body.installation_id,
+          allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+          current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+          supervisor_grant: "lashg_recovered", owner_account_id: "account_1", scope_key: "owner",
+        } as T;
+      }) as never;
+      const recovered = await getOrProvisionDesktopSupervisorGrantForAgent({
+        hostId: "desktop_host", entryId, agentKey, roomScopes: [roomScope("room-continuity")],
+        forceReprovision: !expired,
+      }, { storage: keychain, apiFetch });
+      assert.deepEqual(calls, ["POST /supervisor-host-grants", "POST /supervisor-host-grants"]);
+      assert.equal(recovered.metadata.grantId, saved.grantId);
+      assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_recovered");
+    });
+  });
+}
+
+test("failed secure storage after same-scope recovery does not revoke the live worker", async () => {
+  await withRegistry(async () => {
+    const agentKey = "owner/agent-storage-recovery";
+    const entryId = "entry-storage-recovery";
+    const saved = {
+      ...metadata(agentKey, "storage-recovery"),
+      installationId: desktopSupervisorGrantInstallationId("desktop_host", entryId),
+      allowedRoomIds: ["room-recovery"],
+    };
+    await replaceDesktopSupervisorGrantForAgent({ agentKey, metadata: saved, token: "lashg_previous", entryId }, { storage: keychain });
+    const calls: string[] = [];
+    const apiFetch = (async <T>(path: string, init?: { method?: string; body?: string }) => {
+      calls.push(`${init?.method} ${path}`);
+      const body = JSON.parse(init!.body!) as Record<string, unknown>;
+      return {
+        grant_id: saved.grantId, host_id: body.host_id, installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: `lashg_recovered_${calls.length}`, owner_account_id: "account_1", scope_key: "owner",
+      } as T;
+    }) as never;
+    const input = { hostId: "desktop_host", entryId, agentKey, roomScopes: [roomScope("room-recovery")], forceReprovision: true };
+    await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent(input, {
+      storage: { ...keychain, encryptString: (value: string) => {
+        if (value.startsWith("lashg_recovered")) throw new Error("Keychain locked");
+        return keychain.encryptString(value);
+      } }, apiFetch,
+    }), /OS-backed encryption/);
+    assert.deepEqual(calls, ["POST /supervisor-host-grants"]);
+    assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_previous");
+    const recovered = await getOrProvisionDesktopSupervisorGrantForAgent(input, { storage: keychain, apiFetch });
+    assert.equal(recovered.metadata.grantId, saved.grantId);
+    assert.equal(recovered.token, "lashg_recovered_2");
+  });
+});
+
+test("under-scoped cached grant is revoked and reprovisioned", async () => {
   await withRegistry(async () => {
     const agentKey = "owner/agent-stale";
     const installationId = desktopSupervisorGrantInstallationId("desktop_host", "entry-stale");
@@ -578,6 +773,7 @@ test("stale or under-scoped cached grant is revoked and reprovisioned", async ()
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_replacement",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const result = await getOrProvisionDesktopSupervisorGrantForAgent({
@@ -617,6 +813,7 @@ test("pre-send DELETE failure preserves local recovery until an acknowledged ret
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_presend_new",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const input = {
@@ -633,6 +830,63 @@ test("pre-send DELETE failure preserves local recovery until an acknowledged ret
     assert.equal(deletes, 2);
     assert.equal(posts, 1);
     assert.equal(recovered.token, "lashg_presend_new");
+  });
+});
+
+test("replacement authority is validated before the durable grant changes", async () => {
+  await withRegistry(async () => {
+    const agentKey = "owner/agent-authority-fence";
+    const entryId = "entry-authority-fence";
+    const installationId = desktopSupervisorGrantInstallationId("desktop_host", entryId);
+    const expectedAuthority = { ownerAccountId: "account_1", scopeKey: "owner" };
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        ...metadata(agentKey, "authority-fence"), hostId: "desktop_host", installationId,
+        allowedRoomIds: ["room-old"],
+      },
+      authority: expectedAuthority,
+      token: "lashg_authority_fence_old",
+      entryId,
+    }, { storage: keychain });
+    const revoked: string[] = [];
+    let createAttempts = 0;
+    const apiFetch = (async <T>(path: string, init?: { body?: string }) => {
+      if (!init?.body) {
+        revoked.push(path);
+        return {} as T;
+      }
+      createAttempts += 1;
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      return {
+        grant_id: `grant_authority_fence_new_${createAttempts}`,
+        host_id: createAttempts === 1 ? body.host_id : "host_other",
+        installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: "lashg_authority_fence_new",
+        owner_account_id: createAttempts === 1 ? "account_other" : "account_1", scope_key: "owner",
+      } as T;
+    }) as never;
+
+    await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent({
+      hostId: "desktop_host", entryId, agentKey, roomScopes: [roomScope("room-new")],
+      forceReprovision: true, expectedAuthority,
+    }, { storage: keychain, apiFetch }), /changed its stable owner authority coordinates/);
+    await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent({
+      hostId: "desktop_host", entryId, agentKey, roomScopes: [roomScope("room-new")],
+      forceReprovision: true, expectedAuthority,
+    }, { storage: keychain, apiFetch }), /not scoped to the requested agent entry/);
+
+    const preserved = await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain });
+    assert.equal(preserved?.token, "lashg_authority_fence_old");
+    assert.deepEqual(preserved?.authority, expectedAuthority);
+    assert.deepEqual(revoked, [
+      "/supervisor-host-grants/grant_authority-fence",
+      "/supervisor-host-grants/grant_authority_fence_new_1",
+      "/supervisor-host-grants/grant_authority-fence",
+      "/supervisor-host-grants/grant_authority_fence_new_2",
+    ]);
   });
 });
 
@@ -665,6 +919,7 @@ test("lost DELETE response preserves local recovery, then an explicit 404 retry 
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_cleanup_new",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const input = {
@@ -735,6 +990,7 @@ for (const scenario of [
           current_generation: 1,
           expires_at: new Date(Date.now() + 60_000).toISOString(),
           supervisor_grant: `lashg_${scenario.name}_recovered`,
+          owner_account_id: "account_1", scope_key: "owner",
         } as T;
       }) as never;
       const recovered = await getOrProvisionDesktopSupervisorGrantForAgent({
@@ -808,6 +1064,7 @@ test("replacement restart skips an already-acknowledged exact session end and re
           current_generation: 1,
           expires_at: new Date(Date.now() + 60_000).toISOString(),
           supervisor_grant: "lashg_replacement_restart_new",
+          owner_account_id: "account_1", scope_key: "owner",
         } as T;
       }) as never,
     });
@@ -851,6 +1108,7 @@ test("legacy provision cannot overwrite a concurrent managed registry save", asy
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_manual",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const manual = provisionDesktopSupervisorGrant({
@@ -883,6 +1141,7 @@ test("legacy provision accepts a registry with identity metadata but no actual g
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_manual",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     await provisionDesktopSupervisorGrant({
@@ -924,5 +1183,18 @@ test("global revoke cannot erase a concurrent managed save it did not revoke", a
     assert.deepEqual(revoked, ["/supervisor-host-grants/grant_old"]);
     assert.equal(await readDesktopSupervisorGrantForAgent("owner/agent-old", { storage: keychain }), null);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-new", { storage: keychain }))?.token, "lashg_new");
+  });
+});
+
+
+test("live and listed supervisor entries retain canonical identity for contribution inspector resolution", async () => {
+  await withRegistry(async path => {
+    await writeFile(path, JSON.stringify({ version: 7, grants: {}, entryAgentKeys: { copper: "EmmyMay/desktop-codex-copper" }, credentialRevocations: {}, purgeRevocationReceipts: {} }));
+    const input = [{ id: "copper", agentKey: null }, { id: "external", agentKey: null }, { id: "explicit", agentKey: "Jessica/agent" }];
+    const projected = await projectDesktopSupervisorAgentKeys(input);
+    assert.deepEqual(projected.map(entry => entry.agentKey), ["EmmyMay/desktop-codex-copper", null, "Jessica/agent"]);
+    assert.equal(input[0]!.agentKey, null);
+    await writeFile(path, JSON.stringify({ version: 7, grants: {}, entryAgentKeys: {}, credentialRevocations: {}, purgeRevocationReceipts: {} }));
+    assert.equal((await projectDesktopSupervisorAgentKeys(input))[0]!.agentKey, null);
   });
 });

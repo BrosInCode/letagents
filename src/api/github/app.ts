@@ -112,8 +112,10 @@ export interface GitHubWebhookPayload {
     url?: string;
   }>;
   installation?: GitHubWebhookInstallation;
+  member?: GitHubWebhookAccount;
   organization?: GitHubWebhookAccount;
   repository?: GitHubWebhookRepository;
+  repositories?: GitHubWebhookRepository[];
   repositories_added?: GitHubWebhookRepository[];
   repositories_removed?: GitHubWebhookRepository[];
   pull_request?: GitHubWebhookPullRequest;

@@ -23,6 +23,7 @@ const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const createProjectWithName = dbModule?.createProjectWithName;
+const endRoomAgentSession = dbModule?.endRoomAgentSession;
 const getRoomAgentPresence = dbModule?.getRoomAgentPresence;
 const getRoomAgentPresenceSnapshot = dbModule?.getRoomAgentPresenceSnapshot;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
@@ -241,6 +242,92 @@ test(
     assert.ok(lastObservedAt);
     assert.equal(new Date(lastObservedAt).toISOString(), "2026-05-08T12:00:00.000Z");
   }
+);
+
+test(
+  "live presence snapshots exclude ended workers while history retains their observations",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (
+      !createProjectWithName ||
+      !createRoomAgentSession ||
+      !endRoomAgentSession ||
+      !getRoomAgentPresence ||
+      !getRoomAgentPresenceSnapshot ||
+      !markRoomAgentDeliveryConnected ||
+      !upsertAccount ||
+      !upsertRoomAgentLivenessObservation
+    ) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const actorLabel = "CedarMeadow | EmmyMay's agent | Codex";
+    const owner = await upsertAccount({
+      provider: "github",
+      provider_user_id: "31524469",
+      login: "EmmyMay",
+      display_name: "EmmyMay",
+    });
+    const agentSession = await createRoomAgentSession({
+      room_id: room.id,
+      session_kind: "worker",
+      runtime: "codex",
+      actor_label: actorLabel,
+      agent_key: "EmmyMay/cedarmeadow",
+      agent_instance_id: "instance-retired-live-snapshot",
+      display_name: "CedarMeadow",
+      owner_account_id: owner.id,
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+    });
+
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "EmmyMay/cedarmeadow",
+      agent_instance_id: "instance-retired-live-snapshot",
+      agent_session_id: agentSession.session_id,
+      session_kind: "worker",
+      runtime: "codex",
+      display_name: "CedarMeadow",
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+      transport: "desktop_events",
+      credential_fence: {
+        kind: "session_token",
+        token_hash: hashToken(agentSession.session_token),
+      },
+    });
+    await upsertRoomAgentLivenessObservation({
+      room_id: room.id,
+      agent_session_id: agentSession.session_id,
+      source: "native_harness",
+      host_kind: "macos",
+      liveness_capability: "native_process",
+      last_observed_at: new Date().toISOString(),
+    });
+
+    assert.equal((await getRoomAgentPresence(room.id)).length, 1);
+    assert.equal((await getRoomAgentPresenceSnapshot(room.id)).length, 1);
+
+    await endRoomAgentSession({ session_id: agentSession.session_id });
+
+    assert.deepEqual(await getRoomAgentPresence(room.id), []);
+    assert.deepEqual(await getRoomAgentPresenceSnapshot(room.id), []);
+    const historySnapshot = await getRoomAgentPresenceSnapshot(room.id, {
+      includeEndedSessions: true,
+    });
+    assert.equal(historySnapshot.length, 1);
+    assert.equal(historySnapshot[0]?.agent_session_id, agentSession.session_id);
+    assert.equal(
+      historySnapshot[0]?.liveness_observation?.agent_session_id,
+      agentSession.session_id,
+    );
+  },
 );
 
 test(

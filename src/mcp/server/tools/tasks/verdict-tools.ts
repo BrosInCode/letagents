@@ -14,7 +14,7 @@ import { taskReviewIdentitySchema } from "./schemas.js";
 export function registerTaskVerdictTools(server: McpServer): void {
   server.tool(
     "submit_review_verdict",
-    "Submit a GitHub review verdict through the durable effect journal. Requires this exact worker session to hold an active review lease. Ambiguous provider outcomes are reconciled by correlation lookup and are never blindly retried.",
+    "Submit a GitHub review verdict through the durable effect journal. Requires this exact worker session to hold an active review lease. Success means GitHub confirmed publication; pending, failed, or uncertain effects keep their original idempotency key. Ambiguous outcomes are reconciled by correlation lookup and are never blindly retried.",
     {
       task_id: z.string().describe("Task in review, e.g. 'task_1'."),
       verdict: z.enum(["approve", "request_changes", "comment"]).describe("GitHub review verdict."),
@@ -50,13 +50,25 @@ export function registerTaskVerdictTools(server: McpServer): void {
             }),
           },
         });
-        await syncRoomPresence(targetRoomId, identity, {
-          status: "reviewing",
-          status_text: `submitted ${verdict} verdict for ${task_id}`,
-        }, agentSession);
+        const published = result.effect.state === "succeeded";
+        const publicationStatus = published ? `published ${verdict} verdict for ${task_id}`
+          : result.effect.quarantined_at ? `review publication blocked for ${task_id}`
+          : result.effect.state === "failed" ? `review publication failed for ${task_id}`
+          : result.effect.state === "pending" ? `review publication pending for ${task_id}`
+          : `review publication outcome unknown for ${task_id}`;
+        // Presence is a secondary notification. Its failure cannot erase an
+        // exact journal receipt or turn a known publication into a new retry.
+        try {
+          await syncRoomPresence(targetRoomId, identity, {
+            status: "reviewing",
+            status_text: publicationStatus,
+          }, agentSession);
+        } catch { /* Return the durable effect even when presence is unavailable. */ }
         return jsonToolResponse({
-          success: true,
           ...result,
+          success: published,
+          message: published ? "The review was published on GitHub."
+            : `${publicationStatus}. The returned effect is the publication record; do not submit a new idempotency key to retry it.`,
           agent_identity: toPublicAgentIdentity(identity),
         }, 2);
       } catch (error) {

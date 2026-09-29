@@ -22,7 +22,7 @@ export function gitRoomFromBranchRoomIdentifier(
   roomIdentifier: string | null | undefined,
 ): DesktopGitRoomInfo | null {
   const identifier = roomIdentifier?.trim() || "";
-  const githubMatch = /^git-room:github\.com:([^/:\s]+\/[^/:\s]+):branch:([A-Za-z0-9_-]+)$/i.exec(identifier);
+  const githubMatch = /^github\.com\/([^/\s]+\/[^/\s]+)\/focus\/git:branch:([A-Za-z0-9_-]+)$/i.exec(identifier);
   if (githubMatch) {
     const [owner, name] = githubMatch[1].split("/");
     const branch = decodeRoomRef(githubMatch[2]);

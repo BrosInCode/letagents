@@ -15,6 +15,10 @@ import { runGitStdout } from "./main/git-exec.js";
 
 export type RepoStatusBuildOptions = {
   signal?: AbortSignal;
+  /** Room opening needs repository identity before the watcher loads branch statistics. */
+  includeBranchDeltas?: boolean;
+  /** Project ownership checks must derive identity from Git, never repository config. */
+  ignoreConfiguredRoom?: boolean;
 };
 
 function throwIfAborted(options: RepoStatusBuildOptions): void {
@@ -478,12 +482,14 @@ export async function buildRepoStatus(
   const defaultBranch = resolvedRoom.routingDefaultBranch || fallbackDefaultBranch(localBranches);
   throwIfAborted(options);
 
-  const branchDeltas = await getKnownBranchDeltas(
-    repoRoot,
-    [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
-    defaultBranch,
-    options,
-  );
+  const branchDeltas = options.includeBranchDeltas === false
+    ? []
+    : await getKnownBranchDeltas(
+      repoRoot,
+      [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
+      defaultBranch,
+      options,
+    );
   const branchDelta = branchDeltas.find((delta) => delta.branch === gitStatus.branch) ?? null;
   throwIfAborted(options);
 
@@ -738,7 +744,7 @@ export function buildGitHubBranchRoomIdentifier(
   const repositoryFullName = githubRepositoryFullNameFromRoom(repoRoom);
   const refName = branchName?.trim();
   if (!repositoryFullName || !refName) return null;
-  return `git-room:github.com:${repositoryFullName.toLowerCase()}:branch:${encodeRefForRoomId(refName)}`;
+  return `github.com/${repositoryFullName.toLowerCase()}/focus/git:branch:${encodeRefForRoomId(refName)}`;
 }
 
 export function activeGitHubRoomIdentifier(input: {
@@ -849,7 +855,9 @@ export async function resolveRoomIdentifierFromPath(
   const defaultBranch = routingDefaultBranch || fallbackDefaultBranch(localBranches);
   throwIfAborted(options);
 
-  const configured = readConfiguredRoomIdentifierAt(repoRoot);
+  const configured = options.ignoreConfiguredRoom
+    ? null
+    : readConfiguredRoomIdentifierAt(repoRoot);
   if (configured) {
     return {
       repoRoot,

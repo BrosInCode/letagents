@@ -39,6 +39,7 @@ export interface MaterializedThreadKeySelection {
 export interface MaterializedThreadSummarySelection extends MaterializedThreadKeySelection {
   latest_reply_sender: string;
   latest_reply_text: string;
+  latest_reply_display_text?: string | null;
   latest_reply_source: string | null;
   latest_reply_timestamp: string;
 }
@@ -60,6 +61,7 @@ export async function buildThreadSummariesForRoots(
   roomId: string,
   rootNumbers: number[],
   accountId: string | null,
+  executor: Pick<typeof db, "select" | "execute"> = db,
 ): Promise<Map<number, MessageThreadSummary>> {
   const uniqueRootNumbers = Array.from(new Set(rootNumbers));
   if (uniqueRootNumbers.length === 0) {
@@ -67,7 +69,7 @@ export async function buildThreadSummariesForRoots(
   }
 
   const readJoin = materializedThreadReadJoin(accountId);
-  const rows = await db
+  const rows = await executor
     .select(materializedThreadKeySelection)
     .from(message_thread_summaries)
     .leftJoin(message_thread_reads, readJoin)
@@ -76,8 +78,8 @@ export async function buildThreadSummariesForRoots(
       inArray(message_thread_summaries.thread_root_number, uniqueRootNumbers),
     ));
   const [participants, latestMessages] = await Promise.all([
-    loadThreadParticipants(roomId, rows.map((row) => row.summary_thread_root_number)),
-    loadMessageRowsByNumber(roomId, rows.map((row) => row.summary_latest_reply_number)),
+    loadThreadParticipants(roomId, rows.map((row) => row.summary_thread_root_number), executor),
+    loadMessageRowsByNumber(roomId, rows.map((row) => row.summary_latest_reply_number), executor),
   ]);
   const summaries = new Map<number, MessageThreadSummary>();
   for (const row of rows) {
@@ -114,6 +116,7 @@ export function toMaterializedThreadSummaryRow(
     ...key,
     latest_reply_sender: latest.sender,
     latest_reply_text: latest.text,
+    latest_reply_display_text: latest.display_text,
     latest_reply_source: latest.source,
     latest_reply_timestamp: latest.timestamp,
   };
@@ -122,10 +125,11 @@ export function toMaterializedThreadSummaryRow(
 export async function loadMessageRowsByNumber(
   roomId: string,
   messageNumbers: number[],
+  executor: Pick<typeof db, "select" | "execute"> = db,
 ): Promise<Map<number, MessageRow>> {
   const uniqueNumbers = Array.from(new Set(messageNumbers));
   if (uniqueNumbers.length === 0) return new Map();
-  const rows = await db
+  const rows = await executor
     .select(messageRowSelection)
     .from(messages)
     .where(and(eq(messages.room_id, roomId), inArray(messages.number, uniqueNumbers)));
@@ -149,6 +153,7 @@ export function toMaterializedThreadSummary(
       id: formatMessageId(row.summary_latest_reply_number),
       sender: row.latest_reply_sender,
       text: row.latest_reply_text,
+      ...(row.latest_reply_display_text ? { display_text: row.latest_reply_display_text } : {}),
       source: row.latest_reply_source,
       timestamp: row.latest_reply_timestamp,
       agent_identity: null,
@@ -165,11 +170,12 @@ export function toMaterializedThreadSummary(
 export async function loadThreadParticipants(
   roomId: string,
   rootNumbers: number[],
+  executor: Pick<typeof db, "select" | "execute"> = db,
 ): Promise<Map<number, MessageThreadParticipant[]>> {
   const uniqueRootNumbers = Array.from(new Set(rootNumbers));
   if (uniqueRootNumbers.length === 0) return new Map();
 
-  const rows = await db.execute<{
+  const rows = await executor.execute<{
     thread_root_number: number;
     sender: string;
     source: string | null;
@@ -223,10 +229,11 @@ export async function buildEmptyThreadSummariesForRoots(
   roomId: string,
   rootNumbers: number[],
   accountId: string | null,
+  executor: Pick<typeof db, "select" | "execute"> = db,
 ): Promise<Map<number, MessageThreadSummary>> {
   const uniqueRootNumbers = Array.from(new Set(rootNumbers));
   if (uniqueRootNumbers.length === 0) return new Map();
-  const roots = await db
+  const roots = await executor
     .select(messageRowSelection)
     .from(messages)
     .where(and(
@@ -234,7 +241,7 @@ export async function buildEmptyThreadSummariesForRoots(
       inArray(messages.number, uniqueRootNumbers),
       visibleMessageCondition(false),
     ));
-  const reads = await loadThreadReadCursors(roomId, roots.map((root) => root.number), accountId);
+  const reads = await loadThreadReadCursors(roomId, roots.map((root) => root.number), accountId, executor);
   return new Map(roots.map((root) => [
     root.number,
     toEmptyThreadSummary(root, reads.get(root.number) ?? null),
@@ -245,9 +252,10 @@ async function loadThreadReadCursors(
   roomId: string,
   rootNumbers: number[],
   accountId: string | null,
+  executor: Pick<typeof db, "select" | "execute"> = db,
 ): Promise<Map<number, number>> {
   if (!accountId || rootNumbers.length === 0) return new Map();
-  const reads = await db
+  const reads = await executor
     .select({
       thread_root_number: message_thread_reads.thread_root_number,
       last_read_message_number: message_thread_reads.last_read_message_number,

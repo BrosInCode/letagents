@@ -1,10 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createConnection } from "node:net";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { access, mkdir } from "node:fs/promises";
+import { access, appendFile, chmod, mkdir, stat } from "node:fs/promises";
 import { EventEmitter } from "node:events";
+import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
+import { withDaemonMaintenanceOperation, readDaemonMaintenance, daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../shared/daemon-maintenance.mjs";
+import { forceStopDaemon } from "./force-daemon-restart.js";
 
 import type {
   DesktopSupervisorActivityEvent,
@@ -12,6 +16,9 @@ import type {
   DesktopSupervisorCreateInput,
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
+  DesktopLifecycleCaptureAdmissionStatus,
+  DesktopLifecycleProjectionDiagnostics,
+  DesktopLifecycleProjectionProvider,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorRoomDeliveryRetryInput,
   DesktopSupervisorStateSnapshot,
@@ -20,16 +27,41 @@ import type {
   DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
 import { apiUrl, desktopRoot, workspaceRoot } from "./paths.js";
+import {
+  desktopRuntimeEnvironment,
+  desktopShellEnvironmentReady,
+} from "./desktop-shell-environment.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
 import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
+import { LETAGENTS_MCP_RUNTIME_TREE_SHA256 } from "./agents/letagents-mcp-runtime.js";
+import { prepareSupervisorState } from "./supervisor-state-recovery.js";
+import { loadHostApprovalSigner, type HostApprovalSigner } from "./host-approval-auth.js";
+import type { HostApprovalChallenge } from "../../shared/host-approval-auth.js";
+import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalCandidate, HostApprovalSelection, HostApprovalStatus } from "../../shared/host-approvals.js";
+import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
 
-export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
+export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.100";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.201";
+/**
+ * The room-level state channel carries activity summaries, not history. Keep in
+ * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
+ * enforcing it here as well keeps the renderer payload bounded even if a daemon
+ * ever answers with more than it promised.
+ */
+export const SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT = 16;
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
+// Once configuration application is admitted, the daemon may already be
+// stopping the current provider. Abandoning that authority-bearing request
+// would make a successful replacement look retryable to the renderer.
+const CONFIGURATION_APPLY_REQUEST_TIMEOUT_MS = 0;
+// Retirement can queue behind one already-admitted worker mint (3 x 10s) so
+// its background completion channel needs a deadline that covers that safety
+// fence. The renderer no longer waits on this request.
+const RETIRE_REQUEST_TIMEOUT_MS = 60_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
 // worker session and reads the initial room tail against the cloud. Each of
 // those daemon-side requests is bounded at 20s, so the client deadline must
@@ -45,14 +77,65 @@ const INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS = 60_000;
 // restoration probes provider continuations at 0/1/3/7s offsets. Both exceed
 // the 3s control budget by design.
 const RECOVERY_REQUEST_TIMEOUT_MS = 30_000;
+// Once prepare_handoff is admitted, the daemon is fenced and must durably
+// drain every already-running tool before replacement. A client deadline here
+// would abandon a healthy long operation halfway through that protocol.
+const HANDOFF_DRAIN_REQUEST_TIMEOUT_MS = 0;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
-const START_TIMEOUT_MS = 8_000;
+// Database readiness precedes interrupted-work and workspace recovery. That
+// recovery must finish before the socket opens, and can exceed eight seconds.
+// Updates join this wait before handing off the same child, so allow a bounded
+// recovery window without treating a slow daemon as absent or spawning another.
+const START_TIMEOUT_MS = 60_000;
 const NATURAL_EXIT_TIMEOUT_MS = 2_000;
 const TERMINATE_EXIT_TIMEOUT_MS = 2_000;
 const KILL_EXIT_TIMEOUT_MS = 1_000;
 const PROCESS_POLL_INTERVAL_MS = 25;
 const STATE_WATCH_RETRY_BASE_MS = 1_000;
 const STATE_WATCH_RETRY_MAX_MS = 30_000;
+const DAEMON_LIFECYCLE_LOG_MAX_BYTES = 256 * 1024;
+const daemonLifecycleLogWrites = new Map<string, Promise<void>>();
+
+type DesktopDaemonLifecycleEvent = {
+  event: "daemon_spawned" | "daemon_spawn_error" | "daemon_exited" | "daemon_disappeared" | "daemon_identity_changed";
+  pid: number | null;
+  detail?: string | null;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  generation?: number | null;
+};
+
+function appendDaemonLifecycleEvent(path: string, event: DesktopDaemonLifecycleEvent): void {
+  const previous = daemonLifecycleLogWrites.get(path) ?? Promise.resolve();
+  const operation = previous.then(async () => {
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await chmod(dirname(path), 0o700);
+    try {
+      // Rotation belongs exclusively to the daemon process. Electron only
+      // appends below the cap so the two processes can never rename the file
+      // out from under one another.
+      if ((await stat(path)).size >= DAEMON_LIFECYCLE_LOG_MAX_BYTES) return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const detail = event.detail == null
+      ? null
+      : redactCredentialText(event.detail).value.slice(0, 4_096);
+    await appendFile(path, `${JSON.stringify({
+      at: new Date().toISOString(),
+      event: event.event,
+      pid: event.pid,
+      ...(detail ? { detail } : {}),
+      ...(event.exitCode === undefined ? {} : { exit_code: event.exitCode }),
+      ...(event.signal === undefined ? {} : { signal: event.signal }),
+      ...(event.generation === undefined ? {} : { generation: event.generation }),
+    })}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(path, 0o600);
+  }).catch(() => undefined).finally(() => {
+    if (daemonLifecycleLogWrites.get(path) === operation) daemonLifecycleLogWrites.delete(path);
+  });
+  daemonLifecycleLogWrites.set(path, operation);
+}
 /**
  * While a focused agent's feed sits ended, re-poll at this cadence. The daemon
  * ends the feed when a provider generation exits but keeps the entry so the next
@@ -81,6 +164,10 @@ export function onSupervisorDaemonGeneration(
 
 type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
 type WireEntry = {
+  provider_progress?: DesktopSupervisorManifestEntry["providerProgress"];
+  runtime_recovery?: DesktopSupervisorManifestEntry["runtimeRecovery"];
+  local_room_id?: string;
+  runtime_generation_id?: string | null;
   id: string;
   room_id: string;
   display_name: string;
@@ -96,6 +183,7 @@ type WireEntry = {
   last_error?: string | null;
   permission_profile_id: string | null;
   delivery_mode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  polling_contract?: "custodial_polling_v1" | null;
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
@@ -157,9 +245,9 @@ type WireEntry = {
     task: { state: string; task_id: string | null; title: string | null };
   } | null;
   delivery_receipts?: Array<{
-    inbox_item_id: string; source_message_id: string; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
+    inbox_item_id: string; source_message_id: string; fifo_sequence?: number; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
     provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code?: string | null; terminal_reason?: string | null; updated_at: string;
-    timeline?: Array<{ phase: string; observed_at: string; detail: string | null }>;
+    timeline?: Array<{ event_sequence?: number; phase: string; observed_at: string; detail: string | null }>;
   }>;
 };
 type WireActivityEvent = {
@@ -246,11 +334,44 @@ export class SupervisorDaemonProtocolMismatchError extends Error {
   }
 }
 
+const approvalId = z.string().min(1).max(256);
+const approvalSha = z.string().regex(/^[a-f0-9]{64}$/);
+const approvalStatus = z.enum(["pending", "decision_recorded", "decision_sent", "uncertain", "request_closed", "resolved", "unavailable"]);
+const approvalChallenge = z.strictObject({ daemonGeneration: z.number().int().positive().safe(),
+  bootNonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/), keyFingerprint: approvalSha });
+const hostToolLabel = approvalId.regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/);
+const projectHostToolScope = z.strictObject({
+  agentId: approvalId, accountId: approvalId, projectId: approvalSha, projectName: hostToolLabel, sourceRepoPath: z.string().min(1).max(4096),
+  canonicalSourcePath: z.string().min(1).max(4096), repository: z.string().min(1).max(4096), remoteUrl: z.string().min(1).max(4096),
+  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
+});
+const hostToolScope = z.union([projectHostToolScope, z.strictObject({
+  kind: z.literal("room_workspace"), version: z.literal(1), agentId: approvalId, accountId: approvalId, roomId: approvalId,
+  workAttemptId: z.string().uuid(), workspacePath: z.string().min(1).max(4096), canonicalWorkspacePath: z.string().min(1).max(4096),
+  provider: z.enum(["codex", "claude-code", "open-model"]), toolId: approvalId, toolLabel: hostToolLabel, policySha256: approvalSha,
+})]);
+const hostToolRule = z.strictObject({ id: approvalId, revision: z.number().int().positive().safe(), ownerId: approvalId,
+  scope: hostToolScope, createdAtMs: z.number().int().nonnegative().safe() });
+const approvalCandidate = z.strictObject({
+  reference: z.strictObject({ requestId: approvalId, requestVersion: z.number().int().positive().safe(), requestSha256: approvalSha,
+    agentId: approvalId, roomId: approvalId, executionGenerationId: approvalId, runtimeGenerationId: approvalId,
+    turnId: approvalId, providerContinuationId: approvalId, providerTurnId: approvalId, connectionId: approvalId,
+    nativeRequestId: z.union([approvalId, z.number().int().nonnegative().safe()]) }).nullable(),
+  presentation: z.strictObject({ agentId: approvalId, displayName: z.string().max(256),
+    provider: z.enum(["codex", "open-model", "claude-code"]), title: z.enum(["Run a command", "Run a tool", "Change files", "Grant for this turn", "Approval unavailable"]),
+    details: z.string().max(24 * 1024), denyScope: z.enum(["request", "session_pending"]), alwaysAllow: hostToolScope.optional() }),
+  status: approvalStatus, detail: z.string().max(1024).nullable(),
+  recordedDecision: z.strictObject({ decisionId: approvalId, actorId: approvalId,
+    decision: z.enum(["allow_once", "deny"]), projectionSha256: approvalSha.nullable() }).nullable(),
+});
+
 export interface SupervisorDaemonLifecycleOptions {
+  loadApprovalSigner?: typeof loadHostApprovalSigner;
   socketPath?: string;
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;
-  spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
+  lifecycleLogPath?: string;
+  spawnDaemon?: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
   /** @deprecated Prefer signalDaemon so tests can distinguish TERM from KILL. */
   terminateDaemon?: (pid: number) => void;
   signalDaemon?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
@@ -261,6 +382,7 @@ export interface SupervisorDaemonLifecycleOptions {
   killTimeoutMs?: number;
   processPollIntervalMs?: number;
   startTimeoutMs?: number;
+  statePreparationWaitMs?: number;
   requestTimeoutMs?: number;
   turnControlRequestTimeoutMs?: number;
   now?: () => Date;
@@ -270,14 +392,81 @@ export function supervisorDaemonSpawnEnvironment(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
   sourceWorkspaceRoot = workspaceRoot,
 ): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { ...env, ELECTRON_RUN_AS_NODE: "1" };
+  const result: NodeJS.ProcessEnv = { ...desktopRuntimeEnvironment(env), ELECTRON_RUN_AS_NODE: "1" };
   // Never trust a caller's cwd/cache-derived dev entry. The desktop's compiled
   // location is the authority for the repo build paired with this dev renderer.
   delete result.LETAGENTS_DEV_MCP_SERVER_ENTRY;
+  delete result.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY;
+  delete result.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256;
+  delete result.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV;
   if (env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()) {
     result.LETAGENTS_DEV_MCP_SERVER_ENTRY = join(sourceWorkspaceRoot, "dist", "mcp", "server.js");
+    result.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY = join(sourceWorkspaceRoot, "dist", "mcp", "server", "daemon-tool-executor.js");
+    result.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV = "1";
+  } else if (typeof process.resourcesPath === "string" && process.resourcesPath.trim()) {
+    result.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY = join(
+      process.resourcesPath, "app", "runtime", "letagents", "node_modules", "letagents",
+      "dist", "mcp", "server", "daemon-tool-executor.js",
+    );
   }
+  result.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256 = LETAGENTS_MCP_RUNTIME_TREE_SHA256;
+  result.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = supervisorRuntimeEnvironmentFingerprint(result);
+  result.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT = supervisorCompatibilityFingerprint(result);
   return result;
+}
+
+const SUPERVISOR_COMPATIBILITY_KEYS = [
+  "HOME",
+  "LETAGENTS_API_URL",
+  "LETAGENTS_LOCAL_CHAT_DB",
+  "LETAGENTS_LOCAL_FILES_DIR",
+  "LETAGENTS_LOCAL_PROFILE_PATH",
+  "LETAGENTS_CHAT_STORAGE_SETTINGS_PATH",
+  "LETAGENTS_STATE_PATH",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV",
+] as const;
+
+const SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS = [
+  "PATH",
+  "CODEX_INSTALL_DIR",
+  "LETAGENTS_CODEX_BIN",
+  "LETAGENTS_CLAUDE_BIN",
+  "LETAGENTS_CLAUDE_CODE_BIN",
+  "LETAGENTS_CURSOR_AGENT_BIN",
+  "LETAGENTS_OPENCODE_BIN",
+] as const;
+
+/** State and runtime identity must agree even when retaining a daemon's provider environment. */
+export function supervisorCompatibilityFingerprint(env: Readonly<NodeJS.ProcessEnv>): string {
+  const home = env.HOME ?? homedir();
+  const effective: NodeJS.ProcessEnv = {
+    ...env,
+    HOME: home,
+    LETAGENTS_API_URL: env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
+    // MCP consumes a nonempty state path verbatim, unlike the desktop chat paths.
+    LETAGENTS_STATE_PATH: env.LETAGENTS_STATE_PATH || join(home, ".letagents", "mcp-state.json"),
+    LETAGENTS_LOCAL_CHAT_DB: env.LETAGENTS_LOCAL_CHAT_DB?.trim() || join(home, ".letagents", "local-chat.sqlite"),
+    LETAGENTS_LOCAL_FILES_DIR: env.LETAGENTS_LOCAL_FILES_DIR?.trim() || join(home, ".letagents", "local-files"),
+    LETAGENTS_LOCAL_PROFILE_PATH: env.LETAGENTS_LOCAL_PROFILE_PATH?.trim() || join(home, ".letagents", "local-profile.json"),
+    LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH?.trim() || join(home, ".letagents", "chat-storage.json"),
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(SUPERVISOR_COMPATIBILITY_KEYS.map((key) => [key, effective[key] ?? null])))
+    .digest("hex");
+}
+
+/** Opaque equality proof for every environment input that can select a provider executable. */
+export function supervisorRuntimeEnvironmentFingerprint(
+  env: Readonly<NodeJS.ProcessEnv>,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([
+      ["compatibility", supervisorCompatibilityFingerprint(env)],
+      ...SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS.map((key) => [key, env[key] ?? null]),
+    ]))
+    .digest("hex");
 }
 
 export class SupervisorDaemonClient {
@@ -285,11 +474,80 @@ export class SupervisorDaemonClient {
   readonly daemonScriptPath: string;
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private applicationUpdateHandoff: Promise<void> | null = null;
+  private environmentRefreshHandoff: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private applicationUpdatePrepared = false;
+  private maintenanceRequested = false;
+  private readonly maintenanceRequests = new Set<() => void>();
+  private maintenanceTarget: DaemonProcessIdentity | null = null;
+  private maintenanceOperation: Promise<void> | null = null;
+  private get maintenancePath(): string { return daemonMaintenancePath(dirname(this.socketPath)); }
+  async isMaintenanceHeld(): Promise<boolean> {
+    if (this.maintenanceRequested) return true;
+    const hold = await readDaemonMaintenance(this.maintenancePath);
+    return this.maintenanceRequested || Boolean(hold);
+  }
+  async getMaintenanceStatus(): Promise<{ held: boolean; ready: boolean }> {
+    const hold = await readDaemonMaintenance(this.maintenancePath);
+    if (!hold) return { held: false, ready: false };
+    const status = await this.request<Record<string, unknown>>("daemon.negotiate", undefined,
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.requestTimeoutMs, false, undefined, undefined, true).catch(() => null);
+    return { held: true, ready: status?.maintenance_hold_id === hold.id };
+  }
+  private assertNotRestarting(): void {
+    if (this.maintenanceRequested) throw new Error(DAEMON_MAINTENANCE_MESSAGE);
+  }
+  /** Native-confirmed action. The caller relaunches Electron after success. */
+  stopForMaintenance(resume = false): Promise<void> {
+    if (this.applicationUpdatePrepared) return Promise.reject(new Error("The application update is already being installed."));
+    if (this.maintenanceOperation) return this.maintenanceOperation;
+    this.maintenanceRequested = true;
+    for (const cancel of this.maintenanceRequests) cancel();
+    const operation = withDaemonMaintenanceOperation(async owner => {
+      const hold = await owner.read();
+      const observed: { negotiated: Record<string, unknown> | null } = { negotiated: null };
+      const identify = async () => {
+        try {
+          observed.negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined,
+            SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.requestTimeoutMs, false, undefined, undefined, true);
+          return this.captureRetiredDaemon(observed.negotiated);
+        } catch (error) {
+          if (observed.negotiated || !this.maintenanceTarget) throw error;
+          return this.maintenanceTarget;
+        }
+      };
+      if (resume) {
+        const target = await identify();
+        if (!hold || observed.negotiated?.maintenance_hold_id !== hold.id) {
+          throw new Error("Force restart the service before resuming supervision.");
+        }
+        await this.request("daemon.prepare_handoff", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+          this.requestTimeoutMs, false, undefined, undefined, true);
+        const stopped = await this.waitForRetiredProcessChange(target, this.terminateTimeoutMs);
+        if (!["absent", "zombie"].includes(stopped.kind) || !await this.isSocketReleased(SUPERVISOR_DAEMON_PROTOCOL_VERSION, true)) {
+          throw new Error("The maintenance service has not stopped. Supervision remains paused.");
+        }
+        await owner.clear(hold.id);
+      } else {
+        await forceStopDaemon({ identify, persistHold: () => owner.create(),
+          observe: target => this.observeRetiredDaemon(target), signal: (target, signal) => this.guardedSignalRetiredDaemon(target, signal),
+          delay, now: Date.now, pollIntervalMs: this.processPollIntervalMs,
+          socketReleased: () => this.isSocketReleased(SUPERVISOR_DAEMON_PROTOCOL_VERSION, true),
+          terminateTimeoutMs: this.terminateTimeoutMs, killTimeoutMs: this.killTimeoutMs });
+      }
+      this.stopAttachedDaemonObservation();
+      this.ownedDaemon = null;
+    }, this.maintenancePath);
+    this.maintenanceOperation = operation;
+    void operation.finally(() => { if (this.maintenanceOperation === operation) this.maintenanceOperation = null; }).catch(() => undefined);
+    return operation;
+  }
+  private drainingCurrentDaemon = false;
+  private readonly startupApprovalWaiters = new Set<() => void>();
   private lastReadyGeneration: number | null = null;
   private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
-  private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
+  private readonly spawnDaemon: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
   private readonly daemonWorkingDirectory: string;
+  private readonly lifecycleLogPath: string;
   private readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
   private readonly inspectDaemonProcess: (pid: number) => DaemonIdentityInspection | null | undefined;
   private readonly reportHandoffDiagnostic: (diagnostic: DaemonHandoffDiagnostic) => void;
@@ -298,14 +556,36 @@ export class SupervisorDaemonClient {
   private readonly killTimeoutMs: number;
   private readonly processPollIntervalMs: number;
   private readonly startTimeoutMs: number;
+  private readonly statePreparationWaitMs: number;
   private readonly requestTimeoutMs: number;
   private readonly turnControlRequestTimeoutMs: number;
   private readonly now: () => Date;
+  private attachedDaemonObservation: {
+    identity: DaemonProcessIdentity;
+    generation: number;
+  } | null = null;
+  // Caller deadlines do not end child custody. Retain the launch and its
+  // readiness fences until process exit or a completed negotiated handoff.
+  private ownedDaemon: {
+    pid: number | null;
+    ready: boolean;
+    retiredGeneration: number | undefined;
+    runtimeEnvironmentFingerprint: string;
+    compatibilityFingerprint: string;
+  } | null = null;
+  private readonly loadApprovalSigner: typeof loadHostApprovalSigner;
+  private approvalSigner: { fingerprint: string; promise: Promise<HostApprovalSigner> } | null = null;
+  private readonly approvalPresentations = new Map<string, {
+    roomId: string; view: DesktopHostApproval; candidate: HostApprovalCandidate; challenge: HostApprovalChallenge;
+    presentationSha256: string; touchedAt: number; decision: { id: string; choice: HostApprovalSelection } | null;
+  }>();
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
+    this.loadApprovalSigner = options.loadApprovalSigner ?? loadHostApprovalSigner;
     this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
+    this.lifecycleLogPath = options.lifecycleLogPath ?? join(dirname(this.socketPath), "daemon-lifecycle.jsonl");
     this.signalDaemon = options.signalDaemon ?? ((pid, signal) => {
       if (signal === "SIGTERM" && options.terminateDaemon) {
         options.terminateDaemon(pid);
@@ -322,34 +602,228 @@ export class SupervisorDaemonClient {
     this.killTimeoutMs = options.killTimeoutMs ?? KILL_EXIT_TIMEOUT_MS;
     this.processPollIntervalMs = options.processPollIntervalMs ?? PROCESS_POLL_INTERVAL_MS;
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
+    this.statePreparationWaitMs = options.statePreparationWaitMs ?? 30_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
-    this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
+    this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {
       const child = spawn(process.execPath, [scriptPath], {
         cwd,
         detached: true,
-        stdio: "ignore",
-        env: supervisorDaemonSpawnEnvironment(),
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        env,
       });
       child.unref();
       return child;
     });
   }
 
-  ensureRunning(): Promise<DesktopSupervisorDaemonStatus> {
+  ensureRunning(startupPreparation?: Promise<void>): Promise<DesktopSupervisorDaemonStatus> {
+    if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Supervised agents currently require macOS."));
     }
     if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
       return Promise.reject(new Error("Supervisor startup is paused while LetAgents installs an application update."));
     }
+    if (this.environmentRefreshHandoff) return this.environmentRefreshHandoff;
     if (!this.ensureOperation) {
-      this.ensureOperation = this.ensureRunningOnce()
+      this.ensureOperation = Promise.resolve(startupPreparation)
+        .then(() => desktopShellEnvironmentReady())
+        .then(() => this.ensureRunningOnce())
         .then((status) => this.rememberReadyStatus(status))
         .finally(() => { this.ensureOperation = null; });
     }
     return this.ensureOperation;
+  }
+
+  /** Join startup already registered by the app without starting another service. */
+  async waitForStartup(): Promise<void> {
+    if (!this.ensureOperation || this.drainingCurrentDaemon) return;
+    let release!: () => void;
+    const currentDaemonReady = new Promise<void>(resolve => { release = resolve; });
+    this.startupApprovalWaiters.add(release);
+    try {
+      // A negotiated old daemon may need a human approval before startup can
+      // replace it. Also wake reads that joined startup before negotiation.
+      await Promise.race([this.ensureOperation, currentDaemonReady]);
+    } finally { this.startupApprovalWaiters.delete(release); }
+  }
+
+  /** Main computes and remembers what it actually presents; renderer IDs carry no authority. */
+  async listHostApprovals(roomId: string): Promise<DesktopHostApprovalSnapshot> {
+    try {
+      if (!approvalId.safeParse(roomId).success) throw new Error("Invalid approval room.");
+      // Opening a composer must not spawn, hand off, or reconfigure a provider.
+      // Wait only for startup already owned by the app; an absent or failed
+      // service still returns unavailable without initiating any recovery.
+      await this.waitForStartup();
+      const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+      if (rawChallenge === null) {
+        this.clearApprovalPresentations(roomId);
+        return { available: false, approvals: [], error: "Host approval signing was not enrolled. Unlock secure storage and restart the background service before approving." };
+      }
+      const challenge = approvalChallenge.parse(rawChallenge);
+      const signer = await this.signerForApproval(challenge);
+      const raw = await this.request<unknown>("supervisor.host_approval_request",
+        signer.sign(challenge, "list", { roomId }), undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+      if (!Array.isArray(raw) || raw.length > 128) throw new Error("Invalid approval presentation.");
+      for (const candidate of raw) {
+        const parsed = approvalCandidate.safeParse(candidate);
+        if (!parsed.success || Buffer.byteLength(JSON.stringify(candidate)) > 32 * 1024
+          || (parsed.data.reference && (parsed.data.reference.roomId !== roomId
+            || parsed.data.reference.agentId !== parsed.data.presentation.agentId))
+          || (parsed.data.presentation.alwaysAllow && (parsed.data.presentation.alwaysAllow.agentId !== parsed.data.presentation.agentId
+            || parsed.data.presentation.alwaysAllow.provider !== parsed.data.presentation.provider))
+          || (!parsed.data.reference && parsed.data.status !== "unavailable")
+          || (parsed.data.presentation.title === "Approval unavailable" && parsed.data.status !== "unavailable"
+            && !(parsed.data.status === "uncertain" && parsed.data.reference && parsed.data.recordedDecision))
+          || (parsed.data.presentation.provider === "open-model") !== (parsed.data.presentation.denyScope === "session_pending")) {
+          throw new Error("Invalid approval presentation.");
+        }
+      }
+      // Preserve the transmitted property order used by the daemon's digest.
+      const candidates = structuredClone(raw) as HostApprovalCandidate[];
+      const now = this.now().getTime();
+      for (const [key, item] of this.approvalPresentations) {
+        if (now - item.touchedAt > 30 * 60 * 1000) this.approvalPresentations.delete(key);
+      }
+      const approvals: DesktopHostApproval[] = [];
+      for (const candidate of candidates) {
+        const presentationSha256 = createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex");
+        let cached = [...this.approvalPresentations.values()].find(item =>
+          item.roomId === roomId && JSON.stringify(item.challenge) === JSON.stringify(challenge) && item.presentationSha256 === presentationSha256
+          && JSON.stringify(item.candidate.reference) === JSON.stringify(candidate.reference));
+        if (!cached) {
+          cached = { roomId, view: { id: randomUUID(), presentation: candidate.presentation, status: candidate.status, detail: candidate.detail, retryDecision: null },
+            candidate, challenge, presentationSha256, touchedAt: now, decision: null };
+          this.approvalPresentations.set(cached.view.id, cached);
+        }
+        // Polling the same authenticated snapshot must not revoke an in-flight
+        // decision. Any changed candidate still invalidates its dispatch fence.
+        if (!isDeepStrictEqual(cached.candidate, candidate)) cached.candidate = candidate;
+        cached.touchedAt = now;
+        cached.view.status = candidate.status;
+        cached.view.detail = candidate.detail;
+        cached.view.retryDecision = null;
+        const recorded = candidate.recordedDecision;
+        if (recorded) {
+          cached.decision = { id: recorded.decisionId, choice: recorded.decision };
+          if (candidate.status === "decision_recorded" && recorded.actorId === `host-${challenge.keyFingerprint}`
+            && recorded.projectionSha256 === presentationSha256) cached.view.retryDecision = recorded.decision;
+          else if (candidate.status === "pending" || candidate.status === "decision_recorded") {
+            cached.view.status = "unavailable";
+            cached.view.detail = "The recorded decision cannot be retried against this presentation. No new decision will be created.";
+          }
+        } else if (candidate.status === "decision_recorded") {
+          cached.view.status = "unavailable";
+          cached.view.detail = "The recorded decision identity is unavailable. No new decision will be created.";
+        }
+        approvals.push(structuredClone(cached.view));
+      }
+      const retained = new Set(approvals.map(item => item.id));
+      for (const [key, item] of this.approvalPresentations) if (item.roomId === roomId && !retained.has(key)) this.approvalPresentations.delete(key);
+      while (this.approvalPresentations.size > 128) this.approvalPresentations.delete(this.approvalPresentations.keys().next().value!);
+      return { available: true, approvals, error: null };
+    } catch {
+      this.clearApprovalPresentations(roomId);
+      return { available: false, approvals: [], error: "Could not load host approvals. Check secure storage and the background service, then refresh." };
+    }
+  }
+
+  private clearApprovalPresentations(roomId: string): void {
+    for (const [key, item] of this.approvalPresentations) if (item.roomId === roomId) this.approvalPresentations.delete(key);
+  }
+
+  private signerForApproval(challenge: HostApprovalChallenge): Promise<HostApprovalSigner> {
+    if (this.approvalSigner?.fingerprint === challenge.keyFingerprint) return this.approvalSigner.promise;
+    const pending = { fingerprint: challenge.keyFingerprint, promise: this.loadApprovalSigner().then(signer => {
+      if (createHash("sha256").update(Buffer.from(signer.publicKey, "base64")).digest("hex") !== challenge.keyFingerprint) {
+        throw new Error("Host approval signer does not match this daemon.");
+      }
+      return signer;
+    }) };
+    this.approvalSigner = pending;
+    void pending.promise.catch(() => { if (this.approvalSigner === pending) this.approvalSigner = null; });
+    return pending.promise;
+  }
+
+  async decideHostApproval(input: { id: string; decision: HostApprovalSelection }, assertCaller?: () => void): Promise<HostApprovalStatus> {
+    if (!input || Object.keys(input).length !== 2 || typeof input.id !== "string"
+      || !["allow_once", "deny", "allow_always"].includes(input.decision)) throw new Error("Invalid approval decision.");
+    const selection = { id: input.id, decision: input.decision };
+    assertCaller?.();
+    const cached = this.approvalPresentations.get(selection.id);
+    if (!cached?.candidate.reference || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000) throw new Error("Refresh the approval before deciding.");
+    const assertEligible = () => {
+      if (selection.decision === "allow_always" && !cached.view.presentation.alwaysAllow) throw new Error("This request has no reusable tool permission.");
+      if (this.approvalPresentations.get(selection.id) !== cached || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000
+        || (cached.view.status !== "pending" && !(cached.view.status === "decision_recorded" && cached.view.retryDecision === selection.decision))) {
+        throw new Error("Refresh the approval before deciding; this request cannot currently be sent.");
+      }
+      if (cached.decision && cached.decision.choice !== selection.decision) throw new Error("A different decision is already recorded for this request.");
+    };
+    assertEligible();
+    const presented = cached.candidate;
+    const expected = structuredClone(cached.candidate.reference);
+    const signer = await this.signerForApproval(cached.challenge);
+    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    if (JSON.stringify(challenge) !== JSON.stringify(cached.challenge)) throw new Error("The background service changed. Refresh the approval before deciding.");
+    assertCaller?.();
+    assertEligible();
+    if (cached.candidate !== presented) throw new Error("The approval was refreshed while deciding. Check it before trying again.");
+    const decision = cached.decision ?? { id: randomUUID(), choice: selection.decision };
+    const envelope = signer.sign(challenge, "decide", { expected,
+      decisionId: decision.id, actorId: `host-${challenge.keyFingerprint}`,
+      decision: decision.choice, projectionSha256: cached.presentationSha256 });
+    cached.decision = decision;
+    cached.view.status = "uncertain";
+    cached.view.retryDecision = null;
+    try {
+      const status = await this.request<HostApprovalStatus>("supervisor.host_approval_request", envelope,
+        undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, () => {
+          assertCaller?.();
+          if (this.approvalPresentations.get(selection.id) !== cached || cached.candidate !== presented
+            || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000 || cached.decision !== decision) {
+            throw new Error("The approval changed before dispatch.");
+          }
+        });
+      if (!approvalStatus.safeParse(status).success || status === "pending") throw new Error();
+      if (cached.candidate === presented && cached.decision === decision) {
+        cached.view.status = status;
+        cached.view.retryDecision = null;
+      }
+      return status;
+    } catch {
+      // Keep the exact decision identity: the daemon may have committed it.
+      if (cached.candidate === presented && cached.decision === decision) {
+        cached.view.status = "uncertain";
+        cached.view.retryDecision = null;
+      }
+      throw new Error("Could not confirm the decision. Refresh to check it; no new decision has been created.");
+    }
+  }
+
+  async listHostToolRules(agentId: string): Promise<import("../../shared/host-tool-rules.js").HostToolRule[]> {
+    approvalId.parse(agentId);
+    await this.waitForStartup();
+    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    const signer = await this.signerForApproval(challenge);
+    const raw = await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "list_tool_rules", { agentId }));
+    const rules = z.array(hostToolRule).parse(raw);
+    if (rules.some(rule => rule.scope.agentId !== agentId || rule.ownerId !== `host-${challenge.keyFingerprint}`)) throw new Error("Invalid saved permissions.");
+    return rules;
+  }
+
+  async revokeHostToolRule(input: { agentId: string; ruleId: string; revision: number }, assertCaller?: () => void): Promise<void> {
+    const value = z.strictObject({ agentId: approvalId, ruleId: approvalId, revision: z.number().int().positive().safe() }).parse(input);
+    assertCaller?.();
+    await this.waitForStartup();
+    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    const signer = await this.signerForApproval(challenge);
+    assertCaller?.();
+    await this.request("supervisor.host_approval_request", signer.sign(challenge, "revoke_tool_rule", value),
+      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller);
   }
 
   /**
@@ -358,6 +832,7 @@ export class SupervisorDaemonClient {
    * generations during normal startup reconciliation.
    */
   prepareForApplicationUpdate(): Promise<void> {
+    if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Application update handoff currently requires macOS."));
     }
@@ -380,6 +855,44 @@ export class SupervisorDaemonClient {
     return this.ensureRunning();
   }
 
+  /** Explicit setup action: reconcile provider environment without replacing an already current service. */
+  restartForEnvironmentRefresh(): Promise<DesktopSupervisorDaemonStatus> {
+    if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
+    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+      return Promise.reject(new Error("Supervised agents currently require macOS."));
+    }
+    if (!this.environmentRefreshHandoff) {
+      this.environmentRefreshHandoff = (async () => {
+        await desktopShellEnvironmentReady();
+        if (this.ensureOperation) await this.ensureOperation;
+        if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
+          throw new Error("Supervisor startup is paused while LetAgents installs an application update.");
+        }
+        this.ensureOperation = this.ensureRunningOnce(true)
+          .then((status) => this.rememberReadyStatus(status))
+          .finally(() => { this.ensureOperation = null; });
+        return this.ensureOperation;
+      })().finally(() => {
+        this.environmentRefreshHandoff = null;
+      });
+    }
+    return this.environmentRefreshHandoff;
+  }
+
+  /** Compare only: opening setup must not retire the owner of live approval connections. */
+  async isRuntimeEnvironmentCurrent(): Promise<boolean> {
+    await this.waitForStartup();
+    try {
+      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate");
+      return negotiated.runtime_environment_fingerprint ===
+        supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT;
+    } catch (error) {
+      // An absent daemon will inherit this environment when explicitly started.
+      if (isConnectionUnavailable(error)) return true;
+      throw error;
+    }
+  }
+
   /**
    * Observe an existing daemon without becoming its lifecycle owner.
    * Subscriptions use this path so merely registering an IPC listener can
@@ -395,9 +908,14 @@ export class SupervisorDaemonClient {
         undefined,
         SUPERVISOR_DAEMON_PROTOCOL_VERSION,
       );
-      return this.rememberReadyStatus(mapStatus(negotiated));
+      const status = mapStatus(negotiated);
+      this.observeAttachedDaemon(status);
+      return this.rememberReadyStatus(status);
     } catch (error) {
-      if (isConnectionUnavailable(error)) return null;
+      if (isConnectionUnavailable(error)) {
+        this.recordAttachedDaemonDisconnect();
+        return null;
+      }
       throw error;
     }
   }
@@ -408,6 +926,7 @@ export class SupervisorDaemonClient {
   }
 
   private rememberReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
+    if (this.maintenanceRequested || status.maintenanceHoldId) return status;
     if (this.lastReadyGeneration !== status.generation) {
       this.lastReadyGeneration = status.generation;
       queueMicrotask(() => {
@@ -422,13 +941,18 @@ export class SupervisorDaemonClient {
     // Rich manifest projections open several durable stores and can be slower
     // on their first read. This must not share the tight timeout used by small
     // control requests or a healthy cold daemon is misreported as unavailable.
+    // manifest.list stays the full-history read: it backs first load, the
+    // stale-subscription repair, and the Inspector's payload detail. It is also
+    // the expensive one, so ask the daemon to project and serialize only the
+    // room this caller will keep. The client-side filter stays as well: a
+    // daemon that ignored the scope still yields a correct answer.
     const entries = await this.request<WireEntry[]>(
       "manifest.list",
-      undefined,
+      roomIdentifier ? { room_id: roomIdentifier } : undefined,
       SUPERVISOR_DAEMON_PROTOCOL_VERSION,
       MANIFEST_LIST_REQUEST_TIMEOUT_MS,
     );
-    return entries.map(mapEntry).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
+    return entries.map((entry) => mapEntry(entry)).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
   }
 
   async watchState(input: {
@@ -458,7 +982,7 @@ export class SupervisorDaemonClient {
     return {
       daemonGeneration: value.daemon_generation,
       sequence: value.sequence,
-      entries: value.entries.map(mapEntry),
+      entries: value.entries.map((entry) => mapEntry(entry, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT)),
     };
   }
 
@@ -497,7 +1021,7 @@ export class SupervisorDaemonClient {
   }
 
   async create(input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> {
-    if (!input.charter.trim()) throw new Error("A supervised agent charter is required.");
+    if (!input.charter.trim()) throw new Error("A supervised agent initial message is required.");
     const creationRequestId = input.creationRequestId?.trim() || randomUUID();
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(creationRequestId)) {
       throw new Error("A valid supervised agent creation request id is required.");
@@ -506,6 +1030,7 @@ export class SupervisorDaemonClient {
     const entry: WireEntry = {
       id: `supervised_${creationRequestId}`,
       room_id: input.roomIdentifier,
+      ...(input.localRoomId ? { local_room_id: input.localRoomId } : {}),
       display_name: input.displayName.trim() || "Supervised agent",
       provider: input.providerId,
       model: input.model?.trim() || null,
@@ -592,17 +1117,22 @@ export class SupervisorDaemonClient {
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
   }
 
-  async recoverAgentRuntime(id: string): Promise<DesktopSupervisorManifestEntry> {
+  async recoverAgentRuntime(id: string, recovery?: import("../ipc-types.js").DesktopSupervisorRuntimeRecoveryInput["recovery"]): Promise<DesktopSupervisorManifestEntry> {
     if (!nonEmptyString(id) || id !== id.trim()) {
       throw new Error("Agent runtime recovery requires an exact identity.");
     }
     const status = await this.ensureRunning();
+    if (recovery && !status.capabilities.agentRuntimeRecoveryV2) {
+      throw new Error("Update the background service to use reconnect and runtime restart controls.");
+    }
     if (!status.capabilities.agentRuntimeRecovery) {
       throw new Error("This supervisor is too old for safe provider runtime recovery; rebuild the desktop daemon.");
     }
     const result = await this.request<{ outcome: "recovering"; entry: WireEntry }>(
       "supervisor.recover_agent_runtime",
-      { entry_id: id, daemon_generation: status.generation },
+      { entry_id: id, daemon_generation: status.generation, ...(recovery ? { mode: recovery.mode,
+        operation_id: recovery.operationId, room_id: recovery.roomId,
+        execution_generation_id: recovery.executionGenerationId, runtime_generation_id: recovery.runtimeGenerationId } : {}) },
       SUPERVISOR_DAEMON_PROTOCOL_VERSION,
       RECOVERY_REQUEST_TIMEOUT_MS,
     );
@@ -777,6 +1307,34 @@ export class SupervisorDaemonClient {
     return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, input.entryId, input.daemonGeneration) };
   }
 
+  async applyAgentConfiguration(input: import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyResult> {
+    if (!input || !nonEmptyString(input.entryId)
+      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1
+      || !Number.isSafeInteger(input.expectedConfigurationRevision) || input.expectedConfigurationRevision < 1) {
+      throw new Error("Agent configuration apply requires exact typed coordinates.");
+    }
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    const result = await this.request<Record<string, unknown>>(
+      "supervisor.apply_agent_configuration",
+      {
+        entry_id: input.entryId,
+        daemon_generation: input.daemonGeneration,
+        expected_configuration_revision: input.expectedConfigurationRevision,
+      },
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      CONFIGURATION_APPLY_REQUEST_TIMEOUT_MS,
+    );
+    if (result.outcome !== "already_applied"
+      && result.outcome !== "restarting"
+      && result.outcome !== "busy_active_turn"
+      && result.outcome !== "conflict"
+      && result.outcome !== "unsupported") {
+      throw new Error("Supervisor returned an invalid configuration apply result.");
+    }
+    return { outcome: result.outcome };
+  }
+
   async prepareRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMovePrepareInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.entryId) || !nonEmptyString(input.destinationRoomId) || !nonEmptyString(input.requestId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move preparation requires exact typed coordinates.");
     const status = await this.ensureRunning();
@@ -827,11 +1385,43 @@ export class SupervisorDaemonClient {
     return result === null ? null : mapRoomMove(result, input.entryId);
   }
 
-  async retireAgent(entryId: string, daemonGeneration: number): Promise<void> {
-    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Retire requires exact typed coordinates.");
+  async retireAgent(
+    entryId: string,
+    daemonGeneration: number,
+    revokedAgentSessionId: string | null = null,
+    grantRevokedWithoutWorkerSession = false,
+  ): Promise<{
+    outcome: "retired" | "invalid" | "revocation_required";
+    revocationKind?: "worker_session" | "grant_only";
+    agentSessionId?: string;
+    error?: string;
+  }> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1
+      || !(revokedAgentSessionId === null || nonEmptyString(revokedAgentSessionId))
+      || (revokedAgentSessionId !== null && grantRevokedWithoutWorkerSession)
+      || typeof grantRevokedWithoutWorkerSession !== "boolean") throw new Error("Retire requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
-    await this.request("supervisor.retire_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
+    const result = await this.request<Record<string, unknown>>("supervisor.retire_agent", {
+      entry_id: entryId,
+      daemon_generation: daemonGeneration,
+      revoked_agent_session_id: revokedAgentSessionId,
+      grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, RETIRE_REQUEST_TIMEOUT_MS);
+    if (result.outcome === "retired") return { outcome: "retired" };
+    if (result.outcome === "revocation_required") {
+      if (result.revocation_kind === "worker_session"
+        && typeof result.agent_session_id === "string" && result.agent_session_id.trim()) {
+        return { outcome: "revocation_required", revocationKind: "worker_session", agentSessionId: result.agent_session_id };
+      }
+      if (result.revocation_kind === "grant_only" && result.agent_session_id === undefined) {
+        return { outcome: "revocation_required", revocationKind: "grant_only" };
+      }
+    }
+    if (result.outcome === "invalid" && typeof result.error === "string" && result.error.trim()) {
+      return { outcome: "invalid", error: result.error };
+    }
+    throw new Error("Supervisor returned an invalid retirement result.");
   }
 
   async purgeAgent(
@@ -961,6 +1551,8 @@ export class SupervisorDaemonClient {
     daemonGeneration: number;
     hostId: string;
     installationId: string;
+    ownerAccountId: string | null;
+    scopeKey: string | null;
     expiresAt: string;
     apiUrl?: string;
     /** Rebind only an already-live exact provider generation; never converge. */
@@ -985,6 +1577,8 @@ export class SupervisorDaemonClient {
       grant_generation: input.grantGeneration,
       host_id: input.hostId,
       installation_id: input.installationId,
+      owner_account_id: input.ownerAccountId,
+      scope_key: input.scopeKey,
       grant_expires_at: input.expiresAt,
       api_url: input.apiUrl ?? apiUrl,
       daemon_generation: input.daemonGeneration,
@@ -995,46 +1589,139 @@ export class SupervisorDaemonClient {
     return "stale";
   }
 
+  /** Queue exact host-side delegation discovery; no authority crosses IPC. */
+  async syncExecutionDelegations(roomId: string): Promise<"queued" | "stale"> {
+    const status = await this.ensureRunning();
+    const result = await this.request<{ status?: unknown }>("supervisor.sync_execution_delegations", {
+      room_id: roomId,
+      daemon_generation: status.generation,
+    });
+    return result.status === "queued" ? "queued" : "stale";
+  }
+
   /** Establish a daemon-inbox entry's one-time durable room boundary. */
-  async bootstrapRoomIngress(entryId: string, daemonGeneration: number): Promise<"bootstrapped" | "existing" | "stale"> {
+  async bootstrapRoomIngress(entryId: string, daemonGeneration: number, initialMessage?: string): Promise<"bootstrapped" | "existing" | "stale"> {
     const status = await this.ensureRunning();
     if (status.generation !== daemonGeneration) return "stale";
     const result = await this.request<{ status?: unknown }>("supervisor.bootstrap_room_ingress", {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
+      ...(initialMessage?.trim() ? { initial_message: initialMessage.trim() } : {}),
     }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS);
     return result.status === "bootstrapped" || result.status === "existing" ? result.status : "stale";
   }
 
-  private async ensureRunningOnce(): Promise<DesktopSupervisorDaemonStatus> {
+  private async ensureRunningOnce(refreshRuntimeEnvironment = false): Promise<DesktopSupervisorDaemonStatus> {
+    await this.waitForOwnedDaemonReadiness();
+    this.assertNotRestarting();
+    const hold = await readDaemonMaintenance(this.maintenancePath);
+    const spawnEnvironment = supervisorDaemonSpawnEnvironment();
+    const expectedRuntimeEnvironmentFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT!;
     let retiredGeneration: number | undefined;
     try {
       const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
+      this.assertNotRestarting();
+      if (hold && negotiated.maintenance_hold_id !== hold.id) throw new Error("Service maintenance is pending. Use Force restart service in Settings → Updates.");
       const daemonVersion = Number(negotiated.protocol_version ?? 0);
       const implementationVersion = String(negotiated.implementation_version ?? "unknown");
       if (
         daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION
+        && Boolean(hold) === Boolean(negotiated.maintenance_hold_id)
         && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
-      ) return mapStatus(negotiated);
+        && negotiated.compatibility_fingerprint === spawnEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT
+        && (!refreshRuntimeEnvironment || negotiated.runtime_environment_fingerprint === expectedRuntimeEnvironmentFingerprint)
+      ) {
+        const status = mapStatus(negotiated);
+        this.observeAttachedDaemon(status);
+        return status;
+      }
       const retired = this.captureRetiredDaemon(negotiated);
       retiredGeneration = Number(negotiated.generation);
       // Handoff drains in-flight provider dispatch reservations, which can
       // span a full provider launch; the tight control timeout aborted real
       // upgrades attempted while any agent was mid-launch.
-      await this.request("daemon.prepare_handoff", undefined, daemonVersion, RECOVERY_REQUEST_TIMEOUT_MS);
+      await this.drainCurrentDaemon(daemonVersion);
+      this.stopAttachedDaemonObservation();
       await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
+      if (this.ownedDaemon?.pid === retired.pid) this.ownedDaemon = null;
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
+      this.recordAttachedDaemonDisconnect();
+      // A previously ready child can also temporarily lose its socket. Only
+      // its exit/handoff, never a failed connection, permits another launch.
+      if (this.ownedDaemon) throw error;
     }
     await access(this.daemonScriptPath);
+    this.stopAttachedDaemonObservation();
     await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
-    const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory);
-    child.once("error", () => undefined);
-    return this.waitForHealthy(retiredGeneration);
+    this.assertNotRestarting();
+    const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory, spawnEnvironment);
+    if (child.pid) {
+      const identity = this.safeInspectDaemon(child.pid);
+      if (identity?.state === "live" && identity.pid === child.pid) this.maintenanceTarget = { ...identity, expectedScriptPath: this.daemonScriptPath };
+    }
+    const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs);
+    const childPid = Number.isSafeInteger(child.pid) && (child.pid ?? 0) > 0 ? child.pid! : null;
+    const owned = {
+      pid: childPid,
+      ready: false,
+      retiredGeneration,
+      runtimeEnvironmentFingerprint: expectedRuntimeEnvironmentFingerprint,
+      compatibilityFingerprint: spawnEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!,
+    };
+    this.ownedDaemon = owned;
+    appendDaemonLifecycleEvent(this.lifecycleLogPath, { event: "daemon_spawned", pid: childPid });
+    child.once("error", (error) => {
+      // An error after a successful spawn may be an IPC/signalling error,
+      // not process death. A failed spawn has no native PID to preserve.
+      if (childPid === null && this.ownedDaemon === owned) this.ownedDaemon = null;
+      appendDaemonLifecycleEvent(this.lifecycleLogPath, {
+        event: "daemon_spawn_error",
+        pid: childPid,
+        detail: error instanceof Error ? error.stack || error.message : String(error),
+      });
+    });
+    child.once("exit", (exitCode, signal) => {
+      if (this.ownedDaemon === owned) this.ownedDaemon = null;
+      appendDaemonLifecycleEvent(this.lifecycleLogPath, {
+        event: "daemon_exited",
+        pid: childPid,
+        exitCode,
+        signal,
+      });
+    });
+    // Migration/OS-key custody has its own bootstrap protocol. The socket's
+    // short startup deadline must not expire while a large backup is fsyncing.
+    await statePreparation;
+    const status = await this.waitForHealthy(owned.retiredGeneration,
+      owned.runtimeEnvironmentFingerprint, owned.compatibilityFingerprint);
+    owned.ready = true;
+    return status;
+  }
+
+  private async waitForOwnedDaemonReadiness(): Promise<void> {
+    const owned = this.ownedDaemon;
+    if (!owned || owned.ready) return;
+    await this.waitForHealthy(owned.retiredGeneration,
+      owned.runtimeEnvironmentFingerprint, owned.compatibilityFingerprint);
+    owned.ready = true;
+  }
+
+  private async drainCurrentDaemon(daemonVersion: number): Promise<void> {
+    this.drainingCurrentDaemon = true;
+    for (const ready of this.startupApprovalWaiters) ready();
+    try {
+      // Approval reads must reach this live owner even when ensureOperation is
+      // waiting for an upgrade. Joining that promise would deadlock the turn.
+      await this.request("daemon.prepare_handoff", undefined, daemonVersion, HANDOFF_DRAIN_REQUEST_TIMEOUT_MS);
+    } finally {
+      this.drainingCurrentDaemon = false;
+    }
   }
 
   private async prepareForApplicationUpdateOnce(): Promise<void> {
     if (this.ensureOperation) await this.ensureOperation;
+    await this.waitForOwnedDaemonReadiness();
     let negotiated: Record<string, unknown>;
     try {
       negotiated = await this.request<Record<string, unknown>>(
@@ -1046,22 +1733,23 @@ export class SupervisorDaemonClient {
       // A failed or never-started supervisor has no owner-only socket to
       // relinquish. Keep the update fence active, but do not prevent Squirrel
       // from replacing the app that may contain the daemon recovery fix.
-      if (isConnectionUnavailable(error)) return;
+      if (isConnectionUnavailable(error) && !this.ownedDaemon) return;
       throw error;
     }
     const daemonVersion = Number(negotiated.protocol_version ?? 0);
     const implementationVersion = String(negotiated.implementation_version ?? "unknown");
     const retired = this.captureRetiredDaemon(negotiated);
-    await this.request(
-      "daemon.prepare_handoff",
-      undefined,
-      daemonVersion,
-      RECOVERY_REQUEST_TIMEOUT_MS,
-    );
+    await this.drainCurrentDaemon(daemonVersion);
+    this.stopAttachedDaemonObservation();
     await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
+    if (this.ownedDaemon?.pid === retired.pid) this.ownedDaemon = null;
   }
 
-  private async waitForHealthy(retiredGeneration?: number): Promise<DesktopSupervisorDaemonStatus> {
+  private async waitForHealthy(
+    retiredGeneration: number | undefined,
+    expectedRuntimeEnvironmentFingerprint: string,
+    expectedCompatibilityFingerprint: string,
+  ): Promise<DesktopSupervisorDaemonStatus> {
     const deadline = Date.now() + this.startTimeoutMs;
     let lastError: unknown = null;
     while (Date.now() < deadline) {
@@ -1075,6 +1763,12 @@ export class SupervisorDaemonClient {
           throw new Error(
             `Replacement supervisor daemon is still ${status.implementationVersion}; expected ${SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION}. Rebuild the desktop daemon and try again.`,
           );
+        }
+        if (result.runtime_environment_fingerprint !== expectedRuntimeEnvironmentFingerprint) {
+          throw new Error("Replacement supervisor daemon did not inherit the current provider runtime environment.");
+        }
+        if (result.compatibility_fingerprint !== expectedCompatibilityFingerprint) {
+          throw new Error("Replacement supervisor daemon did not inherit the current state and runtime identity.");
         }
         if (retiredGeneration !== undefined && status.generation <= retiredGeneration) {
           throw new Error(
@@ -1102,10 +1796,51 @@ export class SupervisorDaemonClient {
     if (inspected.pid !== pid) {
       throw new Error("Refusing daemon handoff because the inspected daemon PID does not match the serving daemon.");
     }
-    if (!this.commandPointsAtExpectedDaemon(inspected.command)) {
-      throw new Error("Refusing daemon handoff because the serving PID does not point at the expected daemon script.");
+    // A prior app install or a local development build can legitimately own
+    // the stable daemon socket. Let that negotiated daemon retire itself, but
+    // retain the current script path as the hard boundary for TERM/KILL: only
+    // the exact executable this desktop expected to launch may be signalled.
+    return this.maintenanceTarget = { ...inspected, expectedScriptPath: this.daemonScriptPath };
+  }
+
+  private observeAttachedDaemon(status: DesktopSupervisorDaemonStatus): void {
+    if (status.pid === this.ownedDaemon?.pid) {
+      this.stopAttachedDaemonObservation();
+      return;
     }
-    return { ...inspected, expectedScriptPath: this.daemonScriptPath };
+    if (
+      this.attachedDaemonObservation?.identity.pid === status.pid
+      && this.attachedDaemonObservation.generation === status.generation
+    ) return;
+    this.stopAttachedDaemonObservation();
+    const inspected = this.safeInspectDaemon(status.pid);
+    if (!inspected || inspected.state !== "live" || inspected.pid !== status.pid) return;
+    const observation = {
+      identity: { ...inspected, expectedScriptPath: this.daemonScriptPath },
+      generation: status.generation,
+    };
+    this.attachedDaemonObservation = observation;
+    this.maintenanceTarget = observation.identity;
+  }
+
+  private recordAttachedDaemonDisconnect(): void {
+    const observation = this.attachedDaemonObservation;
+    if (!observation) return;
+    const current = this.observeRetiredDaemon(observation.identity);
+    if (current.kind === "same" || current.kind === "unverifiable") return;
+    this.attachedDaemonObservation = null;
+    appendDaemonLifecycleEvent(this.lifecycleLogPath, {
+      event: current.kind === "changed" ? "daemon_identity_changed" : "daemon_disappeared",
+      pid: observation.identity.pid,
+      generation: observation.generation,
+      detail: current.kind === "changed"
+        ? current.reason
+        : `Observed daemon became ${current.kind}.`,
+    });
+  }
+
+  private stopAttachedDaemonObservation(): void {
+    this.attachedDaemonObservation = null;
   }
 
   private async enforceRetiredDaemonExit(
@@ -1130,9 +1865,16 @@ export class SupervisorDaemonClient {
       return;
     }
 
+    if (!this.commandPointsAtExpectedDaemon(retired.command, retired.expectedScriptPath)) {
+      throw new Error(authorityReleased
+        ? "A LetAgents daemon from another installation released its socket but did not exit; it was not signalled and the replacement was not started."
+        : "A LetAgents daemon from another installation did not retire after the negotiated handoff; it was not signalled and the replacement was not started.");
+    }
+
     if (implementationVersion === "2.0.25" && authorityReleased) {
       this.emitHandoffDiagnostic(retired, implementationVersion, authorityReleased, "legacy_sigterm_expected", "Daemon 2.0.25 released authority but retains live RPC handles; SIGTERM escalation is expected.");
     }
+    this.assertNotRestarting();
     observation = this.guardedSignalRetiredDaemon(retired, "SIGTERM");
     if (observation.kind === "same") {
       observation = await this.waitForRetiredProcessChange(retired, this.terminateTimeoutMs);
@@ -1150,6 +1892,7 @@ export class SupervisorDaemonClient {
       return;
     }
 
+    this.assertNotRestarting();
     observation = this.guardedSignalRetiredDaemon(retired, "SIGKILL");
     if (observation.kind === "same") {
       observation = await this.waitForRetiredProcessChange(retired, this.killTimeoutMs);
@@ -1216,9 +1959,6 @@ export class SupervisorDaemonClient {
     }
     if (current.state === "zombie") return { kind: "zombie" };
     if (current.command !== retired.command) return { kind: "changed", reason: "full command changed" };
-    if (!this.commandPointsAtExpectedDaemon(current.command, retired.expectedScriptPath)) {
-      return { kind: "changed", reason: "command no longer points at expected daemon script" };
-    }
     return { kind: "same", identity: retired };
   }
 
@@ -1234,9 +1974,9 @@ export class SupervisorDaemonClient {
     return command === expectedScriptPath || command.endsWith(` ${expectedScriptPath}`);
   }
 
-  private async isSocketReleased(daemonVersion: number): Promise<boolean> {
+  private async isSocketReleased(daemonVersion: number, maintenance = false): Promise<boolean> {
     try {
-      await this.request("daemon.negotiate", undefined, daemonVersion);
+      await this.request("daemon.negotiate", undefined, daemonVersion, this.requestTimeoutMs, false, undefined, undefined, maintenance);
       return false;
     } catch (error) {
       if (isConnectionUnavailable(error)) return true;
@@ -1278,21 +2018,27 @@ export class SupervisorDaemonClient {
     timeoutMs = this.requestTimeoutMs,
     unrefSocket = false,
     signal?: AbortSignal,
+    assertDispatch?: () => void,
+    maintenance = false,
   ): Promise<T> {
+    if (!maintenance && this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
       const socket = createConnection(this.socketPath);
       if (unrefSocket) socket.unref();
-      let buffer = "";
+      const chunks: string[] = [];
       let settled = false;
       let onAbort: (() => void) | null = null;
       const finish = (error?: Error, value?: T) => {
         if (settled) return;
         settled = true;
         if (onAbort) signal?.removeEventListener("abort", onAbort);
+        this.maintenanceRequests.delete(cancelForMaintenance);
         socket.destroy();
         if (error) reject(error); else resolve(value as T);
       };
+      const cancelForMaintenance = () => finish(new Error(DAEMON_MAINTENANCE_MESSAGE));
+      if (!maintenance) this.maintenanceRequests.add(cancelForMaintenance);
       onAbort = () => finish(new Error(`Supervisor daemon request aborted: ${method}`));
       if (signal?.aborted) {
         onAbort();
@@ -1302,12 +2048,16 @@ export class SupervisorDaemonClient {
       socket.setEncoding("utf8");
       socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
       socket.once("error", (error) => finish(error));
+      socket.once("close", () => finish(new Error(`Supervisor daemon disconnected before replying: ${method}`)));
       socket.on("data", (chunk: string) => {
-        buffer += chunk;
-        const newline = buffer.indexOf("\n");
+        if (settled) return;
+        // Each earlier chunk is already known to contain no newline. Scanning
+        // the growing response again makes large state snapshots quadratic.
+        const newline = chunk.indexOf("\n");
+        chunks.push(newline < 0 ? chunk : chunk.slice(0, newline));
         if (newline < 0) return;
         try {
-          const response = JSON.parse(buffer.slice(0, newline)) as WireResponse;
+          const response = JSON.parse(chunks.join("")) as WireResponse;
           if (response.id !== id) throw new Error("Supervisor daemon response id mismatch.");
           if (!response.ok) {
             if (/Protocol version mismatch/i.test(response.error ?? "")) {
@@ -1321,13 +2071,46 @@ export class SupervisorDaemonClient {
         }
       });
       socket.once("connect", () => {
-        if (!settled) socket.write(`${JSON.stringify({ version, id, method, params })}\n`);
+        if (settled) return;
+        try { if (!maintenance) this.assertNotRestarting(); assertDispatch?.(); socket.write(`${JSON.stringify({ version, id, method, params })}\n`); }
+        catch (error) { finish(error instanceof Error ? error : new Error("Supervisor request was not dispatched.")); }
       });
     });
   }
 }
 
 function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatus {
+  const rawRecoveryDiagnostics = record(value.recovery_diagnostics);
+  const daemonInboxWaitEvidenceDependency = rawRecoveryDiagnostics?.daemon_inbox_wait_evidence_dependency;
+  const lifecycleProjection = mapLifecycleProjectionDiagnostics(rawRecoveryDiagnostics?.lifecycle_projection);
+  const lifecycleCaptureAdmission = mapLifecycleCaptureAdmission(
+    rawRecoveryDiagnostics?.lifecycle_capture_admission,
+  );
+  const lifecycleLocalConformanceEligible = mapLifecycleLocalConformanceEligibility(
+    rawRecoveryDiagnostics?.lifecycle_local_conformance_eligible,
+  );
+  const eligibilityClaimsAreSupported = lifecycleProjection && lifecycleCaptureAdmission && lifecycleLocalConformanceEligible
+    ? lifecycleProjectionProviders.every((provider) => !lifecycleLocalConformanceEligible[provider]
+      || lifecycleProjectionSupportsLocalConformance(
+        lifecycleProjection,
+        provider,
+        daemonInboxWaitEvidenceDependency,
+        lifecycleCaptureAdmission,
+      ))
+    : false;
+  const recoveryDiagnostics = Number.isSafeInteger(daemonInboxWaitEvidenceDependency)
+    && (daemonInboxWaitEvidenceDependency as number) >= 0
+    && lifecycleProjection
+    && lifecycleCaptureAdmission
+    && lifecycleLocalConformanceEligible
+    && eligibilityClaimsAreSupported
+    ? {
+        daemonInboxWaitEvidenceDependency: daemonInboxWaitEvidenceDependency as number,
+        lifecycleProjection,
+        lifecycleCaptureAdmission,
+        lifecycleLocalConformanceEligible,
+      }
+    : null;
   return {
     healthy: value.healthy === true,
     protocolVersion: Number(value.protocol_version ?? 0),
@@ -1341,13 +2124,91 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
       agentRoomMove: booleanField(value.capabilities, "agent_room_move_v1"),
       agentLifecycle: booleanField(value.capabilities, "agent_lifecycle_v1"),
       agentRuntimeRecovery: booleanField(value.capabilities, "agent_runtime_recovery_v1"),
+      agentRuntimeRecoveryV2: booleanField(value.capabilities, "agent_runtime_recovery_v2"),
       agentStateSubscription: booleanField(value.capabilities, "agent_state_subscription_v1"),
       agentActivityStream: booleanField(value.capabilities, "agent_activity_stream_v1"),
     },
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
+    maintenanceHoldId: typeof value.maintenance_hold_id === "string" ? value.maintenance_hold_id : null,
+    recoveryDiagnostics,
   };
+}
+
+const lifecycleProjectionProviders = ["codex", "claude-code", "cursor", "open-model"] as const;
+const lifecycleProjectionCounterKeys = [
+  "comparedSegments",
+  "matched",
+  "missingInTyped",
+  "missingInLegacy",
+  "pairedButDifferent",
+  "conflicts",
+  "observationUnavailable",
+] as const;
+
+function mapLifecycleProjectionDiagnostics(value: unknown): DesktopLifecycleProjectionDiagnostics | null {
+  const projection = record(value);
+  const providers = record(projection?.providers);
+  if (!projection || typeof projection.available !== "boolean" || !providers) return null;
+  const mapped = {} as DesktopLifecycleProjectionDiagnostics["providers"];
+  for (const provider of lifecycleProjectionProviders) {
+    const source = record(providers[provider]);
+    if (!source) return null;
+    const counters = {} as DesktopLifecycleProjectionDiagnostics["providers"][DesktopLifecycleProjectionProvider];
+    for (const key of lifecycleProjectionCounterKeys) {
+      const counter = source[key];
+      if (!Number.isSafeInteger(counter) || (counter as number) < 0) return null;
+      counters[key] = counter as number;
+    }
+    mapped[provider] = counters;
+  }
+  return { available: projection.available, providers: mapped };
+}
+
+function mapLifecycleLocalConformanceEligibility(
+  value: unknown,
+): Record<DesktopLifecycleProjectionProvider, boolean> | null {
+  const source = record(value);
+  if (!source) return null;
+  const mapped = {} as Record<DesktopLifecycleProjectionProvider, boolean>;
+  for (const provider of lifecycleProjectionProviders) {
+    if (typeof source[provider] !== "boolean") return null;
+    mapped[provider] = source[provider];
+  }
+  return mapped;
+}
+
+function mapLifecycleCaptureAdmission(
+  value: unknown,
+): Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus> | null {
+  const source = record(value);
+  if (!source) return null;
+  const mapped = {} as Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus>;
+  for (const provider of lifecycleProjectionProviders) {
+    const status = enumValue(source[provider], ["pending", "ready", "unavailable"] as const);
+    if (!status) return null;
+    mapped[provider] = status;
+  }
+  return mapped;
+}
+
+function lifecycleProjectionSupportsLocalConformance(
+  projection: DesktopLifecycleProjectionDiagnostics,
+  provider: DesktopLifecycleProjectionProvider,
+  daemonInboxWaitEvidenceDependency: unknown,
+  captureAdmission: Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus>,
+): boolean {
+  const evidence = projection.providers[provider];
+  return projection.available
+    && daemonInboxWaitEvidenceDependency === 0
+    && captureAdmission[provider] === "ready"
+    && evidence.comparedSegments >= 1
+    && evidence.missingInTyped === 0
+    && evidence.missingInLegacy === 0
+    && evidence.pairedButDifferent === 0
+    && evidence.conflicts === 0
+    && evidence.observationUnavailable === 0;
 }
 
 function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, daemonGeneration: number): import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration {
@@ -1397,6 +2258,36 @@ function mapRoomMove(value: Record<string, unknown>, entryId: string, operationI
 function booleanField(value: unknown, key: string): boolean {
   return value !== null && typeof value === "object" && !Array.isArray(value) && Reflect.get(value, key) === true;
 }
+
+// Host-private, structural evidence only. Reject malformed optional evidence
+// independently so delivery receipts remain usable when capture is unavailable.
+const recordedIdentity = z.string().min(1).max(512).regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/);
+const recordedOperation = z.strictObject({
+  executionId: recordedIdentity,
+  operation: z.enum(["command", "file_read", "file_change", "network", "question", "other"]),
+  outcome: z.enum(["succeeded", "failed", "denied_before_start", "cancelled_before_start", "interrupted_after_start", "lost_after_start"]).nullable(),
+  startObserved: z.boolean(), outputBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  sideEffects: z.enum(["none", "possible", "observed"]),
+  exitCode: z.number().int().min(-2147483648).max(2147483647).nullable(),
+  signalNumber: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).nullable(),
+}).refine((row) => row.outcome !== null || row.exitCode === null && row.signalNumber === null)
+  .refine((row) => !["denied_before_start", "cancelled_before_start"].includes(row.outcome ?? "")
+    || !row.startObserved && row.outputBytes === 0 && row.sideEffects === "none" && row.exitCode === null && row.signalNumber === null);
+const recordedExecutionSchema: z.ZodType<RetainedExecutionDetail> = z.union([
+  z.strictObject({ availability: z.enum(["not_captured", "unavailable"]) }),
+  z.strictObject({
+    availability: z.literal("available"), truncated: z.boolean(), evidenceIncomplete: z.boolean(),
+    turns: z.array(z.strictObject({
+      turnId: recordedIdentity, state: z.enum(["none", "active", "terminal", "lost"]),
+      outcome: z.enum(["completed", "failed", "interrupted", "unreadable"]).nullable(),
+      operations: z.array(recordedOperation).max(128),
+    }).refine((turn) => (turn.state === "terminal") === (turn.outcome !== null))
+      .refine((turn) => new Set(turn.operations.map((row) => row.executionId)).size === turn.operations.length)).max(32),
+  }).refine((value) => value.turns.reduce((count, turn) => count + turn.operations.length, 0) <= 128)
+    .refine((value) => new Set(value.turns.map((turn) => turn.turnId)).size === value.turns.length)
+    .refine((value) => value.turns.length > 0 || value.evidenceIncomplete),
+]);
+
 export function mapAgentInspectorDetail(value: Record<string, unknown>, input: import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetailInput): import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail {
   type Detail = import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail;
   const fail = (): never => { throw new Error("Supervisor returned an invalid or unfenced agent inspector detail response."); };
@@ -1413,14 +2304,14 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
     return { ...(outcome.kind === undefined ? {} : { kind: String(outcome.kind) }), ...(outcome.text === undefined ? {} : { text: outcome.text as string | null }), ...(outcome.evidence === undefined ? {} : { evidence: String(outcome.evidence) }) } as never;
   };
   const source = value.source_message === null ? null : (() => { const row = record(value.source_message) ?? fail(); const id = nonEmptyString(row.id) ?? fail(); const roomId = nonEmptyString(row.room_id); const sender = nullableString(row.sender); const text = nullableString(row.text); const createdAt = nullableNonEmptyString(row.created_at); const replyTo = nullableNonEmptyString(row.reply_to); const threadRoot = nullableNonEmptyString(row.thread_root_id); const activation = row.activation === null ? null : record(row.activation); if (roomId !== input.roomId || sender === undefined || text === undefined || createdAt === undefined || replyTo === undefined || threadRoot === undefined || (row.activation !== null && !activation)) fail(); return { id, room_id: roomId!, sender, text, created_at: createdAt, reply_to: replyTo, thread_root_id: threadRoot, activation }; })();
-  const receipt = value.receipt === null ? null : (() => { const row = record(value.receipt) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"] as const) ?? fail(); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const failureCode = row.failure_code == null ? null : enumValue(row.failure_code, ["provider_continuation_missing"] as const); const terminalReason = row.terminal_reason == null ? null : enumValue(row.terminal_reason, ["upgrade_authority_unavailable"] as const); const blocked = nullableNonEmptyString(row.blocked_by_inbox_item_id); const next = row.next_attempt_at_ms; if (providerTurn === undefined || error === undefined || (row.failure_code != null && !failureCode) || (row.terminal_reason != null && !terminalReason) || blocked === undefined || !(next === null || (typeof next === "number" && Number.isSafeInteger(next) && next >= 0)) || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { state, attempt_count: row.attempt_count, provider_turn_id: providerTurn, outcome: mapOutcome(row.outcome), last_error: error, failure_code: failureCode, terminal_reason: terminalReason, blocked_by_inbox_item_id: blocked, next_attempt_at_ms: next as number | null }; })();
+  const receipt = value.receipt === null ? null : (() => { const row = record(value.receipt) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"] as const) ?? fail(); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const failureCode = row.failure_code == null ? null : enumValue(row.failure_code, ["provider_continuation_missing"] as const); const terminalReason = row.terminal_reason == null ? null : enumValue(row.terminal_reason, ["upgrade_authority_unavailable"] as const); const blocked = nullableNonEmptyString(row.blocked_by_inbox_item_id); const next = row.next_attempt_at_ms; if (providerTurn === undefined || error === undefined || (row.failure_code != null && !failureCode) || (row.terminal_reason != null && !terminalReason) || blocked === undefined || !(next === null || (typeof next === "number" && Number.isSafeInteger(next) && next >= 0)) || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { state, attempt_count: row.attempt_count, provider_turn_id: providerTurn, outcome: mapOutcome(row.outcome), last_error: error, failure_code: failureCode, terminal_reason: terminalReason, blocked_by_inbox_item_id: blocked, next_attempt_at_ms: next as number | null }; })();
   const terminal = value.terminal === null ? null : (() => { const row = record(value.terminal) ?? fail(); const outcome = nonEmptyString(row.outcome) ?? fail(); const text = nullableString(row.normalized_text); const evidence = nonEmptyString(row.evidence_source) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); if (text === undefined) fail(); return { outcome, normalized_text: text, evidence_source: evidence, observed_at: at }; })();
   const publication = value.publication === null ? null : (() => { const row = record(value.publication) ?? fail(); const client = nonEmptyString(row.client_message_id) ?? fail(); const canonical = nullableNonEmptyString(row.canonical_message_id); const roomId = nullableNonEmptyString(row.room_id); if (canonical === undefined || roomId === undefined || (roomId !== null && roomId !== input.roomId)) fail(); return { client_message_id: client, canonical_message_id: canonical, room_id: roomId }; })();
   const rawUncertainEffects = value.uncertain_effects ?? [];
   if (!Array.isArray(value.timeline) || value.timeline.length > 100 || !Array.isArray(value.items) || value.items.length > 50 || !Array.isArray(rawUncertainEffects) || rawUncertainEffects.length > 32) fail();
   const timelineRows = value.timeline as unknown[]; const itemRows = value.items as unknown[]; const uncertainEffectRows = rawUncertainEffects as unknown[];
-  const timeline = timelineRows.map((candidate) => { const row = record(candidate) ?? fail(); const phase = enumValue(row.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled", "conversation_restoring", "conversation_restored", "user_cancelled"] as const) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); const detail = nullableString(row.detail); if (detail === undefined) fail(); return { phase, observedAt: at, detail }; });
-  const items = itemRows.map((candidate) => { const row = record(candidate) ?? fail(); const sourceId = nonEmptyString(row.source_message_id) ?? fail(); const itemId = nonEmptyString(row.inbox_item_id) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"] as const) ?? fail(); const updatedAt = nonEmptyString(row.updated_at) ?? fail(); const sender = nullableString(row.sender); const preview = nullableString(row.text_preview); const createdAt = nullableNonEmptyString(row.created_at); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const failureCode = row.failure_code == null ? null : enumValue(row.failure_code, ["provider_continuation_missing"] as const); const terminalReason = row.terminal_reason == null ? null : enumValue(row.terminal_reason, ["upgrade_authority_unavailable"] as const); const canonical = nullableNonEmptyString(row.canonical_message_id); if (sender === undefined || preview === undefined || createdAt === undefined || providerTurn === undefined || error === undefined || (row.failure_code != null && !failureCode) || (row.terminal_reason != null && !terminalReason) || canonical === undefined || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { source_message_id: sourceId, inbox_item_id: itemId, state, attempt_count: row.attempt_count, updated_at: updatedAt, sender, text_preview: preview, created_at: createdAt, outcome: mapOutcome(row.outcome), provider_turn_id: providerTurn, last_error: error, failure_code: failureCode, terminal_reason: terminalReason, canonical_message_id: canonical }; });
+  const timeline = timelineRows.map((candidate) => { const row = record(candidate) ?? fail(); const phase = enumValue(row.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled", "conversation_restoring", "conversation_restored", "user_cancelled"] as const) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); const detail = nullableString(row.detail); const rawSequence = row.event_sequence; if (detail === undefined || typeof rawSequence !== "number" || !Number.isSafeInteger(rawSequence) || rawSequence < 1) fail(); const sequence = Number(rawSequence); return { sequence, phase, observedAt: at, detail }; });
+  const items = itemRows.map((candidate) => { const row = record(candidate) ?? fail(); const sourceId = nonEmptyString(row.source_message_id) ?? fail(); const itemId = nonEmptyString(row.inbox_item_id) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"] as const) ?? fail(); const updatedAt = nonEmptyString(row.updated_at) ?? fail(); const sender = nullableString(row.sender); const preview = nullableString(row.text_preview); const createdAt = nullableNonEmptyString(row.created_at); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const failureCode = row.failure_code == null ? null : enumValue(row.failure_code, ["provider_continuation_missing"] as const); const terminalReason = row.terminal_reason == null ? null : enumValue(row.terminal_reason, ["upgrade_authority_unavailable"] as const); const canonical = nullableNonEmptyString(row.canonical_message_id); if (sender === undefined || preview === undefined || createdAt === undefined || providerTurn === undefined || error === undefined || (row.failure_code != null && !failureCode) || (row.terminal_reason != null && !terminalReason) || canonical === undefined || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { source_message_id: sourceId, inbox_item_id: itemId, state, attempt_count: row.attempt_count, updated_at: updatedAt, sender, text_preview: preview, created_at: createdAt, outcome: mapOutcome(row.outcome), provider_turn_id: providerTurn, last_error: error, failure_code: failureCode, terminal_reason: terminalReason, canonical_message_id: canonical }; });
   const uncertainEffects = uncertainEffectRows.map((candidate) => { const row = record(candidate) ?? fail(); return { effect_id: nonEmptyString(row.effect_id) ?? fail(), tool_name: nonEmptyString(row.tool_name) ?? fail(), mcp_request_id: nonEmptyString(row.mcp_request_id) ?? fail(), error: nonEmptyString(row.error) ?? fail(), created_at: nonEmptyString(row.created_at) ?? fail(), updated_at: nonEmptyString(row.updated_at) ?? fail() }; });
   const repair = value.continuation_repair == null ? null : (() => {
     const row = record(value.continuation_repair) ?? fail();
@@ -1447,7 +2338,46 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
   if (availability === "available" && (!requestedSourceId || !inboxItemId || !source || source.id !== requestedSourceId || !receipt)) fail();
   if (availability !== "available" && (inboxItemId || source || receipt || terminal || publication || repair || timeline.length)) fail();
   if (requestedSourceId === null && availability !== "not_loaded") fail();
-  return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary } as Detail;
+  const recorded = availability === "available" && value.recorded_execution !== undefined
+    ? recordedExecutionSchema.safeParse(value.recorded_execution) : null;
+  const preparedContext = availability === "available" && value.prepared_context != null
+    ? z.object({
+      preparedAt: z.string().datetime(), totalMessages: z.number().int().nonnegative(),
+      omittedMessages: z.number().int().nonnegative(),
+      messages: z.array(z.object({ id: z.string().max(256).nullable(), sender: z.string().max(256).nullable(),
+        text: z.string().max(2_000).nullable(), truncated: z.boolean() })).max(30),
+    }).refine(row => row.totalMessages === row.messages.length + row.omittedMessages).safeParse(value.prepared_context)
+    : null;
+  const intervention = availability === "available" && value.latest_intervention != null
+    ? z.object({
+      actionId: z.string().min(1), recordedAt: z.string().datetime(), hasCorrection: z.boolean(),
+      correctionText: z.string().max(32_768).nullable(), strategy: z.enum(["native", "stop_then_resend"]).nullable(),
+      operatorResolution: z.enum(["applied", "not_applied"]).nullable(),
+      status: z.enum(["prepared", "dispatching", "completed", "retryable", "uncertain"]),
+      interrupted: z.boolean().nullable(), resumed: z.boolean().nullable(),
+    }).safeParse(value.latest_intervention) : null;
+  let runtimeControl: Detail["runtime_control"] = undefined;
+  if (value.runtime_control !== undefined) {
+    runtimeControl = null;
+    const row = value.runtime_control === null ? null : record(value.runtime_control);
+    if (row) {
+      const controlState = enumValue(row.control_state, ["connecting", "responsive", "degraded", "lost", "unprobeable"] as const);
+      const runtimeState = enumValue(row.runtime_state, ["starting", "ready", "stopping", "exited"] as const);
+      const observedAt = nullableNonEmptyString(row.observed_at);
+      const executionGenerationId = nonEmptyString(row.execution_generation_id);
+      const daemonGenerationId = nonEmptyString(row.daemon_generation_id);
+      if (controlState && runtimeState && observedAt !== undefined && executionGenerationId && daemonGenerationId) {
+        runtimeControl = { control_state: controlState, runtime_state: runtimeState, observed_at: observedAt,
+          execution_generation_id: executionGenerationId, daemon_generation_id: daemonGenerationId,
+          ...(nonEmptyString(row.runtime_generation_id) ? { runtime_generation_id: nonEmptyString(row.runtime_generation_id)! } : {}) };
+      }
+    }
+  }
+  return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary,
+    ...(recorded ? { recorded_execution: recorded.success ? recorded.data : { availability: "unavailable" } } : {}),
+    prepared_context: preparedContext?.success ? preparedContext.data : null,
+    latest_intervention: intervention?.success ? intervention.data : null,
+    ...(runtimeControl === undefined ? {} : { runtime_control: runtimeControl }) } as Detail;
 }
 
 /**
@@ -1456,12 +2386,13 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
  * so a malformed row must never make the desktop accept a partly-coerced
  * delivery identity (or crash while rendering the manifest).
  */
-export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
+export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSupervisorManifestEntry {
   const activeWorkerBinding = entry.worker_binding ?? null;
   const workerBinding = activeWorkerBinding ?? entry.last_worker_binding ?? null;
   return {
     id: entry.id,
     roomId: entry.room_id,
+    ...(entry.local_room_id ? { localRoomId: entry.local_room_id } : {}),
     displayName: entry.display_name,
     provider: entry.provider,
     model: entry.model,
@@ -1472,8 +2403,10 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     lastError: entry.last_error ?? null,
     permissionProfileId: entry.permission_profile_id,
     deliveryMode: entry.delivery_mode ?? "mcp_polling",
+    ...(entry.polling_contract === "custodial_polling_v1" ? { pollingContract: entry.polling_contract } : {}),
     createdBy: entry.created_by,
     createdAt: entry.created_at,
+    sourceRepoPath: entry.source_repo_path ?? null,
     workspacePath: entry.workspace_path ?? null,
     workAttemptId: entry.work_attempt_id ?? null,
     agentSessionId: workerBinding?.agent_session_id ?? null,
@@ -1482,6 +2415,12 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     executionGenerationId: entry.provider_ref?.execution_generation_id ?? null,
     providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
     providerPid: entry.provider_ref?.provider_connection?.pid ?? null,
+    runtimeGenerationId: nonEmptyString(entry.runtime_generation_id) ?? null,
+    runtimeRecovery: entry.runtime_recovery ?? null,
+    providerProgress: entry.provider_progress?.state === "compacting"
+      && typeof entry.provider_progress.startedAt === "string"
+      && Number.isFinite(Date.parse(entry.provider_progress.startedAt))
+      ? { state: "compacting", startedAt: entry.provider_progress.startedAt } : null,
     workplaceLiveness: {
       state: entry.workplace_liveness?.state ?? "unknown",
       observedAt: entry.workplace_liveness?.observed_at ?? null,
@@ -1495,7 +2434,7 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     readyReachedAt: entry.ready_reached_at ?? null,
     restartCount: entry.reconciliation?.exit_timestamps_ms?.length ?? 0,
     lastTerminal: entry.reconciliation?.last_terminal ?? null,
-    activity: (entry.activity ?? []).map(mapActivity),
+    activity: boundedWireActivity(entry.activity, activityLimit).map(mapActivity),
     lastTurnControlSequence: entry.last_turn_control_sequence ?? 0,
     roomAgentState: projectRoomAgentState(entry.room_agent_state),
     deliveryReceipts: projectDeliveryReceipts(entry.delivery_receipts),
@@ -1603,11 +2542,12 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
     if (!receipt) return [];
     const inboxItemId = nonEmptyString(receipt.inbox_item_id);
     const sourceMessageId = nonEmptyString(receipt.source_message_id);
+    const fifoSequence = receipt.fifo_sequence;
     const replyClientMessageId = nonEmptyString(receipt.reply_client_message_id);
     const canonicalMessageId = receipt.canonical_message_id === undefined
       ? null
       : nullableNonEmptyString(receipt.canonical_message_id);
-    const state = enumValue(receipt.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "acknowledged", "acknowledged_no_reply", "retryable", "blocked", "restoring_conversation", "cancelled_by_room_move", "cancelled_by_user", "queued_behind_blocked"] as const);
+    const state = enumValue(receipt.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "acknowledged", "acknowledged_no_reply", "acknowledged_failed", "retryable", "blocked", "restoring_conversation", "cancelled_by_room_move", "cancelled_by_user", "queued_behind_blocked"] as const);
     const providerTurnId = nullableNonEmptyString(receipt.provider_turn_id);
     const blockedByMessageId = nullableNonEmptyString(receipt.blocked_by_message_id);
     const error = nullableString(receipt.error);
@@ -1618,7 +2558,7 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       ? null
       : enumValue(receipt.terminal_reason, ["upgrade_authority_unavailable"] as const);
     const updatedAt = nonEmptyString(receipt.updated_at);
-    if (!inboxItemId || !sourceMessageId || !replyClientMessageId || canonicalMessageId === undefined || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || failureCode === undefined || terminalReason === undefined || !updatedAt
+    if (!inboxItemId || !sourceMessageId || typeof fifoSequence !== "number" || !Number.isSafeInteger(fifoSequence) || fifoSequence < 1 || !replyClientMessageId || canonicalMessageId === undefined || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || failureCode === undefined || terminalReason === undefined || !updatedAt
       || typeof receipt.attempt_count !== "number" || !Number.isFinite(receipt.attempt_count) || !Number.isInteger(receipt.attempt_count) || receipt.attempt_count < 0
       || !Array.isArray(receipt.timeline)) return [];
     const timeline: NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["timeline"] = [];
@@ -1628,11 +2568,31 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       const phase = enumValue(value.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled", "conversation_restoring", "conversation_restored", "user_cancelled"] as const);
       const observedAt = nonEmptyString(value.observed_at);
       const detail = nullableString(value.detail);
-      if (!phase || !observedAt || detail === undefined) return [];
-      timeline.push({ phase, observedAt, detail });
+      const rawSequence = value.event_sequence;
+      if (!phase || !observedAt || detail === undefined || typeof rawSequence !== "number" || !Number.isSafeInteger(rawSequence) || rawSequence < 1) return [];
+      const sequence = Number(rawSequence);
+      timeline.push({ sequence, phase, observedAt, detail });
     }
-    return [{ inboxItemId, sourceMessageId, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt, timeline }];
+    return [{ inboxItemId, sourceMessageId, fifoSequence, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt, timeline }];
   });
+}
+
+/**
+ * `manifest.list` carries full history; the pushed state channel carries a
+ * bounded, payload-free summary tail. Keep the newest events by sequence and
+ * strip payloads so one oversized wire answer cannot reintroduce a
+ * multi-megabyte IPC frame per sequence change.
+ */
+function boundedWireActivity(
+  activity: WireActivityEvent[] | undefined,
+  limit?: number,
+): WireActivityEvent[] {
+  const events = activity ?? [];
+  if (limit === undefined || events.length === 0) return events;
+  const bounded = limit <= 0
+    ? []
+    : [...events].sort((left, right) => left.sequence - right.sequence).slice(-limit);
+  return bounded.map((event) => (event.payload === null ? event : { ...event, payload: null }));
 }
 
 function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {
@@ -1748,6 +2708,12 @@ export function supervisorStateWatchRetryDelay(failureCount: number): number {
   );
 }
 
+export function supervisorStateWatchAcceptsStatus(
+  status: Pick<DesktopSupervisorDaemonStatus, "implementationVersion">,
+): boolean {
+  return status.implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION;
+}
+
 async function runSupervisorStateWatch(): Promise<void> {
   let afterDaemonGeneration = 0;
   let afterSequence = 0;
@@ -1756,6 +2722,13 @@ async function runSupervisorStateWatch(): Promise<void> {
     try {
       const status = await supervisorDaemonClient.connectIfRunning();
       if (!status) return;
+      if (!supervisorStateWatchAcceptsStatus(status)) {
+        // Startup may briefly attach to the previous desktop build's daemon
+        // while the lifecycle owner performs a negotiated handoff. Do not
+        // project its additive wire shape as current durable state.
+        await unrefDelay(STATE_WATCH_RETRY_BASE_MS);
+        continue;
+      }
       if (stateWatchUnsupportedGeneration === status.generation) return;
       if (!status.capabilities.agentStateSubscription) {
         stateWatchUnsupportedGeneration = status.generation;

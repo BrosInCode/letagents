@@ -193,7 +193,7 @@ test("announcement texts name the manager, successor, and pending work", () => {
     assignment,
     suggested_candidate: buildCandidate(),
   });
-  assert.ok(withCandidate.includes("RiverGrove is the most recently active worker"));
+  assert.ok(withCandidate.includes("RiverGrove is the most recently active agent"));
 
   const failover = buildManagerFailoverAnnouncementText({
     assignment,
@@ -205,12 +205,12 @@ test("announcement texts name the manager, successor, and pending work", () => {
     successor: buildAssignment({ actor_label: "RiverGrove | EmmyMay's agent | Claude Code" }),
     pending_count: 1,
   });
-  assert.ok(single.includes("1 pending board intent awaits"));
+  assert.ok(single.includes("1 pending request awaits"));
   const plural = buildPendingIntentsHandoffText({
     successor: buildAssignment({ actor_label: "RiverGrove | EmmyMay's agent | Claude Code" }),
     pending_count: 3,
   });
-  assert.ok(plural.includes("3 pending board intents await"));
+  assert.ok(plural.includes("3 pending requests await"));
 });
 
 interface FakeDepsOptions {
@@ -324,7 +324,7 @@ test("announce mode posts once per outage and respects the cooldown", async () =
   assert.deepEqual(fake.failoverCalls, []);
 });
 
-test("daemon-supervised managers still trigger governance failover", async () => {
+test("daemon-supervised managers keep their role while delivery is quiet", async () => {
   const daemonManagerDelivery: LivenessAnnouncementCandidate = {
     ...delivery(buildDeliverySession()),
     supervisor_managed: true,
@@ -339,8 +339,14 @@ test("daemon-supervised managers still trigger governance failover", async () =>
 
   const summary = await createBoardManagerFailoverSweeper(fake.deps).sweepOnce();
 
-  assert.equal(summary.failovers, 1);
-  assert.equal(fake.failoverCalls.length, 1);
+  assert.equal(summary.failovers, 0);
+  assert.equal(fake.failoverCalls.length, 0);
+  assert.equal(evaluateBoardManagerDeath({
+    assignment_created_at: isoMinutesAgo(120),
+    agent_session_ended_at: isoMinutesAgo(1),
+    delivery: daemonManagerDelivery,
+    now: NOW,
+  }).dead, true, "supervisor termination still makes the role vacant");
 });
 
 test("auto mode promotes the best reachable successor and hands over pending intents", async () => {
@@ -362,7 +368,7 @@ test("auto mode promotes the best reachable successor and hands over pending int
   assert.equal(fake.failoverCalls[0]?.clientMessageId, "board_manager_failover:bm_dead");
   assert.equal(fake.recordedEvents.length, 1);
   assert.equal(fake.intentAnnouncements.length, 1);
-  assert.ok(fake.intentAnnouncements[0]!.includes("2 pending board intents await"));
+  assert.ok(fake.intentAnnouncements[0]!.includes("2 pending requests await"));
 });
 
 test("a freshly assigned manager gets the full threshold despite stale delivery evidence", () => {

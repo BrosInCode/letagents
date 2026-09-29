@@ -30,6 +30,8 @@ export interface BoardIntentConsumptionInput {
   payload: BoardIntentPayload;
   intent_id?: string | null;
   approval_token?: string | null;
+  /** Internal only: derived from authenticated worker authority, never request payload. */
+  trusted_worker?: { agent_session_id: string; agent_key: string };
   now?: Date;
 }
 
@@ -64,17 +66,12 @@ export function hashBoardIntentPayload(payload: BoardIntentPayload): string {
   return crypto.createHash("sha256").update(stableJson(payload)).digest("hex");
 }
 
-export async function verifyBoardIntentApproval(input: {
-  room_id: string;
-  action_type: BoardIntentActionType;
-  payload: BoardIntentPayload;
-  intent_id?: string | null;
-  approval_token?: string | null;
-  now?: Date;
-}, executor: BoardIntentExecutor = db): Promise<BoardIntentApprovalDecision> {
+export async function verifyBoardIntentApproval(input: BoardIntentConsumptionInput, executor: BoardIntentExecutor = db): Promise<BoardIntentApprovalDecision> {
   const intentId = input.intent_id?.trim();
   const token = input.approval_token?.trim();
-  if (!intentId || !token) {
+  const worker = input.trusted_worker;
+  const workerBound = Boolean(worker?.agent_session_id?.trim() && worker.agent_key?.trim());
+  if (!intentId || (!token && !workerBound)) {
     return {
       kind: "deny",
       code: "board_intent_required",
@@ -136,11 +133,12 @@ export async function verifyBoardIntentApproval(input: {
       error: `Board intent ${intentId} approval has expired.`,
     };
   }
-  if (!row.approval_token_hash || hashToken(token) !== row.approval_token_hash) {
+  if (token ? !row.approval_token_hash || hashToken(token) !== row.approval_token_hash
+    : row.proposer_agent_session_id !== worker!.agent_session_id || row.proposer_actor_key !== worker!.agent_key) {
     return {
       kind: "deny",
-      code: "board_intent_token_invalid",
-      error: "Board intent approval token is invalid.",
+      code: token ? "board_intent_token_invalid" : "board_intent_worker_mismatch",
+      error: token ? "Board intent approval token is invalid." : "Board intent approval belongs to a different worker session.",
     };
   }
 
@@ -153,7 +151,9 @@ export async function consumeBoardIntentApproval(
 ): Promise<BoardIntentApprovalDecision> {
   const intentId = input.intent_id?.trim();
   const token = input.approval_token?.trim();
-  if (!intentId || !token) {
+  const worker = input.trusted_worker;
+  const workerBound = Boolean(worker?.agent_session_id?.trim() && worker.agent_key?.trim());
+  if (!intentId || (!token && !workerBound)) {
     return {
       kind: "deny",
       code: "board_intent_required",
@@ -176,7 +176,10 @@ export async function consumeBoardIntentApproval(
         eq(board_intents.status, "approved"),
         eq(board_intents.action_type, input.action_type),
         eq(board_intents.payload_hash, hashBoardIntentPayload(input.payload)),
-        eq(board_intents.approval_token_hash, hashToken(token)),
+        ...(token ? [eq(board_intents.approval_token_hash, hashToken(token))] : [
+          eq(board_intents.proposer_agent_session_id, worker!.agent_session_id),
+          eq(board_intents.proposer_actor_key, worker!.agent_key),
+        ]),
         sql`(${board_intents.expires_at} IS NULL OR ${board_intents.expires_at} > ${now}::timestamptz)`
       )
     )

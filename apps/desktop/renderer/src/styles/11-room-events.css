@@ -541,8 +541,7 @@
   z-index: 90;
   display: flex;
   justify-content: flex-end;
-  background: rgba(0, 0, 0, 0.42);
-  backdrop-filter: blur(2px);
+  background: var(--overlay-scrim);
 }
 
 .desktop-events-detail-slide-enter-active,

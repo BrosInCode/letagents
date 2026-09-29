@@ -30,6 +30,7 @@ interface ConfigurationBindings {
   repoRootPath: () => string | null;
   selectedProviderId: Ref<DesktopAgentProviderId | null>;
   selectedProvider: ComputedRef<DesktopAgentProvider | null>;
+  selectedPermissionProfiles: ComputedRef<DesktopManagedAgentPermissionProfile[]>;
   selectedPermissionProfile: ComputedRef<DesktopManagedAgentPermissionProfile | null>;
   showOpenModelConfig: ComputedRef<boolean>;
   showModelSelector: ComputedRef<boolean>;
@@ -44,8 +45,8 @@ interface ConfigurationBindings {
 
 export function useAddAgentConfiguration() {
   const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
-  const launchMode = ref<"legacy" | "supervised">("legacy");
-  const supervisedCharter = ref("Work from the room board, coordinate through the room, and help move assigned work forward.");
+  const launchMode = ref<"legacy" | "supervised">("supervised");
+  const supervisedCharter = ref("Join the room, check the board, and help move the available work forward.");
   const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
   const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
   const openModelBaseUrl = ref("");
@@ -66,6 +67,7 @@ export function useAddAgentConfiguration() {
   const selectedSupervisedPermissionProfileIdsByProvider = ref<
     Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
   >({});
+  const repoLessSupervisedSelections = new Map<string, DesktopManagedAgentPermissionProfileId>();
   let modelRequestId = 0;
   let configurationVersion = 0;
   let openModelWrite: Promise<void> | null = null;
@@ -276,18 +278,41 @@ export function useAddAgentConfiguration() {
     }
     function syncPermissionProfileSelection(): void {
       const supervised = launchMode.value === "supervised";
+      const permissionProfiles = bindings.selectedPermissionProfiles.value;
       const selections = supervised
         ? selectedSupervisedPermissionProfileIdsByProvider.value
         : selectedPermissionProfileIdsByProvider.value;
-      const nextId = managedAgentPermissionProfileSelectionForProvider(
-        bindings.selectedProvider.value,
-        selections,
-        supervised && bindings.selectedProviderId.value === "cursor"
-          ? "sandboxed_write"
-          : null,
-      );
+      const repoLess = supervised
+        && bindings.roomGitRoom() == null
+        && !bindings.repoRootPath()?.trim();
+      const repoLessSelectionKey = repoLess && bindings.selectedProviderId.value
+        ? `${bindings.roomIdentifier()}\u0000${bindings.selectedProviderId.value}`
+        : null;
+      const repoLessSavedId = repoLessSelectionKey
+        ? repoLessSupervisedSelections.get(repoLessSelectionKey)
+        : null;
+      const repoLessSaved = repoLessSavedId
+        ? permissionProfiles.find(
+          (profile) => profile.id === repoLessSavedId && profile.status === "available",
+        )
+        : null;
+      // A scratch workspace is not a trusted project boundary. Keep read-only
+      // selected even when it is gated unless this room has an explicit choice;
+      // repo-backed remembered authority remains isolated from this context.
+      const readOnly = repoLess && !repoLessSaved
+        ? permissionProfiles.find((profile) => profile.id === "read_only")
+        : null;
+      const nextId = repoLessSaved?.id ?? readOnly?.id ?? managedAgentPermissionProfileSelectionForProvider(
+          bindings.selectedProvider.value
+            ? { ...bindings.selectedProvider.value, permissionProfiles }
+            : null,
+          selections,
+          supervised && bindings.selectedProviderId.value === "cursor"
+            ? "sandboxed_write"
+            : null,
+        );
       selectedPermissionProfileId.value = nextId;
-      if (bindings.selectedProviderId.value && nextId) {
+      if (bindings.selectedProviderId.value && nextId && !repoLess) {
         if (supervised) {
           selectedSupervisedPermissionProfileIdsByProvider.value = {
             ...selectedSupervisedPermissionProfileIdsByProvider.value,
@@ -306,10 +331,17 @@ export function useAddAgentConfiguration() {
       selectedPermissionProfileId.value = profile.id;
       if (bindings.selectedProviderId.value) {
         if (launchMode.value === "supervised") {
-          selectedSupervisedPermissionProfileIdsByProvider.value = {
-            ...selectedSupervisedPermissionProfileIdsByProvider.value,
-            [bindings.selectedProviderId.value]: profile.id,
-          };
+          if (bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim()) {
+            repoLessSupervisedSelections.set(
+              `${bindings.roomIdentifier()}\u0000${bindings.selectedProviderId.value}`,
+              profile.id,
+            );
+          } else {
+            selectedSupervisedPermissionProfileIdsByProvider.value = {
+              ...selectedSupervisedPermissionProfileIdsByProvider.value,
+              [bindings.selectedProviderId.value]: profile.id,
+            };
+          }
         } else {
           selectedPermissionProfileIdsByProvider.value = {
             ...selectedPermissionProfileIdsByProvider.value,
@@ -327,6 +359,8 @@ export function useAddAgentConfiguration() {
     }
     function resetTransientState(): void {
       invalidateRequests();
+      repoLessSupervisedSelections.clear();
+      syncPermissionProfileSelection();
       openModelApiKey.value = "";
       openModelError.value = null;
       resetModelSelection();
@@ -342,6 +376,15 @@ export function useAddAgentConfiguration() {
       },
     );
     watch(launchMode, syncPermissionProfileSelection, { flush: "sync" });
+    watch(
+      () => [
+        bindings.repoRootPath(),
+        bindings.roomGitRoom()?.ref.type,
+        bindings.roomGitRoom()?.ref.name,
+      ] as const,
+      syncPermissionProfileSelection,
+      { flush: "sync" },
+    );
     watch(
       () => [selectedModelMode.value, selectedProviderModelId.value] as const,
       () => {

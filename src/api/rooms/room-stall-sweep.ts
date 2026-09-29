@@ -92,9 +92,9 @@ export function buildRoomStallNudgeText(input: {
   // a human can grant.
   const intentPath =
     input.manager_mode === "manager_optional"
-      ? "create the next tasks with register_task_create_intent (they auto-approve when no manager responds within 10m)"
-      : "create the next tasks with register_task_create_intent (this room requires human approval, so a room admin will need to decide them)";
-  return `[status] The board has been empty for ${minutes}m after active work, and no Board Manager is reachable. ${audience}: if the plan has remaining phases, ${intentPath}. If the work is genuinely finished, a human should confirm and close the room out.`;
+      ? "propose the next tasks for approval (they are approved automatically if no manager responds within 10 minutes)"
+      : "propose the next tasks for a room admin to approve";
+  return `[status] The board has been empty for ${minutes}m after active work, and no Board Manager is reachable. ${audience}: if the plan has remaining phases, ${intentPath}. If the work is genuinely finished, a person should confirm that the work is finished and close the room.`;
 }
 
 export interface RoomStallSweeperDeps {

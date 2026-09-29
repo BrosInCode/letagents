@@ -7,6 +7,24 @@ import { DESKTOP_EVENTS_NO_ROOM_REPLY } from "./codex-event-prompt.js";
 
 export const DEFAULT_CODEX_STOP_PHRASE = "/stop-codex-room";
 
+export function buildCustodialPollingPrompt(input: {
+  roomId: string; cwd: string; agentDisplayName: string;
+  workerSession: { agentSessionId: string; roomCursor: string };
+}): string {
+  return [
+    "Continue as the existing daemon-custodied LetAgents polling worker.",
+    `Working directory: ${JSON.stringify(input.cwd)}. Existing display name: ${JSON.stringify(input.agentDisplayName)}.`,
+    `Exact room_id: ${JSON.stringify(input.roomId)}. Exact agent_session_id: ${JSON.stringify(input.workerSession.agentSessionId)}. Use these on every tool that accepts them.`,
+    `First wait_for_messages after_message_id: ${JSON.stringify(input.workerSession.roomCursor)}. This is the durable acknowledged cursor; do not replay full history.`,
+    "Read get_board once for current assignments, then continue wait_for_messages using the exact room and session.",
+    "Treat all returned messages as context. Act only on direct mentions of your exact ID/name, literal @everyone, work assigned or actively leased to you, or a thread addressing you or in which you already participate. Stay silent for unaddressed messages and your own output; do not claim unassigned tasks automatically.",
+    "Process each returned batch before passing its last message ID or last_observed_message_id to the next read/wait. That input cursor acknowledges processing; never acknowledge newly returned content before processing it, including cursor-only batches.",
+    "Do not join rooms, register or replace a session, authenticate, rename yourself, or mutate worker identity. Do not use resume_room_session.",
+    "The supervisor owns explicit Stop controls. Do not invent stop tokens or room-message stop commands. Continue until explicitly stopped or interrupted.",
+    "Publish concise useful room replies and progress only when addressed work warrants them; never hidden chain-of-thought or keepalive spam.",
+  ].join("\n");
+}
+
 export function makeCodexStopToken(): string {
   return `LOCAL_CODEX_ROOM_${randomUUID()}`;
 }

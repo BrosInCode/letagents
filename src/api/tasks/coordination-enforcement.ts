@@ -99,6 +99,7 @@ export interface TaskCoordinationEnforcementDeps {
     payload: BoardIntentPayload;
     intent_id?: string | null;
     approval_token?: string | null;
+    trusted_worker?: { agent_session_id: string; agent_key: string };
   }): Promise<
     | { kind: "allow"; intent?: { id: string } }
     | { kind: "deny"; code: string; error: string }
@@ -340,7 +341,8 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     ]);
     const admission = evaluateTaskAdmission({
       intent: {
-        sourceMessageId: input.sourceMessageId,
+        // One source message may describe several tasks. Creation IDs handle
+        // retries; active work/lease identity still prevents competing work.
         outputIntent: input.title,
       },
       tasks: tasks.tasks,
@@ -445,6 +447,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     actorSessionId: string | null;
     intentId?: string | null;
     approvalToken?: string | null;
+    trustedWorker?: { agent_session_id: string; agent_key: string };
   }): Promise<TaskCoordinationGuardDecision> {
     if (!input.actorKey && !input.actorSessionId) {
       return { kind: "allow" };
@@ -459,6 +462,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       payload: input.payload,
       intent_id: input.intentId,
       approval_token: input.approvalToken,
+      ...(input.trustedWorker ? { trusted_worker: input.trustedWorker } : {}),
     });
     if (approval.kind === "deny") {
       return {
@@ -478,6 +482,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         payload: input.payload,
         intent_id: approval.intent.id,
         approval_token: input.approvalToken,
+        ...(input.trustedWorker ? { trusted_worker: input.trustedWorker } : {}),
       },
     };
   }
@@ -485,18 +490,19 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
   async function enforceTaskCoordinationMutation(
     input: TaskCoordinationMutationInput
   ): Promise<TaskCoordinationGuardDecision> {
+    const classified = input.forcedMutation
+      ? { ...input.forcedMutation, claim: false }
+      : classifyTaskCoordinationMutation(input.updates);
+    const workerClaim = input.req.authKind === "agent_session" && classified?.claim === true;
     // The work-lease fence applies ONLY to authenticated worker (agent_session)
     // writes. Anonymous / human-session / other non-owner_token requests are
     // NOT lease principals and must not be reclassified as work-lease traffic —
     // check agent_session explicitly, not "!== owner_token".
-    if (input.req.authKind === "agent_session") {
+    if (input.req.authKind === "agent_session" && !workerClaim) {
       // agent_session (worker-bearer) writes. Only WORK-lease-scoped mutations
       // are holder-scoped: claim creates a fresh lease, review mutations ride a
       // non-rebindable review lease, and unclassified updates aren't lease-bound.
-      const workerClassified = input.forcedMutation
-        ? { ...input.forcedMutation, claim: false }
-        : classifyTaskCoordinationMutation(input.updates);
-      if (!workerClassified || workerClassified.leaseKind !== "work" || workerClassified.claim) {
+      if (!classified || classified.leaseKind !== "work") {
         return { kind: "allow" };
       }
       // A work-lease-scoped worker mutation MUST be performed by the CURRENT
@@ -519,7 +525,11 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         return {
           kind: "deny",
           code: "coordination_work_lease_required",
-          error: "This task mutation requires holding the task's active work lease.",
+          error: input.task.status === "assigned" && input.actorLabel && input.actorKey && taskIsAssignedToActor({
+            taskOwnership: input.taskOwnership, actorLabel: input.actorLabel, actorKey: input.actorKey,
+          }) && !activeWorkLease
+            ? "Your assigned task has no active work lease. Request approval and retry claim_task to recover it before advancing work."
+            : "This task mutation requires holding the task's active work lease.",
         };
       }
       // Matches now — capture the lease's OWN full tuple; the in-tx shared lock
@@ -540,13 +550,18 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
 
     // Non-owner, non-worker requests (anonymous / human session / other) are not
     // lease principals — preserve their prior behavior, no coordination fence.
-    if (input.req.authKind !== "owner_token") {
+    if (input.req.authKind !== "owner_token" && !workerClaim) {
       return { kind: "allow" };
     }
 
-    const classified = input.forcedMutation
-      ? { ...input.forcedMutation, claim: false }
-      : classifyTaskCoordinationMutation(input.updates);
+    // Worker claims use the same lock, approval and transactional lease creation
+    // path as owner-token claims. Their actor comes from the verified bearer.
+    if (workerClaim && (!input.actorSessionId
+      || input.req.agentSession?.agent_session_id !== input.actorSessionId
+      || input.req.agentSession.agent_key !== input.actorKey
+      || input.req.agentSession.room_id !== input.projectId)) {
+      return { kind: "deny", code: "coordination_invalid_actor", error: "Task claims require the authenticated worker identity for this room." };
+    }
     if (!classified) {
       return { kind: "allow" };
     }
@@ -560,10 +575,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         error: "actor_label and actor_key are required for coordinated task mutations",
       };
     }
-    const verified = await validateOwnerTokenTaskActorKey({
-      req: input.req,
-      actorKey: requestedActorKey,
-    });
+    const verified = workerClaim
+      ? { actorKey: requestedActorKey, error: null }
+      : await validateOwnerTokenTaskActorKey({ req: input.req, actorKey: requestedActorKey });
     if (verified.error || !verified.actorKey) {
       return {
         kind: "deny",
@@ -576,6 +590,12 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       deps.getActiveTaskLeases(input.projectId, input.task.id),
       deps.getActiveTaskLocks(input.projectId, input.task.id),
     ]);
+    const recoveringOwnClaim = workerClaim && input.task.status === "assigned"
+      && taskIsAssignedToActor({ taskOwnership: input.taskOwnership, actorLabel, actorKey });
+    if (workerClaim && input.task.status !== "accepted" && !recoveringOwnClaim) {
+      return { kind: "deny", code: "coordination_claim_conflict",
+        error: "Claim an accepted task, or retry your own assigned task to recover its missing work lease." };
+    }
     const decision = evaluateCoordinationMutation({
       mutation: classified.mutation,
       taskId: input.task.id,
@@ -590,6 +610,12 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       locks,
     });
 
+    // A lost claim response must be retryable after its one-use approval was
+    // consumed. Existing authority is revalidated in the task write transaction.
+    if (recoveringOwnClaim && decision.kind === "allow"
+      && decision.lease.agent_session_id === input.actorSessionId) {
+      return allowDecision({ leaseFence: leaseFenceFor(decision.lease) });
+    }
     const intentActionType = boardIntentActionForMutation(input.updates);
     const intentDecision = intentActionType
       ? await enforceBoardIntentForAgentAction({
@@ -608,6 +634,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
           actorSessionId: input.actorSessionId,
           intentId: input.boardIntentId,
           approvalToken: input.boardApprovalToken,
+          ...(input.req.authKind === "agent_session" && input.req.agentSession
+            ? { trustedWorker: { agent_session_id: input.req.agentSession.agent_session_id,
+                agent_key: input.req.agentSession.agent_key } } : {}),
         })
       : { kind: "allow" as const };
     const boardIntentApproval = intentDecision.kind === "allow"
@@ -651,7 +680,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     }
 
     if (decision.code === "missing_lease") {
-      if (classified.claim && input.task.status === "accepted") {
+      if (classified.claim && (input.task.status === "accepted" || recoveringOwnClaim)) {
         if (intentDecision.kind === "deny") {
           return recordIntentDenial({
             roomId: input.projectId,

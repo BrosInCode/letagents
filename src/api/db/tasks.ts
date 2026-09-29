@@ -1,8 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
-import { task_leases, tasks } from "./schema.js";
+import { room_agent_sessions, task_leases, tasks } from "./schema.js";
 import { clampLimit, formatTaskId, nextRoomScopedNumber, parseScopedId, type RoomSequenceExecutor } from "./utils.js";
 import { toTask } from "./mappers.js";
 import {
@@ -76,7 +77,7 @@ async function insertTaskRow(
   description?: string,
   sourceMessageId?: string,
   executor: RoomSequenceExecutor = db,
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null }
 ): Promise<Task> {
   const now = new Date().toISOString();
   const task: TaskRow = {
@@ -89,6 +90,7 @@ async function insertTaskRow(
     assignee_agent_key: null,
     created_by: createdBy,
     source_message_id: sourceMessageId ?? null,
+    client_task_id: options?.clientTaskId ?? (options?.boardIntentApproval?.intent_id ? `board-intent:${options.boardIntentApproval.intent_id}` : null),
     pr_url: null,
     workflow_artifacts: [],
     created_at: now,
@@ -150,7 +152,7 @@ export async function createTask(
   createdBy: string,
   description?: string,
   sourceMessageId?: string,
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null }
 ): Promise<Task> {
   if (options?.boardIntentApproval) {
     return db.transaction((tx) =>
@@ -158,7 +160,7 @@ export async function createTask(
     );
   }
 
-  return insertTaskRow(roomId, title, createdBy, description, sourceMessageId);
+  return insertTaskRow(roomId, title, createdBy, description, sourceMessageId, db, options);
 }
 
 export async function approveTaskCreateBoardIntent(input: {
@@ -223,7 +225,7 @@ export async function approveTaskCreateBoardIntent(input: {
 export async function getTasks(
   roomId: string,
   statusFilter?: string,
-  options?: { limit?: number; after?: string }
+  options?: { limit?: number; after?: string; order?: "recent" }
 ): Promise<{ tasks: Task[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const afterNumber = options?.after ? parseScopedId(options.after, "task") : null;
@@ -236,7 +238,7 @@ export async function getTasks(
     .select()
     .from(tasks)
     .where(and(...conditions))
-    .orderBy(asc(tasks.number))
+    .orderBy(...(options?.order === "recent" ? [desc(tasks.updated_at), desc(tasks.number)] : [asc(tasks.number)]))
     .limit(limit + 1);
 
   const rows = (await query) as TaskRow[];
@@ -270,13 +272,13 @@ export async function getOpenTasks(
   return { tasks: bounded.map(toTask), has_more };
 }
 
-export async function getTaskRowById(roomId: string, taskId: string): Promise<TaskRow | undefined> {
+export async function getTaskRowById(roomId: string, taskId: string, executor: Pick<typeof db, "select"> = db): Promise<TaskRow | undefined> {
   const taskNumber = parseScopedId(taskId, "task");
   if (!taskNumber) {
     return undefined;
   }
 
-  const [task] = await db
+  const [task] = await executor
     .select()
     .from(tasks)
     .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)))
@@ -317,9 +319,17 @@ export async function findTaskByPrUrl(roomId: string, prUrl: string): Promise<Ta
   return task ? toTask(task as TaskRow) : undefined;
 }
 
+export async function findTaskByClientId(roomId: string, clientTaskId: string): Promise<Task | null> {
+  const [row] = await db.select().from(tasks).where(and(
+    eq(tasks.room_id, roomId), eq(tasks.client_task_id, clientTaskId),
+  )).limit(1);
+  return row ? toTask(row) : null;
+}
+
 export async function findTaskBySourceMessageId(
   roomId: string,
   sourceMessageId: string,
+  options?: { legacyOnly?: boolean },
 ): Promise<Task | undefined> {
   const trimmedSourceMessageId = sourceMessageId.trim();
   if (!trimmedSourceMessageId) return undefined;
@@ -330,6 +340,7 @@ export async function findTaskBySourceMessageId(
     .where(and(
       eq(tasks.room_id, roomId),
       eq(tasks.source_message_id, trimmedSourceMessageId),
+      options?.legacyOnly ? sql`${tasks.client_task_id} IS NULL` : undefined,
     ))
     .orderBy(asc(tasks.number))
     .limit(1);
@@ -405,10 +416,22 @@ export async function findTaskByWorkflowArtifactMatches(
   return undefined;
 }
 
+export class TaskContentConflictError extends Error {
+  readonly code = "task_content_conflict";
+
+  constructor() {
+    super("Task content changed. Reload the task before saving.");
+    this.name = "TaskContentConflictError";
+  }
+}
+
 export async function updateTask(
   roomId: string,
   taskId: string,
   updates: {
+    title?: string;
+    description?: string;
+    expected_content?: { title?: string; description?: string };
     status?: TaskStatus;
     assignee?: string | null;
     assignee_agent_key?: string | null;
@@ -426,12 +449,40 @@ export async function updateTask(
     // LeaseFenceStaleError instead of a stale predecessor overwriting the
     // successor's task state. Absent for owner/admin or lease-creation writes.
     leaseFence?: LeaseFence | null;
-  }
+  },
+  executor?: Parameters<Parameters<(typeof db)["transaction"]>[0]>[0]
 ): Promise<Task | null> {
-  const task = await getTaskRowById(roomId, taskId);
+  const task = await getTaskRowById(roomId, taskId, executor);
   if (!task) return null;
 
-  if (updates.status && !isValidTransition(task.status, updates.status)) {
+  const fence = options?.leaseFence;
+  const progressRetryEligible = Boolean(fence?.kind === "work" && fence.room_id === roomId
+    && fence.task_id === taskId && !options?.boardIntentApproval && !options?.workLeaseCreation);
+  const isExactProgressRetry = (current: TaskRow) => progressRetryEligible
+    && updates.status === current.status && ["in_progress", "in_review"].includes(current.status)
+    && (updates.title === undefined || updates.title === current.title)
+    && (updates.description === undefined || updates.description === current.description)
+    && (updates.assignee === undefined || updates.assignee === current.assignee)
+    && (updates.assignee_agent_key === undefined || updates.assignee_agent_key === current.assignee_agent_key)
+    && (updates.pr_url === undefined || updates.pr_url === current.pr_url)
+    && (updates.workflow_artifacts === undefined
+      || isDeepStrictEqual(normalizeTaskWorkflowArtifacts({ artifacts: updates.workflow_artifacts,
+        prUrl: updates.pr_url ?? current.pr_url }), current.workflow_artifacts));
+  const retryingProgress = isExactProgressRetry(task);
+  const retryingOwnClaim = task.status === "assigned" && updates.status === "assigned"
+    && (updates.title === undefined || updates.title === task.title)
+    && (updates.description === undefined || updates.description === task.description)
+    && Boolean(task.assignee_agent_key)
+    && updates.assignee_agent_key === task.assignee_agent_key
+    && updates.assignee === task.assignee
+    && Boolean(options?.leaseFence?.agent_session_id
+      || (options?.workLeaseCreation?.agent_session_id
+        && options.workLeaseCreation.agent_key === task.assignee_agent_key));
+  if (options?.workLeaseCreation && updates.status === "assigned"
+    && task.status !== "accepted" && !retryingOwnClaim) {
+    throw new LeaseFenceStaleError();
+  }
+  if (updates.status && !isValidTransition(task.status, updates.status) && !retryingOwnClaim && !retryingProgress) {
     throw new Error(
       `Invalid transition: ${task.status} → ${updates.status}. ` +
         `Allowed: ${VALID_TRANSITIONS[task.status].join(", ") || "none"}`
@@ -456,19 +507,33 @@ export async function updateTask(
         nextPrUrl: newPrUrl,
       });
   const now = new Date().toISOString();
+  const expectedContent = updates.expected_content;
+  const writesWorkflow = updates.pr_url !== undefined || updates.workflow_artifacts !== undefined;
+  let writtenTask: TaskRow | undefined;
 
   const writeTaskUpdate = async (executor: Pick<typeof db, "update">) => {
-    await executor
+    // Omitted fields must not replay the earlier read over a concurrent write.
+    [writtenTask] = await executor
       .update(tasks)
       .set({
-        status: assignment.status,
-        assignee: assignment.assignee,
-        assignee_agent_key: assignment.assignee_agent_key,
-        pr_url: newPrUrl,
-        workflow_artifacts: newWorkflowArtifacts,
+        title: updates.title,
+        description: updates.description,
+        status: updates.status,
+        assignee: Object.prototype.hasOwnProperty.call(updates, "assignee") ? assignment.assignee : undefined,
+        assignee_agent_key: Object.prototype.hasOwnProperty.call(updates, "assignee")
+          ? assignment.assignee_agent_key : updates.assignee_agent_key,
+        pr_url: updates.pr_url,
+        workflow_artifacts: writesWorkflow ? newWorkflowArtifacts : undefined,
         updated_at: now,
       })
-      .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+      .where(and(
+        eq(tasks.room_id, roomId), eq(tasks.number, taskNumber),
+        expectedContent?.title === undefined ? undefined : eq(tasks.title, expectedContent.title),
+        expectedContent?.description === undefined ? undefined
+          : sql`coalesce(${tasks.description}, '') = ${expectedContent.description}`,
+      ))
+      .returning();
+    if (!writtenTask && expectedContent) throw new TaskContentConflictError();
   };
 
   const writeWorkLeaseCreation = async (executor: Pick<typeof db, "insert">) => {
@@ -496,6 +561,7 @@ export async function updateTask(
     executor: Parameters<typeof syncRoomSharedArtifactsForTask>[1] &
       Parameters<typeof updateTaskLeaseWorkflowRefs>[3]
   ) => {
+    if (!writesWorkflow) return;
     if (options?.leaseFence && updates.pr_url !== undefined) {
       await updateTaskLeaseWorkflowRefs(
         roomId,
@@ -510,14 +576,63 @@ export async function updateTask(
     );
   };
 
+  let progressRetryResult: Task | null = null;
   if (options?.boardIntentApproval || options?.workLeaseCreation || options?.leaseFence) {
-    await db.transaction(async (tx) => {
+    const run = async (tx: NonNullable<typeof executor>) => {
       // Fence FIRST, under the shared lease advisory lock, so the whole write
       // linearizes against a concurrent rebind. A stale fence aborts the tx
       // before any task state changes.
       if (options.leaseFence) {
         const held = await acquireLeaseFenceTx(tx, options.leaseFence);
         if (!held) throw new LeaseFenceStaleError();
+        if (progressRetryEligible && updates.status && ["in_progress", "in_review"].includes(updates.status)) {
+          // Re-read under the rebind lock and task lock: concurrent identical
+          // requests must return the winning commit without changing its timestamp.
+          const [current] = await tx.select().from(tasks)
+            .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber))).for("update");
+          if (!current) throw new LeaseFenceStaleError();
+          if (isExactProgressRetry(current)) {
+            if ((expectedContent?.title !== undefined && expectedContent.title !== current.title)
+              || (expectedContent?.description !== undefined && expectedContent.description !== (current.description ?? ""))) {
+              throw new TaskContentConflictError();
+            }
+            const [session] = await tx.select().from(room_agent_sessions)
+              .where(eq(room_agent_sessions.session_id, options.leaseFence.agent_session_id)).for("share");
+            if (held.agent_key !== current.assignee_agent_key
+              || (held.expires_at && Date.parse(held.expires_at) <= Date.now())
+              || !session || session.ended_at || session.room_id !== roomId
+              || session.agent_key !== held.agent_key) throw new LeaseFenceStaleError();
+            progressRetryResult = toTask(current);
+            return;
+          }
+          if (retryingProgress || current.status !== task.status
+            || current.updated_at !== task.updated_at || current.assignee !== task.assignee
+            || current.assignee_agent_key !== task.assignee_agent_key
+            || current.pr_url !== task.pr_url
+            || JSON.stringify(current.workflow_artifacts) !== JSON.stringify(task.workflow_artifacts)) throw new LeaseFenceStaleError();
+        }
+      }
+      if (options.workLeaseCreation || retryingOwnClaim) {
+        // Serialize fresh/recovery claims on the task row. A concurrent claim
+        // must not overwrite the winning assignee or mint a second work lease.
+        const [current] = await tx.select().from(tasks)
+          .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)))
+          .for("update");
+        if (!current || current.status !== task.status
+          || current.assignee !== task.assignee
+          || current.assignee_agent_key !== task.assignee_agent_key
+          || current.updated_at !== task.updated_at
+          || current.pr_url !== task.pr_url
+          || JSON.stringify(current.workflow_artifacts) !== JSON.stringify(task.workflow_artifacts)) {
+          throw new LeaseFenceStaleError();
+        }
+        if (options.workLeaseCreation) {
+          const [existingWork] = await tx.select({ id: task_leases.id }).from(task_leases)
+            .where(and(eq(task_leases.room_id, roomId), eq(task_leases.task_id, taskId),
+              eq(task_leases.kind, "work"), eq(task_leases.status, "active")))
+            .limit(1);
+          if (existingWork) throw new LeaseFenceStaleError();
+        }
       }
       if (options.boardIntentApproval) {
         await assertConsumeBoardIntentApproval(options.boardIntentApproval, tx);
@@ -528,26 +643,20 @@ export async function updateTask(
       if (options.leaseFence) {
         await writeArtifactSideEffects(tx);
       }
-    });
+    };
+    await (executor ? run(executor) : db.transaction(run));
     // Non-fenced tx (board-intent / lease-creation only): the lease ref bind is
     // still performed by enforcement; sync outside the tx as before.
     if (!options?.leaseFence) {
-      await writeArtifactSideEffects(db);
+      await writeArtifactSideEffects(executor ?? db);
     }
   } else {
-    await writeTaskUpdate(db);
-    await writeArtifactSideEffects(db);
+    await writeTaskUpdate(executor ?? db);
+    await writeArtifactSideEffects(executor ?? db);
   }
 
-  return toTask({
-    ...task,
-    status: assignment.status,
-    assignee: assignment.assignee,
-    assignee_agent_key: assignment.assignee_agent_key,
-    pr_url: newPrUrl,
-    workflow_artifacts: newWorkflowArtifacts,
-    updated_at: now,
-  });
+  if (progressRetryResult) return progressRetryResult;
+  return writtenTask ? toTask(writtenTask) : null;
 }
 
 export async function setTaskAssignmentStateForLeaseAction(

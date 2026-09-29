@@ -21,6 +21,8 @@ export type WorkspaceFenceHandle = {
 };
 
 type FenceRecord = { owner: string; generation: number; pid: number; workspace_path: string; mode: WorkspaceFenceMode; scope: WorkspaceFenceScope; created_at: string };
+const MUTATION_LOCK_WAIT_MS = 5_000;
+const MUTATION_LOCK_RETRY_MS = 5;
 
 // A repository worktree root is the smallest namespace in which a worktree
 // can be substituted for another valid managed worktree.  Scoping here keeps
@@ -49,7 +51,8 @@ async function readRecord(path: string): Promise<FenceRecord | null> {
 async function withMutationLock<T>(directory: string, operation: () => Promise<T>): Promise<T> {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const lock = join(directory, ".mutation.lock");
-  for (let tries = 0; tries < 32; tries += 1) {
+  const deadline = Date.now() + MUTATION_LOCK_WAIT_MS;
+  while (Date.now() < deadline) {
     try {
       const handle = await open(lock, "wx", 0o600);
       try { await handle.writeFile(JSON.stringify({ pid: process.pid })); await handle.sync(); return await operation(); }
@@ -61,7 +64,12 @@ async function withMutationLock<T>(directory: string, operation: () => Promise<T
         const pid = value && typeof value === "object" ? (value as { pid?: unknown }).pid : undefined;
         if (typeof pid === "number") { try { process.kill(pid, 0); } catch (inner: unknown) { if ((inner as NodeJS.ErrnoException).code === "ESRCH") { await rm(lock, { force: true }); continue; } } }
       } catch { await rm(lock, { force: true }); continue; }
-      await new Promise((resolve) => setTimeout(resolve, 2));
+      // Fence transitions fsync their authority record while holding this lock.
+      // A loaded filesystem can legitimately take longer than the predecessor's
+      // fixed 64 ms retry window, especially when sibling workspaces start at
+      // once. Keep the wait bounded, but size it for storage contention rather
+      // than scheduler tick count.
+      await new Promise((resolve) => setTimeout(resolve, MUTATION_LOCK_RETRY_MS));
     }
   }
   throw new WorkspaceFenceError("Could not acquire workspace-fence mutation lock.");

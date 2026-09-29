@@ -1,6 +1,6 @@
 <template>
   <label class="desktop-select-field">
-    <span v-if="label" class="desktop-select-label">{{ label }}</span>
+    <span v-if="label" class="desktop-select-label" :class="{ 'sr-only': labelHidden }">{{ label }}</span>
     <span class="desktop-select-control">
       <select
         :id="id"
@@ -42,6 +42,7 @@ withDefaults(
     modelValue: string;
     options: readonly DesktopSelectOption[];
     label?: string;
+    labelHidden?: boolean;
     disabled?: boolean;
     id?: string;
     describedBy?: string;
@@ -51,6 +52,7 @@ withDefaults(
   }>(),
   {
     label: "",
+    labelHidden: false,
     disabled: false,
     id: undefined,
     describedBy: "",

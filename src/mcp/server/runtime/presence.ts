@@ -11,7 +11,7 @@ import { type AgentPresenceStatus } from "../../../shared/agent-presence.js";
 import { apiCall, isMissingRouteError } from "./api.js";
 import { agentSessionCredentials, identityFromAgentSession } from "./agent-sessions.js";
 import { getSessionLivenessRegistration } from "./identity.js";
-import { isSupervisedBoundedTurn } from "./worker-bearer.js";
+import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
 
 const roomPresenceByIdentity = new Map<
   string,
@@ -49,7 +49,7 @@ export async function syncRoomPresence(
     presence
   );
   const { localRoomId, cloudRoomId } = await resolveLocalRoomStorageIdentifiers(roomId);
-  if (!isSupervisedBoundedTurn() && await isLocalRoomStorageEnabled(roomId)) {
+  if (!hasSupervisedWorkerAuthority() && await isLocalRoomStorageEnabled(roomId)) {
     touchRoomSession(localRoomId || roomId);
     return;
   }
@@ -70,7 +70,7 @@ export async function syncRoomPresence(
         ...agentSessionCredentials(agentSession),
       }),
     });
-    if (!isSupervisedBoundedTurn()) touchRoomSession(apiRoomId);
+    if (!hasSupervisedWorkerAuthority()) touchRoomSession(apiRoomId);
   } catch (error) {
     if (isMissingRouteError(error)) {
       return;

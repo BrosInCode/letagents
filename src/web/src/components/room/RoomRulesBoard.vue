@@ -17,7 +17,7 @@
           <header class="rules-board-header">
             <div>
               <p class="rules-eyebrow">Pinned room rules</p>
-              <h2 id="rules-board-title">Repo Room Operating Rules</h2>
+              <h2 id="rules-board-title">Project room rules</h2>
             </div>
             <button class="rules-close" type="button" aria-label="Close rules board" @click="$emit('close')">
               &times;
@@ -28,7 +28,7 @@
             <section class="rules-section">
               <div class="rules-section-heading">
                 <h3>Required Workflow</h3>
-                <p>Use the board, lease, and PR as the source of truth.</p>
+                <p>Check the task board and pull request before starting work.</p>
               </div>
               <ol class="rules-list">
                 <li v-for="rule in workflowRules" :key="rule.title">
@@ -40,8 +40,8 @@
 
             <section class="rules-section">
               <div class="rules-section-heading">
-                <h3>Active Task Authority</h3>
-                <p>Current tasks with lease, lock, or review state.</p>
+                <h3>Current assignments</h3>
+                <p>See who can work on each task and where the changes belong.</p>
               </div>
               <div v-if="authorityRows.length" class="authority-list">
                 <article v-for="row in authorityRows" :key="row.id" class="authority-row">
@@ -55,7 +55,7 @@
                       <dd>{{ row.status }}</dd>
                     </div>
                     <div>
-                      <dt>Lease</dt>
+                      <dt>Assignment</dt>
                       <dd>{{ row.lease }}</dd>
                     </div>
                     <div>
@@ -69,13 +69,13 @@
                   </dl>
                 </article>
               </div>
-              <p v-else class="rules-empty">No active task authority is currently exposed on the board.</p>
+              <p v-else class="rules-empty">No tasks are currently assigned.</p>
             </section>
 
             <section class="rules-section">
               <div class="rules-section-heading">
                 <h3>Warning Meanings</h3>
-                <p>Read warnings as routing signals before taking action.</p>
+                <p>What each warning means and what to do next.</p>
               </div>
               <details v-for="warning in warningRules" :key="warning.title" class="warning-row">
                 <summary>{{ warning.title }}</summary>
@@ -109,8 +109,8 @@ const workflowRules = [
     body: 'Start implementation only after the task shows you as assignee.',
   },
   {
-    title: 'Use the leased branch.',
-    body: 'Work from the leased branch name or attach the PR through the task workflow.',
+    title: 'Use the assigned branch.',
+    body: 'Use the branch shown on the task, or link your pull request to the task.',
   },
   {
     title: 'Open your own PR.',
@@ -129,7 +129,7 @@ const workflowRules = [
 const warningRules = [
   {
     title: 'GitHub event ignored.',
-    body: 'The PR event did not match the active task lease, so it cannot move the board automatically.',
+    body: 'The pull request does not match the current task assignment. Check that the right branch and pull request are linked.',
   },
   {
     title: 'No checks reported.',
@@ -166,7 +166,7 @@ const authorityRows = computed(() =>
         shortId: formatTaskShortId(task.id),
         title: task.title,
         status: taskStatusLabel(task.status),
-        lease: lease ? `${lease.kind} lease` : 'No active lease',
+        lease: lease ? `${lease.kind === 'review' ? 'Review' : 'Work'}: ${lease.actor_label}` : 'Unassigned',
         branch: lease?.branch_ref || 'No branch',
         pr,
       }

@@ -22,6 +22,7 @@ const { registerRoomPresenceRoutes } = await import("../routes/rooms/presence/in
 const { registerRoomReasoningRoutes } = await import("../routes/rooms/reasoning.js");
 const { registerRoomTaskRoutes } = await import("../routes/rooms/tasks/index.js");
 const { buildAgentActorLabel } = await import("../../shared/agent-identity.js");
+const { pickLocalCodename } = await import("../../shared/codenames.js");
 const { hashToken } = await import("../db/utils.js");
 const {
   LETAGENTS_AGENT_SESSION_ID_HEADER,
@@ -215,6 +216,110 @@ function sessionCredentials(session: CreatedSession): Record<string, string> {
     agent_session_token: session.session_token,
   };
 }
+
+test("durable MCP workers keep identity and name through retries, crashes, and clean reconnects", {
+  skip: requiresDatabase,
+}, async () => {
+  const { room } = await seedHarness();
+  const handlers = registerRoutesForRoom(room);
+  const register = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+  const disconnect = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/disconnect$/");
+  const body = {
+    actor_key: agentIdentity.canonical_key, display_name: "Atlas", requested_base_display_name: "Atlas",
+    agent_instance_id: `worker_${"a".repeat(32)}`, session_kind: "worker", ide_label: "Agent",
+    runtime: "codex", connection_token: "a".repeat(43),
+  };
+  const joinWorker = (value: Record<string, unknown>) => invoke(register, ownerTokenRequest(value, { params: { 0: room.id } }));
+  const first = await joinWorker(body);
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  let current = first.body as CreatedSession;
+  const task = await createTask!(room.id, "Durable chat owns its work across reconnects", "Human");
+  await updateTask!(room.id, task.id, { status: "accepted" });
+  const assigned = await invoke(handlers.patch.get("/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/"),
+    ownerTokenRequest({ status: "assigned", assignee: current.actor_label, ...sessionCredentials(current) },
+      { params: { 0: room.id, 1: task.id }, query: {} }));
+  assert.equal(assigned.statusCode, 200, JSON.stringify(assigned.body));
+  await createTaskLease!({ room_id: room.id, task_id: task.id, kind: "work", agent_key: current.agent_key,
+    agent_session_id: current.session_id, actor_label: current.actor_label, created_by: "durable_worker_test" });
+  const retry = await joinWorker(body);
+  assert.equal(retry.statusCode, 201, JSON.stringify(retry.body));
+  assert.equal((retry.body as CreatedSession).session_id, current.session_id);
+  assert.equal((retry.body as CreatedSession).session_token, current.session_token);
+
+  // A stale heartbeat is never sufficient proof to take over a durable worker.
+  await pool!.query("UPDATE room_agent_sessions SET last_seen_at = NOW() - INTERVAL '1 day' WHERE session_id = $1", [current.session_id]);
+  assert.equal((await joinWorker({ ...body, connection_token: "b".repeat(43) })).statusCode, 409);
+  for (let i = 0; i < 4; i++) {
+    const old = current;
+    if (i % 2 === 0) {
+      const ended = await invoke(disconnect, ownerTokenRequest(sessionCredentials(old), { params: { 0: room.id, 1: old.session_id } }));
+      assert.equal(ended.statusCode, 200, JSON.stringify(ended.body));
+    }
+    const resumed = await joinWorker({ ...body, display_name: "Ignored rename", connection_token: String(i).repeat(43),
+      replace_agent_session_id: old.session_id, replace_agent_session_token: old.session_token });
+    assert.equal(resumed.statusCode, 201, JSON.stringify(resumed.body));
+    current = resumed.body as CreatedSession;
+    assert.equal(current.session_id, old.session_id);
+    assert.equal(current.agent_key, old.agent_key);
+    assert.equal(current.display_name, "Atlas");
+    assert.equal(current.actor_label, old.actor_label);
+    assert.notEqual(current.session_token, old.session_token);
+    // A delayed disconnect authenticated before rotation must not end its successor.
+    assert.equal(await endRoomAgentSession!({ session_id: old.session_id, room_id: room.id,
+      credential_fence: { kind: "session_token", token_hash: hashToken(old.session_token) } }), null);
+    const staleDisconnect = await invoke(disconnect, ownerTokenRequest(sessionCredentials(old), { params: { 0: room.id, 1: old.session_id } }));
+    assert.ok([401, 403].includes(staleDisconnect.statusCode), JSON.stringify(staleDisconnect.body));
+  }
+  const rows = await pool!.query("SELECT * FROM room_agent_sessions WHERE agent_instance_id = $1", [body.agent_instance_id]);
+  assert.equal(rows.rowCount, 1, "reconnects do not add historical worker rows");
+  assert.equal(rows.rows[0].ended_at, null);
+  const continued = await invoke(handlers.patch.get("/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/"),
+    ownerTokenRequest({ status: "in_progress", ...sessionCredentials(current) },
+      { params: { 0: room.id, 1: task.id }, query: {} }));
+  assert.equal(continued.statusCode, 200, JSON.stringify(continued.body));
+  const leases = await pool!.query("SELECT agent_session_id FROM task_leases WHERE task_id = $1 AND status = 'active'", [task.id]);
+  assert.deepEqual(leases.rows, [{ agent_session_id: current.session_id }]);
+});
+
+test("separate durable chats reserve different names even when one is offline", { skip: requiresDatabase }, async () => {
+  const { room } = await seedHarness();
+  const handlers = registerRoutesForRoom(room);
+  const register = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+  const joinWorker = (value: Record<string, unknown>) => invoke(register, ownerTokenRequest(value, { params: { 0: room.id } }));
+  const now = new Date().toISOString();
+  const secondKey = "EmmyMay/second-chat";
+  await db!.insert(agents!).values({ ...agentIdentity, id: "agent_second_chat", canonical_key: secondKey,
+    name: "second-chat", created_at: now, updated_at: now });
+  const common = { display_name: "Atlas", requested_base_display_name: "Atlas", session_kind: "worker", runtime: "codex", ide_label: "Agent" };
+  const first = await joinWorker({ ...common, actor_key: agentIdentity.canonical_key,
+    agent_instance_id: `worker_${"a".repeat(32)}`, connection_token: "a".repeat(43) });
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  const one = first.body as CreatedSession;
+  await endRoomAgentSession!({ room_id: room.id, session_id: one.session_id });
+  const second = await joinWorker({ ...common, actor_key: secondKey,
+    agent_instance_id: `worker_${"b".repeat(32)}`, connection_token: "b".repeat(43) });
+  assert.equal(second.statusCode, 201, JSON.stringify(second.body));
+  const two = second.body as CreatedSession;
+  assert.notEqual(two.agent_key, one.agent_key);
+  assert.notEqual(two.display_name, one.display_name);
+  assert.notEqual(two.session_id, one.session_id);
+  const resumed = await joinWorker({ ...common, actor_key: one.agent_key, agent_instance_id: one.agent_instance_id,
+    connection_token: "c".repeat(43), replace_agent_session_id: one.session_id, replace_agent_session_token: one.session_token });
+  assert.equal(resumed.statusCode, 201, JSON.stringify(resumed.body));
+  assert.equal((resumed.body as CreatedSession).display_name, one.display_name);
+});
+
+test("concurrent durable registration retries converge on one connection", { skip: requiresDatabase }, async () => {
+  const { room } = await seedHarness();
+  const handlers = registerRoutesForRoom(room);
+  const register = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+  const body = { actor_key: agentIdentity.canonical_key, display_name: "Juniper", session_kind: "worker",
+    agent_instance_id: `worker_${"c".repeat(32)}`, connection_token: "c".repeat(43) };
+  const replies = await Promise.all(Array.from({ length: 4 }, () => invoke(register, ownerTokenRequest(body, { params: { 0: room.id } }))));
+  for (const result of replies) assert.equal(result.statusCode, 201, JSON.stringify(result.body));
+  assert.equal(new Set(replies.map((result) => (result.body as CreatedSession).session_id)).size, 1);
+  assert.equal(new Set(replies.map((result) => (result.body as CreatedSession).display_name)).size, 1);
+});
 
 function requestWithDeliveryHeaders(session: CreatedSession, extra: Record<string, unknown> = {}) {
   const headers = new Map<string, string>([
@@ -896,10 +1001,19 @@ test(
     assert.notEqual(thirdSession.session_id, worker.session_id);
     assert.notEqual(thirdSession.session_id, secondSession.session_id);
     assert.equal(thirdSession.repo_branch, "codex/git-rooms");
+    // Concurrent same-name registrations each receive their own codename;
+    // a held name is never decorated with a number.
     assert.deepEqual(
       [secondSession.display_name, thirdSession.display_name].sort(),
-      ["OwlSolar 1", "OwlSolar 2"]
+      [
+        pickLocalCodename(`${worker.agent_key}:1`).display_name,
+        pickLocalCodename(`${worker.agent_key}:2`).display_name,
+      ].sort()
     );
+    for (const displayName of [secondSession.display_name, thirdSession.display_name]) {
+      assert.match(displayName ?? "", /^[A-Za-z]+$/, "a collision name is one mentionable word");
+      assert.notEqual(displayName, worker.display_name);
+    }
 
     const oldDeliverySession = (await getRoomAgentDeliverySessions(room.id))
       .find((session) => session.agent_session_id === worker.session_id);
@@ -1138,6 +1252,326 @@ test(
 );
 
 test(
+  "a reconnecting agent keeps its name against room history and a newer namesake",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!db || !agents || !createRoomAgentSession || !dbModule) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { room, worker } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    const now = new Date().toISOString();
+    // A person once seen in the room under another spelling of the name.
+    // People are not woken by mentions, so history cannot make one ambiguous.
+    await dbModule.upsertRoomParticipant({
+      room_id: room.id, participant_key: "human:owl-solar", kind: "human",
+      github_login: "owl-solar", display_name: "Owl Solar",
+    });
+    // A newer agent of another identity that already shares the name.
+    const twin = {
+      ...agentIdentity,
+      id: "agent_worker_session_namesake",
+      canonical_key: "EmmyMay/desktop-claude-namesake",
+      name: "desktop-claude-namesake",
+    };
+    await db.insert(agents).values({ ...twin, created_at: now, updated_at: now });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await createRoomAgentSession({
+      room_id: room.id, runtime: "claude-code", session_kind: "worker",
+      agent_key: twin.canonical_key, agent_instance_id: "namesake-instance",
+      owner_account_id: ownerAccount.id, owner_label: twin.owner_label, ide_label: "Claude Code",
+      display_name: "OwlSolar",
+      actor_label: buildAgentActorLabel({ display_name: "OwlSolar", owner_label: twin.owner_label, ide_label: "Claude Code" }),
+    });
+
+    const reconnect = await invoke(
+      registerHandler,
+      ownerTokenRequest({
+        actor_key: worker.agent_key,
+        actor_label: worker.actor_label,
+        display_name: worker.display_name,
+        ide_label: "Codex",
+        session_kind: "worker",
+        runtime: "codex",
+        agent_instance_id: worker.agent_instance_id,
+        replace_agent_session_id: worker.session_id,
+        replace_agent_session_token: worker.session_token,
+      }, { params: { 0: room.id } }),
+    );
+    assert.equal(reconnect.statusCode, 201, JSON.stringify(reconnect.body));
+    assert.equal(
+      (reconnect.body as { display_name?: string }).display_name,
+      "OwlSolar",
+      "the older holder keeps the name when it reconnects",
+    );
+
+    // A third identity asking for any spelling of the name does not get it.
+    const third = { ...agentIdentity, id: "agent_worker_session_third", canonical_key: "EmmyMay/worker-third", name: "worker-third" };
+    await db.insert(agents).values({ ...third, created_at: now, updated_at: now });
+    const newcomer = await invoke(
+      registerHandler,
+      ownerTokenRequest({
+        actor_key: third.canonical_key,
+        display_name: "owlsolar",
+        ide_label: "Agent",
+        session_kind: "worker",
+        runtime: "claude-code",
+        agent_instance_id: "third-instance",
+      }, { params: { 0: room.id } }),
+    );
+    assert.equal(newcomer.statusCode, 201, JSON.stringify(newcomer.body));
+    const newcomerName = (newcomer.body as { display_name?: string }).display_name ?? "";
+    assert.match(newcomerName, /^[A-Za-z]+$/);
+    assert.notEqual(newcomerName.toLowerCase(), "owlsolar");
+  },
+);
+
+test(
+  "an agent that registers again keeps its name, however often it has spoken",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!db || !agents || !dbModule) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { createRoomParticipantRecorder } = await import("../rooms/participants.js");
+    const { room } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    const recorder = createRoomParticipantRecorder({ upsertRoomParticipant: dbModule.upsertRoomParticipant });
+    const now = new Date().toISOString();
+    const identity = { ...agentIdentity, id: "agent_mossdawn", canonical_key: "EmmyMay/mossdawn", name: "mossdawn", display_name: "MossDawn" };
+    await db.insert(agents).values({ ...identity, created_at: now, updated_at: now });
+
+    let prior: { session_id?: string; session_token?: string } | null = null;
+    const sessionIds = new Set<string>();
+    for (let round = 0; round < 4; round += 1) {
+      const registered = await invoke(
+        registerHandler,
+        ownerTokenRequest({
+          actor_key: identity.canonical_key,
+          display_name: "MossDawn",
+          requested_base_display_name: "MossDawn",
+          ide_label: "Agent",
+          session_kind: "worker",
+          runtime: "antigravity",
+          // One process that calls register again, as an agent does whenever
+          // it starts a new turn.
+          agent_instance_id: "one-process",
+          ...(prior ? { replace_agent_session_id: prior.session_id, replace_agent_session_token: prior.session_token } : {}),
+        }, { params: { 0: room.id } }),
+      );
+      assert.equal(registered.statusCode, 201, JSON.stringify(registered.body));
+      const session = registered.body as { session_id?: string; session_token?: string; display_name?: string; actor_label?: string };
+      assert.equal(session.display_name, "MossDawn", `registration ${round + 1} keeps the name`);
+      sessionIds.add(session.session_id!);
+      prior = session;
+
+      // Speaking records the sender as a participant. An authenticated send
+      // carries the agent key; an older caller does not, and must not erase it.
+      await recorder.rememberRoomParticipantFromMessage({
+        projectId: room.id, sender: session.actor_label!, source: "agent",
+        agentKey: identity.canonical_key, timestamp: new Date().toISOString(),
+      });
+      await recorder.rememberRoomParticipantFromMessage({
+        projectId: room.id, sender: session.actor_label!, source: "agent", timestamp: new Date().toISOString(),
+      });
+      const [row] = (await dbModule.getRoomParticipants(room.id, { limit: 200 }))
+        .filter((participant) => participant.display_name === "MossDawn");
+      assert.equal(row?.agent_key, identity.canonical_key, "a participant never loses its recorded owner");
+    }
+    assert.equal(sessionIds.size, 1, "one process keeps one session");
+  },
+);
+
+test(
+  "an agent that was renamed on earlier reconnects returns to its own name",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!db || !agents || !createRoomAgentSession || !dbModule) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { room } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    const now = new Date().toISOString();
+    const identity = { ...agentIdentity, id: "agent_mossdawn", canonical_key: "EmmyMay/mossdawn", name: "mossdawn", display_name: "MossDawn" };
+    await db.insert(agents).values({ ...identity, created_at: now, updated_at: now });
+    const label = (name: string) => buildAgentActorLabel({ display_name: name, owner_label: identity.owner_label, ide_label: "Agent" });
+
+    // The state the old behaviour leaves a room in. The agent kept ONE
+    // session, renamed in place each time, so nothing in its session records
+    // the names it had before. It spoke under each name, and each time the
+    // participant row was written with no owner.
+    const live = await createRoomAgentSession({
+      room_id: room.id, runtime: "antigravity", session_kind: "worker", agent_key: identity.canonical_key,
+      agent_instance_id: "one-process", owner_account_id: ownerAccount.id, owner_label: identity.owner_label,
+      ide_label: "Agent", display_name: "WoodFjord", actor_label: label("WoodFjord"),
+    });
+    for (const name of ["MossDawn", "MossDawn 1", "MossDawn 2", "WolfRidge", "WoodFjord"]) {
+      await dbModule.addMessage(room.id, label(name), `working as ${name}`, {
+        source: "agent", publisher_agent_key: identity.canonical_key, publisher_agent_session_id: live.session_id,
+      });
+      await dbModule.upsertRoomParticipant({
+        room_id: room.id, participant_key: `agent:${label(name).toLowerCase()}`, kind: "agent",
+        actor_label: label(name), agent_key: null, display_name: name,
+        owner_label: identity.owner_label, ide_label: "Agent",
+      });
+    }
+    const register = (body: Record<string, unknown>) => invoke(
+      registerHandler,
+      ownerTokenRequest({ ide_label: "Agent", session_kind: "worker", ...body }, { params: { 0: room.id } }),
+    );
+
+    const registered = await register({
+      actor_key: identity.canonical_key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+      runtime: "antigravity", agent_instance_id: "one-process",
+      replace_agent_session_id: live.session_id, replace_agent_session_token: live.session_token,
+    });
+    assert.equal(registered.statusCode, 201, JSON.stringify(registered.body));
+    const session = registered.body as { session_id?: string; display_name?: string };
+    assert.equal(session.display_name, "MossDawn");
+    assert.equal(session.session_id, live.session_id, "it is still the one session");
+    const owned = (await dbModule.getRoomParticipants(room.id, { limit: 200 }))
+      .find((participant) => participant.display_name === "MossDawn");
+    assert.equal(owned?.agent_key, identity.canonical_key, "the proven owner is recorded, so it is proven once");
+
+    // Its history is its own, not everyone's: another agent still cannot
+    // take a name this agent is living under.
+    const other = { ...agentIdentity, id: "agent_other", canonical_key: "EmmyMay/worker-other", name: "worker-other" };
+    await db.insert(agents).values({ ...other, created_at: now, updated_at: now });
+    const newcomer = await register({
+      actor_key: other.canonical_key, display_name: "MossDawn", runtime: "claude-code", agent_instance_id: "other-process",
+    });
+    assert.equal(newcomer.statusCode, 201, JSON.stringify(newcomer.body));
+    assert.notEqual((newcomer.body as { display_name?: string }).display_name, "MossDawn");
+  },
+);
+
+test(
+  "a name with no owner on record stays taken unless the room's messages prove whose it is",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!db || !agents || !dbModule) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { room } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    const now = new Date().toISOString();
+    const mine = { ...agentIdentity, id: "agent_heron_a", canonical_key: "EmmyMay/heron", name: "heron", display_name: "Heron" };
+    const theirs = { ...agentIdentity, id: "agent_heron_b", canonical_key: "EmmyMay/worker-heron", name: "worker-heron", display_name: "Heron" };
+    await db.insert(agents).values([
+      { ...mine, created_at: now, updated_at: now },
+      { ...theirs, created_at: now, updated_at: now },
+    ]);
+    const heron = buildAgentActorLabel({ display_name: "Heron", owner_label: mine.owner_label, ide_label: "Agent" });
+    const crane = buildAgentActorLabel({ display_name: "Crane", owner_label: mine.owner_label, ide_label: "Agent" });
+    for (const [actorLabel, name] of [[heron, "Heron"], [crane, "Crane"]] as const) {
+      await dbModule.upsertRoomParticipant({
+        room_id: room.id, participant_key: `agent:${actorLabel.toLowerCase()}`, kind: "agent",
+        actor_label: actorLabel, agent_key: null, display_name: name, owner_label: mine.owner_label, ide_label: "Agent",
+      });
+    }
+    // Two agents have spoken as "Heron": the label proves nothing.
+    await dbModule.addMessage(room.id, heron, "one", { source: "agent", publisher_agent_key: mine.canonical_key });
+    await dbModule.addMessage(room.id, heron, "two", { source: "agent", publisher_agent_key: theirs.canonical_key });
+    // Nobody authenticated has spoken as "Crane": nothing to prove it with.
+    await dbModule.addMessage(room.id, crane, "three", { source: "agent" });
+
+    for (const requested of ["Heron", "Crane"]) {
+      const registered = await invoke(
+        registerHandler,
+        ownerTokenRequest({
+          actor_key: mine.canonical_key, display_name: requested, requested_base_display_name: requested,
+          ide_label: "Agent", session_kind: "worker", runtime: "antigravity", agent_instance_id: `process-${requested}`,
+        }, { params: { 0: room.id } }),
+      );
+      assert.equal(registered.statusCode, 201, JSON.stringify(registered.body));
+      assert.notEqual((registered.body as { display_name?: string }).display_name, requested,
+        `${requested} is not proven to be this agent's`);
+    }
+    const rows = await dbModule.getRoomParticipants(room.id, { limit: 200 });
+    assert.equal(rows.find((row) => row.display_name === "Heron")?.agent_key, null, "an unproven owner is never recorded");
+  },
+);
+
+test(
+  "a mention that names two live agents tells the sender it reached neither",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!db || !agents || !createRoomAgentSession || !dbModule) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { room, worker } = await seedHarness();
+    const now = new Date().toISOString();
+    const twin = {
+      ...agentIdentity,
+      id: "agent_worker_session_twin",
+      canonical_key: "EmmyMay/desktop-claude-twin",
+      name: "desktop-claude-twin",
+    };
+    await db.insert(agents).values({ ...twin, created_at: now, updated_at: now });
+    await createRoomAgentSession({
+      room_id: room.id,
+      runtime: "claude-code",
+      session_kind: "worker",
+      agent_key: twin.canonical_key,
+      agent_instance_id: "worker-session-twin-instance",
+      owner_account_id: ownerAccount.id,
+      owner_label: twin.owner_label,
+      ide_label: "Claude Code",
+      display_name: "OwlSolar",
+      actor_label: buildAgentActorLabel({
+        display_name: "OwlSolar",
+        owner_label: twin.owner_label,
+        ide_label: "Claude Code",
+      }),
+    });
+
+    const ambiguous = await dbModule.addMessageWithCreateStatus(room.id, "Human", "@OwlSolar please investigate this");
+    assert.deepEqual([...ambiguous.recipientAgentKeys], [], "an ambiguous mention wakes nobody");
+    assert.equal(ambiguous.message.mention_notices?.length, 1);
+    const [notice] = ambiguous.message.mention_notices!;
+    assert.equal(notice!.reason, "ambiguous");
+    assert.equal(notice!.handle, "OwlSolar");
+    assert.deepEqual(
+      notice!.candidates.map((candidate) => candidate.mention).sort(),
+      [`@agent:${twin.canonical_key}`, `@agent:${worker.agent_key}`].sort(),
+    );
+    assert.equal(
+      ambiguous.canonical_message.mention_notices,
+      undefined,
+      "the notice is for the sender, never part of the shared message",
+    );
+
+    // The mention the notice offers reaches exactly the agent it names.
+    const exact = await dbModule.addMessageWithCreateStatus(
+      room.id,
+      "Human",
+      `@agent:${twin.canonical_key} please investigate this`,
+    );
+    assert.deepEqual([...exact.recipientAgentKeys], [twin.canonical_key]);
+    assert.equal(exact.message.mention_notices, undefined);
+  },
+);
+
+test(
   "worker-authenticated message polls attach activation metadata for direct and broadcast delivery",
   {
     concurrency: false,
@@ -1246,8 +1680,8 @@ test(
       "restart with a trusted base signal converges the compounded label to the base"
     );
 
-    // A DIFFERENT instance while the name is actively held still gets a
-    // numbered variant — the live-collision path is unchanged.
+    // A DIFFERENT instance while the name is actively held receives its own
+    // codename, never a numbered variant of the held name.
     const third = await invoke(
       registerHandler,
       ownerTokenRequest(
@@ -1258,11 +1692,15 @@ test(
     assert.equal(third.statusCode, 201, JSON.stringify(third.body));
     const thirdSession = third.body as { display_name?: string };
     assert.notEqual(thirdSession.display_name, "MistyMorrow");
-    assert.equal(thirdSession.display_name, "MistyMorrow 1");
+    assert.equal(
+      thirdSession.display_name,
+      pickLocalCodename(`${agentIdentity.canonical_key}:1`).display_name
+    );
+    assert.match(thirdSession.display_name ?? "", /^[A-Za-z]+$/, "a collision name is one mentionable word");
 
-    // If the base holder ends while a suffixed sibling remains active, the
+    // If the base holder ends while a renamed sibling remains active, the
     // base is free. A restarted worker must reclaim it instead of treating
-    // the sibling's suffix as proof that the base itself is occupied.
+    // the sibling as proof that the base itself is occupied.
     await endRoomAgentSession!({ session_id: restartedSession.session_id! });
     const overlapRestart = await invoke(
       registerHandler,

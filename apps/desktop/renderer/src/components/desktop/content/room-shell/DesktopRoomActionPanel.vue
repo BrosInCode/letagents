@@ -50,6 +50,7 @@
         </form>
 
         <div class="desktop-room-property-list" aria-label="Room settings inspector">
+          <RoomConversationRouting v-if="storage.effectiveMode === 'cloud'" :room-identifier="room.identifier" />
           <div
             class="desktop-room-property-row desktop-room-storage-row"
             :data-busy="storageBusy"
@@ -159,22 +160,6 @@
             <span class="desktop-room-status-chip" :data-state="notificationShortLabel.toLowerCase()">{{ notificationShortLabel }}</span>
           </button>
 
-          <button class="desktop-room-property-row" type="button" data-testid="desktop-room-liquid-glass-card" @click="$emit('toggle-liquid-glass')">
-            <span class="desktop-room-action-icon is-glass" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M5 7.5A2.5 2.5 0 0 1 7.5 5h9A2.5 2.5 0 0 1 19 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 5 16.5v-9Z" stroke="currentColor" stroke-width="1.8"/>
-                <path d="M8 9h8M8 12h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-            </span>
-            <span class="desktop-room-property-copy">
-              <strong>Glass surfaces</strong>
-              <small>{{ liquidGlassEnabled ? "Use layered translucent panels." : "Use simpler high-contrast panels." }}</small>
-            </span>
-            <span class="desktop-room-toggle" :data-active="liquidGlassEnabled">
-              <span />
-            </span>
-          </button>
-
           <button
             v-if="githubEventsAvailable"
             class="desktop-room-property-row"
@@ -222,6 +207,11 @@
               <div>
                 <strong>{{ githubTitle }}</strong>
                 <small>{{ githubDescription }}</small>
+                <small
+                  v-if="githubStatus?.connected"
+                  data-testid="desktop-room-github-reviews"
+                  :title="githubReviewDetails"
+                >{{ githubReviewDescription }}</small>
               </div>
             </div>
             <div class="desktop-room-github-actions">
@@ -246,6 +236,7 @@
 </template>
 
 <script setup lang="ts">
+import RoomConversationRouting from "./RoomConversationRouting.vue";
 import { computed, ref, watch } from "vue";
 import type {
   DesktopGitHubIntegrationStatus,
@@ -266,7 +257,6 @@ const props = defineProps<{
   soundEnabled: boolean;
   notificationsEnabled: boolean;
   notificationPermission: NotificationPermission | "unsupported";
-  liquidGlassEnabled: boolean;
   renameBusy: boolean;
   renameError: string | null;
   githubStatus: DesktopGitHubIntegrationStatus | null;
@@ -283,7 +273,6 @@ const emit = defineEmits<{
   "open-rules": [];
   "toggle-sound": [];
   "toggle-notifications": [];
-  "toggle-liquid-glass": [];
   "toggle-github-events-visible": [];
   "set-room-storage-mode": [mode: DesktopRoomStorageOverrideMode];
   "fork-room-to-local": [mode: "local"];
@@ -323,7 +312,7 @@ const cloudStorageUnavailableReason = computed(() =>
 const storageDescription = computed(() => {
   if (props.storage.effectiveMode === "local") {
     if (localGitRoom.value) {
-      return "This local Git Room needs a provider-backed remote before it can use cloud storage.";
+      return "Connect this project to a repository hosted online before sharing its room.";
     }
     const target = props.storage.localRoom?.cloudRoomIdentifier;
     return target
@@ -394,6 +383,24 @@ const githubStatusLabel = computed(() => {
   if (props.githubStatus?.installUrlAvailable) return "Ready";
   if (props.githubStatus?.configured === false) return "Setup needed";
   return "Offline";
+});
+
+const githubReviewDescription = computed(() => {
+  if (props.githubStatus?.reviewSubmission?.permission === "write") {
+    return "Reviews: write permission recorded";
+  }
+  if (props.githubStatus?.reviewSubmission?.permission === "missing") {
+    return "Reviews: Pull requests (write) permission missing";
+  }
+  return "Reviews: permission unknown";
+});
+
+const githubReviewDetails = computed(() => {
+  const recordedAt = props.githubStatus?.reviewSubmission?.recordedAt;
+  const detail = props.githubStatus?.reviewSubmission?.permission === "write"
+    ? "GitHub confirms authorization when a review is published."
+    : "Ask the repository owner to check the GitHub App's Pull requests (write) permission.";
+  return recordedAt ? `${detail} Installation metadata recorded at ${recordedAt}.` : detail;
 });
 
 const githubFriendlyError = computed(() => {

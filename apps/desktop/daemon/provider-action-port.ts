@@ -3,7 +3,11 @@
  * control-socket bridge; keeping this structural port here keeps reconciliation
  * outside Electron's failure domain.
  */
+import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
+import { nativeRuntimeDeathSchema } from "./execution-protocol.js";
+import type { ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 export type ProviderActionCapabilities = {
+  execution?: NativeExecutionCapabilities;
   /** Explicit adapter admission for durable room-ingress ownership. */
   deliveryModes?: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox">;
   resume: boolean;
@@ -11,6 +15,8 @@ export type ProviderActionCapabilities = {
   transcriptAccess: boolean;
   permissionPromptBridging: boolean;
   survivesRestart: boolean;
+  /** The selected adapter can stop an exact OS process birth without attachment. */
+  exactProcessStop?: boolean;
   turnControl?: "native_interrupt" | "restart_resume" | "unsupported";
   /** Native interrupt+resume of the current turn (Codex). Absent/false ⇒ the daemon uses stop-then-resend. */
   midTurnCorrection?: boolean;
@@ -82,11 +88,37 @@ export function sameProviderActionConnectionSnapshot(
   return true;
 }
 
-export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; provider?: string; providerConnection?: ProviderActionConnectionRef | null };
-export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
-export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
-export type ProviderActionTerminal = { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
+export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; launchPolicy?: unknown; provider?: string; providerConnection?: ProviderActionConnectionRef | null; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed" };
+export type ProviderActionSpawn = { onProgress?: () => void; workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
+export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; managedLaunchContract?: string; custodyLaunchAgentSessionId?: string; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
+export type ProviderActionTerminal = { nativeRuntimeDeath?: import("../shared/execution-protocol.js").NativeRuntimeDeath; endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
+/** Validate death against the immutable handle/ref before retaining it as operational evidence. */
+export function validatedNativeRuntimeDeath(terminal: Pick<ProviderActionTerminal, "nativeRuntimeDeath">,
+  expected: ProviderActionConnectionRef | null | undefined) {
+  if (terminal.nativeRuntimeDeath === undefined) return undefined;
+  const death = nativeRuntimeDeathSchema.parse(terminal.nativeRuntimeDeath);
+  if (!expected || expected.kind !== death.kind || expected.pid !== death.pid
+    || expected.processIdentity !== death.processIdentity) {
+    throw new Error("Native process death does not match the exact provider installation.");
+  }
+  return death;
+}
+
 export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal };
+export type CustodialPollingActivationRequest = {
+  operationId: string; roomId: string; cwd: string; agentDisplayName: string;
+  workerSession: { agentSessionId: string; roomCursor: string };
+  /** Internal daemon attestation from the persisted applied launch, never controller input. */
+  launchReceipt: {
+    contract: "custodial_polling_v1"; configurationRevision: number; workAttemptId: string; agentSessionId: string;
+    providerContinuationId: string; providerConnection: ProviderActionConnectionRef;
+  };
+};
+export type CustodialPollingActivationOptions = {
+  beforeNativeDispatch: () => Promise<void>;
+  checkpointTurnStarted: (id: string) => Promise<void>;
+  detachSignal?: AbortSignal;
+};
 export type ProviderActionAttachment = { state: "attached"; handle: ProviderActionHandle } | { state: "absent" } | { state: "ambiguous"; reason: string };
 export type ProviderActionStreamEvent = {
   workAttemptId: string;
@@ -96,6 +128,16 @@ export type ProviderActionStreamEvent = {
   provider: string;
   kind: string;
   method: string;
+  /** Opaque identity shared only with typed facts derived from this exact native lifecycle event. */
+  nativeEventId?: string;
+  /** Exact native process birth that emitted the event; required for Cursor child fencing. */
+  nativeProcessIdentity?: string;
+  /** PID paired with nativeProcessIdentity; neither field is exact alone. */
+  nativeProcessPid?: number;
+  /** Structural boundary for the correlated lifecycle checkpoint; never provider-authored text. */
+  nativeLifecyclePhase?: "turn_active" | "turn_terminal";
+  /** Shadow-comparison evidence only; consumers must not derive operational state from this frame. */
+  lifecycleProjectionOnly?: true;
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
   summary?: string | null;
   payload: unknown;
@@ -113,12 +155,13 @@ export type ProviderRoomTurnRequest = {
   sourceMessage: unknown;
   activation: Record<string, unknown>;
   actionId: string;
-  charter?: string;
   observedContext?: unknown[];
 };
 export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+  /** Exact native terminal proof; never synthesized from an exception or stream classifier. */
+  | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
 export type ProviderRoomTurnCheckpointDisposition = {
   acceptedResult: ProviderRoomTurnResult;
@@ -157,8 +200,22 @@ export class ProviderActionFailure extends Error {
   }
 }
 
+/** A synchronous read of native custody already acquired by this process. */
+export type ProviderRuntimeCustody = { state: "absent" } | { state: "owned" | "retired"; handle: ProviderActionHandle } | { state: "unknown" };
+
 export interface ProviderActionPort {
+  compactionProgress?(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null;
+  runtimeCustody?(workAttemptId: string, provider: string): ProviderRuntimeCustody;
+  onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;
+  probeControl?(handle: ProviderActionHandle): Promise<ControlProbeResult>;
+  observePermissions?(handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, signal: AbortSignal): Promise<void>;
+  correlatePermissionTurn?(handle: ProviderActionHandle, request: ProviderPermissionRequest): Promise<ProviderPermissionCorrelation>;
+  replyPermission?(handle: ProviderActionHandle, request: ProviderPermissionRequest, reply: "once" | "reject", options: ProviderPermissionDispatchOptions): Promise<ProviderPermissionReply>;
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
+  /** Verify the selected polling runtime before an existing writer is stopped. */
+  preflightCustodialPolling?(input: { provider: string; devMcpServerEntryPath?: string }): Promise<void>;
+  activateCustodialPolling?(handle: ProviderActionHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
+  inspectCustodialPollingActivation?(handle: ProviderActionHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle>;
   attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null>;
   /** Recover an intent journaled before dispatch, never by spawning a second child. */
@@ -172,6 +229,8 @@ export interface ProviderActionPort {
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderTurnControlResult>;
   inspectTurn?(handle: ProviderActionHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
+  /** Read-only discovery; an idle snapshot does not itself fence new native work. */
+  inspectTurnBoundary?(handle: ProviderActionHandle): Promise<NativeTurnBoundary>;
   controlExactTurn?(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: {
     /** Durable intent checkpoint; completes before the first native turn/start side effect. */
@@ -192,6 +251,8 @@ export interface ProviderActionPort {
       providerContinuationId: string;
       providerConnection: ProviderActionConnectionRef;
     }) => Promise<void>;
+    /** Dispose the exact native birth's typed lifecycle effect before a reusable lane drops that birth. */
+    settleLifecycleBeforeIdle?: () => Promise<void>;
     /** Synchronously marks that exact turn identity and process recovery state are durable. */
     markDurableTurnStarted?: () => void;
     /** Release provider-local output only after this durable terminal checkpoint succeeds. */
@@ -208,6 +269,7 @@ export interface ProviderActionPort {
       providerContinuationId: string;
       providerConnection: ProviderActionConnectionRef;
     }) => Promise<void>;
+    settleLifecycleBeforeIdle?: () => Promise<void>;
     checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>;
   }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: {
@@ -217,7 +279,14 @@ export interface ProviderActionPort {
   }): Promise<ProviderContinuationRepairResult>;
   /** Stop an exact durable process birth without first attaching its transport. */
   stopRef?(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
+  describeManagedLaunchContract?(input: { provider: string; apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null>;
+  stopIdle?(handle: ProviderActionHandle, assertCurrent: () => void): Promise<ProviderActionTerminal>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;
+}
+
+/** No native stop was dispatched because its final idle proof changed. */
+export class ManagedRuntimeRefreshDeferred extends Error {
+  readonly code = "MANAGED_RUNTIME_REFRESH_DEFERRED";
 }

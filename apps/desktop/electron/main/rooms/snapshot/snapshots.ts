@@ -119,6 +119,8 @@ export function createLocalReadyRoomSnapshot(input: {
   storage: DesktopRoomStorageState;
   tasks: DesktopTaskSummary[];
   messages: RoomMessagePayload[];
+  participants?: DesktopRoomSnapshot["participants"];
+  presence?: DesktopRoomSnapshot["presence"];
 }): DesktopRoomSnapshot {
   const joined: RoomInfoPayload = {
     room_id: input.roomIdentifier,
@@ -140,9 +142,9 @@ export function createLocalReadyRoomSnapshot(input: {
     storage: input.storage,
     focusRooms: [],
     tasks: input.tasks,
-    participants: [],
+    participants: input.participants ?? [],
     participantHiddenCount: 0,
-    presence: [],
+    presence: input.presence ?? [],
     reasoningSessions: [],
     recentActivity: [],
     roomArtifacts: [],

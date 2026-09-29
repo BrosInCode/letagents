@@ -79,18 +79,25 @@ test("repo status watch does not build refreshes while the window is hidden", as
 });
 
 test("repo status watch closes the initial snapshot/listener race authoritatively", async () => {
-  const initial = repoStatus();
+  const initial = repoStatus({ branchDelta: null, branchDeltas: [] });
+  const branchDelta = { branch: "main", baseBranch: "main", filesChanged: 0, additions: 0, deletions: 0 };
   const reconciled = repoStatus({
     ahead: 1,
     changes: { staged: 0, unstaged: 1, untracked: 0, conflicted: 0 },
     dirty: true,
+    branchDelta,
+    branchDeltas: [branchDelta],
   });
   const emitted: RepoStatus[] = [];
   const restore = configureRepoStatusWatchForTest({
-    buildRepoStatus: async () => initial,
-    refreshRepoStatus: async (_rootPath, previous, invalidation) => {
+    buildRepoStatus: async (_rootPath, options) => {
+      assert.equal(options?.includeBranchDeltas, false);
+      return initial;
+    },
+    refreshRepoStatus: async (_rootPath, previous, invalidation, options) => {
       assert.strictEqual(previous, initial);
       assert.deepEqual(invalidation, { full: true });
+      assert.notEqual(options?.includeBranchDeltas, false);
       return reconciled;
     },
     emitToMainWindow: (_channel, payload) => emitted.push(payload as RepoStatus),
@@ -309,6 +316,61 @@ test("repo status watch permits one refresh with one coalesced trailing refresh"
       { status: true, head: false, refs: false, worktrees: false, static: false },
       { status: false, head: false, refs: true, worktrees: true, static: false },
     ]);
+  } finally {
+    stopRepoStatusWatch();
+    restore();
+  }
+});
+
+test("repo status watch coalesces busy trailing signals without a tight scan loop", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let focus!: () => void;
+  let collecting = false;
+  let refreshCalls = 0;
+  let targetRefreshes = 8;
+  const drain = async () => { for (let index = 0; index < 20; index += 1) await Promise.resolve(); };
+  const restore = configureRepoStatusWatchForTest({
+    buildRepoStatus: async () => repoStatus(),
+    refreshRepoStatus: async () => {
+      if (collecting) {
+        refreshCalls += 1;
+        await Promise.resolve();
+        // Focus and filesystem events use the same debounce-eligible path.
+        if (refreshCalls < targetRefreshes) for (let index = 0; index < 8; index += 1) focus();
+      }
+      return repoStatus({ ahead: refreshCalls });
+    },
+    emitToMainWindow: () => undefined,
+    getMainWindow: () => ({ ...visibleWindow(), on: (event, listener) => {
+      if (event === "focus") focus = listener;
+    }, off: () => undefined }),
+  });
+  try {
+    await startRepoStatusWatch("/repo");
+    collecting = true;
+    const refresh = refreshActiveRepoStatusForTest({ status: true });
+    await drain();
+    assert.equal(refreshCalls, 1);
+    for (let expected = 2; expected <= targetRefreshes; expected += 1) {
+      t.mock.timers.tick(249);
+      await drain();
+      assert.equal(refreshCalls, expected - 1);
+      // More signals must not reset the deadline and starve a busy repository.
+      focus();
+      t.mock.timers.tick(1);
+      await drain();
+      assert.equal(refreshCalls, expected);
+    }
+    await refresh;
+
+    targetRefreshes = 100;
+    const stoppedRefresh = refreshActiveRepoStatusForTest({ status: true });
+    await drain();
+    assert.equal(refreshCalls, 9);
+    stopRepoStatusWatch();
+    t.mock.timers.tick(250);
+    await stoppedRefresh;
+    assert.equal(refreshCalls, 9, "stop cancels a delayed trailing scan and settles its waiter");
   } finally {
     stopRepoStatusWatch();
     restore();

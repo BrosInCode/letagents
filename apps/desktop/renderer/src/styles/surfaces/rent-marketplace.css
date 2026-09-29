@@ -4,8 +4,8 @@
   --rent-border: color-mix(in srgb, var(--text) 10%, transparent);
   --rent-border-subtle: color-mix(in srgb, var(--text) 6%, transparent);
   --rent-focus: color-mix(in srgb, var(--rent-accent) 52%, transparent);
-  --rent-surface: color-mix(in srgb, var(--bg-card) 90%, transparent);
-  --rent-surface-raised: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  --rent-surface: var(--bg-card);
+  --rent-surface-raised: var(--bg-elevated);
   --rent-surface-subtle: color-mix(in srgb, var(--text) 3%, transparent);
   --rent-surface-hover: color-mix(in srgb, var(--text) 6%, transparent);
   display: grid;
@@ -78,7 +78,6 @@
 
 .rent-marketplace-role.desktop-segmented-control {
   background: var(--rent-surface);
-  backdrop-filter: blur(14px) saturate(135%);
 }
 
 .rent-marketplace-layout {
@@ -210,7 +209,7 @@
   overflow: visible;
   border: 1px solid var(--rent-border);
   border-radius: 50%;
-  background: var(--bg-elevated);
+  background: var(--rent-surface);
   color: var(--text-secondary);
   font-size: 0.68rem;
   font-weight: 780;
@@ -299,7 +298,6 @@
   box-shadow:
     0 18px 42px color-mix(in srgb, var(--bg) 44%, transparent),
     inset 0 1px color-mix(in srgb, var(--text) 7%, transparent);
-  backdrop-filter: blur(18px) saturate(135%);
 }
 
 .rent-request-provider {
@@ -914,8 +912,7 @@
 @media (prefers-reduced-transparency: reduce) {
   .rent-marketplace-role.desktop-segmented-control,
   .rent-request-panel {
-    background: var(--bg-elevated);
-    backdrop-filter: none;
+    background: var(--rent-surface);
   }
 }
 

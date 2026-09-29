@@ -1,4 +1,5 @@
 import type { DesktopAgentStreamEvent } from "../../../electron/ipc-types";
+import type { AgentInspectorOverallState } from "./agent-inspector";
 
 /**
  * A folded, renderable view of an agent's ephemeral live feed: reasoning and
@@ -22,6 +23,48 @@ export type LiveTranscriptItem =
 export interface AgentLiveTranscript {
   items: LiveTranscriptItem[];
   ended: boolean;
+  startedAt: string | null;
+  lastActivityAt: string | null;
+}
+
+/** Select only evidence owned by the durable room turn. An open provider
+ * stream can span many idle periods and turns, so its replay is not itself a
+ * work boundary. Idle views intentionally retain the bounded recent replay. */
+export function scopeAgentStreamEventsToWork(
+  events: readonly DesktopAgentStreamEvent[],
+  work: { active: boolean; startedAt: string | null },
+): readonly DesktopAgentStreamEvent[] {
+  if (!work.active) return events;
+  const startedAt = Date.parse(work.startedAt ?? "");
+  if (!Number.isFinite(startedAt)) return [];
+  return events.filter((event) => Date.parse(event.observedAt) >= startedAt);
+}
+
+export type AgentLiveAvailability =
+  | "closed"
+  | "stale"
+  | "active"
+  | "stopped"
+  | "paused"
+  | "disconnected"
+  | "attention"
+  | "transitioning"
+  | "idle";
+
+/** One precedence table for the Live tab's claims about availability. */
+export function agentLiveAvailability(
+  work: { active: boolean; freshness: "fresh" | "stale"; agentState: AgentInspectorOverallState },
+  streamEnded: boolean,
+): AgentLiveAvailability {
+  if (streamEnded) return "closed";
+  if (work.freshness === "stale") return "stale";
+  if (work.active) return "active";
+  if (work.agentState === "retired") return "stopped";
+  if (work.agentState === "paused") return "paused";
+  if (work.agentState === "disconnected") return "disconnected";
+  if (work.agentState === "needs_attention") return "attention";
+  if (["restoring_conversation", "recovering", "reconnecting", "starting"].includes(work.agentState)) return "transitioning";
+  return "idle";
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -71,7 +114,10 @@ export function foldAgentStreamEvents(
           : "reasoning";
       upsertText("reasoning", partId, deltaText(payload, event.summary));
     } else if (event.method === "item/agentMessage/delta") {
-      const partId = payload && typeof payload.partId === "string" ? payload.partId : "message";
+      const nativeId = payload && typeof payload.partId === "string" ? payload.partId
+        : payload && typeof payload.itemId === "string" ? payload.itemId : "message";
+      const partId = payload && (typeof payload.turnId === "string" || typeof payload.threadId === "string")
+        ? JSON.stringify([payload.threadId ?? null, payload.turnId ?? null, nativeId]) : nativeId;
       // Assistant text deltas carry the real text only in the payload; the
       // summary is a "provider · method" fallback and must not be shown.
       upsertText("message", partId, deltaText(payload, null));
@@ -88,7 +134,7 @@ export function foldAgentStreamEvents(
       const priorIsTerminal = priorTool
         ? ["completed", "error", "failed", "interrupted"].includes(priorTool.status)
         : false;
-      if (priorIsTerminal && nextStatus === "running") continue;
+      if (priorIsTerminal && (nextStatus === "running" || nextStatus === "pending")) continue;
       const next: LiveTranscriptItem = {
         kind: "tool",
         id: callId,
@@ -109,11 +155,37 @@ export function foldAgentStreamEvents(
 
   if (ended) {
     for (const item of items) {
-      if (item.kind === "tool" && item.status === "running") item.status = "interrupted";
+      if (item.kind === "tool" && ["pending", "running"].includes(item.status)) item.status = "interrupted";
     }
   }
 
-  return { items, ended };
+  return {
+    items,
+    ended,
+    startedAt: events.find((event) => Boolean(event.observedAt))?.observedAt ?? null,
+    lastActivityAt: [...events].reverse().find((event) => Boolean(event.observedAt))?.observedAt ?? null,
+  };
+}
+
+/** Compact elapsed copy for the live-work header. Invalid timestamps are
+ * ignored instead of leaking `NaN` into the inspector. */
+export function formatLiveWorkDuration(
+  startedAt: string | null,
+  endedAt: string | null,
+  now = Date.now(),
+): string | null {
+  const started = Date.parse(startedAt || "");
+  const ended = endedAt ? Date.parse(endedAt) : now;
+  if (!Number.isFinite(started) || !Number.isFinite(ended)) return null;
+
+  const seconds = Math.max(0, Math.floor((ended - started) / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 /**
@@ -138,7 +210,7 @@ export interface LiveToolPresentation {
 const MCP_SERVER_ALIAS_PREFIX = /^letagents[-_]supervised[-_][0-9a-f]{12,}[-_]/i;
 
 const SALIENT_ARG_KEYS = [
-  "command", "text", "message", "title", "name", "description", "path",
+  "command", "cmd", "text", "message", "title", "name", "description", "path",
   "file_path", "query", "pattern", "status", "room", "room_id", "url",
 ] as const;
 
@@ -171,10 +243,14 @@ function stringArg(args: Record<string, unknown> | null, key: string): string | 
 function describeLetAgentsTool(
   bareTool: string,
   args: Record<string, unknown> | null,
+  outcome?: { status: string; output: unknown; error: string | null },
 ): LiveToolPresentation | null {
   switch (bareTool) {
     case "complete_room_turn": {
       const noReply = stringArg(args, "outcome") === "no_reply";
+      if (outcome?.status !== "completed" || outcome.error || !containsAcceptedResult(outcome.output)) {
+        return action(noReply ? "Tried to close the turn without a reply" : "Tried to reply to the room", args, bareTool);
+      }
       return {
         kind: "reply",
         headline: noReply ? "Closed the turn without a reply" : "Replied to the room",
@@ -183,29 +259,47 @@ function describeLetAgentsTool(
         toolName: bareTool,
       };
     }
-    case "send_message":
-      return action("Sent a room message", args, bareTool);
-    case "send_thread_message":
-      return action("Sent a thread reply", args, bareTool);
-    case "post_status":
-      return action("Posted a status update", args, bareTool);
-    case "post_reasoning":
-      return action("Shared reasoning in the room", args, bareTool);
-    case "add_task":
-      return action("Added a board task", args, bareTool);
-    case "get_board":
-      return action("Read the room board", null, bareTool);
-    case "get_board_settings":
-      return action("Read the board settings", null, bareTool);
-    case "get_current_room":
-      return action("Checked the current room", null, bareTool);
-    case "check_repo":
-      return action("Checked the repository", args, bareTool);
-    case "wait_for_messages":
-      return action("Waited for new room messages", null, bareTool);
-    default:
-      return null;
+    default: {
+      const labels = ROOM_TOOL_HEADLINES[bareTool];
+      if (!labels) return null;
+      const status = outcome?.status;
+      const headline = status === "pending" ? `Requested: ${labels.request}`
+        : status === "running" ? labels.running
+        : status === "error" || status === "failed" ? `Failed: ${labels.request}`
+        : status === "interrupted" ? `Interrupted: ${labels.request}`
+        : labels.complete;
+      return action(headline, args, bareTool);
+    }
   }
+}
+
+const ROOM_TOOL_HEADLINES: Readonly<Record<string, { request: string; running: string; complete: string }>> = {
+  update_task: { request: "Update a task", running: "Updating a task", complete: "Updated a task" },
+  release_task_lease: { request: "Release a task lease", running: "Releasing a task lease", complete: "Released a task lease" },
+  register_task_lease_action_intent: { request: "Register a task lease action", running: "Registering a task lease action", complete: "Registered a task lease action" },
+  send_message: { request: "Send a room message", running: "Sending a room message", complete: "Sent a room message" },
+  send_thread_message: { request: "Send a thread reply", running: "Sending a thread reply", complete: "Sent a thread reply" },
+  post_status: { request: "Post a status update", running: "Posting a status update", complete: "Posted a status update" },
+  post_reasoning: { request: "Share reasoning in the room", running: "Sharing reasoning in the room", complete: "Shared reasoning in the room" },
+  add_task: { request: "Add a board task", running: "Adding a board task", complete: "Added a board task" },
+  get_board: { request: "Read the room board", running: "Reading the room board", complete: "Read the room board" },
+  get_board_settings: { request: "Read the board settings", running: "Reading the board settings", complete: "Read the board settings" },
+  get_current_room: { request: "Check the current room", running: "Checking the current room", complete: "Checked the current room" },
+  check_repo: { request: "Check the repository", running: "Checking the repository", complete: "Checked the repository" },
+  wait_for_messages: { request: "Wait for room messages", running: "Waiting for room messages", complete: "Waited for new room messages" },
+};
+
+function containsAcceptedResult(value: unknown, depth = 0): boolean {
+  if (depth > 8 || value === null || value === undefined) return false;
+  if (typeof value === "string") {
+    if (value.length > 64 * 1024) return false;
+    try { return containsAcceptedResult(JSON.parse(value), depth + 1); } catch { return false; }
+  }
+  if (Array.isArray(value)) return value.some((item) => containsAcceptedResult(item, depth + 1));
+  const valueRecord = record(value);
+  if (!valueRecord) return false;
+  if (valueRecord.accepted === true) return true;
+  return Object.values(valueRecord).some((item) => containsAcceptedResult(item, depth + 1));
 }
 
 function action(
@@ -217,15 +311,15 @@ function action(
 }
 
 /** Headlines for the provider's own (non-MCP) tool surfaces. */
-const NATIVE_TOOL_HEADLINES: Readonly<Record<string, string>> = {
-  shellToolCall: "Ran a shell command",
-  terminalToolCall: "Ran a shell command",
-  editToolCall: "Edited a file",
-  writeToolCall: "Wrote a file",
-  readToolCall: "Read a file",
-  searchToolCall: "Searched the workspace",
-  grepToolCall: "Searched the workspace",
-  globToolCall: "Listed matching files",
+const NATIVE_TOOL_HEADLINES: Readonly<Record<string, { running: string; complete: string }>> = {
+  shellToolCall: { running: "Running a shell command", complete: "Ran a shell command" },
+  terminalToolCall: { running: "Running a shell command", complete: "Ran a shell command" },
+  editToolCall: { running: "Editing a file", complete: "Edited a file" },
+  writeToolCall: { running: "Writing a file", complete: "Wrote a file" },
+  readToolCall: { running: "Reading a file", complete: "Read a file" },
+  searchToolCall: { running: "Searching the workspace", complete: "Searched the workspace" },
+  grepToolCall: { running: "Searching the workspace", complete: "Searched the workspace" },
+  globToolCall: { running: "Listing matching files", complete: "Listed matching files" },
 };
 
 /**
@@ -234,18 +328,39 @@ const NATIVE_TOOL_HEADLINES: Readonly<Record<string, string>> = {
  * wrapper is unwrapped first; hashed per-turn server aliases are stripped so
  * the reader sees `complete_room_turn`, never the transport identity.
  */
-export function describeLiveToolCall(tool: string, input: unknown): LiveToolPresentation {
+export function describeLiveToolCall(
+  tool: string,
+  input: unknown,
+  outcome?: { status: string; output: unknown; error: string | null },
+): LiveToolPresentation {
   const inputRecord = argsRecord(input);
   if (tool === "mcpToolCall" && inputRecord && typeof inputRecord.name === "string") {
     const bareTool = inputRecord.name.replace(MCP_SERVER_ALIAS_PREFIX, "");
     const args = argsRecord(inputRecord.args);
-    return describeLetAgentsTool(bareTool, args)
+    return describeLetAgentsTool(bareTool, args, outcome)
       ?? action(bareTool, args, bareTool);
   }
-  const bareTool = tool.replace(MCP_SERVER_ALIAS_PREFIX, "");
-  const known = describeLetAgentsTool(bareTool, inputRecord);
+  const bareTool = tool.replace(/^mcp__letagents__/, "").replace(MCP_SERVER_ALIAS_PREFIX, "");
+  const known = describeLetAgentsTool(bareTool, inputRecord, outcome);
   if (known) return known;
-  const nativeHeadline = NATIVE_TOOL_HEADLINES[bareTool];
-  if (nativeHeadline) return action(nativeHeadline, inputRecord, bareTool);
+  const nativeHeadlines = NATIVE_TOOL_HEADLINES[bareTool];
+  if (nativeHeadlines) {
+    const headline = outcome?.status === "pending" ? `Requested: ${nativeHeadlines.running}`
+      : outcome?.status === "running" ? nativeHeadlines.running : nativeHeadlines.complete;
+    const status = outcome?.status;
+    const operation = /shell|terminal/.test(bareTool) ? "Command"
+      : /read/.test(bareTool) ? "File read" : /edit|write/.test(bareTool) ? "File change" : "Search";
+    const title = status === "error" || status === "failed" || outcome?.error ? `${operation} failed`
+      : status === "interrupted" ? `${operation} interrupted` : headline;
+    const changes = Array.isArray(inputRecord?.changes) ? inputRecord.changes : [];
+    const paths = changes.flatMap(change => {
+      const value = argsRecord(change);
+      return typeof value?.path === "string" ? [value.path] : [];
+    });
+    const detail = ["grepToolCall", "searchToolCall", "globToolCall"].includes(bareTool)
+      ? [stringArg(inputRecord, "pattern") ?? stringArg(inputRecord, "query"), stringArg(inputRecord, "path")].filter(Boolean).join(" · ")
+      : paths.length ? paths.join(", ") : null;
+    return { ...action(title, inputRecord, bareTool), ...(detail ? { detail: truncateDetail(detail) } : {}) };
+  }
   return action(bareTool, inputRecord, bareTool);
 }

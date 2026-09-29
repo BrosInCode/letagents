@@ -44,3 +44,14 @@ export function buildCursorDesktopEventPrompt(
     "- Do not include hidden chain-of-thought in the final answer.",
   ].join("\n");
 }
+
+export function buildCursorRoomToolFormattingCorrectionPrompt(): string {
+  return [
+    "Your previous turn included a potential desktop room tool request, but the whole response was not one exact valid request line. No room tool from that turn was executed.",
+    "Correct the response formatting now. Return exactly one of:",
+    "- The intended public room reply as prose, without LETAGENTS_ROOM_TOOL_REQUEST text.",
+    "- NO_ROOM_REPLY.",
+    "- One valid LETAGENTS_ROOM_TOOL_REQUEST JSON line with no other text.",
+    "Do not add an explanation, code fence, quote, or list marker.",
+  ].join("\n");
+}

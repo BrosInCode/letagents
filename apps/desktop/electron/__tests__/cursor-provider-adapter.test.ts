@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -20,18 +22,24 @@ import {
 } from "../main/agents/cursor-provider-adapter.js";
 import type {
   ProviderHandle,
+  ProviderRoomTurnOptions,
   ProviderRoomTurnResult,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
+  NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
 import {
+  relocateCursorConversationNamespace,
   cursorSupervisedMcpServerName,
   prepareCursorSupervisedProfile,
   type CursorManagedProfile,
 } from "../main/agents/cursor-managed-profile.js";
+import { prepareCursorResumeOwnershipLock } from "../main/agents/cursor-sandbox-policy.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { removeSupervisedWorkspaceGenerationReceipt } from "../main/agents/supervised-workspace-generation.js";
+const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
 if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -276,6 +284,24 @@ socket.once("close", () => process.exit(0));
   };
 }
 
+function cursorConversationStoreFixtureSource(sessionId: string): string {
+  return `{
+    const fs = require("node:fs");
+    const path = require("node:path");
+    process.chdir(process.argv[process.argv.indexOf("--workspace") + 1]);
+    const hash = require("node:crypto").createHash("md5").update(path.resolve(process.cwd())).digest("hex");
+    const store = path.join(process.env.CURSOR_CONFIG_DIR, "chats", hash, ${JSON.stringify(sessionId)}, "store.db");
+    const resume = process.argv.find((arg) => arg.startsWith("--resume="));
+    if (resume && (resume !== "--resume=" + ${JSON.stringify(sessionId)} || !fs.existsSync(store))) {
+      throw new Error("The original conversation is missing in this workspace");
+    }
+    const previous = fs.existsSync(store) ? JSON.parse(fs.readFileSync(store, "utf8")) : { context: "original conversation", turns: 0 };
+    if (previous.context !== "original conversation") throw new Error("Conversation context was replaced");
+    fs.mkdirSync(path.dirname(store), { recursive: true });
+    fs.writeFileSync(store, JSON.stringify({ ...previous, turns: previous.turns + 1 }));
+  }`;
+}
+
 const cursorMcpAttestationFixtureSource = `
 function attestFixtureMcp() {
   return new Promise((resolve, reject) => {
@@ -380,6 +406,7 @@ function createHarness(options: HarnessOptions = {}) {
   const profilePreparations: Array<{
     workAttemptId: string;
     cwd: string;
+    apiBaseUrl: string;
     permissionProfileId?: string | null;
     profileRoot?: string;
     includeAuth?: boolean;
@@ -408,11 +435,18 @@ function createHarness(options: HarnessOptions = {}) {
   }> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const workspaceGenerationEvents: Array<{ kind: "create" | "retire" | "recover" | "abandon" | "remove"; turnIdentity?: string }> = [];
+  const generations = new Map<string, Awaited<ReturnType<CursorProviderAdapterDependencies["createWorkspaceGeneration"]>>>();
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 5200;
   let mintedSessions = 0;
 
   const dependencies: CursorProviderAdapterDependencies = {
+    relocateConversationNamespace() {},
+    async openWorkspaceGeneration(path) {
+      const generation = generations.get(path);
+      if (!generation) throw new Error("Unexpected generation reopen in fixture");
+      return generation;
+    },
     bindPersonalIdentity() {},
     async attestPersonalIdentity(input) {
       identityAttestations.push(input);
@@ -478,7 +512,7 @@ function createHarness(options: HarnessOptions = {}) {
     async createWorkspaceGeneration(input) {
       workspaceGenerationEvents.push({ kind: "create", turnIdentity: input.turnIdentity });
       const manifestPath = `/tmp/letagents-test-generation-${createHash("sha256").update(input.turnIdentity).digest("hex")}.json`;
-      return {
+      const generation = {
         generationId: createHash("sha256").update(input.turnIdentity).digest("hex").slice(0, 32),
         manifestPath,
         sourceRoot: input.realWorkspace,
@@ -499,6 +533,8 @@ function createHarness(options: HarnessOptions = {}) {
           return { phase: "aborted" as const, appliedPaths: [], manifestPath };
         },
       };
+      generations.set(manifestPath, generation);
+      return generation;
     },
     async recoverWorkspaceGeneration(manifestPath) {
       workspaceGenerationEvents.push({ kind: "recover" });
@@ -537,6 +573,7 @@ function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRe
 function daemonSpawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
   return spawnRequest({
     deliveryMode: "daemon_inbox",
+    workspaceKind: "git_worktree",
     launchPolicy: { mode: "ask", force: false },
     permissionProfileId: "read_only",
     reasoningEffort: null,
@@ -560,6 +597,7 @@ function supervisedAdapter(harness: ReturnType<typeof createHarness>, stopGraceM
       harness.profilePreparations.push(input);
       const { workAttemptId, profileRoot } = input;
       const root = profileRoot ?? `/private/cursor/${workAttemptId}`;
+      const runtime = input.mcpConnectorSocketPath ? wrapperHostedMcpFixture(root) : {};
       return {
         homeDir: `${root}/home`,
         configDir: `${root}/config`,
@@ -576,7 +614,8 @@ function supervisedAdapter(harness: ReturnType<typeof createHarness>, stopGraceM
         ...(input.inspectionOnly ? {} : {
           mcpRuntimeEntryPath: "/Applications/LetAgents.app/runtime/letagents/server.js",
           mcpRuntimeReadRoots: ["/Applications/LetAgents.app/runtime/letagents"],
-          ...(input.mcpConnectorSocketPath ? wrapperHostedMcpFixture(root) : {}),
+          ...runtime,
+          ...(runtime.mcpRuntimeEnv ? { mcpRuntimeEnv: { ...runtime.mcpRuntimeEnv, LETAGENTS_API_URL: input.apiBaseUrl } } : {}),
         }),
         mcpServerName: cursorSupervisedMcpServerName(workAttemptId),
       };
@@ -595,12 +634,10 @@ async function spawnDaemonLane(
 function roomTurnRequest(over: Partial<{
   inboxItemId: string;
   actionId: string;
-  charter: string;
 }> = {}) {
   return {
     inboxItemId: over.inboxItemId ?? "inbox_cursor_1",
     actionId: over.actionId ?? "action_cursor_1",
-    charter: over.charter ?? "Review and implement carefully.",
     sourceMessage: { id: "msg_8", text: "Please fix it" },
     activation: { decision: "activate" },
     observedContext: [{ id: "msg_7", text: "Earlier context" }],
@@ -663,6 +700,33 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
   assert.equal(handle.providerContinuationId, "sess-cursor-1", "session id captured from the stream");
 });
 
+test("Cursor resume ownership rejects occupied or unsafe structures without changing native state", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "cursor-resume-ownership-")));
+  const id = randomUUID();
+  try {
+    assert.throws(() => prepareCursorResumeOwnershipLock("../escape", root), /exact native conversation UUID/);
+    const lock = prepareCursorResumeOwnershipLock(id.toUpperCase(), root);
+    const shared = dirname(dirname(lock));
+    assert.equal(lock, join(shared, "claim-locks", `${id}.lock`));
+    assert.equal(existsSync(lock), false);
+    mkdirSync(lock, { mode: 0o700 });
+    assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /ownership is already recorded/);
+    assert.equal(existsSync(lock), true);
+    fs.rmdirSync(lock);
+    const binding = join(shared, "bindings", `${id}.json`);
+    symlinkSync(join(root, "absent"), binding);
+    assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /ownership is already recorded/);
+    fs.unlinkSync(binding);
+    chmodSync(join(shared, "bindings"), 0o755);
+    assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /not private/);
+    assert.equal(fs.statSync(join(shared, "bindings")).mode & 0o777, 0o755);
+    fs.rmdirSync(join(shared, "bindings"));
+    symlinkSync(join(root, "elsewhere"), join(shared, "bindings"));
+    assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /not private/);
+    assert.equal(existsSync(join(root, "elsewhere")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags", () => {
   assert.deepEqual(
     cursorLaunchPolicyArgs({ mode: "plan", force: true, sandbox: "disabled" }),
@@ -718,6 +782,25 @@ test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags",
     mcpRuntimeCwd: process.cwd(),
     mcpRuntimeEnv: {},
   };
+  assert.throws(
+    () => defaultLaunchTurn({
+      ...supervisedBoundary,
+      allowedReadSubpaths: [process.cwd()],
+      allowedWriteSubpaths: [process.cwd()],
+      nativeResumeSessionId: randomUUID(),
+      args: [`--resume=${randomUUID()}`],
+    }),
+    /ownership access must match the exact supervised resume session/,
+  );
+  assert.throws(
+    () => defaultLaunchTurn({
+      cursorBin: process.execPath,
+      args: [],
+      cwd: process.cwd(),
+      nativeResumeSessionId: randomUUID(),
+    }),
+    /ownership access must match the exact supervised resume session/,
+  );
   assert.throws(
     () => defaultLaunchTurn({
       ...supervisedBoundary,
@@ -805,7 +888,9 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
   process.env.NPM_TOKEN = "npm-must-not-leak";
   try {
     const adapter = supervisedAdapter(harness);
-    const handle = await spawnDaemonLane(adapter, harness);
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      supervisorWorkerSession: { agentSessionId: "agent_session_cursor_1", roomCursor: "msg_7", apiUrl: "letagents-local://rooms" },
+    }));
 
     assert.deepEqual(adapter.capabilities().deliveryModes, ["mcp_polling", "daemon_inbox"]);
     assert.equal(adapter.capabilities().midTurnCorrection, false);
@@ -903,6 +988,9 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     const finalPreparation = harness.profilePreparations.find((entry) =>
       entry.mcpConnectorSocketPath !== undefined
     )!;
+    assert.equal(harness.profilePreparations.length, 6);
+    assert.ok(harness.profilePreparations.every(input => input.apiBaseUrl === "letagents-local://rooms"));
+    assert.equal(launch.mcpRuntimeEnv?.LETAGENTS_API_URL, "letagents-local://rooms");
     assert.equal(finalPreparation.authSourceHomeDir, `${inspectionPreparations[3]!.profileRoot}/home`);
     assert.equal(finalPreparation.supervisorMcpEnv, undefined, "native-readable MCP config contains no supervisor coordinates");
     assert.deepEqual(Object.fromEntries(Object.entries(launch.mcpRuntimeEnv ?? {}).filter(([key]) =>
@@ -975,6 +1063,9 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     for (let index = 0; index < 100 && !harness.children[1]?.isReleased; index += 1) await flush();
     assert.equal(harness.children[1]?.isReleased, true);
     const resumeLaunch = harness.launches[1]!;
+    assert.equal(harness.profilePreparations.length, 11);
+    assert.ok(harness.profilePreparations.every(input => input.apiBaseUrl === "letagents-local://rooms"));
+    assert.equal(resumeLaunch.mcpRuntimeEnv?.LETAGENTS_API_URL, "letagents-local://rooms");
     const resumeRuntimeDataDir = resumeLaunch.env?.CURSOR_DATA_DIR;
     assert.match(resumeRuntimeDataDir ?? "", /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/);
     assert.notEqual(resumeRuntimeDataDir, firstRuntimeDataDir, "each resumed turn gets a fresh worker socket namespace");
@@ -1209,7 +1300,17 @@ let initialized = false;
 let listed = false;
 let largeResponse = false;
 let secondBlocked = false;
+let replayProbeStarted = false;
 let finished = false;
+function startReplayProbe() {
+  if (replayProbeStarted) return;
+  replayProbeStarted = true;
+  const second = net.createConnection({ path: socketPath });
+  let accepted = false;
+  second.once("connect", () => { accepted = true; second.write("replay"); });
+  second.once("error", () => { secondBlocked = true; finishIfReady(); });
+  second.once("close", () => { if (accepted) { secondBlocked = true; finishIfReady(); } });
+}
 function finishIfReady() {
   if (finished || !initialized || !listed || !largeResponse || !secondBlocked) return;
   finished = true;
@@ -1233,6 +1334,7 @@ lines.on("line", (line) => {
   if (response.id === 1) initialized = true;
   if (response.id === 2) listed = response.result.tools.some((tool) => tool.name === "connector_boundary_valid");
   if (response.id === 3) largeResponse = response.result.payload.length === 2 * 1024 * 1024;
+  startReplayProbe();
   finishIfReady();
 });
 connector.once("error", () => process.exit(72));
@@ -1240,13 +1342,6 @@ connector.once("close", (code, signal) => note("connector-close:" + code + ":" +
 connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } }) + "\\n");
 connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\\n");
 connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "fixture/large", params: {} }) + "\\n");
-setTimeout(() => {
-  const second = net.createConnection({ path: socketPath });
-  let accepted = false;
-  second.once("connect", () => { accepted = true; second.write("replay"); });
-  second.once("error", () => { secondBlocked = true; finishIfReady(); });
-  second.once("close", () => { if (accepted) { secondBlocked = true; finishIfReady(); } });
-}, 25);
 setTimeout(() => process.exit(73), 5000).unref();
 `);
   chmodSync(cursorBin, 0o700);
@@ -1334,11 +1429,12 @@ setTimeout(() => process.exit(73), 5000).unref();
       withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "connector-stubborn-native" }))),
       // A forced process-group reap deliberately kills the wrapper too. The
       // exact fail-closed observation depends on whether its already-buffered
-      // init/result reaches the parent before that SIGKILL: either the bounded
-      // turn starts and then loses terminal evidence, or startup never becomes
-      // observable. Both paths must reject and the PID assertions below prove
-      // the intended authority-before-group-reap ordering independently.
-      /(?:ended before the bounded room turn produced a terminal result|exited before reporting its stream-json init)/,
+      // init/result reaches the parent before that SIGKILL: the connector can
+      // close before init, the bounded turn can lose terminal evidence, or
+      // startup can remain unobservable. Every path must reject, and the PID
+      // assertions below prove the intended authority-before-group-reap ordering
+      // independently.
+      /(?:live MCP connector ended before the turn became terminal|ended before the bounded room turn produced a terminal result|exited before reporting its stream-json init)/,
     );
     assert.equal(await waitForPath(stubbornPidPath), true, "the combined teardown fixture launched its stubborn native member");
     stubbornPid = Number(readFileSync(stubbornPidPath, "utf8"));
@@ -2219,6 +2315,9 @@ test("Cursor handoff stays cancellation-linked until both turn id and wrapper bi
   let durableBoundaryReached = false;
   let persistedTurnId = "";
   const retiredConnections: unknown[] = [];
+  const execution: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, event => execution.push(event));
+  let lifecycleSettlements = 0;
   const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
     checkpointPreparedTurn: async (state) => {
       persistedTurnId = state.providerTurnId;
@@ -2229,6 +2328,11 @@ test("Cursor handoff stays cancellation-linked until both turn id and wrapper bi
       await providerCheckpointRelease;
     },
     checkpointProviderState: async (state) => { retiredConnections.push(state.providerConnection); },
+    settleLifecycleBeforeIdle: async () => {
+      lifecycleSettlements++;
+      assert.ok(handle.providerConnection?.processIdentity, "the committed wrapper birth remains installed at settlement");
+      assert.ok(execution.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"));
+    },
     markDurableTurnStarted: () => { durableBoundaryReached = true; },
     detachSignal: detach.signal,
   });
@@ -2244,6 +2348,7 @@ test("Cursor handoff stays cancellation-linked until both turn id and wrapper bi
   assert.match(persistedTurnId, /^cursor:/);
   assert.equal(durableBoundaryReached, false);
   assert.equal(child.isReleased, false, "native Cursor stays paused before the combined durability boundary");
+  assert.equal(lifecycleSettlements, 1);
   assert.deepEqual(retiredConnections, [{ kind: "cursor_cli", pid: null, processIdentity: null }]);
   assert.equal(handle.pid, null);
   assert.equal(handle.observedState(), "idle");
@@ -2270,6 +2375,80 @@ test("a failed atomic prepared-turn checkpoint reaps the wrapper before native C
   assert.deepEqual(harness.signals, [{ pid: child.pid, signal: "SIGTERM" }]);
   assert.equal(handle.pid, null);
   assert.equal(handle.observedState(), "idle");
+});
+
+test("a failed prepared-wrapper idle checkpoint recovers before the inbox item becomes retryable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-prepared-retirement-"));
+  const harness = createHarness();
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        if (input.statePath) {
+          writeFileSync(`${input.statePath}.terminal.json`, JSON.stringify({
+            type: "not_started",
+            native_process_group_reaped: true,
+            reap_scope: "native_process_group",
+            remote_authority_revoked: true,
+          }));
+        }
+        return child;
+      },
+    };
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir: join(root, "config"),
+        dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const detach = new AbortController();
+    let idleCheckpoints = 0;
+    let settlements = 0;
+    const firstTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointPreparedTurn: async () => { detach.abort(); },
+      checkpointProviderState: async (state) => {
+        assert.equal(state.providerConnection.processIdentity, null);
+        idleCheckpoints += 1;
+        if (idleCheckpoints === 1) throw new Error("transient prepared idle checkpoint failure");
+      },
+      settleLifecycleBeforeIdle: async () => { settlements += 1; },
+      detachSignal: detach.signal,
+    });
+    await assert.rejects(firstTurn, (error: unknown) =>
+      (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched");
+    assert.equal(idleCheckpoints, 2, "exact-turn recovery retries the failed live-to-idle checkpoint");
+    assert.equal(settlements, 2, "typed settlement remains idempotent across compensation retry");
+    assert.equal(handle.pid, null);
+    assert.equal(handle.observedState(), "idle");
+
+    const secondTurn = adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: "prepared-retirement-successor",
+      actionId: "prepared-retirement-successor",
+    }), {
+      checkpointPreparedTurn: async () => {},
+      checkpointProviderState: async () => {},
+      settleLifecycleBeforeIdle: async () => {},
+    });
+    while (!harness.children[1]?.isReleased) await flush();
+    harness.children[1]!.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: "successor ran once", session_id: "sess-cursor-1",
+    });
+    harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+    assert.equal((await secondTurn).text, "successor ran once");
+    assert.equal(harness.children.length, 2, "compensation does not redispatch the first inbox item");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Cursor control during a blocked provider checkpoint can never release deferred native work", async () => {
@@ -2353,7 +2532,10 @@ test("Cursor Stop after native release but before init preserves the lane and pe
   }), "pre-init Stop");
   await bounded(assert.rejects(firstTurn, (error: unknown) =>
     error instanceof Error
-    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched"), "first turn rejection");
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "ambiguous"), "first turn rejection");
+  assert.equal(harness.children[0]!.isReleased, true, "absence of init does not make an admitted turn safe to redispatch");
+  assert.equal(harness.children[0]!.alive, false, "the exact released child is reaped before Stop completes");
+  assert.equal(harness.children.length, 1, "post-release interruption does not launch a replacement turn");
   assert.equal(control.interrupted, true);
   assert.equal(control.state, "idle");
   assert.equal(handle.observedState(), "idle", "a normal turn Stop does not terminalize the Cursor attempt");
@@ -2500,10 +2682,14 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   const harness = createHarness();
   const adapter = supervisedAdapter(harness);
   const handle = await spawnDaemonLane(adapter, harness);
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
   const order: string[] = [];
   let persistedTurnId = "";
   const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
-    beforeNativeDispatch: async () => { order.push("dispatch_intent"); },
+    beforeNativeDispatch: async () => {
+      assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown", "admitted preparation is owned before child creation");
+      order.push("dispatch_intent");
+    },
     checkpointTurnStarted: async (turnId) => {
       persistedTurnId = turnId;
       order.push("turn_started");
@@ -2514,7 +2700,10 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
       order.push("durable");
       assert.equal(harness.children[0]?.isReleased, false, "the durable milestone precedes native release");
     },
-    checkpointTerminalResult: async () => { order.push("terminal"); },
+    checkpointTerminalResult: async () => {
+      assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown", "native death does not skip in-flight terminal settlement");
+      order.push("terminal");
+    },
   });
   await flush();
 
@@ -2525,6 +2714,16 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   assert.equal(launch.args.at(-1)?.includes(`Turn id: ${persistedTurnId}`), true);
   assert.equal(launch.args.at(-1)?.includes("Please fix it"), true);
   assert.equal(launch.args.at(-1)?.includes("call complete_room_turn exactly once"), true);
+  assert.match(launch.args.at(-1)!, /chat reply publication does not publish code or create PRs/);
+  assert.match(launch.args.at(-1)!, /standing merge approval/);
+  assert.match(launch.args.at(-1)!, /only LetAgents MCP tools and no browser\/computer-use integration/);
+  assert.match(launch.args.at(-1)!, /Browser QA is unavailable here/);
+  assert.match(launch.args.at(-1)!, /even when Cursor's own sandbox is disabled/);
+  assert.match(launch.args.at(-1)!, /report the specific gap once and continue independent feasible work/);
+  assert.match(launch.args.at(-1)!, /leave affected verification incomplete/);
+  assert.match(launch.args.at(-1)!, /Still respond to explicit user instructions and new questions/);
+  assert.match(launch.args.at(-1)!, /acknowledgment-only closing messages.*no-reply completion/);
+  assert.match(launch.args.at(-1)!, /outcome: "no_reply"/, "quiet completion still uses Cursor's existing structured proposal");
   const child = harness.children[0]!;
   child.emit({
     type: "result",
@@ -2546,6 +2745,35 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   });
   assert.deepEqual(order, ["dispatch_intent", "turn_started", "durable", "terminal"]);
   assert.equal(handle.observedState(), "idle");
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
+});
+
+test("Cursor checkpoints a proven native provider failure and reuses its exact session", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const checkpoints: unknown[] = [];
+  const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTerminalResult: async result => { checkpoints.push(result); },
+  });
+  await flush();
+  const child = harness.children[0]!;
+  child.emit({ type: "result", subtype: "error_during_execution", is_error: true,
+    result: "HTTP 503 service unavailable", session_id: "sess-cursor-1" });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  const failure = await pending;
+  assert.equal(failure.outcome, "failed");
+  assert.equal("providerContinuationId" in failure && failure.providerContinuationId, "sess-cursor-1");
+  assert.equal("error" in failure && failure.error, "HTTP 503 service unavailable");
+  assert.deepEqual(checkpoints, [failure]);
+  assert.equal(handle.observedState(), "idle");
+  const next = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "continuation" }));
+  await flush();
+  assert.equal(argValue(harness.launches[1]!.args, "--resume"), "sess-cursor-1");
+  harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false,
+    result: "finished", session_id: "sess-cursor-1" });
+  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await next).text, "finished");
 });
 
 test("writable Cursor turns launch only in their private generation and retire it before publication", async () => {
@@ -2589,13 +2817,14 @@ test("writable Cursor turns launch only in their private generation and retire i
   assert.deepEqual(terminalOrder, ["terminal"]);
 });
 
-test("room-only rental Cursor turns use their disposable workspace without Git generation", async () => {
+test("room scratch Cursor turns use their exact workspace without Git generation", async () => {
   const harness = createHarness();
   const adapter = supervisedAdapter(harness);
-  const rentalWorkspace = "/private/letagents-daemon/room-only/2bbffeb2-a7ad-4cf0-bdac-114c6b37cb39";
+  const scratchWorkspace = "/private/letagents-daemon/room-only/2bbffeb2-a7ad-4cf0-bdac-114c6b37cb39";
   const handle = await adapter.spawn(daemonSpawnRequest({
-    supervisorEntryId: "supervised_rental_session_1_attempt_1",
-    cwd: rentalWorkspace,
+    supervisorEntryId: "supervised_agent_1",
+    workspaceKind: "room_scratch",
+    cwd: scratchWorkspace,
     permissionProfileId: "sandboxed_write",
     launchPolicy: { force: true, sandbox: "enabled" },
   }));
@@ -2604,9 +2833,9 @@ test("room-only rental Cursor turns use their disposable workspace without Git g
   await flush();
 
   const launch = harness.launches[0]!;
-  assert.equal(argValue(launch.args, "--workspace"), rentalWorkspace);
+  assert.equal(argValue(launch.args, "--workspace"), scratchWorkspace);
   assert.equal(argValue(launch.args, "--sandbox"), "enabled");
-  assert.equal(launch.mcpRuntimeCwd, rentalWorkspace);
+  assert.equal(launch.mcpRuntimeCwd, scratchWorkspace);
   assert.equal(launch.workspaceGenerationManifestPath, undefined);
   assert.deepEqual(harness.workspaceGenerationEvents, []);
 
@@ -2900,6 +3129,9 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
       JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart" }),
       "",
     ].join("\n"));
+    const harness = createHarness();
+    const generation = await harness.dependencies.createWorkspaceGeneration({ realWorkspace: root, turnIdentity: turnId });
+    harness.workspaceGenerationEvents.length = 0;
     writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
       type: "exit", code: 0, signal: null,
       native_process_group_reaped: true,
@@ -2907,11 +3139,10 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
       remote_authority_revoked: true,
       session_contract_valid: true,
       stream_contract_complete: true,
-      workspace_generation_manifest_path: "/tmp/letagents-recovered-workspace-generation.json",
+      workspace_generation_manifest_path: generation.manifestPath,
       init: { type: "system", subtype: "init", session_id: "sess-after-restart" },
       result: { type: "result", subtype: "success", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart", request_id: null },
     }));
-    const harness = createHarness();
     const adapter = new CursorProviderAdapter({
       dependencies: harness.dependencies,
       supervisedProfileFactory: ({ workAttemptId }) => ({
@@ -2919,7 +3150,7 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
         env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
       }),
     });
-    const request = daemonSpawnRequest();
+    const request = daemonSpawnRequest({ cwd: root });
     const handle = await adapter.resume({
       workAttemptId: request.workAttemptId,
       providerContinuationId: "sess-after-restart",
@@ -2944,6 +3175,120 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
     assert.deepEqual(harness.workspaceGenerationEvents.map((event) => event.kind), ["recover"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor recommits a visible settlement before cleanup after a failed directory sync", async (t) => {
+  for (const phase of ["cleaned", "aborted", "before-loan", "fresh-aborted"] as const) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-cursor-settlement-sync-")));
+    const originalSync = fs.fsyncSync;
+    try {
+      const workspace = join(root, "workspace");
+      const live = join(root, "live");
+      const configDir = join(root, "config");
+      mkdirSync(workspace);
+      mkdirSync(live);
+      mkdirSync(configDir);
+      const turnId = `cursor:settlement-${phase}`;
+      const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl.terminal.json`);
+      const harness = createHarness();
+      const generation = { ...await harness.dependencies.createWorkspaceGeneration({ realWorkspace: workspace, turnIdentity: turnId }), liveWorkspace: live };
+      let generationAvailable = true;
+      let removals = 0;
+      let successfulMarkerParentSyncs = 0;
+      let failSync = true;
+      const profile = { homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"), env: { HOME: join(root, "home") } };
+      const makeAdapter = () => new CursorProviderAdapter({
+        dependencies: {
+          ...harness.dependencies,
+          relocateConversationNamespace: relocateCursorConversationNamespace,
+          async openWorkspaceGeneration() {
+            assert.equal(generationAvailable, true, "a settled terminal must not require a removed receipt");
+            return generation;
+          },
+          async removeWorkspaceGenerationReceipt() {
+            assert.ok(successfulMarkerParentSyncs > 0, "marker durability precedes every removal");
+            generationAvailable = false;
+            removals += 1;
+            if (removals === 1) throw new Error("crash after receipt removal");
+          },
+        },
+        supervisedProfileFactory: () => profile,
+      });
+      const adapter = makeAdapter();
+      const request = daemonSpawnRequest({ cwd: workspace });
+      const initial = phase === "fresh-aborted" ? await adapter.spawn(request) : null;
+      const session = initial?.providerContinuationId ?? "sess-sync-recovery";
+      const handle = initial ?? await adapter.resume({
+        workAttemptId: request.workAttemptId, providerContinuationId: session,
+        providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+      }, request);
+      const storeAt = (cwd: string) => join(configDir, "cursor", "chats", createHash("md5").update(cwd).digest("hex"), session, "store.db");
+      if (phase !== "fresh-aborted") {
+        const initialStore = storeAt(phase === "before-loan" ? workspace : live);
+        mkdirSync(dirname(initialStore), { recursive: true });
+        writeFileSync(initialStore, "original conversation");
+      }
+      writeFileSync(terminalPath, JSON.stringify({
+        type: phase === "cleaned" ? "exit" : "not_started", code: 0, signal: null,
+        native_process_group_reaped: true, reap_scope: "native_process_group", remote_authority_revoked: true,
+        session_contract_valid: true, stream_contract_complete: true, turn_contract_version: 1,
+        workspace_generation_manifest_path: generation.manifestPath,
+        init: phase === "cleaned" ? { type: "system", subtype: "init", session_id: session } : null,
+        result: phase === "cleaned" ? { type: "result", subtype: "success", is_error: false, result: "preserved", session_id: session } : null,
+      }));
+      const syncMock = t.mock.method(fs, "fsyncSync", (fd: number) => {
+        const isMarkerParent = fs.fstatSync(fd).isDirectory()
+          && fs.fstatSync(fd).ino === fs.statSync(configDir).ino
+          && JSON.parse(readFileSync(terminalPath, "utf8")).workspace_generation_settlement;
+        if (isMarkerParent && failSync) { failSync = false; throw new Error("injected marker parent sync failure"); }
+        originalSync(fd);
+        if (isMarkerParent) successfulMarkerParentSyncs += 1;
+      });
+      syncBuiltinESMExports();
+      const recovery = { inboxItemId: "settlement", providerTurnId: turnId };
+      const checkpoint = { checkpointTerminalResult: async (raw: ProviderRoomTurnResult) => ({ acceptedResult: raw, cleanupRecoveryEvidence: true }) };
+      await assert.rejects(adapter.recoverRoomTurn(handle, recovery, checkpoint), /injected marker parent sync failure/);
+      assert.equal(removals, 0);
+      assert.equal(successfulMarkerParentSyncs, 0);
+      assert.equal(JSON.parse(readFileSync(terminalPath, "utf8")).workspace_generation_settlement.phase, phase === "cleaned" ? "cleaned" : "aborted");
+      if (phase !== "fresh-aborted") assert.equal(readFileSync(storeAt(workspace), "utf8"), "original conversation");
+      const markedTerminal = readFileSync(terminalPath, "utf8");
+      for (const invalid of [{ version: 2 }, { phase: "unknown" }, { provider_continuation_id: "another-session" }]) {
+        const raw = JSON.parse(markedTerminal);
+        raw.workspace_generation_settlement = { ...raw.workspace_generation_settlement, ...invalid };
+        writeFileSync(terminalPath, JSON.stringify(raw));
+        await assert.rejects(adapter.recoverRoomTurn(handle, recovery, checkpoint), /settlement evidence is invalid/);
+        assert.equal(removals, 0);
+      }
+      writeFileSync(terminalPath, markedTerminal);
+      if (phase !== "fresh-aborted") {
+        fs.renameSync(storeAt(workspace), `${storeAt(workspace)}.held`);
+        await assert.rejects(adapter.recoverRoomTurn(handle, recovery, checkpoint), /exact session store/);
+        assert.equal(removals, 0);
+        fs.renameSync(`${storeAt(workspace)}.held`, storeAt(workspace));
+      }
+      await assert.rejects(adapter.recoverRoomTurn(handle, recovery, checkpoint), /crash after receipt removal/);
+      assert.equal(generationAvailable, false);
+      const successor = makeAdapter();
+      const resumed = await successor.resume({ workAttemptId: request.workAttemptId, providerContinuationId: session,
+        providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null } }, request);
+      if (phase === "cleaned") {
+        assert.equal((await successor.recoverRoomTurn(resumed, recovery, checkpoint)).text, "preserved");
+        assert.equal(existsSync(terminalPath), false);
+      } else {
+        await assert.rejects(successor.recoverRoomTurn(resumed, recovery, checkpoint),
+          (error: unknown) => (error as { roomTurnRecoveryOutcome?: string }).roomTurnRecoveryOutcome === "not_dispatched");
+        assert.equal(existsSync(terminalPath), true, "undispatched evidence remains until the daemon resets that exact turn");
+      }
+      assert.equal(removals, 2);
+      assert.equal(harness.launches.length, 0);
+      syncMock.mock.restore();
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -3740,6 +4085,31 @@ test("a writable generation reconciles only after its exact durable containment 
 
 test("the production supervised wrapper blocks remote Cursor authority and retires its loopback proxy", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-remote-authority-"));
+  const controlRequests: Array<{ method: string; path: string; authorization: string; body: string }> = [];
+  const controlUpstream = createHttpServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.once("end", () => {
+      controlRequests.push({
+        method: request.method ?? "",
+        path: request.url ?? "",
+        authorization: String(request.headers.authorization ?? ""),
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+      response.writeHead(200, { "content-type": "application/proto", "content-length": "0" });
+      response.end();
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    controlUpstream.once("error", rejectListen);
+    controlUpstream.listen(0, "127.0.0.1", () => {
+      controlUpstream.removeListener("error", rejectListen);
+      resolveListen();
+    });
+  });
+  const controlAddress = controlUpstream.address();
+  assert.ok(controlAddress && typeof controlAddress !== "string");
+  const testControlPlaneUpstreamEndpoint = `http://127.0.0.1:${controlAddress.port}`;
   try {
     const configDir = join(root, "config");
     const homeDir = join(root, "home");
@@ -3772,9 +4142,25 @@ const blockedPaths = [
 ];
 function expectBlocked(path) {
   return new Promise((resolve, reject) => {
-    const request = http.request(new URL(path, endpoint), { method: "POST", headers: { "content-length": "0" } }, (response) => {
+    const request = http.request(new URL(path, endpoint), {
+      method: "POST",
+      headers: { "content-length": "0", "authorization": "Bearer " + value("--auth-token") },
+    }, (response) => {
       response.resume();
       response.once("end", () => response.statusCode === 503 ? resolve() : reject(new Error("unexpected status")));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
+function expectAllowed(path) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(new URL(path, endpoint), {
+      method: "POST",
+      headers: { "content-length": "0", "authorization": "Bearer " + value("--auth-token") },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => response.statusCode === 200 ? resolve() : reject(new Error("allowed request was rejected")));
     });
     request.once("error", reject);
     request.end();
@@ -3783,7 +4169,8 @@ function expectBlocked(path) {
 function expectChunkedBlocked() {
   return new Promise((resolve, reject) => {
     const request = http.request(new URL("/aiserver.v1.DashboardService/GetMe", endpoint), {
-      method: "POST", headers: { "transfer-encoding": "chunked" },
+      method: "POST",
+      headers: { "transfer-encoding": "chunked", "authorization": "Bearer " + value("--auth-token") },
     }, (response) => {
       response.resume();
       response.once("end", () => response.statusCode === 503 ? resolve() : reject(new Error("chunked request was accepted")));
@@ -3792,7 +4179,11 @@ function expectChunkedBlocked() {
     request.end("x");
   });
 }
-Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then(() => {
+Promise.all([
+  expectAllowed("/aiserver.v1.DashboardService/GetTeamReposOrEmptyIfNotInTeam"),
+  ...blockedPaths.map(expectBlocked),
+  expectChunkedBlocked(),
+]).then(() => {
     process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-remote-authority" }) + "\\n");
     process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: endpoint, session_id: "sess-remote-authority" }) + "\\n");
 }).catch(() => process.exit(9));
@@ -3800,7 +4191,12 @@ Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then((
     chmodSync(executable, 0o700);
     const adapter = new CursorProviderAdapter({
       cursorBin: executable,
-      dependencies: productionPersonalIdentityDependencies,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          return defaultLaunchTurn({ ...input, testControlPlaneUpstreamEndpoint });
+        },
+      },
       supervisedProfileFactory: () => ({
         homeDir,
         configDir,
@@ -3813,6 +4209,12 @@ Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then((
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
     const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
     assert.match(result.text ?? "", /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.deepEqual(controlRequests, [{
+      method: "POST",
+      path: "/aiserver.v1.DashboardService/GetTeamReposOrEmptyIfNotInTeam",
+      authorization: "Bearer test-provider-authorization",
+      body: "",
+    }]);
     const proxyUrl = new URL(result.text!);
     await new Promise<void>((resolveRequest, rejectRequest) => {
       const request = httpRequest(proxyUrl, { method: "POST" });
@@ -3821,6 +4223,7 @@ Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then((
       request.end();
     });
   } finally {
+    await new Promise<void>((resolveClose) => controlUpstream.close(() => resolveClose()));
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -3989,11 +4392,13 @@ const ready = setInterval(() => {
   }
 });
 
-test("the supervised agent proxy admits one exact HTTP/1 Run stream and injects its wrapper-held bearer", async () => {
+test("the supervised agent proxy admits HTTP/1 retries and background Runs until the native terminal result", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-agent-h1-proxy-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
   const executable = join(root, "fake-cursor-agent");
+  const terminalObserved = join(root, "terminal-observed");
+  const terminalProbe = join(homeDir, "terminal-probe");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
   let upstreamAuthorization = "";
@@ -4001,9 +4406,11 @@ test("the supervised agent proxy admits one exact HTTP/1 Run stream and injects 
   const upstream = createHttp2Server();
   upstream.on("stream", (stream, headers) => {
     upstreamAuthorization = String(headers.authorization ?? "");
-    stream.on("data", (chunk) => { upstreamBody += chunk.toString("utf8"); });
+    let body = "";
+    stream.on("data", (chunk) => { body += chunk.toString("utf8"); });
     stream.once("end", () => {
-      stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+      upstreamBody += body + ";";
+      stream.respond({ ":status": body === "transient-failure" ? 503 : 200, "content-type": "application/connect+proto" });
       stream.end("h1-upstream-ok");
     });
   });
@@ -4020,6 +4427,7 @@ test("the supervised agent proxy admits one exact HTTP/1 Run stream and injects 
   try {
     writeFileSync(executable, `#!/usr/bin/env node
 const http = require("node:http");
+const fs = require("node:fs");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
@@ -4048,11 +4456,17 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
   const wrongPath = await request("/agent.v1.AgentService/Other", "application/connect+proto", "wrong");
   const staleTurn = await request("/agent.v1.AgentService/Run", "application/connect+proto", "stale", "Bearer predecessor-placeholder");
   const accepted = await request("/agent.v1.AgentService/Run", "application/connect+proto; charset=binary", "h1-request-body");
-  const replay = await request("/agent.v1.AgentService/Run", "application/connect+proto", "replay");
+  const transient = await request("/agent.v1.AgentService/Run", "application/connect+proto", "transient-failure");
+  const retry = await request("/agent.v1.AgentService/Run", "application/connect+proto", "resume-action");
+  const background = await request("/agent.v1.AgentService/Run", "application/connect+proto", "background-completion");
   if (wrongMedia.status !== 503 || wrongPath.status !== 503 || staleTurn.status !== 503
-    || accepted.status !== 200 || accepted.body !== "h1-upstream-ok" || replay.status !== 503) process.exit(78);
+    || accepted.status !== 200 || accepted.body !== "h1-upstream-ok" || transient.status !== 503 || retry.status !== 200 || background.status !== 200) process.exit(78);
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-agent-h1" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "h1-proxy-ok", session_id: "sess-agent-h1" }) + "\\n");
+  while (!fs.existsSync(${JSON.stringify(terminalObserved)})) await new Promise((resolve) => setTimeout(resolve, 5));
+  const afterTerminal = await request("/agent.v1.AgentService/Run", "application/connect+proto", "after-terminal");
+  fs.writeFileSync(${JSON.stringify(terminalProbe)}, String(afterTerminal.status));
+  if (afterTerminal.status !== 503) process.exit(80);
   detachFixtureMcp(connector);
 })().catch(() => process.exit(79));
 `);
@@ -4062,7 +4476,9 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
       dependencies: {
         ...productionPersonalIdentityDependencies,
         launchTurn(input) {
-          return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint });
+          const child = defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint });
+          child.onLine((line) => { if (JSON.parse(line).type === "result") writeFileSync(terminalObserved, "observed"); });
+          return child;
         },
       },
       supervisedProfileFactory: (input) => ({
@@ -4078,7 +4494,8 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
     const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
     assert.equal(result.text, "h1-proxy-ok");
     assert.equal(upstreamAuthorization, "Bearer test-provider-authorization");
-    assert.equal(upstreamBody, "h1-request-body");
+    assert.equal(upstreamBody, "h1-request-body;transient-failure;resume-action;background-completion;");
+    assert.equal(readFileSync(terminalProbe, "utf8"), "503");
   } finally {
     await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
     rmSync(root, { recursive: true, force: true });
@@ -4198,26 +4615,34 @@ function value(flag) { const index = args.indexOf(flag); return index >= 0 ? arg
   }
 });
 
-test("the supervised agent proxy relays exact HTTP/2 Run streams, survives an idle first token, and rejects replay", async () => {
+test("the supervised agent proxy relays sequential and bounded concurrent HTTP/2 Runs through the live turn lease", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-agent-h2-proxy-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
   const executable = join(root, "fake-cursor-agent");
+  const slotReleased = join(root, "slot-released");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
   let upstreamAuthorization = "";
-  let upstreamBody = "";
+  const upstreamBodies: string[] = [];
   let upstreamRuns = 0;
   const upstream = createHttp2Server();
   upstream.on("stream", (stream, headers) => {
     upstreamRuns += 1;
     upstreamAuthorization = String(headers.authorization ?? "");
-    stream.on("data", (chunk) => { upstreamBody += chunk.toString("utf8"); });
+    let body = "";
+    stream.on("error", () => {});
+    stream.on("data", (chunk) => { body += chunk.toString("utf8"); });
+    stream.once("close", () => {
+      if (headers["x-fixture-child"] === "0") writeFileSync(slotReleased, "closed");
+    });
+    if (headers["x-fixture-child"] !== undefined) stream.respond({ ":status": 200 });
     stream.once("end", () => {
+      upstreamBodies.push(body);
       setTimeout(() => {
-        stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+        if (!stream.headersSent) stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
         stream.end("h2-upstream-ok");
-      }, 5_250);
+      }, body === "h2-request-body" ? 5_250 : 0);
     });
   });
   await new Promise<void>((resolveListen, rejectListen) => {
@@ -4233,6 +4658,7 @@ test("the supervised agent proxy relays exact HTTP/2 Run streams, survives an id
   try {
     writeFileSync(executable, `#!/usr/bin/env node
 const http2 = require("node:http2");
+const fs = require("node:fs");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
@@ -4242,32 +4668,50 @@ if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === 
 function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
 const endpoint = value("--agent-endpoint");
 const client = http2.connect(endpoint);
-function request(path, contentType, body, authorization = "Bearer " + value("--auth-token")) {
-  return new Promise((resolve, reject) => {
-    const stream = client.request({
+function startRequest(path, contentType, body, authorization = "Bearer " + value("--auth-token"), child) {
+  let stream;
+  let headersReady;
+  const ready = new Promise((resolve) => { headersReady = resolve; });
+  const done = new Promise((resolve, reject) => {
+    stream = client.request({
       ":method": "POST", ":path": path,
       "content-type": contentType,
       authorization,
+      ...(child === undefined ? {} : { "x-fixture-child": String(child) }),
     });
     const chunks = [];
     let status = 0;
-    stream.once("response", (headers) => { status = Number(headers[":status"] || 0); });
+    stream.once("response", (headers) => { status = Number(headers[":status"] || 0); headersReady(status); });
     stream.on("data", (chunk) => chunks.push(chunk));
     stream.once("error", reject);
     stream.once("end", () => resolve({ status, body: Buffer.concat(chunks).toString("utf8") }));
-    stream.end(body);
+    if (child === undefined) stream.end(body);
+    else stream.write(body);
   });
+  return { stream, ready, done };
 }
+function request(...args) { return startRequest(...args).done; }
 (async () => {
   const connector = await attestFixtureMcp();
   const wrongMedia = await request("/agent.v1.AgentService/Run", "application/connect+protobufad", "wrong");
   const wrongPath = await request("/agent.v1.AgentService/Other", "application/connect+proto", "wrong");
   const staleTurn = await request("/agent.v1.AgentService/Run", "application/connect+proto", "stale", "Bearer predecessor-placeholder");
   const accepted = await request("/agent.v1.AgentService/Run", "application/connect+proto; charset=binary", "h2-request-body");
-  const replay = await request("/agent.v1.AgentService/Run", "application/connect+proto", "replay");
+  const children = Array.from({ length: 24 }, (_, index) => startRequest("/agent.v1.AgentService/Run", "application/connect+proto", "child-" + index, undefined, index));
+  if ((await Promise.all(children.map((child) => child.ready))).some((status) => status !== 200)) process.exit(91);
+  const overflow = await request("/agent.v1.AgentService/Run", "application/connect+proto", "overflow");
+  if (overflow.status !== 503) process.exit(92);
+  children[0].stream.close();
+  await children[0].done;
+  while (!fs.existsSync(${JSON.stringify(slotReleased)})) await new Promise((resolve) => setTimeout(resolve, 5));
+  const replacement = startRequest("/agent.v1.AgentService/Run", "application/connect+proto", "replacement-child", undefined, 24);
+  if (await replacement.ready !== 200) process.exit(93);
+  for (const child of [...children.slice(1), replacement]) child.stream.end();
+  await Promise.all([...children.slice(1), replacement].map((child) => child.done));
+  const background = await request("/agent.v1.AgentService/Run", "application/connect+proto", "background-completion");
   client.close();
   if (wrongMedia.status !== 503 || wrongPath.status !== 503 || staleTurn.status !== 503
-    || accepted.status !== 200 || accepted.body !== "h2-upstream-ok" || replay.status !== 503) process.exit(88);
+    || accepted.status !== 200 || accepted.body !== "h2-upstream-ok" || background.status !== 200) process.exit(88);
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-agent-h2" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "h2-proxy-ok", session_id: "sess-agent-h2" }) + "\\n");
   detachFixtureMcp(connector);
@@ -4294,16 +4738,20 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
     const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
     assert.equal(result.text, "h2-proxy-ok");
-    assert.equal(upstreamRuns, 1);
+    assert.equal(upstreamRuns, 27);
     assert.equal(upstreamAuthorization, "Bearer test-provider-authorization");
-    assert.equal(upstreamBody, "h2-request-body");
+    assert.ok(upstreamBodies.includes("h2-request-body"));
+    assert.ok(upstreamBodies.includes("replacement-child"));
+    assert.ok(upstreamBodies.includes("background-completion"));
+    assert.ok(!upstreamBodies.includes("overflow"));
   } finally {
     await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("the supervised agent proxy holds an HTTP/2 Run that races ahead of MCP attestation, then admits it", async () => {
+for (const terminalWhileHeld of [false, true]) {
+test(`the supervised agent proxy bounds and cancels held Runs before ${terminalWhileHeld ? "terminal" : "attestation"}`, async () => {
   // Cursor opens its model connection at startup, before its MCP handshake has
   // finished. The proxy must HOLD that first Run until live attestation
   // completes and then admit it -- not reject it, which is what made Cursor
@@ -4313,6 +4761,8 @@ test("the supervised agent proxy holds an HTTP/2 Run that races ahead of MCP att
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
   const executable = join(root, "fake-cursor-agent");
+  const terminalObserved = join(root, "terminal-observed");
+  const heldProbe = join(homeDir, "held-probe");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
   let upstreamAuthorization = "";
@@ -4336,6 +4786,7 @@ test("the supervised agent proxy holds an HTTP/2 Run that races ahead of MCP att
   try {
     writeFileSync(executable, `#!/usr/bin/env node
 const http2 = require("node:http2");
+const fs = require("node:fs");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
@@ -4344,35 +4795,55 @@ if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === 
 }
 function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
 const client = http2.connect(value("--agent-endpoint"));
-function request(body) {
-  return new Promise((resolve, reject) => {
-    const stream = client.request({ ":method": "POST", ":path": "/agent.v1.AgentService/Run", "content-type": "application/connect+proto", authorization: "Bearer " + value("--auth-token") });
+function request(body, path = "/agent.v1.AgentService/Run") {
+  let stream;
+  const done = new Promise((resolve, reject) => {
+    stream = client.request({ ":method": "POST", ":path": path, "content-type": "application/connect+proto", authorization: "Bearer " + value("--auth-token") });
     const chunks = [];
     let status = 0;
     stream.once("response", (headers) => { status = Number(headers[":status"] || 0); });
     stream.on("data", (chunk) => chunks.push(chunk));
     stream.once("error", reject);
     stream.once("end", () => resolve({ status, body: Buffer.concat(chunks).toString("utf8") }));
+    stream.once("close", () => resolve({ status, body: Buffer.concat(chunks).toString("utf8") }));
     stream.end(body);
   });
+  return { stream, done };
 }
 (async () => {
-  // Fire the Run first; only then complete attestation. The Run must stay
-  // pending (held) across that gap and resolve 200 only AFTER attestation --
-  // resolving before it would mean it was admitted without attestation.
+  const held = Array.from({ length: 24 }, (_, index) => request("held-" + index));
+  const overflow = await request("overflow").done;
+  if (overflow.status !== 503) process.exit(91);
+  held[0].stream.close();
+  await held[0].done;
+  // A response from the same HTTP/2 session acknowledges processing past the
+  // cancellation without requiring a timing allowance in the production code.
+  await request("barrier", "/agent.v1.AgentService/Other").done;
+  const replacement = request("replacement-held");
+  if ((await request("overflow-again").done).status !== 503) process.exit(92);
+  const remaining = [...held.slice(1), replacement];
   let attested = false;
   let resolvedBeforeAttest = false;
-  const held = request("held-request-body");
-  held.then(() => { if (!attested) resolvedBeforeAttest = true; }).catch(() => {});
+  for (const pending of remaining) pending.done.then(() => { if (!attested) resolvedBeforeAttest = true; });
+  const init = { type: "system", subtype: "init", session_id: "sess-hold-admit" };
+  const result = { type: "result", subtype: "success", is_error: false, result: "hold-admit-ok", session_id: "sess-hold-admit" };
+  if (${terminalWhileHeld}) {
+    process.stdout.write(JSON.stringify(init) + "\\n");
+    process.stdout.write(JSON.stringify(result) + "\\n");
+    while (!fs.existsSync(${JSON.stringify(terminalObserved)})) await new Promise((resolve) => setTimeout(resolve, 5));
+    if ((await Promise.all(remaining.map((pending) => pending.done))).some((response) => response.status !== 503)) process.exit(93);
+  }
   const connector = await attestFixtureMcp();
   attested = true;
-  const admitted = await held;
-  const replay = await request("replay");
+  if (!${terminalWhileHeld}) {
+    const responses = await Promise.all(remaining.map((pending) => pending.done));
+    if (resolvedBeforeAttest || responses.some((response) => response.status !== 200 || response.body !== "held-upstream-ok")) process.exit(94);
+    if ((await request("background-completion").done).status !== 200) process.exit(95);
+    process.stdout.write(JSON.stringify(init) + "\\n");
+    process.stdout.write(JSON.stringify(result) + "\\n");
+  } else if ((await request("after-terminal-attestation").done).status !== 503) process.exit(96);
+  fs.writeFileSync(${JSON.stringify(heldProbe)}, "verified");
   client.close();
-  if (resolvedBeforeAttest) process.exit(90);
-  if (admitted.status !== 200 || admitted.body !== "held-upstream-ok" || replay.status !== 503) process.exit(88);
-  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-hold-admit" }) + "\\n");
-  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "hold-admit-ok", session_id: "sess-hold-admit" }) + "\\n");
   detachFixtureMcp(connector);
 })().catch(() => process.exit(89));
 `);
@@ -4381,7 +4852,11 @@ function request(body) {
       cursorBin: executable,
       dependencies: {
         ...productionPersonalIdentityDependencies,
-        launchTurn(input) { return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint }); },
+        launchTurn(input) {
+          const child = defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint });
+          child.onLine((line) => { if (JSON.parse(line).type === "result") writeFileSync(terminalObserved, "observed"); });
+          return child;
+        },
       },
       supervisedProfileFactory: (input) => ({
         homeDir,
@@ -4395,13 +4870,23 @@ function request(body) {
     const handle = await adapter.spawn(daemonSpawnRequest({ workAttemptId: "wa-cursor-hold-admit", cwd: root }));
     const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "hold-admit" })));
     assert.equal(result.text, "hold-admit-ok");
-    assert.equal(upstreamAuthorization, "Bearer test-provider-authorization");
-    assert.equal(upstreamBody, "held-request-body");
+    assert.equal(readFileSync(heldProbe, "utf8"), "verified");
+    if (terminalWhileHeld) {
+      assert.equal(upstreamBody, "", "terminal rejects every held Run even if MCP later attests");
+      assert.equal(upstreamAuthorization, "");
+    } else {
+      assert.equal(upstreamAuthorization, "Bearer test-provider-authorization");
+      assert.ok(upstreamBody.includes("replacement-held"));
+      assert.ok(upstreamBody.includes("background-completion"));
+      assert.ok(!upstreamBody.includes("overflow"));
+    }
   } finally {
     await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+}
 
 test("a held Run whose MCP attestation never completes fails with the exact causal reason and is never forwarded upstream", async () => {
   // With the model Run held rather than rejected, Cursor no longer dies in a
@@ -4587,7 +5072,7 @@ function request(body) {
 });
 
 test("the supervised agent proxy rejects a boundary-violating request immediately, never holding it for attestation", async () => {
-  // The attestation hold is only for the one exact, authorized Run. A request
+  // The attestation hold is only for authorized Run requests. A request
   // outside that boundary -- wrong path or a bearer that is not the wrapper's
   // placeholder -- must be rejected at once, never granted the grace window.
   // The fake awaits those rejections BEFORE attesting: if such a request were
@@ -4791,6 +5276,104 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
+test("Cursor preserves its exact native conversation across writable generations and a supervisor restart", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-cursor-conversation-restart-")));
+  try {
+    const sessionId = randomUUID();
+    const workspace = join(root, "workspace");
+    const sourceHomeDir = join(root, "source-home");
+    const profileRoot = join(root, "profile");
+    const executable = join(root, "fake-cursor-agent");
+    initializeGitWorkspace(workspace);
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    writeFileSync(executable, `#!/usr/bin/env node
+{
+  const fs = require("node:fs");
+  const path = require("node:path");
+  if (process.argv.some((arg) => arg.startsWith("--resume="))) {
+    const shared = "/tmp/cursor-agent-persist-" + process.getuid();
+    const locks = path.join(shared, "claim-locks");
+    const bindings = path.join(shared, "bindings");
+    const lock = path.join(locks, ${JSON.stringify(sessionId)} + ".lock");
+    for (const directory of [shared, locks, bindings]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(lock, { mode: 0o700 });
+    fs.writeFileSync(path.join(lock, "owner.json"), "owned", { flag: "wx", mode: 0o600 });
+    if (fs.readFileSync(path.join(lock, "owner.json"), "utf8") !== "owned") process.exit(81);
+    const denied = (operation) => {
+      try { operation(); } catch (error) { if (["EPERM", "EACCES"].includes(error.code)) return; throw error; }
+      throw new Error("Resume lock access escaped its exact conversation");
+    };
+    denied(() => fs.mkdirSync(path.join(locks, "unrelated.lock")));
+    denied(() => fs.writeFileSync(path.join(bindings, ${JSON.stringify(sessionId)} + ".json"), "foreign"));
+    denied(() => fs.readdirSync(bindings));
+    denied(() => fs.readdirSync(shared));
+    denied(() => fs.chmodSync(shared, 0o777));
+    denied(() => fs.renameSync(locks, locks + ".moved"));
+    fs.rmSync(lock, { recursive: true });
+  }
+}
+${cursorConversationStoreFixtureSource(sessionId)}
+const fs = require("node:fs");
+fs.writeFileSync("agent-change.txt", "preserved work");
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(sessionId)} }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "conversation retained", session_id: ${JSON.stringify(sessionId)} }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const launches: Parameters<CursorProviderAdapterDependencies["launchTurn"]>[0][] = [];
+    let interruptAfterReceiptDeletion = true;
+    const createAdapter = () => new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+        launchTurn(input) { launches.push(input); return defaultLaunchTurn(input); },
+        async removeWorkspaceGenerationReceipt(path, options) {
+          await removeSupervisedWorkspaceGenerationReceipt(path, options);
+          if (interruptAfterReceiptDeletion) {
+            interruptAfterReceiptDeletion = false;
+            throw new Error("crash after receipt deletion");
+          }
+        },
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input, apiBaseUrl: "https://desktop.letagents.example", workspaceRoot: input.cwd,
+        sourceHomeDir, profileRoot: input.profileRoot ?? profileRoot,
+        ...(input.inspectionOnly ? {} : { mcpRuntime: {
+          entryPath: materializeAttestableMcpRuntime(join(root, "mcp-runtime")), readRoots: [join(root, "mcp-runtime")],
+        } }),
+      }),
+    });
+    const request = daemonSpawnRequest({ cwd: workspace, permissionProfileId: "sandboxed_write", launchPolicy: { force: true, sandbox: "enabled" } });
+    const first = createAdapter();
+    const firstHandle = await first.spawn(request);
+    let turnId = "";
+    const checkpoint = { checkpointTerminalResult: async (raw: ProviderRoomTurnResult) => ({ acceptedResult: raw, cleanupRecoveryEvidence: true }) };
+    await assert.rejects(withLoopAlive(first.runRoomTurn(firstHandle, roomTurnRequest(), {
+      ...checkpoint, checkpointTurnStarted: async (id) => { turnId = id; },
+    })), /crash after receipt deletion/);
+    assert.equal(existsSync(launches[0]!.workspaceGenerationManifestPath!), false);
+    const restingStore = join(profileRoot, "config", "cursor", "chats", createHash("md5").update(workspace).digest("hex"), sessionId, "store.db");
+    assert.deepEqual(JSON.parse(readFileSync(restingStore, "utf8")), { context: "original conversation", turns: 1 });
+    const successor = createAdapter();
+    const handle = await successor.resume({
+      workAttemptId: request.workAttemptId, providerContinuationId: sessionId,
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    const recovered = await successor.recoverRoomTurn(handle, { inboxItemId: "first", providerTurnId: turnId }, checkpoint);
+    assert.equal(recovered.text, "conversation retained");
+    assert.equal(launches.length, 1, "restart recovery never replays native work");
+    const second = await withLoopAlive(successor.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }), checkpoint));
+    assert.equal(second.text, "conversation retained");
+    assert.equal(launches[1]!.nativeResumeSessionId, sessionId);
+    assert.notEqual(argValue(launches[0]!.args, "--workspace"), argValue(launches[1]!.args, "--workspace"));
+    assert.equal(argValue(launches[1]!.args, "--resume"), sessionId);
+    assert.deepEqual(JSON.parse(readFileSync(restingStore, "utf8")), { context: "original conversation", turns: 2 });
+    assert.equal(readFileSync(join(workspace, "agent-change.txt"), "utf8"), "preserved work");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("the real supervised boundary starts without inventorying pre-existing project files", {
   skip: process.platform !== "darwin",
 }, async () => {
@@ -4844,6 +5427,7 @@ const outcome = {
   hardlinkCreate: link(path.join(workspace, "hardlink-source.txt"), path.join(workspace, "hardlink-escape.txt")),
   authority: write(path.join(workspace, ".cursor", "mcp.json")),
 };
+${cursorConversationStoreFixtureSource("sess-write-boundary")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-write-boundary" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-write-boundary" }) + "\\n");
 `);
@@ -5008,6 +5592,7 @@ const outcome = {
   insideCopy: run("/bin/cp", [path.join(workspace, "copy-source.txt"), path.join(workspace, "copy-target.txt")]),
   outsideClone: run("/bin/cp", ["-c", ${JSON.stringify(outsideCopySource)}, path.join(workspace, "outside-clone-target.txt")]),
 };
+${cursorConversationStoreFixtureSource("sess-workspace-toolchains")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-workspace-toolchains" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-workspace-toolchains" }) + "\\n");
 `);
@@ -5215,6 +5800,7 @@ const hooksConfig = run(["config", "core.hooksPath", ".planted-hooks"]);
 const add = run(["add", "feature.txt"]);
 const commit = run(["-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test", "commit", "--quiet", "-m", "cursor linked worktree"]);
 const outcome = { add, commit, outside, hook, worktreeConfig, marker, hooksConfig };
+${cursorConversationStoreFixtureSource("sess-linked-worktree")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-linked-worktree" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-linked-worktree" }) + "\\n");
 `);
@@ -5413,6 +5999,7 @@ const outcome = {
   read: attempt(() => fs.readFileSync(path.join(workspace, ".cursor", "settings.json"), "utf8")),
   write: attempt(() => fs.writeFileSync(path.join(workspace, ".cursor", "mcp.json"), "replaced\\n")),
 };
+${cursorConversationStoreFixtureSource("sess-late-authority-symlink")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-late-authority-symlink" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-late-authority-symlink" }) + "\\n");
 `);
@@ -5886,23 +6473,47 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       }),
     });
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    let persistedTurnId = "";
     let realSessionCheckpoints = 0;
-    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
-      checkpointTurnStarted: async () => {},
-      checkpointProviderState: async (state) => {
-        if (state.providerContinuationId === "sess-checkpoint-real") {
-          realSessionCheckpoints += 1;
-          if (realSessionCheckpoints === 1) {
-            // Let the already-emitted result drain so this covers recovery of
-            // a terminal first turn, not the separate interrupted-turn case.
-            await new Promise((resolve) => setTimeout(resolve, 50));
-            throw new Error("transient manifest checkpoint failure");
-          }
+    let lifecycleSettlements = 0;
+    const checkpointProviderState: NonNullable<ProviderRoomTurnOptions["checkpointProviderState"]> = async (state) => {
+      if (state.providerContinuationId === "sess-checkpoint-real") {
+        realSessionCheckpoints += 1;
+        if (realSessionCheckpoints === 1) {
+          // Let the already-emitted result drain so this covers recovery of
+          // a terminal first turn, not the separate interrupted-turn case.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          throw new Error("transient manifest checkpoint failure");
         }
-      },
-    }));
+        if (realSessionCheckpoints === 3) {
+          assert.equal(state.providerConnection.processIdentity, null);
+          throw new Error("transient processless checkpoint failure");
+        }
+      }
+    };
+    const settleLifecycleBeforeIdle = async () => {
+      lifecycleSettlements += 1;
+      assert.equal(realSessionCheckpoints, lifecycleSettlements === 1 ? 2 : 4,
+        "the real live continuation is durable before typed settlement");
+      assert.ok(handle.providerConnection?.processIdentity);
+    };
+    await assert.rejects(withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async (turnId) => { persistedTurnId = turnId; },
+      checkpointProviderState,
+      settleLifecycleBeforeIdle,
+    })), /transient processless checkpoint failure/);
+    assert.ok(handle.providerConnection?.processIdentity,
+      "a failed live-to-idle checkpoint keeps the exited child birth recoverable");
+    assert.notEqual(handle.observedState(), "failed");
+
+    const result = await adapter.recoverRoomTurn(handle, {
+      inboxItemId: "inbox-1",
+      providerTurnId: persistedTurnId,
+    }, { checkpointProviderState, settleLifecycleBeforeIdle });
     assert.equal(result.text, "checkpoint recovered");
-    assert.equal(realSessionCheckpoints, 2, "recovery retries the real session checkpoint exactly once");
+    assert.equal(realSessionCheckpoints, 5,
+      "the retry checkpoints the retained child and then its processless lane");
+    assert.equal(lifecycleSettlements, 2);
     assert.equal(handle.providerContinuationId, "sess-checkpoint-real");
     assert.equal(handle.observedState(), "idle");
   } finally {
@@ -5944,6 +6555,7 @@ setInterval(() => {}, 1_000);
     });
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
     let realSessionCheckpoints = 0;
+    let lifecycleSettlements = 0;
     const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
       checkpointTurnStarted: async () => {},
       checkpointProviderState: async (state) => {
@@ -5952,9 +6564,15 @@ setInterval(() => {}, 1_000);
           if (realSessionCheckpoints === 1) throw new Error("transient manifest checkpoint failure");
         }
       },
+      settleLifecycleBeforeIdle: async () => {
+        lifecycleSettlements += 1;
+        assert.equal(realSessionCheckpoints, 2);
+        assert.ok(handle.providerConnection?.processIdentity);
+      },
     }));
     assert.equal(result.text, "late durable reply");
-    assert.equal(realSessionCheckpoints, 2);
+    assert.equal(realSessionCheckpoints, 3);
+    assert.equal(lifecycleSettlements, 1);
     assert.equal(handle.providerContinuationId, "sess-term-real");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -5993,24 +6611,48 @@ setInterval(() => {}, 1_000);
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
     const terminals: ProviderTerminalPayload[] = [];
     adapter.onExit(handle, (terminal) => terminals.push(terminal));
+    let persistedTurnId = "";
     let realSessionCheckpoints = 0;
+    let lifecycleSettlements = 0;
+    const checkpointProviderState = async (state: { providerContinuationId: string }) => {
+      if (state.providerContinuationId !== "sess-checkpoint-terminal") return;
+      realSessionCheckpoints += 1;
+      if (realSessionCheckpoints === 1) throw new Error("transient manifest checkpoint failure");
+      assert.equal(
+        terminals.length,
+        0,
+        "recovered continuation checkpoints before onExit retires the daemon's live handle",
+      );
+    };
+    const settleLifecycleBeforeIdle = async () => {
+      lifecycleSettlements += 1;
+      assert.ok(handle.providerConnection?.processIdentity);
+      if (lifecycleSettlements === 1) throw new Error("transient lifecycle settlement failure");
+    };
     await assert.rejects(
       withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "checkpoint-terminal" }), {
-        checkpointTurnStarted: async () => {},
-        checkpointProviderState: async (state) => {
-          if (state.providerContinuationId !== "sess-checkpoint-terminal") return;
-          realSessionCheckpoints += 1;
-          if (realSessionCheckpoints === 1) throw new Error("transient manifest checkpoint failure");
-          assert.equal(
-            terminals.length,
-            0,
-            "recovered continuation checkpoints before onExit retires the daemon's live handle",
-          );
-        },
+        checkpointTurnStarted: async (turnId) => { persistedTurnId = turnId; },
+        checkpointProviderState,
+        settleLifecycleBeforeIdle,
       })),
+      /transient lifecycle settlement failure/,
+    );
+    assert.match(persistedTurnId, /^cursor:/);
+    assert.equal(realSessionCheckpoints, 2);
+    assert.equal(lifecycleSettlements, 1);
+    assert.notEqual(handle.observedState(), "failed", "failed recovery does not terminalize the attempt");
+    assert.ok(handle.providerConnection?.processIdentity, "failed recovery retains the exact exited child birth");
+    assert.equal(terminals.length, 0);
+
+    await assert.rejects(
+      withLoopAlive(adapter.recoverRoomTurn(handle, {
+        inboxItemId: "checkpoint-terminal",
+        providerTurnId: persistedTurnId,
+      }, { checkpointProviderState, settleLifecycleBeforeIdle })),
       (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "terminal_failure",
     );
-    assert.equal(realSessionCheckpoints, 2, "terminal recovery still converges the real session checkpoint");
+    assert.equal(realSessionCheckpoints, 4, "retry checkpoints the live birth, then its processless continuation");
+    assert.equal(lifecycleSettlements, 2);
     assert.equal(handle.observedState(), "failed");
     assert.equal(terminals.length, 1);
     assert.equal(terminals[0]!.terminalCause, "crashed");
@@ -6282,6 +6924,54 @@ test("a successful result is TURN-terminal: the lane goes idle with NO claimed p
   assert.equal(handle.providerContinuationId, "sess-cursor-1", "the session id is the only continuation state");
 });
 
+test("Cursor missing wrapper cwd proves no native child was acquired", async () => {
+  const harness = createHarness();
+  const adapter = new CursorProviderAdapter({ dependencies: { ...harness.dependencies, launchTurn: input => {
+    const child = defaultLaunchTurn({ ...input, deferStart: true });
+    // Join the alternate readiness rejection too: this case deliberately
+    // fails before a wrapper exists or can receive its start IPC message.
+    void child.prepared?.catch(() => {});
+    return child;
+  } } });
+  await assert.rejects(adapter.spawn(spawnRequest({ cwd: "/nonexistent-letagents-test/cursor-cwd" })), /did not expose a process id/);
+  assert.equal(adapter.runtimeCustody("wa-cursor-1"), "absent");
+  assert.deepEqual(harness.signals, []);
+});
+
+test("Cursor legacy poke retains custody while preparing a child before liveTurn installation", async () => {
+  const harness = createHarness();
+  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  harness.children[0]!.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "sess-cursor-1" });
+  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
+  const launch = harness.dependencies.launchTurn;
+  let release!: () => void;
+  const prepared = new Promise<void>(resolve => { release = resolve; });
+  // Early birth lookup may be unavailable before wrapper readiness. Custody
+  // recording must not move the existing launch validation before prepared.
+  const liveDeps = (adapter as unknown as { deps: CursorProviderAdapterDependencies }).deps;
+  liveDeps.launchTurn = input => {
+    const child = launch(input);
+    harness.identities.set(child.pid!, undefined);
+    Object.defineProperty(child, "prepared", { value: prepared.then(() => {
+      harness.identities.set(child.pid!, birthIdentity(child.pid!));
+    }) });
+    return child;
+  };
+  const pending = adapter.poke(handle, "next message");
+  await flush();
+  assert.equal(handle.pid, null, "no public liveTurn is installed during preparation");
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown");
+  release();
+  await pending;
+  harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id: "sess-cursor-1" });
+  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent");
+});
+
 test("a turn child that dies WITHOUT its result event is attempt-terminal (crashed) and attach reports absent", async () => {
   const harness = createHarness();
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
@@ -6330,6 +7020,195 @@ test("live Cursor stop never signals a recycled wrapper PID or process group", a
   assert.deepEqual(harness.signals, []);
   assert.equal(stopped.terminalCause, "stopped");
   assert.equal(handle.pid, null);
+});
+
+test("Cursor Stop joins the bounded turn settlement barrier before retiring its exact child birth", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  let enterSettlement!: () => void;
+  const settlementEntered = new Promise<void>((resolve) => { enterSettlement = resolve; });
+  let releaseSettlement!: () => void;
+  const settlementRelease = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+  const retiredConnections: unknown[] = [];
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointPreparedTurn: async () => {},
+    checkpointProviderState: async (state) => { retiredConnections.push(state.providerConnection); },
+    settleLifecycleBeforeIdle: async () => {
+      enterSettlement();
+      await settlementRelease;
+    },
+  });
+  for (let index = 0; index < 100 && !harness.children[0]?.isReleased; index += 1) await flush();
+  const child = harness.children[0]!;
+  assert.notEqual(child.pid, null);
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "settled", session_id: "sess-cursor-1" });
+  harness.identities.set(child.pid!, null);
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await settlementEntered;
+
+  let stopSettled = false;
+  const stopping = adapter.stop(handle).finally(() => { stopSettled = true; });
+  await flush();
+  assert.equal(stopSettled, false, "Stop cannot fire onExit while the exact child effect is unsettled");
+  assert.equal(handle.providerConnection?.processIdentity, birthIdentity(child.pid!));
+
+  releaseSettlement();
+  const [result, stopped] = await Promise.all([roomTurn, stopping]);
+  assert.equal(result.text, "settled");
+  assert.equal(stopped.terminalCause, "stopped");
+  assert.deepEqual(retiredConnections.at(-1), { kind: "cursor_cli", pid: null, processIdentity: null });
+  assert.equal(handle.pid, null);
+});
+
+test("Cursor releases native custody after failed checkpoint only when exact workspace retirement is saved", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-retired-custody-"));
+  const harness = createHarness({ ownsDescendantReaping: true });
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const adapter = new CursorProviderAdapter({
+      dependencies: {
+        ...harness.dependencies,
+        prepareTurnState(path) { writeFileSync(path, "", { flag: "wx", mode: 0o600 }); },
+        launchTurn(input) {
+          const child = harness.dependencies.launchTurn(input);
+          Object.defineProperty(child, "requiresDurableTerminalEvidence", { value: true });
+          return child;
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      cwd: root, permissionProfileId: "sandboxed_write", launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    let turnId = "";
+    let checkpoints = 0;
+    let resultCheckpoints = 0;
+    let releaseCheckpoint!: () => void;
+    const checkpointGate = new Promise<void>(resolve => { releaseCheckpoint = resolve; });
+    let enteredCheckpoint!: () => void;
+    const checkpointEntered = new Promise<void>(resolve => { enteredCheckpoint = resolve; });
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, terminal => terminals.push(terminal));
+    const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async id => { turnId = id; },
+      checkpointProviderState: async state => {
+        if (state.providerContinuationId !== "sess-cursor-1") return;
+        checkpoints++;
+        if (checkpoints === 1) {
+          const launch = harness.launches[0]!;
+          const init = { type: "system", subtype: "init", session_id: "sess-cursor-1" };
+          const result = { type: "result", subtype: "success", is_error: false, session_id: "sess-cursor-1", result: "saved reply" };
+          writeFileSync(launch.statePath!, [JSON.stringify(init), JSON.stringify(result), ""].join("\n"));
+          writeFileSync(`${launch.statePath}.terminal.json`, JSON.stringify({
+            type: "exit", code: 0, signal: null, init, result,
+            native_process_group_reaped: true, reap_scope: "native_process_group", remote_authority_revoked: true,
+            turn_contract_version: 1, session_contract_valid: true, stream_contract_complete: true,
+            workspace_generation_manifest_path: launch.workspaceGenerationManifestPath,
+          }));
+          harness.children[0]!.emit(result);
+          harness.identities.set(harness.children[0]!.pid!, null);
+          harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+        } else {
+          // Recovery has retired native/filesystem authority, but still owns
+          // this checkpoint until the callback settles.
+          assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown");
+          enteredCheckpoint();
+          await checkpointGate;
+        }
+        throw new Error("Execution evidence rejected: identity_mismatch.");
+      },
+      settleLifecycleBeforeIdle: async () => {},
+      checkpointTerminalResult: async () => { resultCheckpoints++; },
+    });
+    const rejected = assert.rejects(withLoopAlive(pending), /terminal recovery.*identity_mismatch/);
+    await checkpointEntered;
+    assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown", "in-flight settlement still fences update");
+    releaseCheckpoint();
+    await rejected;
+    const retainedConnection = { ...handle.providerConnection };
+    assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent", "retained failed evidence owns no native work");
+    assert.deepEqual(handle.providerConnection, retainedConnection, "custody observation must not clear failed identity");
+    assert.ok("pid" in retainedConnection);
+    assert.equal(retainedConnection.pid, harness.children[0]!.pid);
+    assert.equal(resultCheckpoints, 0, "failed turn is not promoted to successful delivery");
+    assert.equal(terminals.length, 0, "failed attempt is not falsely closed");
+    const terminalPath = `${harness.launches[0]!.statePath}.terminal.json`;
+    const terminal = JSON.parse(readFileSync(terminalPath, "utf8"));
+    assert.equal(terminal.workspace_generation_settlement.phase, "cleaned");
+    assert.equal(terminal.workspace_generation_settlement.provider_continuation_id, "sess-cursor-1");
+    assert.equal(existsSync(harness.launches[0]!.statePath!), true, "exact turn stream stays recoverable");
+    assert.equal(harness.launches.length, 1);
+    assert.deepEqual(harness.signals, [], "no live or repeated turn is needed to retire custody");
+    assert.match(turnId, /^cursor:/);
+    let finishRecovery!: () => void;
+    const recoveryGate = new Promise<void>(resolve => { finishRecovery = resolve; });
+    const recovering = adapter.recoverRoomTurn(handle, { inboxItemId: "retry-checkpoint-only", providerTurnId: turnId }, {
+      checkpointProviderState: async () => {
+        await recoveryGate;
+        throw new Error("still blocked");
+      },
+    });
+    const rejectedRecovery = assert.rejects(recovering, /still blocked/);
+    assert.equal(adapter.runtimeCustody(handle.workAttemptId), "unknown", "direct recovery owns settlement before its first await");
+    finishRecovery();
+    await rejectedRecovery;
+    assert.equal(adapter.runtimeCustody(handle.workAttemptId), "absent", "failed direct recovery releases only its operation hold");
+    assert.deepEqual(handle.providerConnection, retainedConnection);
+    assert.equal(harness.launches.length, 1, "recovery does not redispatch the native turn");
+    assert.equal(readFileSync(terminalPath, "utf8"), JSON.stringify(terminal));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor Stop and turn control retain the exact child when bounded settlement fails", async () => {
+  for (const operation of ["stop", "control"] as const) {
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    const handle = await spawnDaemonLane(adapter, harness);
+    const execution: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, event => execution.push(event));
+    let enterSettlement!: () => void;
+    const settlementEntered = new Promise<void>((resolve) => { enterSettlement = resolve; });
+    let releaseSettlement!: () => void;
+    const settlementRelease = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, terminal => terminals.push(terminal));
+    const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: `failed-settlement-${operation}`,
+      actionId: `failed-settlement-${operation}`,
+    }), {
+      checkpointPreparedTurn: async () => {},
+      checkpointProviderState: async () => {},
+      settleLifecycleBeforeIdle: async () => {
+        enterSettlement();
+        await settlementRelease;
+        throw new Error("injected bounded settlement failure");
+      },
+    });
+    while (!harness.children[0]?.isReleased) await flush();
+    const child = harness.children[0]!;
+    child.emit({ type: "result", subtype: "success", is_error: false, result: "settled", session_id: "sess-cursor-1" });
+    child.resolveExit({ type: "exit", code: 0, signal: null });
+    await settlementEntered;
+
+    const control = operation === "stop" ? adapter.stop(handle) : adapter.controlTurn(handle, null);
+    releaseSettlement();
+    await assert.rejects(roomTurn, /injected bounded settlement failure/);
+    await assert.rejects(control, /recover/);
+    assert.equal(handle.providerConnection?.processIdentity, birthIdentity(child.pid!));
+    assert.equal(terminals.length, 0, `${operation} cannot emit attempt exit after settlement failure`);
+    const settledPosition = execution.length;
+    assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+    assert.equal(execution.length, settledPosition,
+      "failed settlement retains identity for recovery, not renewed control observations");
+  }
 });
 
 test("stop while idle needs no signal: nothing is running, the attempt ends immediately as stopped", async () => {
@@ -6741,6 +7620,103 @@ test("a Cursor result terminalizes any tool card that never emitted its own comp
   assert.deepEqual(toolStatuses, ["running", "interrupted"]);
 });
 
+test("Cursor live display refuses a mismatched native tool terminal", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  const executionEvents: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => executionEvents.push(event));
+  const child = harness.children[0]!;
+
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "tool-mismatch",
+    tool_call: { readToolCall: { args: { path: "README.md" } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "tool-mismatch",
+    tool_call: { writeToolCall: { args: { path: "other.ts" } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "tool-mismatch",
+    tool_call: { writeToolCall: { result: { success: {} } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "result", subtype: "success", is_error: false, result: "done",
+    session_id: "sess-cursor-1",
+  });
+  await flush();
+
+  const toolUpdates = streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => ({
+      tool: (event.payload as { tool?: unknown }).tool,
+      status: (event.payload as { status?: unknown }).status,
+    }));
+  assert.deepEqual(toolUpdates, [
+    { tool: "readToolCall", status: "running" },
+    { tool: "readToolCall", status: "interrupted" },
+  ], "an uncorrelated terminal cannot complete or erase the exact running tool card");
+  assert.equal(executionEvents.some(({ fact }) => fact.domain === "execution"
+    && fact.executionId === "tool-mismatch" && fact.kind === "completed"), false,
+  "the visual and typed projections both reject the mismatched terminal");
+});
+
+test("Cursor live display leaves invalid native terminals open until the turn result interrupts them", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  const executionEvents: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => executionEvents.push(event));
+  const child = harness.children[0]!;
+  const session_id = "sess-cursor-1";
+
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "contradictory-read", session_id,
+    tool_call: { readToolCall: { args: { path: "README.md" } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "contradictory-read", session_id,
+    tool_call: { readToolCall: { result: { success: {}, failure: { errorMessage: "boom" } } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "background-shell", session_id,
+    tool_call: { shellToolCall: { args: { command: "long-running-command" } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "background-shell", session_id,
+    tool_call: { shellToolCall: { result: { success: { exitCode: 0, shellId: 7 }, isBackground: true } } },
+  });
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
+  await flush();
+
+  assert.deepEqual(streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => ({
+      tool: (event.payload as { tool?: unknown }).tool,
+      status: (event.payload as { status?: unknown }).status,
+    })), [
+    { tool: "readToolCall", status: "running" },
+    { tool: "shellToolCall", status: "running" },
+    { tool: "readToolCall", status: "interrupted" },
+    { tool: "shellToolCall", status: "interrupted" },
+  ], "invalid terminals cannot visually complete a card that typed execution keeps open");
+  assert.equal(executionEvents.some(({ fact }) => fact.domain === "execution"
+    && ["contradictory-read", "background-shell"].includes(fact.executionId)
+    && fact.kind === "completed"), false,
+  "the same shared terminal contract rejects both typed completions");
+});
+
 test("a Cursor turn that exits without result still terminalizes every running tool card", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
@@ -6832,7 +7808,279 @@ test("documented Cursor stream-json shapes project to namespaced response and to
       input: { path: "README.md" }, output: { totalLines: 54 }, error: null,
     },
   }]);
+  for (const [callId, result, detail] of [
+    ["rejected", { rejected: { reason: "not approved" } }, { reason: "not approved" }],
+    ["permission-denied", { permissionDenied: { error: "permission denied" } }, { error: "permission denied" }],
+    ["spawn-error", { spawnError: { error: "spawn failed" } }, { error: "spawn failed" }],
+    ["nonzero-exit", { success: { exitCode: 1 } }, { exitCode: 1 }],
+  ] as const) {
+    assert.deepEqual(cursorLiveDisplayProjections({
+      type: "tool_call", subtype: "completed", call_id: callId,
+      tool_call: { shellToolCall: { args: { command: "false" }, result } },
+      session_id: "session-exact",
+    }, "turn-exact", `event-${callId}`), [{
+      method: "item/toolCall/updated", kind: "tool_lifecycle", payload: {
+        callID: `cursor:turn-exact:${callId}`, tool: "shellToolCall", status: "error",
+        input: { command: "false" }, output: null, error: JSON.stringify(detail, null, 2),
+      },
+    }], `${callId} uses the shared typed outcome instead of visually completing`);
+  }
   assert.deepEqual(cursorLiveDisplayProjections({
     type: "user", message: { role: "user", content: [{ type: "text", text: "prompt echo" }] },
   }, "turn-exact", "event-4"), [], "the user event is never misrendered as a tool");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "ambiguous-tool",
+    tool_call: { readToolCall: { args: {} }, writeToolCall: { args: {} } },
+  }, "turn-exact", "event-5"), [], "an ambiguous native envelope cannot choose an arbitrary tool card");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: " padded-id ",
+    tool_call: { readToolCall: { args: {} } },
+  }, "turn-exact", "event-6"), [], "display uses the exact typed execution-id grammar without trimming");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "unknown-tool",
+    tool_call: { browserToolCall: { args: {} } },
+  }, "turn-exact", "event-7"), [], "an unknown native tool remains raw diagnostic evidence");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "shadowed-tool",
+    tool_call: { readToolCall: { args: {} }, writeToolCall: null },
+  }, "turn-exact", "event-8"), [], "a second tool key invalidates the envelope even when its value is not an object");
+  for (const [label, toolCall] of [
+    ["contradictory variants", { readToolCall: { result: { success: {}, failure: { errorMessage: "boom" } } } }],
+    ["missing variant", { readToolCall: { result: {} } }],
+    ["malformed variant", { readToolCall: { result: { success: null } } }],
+    ["command timeout", { shellToolCall: { result: { timeout: {} } } }],
+    ["invalid exit code", { shellToolCall: { result: { success: { exitCode: "0" } } } }],
+    ["background handoff", { shellToolCall: { result: { success: { exitCode: 0 }, isBackground: true } } }],
+    ["invalid background flag", { shellToolCall: { result: { success: { exitCode: 0 }, isBackground: "false" } } }],
+  ] as const) {
+    assert.deepEqual(cursorLiveDisplayProjections({
+      type: "tool_call", subtype: "completed", call_id: `invalid-${label.replaceAll(" ", "-")}`,
+      tool_call: toolCall,
+    }, "turn-exact", `event-invalid-${label}`), [], `${label} cannot visually complete a rejected typed terminal`);
+  }
+});
+
+test("Cursor typed observations fence each native child and exclude synthetic display completion", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const stream: ProviderStreamEvent[] = [];
+  const stopStream = adapter.onStream(handle, (event) => stream.push(event));
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, () => { throw new Error("observer unavailable"); });
+  adapter.onExecution(handle, (event) => events.push(event));
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+  assert.deepEqual(adapter.capabilities().execution, {
+    controlProbe: "unsupported", approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
+  });
+  assert.equal(events.length, 0, "an idle lane has no runtime birth and cannot poison capture with a processless fact");
+  const settledBirths: string[] = [];
+  const settleExactBirth = async () => {
+    const connection = handle.providerConnection;
+    assert.equal(connection?.kind, "cursor_cli");
+    assert.ok(connection?.processIdentity, "typed settlement retains the exact child birth");
+    const birth = connection.processIdentity;
+    assert.ok(events.some(({ nativeProcessIdentity, fact }) => nativeProcessIdentity === birth
+      && fact.domain === "turn" && fact.state === "terminal"), "validated turn evidence precedes settlement");
+    assert.ok(events.some(({ nativeProcessIdentity, fact }) => nativeProcessIdentity === birth
+      && fact.domain === "runtime" && fact.state === "exited"), "historical child exit precedes settlement");
+    const settledPosition = events.length;
+    assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+    assert.equal(events.length, settledPosition,
+      "a heartbeat during durable settlement cannot revive control on an exited child");
+    settledBirths.push(birth);
+  };
+  const first = adapter.runRoomTurn(handle, roomTurnRequest(), { settleLifecycleBeforeIdle: settleExactBirth });
+  await flush();
+  const child = harness.children[0]!;
+  const session_id = "sess-cursor-1";
+  child.emit({ type: "system", subtype: "init", session_id, model: "cursor-fast" });
+  const started = { type: "tool_call", subtype: "started", call_id: "same-call", session_id,
+    tool_call: { readToolCall: { args: { path: "secret-path" } } } };
+  child.emit(started);
+  child.emit(started);
+  child.emit({ ...started, call_id: "missing-session", session_id: undefined });
+  child.emit({ type: "tool_call", subtype: "completed", call_id: "same-call", session_id,
+    tool_call: { readToolCall: { result: { failure: { errorMessage: "secret-output" } } } } });
+  child.emit({ type: "tool_call", subtype: "started", call_id: "unclosed-write", session_id,
+    tool_call: { writeToolCall: { args: { path: "secret-path", fileText: "secret-content" } } } });
+  assert.equal(handle.providerConnection?.processIdentity, birthIdentity(child.pid!), "the active child has an exact runtime birth");
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" }, "live output does not imply a responsive control channel");
+  const controlObservations = events.filter(event => event.fact.domain === "control");
+  assert.equal(controlObservations.length, 1, "the steady probe coalesces with the native child control observation");
+  const probeObservation = controlObservations[0]!;
+  assert.equal(probeObservation.nativeProcessIdentity, birthIdentity(child.pid!));
+  assert.deepEqual(probeObservation.fact,
+    { domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" },
+    "an active child publishes the probe result with its exact runtime birth");
+  const firstResult = { type: "result", subtype: "success", is_error: false, result: "done", session_id };
+  child.emit(firstResult);
+  child.emit(firstResult);
+  assert.equal(events.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false,
+    "raw result is only a correlation checkpoint until the wrapper terminal validates it");
+  assert.equal(events.filter((event) => event.fact.domain === "execution"
+    && event.fact.executionId === "unclosed-write" && event.fact.kind === "completed").length, 0,
+  "a display-only interrupted card cannot become native interruption evidence");
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await first).text, "done");
+  await flush();
+  assert.equal(handle.observedState(), "idle");
+  assert.equal(handle.providerConnection?.processIdentity, null,
+    "the reusable lane becomes processless only after typed settlement returns");
+  const second = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }), {
+    settleLifecycleBeforeIdle: settleExactBirth,
+  });
+  await flush();
+  const nextChild = harness.children[1]!;
+  nextChild.emit(started);
+  nextChild.emit({ type: "tool_call", subtype: "completed", call_id: "same-call", session_id,
+    tool_call: { readToolCall: { result: { success: { content: "secret-output" } } } } });
+  nextChild.emit({ type: "result", subtype: "success", is_error: false, result: "next", session_id });
+  nextChild.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await second).text, "next");
+  await flush();
+  const runtimes = new Map<string, ReturnType<typeof emptyExecutionProjection>>();
+  for (const event of events) {
+    assert.ok(event.nativeProcessIdentity, "every Cursor observation is safe for runtime-birth keyed capture");
+    const runtimeId = event.nativeProcessIdentity!;
+    runtimes.set(runtimeId, reduceExecutionFact(runtimes.get(runtimeId) ?? emptyExecutionProjection(), {
+      ...event.fact, ...("providerTurnId" in event.fact ? { turnId: event.fact.providerTurnId } : {}),
+      factId: `fact-${event.sequence}`, agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: runtimeId,
+      observerEpoch: 1, sourceSequence: event.sequence, observedAtMs: event.observedAtMs,
+    }));
+  }
+  assert.equal(runtimes.size, 2, "sequential child births cannot share runtime authority");
+  const firstTurn = [...runtimes.get(birthIdentity(child.pid!))!.turns.values()][0]!;
+  const nextTurn = [...runtimes.get(birthIdentity(nextChild.pid!))!.turns.values()][0]!;
+  assert.equal(firstTurn.operations.get("same-call")?.outcome, "failed");
+  assert.equal(firstTurn.operations.get("same-call")?.startObserved, false);
+  assert.equal(firstTurn.operations.has("unclosed-write"), false, "a tool request without a native result has no proven execution");
+  assert.equal(nextTurn.operations.get("same-call")?.outcome, "succeeded");
+  assert.notEqual(firstTurn.providerTurnId, nextTurn.providerTurnId);
+  assert.deepEqual(events.map((event) => event.sequence), events.map((_, index) => index + 1));
+  assert.doesNotMatch(JSON.stringify(events), /secret-path|secret-content|secret-output/);
+  assert.deepEqual(harness.signals, []);
+  const replay: NativeExecutionObservation[] = [];
+  const replaySubscription = adapter.onExecution(handle, event => replay.push(event));
+  assert.deepEqual(replay, events, "late subscribers retain both exact child births and the shared original sequence");
+  assert.ok(replay.every(event => event.sourceId === replaySubscription.sourceId), "successive child births share one observation source");
+  replaySubscription.dispose();
+  const streamCheckpointIds = [...new Set(stream.flatMap((event) => event.nativeEventId ? [event.nativeEventId] : []))];
+  const typedCheckpointIds = [...new Set(events.flatMap((event) => event.fact.nativeEventId ? [event.fact.nativeEventId] : []))];
+  assert.deepEqual(typedCheckpointIds, streamCheckpointIds,
+    "each exact per-child init/result boundary correlates typed and legacy projections");
+  assert.equal(stream.every((event) => !event.nativeEventId || event.nativeLifecyclePhase ===
+    (event.method === "system/init" ? "turn_active" : "turn_terminal")), true,
+  "correlated Cursor events expose only the closed structural lifecycle phase");
+  assert.equal(streamCheckpointIds.length, 4, "two child starts and two native terminals are independently correlated");
+  assert.deepEqual(
+    [...new Set(stream.map((event) => event.nativeProcessIdentity))].sort(),
+    [birthIdentity(child.pid!), birthIdentity(nextChild.pid!)].sort(),
+    "every Cursor display event carries the exact child birth that emitted it",
+  );
+  assert.ok(stream.every((event) => event.nativeProcessIdentity),
+    "a Cursor stream event can never borrow the next child's installation token");
+  const terminalIds = stream.filter((event) => event.method.startsWith("result") && event.nativeEventId)
+    .map((event) => event.nativeEventId);
+  assert.equal(terminalIds.length, 3);
+  assert.equal(terminalIds[0], terminalIds[1], "an identical terminal replay keeps the first checkpoint identity");
+  assert.equal(events.filter((event) => event.fact.domain === "turn" && event.fact.state === "terminal"
+    && event.fact.nativeEventId === terminalIds[0]).length, 1, "a replay does not emit another typed terminal");
+  assert.deepEqual(settledBirths, [birthIdentity(child.pid!), birthIdentity(nextChild.pid!)],
+    "each child birth crosses the settlement barrier exactly once");
+  assert.equal(stream.find((event) => event.method === "system/init_duplicate")?.nativeEventId, undefined,
+    "duplicate init diagnostics do not mint a second lifecycle checkpoint");
+  assert.equal(stream.some((event) => event.kind === "tool_lifecycle" && event.nativeEventId !== undefined), false);
+  assert.equal(events.some((event) => event.fact.domain === "execution" && event.fact.nativeEventId !== undefined), false);
+  stopStream();
+});
+
+test("Cursor typed child loss differs from an exact user interruption", async () => {
+  for (const exitKind of ["exit", "error", "interrupted"] as const) {
+    const interrupted = exitKind === "interrupted";
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    const handle = await spawnDaemonLane(adapter, harness);
+    const events: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, (event) => events.push(event));
+    let settlementCalls = 0;
+    const running = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      settleLifecycleBeforeIdle: async () => {
+        settlementCalls++;
+        assert.ok(handle.providerConnection?.processIdentity, "the terminal effect settles against the exact child birth");
+        assert.ok(events.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"));
+      },
+    });
+    const rejected = interrupted
+      ? running.then(result => { assert.equal(result.outcome, "interrupted"); })
+      : assert.rejects(running, /ended before.*terminal result/);
+    await flush();
+    const child = harness.children[0]!;
+    child.emit({ type: "tool_call", subtype: "started", call_id: "shell", session_id: "sess-cursor-1",
+      tool_call: { shellToolCall: { args: { command: "slow-command" } } } });
+    if (interrupted) await adapter.controlTurn(handle);
+    else if (exitKind === "error") child.resolveExit({ type: "error", error: new Error("native child error") });
+    else child.resolveExit({ type: "exit", code: 1, signal: null });
+    await rejected;
+    await flush();
+    assert.equal(events.filter((event) => event.fact.domain === "execution").length, 0,
+      "a pending tool request cannot become lost_after_start or interrupted_after_start without start proof");
+    const terminal = events.find((event) => event.fact.domain === "turn" && event.fact.state !== "active")?.fact;
+    assert.ok(terminal && "state" in terminal);
+    assert.equal(terminal.state, interrupted ? "terminal" : "lost");
+    const runtime = events.find((event) => event.fact.domain === "runtime" && event.fact.state === "exited")?.fact;
+    assert.ok(runtime && "controlEvidence" in runtime);
+    assert.equal(runtime.controlEvidence, exitKind === "error" ? "native_session_terminated" : "process_exit");
+    assert.equal(settlementCalls, 1);
+    assert.equal(handle.providerConnection?.processIdentity, null);
+    if (!interrupted) assert.deepEqual(harness.signals, []);
+  }
+});
+
+test("Cursor typed shell completion preserves native exit codes and does not complete a background handoff", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  const running = adapter.runRoomTurn(handle, roomTurnRequest());
+  await flush();
+  const child = harness.children[0]!;
+  const session_id = "sess-cursor-1";
+  for (const [call_id, result] of [
+    ["zero", { success: { exitCode: 0, stdout: "secret-output" } }],
+    ["nonzero", { failure: { exitCode: 2, stderr: "secret-output" } }],
+    ["nonzero-success-envelope", { success: { exitCode: 1 } }],
+    ["rejected", { rejected: { reason: "secret-reason" } }],
+    ["permission-denied", { permissionDenied: { error: "secret-error" } }],
+    ["spawn-failed", { spawnError: { error: "secret-error" } }],
+    ["malformed", { success: { exitCode: "0" } }],
+    ["background", { success: { exitCode: 0, shellId: 7 }, isBackground: true }],
+  ] as const) {
+    child.emit({ type: "tool_call", subtype: "started", call_id, session_id,
+      tool_call: { shellToolCall: { args: { command: "secret-command" } } } });
+    child.emit({ type: "tool_call", subtype: "completed", call_id, session_id,
+      tool_call: { shellToolCall: { result } } });
+  }
+  const completions = events.map(({ fact }) => fact).filter((fact) => fact.domain === "execution" && fact.kind === "completed");
+  assert.deepEqual(completions.map((fact) => ({ id: fact.executionId, outcome: fact.outcome, exitCode: fact.exitCode })), [
+    { id: "zero", outcome: "succeeded", exitCode: 0 },
+    { id: "nonzero", outcome: "failed", exitCode: 2 },
+    { id: "nonzero-success-envelope", outcome: "failed", exitCode: 1 },
+    { id: "rejected", outcome: "denied_before_start", exitCode: undefined },
+    { id: "permission-denied", outcome: "denied_before_start", exitCode: undefined },
+    { id: "spawn-failed", outcome: "failed", exitCode: undefined },
+  ]);
+  for (const fact of completions.filter((fact) => ["rejected", "permission-denied", "spawn-failed"].includes(fact.executionId))) {
+    assert.equal(fact.sideEffects, "none");
+  }
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await running;
+  await flush();
+  assert.equal(events.filter(({ fact }) => fact.domain === "execution" && fact.kind === "completed" && fact.executionId === "zero").length, 1,
+    "an observed successful command must not later become lost at child exit");
+  assert.equal(events.filter(({ fact }) => fact.domain === "execution" && ["malformed", "background"].includes(fact.executionId)).length, 0);
+  assert.doesNotMatch(JSON.stringify(events), /secret-command|secret-output|secret-reason|secret-error/);
+  assert.deepEqual(harness.signals, [], "a nonzero shell exit cannot signal the provider");
 });

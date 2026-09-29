@@ -1,26 +1,24 @@
-.desktop-add-agent-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+.desktop-add-agent-model {
+  position: relative;
 }
 
-.desktop-add-agent-section-heading > span {
-  color: var(--text-secondary);
-  font-size: 0.74rem;
-  font-weight: 800;
+.desktop-add-agent-section-heading {
+  position: absolute;
+  top: -6px;
+  right: 0;
 }
 
 .desktop-add-agent-section-heading > button {
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
   cursor: pointer;
-  font-size: 0.7rem;
-  font-weight: 750;
 }
 
 .desktop-add-agent-section-heading > button:disabled {
@@ -82,8 +80,25 @@
     }
 }
 
-@media (max-width: 800px) {
+@media (max-width: 520px) {
   .desktop-add-agent-model-grid {
       grid-template-columns: 1fr;
     }
+}
+
+.desktop-add-agent-setting p {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.desktop-add-agent-model :deep(.desktop-model-picker-control input),
+.desktop-add-agent-model :deep(.desktop-select-control select) {
+  font-size: 0.82rem;
+}
+
+.desktop-add-agent-model :deep(.desktop-model-picker-label),
+.desktop-add-agent-model :deep(.desktop-select-label) {
+  font-weight: 500;
 }

@@ -16,11 +16,23 @@ const motionStyles = readFileSync(fileURLToPath(new URL(
   import.meta.url,
 )), "utf8");
 
+const switcherSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/sidebar/SidebarRoomSwitcher.vue",
+  import.meta.url,
+)), "utf8");
+
 describe("desktop sidebar search contract", () => {
   it("keeps focus on the combobox and only exposes a rendered popup", () => {
     assert.match(sidebarSource, /:aria-controls="searchResults\.length \? 'sidebar-room-search-results' : undefined"/);
     assert.match(sidebarSource, /:aria-expanded="Boolean\(searchResults\.length\)"/);
     assert.match(sidebarSource, /role="option"\s+tabindex="-1"/);
+  });
+
+  it("keeps switcher options out of the dialog shell's button focus trap", () => {
+    assert.match(switcherSource, /<div\s+v-for="\(option, index\) in options"[\s\S]*?role="option"\s+tabindex="-1"/);
+    assert.match(switcherSource, /@keydown.down.prevent="move\(1\)"/);
+    assert.match(switcherSource, /@keydown.enter.prevent="chooseActive"/);
+    assert.match(switcherSource, /<DesktopDialogShell[\s\S]*?initial-focus="#sidebar-switcher-query"/);
   });
 
   it("swaps search and navigation immediately in the same grid row", () => {

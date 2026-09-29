@@ -1,7 +1,6 @@
 import { onBeforeUnmount, ref, watch, type Ref } from "vue";
 import type { DesktopNotificationStatus, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 import {
-  readLiquidGlassEnabled,
   readNotificationPermission,
   readNotificationsEnabled,
   readSoundEnabled,
@@ -12,7 +11,6 @@ export function useDesktopRoomPreferences() {
   const soundEnabled = ref(readSoundEnabled());
   const notificationsEnabled = ref(readNotificationsEnabled());
   const nativeNotificationsActive = ref(false);
-  const liquidGlassEnabled = ref(readLiquidGlassEnabled());
   const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
 
   function applyNotificationStatus(status: DesktopNotificationStatus): void {
@@ -62,11 +60,6 @@ export function useDesktopRoomPreferences() {
     window.localStorage.setItem("letagents-desktop:notifications", notificationsEnabled.value ? "on" : "off");
   }
 
-  function toggleLiquidGlass(): void {
-    liquidGlassEnabled.value = !liquidGlassEnabled.value;
-    window.localStorage.setItem("letagents-desktop:liquid-glass", liquidGlassEnabled.value ? "on" : "off");
-  }
-
   function playRoomSound(kind: "send" | "notification"): void {
     if (!soundEnabled.value) return;
     try {
@@ -81,7 +74,7 @@ export function useDesktopRoomPreferences() {
     if (!notificationsEnabled.value || typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && document.hasFocus()) return;
     const sender = message.sender.split("|")[0]?.trim() || "LetAgents";
-    const body = message.text.trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
+    const body = (message.displayText || message.text).trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
     new Notification(`${sender} in ${roomDisplayName}`, {
       body,
       silent: true,
@@ -91,11 +84,9 @@ export function useDesktopRoomPreferences() {
   return {
     soundEnabled,
     notificationsEnabled,
-    liquidGlassEnabled,
     notificationPermission,
     toggleSound,
     toggleNotifications,
-    toggleLiquidGlass,
     playRoomSound,
     showRoomNotification,
   };

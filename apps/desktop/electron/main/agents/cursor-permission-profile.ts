@@ -99,18 +99,18 @@ export function cursorPermissionProfileReadyDetail(
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
       if (supervised) {
-        return "Cursor works in a private per-turn Git workspace with its native sandbox enabled. LetAgents carries conflict-checked, nonignored file edits back after the turn; ignored dependencies remain read-only and Git history is not changed.";
+        return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and Git history is kept.";
       }
-      return "Cursor will run with --force and Cursor sandbox enabled for write-capable local work. Selected MCP tools still follow the chosen MCP policy.";
+      return "Cursor can edit files with its own file and command restrictions enabled. Connected tools follow the access you selected for them.";
     case "full_access":
       if (supervised) {
-        return "Cursor works in a private per-turn Git workspace with its inner sandbox disabled for tool compatibility. Direct host writes remain blocked; LetAgents carries conflict-checked, nonignored file edits back without changing Git history.";
+        return "Cursor edits a separate copy of your project. Its own command restrictions are off for tool compatibility, but it cannot write directly to files on this Mac. LetAgents checks for conflicts before copying back changes to files tracked by Git or not ignored by it. Git history is kept.";
       }
-      return "Cursor will run with --force and Cursor sandbox disabled for trusted local work. Selected MCP tools still follow the chosen MCP policy.";
+      return "Cursor can change files and run commands without its own restrictions or approval prompts. Connected tools follow the access you selected for them.";
     default:
       return supervised
         ? "Cursor can inspect the selected workspace but cannot edit it."
-        : "Cursor will run in ask mode for read-only local analysis.";
+        : "Cursor can inspect files without editing them.";
   }
 }
 

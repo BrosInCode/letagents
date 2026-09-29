@@ -52,18 +52,18 @@ type ProviderCandidate = {
   runtime?: string | null;
 };
 
-function uniqueProvider(candidates: readonly ProviderCandidate[]): string | null {
-  const providers = new Set<string>();
-  for (const candidate of candidates) {
-    const label = providerLabel(candidate.ideLabel) || providerLabel(candidate.runtime);
-    if (label) providers.add(label);
-  }
-  return providers.size === 1 ? [...providers][0] : null;
+function uniqueProvider(providers: ReadonlySet<string> | undefined): string | null {
+  return providers?.size === 1 ? providers.values().next().value! : null;
 }
 
-function exact(value: string | null | undefined, candidate: string | null | undefined): boolean {
-  const left = normalized(value);
-  return Boolean(left && left === normalized(candidate));
+function addProvider(index: Map<string, Set<string>>, key: string, label: string | null): void {
+  if (!key) return;
+  let labels = index.get(key);
+  if (!labels) {
+    labels = new Set();
+    index.set(key, labels);
+  }
+  if (label) labels.add(label);
 }
 
 function messageDisplayName(message: DesktopRoomMessage): string {
@@ -108,40 +108,71 @@ export function resolveMessageProviderLabel(
   presence: readonly DesktopAgentPresence[] = [],
   supervisorEntries: readonly DesktopSupervisorManifestEntry[] = [],
 ): string | null {
-  // Provider badges and agent controls are identity claims, not a fuzzy name
-  // decoration. Human/browser/system messages must never inherit them merely
-  // because their display name matches a current agent.
-  if (message.source !== "agent") return null;
-  const explicit = providerLabel(message.agentIdentity?.ideLabel);
-  if (explicit) return explicit;
+  return createMessageProviderLabelResolver(participants, presence, supervisorEntries)(message);
+}
 
+/** Build once per reactive room roster, then resolve every displayed row. */
+export function createMessageProviderLabelResolver(
+  participants: readonly DesktopParticipantSummary[] = [],
+  presence: readonly DesktopAgentPresence[] = [],
+  supervisorEntries: readonly DesktopSupervisorManifestEntry[] = [],
+): (message: DesktopRoomMessage) => string | null {
+  const sessions = new Map<string, Set<string>>();
+  const agentKeys = new Map<string, Set<string>>();
+  const actors = new Map<string, Set<string>>();
+  const names = new Map<string, Set<string>>();
+  const namesByOwner = new Map<string, Map<string, Set<string>>>();
   const candidates: ProviderCandidate[] = [
     ...supervisorEntries.map(supervisorProviderCandidate),
     ...presence,
     ...participants,
   ];
-  const sessionId = message.agentIdentity?.agentSessionId;
-  const bySession = uniqueProvider(candidates.filter((candidate) => exact(sessionId, candidate.agentSessionId)));
-  if (bySession) return bySession;
+  for (const candidate of candidates) {
+    const label = providerLabel(candidate.ideLabel) || providerLabel(candidate.runtime);
+    addProvider(sessions, normalized(candidate.agentSessionId), label);
+    addProvider(agentKeys, normalized(candidate.agentKey), label);
+    addProvider(actors, normalized(candidate.actorLabel), label);
+    const name = normalized(candidate.displayName);
+    addProvider(names, name, label);
+    const owner = normalizedOwner(candidate.ownerLabel);
+    if (name && owner) {
+      let ownerNames = namesByOwner.get(owner);
+      if (!ownerNames) {
+        ownerNames = new Map();
+        namesByOwner.set(owner, ownerNames);
+      }
+      // Keep an empty set for generic-only candidates: their owner match must
+      // still prevent falling back to another owner's concrete provider.
+      addProvider(ownerNames, name, label);
+    }
+  }
 
-  const agentKey = message.agentIdentity?.agentKey;
-  const byAgentKey = uniqueProvider(candidates.filter((candidate) => exact(agentKey, candidate.agentKey)));
-  if (byAgentKey) return byAgentKey;
+  return (message) => {
+    // Provider badges and agent controls are identity claims, not a fuzzy name
+    // decoration. Human/browser/system messages must never inherit them merely
+    // because their display name matches a current agent.
+    if (message.source !== "agent") return null;
+    const explicit = providerLabel(message.agentIdentity?.ideLabel);
+    if (explicit) return explicit;
 
-  const actorLabel = message.agentIdentity?.actorLabel || message.actorLabel || message.sender;
-  const byActor = uniqueProvider(candidates.filter((candidate) => exact(actorLabel, candidate.actorLabel)));
-  if (byActor) return byActor;
+    const sessionId = message.agentIdentity?.agentSessionId;
+    const bySession = uniqueProvider(sessions.get(normalized(sessionId)));
+    if (bySession) return bySession;
 
-  const displayName = messageDisplayName(message);
-  const ownerLabel = normalizedOwner(messageOwnerLabel(message));
-  const byDisplayName = candidates.filter((candidate) => exact(displayName, candidate.displayName));
-  const ownerQualifiedCandidates = ownerLabel
-    ? byDisplayName.filter((candidate) => ownerLabel === normalizedOwner(candidate.ownerLabel))
-    : byDisplayName;
-  const byDisplayAndOwner = uniqueProvider(
-    ownerQualifiedCandidates.length > 0 ? ownerQualifiedCandidates : byDisplayName,
-  );
-  if (byDisplayAndOwner) return byDisplayAndOwner;
+    const agentKey = message.agentIdentity?.agentKey;
+    const byAgentKey = uniqueProvider(agentKeys.get(normalized(agentKey)));
+    if (byAgentKey) return byAgentKey;
 
-  return message.agentIdentity?.ideLabel?.trim() || null;
+    const actorLabel = message.agentIdentity?.actorLabel || message.actorLabel || message.sender;
+    const byActor = uniqueProvider(actors.get(normalized(actorLabel)));
+    if (byActor) return byActor;
+
+    const displayName = normalized(messageDisplayName(message));
+    const ownerLabel = normalizedOwner(messageOwnerLabel(message));
+    const ownerProviders = namesByOwner.get(ownerLabel)?.get(displayName);
+    const byDisplayAndOwner = uniqueProvider(ownerProviders ?? names.get(displayName));
+    if (byDisplayAndOwner) return byDisplayAndOwner;
+
+    return message.agentIdentity?.ideLabel?.trim() || null;
+  };
 }

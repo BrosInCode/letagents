@@ -1,7 +1,11 @@
 import type { TaskStatus } from "../db.js";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
+import { RequestValidationError } from "../validation-error.js";
 
 type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | null | undefined;
+
+export const TASK_TITLE_MAX_LENGTH = 512;
+export const TASK_DESCRIPTION_MAX_LENGTH = 100_000;
 
 const AGENT_OWNED_TASK_STATUSES = new Set<TaskStatus>([
   "assigned",
@@ -42,6 +46,9 @@ export function buildTaskUpdatePatch(input: {
   workflowArtifacts?: TaskWorkflowArtifact[];
 }): {
   updates: {
+    title?: string;
+    description?: string;
+    expected_content?: { title?: string; description?: string };
     status?: TaskStatus;
     assignee?: string | null;
     assignee_agent_key?: string | null;
@@ -53,12 +60,56 @@ export function buildTaskUpdatePatch(input: {
 } {
   const { body, workflowArtifacts } = input;
   const updates: {
+    title?: string;
+    description?: string;
+    expected_content?: { title?: string; description?: string };
     status?: TaskStatus;
     assignee?: string | null;
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
   } = {};
+
+  if (Object.prototype.hasOwnProperty.call(body, "title")) {
+    if (typeof body.title !== "string" || !body.title.trim()) {
+      throw new RequestValidationError("title must be a nonblank string");
+    }
+    if (body.title.length > TASK_TITLE_MAX_LENGTH) {
+      throw new RequestValidationError(`title must be at most ${TASK_TITLE_MAX_LENGTH} characters`);
+    }
+    updates.title = body.title.trim();
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "description")) {
+    if (typeof body.description !== "string") {
+      throw new RequestValidationError("description must be a string");
+    }
+    if (body.description.length > TASK_DESCRIPTION_MAX_LENGTH) {
+      throw new RequestValidationError(`description must be at most ${TASK_DESCRIPTION_MAX_LENGTH} characters`);
+    }
+    updates.description = body.description;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "expected_content")) {
+    const expected = body.expected_content;
+    if (!expected || typeof expected !== "object" || Array.isArray(expected)
+      || Object.keys(expected).length === 0
+      || Object.keys(expected).some((key) => key !== "title" && key !== "description")) {
+      throw new RequestValidationError("expected_content must be an object containing only the edited content fields");
+    }
+    const baseline: { title?: string; description?: string } = {};
+    for (const field of ["title", "description"] as const) {
+      const supplied = Object.prototype.hasOwnProperty.call(expected, field);
+      if (supplied !== (updates[field] !== undefined)) {
+        throw new RequestValidationError("expected_content must match the edited content fields");
+      }
+      if (supplied) {
+        const value = (expected as Record<string, unknown>)[field];
+        if (typeof value !== "string") throw new RequestValidationError(`expected_content.${field} must be a string`);
+        baseline[field] = value;
+      }
+    }
+    updates.expected_content = baseline;
+  }
 
   if (typeof body.status === "string") {
     updates.status = body.status as TaskStatus;

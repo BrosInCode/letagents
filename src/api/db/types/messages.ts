@@ -1,10 +1,14 @@
 import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 
 export interface Message {
+  /** Random desktop submission identity; internal publisher keys stay private. */
+  client_message_id?: string;
   id: string;
   agent_identity: MessageAgentIdentity | null;
   sender: string;
   text: string;
+  /** Human-facing copy; canonical text remains the agent/routing input. */
+  display_text?: string | null;
   agent_prompt_kind: AgentPromptKind | null;
   source: string | null;
   timestamp: string;
@@ -15,6 +19,26 @@ export interface Message {
   attachments: MessageAttachment[];
   /** Account-scoped desktop dispatch metadata; omitted from shared events. */
   account_agent_routing?: MessageAccountAgentRouting | null;
+  /**
+   * Present only on the sender's own acknowledgement, never on shared
+   * events: mentions in this message that woke nobody, and how to fix them.
+   */
+  mention_notices?: MessageMentionNotice[];
+}
+
+export interface MessageMentionNotice {
+  reason: "ambiguous";
+  /** The mention exactly as the sender typed it, without the "@". */
+  handle: string;
+  detail: string;
+  /** Each agent the mention could have meant, with a mention that reaches only it. */
+  candidates: Array<{
+    agent_key: string;
+    display_name: string;
+    /** "Name | Owner's agent | Provider", to tell same-named agents apart. */
+    actor_label: string;
+    mention: string;
+  }>;
 }
 
 /** Exact prompt-only receipt audience, scoped by account and generation. */
@@ -67,6 +91,8 @@ export interface MessageReplyReference {
   id: string;
   sender: string;
   text: string;
+  /** Human-facing copy; canonical text remains the agent/routing input. */
+  display_text?: string | null;
   source: string | null;
   timestamp: string;
   agent_identity: MessageAgentIdentity | null;
@@ -131,6 +157,8 @@ export interface MessageRow {
   thread_root_number: number | null;
   sender: string;
   text: string;
+  /** Human-facing copy; canonical text remains the agent/routing input. */
+  display_text?: string | null;
   agent_prompt_kind: string | null;
   source: string | null;
   client_message_id: string | null;

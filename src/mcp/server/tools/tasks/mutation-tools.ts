@@ -24,8 +24,9 @@ import {
 export function registerTaskMutationTools(server: McpServer): void {
   server.tool(
     "claim_task",
-    "Claim an accepted task. The task must be in 'accepted' " +
-      "status. This sets the assignee to you and moves the status to 'assigned'. " +
+    "Claim an accepted task, or retry your own assigned task to recover a missing work lease. " +
+      "This sets the assignee to you and moves the status to 'assigned'. A retry with your active lease is idempotent. " +
+      "If approval is required, register a task claim intent; after the manager approves it, pass board_intent_id. Managed workers do not need to copy approval tokens. " +
       "Do NOT claim proposed tasks — they need to be accepted first.",
     {
       task_id: z.string().describe("The task ID to claim, e.g. 'task_1'"),
@@ -50,7 +51,7 @@ export function registerTaskMutationTools(server: McpServer): void {
         await syncRoomPresence(target.effectiveRoomId, identity, {
           status: "working",
           status_text: `claimed ${task_id}`,
-        }, agentSession);
+        }, agentSession).catch((error) => console.error("[tasks] Task updated; presence update failed:", String(error)));
 
         return jsonToolResponse(
           { success: true, task: updated, agent_identity: toPublicAgentIdentity(identity) },
@@ -106,7 +107,7 @@ export function registerTaskMutationTools(server: McpServer): void {
         await syncRoomPresence(target.effectiveRoomId, identity, {
           status: deriveTaskPresenceStatus(status ?? null, rememberedPresence.status),
           status_text: status ? `${task_id} -> ${status}` : rememberedPresence.status_text,
-        }, agentSession);
+        }, agentSession).catch((error) => console.error("[tasks] Task updated; presence update failed:", String(error)));
 
         return jsonToolResponse(
           {
@@ -146,7 +147,7 @@ export function registerTaskMutationTools(server: McpServer): void {
         await syncRoomPresence(target.effectiveRoomId, identity, {
           status: "reviewing",
           status_text: `${task_id} -> in_review`,
-        }, agentSession);
+        }, agentSession).catch((error) => console.error("[tasks] Task updated; presence update failed:", String(error)));
 
         return jsonToolResponse(
           {

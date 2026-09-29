@@ -595,6 +595,210 @@ test("Cursor runtime feeds desktop room tool results back into the runner", asyn
   assert.deepEqual(published, [{ text: "Artifact published in this local room.", eventId: "msg_1" }]);
 });
 
+test("Cursor runtime corrects an inline room-tool marker before publishing public prose", async () => {
+  resetState();
+  const roomIdentifier = "local_cursor_mixed_prose";
+  const prompts: CursorTurnInput[] = [];
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      prompts.push(input);
+      if (prompts.length === 1) {
+        return {
+          sessionId: "cursor_session_mixed_prose",
+          text: 'package.json uses npm and exposes a dev script. LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":51}}}',
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.equal(input.cursorSessionId, "cursor_session_mixed_prose");
+      assert.match(input.prompt, /No room tool from that turn was executed/);
+      assert.doesNotMatch(input.prompt, /Desktop room tool result/);
+      return {
+        sessionId: "cursor_session_mixed_prose",
+        text: "package.json uses npm and exposes a dev script.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState(roomIdentifier) });
+  await runtime.start({
+    providerId: "cursor",
+    roomIdentifier,
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent({ roomIdentifier }));
+  await runtime.waitForIdle();
+
+  const { getLocalRoomArtifacts } = await import("../main/rooms/artifacts/local-store.js");
+  assert.equal(prompts.length, 2, "the malformed turn receives one formatting correction only");
+  assert.deepEqual(published, [{
+    text: "package.json uses npm and exposes a dev script.",
+    eventId: "msg_1",
+  }]);
+  assert.deepEqual((await getLocalRoomArtifacts(roomIdentifier)).artifacts, []);
+});
+
+test("Cursor runtime executes a room tool only after mixed output is corrected to one request", async () => {
+  resetState();
+  const roomIdentifier = "local_cursor_mixed_request";
+  const prompts: CursorTurnInput[] = [];
+  const validRequest = 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":52}}}';
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      prompts.push(input);
+      if (prompts.length === 1) {
+        return {
+          sessionId: "cursor_session_mixed_request",
+          text: `I found the pull request.\n${validRequest}`,
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.equal(input.cursorSessionId, "cursor_session_mixed_request");
+      if (prompts.length === 2) {
+        assert.match(input.prompt, /No room tool from that turn was executed/);
+        assert.doesNotMatch(input.prompt, /Desktop room tool result/);
+        return {
+          sessionId: "cursor_session_mixed_request",
+          text: validRequest,
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.match(input.prompt, /Desktop room tool result/);
+      assert.match(input.prompt, /github:pull_request:number:52/);
+      return {
+        sessionId: "cursor_session_mixed_request",
+        text: "I found and published the pull request.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState(roomIdentifier) });
+  await runtime.start({
+    providerId: "cursor",
+    roomIdentifier,
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent({ roomIdentifier }));
+  await runtime.waitForIdle();
+
+  const { getLocalRoomArtifacts } = await import("../main/rooms/artifacts/local-store.js");
+  const artifacts = (await getLocalRoomArtifacts(roomIdentifier)).artifacts ?? [];
+  assert.equal(prompts.length, 3);
+  assert.equal(prompts.filter(({ prompt }) => prompt.includes("Correct the response formatting now")).length, 1);
+  assert.deepEqual(published, [{ text: "I found and published the pull request.", eventId: "msg_1" }]);
+  assert.equal(artifacts.length, 1);
+  assert.equal(artifacts[0]?.artifact_number, 52);
+});
+
+test("Cursor runtime does not replay a completed room tool when correcting its continuation", async () => {
+  resetState();
+  const roomIdentifier = "local_cursor_post_tool_mixed_request";
+  const prompts: CursorTurnInput[] = [];
+  const completedRequest = 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":54}}}';
+  const malformedNextRequest = 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":55}}}';
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      prompts.push(input);
+      assert.equal(input.cursorSessionId, prompts.length === 1 ? null : "cursor_session_post_tool");
+      if (prompts.length === 1) {
+        return {
+          sessionId: "cursor_session_post_tool",
+          text: completedRequest,
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      if (prompts.length === 2) {
+        assert.match(input.prompt, /Desktop room tool result/);
+        assert.match(input.prompt, /github:pull_request:number:54/);
+        return {
+          sessionId: "cursor_session_post_tool",
+          text: `The first artifact is published. ${malformedNextRequest}`,
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.match(input.prompt, /Correct the response formatting now/);
+      assert.match(input.prompt, /No room tool from that turn was executed/);
+      assert.doesNotMatch(input.prompt, /Desktop room tool result/);
+      return {
+        sessionId: "cursor_session_post_tool",
+        text: "The first artifact is published.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState(roomIdentifier) });
+  await runtime.start({
+    providerId: "cursor",
+    roomIdentifier,
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent({ roomIdentifier }));
+  await runtime.waitForIdle();
+
+  const { getLocalRoomArtifacts } = await import("../main/rooms/artifacts/local-store.js");
+  const artifacts = (await getLocalRoomArtifacts(roomIdentifier)).artifacts ?? [];
+  assert.equal(prompts.length, 3);
+  assert.equal(prompts.filter(({ prompt }) => prompt.includes("Correct the response formatting now")).length, 1);
+  assert.deepEqual(published, [{ text: "The first artifact is published.", eventId: "msg_1" }]);
+  assert.equal(artifacts.length, 1, "the completed write is not replayed and the malformed request is not executed");
+  assert.equal(artifacts[0]?.artifact_number, 54);
+});
+
+test("Cursor runtime keeps the bridge-protocol error after one malformed correction", async () => {
+  resetState();
+  const roomIdentifier = "local_cursor_mixed_still_malformed";
+  const prompts: CursorTurnInput[] = [];
+  const request = 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":53}}}';
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      prompts.push(input);
+      return {
+        sessionId: "cursor_session_still_malformed",
+        text: `${prompts.length === 1 ? "Initial prose\n" : "Still malformed "}${request}`,
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState(roomIdentifier) });
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier,
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent({ roomIdentifier }));
+  await runtime.waitForIdle();
+
+  const { getLocalRoomArtifacts } = await import("../main/rooms/artifacts/local-store.js");
+  const stored = getStoredCursorLiveSession(started.session.id);
+  assert.equal(prompts.length, 2, "a malformed correction is not corrected recursively");
+  assert.equal(prompts[1]?.cursorSessionId, "cursor_session_still_malformed");
+  assert.deepEqual(published, []);
+  assert.equal(stored?.status, "unknown");
+  assert.equal(stored?.last_error, "Cursor emitted a malformed desktop room tool request.");
+  assert.deepEqual((await getLocalRoomArtifacts(roomIdentifier)).artifacts, []);
+});
+
 test("Cursor runtime runs multiple desktop room tools before publishing the final reply", async () => {
   resetState();
   const prompts: CursorTurnInput[] = [];

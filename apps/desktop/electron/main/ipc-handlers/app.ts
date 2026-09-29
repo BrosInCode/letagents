@@ -1,3 +1,6 @@
+import { readWorkspaceReview, readWorkspaceReviewPage, closeWorkspaceReview } from '../workspace-review.js';
+import { resolveWorkspaceFileLinks, openWorkspaceFile, openLocalSourceFile } from "../workspace-file-links.js";
+import { assertHostApprovalSender } from "../window.js";
 import electron from "electron";
 import type { IpcMain } from "electron";
 import { homedir } from "node:os";
@@ -15,6 +18,7 @@ import type {
 import { getAppAgentSettingsStatus, saveAppAgentSettings } from "../app-agent/settings.js";
 import { listDesktopAppAgentActions, runDesktopAppAgent } from "../app-agent/runner.js";
 import { getOpenModelSettingsStatus, saveOpenModelSettings } from "../agents/open-model-settings.js";
+import { openDesktopCredentialStorage } from "../credential-storage.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "../external-url.js";
 import { getGitHubPullRequestStats } from "../github-pr-stats.js";
 import {
@@ -27,7 +31,37 @@ import { desktopUpdater } from "../updates.js";
 
 const { app } = electron as typeof import("electron");
 
+const reviewSenders = new Set<number>();
+
 export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle("desktop:app:read-workspace-review", async (event, input) => {
+    assertHostApprovalSender(event);
+    const sender = event.sender, owner = sender.id;
+    if (!reviewSenders.has(owner)) {
+      reviewSenders.add(owner);
+      sender.on('render-process-gone', () => { void closeWorkspaceReview(owner); });
+      sender.on('did-start-navigation', (_, __, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) void closeWorkspaceReview(owner); });
+      sender.once('destroyed', () => { reviewSenders.delete(owner); void closeWorkspaceReview(owner); });
+    }
+    return readWorkspaceReview(owner, input);
+  });
+  targetIpcMain.handle("desktop:app:read-workspace-review-page", async (event, input) => {
+    assertHostApprovalSender(event);
+    return readWorkspaceReviewPage(event.sender.id, input);
+  });
+  targetIpcMain.handle("desktop:app:close-workspace-review", async (event, input) => {
+    assertHostApprovalSender(event);
+    if (typeof input?.requestId !== 'string') throw new Error('Invalid review.');
+    return closeWorkspaceReview(event.sender.id, input.requestId);
+  });
+  targetIpcMain.handle("desktop:app:resolve-workspace-files", async (event, input) => {
+    assertHostApprovalSender(event);
+    return resolveWorkspaceFileLinks(input);
+  });
+  targetIpcMain.handle("desktop:app:open-workspace-file", async (event, input) => {
+    assertHostApprovalSender(event);
+    return openWorkspaceFile(input, openLocalSourceFile, openExternalWebUrl);
+  });
   targetIpcMain.handle(
     "desktop:app:get-info",
     async (): Promise<DesktopAppInfo> => ({
@@ -76,6 +110,10 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
     async (_event, url: string): Promise<void> => {
       await openExternalWebUrl(url);
     },
+  );
+  targetIpcMain.handle(
+    "desktop:app:open-credential-storage",
+    async (): Promise<void> => openDesktopCredentialStorage(),
   );
   targetIpcMain.handle(
     "desktop:app:get-github-pull-request-stats",

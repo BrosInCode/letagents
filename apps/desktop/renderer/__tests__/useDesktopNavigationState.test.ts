@@ -459,7 +459,7 @@ describe("useDesktopNavigationState", () => {
       const accountRooms = ref<DesktopAccountRoomEntry[]>([
         accountRoom("github.com/BrosInCode/letagents", "sky-lake", {
           focusRooms: [{
-            roomIdentifier: "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9naXQtcm9vbXM",
+            roomIdentifier: "focus_201",
             displayName: "Branch: feature/git-rooms",
             name: "Branch: feature/git-rooms",
             kind: "focus",
@@ -496,11 +496,69 @@ describe("useDesktopNavigationState", () => {
       });
 
       const focusRoom = state.projectEntries.value
-        .flatMap((project) => project.focusRooms)
-        .find((room) => room.roomIdentifier?.startsWith("git-room:"));
+        .flatMap((project) => project.branchRooms)
+        .find((room) => room.roomIdentifier === "focus_201");
       assert.equal(focusRoom?.sectionLabel, "Git Room");
       assert.equal(focusRoom?.meta, "Branch · feature/git-rooms");
       assert.equal(focusRoom?.headline, "BrosInCode/letagents");
+    });
+  });
+
+  it("deduplicates the current Git focus room against the nested account focus row", () => {
+    withLocalStorage(() => {
+      const defaultGitRoom = gitRoom({ refType: "default_branch", refName: "main", isDefault: true });
+      const branchGitRoom = gitRoom({ refName: "feature/canonical-sidebar" });
+      const branchRoomIdentifier = "focus_207";
+      const nestedFocusRoom: DesktopAccountRoomEntry["focusRooms"][number] = {
+        roomIdentifier: branchRoomIdentifier,
+        displayName: "Branch: feature/canonical-sidebar",
+        name: "Branch: feature/canonical-sidebar",
+        kind: "focus",
+        parentRoomId: "github.com/BrosInCode/letagents",
+        focusKey: "git:branch:ZmVhdHVyZS9jYW5vbmljYWwtc2lkZWJhcg",
+        sourceTaskId: null,
+        focusStatus: "active",
+        role: "participant",
+        source: "join",
+        firstOpenedAt: null,
+        lastOpenedAt: null,
+        latestMessageId: null,
+        latestMessageAt: null,
+        gitRoom: branchGitRoom,
+      };
+      const state = useDesktopNavigationState({
+        accountRooms: ref([accountRoom("github.com/BrosInCode/letagents", "sky-lake", {
+          gitRoom: defaultGitRoom,
+          focusRooms: [nestedFocusRoom],
+        })]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref(roomSnapshot(branchRoomIdentifier, {
+          displayName: "feature/canonical-sidebar",
+          gitRoom: branchGitRoom,
+        })),
+        selectedRootRoomIdentifier: ref(branchRoomIdentifier),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(null),
+      });
+
+      const group = state.projectEntries.value.find((project) =>
+        project.parent.gitRoom?.repository.fullName === "BrosInCode/letagents"
+      );
+      assert.deepEqual(group?.branchRooms.map((room) => room.roomIdentifier), [branchRoomIdentifier]);
+      assert.equal(group?.focusRooms.length, 0);
+      assert.equal(group?.branchRooms[0]?.kind, "focus");
+      assert.equal(group?.branchRooms[0]?.parentRoomIdentifier, "github.com/BrosInCode/letagents");
+      assert.equal(group?.branchRooms[0]?.focusKey, nestedFocusRoom.focusKey);
+      assert.equal(group?.branchRooms[0]?.currentWorkspace, true);
     });
   });
 
@@ -515,7 +573,7 @@ describe("useDesktopNavigationState", () => {
         refName: "feature/sidebar-groups",
       });
       const branchRoomIdentifier =
-        "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9zaWRlYmFyLWdyb3Vwcw";
+        "focus_202";
       const accountRooms = ref<DesktopAccountRoomEntry[]>([
         accountRoom("github.com/BrosInCode/letagents", "sky-lake", {
           gitRoom: defaultGitRoom,
@@ -572,7 +630,7 @@ describe("useDesktopNavigationState", () => {
         refName: "feature/local-only",
       });
       const branchRoomIdentifier =
-        "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9sb2NhbC1vbmx5";
+        "focus_203";
       const state = useDesktopNavigationState({
         accountRooms: ref<DesktopAccountRoomEntry[]>([
           accountRoom("github.com/BrosInCode/letagents", "sky-lake", {
@@ -622,7 +680,7 @@ describe("useDesktopNavigationState", () => {
         refName: "staging",
       });
       const branchRoomIdentifier =
-        "git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw";
+        "focus_204";
       const state = useDesktopNavigationState({
         accountRooms: ref<DesktopAccountRoomEntry[]>([
           accountRoom("github.com/BrosInCode/letagents", "sky-lake", {
@@ -767,7 +825,7 @@ describe("useDesktopNavigationState", () => {
       const branchGitRoom = gitRoom({ refName: "feature/sidebar-only" });
       const defaultRoomIdentifier = "github.com/BrosInCode/letagents";
       const branchRoomIdentifier =
-        "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9zaWRlYmFyLW9ubHk";
+        "focus_205";
       const state = useDesktopNavigationState({
         accountRooms: ref<DesktopAccountRoomEntry[]>([
           accountRoom(branchRoomIdentifier, "feature/sidebar-only", {
@@ -807,7 +865,7 @@ describe("useDesktopNavigationState", () => {
     withLocalStorage(() => {
       const branchGitRoom = gitRoom({ refName: "feature/current-branch" });
       const branchRoomIdentifier =
-        "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9jdXJyZW50LWJyYW5jaA";
+        "focus_206";
       const state = useDesktopNavigationState({
         accountRooms: ref<DesktopAccountRoomEntry[]>([
           accountRoom(branchRoomIdentifier, "feature/current-branch", {

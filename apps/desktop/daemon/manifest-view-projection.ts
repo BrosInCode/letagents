@@ -1,14 +1,15 @@
-import type { SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
+import type { SupervisedInboxReceiptProjection } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntryView } from "./types.js";
 
 export function projectDeliveryReceipts(
-  receipts: readonly SupervisedInboxReceiptWithTimeline[],
+  receipts: readonly SupervisedInboxReceiptProjection[],
   restoringInboxItemId: string | null,
 ): DaemonManifestEntryView["delivery_receipts"] {
   const sourceMessageByInboxId = new Map(receipts.map((receipt) => [receipt.inbox_item_id, receipt.source_message_id]));
   return receipts.map((receipt) => ({
     inbox_item_id: receipt.inbox_item_id,
     source_message_id: receipt.source_message_id,
+    fifo_sequence: receipt.fifo_sequence,
     reply_client_message_id: receipt.reply_client_message_id,
     canonical_message_id: receipt.canonical_message_id,
     state: receipt.inbox_item_id === restoringInboxItemId ? "restoring_conversation" : receipt.receipt_state,
@@ -27,7 +28,7 @@ export function projectDeliveryReceipts(
 }
 
 export function projectDeliveryTurn(
-  head: SupervisedInboxReceiptWithTimeline | null,
+  head: SupervisedInboxReceiptProjection | null,
   activeTurn: { inboxItemId: string; sourceMessageId: string; phase: "dispatching" | "responding" | "publishing" } | null,
 ): NonNullable<DaemonManifestEntryView["room_agent_state"]>["turn"] {
   if (!head) return { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null };
@@ -47,6 +48,8 @@ export function projectDeliveryTurn(
     inbox_item_id: head.inbox_item_id,
     source_message_id: head.source_message_id,
     provider_turn_id: head.provider_turn_id,
-    detail: head.last_error,
+    // The receipt retains prior failures for diagnostics; the active delivery
+    // owns current progress and has not reported a failure of its own.
+    detail: null,
   };
 }

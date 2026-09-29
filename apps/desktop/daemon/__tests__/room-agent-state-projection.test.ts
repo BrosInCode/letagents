@@ -1,0 +1,509 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mapEntry } from "../../electron/main/supervisor-daemon.js";
+import { agentInspectorOverallState, projectAgentInspector } from "../../renderer/src/domain/agent-inspector.js";
+
+import {
+  bindingMatchesRoomAgentGeneration,
+  hasExactRoomAgentDeliveryOwner,
+  projectRoomAgentManifestEntry,
+  type RoomAgentStateProjectionInput,
+} from "../room-agent-state-projection.js";
+import type { SupervisedInboxReceiptWithTimeline } from "../supervised-agent-inbox-store.js";
+import type { DaemonManifestEntry } from "../types.js";
+import type { WorkerSessionBinding } from "../worker-binding-store.js";
+
+const entry: DaemonManifestEntry = {
+  id: "agent_1",
+  room_id: "room_1",
+  display_name: "Agent One",
+  provider: "codex",
+  model: null,
+  charter: "Handle room work.",
+  desired_state: "running",
+  observed_state: "working",
+  condition: "none",
+  permission_profile_id: null,
+  delivery_mode: "daemon_inbox",
+  created_by: "user_1",
+  created_at: "2026-08-26T00:00:00.000Z",
+  work_attempt_id: "attempt_1",
+  provider_ref: {
+    work_attempt_id: "attempt_1",
+    provider_continuation_id: "continuation_1",
+    provider_connection: null,
+    execution_generation_id: "generation_1",
+  },
+  workplace_liveness: {
+    state: "reachable",
+    observed_at: "2026-08-26T00:00:00.000Z",
+    detail: null,
+  },
+  native_liveness: {
+    state: "active",
+    observed_at: "2026-08-26T00:01:00.000Z",
+    detail: "Provider activity observed.",
+  },
+};
+
+const binding: WorkerSessionBinding = {
+  entry_id: entry.id,
+  room_id: entry.room_id,
+  work_attempt_id: "attempt_1",
+  execution_generation_id: "generation_1",
+  agent_session_id: "session_1",
+  credential_ref: "credential_ref_1",
+  api_url: "https://letagents.chat",
+  room_cursor: "message_0",
+  last_sequence: 4,
+  last_observed_at_ms: Date.parse("2026-08-26T00:01:30.000Z"),
+  updated_at: "2026-08-26T00:01:30.000Z",
+};
+
+function receipt(
+  overrides: Partial<SupervisedInboxReceiptWithTimeline> = {},
+): SupervisedInboxReceiptWithTimeline {
+  return {
+    inbox_item_id: "inbox_1",
+    agent_id: entry.id,
+    room_id: entry.room_id,
+    source_message_id: "message_1",
+    source_message: { id: "message_1", text: "Please investigate." },
+    activation: {},
+    fifo_sequence: 1,
+    state: "pending",
+    receipt_state: "pending",
+    attempt_count: 0,
+    action_id: "action_1",
+    reply_client_message_id: "reply_1",
+    provider_turn_id: null,
+    outcome: null,
+    last_error: null,
+    failure_code: null,
+    blocked_by_inbox_item_id: null,
+    next_attempt_at_ms: null,
+    terminal_reason: null,
+    created_at: "2026-08-26T00:01:00.000Z",
+    updated_at: "2026-08-26T00:01:00.000Z",
+    acknowledged_at: null,
+    timeline: [],
+    canonical_message_id: null,
+    ...overrides,
+  };
+}
+
+function facts(overrides: Partial<RoomAgentStateProjectionInput> = {}): RoomAgentStateProjectionInput {
+  return {
+    entry,
+    binding,
+    credentialAvailable: true,
+    currentHostGrantAvailable: true,
+    liveHandle: {
+      workAttemptId: "attempt_1",
+      providerContinuationId: "continuation_1",
+    },
+    ingressHealth: {
+      room_id: "room_1",
+      state: "observing",
+      detail: null,
+      execution_generation_id: "generation_1",
+    },
+    continuationRepair: null,
+    receipts: [receipt()],
+    activeTurn: {
+      inboxItemId: "inbox_1",
+      sourceMessageId: "message_1",
+      phase: "responding",
+    },
+    nowMs: Date.parse("2026-08-26T00:02:00.000Z"),
+    workplaceLivenessStaleAfterMs: 210_000,
+    nativeLivenessStaleAfterMs: 90_000,
+    ...overrides,
+  };
+}
+
+test("a failed delivery receipt is terminal without marking its healthy runtime failed", () => {
+  const projected = projectRoomAgentManifestEntry(facts({ receipts: [receipt({
+    state: "acknowledged_failed", receipt_state: "acknowledged_failed", outcome: JSON.stringify({ kind: "failed", text: null, evidence: "stream" }),
+  })] }));
+  assert.equal(projected.delivery_receipts?.[0]?.state, "acknowledged_failed");
+  assert.equal(projected.room_agent_state?.inbox.state, "empty");
+  assert.equal(projected.room_agent_state?.inbox.pending_count, 0);
+  assert.equal(projected.room_agent_state?.turn.state, "idle");
+  assert.equal(projected.room_agent_state?.connection.state, "connected");
+  assert.equal(projected.observed_state, "working");
+});
+
+test("projects exact room authority without exposing credentials", () => {
+  const input = facts();
+  assert.equal(bindingMatchesRoomAgentGeneration(input.entry, input.binding), true);
+  assert.equal(hasExactRoomAgentDeliveryOwner(input), true);
+
+  const projected = projectRoomAgentManifestEntry(input);
+
+  assert.deepEqual(projected.worker_binding, {
+    agent_session_id: "session_1",
+    work_attempt_id: "attempt_1",
+    execution_generation_id: "generation_1",
+    updated_at: "2026-08-26T00:01:30.000Z",
+  });
+  assert.deepEqual(projected.workplace_liveness, {
+    state: "reachable",
+    observed_at: "2026-08-26T00:01:30.000Z",
+    detail: "supervised worker session bound",
+  });
+  assert.deepEqual(projected.room_agent_state, {
+    connection: {
+      state: "connected",
+      observed_at: "2026-08-26T00:01:30.000Z",
+      detail: "Live provider and exact worker binding are available.",
+    },
+    ingress: {
+      state: "observing",
+      observed_at: "2026-08-26T00:01:30.000Z",
+      detail: null,
+    },
+    inbox: {
+      state: "queued",
+      pending_count: 1,
+      blocked_by_message_id: null,
+      detail: "Room delivery is queued.",
+    },
+    turn: {
+      state: "responding",
+      inbox_item_id: "inbox_1",
+      source_message_id: "message_1",
+      provider_turn_id: null,
+      detail: null,
+    },
+    task: { state: "none", task_id: null, title: null },
+  });
+  assert.equal(projected.delivery_receipts?.[0]?.state, "pending");
+  assert.equal(projected.delivery_receipts?.[0]?.fifo_sequence, 1);
+  assert.equal("credential_ref" in projected.worker_binding!, false);
+});
+
+test("typed admission gates the room view without rewriting lifecycle or claiming recovery", () => {
+  const recovering = { ...entry, observed_state: "recovering" as const };
+  const before = structuredClone(recovering);
+  for (const lifecycleAdmission of ["pending", "unavailable"] as const) {
+    const input = facts({ entry: recovering, lifecycleAdmission });
+    assert.equal(hasExactRoomAgentDeliveryOwner(input), false,
+      "a live handle and worker credentials cannot bypass typed admission");
+    const projected = projectRoomAgentManifestEntry(input);
+    assert.equal(projected.room_agent_state?.connection.state,
+      lifecycleAdmission === "pending" ? "reconnecting" : "disconnected");
+    assert.equal(projected.room_agent_state?.inbox.state, lifecycleAdmission === "pending" ? "queued" : "blocked");
+    assert.equal(projected.room_agent_state?.ingress.state, lifecycleAdmission === "pending" ? "starting" : "blocked",
+      "persisted observation health cannot bypass the same admission gate");
+    assert.match(projected.room_agent_state?.inbox.detail ?? "", /readiness evidence/i);
+    assert.notEqual(projected.room_agent_state?.turn.state, "responding",
+      "unadmitted physical activity is not an operational turn");
+    assert.equal(projected.condition, lifecycleAdmission === "pending" ? "none" : "coordination_blocked");
+    assert.equal(agentInspectorOverallState(mapEntry(projected)),
+      lifecycleAdmission === "pending" ? "reconnecting" : "needs_attention",
+      "ordinary asynchronous admission must not flash Needs attention in the product");
+    assert.equal(projected.observed_state, "recovering", "absence of evidence is not native process failure");
+    const inspector = projectAgentInspector(mapEntry({ ...projected, runtime_generation_id: "exact-runtime" }), { roomId: entry.room_id })!;
+    assert.equal(inspector.actions.find(action => action.kind === "recover")?.available, false,
+      "a delivery admission blocker cannot authorize missing-runtime recovery");
+    assert.equal(inspector.actions.find(action => action.kind === "recovery_options")?.available, lifecycleAdmission === "unavailable",
+      "only blocked admission needs a choice; ordinary pending promotion remains progress");
+    assert.deepEqual(recovering, before, "projection never writes lifecycle or clears historical uncertainty");
+  }
+  const ready = projectRoomAgentManifestEntry(facts({ entry: recovering, lifecycleAdmission: "ready" }));
+  assert.equal(ready.room_agent_state?.connection.state, "connected");
+  assert.equal(ready.room_agent_state?.inbox.state, "queued");
+  assert.equal(ready.condition, "none", "only actual admission removes the derived blocker");
+  assert.equal(ready.room_agent_state?.ingress.state, "observing");
+  const readyInspector = projectAgentInspector(mapEntry({ ...ready, runtime_generation_id: "exact-runtime" }), { roomId: entry.room_id })!;
+  assert.ok(readyInspector.actions.filter(action => ["recover", "recovery_options"].includes(action.kind)).every(action => !action.available));
+  const noBindingYet = projectRoomAgentManifestEntry(facts({ entry: recovering, lifecycleAdmission: "pending",
+    binding: null, credentialAvailable: false, receipts: [],
+  }));
+  assert.equal(agentInspectorOverallState(mapEntry(noBindingYet)), "reconnecting",
+    "pending admission before binding is progress, not a credential intervention");
+  assert.equal(noBindingYet.room_agent_state?.inbox.state, "empty");
+
+  const deliveryBlocked = projectRoomAgentManifestEntry(facts({ entry: recovering, lifecycleAdmission: "unavailable",
+    receipts: [receipt({ state: "blocked", receipt_state: "blocked", last_error: "Existing uncertain effect." })],
+  }));
+  assert.equal(deliveryBlocked.last_error, "Existing uncertain effect.");
+  assert.equal(deliveryBlocked.room_agent_state?.inbox.blocked_by_message_id, "message_1");
+  assert.equal(deliveryBlocked.room_agent_state?.inbox.detail, "Existing uncertain effect.");
+  assert.equal(deliveryBlocked.delivery_receipts?.[0]?.error, "Existing uncertain effect.");
+
+  const authBlocked = projectRoomAgentManifestEntry(facts({
+    entry: { ...recovering, condition: "auth_blocked", last_error: "Sign in required." },
+    lifecycleAdmission: "unavailable",
+  }));
+  assert.equal(authBlocked.condition, "auth_blocked");
+  assert.equal(authBlocked.last_error, "Sign in required.");
+  for (const desired_state of ["paused", "stopped"] as const) {
+    const inactive = projectRoomAgentManifestEntry(facts({
+      entry: { ...recovering, desired_state }, lifecycleAdmission: "unavailable",
+    }));
+    assert.equal(inactive.condition, "none", "an inactive agent does not inherit a live admission blocker");
+  }
+});
+
+test("rejects a stale binding and derives stale persisted liveness", () => {
+  const staleBinding = { ...binding, execution_generation_id: "generation_old" };
+  const input = facts({
+    binding: staleBinding,
+    nowMs: Date.parse("2026-08-26T00:10:00.001Z"),
+  });
+
+  assert.equal(bindingMatchesRoomAgentGeneration(input.entry, input.binding), false);
+  assert.equal(hasExactRoomAgentDeliveryOwner(input), false);
+
+  const projected = projectRoomAgentManifestEntry(input);
+  assert.equal(projected.worker_binding, null);
+  assert.equal(projected.workplace_liveness?.state, "stale");
+  assert.equal(projected.native_liveness?.state, "stale");
+  assert.deepEqual(projected.room_agent_state?.connection, {
+    state: "disconnected",
+    observed_at: "2026-08-26T00:01:00.000Z",
+    detail: "The current worker binding or credential is unavailable.",
+  });
+  assert.deepEqual(projected.room_agent_state?.ingress, {
+    state: "stopped",
+    observed_at: "2026-08-26T00:01:00.000Z",
+    detail: "Room observation is stopped because its exact binding or credential is unavailable.",
+  });
+  assert.equal(projected.room_agent_state?.inbox.detail, "A current worker binding is required before delivery can start.");
+  assert.equal(projected.room_agent_state?.turn.state, "idle");
+});
+
+test("projects credential handoff while a starting provider reconnects", () => {
+  const projected = projectRoomAgentManifestEntry(facts({
+    entry: { ...entry, observed_state: "starting" },
+    credentialAvailable: false,
+    currentHostGrantAvailable: false,
+  }));
+
+  assert.deepEqual(projected.room_agent_state?.connection, {
+    state: "reconnecting",
+    observed_at: "2026-08-26T00:00:00.000Z",
+    detail: "Waiting for desktop credential handoff.",
+  });
+  assert.deepEqual(projected.room_agent_state?.inbox, {
+    state: "waiting_for_desktop_credentials",
+    pending_count: 1,
+    blocked_by_message_id: null,
+    detail: "Waiting for desktop credential handoff.",
+  });
+});
+
+test("an active retry presents its current phase while preserving the previous failure in receipts", () => {
+  const previousError = "Codex could not read this conversation’s room readiness. No model turn was started. Retry the message.";
+  const retry = receipt({ state: "dispatching", receipt_state: "dispatching", attempt_count: 2, last_error: previousError });
+  for (const phase of ["dispatching", "responding", "publishing"] as const) {
+    const projected = projectRoomAgentManifestEntry(facts({
+      receipts: [retry],
+      activeTurn: { inboxItemId: retry.inbox_item_id, sourceMessageId: retry.source_message_id, phase },
+    }));
+    assert.equal(projected.room_agent_state?.turn.state, phase);
+    assert.equal(projected.room_agent_state?.turn.detail, null, "an old failure is not current activity");
+    assert.equal(projected.delivery_receipts?.[0]?.error, previousError);
+    assert.equal(retry.last_error, previousError, "projection never resets the retained receipt");
+  }
+  for (const state of ["blocked", "result_recovery"] as const) {
+    const projected = projectRoomAgentManifestEntry(facts({
+      receipts: [{ ...retry, state, receipt_state: state }],
+      activeTurn: null,
+    }));
+    assert.equal(projected.room_agent_state?.turn.state, state === "blocked" ? "failed" : "retrying");
+    assert.equal(projected.room_agent_state?.turn.detail, previousError, "unresolved failure remains visible without an active delivery");
+  }
+});
+
+test("uncertain legacy cutover overrides inbox and turn projection", () => {
+  const projected = projectRoomAgentManifestEntry(facts({
+    entry: {
+      ...entry,
+      delivery_mode: "mcp_polling",
+      delivery_cutover: {
+        work_attempt_id: "attempt_1",
+        execution_generation_id: "generation_1",
+        provider_continuation_id: "continuation_1",
+        provider_turn_id: "turn_uncertain",
+        phase: "uncertain",
+        error: "Active turn discovery timed out.",
+        updated_at: "2026-08-26T00:01:45.000Z",
+      },
+    },
+  }));
+
+  assert.deepEqual(projected.room_agent_state?.inbox, {
+    state: "blocked",
+    pending_count: 1,
+    blocked_by_message_id: null,
+    detail: "Daemon inbox cutover needs attention; legacy polling remains fenced. Active turn discovery timed out.",
+  });
+  assert.deepEqual(projected.room_agent_state?.turn, {
+    state: "failed",
+    inbox_item_id: null,
+    source_message_id: null,
+    provider_turn_id: "turn_uncertain",
+    detail: "Active turn discovery timed out.",
+  });
+});
+
+test("active continuation repair marks its receipt and prevents a model turn", () => {
+  const blocked = receipt({
+    state: "blocked",
+    receipt_state: "blocked",
+    provider_turn_id: "turn_failed",
+    last_error: "Continuation is missing.",
+  });
+  const projected = projectRoomAgentManifestEntry(facts({
+    receipts: [blocked],
+    continuationRepair: { inbox_item_id: "inbox_1", phase: "probing" },
+  }));
+
+  assert.deepEqual(projected.room_agent_state?.inbox, {
+    state: "restoring_conversation",
+    pending_count: 1,
+    blocked_by_message_id: "message_1",
+    detail: "Restoring the blocked message before any model turn starts.",
+  });
+  assert.deepEqual(projected.room_agent_state?.turn, {
+    state: "idle",
+    inbox_item_id: "inbox_1",
+    source_message_id: "message_1",
+    provider_turn_id: null,
+    detail: "Conversation restoration is happening before any model turn starts.",
+  });
+  assert.equal(projected.delivery_receipts?.[0]?.state, "restoring_conversation");
+});
+
+test("inbox projection preserves cutover, repair, credential, blocked, and queued precedence", () => {
+  const blocked = receipt({
+    state: "blocked",
+    receipt_state: "blocked",
+    last_error: "Delivery is blocked.",
+  });
+  const cutoverEntry: DaemonManifestEntry = {
+    ...entry,
+    delivery_mode: "mcp_polling",
+    delivery_cutover: {
+      work_attempt_id: "attempt_1",
+      execution_generation_id: "generation_1",
+      provider_continuation_id: "continuation_1",
+      provider_turn_id: "turn_uncertain",
+      phase: "uncertain",
+      error: "Cutover is uncertain.",
+      updated_at: "2026-08-26T00:01:45.000Z",
+    },
+  };
+
+  const cutover = projectRoomAgentManifestEntry(facts({
+    entry: cutoverEntry,
+    credentialAvailable: false,
+    receipts: [blocked],
+    continuationRepair: { inbox_item_id: "inbox_1", phase: "probing" },
+    activeTurn: null,
+  }));
+  assert.equal(cutover.room_agent_state?.inbox.state, "blocked", "cutover wins over restoration and credentials");
+  assert.equal(cutover.room_agent_state?.turn.state, "failed");
+
+  const restoring = projectRoomAgentManifestEntry(facts({
+    credentialAvailable: false,
+    receipts: [blocked],
+    continuationRepair: { inbox_item_id: "inbox_1", phase: "probing" },
+    activeTurn: null,
+  }));
+  assert.equal(restoring.room_agent_state?.inbox.state, "restoring_conversation", "restoration wins over credentials and blockage");
+
+  const credentials = projectRoomAgentManifestEntry(facts({
+    credentialAvailable: false,
+    receipts: [blocked],
+    activeTurn: null,
+  }));
+  assert.equal(credentials.room_agent_state?.inbox.state, "waiting_for_desktop_credentials", "missing credentials win over blockage");
+
+  const blockedProjection = projectRoomAgentManifestEntry(facts({
+    receipts: [blocked],
+    activeTurn: null,
+  }));
+  assert.equal(blockedProjection.room_agent_state?.inbox.state, "blocked", "blockage wins over a nonfinal queue");
+
+  const queued = projectRoomAgentManifestEntry(facts({ activeTurn: null }));
+  assert.equal(queued.room_agent_state?.inbox.state, "queued");
+});
+
+test("an idle Cursor replacement cannot hide a failed FIFO head", () => {
+  const cursorEntry = { ...entry, provider: "cursor", observed_state: "idle" as const, last_error: null };
+  const failed = receipt({ state: "blocked", receipt_state: "blocked", attempt_count: 1,
+    provider_turn_id: "crashed-turn", last_error: "Cursor's live MCP connector ended before the turn became terminal." });
+  const later = receipt({ inbox_item_id: "inbox_2", source_message_id: "message_2", fifo_sequence: 2 });
+  const projected = projectRoomAgentManifestEntry(facts({ entry: cursorEntry, receipts: [failed, later], activeTurn: null }));
+  assert.equal(projected.condition, "coordination_blocked");
+  assert.equal(projected.last_error, failed.last_error);
+  assert.equal(projected.room_agent_state?.inbox.state, "blocked");
+  assert.equal(projected.room_agent_state?.turn.state, "failed");
+  assert.equal(later.attempt_count, 0, "projection never replays or skips delivery");
+
+  const recovered = projectRoomAgentManifestEntry(facts({ entry: cursorEntry,
+    receipts: [{ ...failed, state: "cancelled_by_user", receipt_state: "cancelled_by_user" }, later], activeTurn: null }));
+  assert.equal(recovered.condition, "none", "Skip clears the derived error immediately");
+  assert.equal(recovered.last_error, null);
+  assert.equal(projectRoomAgentManifestEntry(facts({ entry: { ...cursorEntry, condition: "quarantined" },
+    receipts: [failed], activeTurn: null })).condition, "quarantined");
+});
+
+test("exact stopped ingress authority clears its observed timestamp", () => {
+  const projected = projectRoomAgentManifestEntry(facts({
+    ingressHealth: {
+      room_id: "room_1",
+      state: "stopped",
+      detail: "Observation was explicitly stopped.",
+      execution_generation_id: "generation_1",
+    },
+  }));
+
+  assert.deepEqual(projected.room_agent_state?.ingress, {
+    state: "stopped",
+    observed_at: null,
+    detail: "Observation was explicitly stopped.",
+  });
+});
+
+test("liveness becomes stale only after, not at, its exact threshold", () => {
+  const threshold = projectRoomAgentManifestEntry(facts({
+    nowMs: Date.parse("2026-08-26T00:02:30.000Z"),
+    workplaceLivenessStaleAfterMs: 60_000,
+    nativeLivenessStaleAfterMs: 90_000,
+  }));
+  assert.equal(threshold.workplace_liveness?.state, "reachable");
+  assert.equal(threshold.native_liveness?.state, "active");
+
+  const beyond = projectRoomAgentManifestEntry(facts({
+    nowMs: Date.parse("2026-08-26T00:02:30.001Z"),
+    workplaceLivenessStaleAfterMs: 60_000,
+    nativeLivenessStaleAfterMs: 90_000,
+  }));
+  assert.equal(beyond.workplace_liveness?.state, "stale");
+  assert.equal(beyond.native_liveness?.state, "stale");
+});
+
+test("committed and failed continuation repairs are ignored", () => {
+  const blocked = receipt({
+    state: "blocked",
+    receipt_state: "blocked",
+    provider_turn_id: "turn_failed",
+    last_error: "Delivery remains blocked.",
+  });
+
+  for (const phase of ["committed", "failed"] as const) {
+    const projected = projectRoomAgentManifestEntry(facts({
+      receipts: [blocked],
+      continuationRepair: { inbox_item_id: "inbox_1", phase },
+      activeTurn: null,
+    }));
+    assert.equal(projected.room_agent_state?.inbox.state, "blocked", `${phase} repair does not override the inbox`);
+    assert.equal(projected.room_agent_state?.turn.state, "failed", `${phase} repair does not override the turn`);
+    assert.equal(projected.delivery_receipts?.[0]?.state, "blocked", `${phase} repair does not relabel the receipt`);
+  }
+});

@@ -27,7 +27,7 @@
     0 14px 34px rgba(0, 0, 0, 0.28);
 }
 
-.desktop-room-shell[data-liquid-glass="false"] .desktop-composer {
+.desktop-room-shell .desktop-composer {
   background: var(--bg-card);
 }
 

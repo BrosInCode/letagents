@@ -29,6 +29,8 @@ export async function createBoardIntent(input: {
   proposer_actor_key?: string | null;
   proposer_actor_instance_id?: string | null;
   proposer_agent_session_id?: string | null;
+  /** Internal only; supplied by authenticated registration, never copied from the request body. */
+  proposer_worker_auth_kind?: "bearer" | "session_token" | null;
   expires_at?: string | null;
   now?: Date;
 }): Promise<BoardIntent> {
@@ -62,7 +64,8 @@ export async function createBoardIntent(input: {
 
   const [created] = (await db
     .insert(board_intents)
-    .values(row)
+    .values({ ...row, proposer_worker_auth_kind: input.proposer_worker_auth_kind ?? null })
+    // A legacy dedupe collision must never acquire trusted provenance.
     .onConflictDoNothing()
     .returning()) as BoardIntentRow[];
 

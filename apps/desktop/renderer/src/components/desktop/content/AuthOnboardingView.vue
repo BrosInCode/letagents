@@ -53,7 +53,7 @@
 
           <template v-else-if="cardState === 'code' && pendingAuth">
             <div class="auth-code-block" data-testid="auth-pending-device-flow">
-              <small>Enter this code on GitHub</small>
+              <small>Check this code in your browser</small>
               <strong data-testid="auth-user-code">{{ pendingAuth.userCode }}</strong>
               <small>Expires {{ pendingExpiryLabel }}</small>
             </div>
@@ -65,7 +65,7 @@
                 data-testid="auth-open-github-button"
                 @click="$emit('open-verification', pendingAuth.verificationUri)"
               >
-                Open GitHub
+                Open browser
               </button>
               <button
                 class="ghost-button"

@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   attachAgentMessageActivations,
+  createGlobalAgentAddressResolver,
   decideAgentMessageActivation,
+  humanConversationFallback,
 } from "../../shared/activation-routing.js";
 
 const worker = {
@@ -145,6 +147,74 @@ test("activation routing activates explicit mentions and silences other mentions
       addressed: false,
     },
   );
+});
+
+test("global mention routing lets one reachable identity break a stale friendly-name tie", () => {
+  const staleGardenPoint = {
+    ...worker,
+    actor_label: "GardenPoint | EmmyMay's agent | Cursor",
+    agent_key: "EmmyMay/old-gardenpoint",
+    agent_instance_id: "agent_instance_old",
+    agent_session_id: "agent_session_old",
+    display_name: "GardenPoint",
+  };
+  const currentGardenPoint = {
+    ...staleGardenPoint,
+    agent_key: "EmmyMay/gardenpoint",
+    agent_instance_id: "agent_instance_current",
+    agent_session_id: "agent_session_current",
+  };
+  const message = { text: "@GardenPoint why did you have issues reading a file?", reply_to: null };
+
+  const withoutReachability = createGlobalAgentAddressResolver([
+    staleGardenPoint,
+    currentGardenPoint,
+  ])(message);
+  assert.deepEqual([...withoutReachability.explicitMentionKeys], []);
+  assert.deepEqual(withoutReachability.ambiguousMentions, [{
+    handle: "GardenPoint",
+    agentKeys: [currentGardenPoint.agent_key, staleGardenPoint.agent_key].sort(),
+  }]);
+
+  const oneReachable = createGlobalAgentAddressResolver([
+    staleGardenPoint,
+    currentGardenPoint,
+  ], {
+    preferredExplicitMentionAgentKeys: new Set([currentGardenPoint.agent_key]),
+    explicitMentionOwnerScopeByAgentKey: new Map([
+      [staleGardenPoint.agent_key, "account_emmy"],
+      [currentGardenPoint.agent_key, "account_emmy"],
+    ]),
+  })(message);
+  assert.deepEqual([...oneReachable.explicitMentionKeys], [currentGardenPoint.agent_key]);
+  assert.deepEqual(oneReachable.ambiguousMentions, [], "a resolved tie is not reported");
+
+  const bothReachable = createGlobalAgentAddressResolver([
+    staleGardenPoint,
+    currentGardenPoint,
+  ], {
+    preferredExplicitMentionAgentKeys: new Set([
+      staleGardenPoint.agent_key,
+      currentGardenPoint.agent_key,
+    ]),
+    explicitMentionOwnerScopeByAgentKey: new Map([
+      [staleGardenPoint.agent_key, "account_emmy"],
+      [currentGardenPoint.agent_key, "account_emmy"],
+    ]),
+  })(message);
+  assert.deepEqual([...bothReachable.explicitMentionKeys], []);
+
+  const differentOwners = createGlobalAgentAddressResolver([
+    staleGardenPoint,
+    currentGardenPoint,
+  ], {
+    preferredExplicitMentionAgentKeys: new Set([currentGardenPoint.agent_key]),
+    explicitMentionOwnerScopeByAgentKey: new Map([
+      [staleGardenPoint.agent_key, "account_old"],
+      [currentGardenPoint.agent_key, "account_emmy"],
+    ]),
+  })(message);
+  assert.deepEqual([...differentOwners.explicitMentionKeys], []);
 });
 
 test("activation routing activates full agent key mentions", () => {
@@ -787,4 +857,24 @@ test("routing aliases use version-independent ASCII folding and exact non-ASCII"
   assert.equal(participantDecision("Ⓐgent", "ⓐgent").reason, "unaddressed");
   assert.equal(participantDecision("İpek", "ipek").reason, "unaddressed");
   assert.equal(participantDecision("ΟΣ", "ΟΣ").reason, "thread_participant");
+});
+
+
+test("send-time human fallback counts distinct registered workers and honors explicit routing", () => {
+  const input = { source: "browser", publisherAccountId: "human", publisherAgentKey: null,
+    explicitlyAddressed: false, registeredAgentKeys: ["oak", "oak", "pine"] };
+  assert.deepEqual(humanConversationFallback(input), { reason: "small_room", agentKeys: ["oak", "pine"] });
+  assert.equal(humanConversationFallback({ ...input, registeredAgentKeys: [] }), null);
+  const larger = { ...input, registeredAgentKeys: ["oak", "pine", "ash"] };
+  assert.equal(humanConversationFallback(larger), null);
+  assert.deepEqual(humanConversationFallback({ ...larger, recentAgentKey: "pine" }), {
+    reason: "recent_conversation", agentKeys: ["pine"],
+  });
+  assert.equal(humanConversationFallback({ ...larger, recentAgentKey: "retired" }), null);
+  for (const source of ["agent", "github", "system", "managed_agent_failure", null]) {
+    assert.equal(humanConversationFallback({ ...input, source }), null);
+  }
+  assert.equal(humanConversationFallback({ ...input, publisherAccountId: null }), null);
+  assert.equal(humanConversationFallback({ ...input, publisherAgentKey: "oak" }), null);
+  assert.equal(humanConversationFallback({ ...input, explicitlyAddressed: true }), null);
 });

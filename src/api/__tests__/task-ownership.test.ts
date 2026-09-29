@@ -8,7 +8,49 @@ import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
   requiresTaskOwnershipGuard,
+  TASK_TITLE_MAX_LENGTH,
+  TASK_DESCRIPTION_MAX_LENGTH,
 } from "../tasks/ownership.js";
+
+test("content patches trim titles, preserve Markdown, and distinguish clearing from omission", () => {
+  const description = "# Plan\n\n- [ ] Ship\n\n```ts\nconst x = 1;\n```\n";
+  assert.deepEqual(buildTaskUpdatePatch({ body: { title: "  New title  ", description } }).updates,
+    { title: "New title", description });
+  assert.deepEqual(buildTaskUpdatePatch({ body: { description: "" } }).updates, { description: "" });
+  assert.deepEqual(buildTaskUpdatePatch({ body: { status: "accepted" } }).updates, { status: "accepted" });
+  assert.equal(buildTaskUpdatePatch({ body: { title: "x".repeat(TASK_TITLE_MAX_LENGTH),
+    description: "x".repeat(TASK_DESCRIPTION_MAX_LENGTH) } }).updates.description?.length, TASK_DESCRIPTION_MAX_LENGTH);
+});
+
+test("content patches reject blank titles, nonstrings, null and oversized values", () => {
+  for (const body of [
+    { title: "" }, { title: " \n " }, { title: null }, { title: 42 }, { title: {} },
+    { title: "x".repeat(TASK_TITLE_MAX_LENGTH + 1) },
+    { description: null }, { description: 42 }, { description: [] },
+    { description: "x".repeat(TASK_DESCRIPTION_MAX_LENGTH + 1) },
+  ]) {
+    assert.throws(() => buildTaskUpdatePatch({ body }), { name: "RequestValidationError" });
+  }
+});
+
+test("expected content matches exactly the edited fields and preserves original strings", () => {
+  const patch = buildTaskUpdatePatch({ body: { title: "  Next  ", description: "",
+    expected_content: { title: " Original ", description: "# Body\n" } } }).updates;
+  assert.deepEqual(patch, { title: "Next", description: "",
+    expected_content: { title: " Original ", description: "# Body\n" } });
+  for (const body of [
+    { title: "Next", expected_content: null }, { title: "Next", expected_content: [] },
+    { title: "Next", expected_content: "Original" }, { title: "Next", expected_content: {} },
+    { title: "Next", expected_content: { title: null } },
+    { title: "Next", expected_content: { description: "Body" } },
+    { title: "Next", description: "Body", expected_content: { title: "Original" } },
+    { title: "Next", expected_content: { title: "Original", description: "Body" } },
+    { title: "Next", expected_content: { title: "Original", status: "accepted" } },
+    { status: "accepted", expected_content: { title: "Original" } },
+  ]) {
+    assert.throws(() => buildTaskUpdatePatch({ body }), /expected_content/);
+  }
+});
 
 test("buildTaskUpdatePatch preserves assignee when the field is omitted", () => {
   const result = buildTaskUpdatePatch({

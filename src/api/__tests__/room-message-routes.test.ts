@@ -50,6 +50,9 @@ function createDeps() {
     artifactEvents: new EventEmitter(),
     rentalActivityEvents: new EventEmitter(),
     messageInfoEvents: new EventEmitter(),
+    agentWorkEvents: new EventEmitter(),
+    agentApprovalEvents: new EventEmitter(),
+    executionDelegationEvents: new EventEmitter(),
   };
 
   return {
@@ -111,6 +114,112 @@ function createDeps() {
     rememberAccountRoom: async () => undefined,
   };
 }
+
+test("room streams negotiate pointer-only resource invalidations without stranding legacy cursors", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {}, put() {}, delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/stream$/");
+  assert.ok(handler);
+
+  function open(query: Record<string, unknown>) {
+    let closeHandler: (() => void) | null = null;
+    const req = {
+      params: { 0: "room_1" }, query, headers: {}, authKind: "session",
+      sessionAccount: { account_id: "acct_1" },
+      get() { return undefined; },
+      on(event: string, callback: () => void) {
+        if (event === "close") closeHandler = callback;
+        return this;
+      },
+    };
+    const res = {
+      statusCode: 200, headers: new Map<string, string>(), writes: [] as string[], writableEnded: false,
+      socket: { setKeepAlive() {} },
+      setHeader(name: string, value: string) { this.headers.set(name, value); },
+      flushHeaders() {},
+      write(chunk: string) { this.writes.push(chunk); return true; },
+      status(code: number) { this.statusCode = code; return this; },
+      json(body: unknown) { this.writes.push(JSON.stringify(body)); return this; },
+      end() { this.writableEnded = true; },
+    };
+    return { req, res, close: () => closeHandler?.() };
+  }
+
+  const negotiated = open({ stream_capability: "resource_invalidation_v1" });
+  const legacy = open({});
+  await Promise.all([
+    handler(negotiated.req, negotiated.res),
+    handler(legacy.req, legacy.res),
+  ]);
+  negotiated.res.writes.length = 0;
+  legacy.res.writes.length = 0;
+
+  deps.agentWorkEvents.emit("agent_work:invalidated", { projectId: "room_1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const negotiatedOutput = negotiated.res.writes.join("");
+  assert.match(negotiatedOutput, /event: resource_invalidation_v1/);
+  assert.match(negotiatedOutput, /"room_id":"room_1","resource":"agent_work"/);
+  assert.doesNotMatch(negotiatedOutput, /attempt|agent_key|revision|summary/);
+
+  const legacyOutput = legacy.res.writes.join("");
+  assert.doesNotMatch(legacyOutput, /resource_invalidation_v1|agent_work/);
+  assert.match(legacyOutput, /event: room_sync/);
+  const negotiatedCursor = negotiatedOutput.match(/id: ([^\n]+)/)?.[1];
+  assert.ok(negotiatedCursor);
+  assert.match(legacyOutput, new RegExp(`id: ${negotiatedCursor}`));
+  assert.match(legacyOutput, new RegExp(`"event_cursor":"${negotiatedCursor}"`));
+  assert.match(legacyOutput, /"gap":false/);
+
+  negotiated.res.writes.length = 0;
+  legacy.res.writes.length = 0;
+  deps.agentApprovalEvents.emit("agent_approval:invalidated", { projectId: "room_1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const approvalOutput = negotiated.res.writes.join("");
+  assert.match(approvalOutput, /event: resource_invalidation_v1/);
+  assert.match(approvalOutput, /"room_id":"room_1","resource":"agent_approval"/);
+  assert.doesNotMatch(approvalOutput, /request_id|projection|decision|agent_key|revision/);
+
+  const legacyApprovalOutput = legacy.res.writes.join("");
+  assert.doesNotMatch(legacyApprovalOutput, /resource_invalidation_v1|agent_approval/);
+  assert.match(legacyApprovalOutput, /event: room_sync/);
+  assert.match(legacyApprovalOutput, /"gap":false/);
+
+  negotiated.res.writes.length = 0;
+  legacy.res.writes.length = 0;
+  deps.executionDelegationEvents.emit("execution_delegation:invalidated", { projectId: "room_1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const delegationOutput = negotiated.res.writes.join("");
+  assert.match(delegationOutput, /event: resource_invalidation_v1/);
+  assert.match(delegationOutput, /"room_id":"room_1","resource":"execution_delegation"/);
+  assert.doesNotMatch(delegationOutput, /delegation_instance_id|agent_key|approver|revision|scope/);
+
+  const legacyDelegationOutput = legacy.res.writes.join("");
+  assert.doesNotMatch(legacyDelegationOutput, /resource_invalidation_v1|execution_delegation/);
+  assert.match(legacyDelegationOutput, /event: room_sync/);
+  assert.match(legacyDelegationOutput, /"gap":false/);
+
+  negotiated.close();
+  legacy.close();
+  deps.roomEventBroker.close();
+});
 
 const flushAsyncEvents = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -383,8 +492,8 @@ test("thread inbox attaches receipt authority and Desktop routing to every root"
   await handler({
     params: { 0: "room_1" },
     query: {},
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
     sessionAccount: { account_id: "acct_1" },
   }, res);
 
@@ -461,8 +570,8 @@ test("thread detail attaches the same receipt authority to its root and replies"
   await handler({
     params: { 0: "room_1", 1: "msg_1" },
     query: {},
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
     sessionAccount: { account_id: "acct_1" },
   }, res);
 
@@ -580,6 +689,7 @@ test("worker message writes persist server-authenticated publisher identity", as
     publisher_agent_session_id?: string | null;
     account_id?: string | null;
   } | null = null;
+  let rememberedParticipant: { sender: string; agentKey?: string | null } | null = null;
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
     get() {},
@@ -620,7 +730,9 @@ test("worker message writes persist server-authenticated publisher identity", as
         timestamp: new Date().toISOString(),
       };
     },
-    rememberRoomParticipantFromMessage: async () => undefined,
+    rememberRoomParticipantFromMessage: async (input: { sender: string; agentKey?: string | null }) => {
+      rememberedParticipant = { sender: input.sender, agentKey: input.agentKey };
+    },
   };
 
   registerRoomMessageRoutes(app as never, deps as never);
@@ -666,9 +778,17 @@ test("worker message writes persist server-authenticated publisher identity", as
     (res.body as { sender?: string }).sender,
     "MapleRidge | EmmyMay's agent | Supervisor Worker",
   );
+  // The participant is recorded after the acknowledgement. It must carry the
+  // sender's key: a participant without one reads as somebody else's, and
+  // the agent's own name is then held against it when it registers again.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(rememberedParticipant, {
+    sender: "MapleRidge | EmmyMay's agent | Supervisor Worker",
+    agentKey: "owner/maple-ridge",
+  });
 });
 
-test("desktop owner-token human messages can post as browser activity", async () => {
+test("desktop app-session human messages can post as browser activity", async () => {
   let createdMessage: { sender: string; text: string; options?: { source?: string; account_id?: string | null } } | null = null;
   let rememberedSource: string | null | undefined;
   let rememberedAccountRoom:
@@ -738,8 +858,8 @@ test("desktop owner-token human messages can post as browser activity", async ()
     {
       params: { 0: "room_1" },
       body: { sender: "EmmyMay", text: "hello from desktop" },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
     },
     res
@@ -774,7 +894,7 @@ test("desktop owner-token human messages can post as browser activity", async ()
   });
 });
 
-test("desktop owner-token messages ignore agent-shaped display labels", async () => {
+test("desktop app-session messages ignore agent-shaped display labels", async () => {
   let createdMessage: { sender: string; text: string; options?: { source?: string; account_id?: string | null } } | null = null;
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
@@ -818,8 +938,8 @@ test("desktop owner-token messages ignore agent-shaped display labels", async ()
     {
       params: { 0: "room_1" },
       body: { sender: "BadgerMoon | EmmyMay's agent | Agent", text: "hello from desktop" },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
     },
     res
@@ -898,8 +1018,8 @@ test("desktop local sync forwards client message idempotency key", async () => {
         text: "synced local message",
         client_message_id: "local-chat:room_1:1",
       },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
     },
     res
@@ -978,8 +1098,8 @@ test("desktop thread replies forward root and quoted reply targets separately", 
         reply_to: "msg_7",
         thread_root_id: "msg_1",
       },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
     },
     res,
@@ -990,7 +1110,7 @@ test("desktop thread replies forward root and quoted reply targets separately", 
   assert.equal(createdOptions?.thread_root_id, "msg_1");
 });
 
-test("desktop owner-token streams do not require worker delivery credentials", async () => {
+test("desktop app-session streams do not require worker delivery credentials", async () => {
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
     get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
@@ -1012,8 +1132,9 @@ test("desktop owner-token streams do not require worker delivery credentials", a
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -1167,8 +1288,8 @@ test("one canonical broker event resolves a thousand long polls without repeat h
     const req = {
       params: { 0: "room_1" },
       query: { after: "msg_6", timeout: "60000" },
-      headers: { "x-letagents-desktop-client": "1" },
-      authKind: "owner_token",
+      headers: {},
+      authKind: "session",
       sessionAccount: { account_id: "acct_1" },
       get() { return undefined; },
       on: requestEvents.on.bind(requestEvents),
@@ -1310,7 +1431,7 @@ test("one broker gap coalesces a thousand poll catch-ups without executor overfl
   batcher.close();
 });
 
-test("browser streams hydrate account thread reads without requesting desktop routing", async () => {
+test("browser app sessions hydrate account thread reads and human routing", async () => {
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
     get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
@@ -1325,10 +1446,12 @@ test("browser streams hydrate account thread reads without requesting desktop ro
     resolveRoomOrReply: async () => ({ id: "room_1" }),
     requireParticipant: async () => true,
     beginRoomAgentDelivery: async () => null,
+    getMessage: async () => ({ id: "msg_8", sender: "Human", text: "thread update", source: "browser", timestamp: new Date().toISOString(), routing_snapshot_version: 1, thread: { root_message_id: "msg_1", reply_count: 4 } }),
     roomMessageOverlayBatcher: {
       async prepare(input: { targets: Array<{ accountId: string; accountAgentRouting: boolean }> }) {
         overlayTargets = input.targets;
         return new Map([["acct_1", {
+          account_agent_routing: { targets: [], unresolved_mentions: [] },
           thread_read: {
             last_read_message_id: "msg_6",
             unread_count: 2,
@@ -1386,7 +1509,7 @@ test("browser streams hydrate account thread reads without requesting desktop ro
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(overlayTargets, [{ accountId: "acct_1", accountAgentRouting: false }]);
+  assert.deepEqual(overlayTargets, [{ accountId: "acct_1", accountAgentRouting: true }]);
   assert.match(res.writes.join(""), /"last_read_message_id":"msg_6"/);
   closeHandler?.();
 });
@@ -1406,6 +1529,7 @@ test("worker streams fail closed when activation authority cannot be attached", 
     resolveCanonicalRoomRequestId: async () => "room_1",
     resolveRoomOrReply: async () => ({ id: "room_1" }),
     requireParticipant: async () => true,
+    getMessageStreamCheckpoint: async () => ({ checkpoint: "msg_9", cursorExists: true }),
     beginRoomAgentDelivery: async () => ({
       identity: {
         actor_label: "Worker | Owner | Codex",
@@ -1504,8 +1628,8 @@ test("desktop streams close without advancing when account routing hydration ret
   const req = {
     params: { 0: "room_1" },
     query: {},
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
     sessionAccount: { account_id: "acct_1" },
     get() { return undefined; },
     on(event: string, handler: () => void) {
@@ -1574,8 +1698,9 @@ test("room streams forward rental activity and patch frames", async () => {
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -1659,8 +1784,9 @@ test("room streams forward artifact update invalidations", async () => {
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -1732,8 +1858,9 @@ test("room streams forward redacted GitHub event updates", async () => {
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -1830,8 +1957,9 @@ test("room stream does NOT forward internal/provider_only/renter_only rental act
   let closeHandler: (() => void) | null = null;
   const req = {
     params: { 0: "room_1" },
-    headers: { "x-letagents-desktop-client": "1" },
-    authKind: "owner_token",
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
     on(event: string, handler: () => void) {
       if (event === "close") closeHandler = handler;
       return this;
@@ -2064,4 +2192,80 @@ test("invalid agent session credentials do not create messages", async () => {
     error: "Invalid agent session credentials.",
   });
   assert.equal(messageCreated, false);
+});
+
+for (const failure of ["participant", "account", "blocked", "persistence"] as const) {
+  test(`message acknowledgement survives secondary work: ${failure}`, { timeout: 2_000 }, async (t) => {
+    const errors: unknown[][] = [];
+    t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args); });
+    let handler: (req: unknown, res: unknown) => Promise<void>;
+    const { registerCreateMessageRoute } = await import("../routes/rooms/messages/create-message.js");
+    const calls: string[] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const message = { id: "msg_1", timestamp: "2026-09-09T00:00:00.000Z" };
+    registerCreateMessageRoute({ post(_path: unknown, callback: typeof handler) { handler = callback; } } as never, {
+      ...createDeps(),
+      resolveCanonicalRoomRequestId: async () => "room_1",
+      resolveRoomOrReply: async () => ({ id: "room_1" }),
+      requireParticipant: async () => true,
+      emitProjectMessage: async () => {
+        calls.push("save");
+        if (failure === "persistence") throw new Error("database unavailable");
+        return message;
+      },
+      rememberRoomParticipantFromMessage: async () => {
+        calls.push("participant");
+        if (failure === "participant") throw new Error("participant unavailable");
+        if (failure === "blocked") await blocked;
+      },
+      rememberAccountRoom: async () => {
+        calls.push("account");
+        if (failure === "account") throw new Error("account unavailable");
+      },
+    } as never);
+    const res = {
+      statusCode: 200, body: undefined as unknown,
+      status(code: number) { this.statusCode = code; return this; },
+      json(body: unknown) { this.body = body; return this; },
+    };
+    try {
+      await handler!({ params: { 0: "room_1" }, body: { sender: "Alice", text: "hello" },
+        authKind: "session", sessionAccount: { account_id: "acct_1" } }, res);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (failure === "persistence") {
+        assert.equal(res.statusCode, 500);
+        assert.deepEqual(calls, ["save"]);
+      } else {
+        assert.equal(res.statusCode, 201);
+        assert.deepEqual(res.body, { ...message, room_id: "room_1" });
+        assert.deepEqual(calls, ["save", "participant", "account"]);
+        if (failure !== "blocked") assert.equal(errors.length, 1);
+      }
+    } finally { release(); }
+  });
+}
+
+
+test("worker stream routing barrier retains frames, coalesces readers and releases without an event", async () => {
+  const { waitForMessageRouting } = await import("../routes/rooms/messages/wait-for-routing.js");
+  let ready = false;
+  let calls = 0;
+  let closed = false;
+  const load = async () => {
+    calls++;
+    await new Promise((resolve) => setImmediate(resolve));
+    return { checkpoint: ready ? "msg_3" : "msg_1", cursorExists: true };
+  };
+  let completed = 0;
+  const frames = ["msg_2", "msg_3"].map((messageId) => waitForMessageRouting({
+    roomId: "routing-stream", messageId, includePromptOnly: false, closed: () => closed, load,
+  }).then((value) => { completed++; return value; }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(completed, 0);
+  assert.equal(calls, 1, "concurrent worker streams share the checkpoint query");
+  ready = true; // Simulate committed completion followed by a lost notification.
+  assert.deepEqual(await Promise.all(frames), [true, true]);
+  closed = true;
+  assert.equal(await waitForMessageRouting({ roomId: "routing-stream", messageId: "msg_4", includePromptOnly: false, closed: () => closed, load }), false);
 });

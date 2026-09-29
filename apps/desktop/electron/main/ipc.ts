@@ -1,7 +1,9 @@
+import { registerDaemonMaintenanceIpcHandlers } from "./ipc-handlers/maintenance.js";
 import electron from "electron";
 import type { IpcMain } from "electron";
 
 import { registerDesktopAppIpcHandlers } from "./ipc-handlers/app.js";
+import { registerConversationIpcHandlers } from "./ipc-handlers/conversations.js";
 import { registerDesktopAuthAndSetupIpcHandlers } from "./ipc-handlers/auth-setup.js";
 import { registerDesktopRentalDomainIpcHandlers } from "./ipc-handlers/rental.js";
 import { registerDesktopRepoIpcHandlers } from "./ipc-handlers/repos.js";
@@ -20,12 +22,15 @@ const { ipcMain } = electron as typeof import("electron");
  */
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
-): void {
+): () => void {
   registerDesktopAuthAndSetupIpcHandlers(targetIpcMain);
+  registerConversationIpcHandlers(targetIpcMain);
   registerDesktopAppIpcHandlers(targetIpcMain);
+  registerDaemonMaintenanceIpcHandlers(targetIpcMain);
   registerDesktopRoomIpcHandlers(targetIpcMain);
-  registerDesktopRentalDomainIpcHandlers(targetIpcMain);
+  const startRentalServices = registerDesktopRentalDomainIpcHandlers(targetIpcMain);
   registerDesktopRepoIpcHandlers(targetIpcMain);
   registerDesktopSupervisorIpcHandlers(targetIpcMain);
   registerDesktopWorkerIpcHandlers(targetIpcMain);
+  return startRentalServices;
 }

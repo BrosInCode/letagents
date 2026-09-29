@@ -30,6 +30,8 @@ import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
+import type { ProviderPermissionObservation } from "../../shared/provider-permissions.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,6 +62,277 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
 
 type FakeProvider = "codex" | "claude-code" | "open-model";
 
+test("restoration preserves permission ownership while replacement retires it", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "repair", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const request = { workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd: "/repo", launchPolicy: {} };
+  const native = { id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1",
+    params: { threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 } };
+  const listeners: Parameters<NonNullable<NativeProviderAdapter["observePermissions"]>>[1][] = [];
+  adapter.observePermissions = async (_handle, listener) => { listeners.push(listener); };
+  const events: ProviderPermissionObservation[] = [];
+  await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
+  const snapshot = { type: "snapshot" as const, connectionId: "socket-1", requests: [native] };
+  listeners[0]!(snapshot);
+  adapter.repairContinuation = async nativeHandle => {
+    listeners[0]!(snapshot); // Pending requests can arrive while restoration awaits the provider.
+    return { handle: nativeHandle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
+      replacementProviderContinuationId: request.expectedProviderContinuationId };
+  };
+  const restored = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
+  listeners[0]!(snapshot);
+  assert.equal(restored.handle, handle);
+  assert.deepEqual(events.map(event => event.type), ["snapshot", "snapshot", "snapshot"]);
+  adapter.repairContinuation = async nativeHandle => {
+    nativeHandle.providerContinuationId = "replacement";
+    return { handle: nativeHandle, outcome: "replaced", previousProviderContinuationId: request.expectedProviderContinuationId,
+      replacementProviderContinuationId: "replacement" };
+  };
+  const replaced = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
+  listeners[0]!(snapshot);
+  assert.equal(events.at(-1)!.type, "unavailable");
+  assert.deepEqual(await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native }), { outcome: "correlation_unproven" });
+  await router.observePermissions(replaced.handle, event => events.push(event), new AbortController().signal);
+  const current = { ...native, params: { ...native.params, threadId: "replacement" } };
+  listeners[1]!({ type: "snapshot", connectionId: "socket-1", requests: [current] });
+  assert.equal(events.at(-1)!.type, "snapshot");
+  assert.equal((await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native: current })).outcome, "correlated");
+});
+
+for (const mutation of ["handle", "continuation", "pid", "connection", "owner", "detach"] as const) {
+  test(`restoration rejects changed ${mutation} authority`, async () => {
+    const adapter = fakeAdapter("codex", []);
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    const spawn = { provider: "codex", workAttemptId: "repair", roomId: "room", cwd: "/repo", launchPolicy: {} };
+    const handle = await router.spawn(spawn);
+    const continuation = handle.providerContinuationId!;
+    const controller = new AbortController();
+    let successor = handle;
+    adapter.repairContinuation = async nativeHandle => {
+      if (mutation === "handle") nativeHandle = { ...nativeHandle };
+      if (mutation === "continuation") nativeHandle.providerContinuationId = "different";
+      if (mutation === "pid") nativeHandle.pid! += 1;
+      if (mutation === "connection") nativeHandle.providerConnection!.processIdentity = "different-birth";
+      if (mutation === "owner") successor = await router.spawn(spawn);
+      if (mutation === "detach") controller.abort();
+      return { handle: nativeHandle, outcome: "rematerialized", previousProviderContinuationId: continuation,
+        replacementProviderContinuationId: nativeHandle.providerContinuationId! };
+    };
+    await assert.rejects(router.repairContinuation(handle, { workAttemptId: "repair",
+      expectedProviderContinuationId: continuation, cwd: "/repo", launchPolicy: {} }, {
+      checkpointReplacement: async () => {}, detachSignal: controller.signal,
+    }), /ownership changed|process identity|must preserve/);
+    if (mutation === "owner") await router.poke(successor, "still owned");
+  });
+}
+
+test("permission routing preserves frozen Codex request identity and fences native dispatch", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("codex", calls);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const native = Object.freeze({ id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 }) });
+  const request = { provider: "codex" as const, native };
+  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", connectionId: "socket-1", requests: [native] }); };
+  await router.observePermissions(handle, event => {
+    assert.equal(event.type, "snapshot");
+    if (event.type === "snapshot") { assert.equal(event.requests[0]!.native, native); assert.equal(event.connectionId, "socket-1"); }
+  }, new AbortController().signal);
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "command" });
+  adapter.replyPermission = async (_handle, expected, _reply, options) => {
+    assert.equal(expected, native);
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); calls.push("send");
+    return { outcome: "sent", scope: "request" };
+  };
+  assert.deepEqual(await router.replyPermission(handle, request, "once", {
+    beforeNativeDispatch: async () => { calls.push("intent"); }, assertNativeDispatch: () => { calls.push("fence"); },
+  }), { outcome: "sent_unacknowledged", nativeScope: "request" });
+  assert.deepEqual(calls.slice(-3), ["intent", "fence", "send"]);
+  await assert.rejects(router.replyPermission(handle, request, "once", {
+    beforeNativeDispatch: async () => {}, assertNativeDispatch: () => { throw new Error("closed"); },
+  }), /closed/);
+  assert.equal(calls.filter(value => value === "send").length, 1);
+  await assert.rejects(router.replyPermission({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "forged" } }, request, "once", { beforeNativeDispatch: async () => {} }), /binding changed/);
+});
+
+test("Codex permission snapshots reject missing or inconsistent RPC identity", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const native = Object.freeze({ id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1",
+    params: { threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 } });
+  let emit!: Parameters<NonNullable<NativeProviderAdapter["observePermissions"]>>[1];
+  adapter.observePermissions = async (_handle, listener) => { emit = listener; };
+  const events: ProviderPermissionObservation[] = [];
+  await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
+  for (const snapshot of [
+    { type: "snapshot" as const, requests: [] },
+    { type: "snapshot" as const, requests: [native] },
+    { type: "snapshot" as const, connectionId: " ", requests: [] },
+    { type: "snapshot" as const, connectionId: "socket-2", requests: [native] },
+    { type: "snapshot" as const, connectionId: "socket-1", requests: [native, { ...native, id: 2, connectionId: "socket-2" }] },
+  ]) {
+    emit(snapshot);
+    assert.deepEqual(events.at(-1), { type: "degraded" });
+  }
+  emit({ type: "snapshot", connectionId: "socket-1", requests: [] });
+  assert.deepEqual(events.at(-1), { type: "snapshot", connectionId: "socket-1", requests: [] });
+});
+
+test("Codex generic permission routing requires an exact bounded current-turn profile", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const native = Object.freeze({ id: 1, method: "item/permissions/requestApproval", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1,
+      cwd: "/repo", permissions: { network: { enabled: true } } }) });
+  adapter.inspectPermissionProfile = async (_handle, expected) => expected === native
+    ? structuredClone(native.params.permissions) : null;
+  assert.deepEqual(await router.correlatePermissionTurn(handle, { provider: "codex", native }), {
+    outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "network",
+  });
+  for (const params of [
+    { ...native.params, permissions: undefined },
+    { ...native.params, permissions: "network" },
+    { ...native.params, permissions: { network: { enabled: true }, reason: "x".repeat(24 * 1024) } },
+  ]) {
+    assert.deepEqual(await router.correlatePermissionTurn(handle, { provider: "codex", native: { ...native, params } }),
+      { outcome: "correlation_unproven" });
+  }
+  adapter.inspectPermissionProfile = async () => {
+    await router.spawn({ provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+    return structuredClone(native.params.permissions);
+  };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, { provider: "codex", native }),
+    { outcome: "correlation_unproven" });
+});
+
+test("Codex MCP tool routing requires exact live adapter inspection without itemId or startedAtMs", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const spawn = { provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  const native = Object.freeze({ id: 1, method: "mcpServer/elicitation/request", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn" }) });
+  const request = { provider: "codex" as const, native };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+  adapter.inspectPermissionMcpToolCall = async (_handle, expected) => expected === native ? native.params : null;
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), {
+    outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "command",
+  });
+  assert.deepEqual(await router.correlatePermissionTurn(handle, { ...request, native: { ...native } }), { outcome: "correlation_unproven" });
+  adapter.inspectPermissionMcpToolCall = async () => { await router.spawn(spawn); return native.params; };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+});
+
+test("permission routing snapshots OpenCode payloads and refuses replacement during broker checkpoint", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  const native = { id: "request", sessionID: handle.providerContinuationId!, permission: "bash", patterns: [], metadata: {}, always: [] };
+  const request = { provider: "open-model" as const, native };
+  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", connectionId: "socket-1", requests: [native] }); };
+  let observedConnection: string | null = null;
+  await router.observePermissions(handle, event => {
+    if (event.type === "snapshot") {
+      assert.notEqual(event.requests[0]!.native, native);
+      assert.deepEqual(event.requests[0]!.native, native);
+      observedConnection = event.connectionId;
+    }
+  }, new AbortController().signal);
+  assert.match(observedConnection!, /^[a-f0-9]{64}$/);
+  let sends = 0;
+  adapter.replyPermission = async (_handle, expected, _reply, options) => {
+    assert.notEqual(expected, native); assert.deepEqual(expected, native);
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); sends++;
+    return { outcome: "processed", nativeScope: "session_pending" };
+  };
+  assert.deepEqual(await router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "native_processed", nativeScope: "session_pending" });
+  await assert.rejects(router.replyPermission(handle, request, "once", { beforeNativeDispatch: async () => { await router.spawn(spawn); } }), /binding changed/);
+  assert.equal(sends, 1);
+});
+
+test("Codex file-change routing requires inspected edits and fences replacement during inspection", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const spawn = { provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  const native = Object.freeze({ id: 1, method: "item/fileChange/requestApproval", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 }) });
+  const request = { provider: "codex" as const, native };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+  const changes = [{ path: "/repo/new.txt", kind: { type: "add" as const }, diff: "exact contents" }];
+  adapter.inspectPermissionFileChanges = async (_handle, expected) => { assert.equal(expected, native); return changes; };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlated",
+    providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "file_change", fileChanges: changes });
+  adapter.replyPermission = async (_handle, expected, _reply, options) => {
+    assert.equal(expected, native); assert.deepEqual(options!.expectedFileChanges, changes);
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!();
+    return { outcome: "sent", scope: "request" };
+  };
+  await router.replyPermission(handle, request, "once", { expectedFileChanges: changes, beforeNativeDispatch: async () => {} });
+  adapter.inspectPermissionFileChanges = async () => { await router.spawn(spawn); return changes; };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+});
+
+test("permission correlation and post-dispatch results reject replacement across native awaits", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  let handle = await router.spawn(spawn);
+  const request = { provider: "open-model" as const, native: { id: "request", sessionID: handle.providerContinuationId!, permission: "bash", patterns: [], metadata: {}, always: [] } };
+  adapter.correlatePermissionTurn = async nativeHandle => {
+    await router.spawn(spawn);
+    return { outcome: "correlated", providerContinuationId: nativeHandle.providerContinuationId!, providerTurnId: "turn" };
+  };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+  handle = await router.spawn(spawn);
+  let sends = 0;
+  adapter.replyPermission = async (_handle, _request, _reply, options) => {
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); sends++;
+    await router.spawn(spawn);
+    throw Object.assign(new Error("native response lost"), { outcome: "not_pending" });
+  };
+  await assert.rejects(router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "uncertain" });
+  assert.equal(sends, 1);
+});
+
+test("custodial activation router forwards exact Codex callbacks and refuses unsupported or forged handles", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("codex", calls);
+  adapter.activateCustodialPolling = async (_handle, _request, options) => {
+    await options.beforeNativeDispatch();
+    calls.push("native:start");
+    await options.checkpointTurnStarted("native-exact");
+    return { providerTurnId: "native-exact" };
+  };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter, "claude-code": async () => fakeAdapter("claude-code", calls) });
+  const spawn = { workAttemptId: "activation", roomId: "room", cwd: "/repo", launchPolicy: {}, provider: "codex" };
+  const handle = await router.spawn(spawn);
+  const request = { operationId: "operation", roomId: "room", cwd: "/repo", agentDisplayName: "Garden",
+    workerSession: { agentSessionId: "session", roomCursor: "msg_4" },
+    launchReceipt: { contract: "custodial_polling_v1" as const, agentSessionId: "session", configurationRevision: 1,
+      workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection! } };
+  const options = { beforeNativeDispatch: async () => { calls.push("intent"); }, checkpointTurnStarted: async (id: string) => { calls.push(`checkpoint:${id}`); } };
+  assert.deepEqual(await router.activateCustodialPolling(handle, request, options), { providerTurnId: "native-exact" });
+  assert.deepEqual(calls.slice(-3), ["intent", "native:start", "checkpoint:native-exact"]);
+  await assert.rejects(router.activateCustodialPolling({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "forged" } }, request, options));
+  delete adapter.activateCustodialPolling;
+  await assert.rejects(router.activateCustodialPolling(handle, request, options), /unavailable/);
+  const other = await router.spawn({ ...spawn, workAttemptId: "other", provider: "claude-code" });
+  await assert.rejects(router.activateCustodialPolling(other, request, options), /exact owned Codex/);
+  assert.equal(calls.filter(value => value === "native:start").length, 1);
+  assert.deepEqual(await router.inspectCustodialPollingActivation(other, "native-exact"), { state: "unknown" });
+  assert.deepEqual(await router.inspectCustodialPollingActivation(handle, "native-exact"), { state: "unknown" });
+  adapter.inspectCustodialPollingActivation = async (_handle, id) => {
+    assert.equal(id, "native-exact"); return { state: "terminal", outcome: "failed" };
+  };
+  assert.deepEqual(await router.inspectCustodialPollingActivation(handle, "native-exact"), { state: "terminal", outcome: "failed" });
+});
+
 function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAdapter {
   const handles = new Map<string, ReturnType<typeof nativeHandle>>();
   let nextPid = provider === "codex" ? 100 : provider === "claude-code" ? 200 : 300;
@@ -74,7 +347,10 @@ function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAda
     }),
     async spawn(input: ProviderActionSpawn) {
       calls.push(`${provider}:spawn:${input.workAttemptId}`);
-      const handle = nativeHandle(provider, input.workAttemptId, `continuation:${input.workAttemptId}`, ++nextPid);
+      const handle = {
+        ...nativeHandle(provider, input.workAttemptId, `continuation:${input.workAttemptId}`, ++nextPid),
+        ...(input.lifecycleAuthorityMode ? { lifecycleAuthorityMode: input.lifecycleAuthorityMode } : {}),
+      };
       handles.set(input.workAttemptId, handle);
       return handle;
     },
@@ -133,6 +409,171 @@ function nativeHandle(
   };
 }
 
+test("provider router preflights only Codex custody without launching or controlling a provider", async () => {
+  const calls: string[] = [];
+  const seen: unknown[] = [];
+  const adapter = { ...fakeAdapter("codex", calls), preflightCustodialPolling: async (input: { devMcpServerEntryPath?: string }) => { seen.push(input); } };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const request = { provider: "codex", devMcpServerEntryPath: "/trusted/dev/dist/mcp/server.js" };
+  const pending = router.preflightCustodialPolling(request);
+  request.devMcpServerEntryPath = "/changed/after-dispatch";
+  await pending;
+  assert.deepEqual(seen, [{ devMcpServerEntryPath: "/trusted/dev/dist/mcp/server.js" }]);
+  await assert.rejects(router.preflightCustodialPolling({ provider: "cursor" }), /only supported by Codex/);
+  await assert.rejects(new ProviderActionPortRouter({ codex: async () => fakeAdapter("codex", calls) }).preflightCustodialPolling({ provider: "codex" }), /does not expose/);
+  adapter.preflightCustodialPolling = async () => { throw new Error("unsupported installed runtime"); };
+  await assert.rejects(router.preflightCustodialPolling({ provider: "codex" }), /unsupported installed runtime/);
+  assert.deepEqual(calls, []);
+});
+
+test("provider router prefers exact Codex stopRef over a remembered protocol terminal with no fallback", async () => {
+  const calls: string[] = [];
+  const seen: ProviderActionRef[] = [];
+  const adapter: NativeProviderAdapter = {
+    ...fakeAdapter("codex", calls),
+    stopRef: async (ref) => {
+      seen.push(ref);
+      return { endedAt: "2026-08-31T00:00:00.000Z", exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: ref.providerContinuationId };
+    },
+  };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "exact-stop", roomId: "room", cwd: "/tmp/exact-stop", launchPolicy: {} });
+  const ref: ProviderActionRef = { provider: "codex", workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: { ...handle.providerConnection! } };
+  const original = structuredClone(ref);
+  const stopped = router.stopRef(ref, { actionId: "stop-exact-birth" });
+  ref.providerContinuationId = "mutated";
+  ref.providerConnection!.pid = 9999;
+  await stopped;
+  assert.deepEqual(seen, [original], "exact reference is snapshotted before loading the adapter");
+  assert.equal((await router.attachAction("stop-exact-birth", original.workAttemptId)).state, "attached");
+  await new ProviderActionPortRouter({ codex: async () => adapter }).stopRef(original);
+  assert.equal(seen.length, 2, "restart recovery does not need a remembered handle");
+  await assert.rejects(router.stopRef({ ...original, provider: "cursor" }), /Conflicting provider identities/);
+  await assert.rejects(router.stopRef({ ...original, providerConnection: { kind: "cursor_cli", pid: 101, processIdentity: "codex:101" } }), /Conflicting provider identities/);
+  adapter.stopRef = async () => { throw new Error("process identity is unknown"); };
+  await assert.rejects(router.stopRef(original), /process identity is unknown/);
+  assert.deepEqual(calls, ["codex:spawn:exact-stop"], "refusal must not fall back to cached ordinary stop");
+});
+
+test("provider router preserves Cursor's remembered-stop path", async () => {
+  const calls: string[] = [];
+  const adapter: NativeProviderAdapter = {
+    ...fakeAdapter("claude-code", calls),
+    spawn: async (input) => ({ ...nativeHandle("claude-code", input.workAttemptId, "cursor-session", 202), providerConnection: { kind: "cursor_cli", pid: 202, processIdentity: "cursor:202" } }),
+    stopRef: async () => { throw new Error("cached Cursor stop must retain its existing behavior"); },
+  };
+  const router = new ProviderActionPortRouter({ cursor: async () => adapter });
+  const handle = await router.spawn({ provider: "cursor", workAttemptId: "cursor-stop", roomId: "room", cwd: "/tmp/cursor", launchPolicy: {} });
+  await router.stopRef({ provider: "cursor", workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection });
+  assert.deepEqual(calls, ["claude-code:stop:cursor-stop"]);
+});
+
+test("provider router carries native shadow facts and probes without invoking legacy actions", async () => {
+  const calls: string[] = [];
+  let listener: ((event: NativeExecutionObservation) => void) | undefined;
+  let latestSequence = 0;
+  const subscription = {
+    sourceId: "opaque-observer-source",
+    position: () => ({ firstRetainedSequence: 1, latestSequence }),
+    dispose: () => { listener = undefined; },
+  };
+  const native = fakeAdapter("codex", calls);
+  const adapter: NativeProviderAdapter = {
+    ...native,
+    onExecution: (_handle, next) => { listener = next; return subscription; },
+    probeControl: async () => ({ state: "degraded" }),
+  };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter, "claude-code": async () => fakeAdapter("claude-code", calls) });
+  const request: ProviderActionSpawn = { provider: "codex", workAttemptId: "shadow", roomId: "room", cwd: "/tmp/shadow", launchPolicy: {} };
+  const handle = await router.spawn(request);
+  const received: NativeExecutionObservation[] = [];
+  const observed = await router.onExecution(handle, (event) => received.push(event));
+  assert.equal(observed, subscription, "the router forwards the source's subscription without inventing identity or positions");
+  assert.equal(observed.sourceId, "opaque-observer-source");
+  assert.deepEqual(observed.position(), { firstRetainedSequence: 1, latestSequence: 0 });
+  const observation: NativeExecutionObservation = {
+    sourceId: subscription.sourceId, sequence: 1, observedAtMs: 1, nativeProcessIdentity: "codex:101",
+    fact: { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+  };
+  latestSequence = 1;
+  listener!(observation);
+  assert.deepEqual(received, [observation]);
+  assert.deepEqual(observed.position(), { firstRetainedSequence: 1, latestSequence: 1 });
+  assert.deepEqual(await router.probeControl(handle), { state: "degraded" });
+  assert.deepEqual(calls, ["codex:spawn:shadow"], "no stop, poke, turn, or restart effect from observation/probe");
+  observed.dispose();
+  assert.equal(listener, undefined);
+  const unprobeable = await router.spawn({ ...request, provider: "claude-code", workAttemptId: "unprobeable" });
+  assert.deepEqual(await router.probeControl(unprobeable), { state: "unprobeable" });
+  await assert.rejects(router.onExecution(unprobeable, () => {}), /does not expose native execution observations/);
+  const stale = { ...handle, providerContinuationId: "stale" };
+  await assert.rejects(router.probeControl(stale), /not owned/);
+  await assert.rejects(router.onExecution(stale, () => {}), /not owned/);
+});
+
+test("provider router forwards exact turn-boundary snapshots and rejects mismatched native authority", async () => {
+  const calls: string[] = [];
+  const native = nativeHandle("codex", "boundary", "thread-boundary");
+  let inspected = 0;
+  let result: NativeTurnBoundary = { state: "idle", providerContinuationId: native.providerContinuationId,
+    nativeProcessIdentity: native.providerConnection.processIdentity, latestProviderTurnId: null };
+  const adapter: NativeProviderAdapter = { ...fakeAdapter("codex", calls), spawn: async () => native,
+    inspectTurnBoundary: async exact => { assert.equal(exact, native); inspected++; return result; } };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter, "claude-code": async () => fakeAdapter("claude-code", calls) });
+  const request: ProviderActionSpawn = { provider: "codex", workAttemptId: native.workAttemptId, roomId: "room", cwd: "/tmp/boundary", launchPolicy: {} };
+  const handle = await router.spawn(request);
+  assert.deepEqual(await router.inspectTurnBoundary(handle), result);
+  result = { state: "active", providerContinuationId: native.providerContinuationId,
+    nativeProcessIdentity: native.providerConnection.processIdentity, providerTurnId: "active-turn" };
+  assert.deepEqual(await router.inspectTurnBoundary(handle), result);
+  for (const mismatch of ["continuation", "process_birth"] as const) {
+    result = { state: "idle", providerContinuationId: mismatch === "continuation" ? "wrong-thread" : native.providerContinuationId,
+      nativeProcessIdentity: mismatch === "process_birth" ? "forged-birth" : native.providerConnection.processIdentity, latestProviderTurnId: null };
+    assert.deepEqual(await router.inspectTurnBoundary(handle), { state: "unknown" }, mismatch);
+  }
+  const inspectedBefore = inspected;
+  for (const connection of [null, { ...native.providerConnection, processIdentity: "fabricated-birth" }, { ...native.providerConnection, processIdentity: "" }]) {
+    assert.deepEqual(await router.inspectTurnBoundary({ ...handle, providerConnection: connection }), { state: "unknown" });
+  }
+  await assert.rejects(router.inspectTurnBoundary({ ...handle, providerContinuationId: "stale-thread" }), /not owned/);
+  assert.equal(inspected, inspectedBefore, "unfenced handles never reach the adapter");
+  const unsupported = await router.spawn({ ...request, provider: "claude-code", workAttemptId: "unsupported" });
+  assert.deepEqual(await router.inspectTurnBoundary(unsupported), { state: "unknown" });
+  assert.deepEqual(calls, ["claude-code:spawn:unsupported"], "boundary inspection invokes no turn, stop, or launch action");
+});
+
+for (const race of ["process_birth", "continuation", "owned_handle"] as const) {
+  test(`provider router discards a turn-boundary result after ${race} changes during inspection`, async () => {
+    let native = nativeHandle("codex", "raced-boundary", "thread-boundary");
+    const original = native;
+    const calls: string[] = [];
+    let release!: () => void; let markReading!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { markReading = resolve; });
+    const adapter: NativeProviderAdapter = { ...fakeAdapter("codex", calls), spawn: async () => native,
+      inspectTurnBoundary: async exact => {
+        assert.equal(exact, original);
+        const result: NativeTurnBoundary = { state: "idle", providerContinuationId: exact.providerContinuationId!,
+          nativeProcessIdentity: exact.providerConnection!.processIdentity!, latestProviderTurnId: "completed-turn" };
+        markReading(); await waiting; return result;
+      } };
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    const request: ProviderActionSpawn = { provider: "codex", workAttemptId: native.workAttemptId, roomId: "room", cwd: "/tmp/boundary", launchPolicy: {} };
+    const handle = await router.spawn(request);
+    const pending = router.inspectTurnBoundary(handle);
+    await reading;
+    if (race === "process_birth") native.providerConnection.processIdentity += "-replaced";
+    else if (race === "continuation") native.providerContinuationId = "thread-replaced";
+    else {
+      native = nativeHandle("codex", original.workAttemptId, original.providerContinuationId, original.pid);
+      await router.spawn(request); // Different owned handle with the same apparent native identity.
+    }
+    release();
+    assert.deepEqual(await pending, { state: "unknown" });
+    assert.deepEqual(calls, [], "observation does not dispatch control actions while ownership changes");
+  });
+}
+
 test("provider router selects the native adapter by manifest provider and fences stale handles", async () => {
   const calls: string[] = [];
   const router = new ProviderActionPortRouter({
@@ -154,6 +595,7 @@ test("provider router selects the native adapter by manifest provider and fences
   };
 
   assert.deepEqual(await router.capabilities("claude-attempt", "claude-code"), {
+    exactProcessStop: false,
     resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt",
   });
   const handle = await router.spawn(claudeSpawn);
@@ -209,7 +651,7 @@ test("provider router selects the native adapter by manifest provider and fences
     /Conflicting provider identities/,
   );
   await assert.rejects(
-    router.spawn({ ...claudeSpawn, provider: "cursor" }),
+    router.spawn({ ...claudeSpawn, provider: "cursor", workAttemptId: "cursor-attempt" }),
     /requires the durable agent display name/,
   );
   const cursor = await router.spawn({
@@ -277,12 +719,13 @@ test("Cursor router ownership remains stable while its per-turn PID changes", as
   assert.equal(handle.pid, null);
 });
 
-test("provider router accepts a missing legacy connection only for the exact remembered work attempt and continuation", async () => {
+test("provider router accepts a missing connection only for the exact remembered Codex birth authority", async () => {
   const calls: string[] = [];
   const adapter = fakeAdapter("codex", calls);
   const router = new ProviderActionPortRouter({ codex: async () => adapter });
   const alpha = await router.spawn({
     provider: "codex", workAttemptId: "alpha-attempt", roomId: "room", cwd: "/tmp/alpha", launchPolicy: {},
+    deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed",
   });
   const bravo = await router.spawn({
     provider: "codex", workAttemptId: "bravo-attempt", roomId: "room", cwd: "/tmp/bravo", launchPolicy: {},
@@ -292,9 +735,21 @@ test("provider router accepts a missing legacy connection only for the exact rem
     provider: "codex",
     providerContinuationId: alpha.providerContinuationId!,
     providerConnection: alpha.providerConnection,
+    lifecycleAuthorityMode: "typed",
   };
 
   assert.deepEqual(await router.attach(alphaRef), alpha);
+  const policy = { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const nativeAttach = adapter.attach.bind(adapter);
+  let forwardedPolicy: unknown;
+  let forwardedConnection: unknown;
+  adapter.attach = async ref => { forwardedPolicy = ref.launchPolicy; forwardedConnection = ref.providerConnection; return nativeAttach(ref); };
+  assert.deepEqual(await router.attach({ ...alphaRef, launchPolicy: policy }), alpha);
+  assert.deepEqual(forwardedPolicy, policy, "cached port handles must forward recovered permission authority to the native adapter");
+  assert.deepEqual(await router.attach({ ...alphaRef, providerConnection: null, launchPolicy: policy }), alpha);
+  assert.deepEqual(forwardedConnection, alpha.providerConnection, "verified policy preserves repair from the exact cached connection");
+  assert.equal(await router.attach({ ...alphaRef, lifecycleAuthorityMode: "typed_shadow" }), null);
+  assert.equal(await router.attach({ ...alphaRef, lifecycleAuthorityMode: undefined }), null);
   assert.equal(await router.attach({ ...alphaRef, providerContinuationId: bravo.providerContinuationId! }), null);
   assert.equal(await router.attach({ ...alphaRef, providerConnection: bravo.providerConnection }), null);
   assert.deepEqual(
@@ -321,6 +776,8 @@ test("provider router accepts a missing legacy connection only for the exact rem
   assert.deepEqual(calls, [
     "codex:spawn:alpha-attempt",
     "codex:spawn:bravo-attempt",
+    "codex:attach:alpha-attempt",
+    "codex:attach:alpha-attempt",
   ], "connection mismatches are rejected by the router instead of delegated to an adapter");
 });
 
@@ -354,6 +811,39 @@ test("provider router selects Open Model from an exact OpenCode connection", asy
   ]);
 });
 
+test("provider router only reuses an Open Model handle under its frozen lifecycle authority", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("open-model", calls);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const handle = await router.spawn({
+    provider: "open-model",
+    workAttemptId: "open-model-typed",
+    roomId: "room",
+    cwd: "/tmp/open-model",
+    launchPolicy: { permission: { "*": "allow" } },
+    deliveryMode: "daemon_inbox",
+    lifecycleAuthorityMode: "typed",
+    providerCredential: {
+      apiKey: "provider-secret",
+      baseUrl: "https://models.example.test/v1",
+      model: "open-model/test",
+    },
+  });
+  const ref: ProviderActionRef = {
+    provider: "open-model",
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed",
+  };
+
+  assert.deepEqual(await router.attach(ref), handle);
+  assert.deepEqual(await router.attach({ ...ref, providerConnection: null }), handle);
+  assert.equal(await router.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
+  assert.equal(await router.attach({ ...ref, lifecycleAuthorityMode: undefined }), null);
+  assert.deepEqual(calls, ["open-model:spawn:open-model-typed"]);
+});
+
 test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {
   assert.equal(devMcpServerEntryFromEnv({}), null, "both absent → null");
   assert.equal(devMcpServerEntryFromEnv({ LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://localhost:3000" }), null, "entry absent → null");
@@ -382,16 +872,22 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
   const capturedSpawns: ProviderActionSpawn[] = [];
   const exitListeners3 = new Map<string, Set<(t: ProviderActionTerminal) => void>>();
   let nextDevPid = 7000;
-  function devHandle(workAttemptId: string) {
+  function devHandle(workAttemptId: string, provider: "codex" | "claude-code" | "cursor") {
     const pid = nextDevPid++;
-    return { workAttemptId, pid, providerContinuationId: "dev-thread", providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `dev:${pid}` }, observedState: () => "working" as const };
+    const processIdentity = `dev:${provider}:${pid}`;
+    const providerConnection = provider === "codex"
+      ? { kind: "codex_app_server" as const, url: `ws://127.0.0.1:${pid}`, pid, processIdentity }
+      : provider === "cursor"
+        ? { kind: "cursor_cli" as const, pid, processIdentity }
+        : { kind: "claude_cli" as const, pid, processIdentity };
+    return { workAttemptId, pid, providerContinuationId: "dev-thread", providerConnection, observedState: () => "working" as const };
   }
-  function makeDevAdapter(): NativeProviderAdapter {
+  function makeDevAdapter(provider: "codex" | "claude-code" | "cursor"): NativeProviderAdapter {
     return {
       capabilities: () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
-      async spawn(input) { capturedSpawns.push(input); return devHandle(input.workAttemptId); },
+      async spawn(input) { capturedSpawns.push(input); return devHandle(input.workAttemptId, provider); },
       async attach() { return null; },
-      async resume(_ref, input) { return devHandle(input.workAttemptId); },
+      async resume(_ref, input) { return devHandle(input.workAttemptId, provider); },
       async poke() {},
       async stop(handle) {
         const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
@@ -423,7 +919,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       id: "dev_gate_codex", room_id: "room", display_name: "CodexAgent", provider: "codex", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
       permission_profile_id: "full_access", provider_launch_policy: { promptForInstallation: false }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
     };
-    const daemon1 = new SupervisorDaemon(paths1, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
+    const daemon1 = new SupervisorDaemon(paths1, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true);
     try {
       await daemon1.start();
       assert.equal((await daemonRequest(paths1.socketPath, "manifest.put", { entry: codexEntry })).ok, true);
@@ -449,7 +945,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     const cursorDaemon = new SupervisorDaemon(
       cursorPaths,
       "darwin",
-      new ProviderActionPortRouter({ cursor: async () => makeDevAdapter() }),
+      new ProviderActionPortRouter({ cursor: async () => makeDevAdapter("cursor") }),
       true,
     );
     try {
@@ -461,7 +957,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       await cursorDaemon.stop();
     }
 
-    // Case 2: a stale generic Claude profile must be rejected before native dispatch.
+    // Case 2: a stale generic Claude policy is narrowed to the selected supervised approval profile.
     capturedSpawns.length = 0;
     const paths2 = {
       lockPath: join(root, "d2.lock"), socketPath: join(root, "d2.sock"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl"),
@@ -471,12 +967,14 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       id: "dev_gate_claude", room_id: "room", display_name: "ClaudeAgent", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
       permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
     };
-    const daemon2 = new SupervisorDaemon(paths2, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter() }), true);
+    const daemon2 = new SupervisorDaemon(paths2, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true);
     try {
       await daemon2.start();
       assert.equal((await daemonRequest(paths2.socketPath, "manifest.put", { entry: claudeEntry })).ok, true);
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      assert.equal(capturedSpawns.length, 0, "a gated supervised profile must fail before provider launch");
+      await eventually(async () => capturedSpawns.length === 1, "Claude approval-profile spawn");
+      assert.equal(capturedSpawns.length, 1);
+      assert.equal((capturedSpawns[0]!.launchPolicy as Record<string, unknown>).permissionMode, "default");
+      assert.equal((capturedSpawns[0]!.launchPolicy as Record<string, unknown>).settingSources, "");
     } finally {
       await daemon2.stop();
     }
@@ -488,7 +986,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       lockPath: join(root, "d3.lock"), socketPath: join(root, "d3.sock"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
       attemptsPath: join(root, "attempts3.json"), attemptsRoot: join(root, "attempts3"), workspaceRoot: root,
     };
-    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter() }), true);
+    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true);
     try {
       await daemon3.start();
       assert.equal((await daemonRequest(paths3.socketPath, "manifest.put", { entry: {
@@ -499,8 +997,14 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       } })).ok, true);
       await eventually(async () => ((await daemonRequest(paths3.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "Claude supervised default spawn");
       assert.equal(capturedSpawns[0]?.permissionProfileId, "read_only");
-      assert.deepEqual(capturedSpawns[0]?.launchPolicy, { permissionMode: "plan", dangerouslySkipPermissions: false });
-      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "claude-code + both gates: devMcpServerEntryPath must be absent (provider gate)");
+      assert.deepEqual(capturedSpawns[0]?.launchPolicy, {
+        permissionMode: "dontAsk",
+        dangerouslySkipPermissions: false,
+        tools: ["Read", "Glob", "Grep"],
+        allowedTools: ["mcp__letagents__*"],
+        settingSources: "",
+      });
+      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js", "Claude uses the same explicitly gated local MCP runtime");
     } finally {
       await daemon3.stop();
     }
@@ -512,7 +1016,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       lockPath: join(root, "d4.lock"), socketPath: join(root, "d4.sock"), manifestPath: join(root, "manifest4.json"), auditPath: join(root, "audit4.jsonl"),
       attemptsPath: join(root, "attempts4.json"), attemptsRoot: join(root, "attempts4"), workspaceRoot: root,
     };
-    const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
+    const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true);
     try {
       await daemon4.start();
       assert.equal((await daemonRequest(paths4.socketPath, "manifest.put", { entry: { ...codexEntry, id: "dev_gate_codex_nourl" } })).ok, true);
@@ -528,6 +1032,51 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     else process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = savedEntry;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("provider router exposes retained native custody synchronously without acquiring a connection", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("claude-code", calls);
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  assert.deepEqual(router.runtimeCustody("attempt-custody", "claude-code"), { state: "absent" });
+  assert.deepEqual(calls, []);
+  const handle = await router.spawn({ provider: "claude-code", workAttemptId: "attempt-custody", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const before = [...calls];
+  const custody = router.runtimeCustody("attempt-custody", "claude-code");
+  assert.equal(custody.state, "owned");
+  if (custody.state === "owned") {
+    assert.equal(custody.handle.providerContinuationId, handle.providerContinuationId);
+    assert.deepEqual(custody.handle.providerConnection, handle.providerConnection);
+  }
+  assert.deepEqual(router.runtimeCustody("attempt-custody", "cursor"), { state: "unknown" });
+  assert.deepEqual(calls, before, "inspection makes no adapter call");
+});
+
+test("provider router keeps rejected acquisitions unknown until the native owner proves retirement", async () => {
+  const adapter = fakeAdapter("claude-code", []);
+  const originalSpawn = adapter.spawn;
+  let custody: "unknown" | "owned" | "absent" = "unknown";
+  let expected: unknown;
+  adapter.runtimeCustody = (_attempt, handle) => {
+    assert.equal(handle, expected, "the adapter receives the exact cached native handle");
+    return custody;
+  };
+  adapter.spawn = async () => { throw new Error("bootstrap cleanup failed"); };
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const request = { provider: "claude-code", workAttemptId: "failed-native", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  await assert.rejects(router.spawn(request), /bootstrap cleanup failed/);
+  assert.deepEqual(router.runtimeCustody(request.workAttemptId, request.provider), { state: "unknown" });
+  await assert.rejects(router.spawn({ ...request, provider: "cursor" }), /Conflicting provider identities/);
+  assert.deepEqual(router.runtimeCustody(request.workAttemptId, request.provider), { state: "unknown" }, "cross-provider reuse preserves the failed native owner");
+  adapter.spawn = async input => { expected = await originalSpawn(input); return expected as Awaited<ReturnType<typeof originalSpawn>>; };
+  const handle = await router.spawn(request);
+  assert.deepEqual(router.runtimeCustody(request.workAttemptId, request.provider), { state: "unknown" }, "earlier failed birth is still owned");
+  custody = "owned";
+  assert.equal(router.runtimeCustody(request.workAttemptId, request.provider).state, "owned");
+  custody = "absent";
+  const retired = router.runtimeCustody(request.workAttemptId, request.provider);
+  assert.equal(retired.state, "retired");
+  if (retired.state === "retired") assert.equal(retired.handle.providerContinuationId, handle.providerContinuationId);
 });
 
 test("provider router public handle reads the native observed state live", async () => {
@@ -1151,4 +1700,33 @@ test("operator resolution remains available after the controlled runtime is deta
     await store.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Claude permissions route exact native turn evidence and one-shot dispatch", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("claude-code", calls);
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const handle = await router.spawn({ provider: "claude-code", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const native = { id: "request", request: { subtype: "can_use_tool" as const, tool_name: "Write", tool_use_id: "tool", input: { file_path: "/repo/a", content: "text" } } };
+  const request = { provider: "claude-code" as const, native };
+  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", requests: [native] }); };
+  await router.observePermissions(handle, event => {
+    assert.equal(event.type, "snapshot");
+    if (event.type === "snapshot") { assert.deepEqual(event.requests, [request]); assert.notEqual(event.requests[0]!.native, native); assert.ok(event.connectionId); }
+  }, new AbortController().signal);
+  adapter.correlatePermissionTurn = async (_handle, expected) => {
+    assert.deepEqual(expected, native);
+    return { outcome: "correlated", providerContinuationId: handle.providerContinuationId!, providerTurnId: "turn" };
+  };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "command" });
+  adapter.replyPermission = async (_handle, expected, reply, options) => {
+    assert.deepEqual(expected, native); assert.equal(reply, "reject");
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); calls.push("send");
+    return { outcome: "sent", scope: "request" };
+  };
+  assert.deepEqual(await router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "sent_unacknowledged", nativeScope: "request" });
+  await assert.rejects(router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {
+    await router.spawn({ provider: "claude-code", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  } }), /binding changed/);
+  assert.equal(calls.filter(value => value === "send").length, 1);
 });

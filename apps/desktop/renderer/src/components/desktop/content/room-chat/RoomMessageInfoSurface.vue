@@ -38,8 +38,7 @@
         </div>
 
         <p v-else-if="localOnly" class="room-message-info-state">
-          Message info is available in shared rooms. Local-only rooms keep no
-          read or receipt evidence.
+          Read and delivery status are available only in shared rooms.
         </p>
 
         <div v-else-if="info" class="room-message-info-body">
@@ -49,14 +48,14 @@
             </span>
             <div>
               <strong>No activity yet</strong>
-              <p>Nobody else has read this, and no agent was asked to respond. Evidence appears here as it happens.</p>
+              <p>Nobody else has read this, and no agent was asked to respond. Updates will appear here.</p>
             </div>
           </div>
 
           <section v-if="info.agentsAsked.length > 0" class="room-message-info-section">
             <h4>Agents asked · {{ info.agentsAsked.length }}</h4>
             <ul>
-              <li v-for="agent in info.agentsAsked" :key="agent.receiptId">
+              <li v-for="agent in info.agentsAsked" :key="agent.receiptId" class="room-message-info-agent">
                 <span class="room-message-info-avatar" data-kind="agent" aria-hidden="true">{{ initial(agent.actorLabel) }}</span>
                 <div class="room-message-info-identity">
                   <span class="room-message-info-name">{{ agent.actorLabel }}</span>
@@ -66,14 +65,23 @@
                     <template v-if="agent.activationReasonLabel"> · {{ agent.activationReasonLabel }}</template>
                   </span>
                 </div>
-                <button
-                  v-if="agent.replyMessageId"
-                  type="button"
-                  class="room-message-info-view-reply"
-                  @click="emit('scroll-to-message', agent.replyMessageId)"
-                >
-                  View reply
-                </button>
+                <div v-if="activityTarget(agent) || agent.replyMessageId" class="room-message-info-agent-actions">
+                  <button
+                    v-if="activityTarget(agent)"
+                    type="button"
+                    class="room-message-info-view-reply"
+                    :aria-label="`View ${agent.actorLabel}’s activity for this message`"
+                    @click="inspectAgent(agent)"
+                  >View activity</button>
+                  <button
+                    v-if="agent.replyMessageId"
+                    type="button"
+                    class="room-message-info-view-reply"
+                    @click="emit('scroll-to-message', agent.replyMessageId)"
+                  >
+                    View reply
+                  </button>
+                </div>
               </li>
             </ul>
           </section>
@@ -129,13 +137,16 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import type { DesktopMessageInfo } from "../../../../../../electron/ipc-types";
+import type { DesktopMessageInfo, DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
+import type { AgentModalTarget } from "../desktop-chat-message/types";
+import { messageOutcomeTarget } from "../../../../domain/message-outcome";
 import { desktopIpc } from "../../../../ipc/index.js";
 
 const props = defineProps<{
   open: boolean;
   roomIdentifier: string;
   messageId: string;
+  supervisorEntries?: readonly DesktopSupervisorManifestEntry[];
   /** Which rendering of the message invoked the surface: a thread root also
    * renders in the timeline, so the same data-message-id appears twice. */
   invokerContext?: "timeline" | "thread-root" | "thread-reply" | null;
@@ -144,6 +155,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: [];
   "scroll-to-message": [messageId: string];
+  "inspect-agent": [target: AgentModalTarget];
 }>();
 
 const surfaceElement = ref<HTMLElement | null>(null);
@@ -155,6 +167,24 @@ const info = ref<DesktopMessageInfo | null>(null);
 const copiedId = ref(false);
 let requestToken = 0;
 let restoreFocusElement: HTMLElement | null = null;
+
+function activityTarget(agent: DesktopMessageInfo["agentsAsked"][number]): AgentModalTarget | null {
+  return messageOutcomeTarget(agent, props.messageId, props.roomIdentifier, props.supervisorEntries ?? []);
+}
+
+function inspectAgent(agent: DesktopMessageInfo["agentsAsked"][number]): void {
+  const target = activityTarget(agent);
+  if (!target) return;
+  // Transfer the invocation anchor before this surface unmounts. The agent
+  // inspector can then restore focus to the originating message on dismissal.
+  const anchor = resolveRestoreFocusTarget();
+  if (anchor) {
+    if (!anchor.hasAttribute("tabindex")) anchor.tabIndex = -1;
+    anchor.focus({ preventScroll: true });
+  }
+  emit("close");
+  emit("inspect-agent", target);
+}
 
 /** Agents observe, humans read; a queued receipt only proves routing. */
 function receiptStatusLabel(state: string, observed: boolean): string {

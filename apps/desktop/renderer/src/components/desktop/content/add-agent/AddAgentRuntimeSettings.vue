@@ -2,23 +2,18 @@
   <section
     v-if="hasSupervisedRuntime(provider)"
     class="desktop-add-agent-delivery"
-    aria-label="Agent lifecycle"
-    data-testid="desktop-add-agent-lifecycle"
+    aria-label="Where the agent works"
+    data-testid="desktop-add-agent-execution"
   >
-    <span>Lifecycle</span>
-    <div v-if="hasDesktopManagedRuntime(provider)" class="desktop-add-agent-segmented">
-      <button type="button" :data-selected="launchMode === 'legacy'" :aria-pressed="launchMode === 'legacy'" data-testid="desktop-add-agent-lifecycle-legacy" @click="emit('update:launchMode', 'legacy')">This app</button>
-      <button type="button" :data-selected="launchMode === 'supervised'" :aria-pressed="launchMode === 'supervised'" data-testid="desktop-add-agent-lifecycle-supervised" @click="emit('update:launchMode', 'supervised')">Supervised</button>
-    </div>
-    <p>{{ lifecycleDescription }}</p>
-    <label v-if="launchMode === 'supervised'" class="desktop-add-agent-model-custom-input">
-      <small>Charter</small>
+    <label class="desktop-add-agent-model-custom-input">
+      <small>First task</small>
       <textarea
         :value="charter"
         rows="3"
+        placeholder="What should this agent work on?"
         required
         :aria-invalid="!charter.trim()"
-        aria-describedby="desktop-add-agent-supervised-charter-error"
+        :aria-describedby="!charter.trim() ? 'desktop-add-agent-supervised-charter-error' : undefined"
         data-testid="desktop-add-agent-supervised-charter"
         @input="emit('update:charter', ($event.target as HTMLTextAreaElement).value)"
       />
@@ -26,25 +21,24 @@
         v-if="!charter.trim()"
         id="desktop-add-agent-supervised-charter-error"
         class="desktop-add-agent-field-error"
-      >Add a charter so the supervised agent knows how to work in this room.</small>
+      >Add the first message the agent should handle after it joins. It is sent once.</small>
     </label>
+    <p>{{ executionDescription }}</p>
   </section>
 
-  <section v-if="showDelivery && launchMode === 'legacy'" class="desktop-add-agent-delivery" aria-label="Agent delivery mode">
-    <span>Delivery</span>
-    <div class="desktop-add-agent-segmented">
-      <button type="button" :data-selected="deliveryMode === 'mcp_polling'" :aria-pressed="deliveryMode === 'mcp_polling'" @click="emit('update:deliveryMode', 'mcp_polling')">From the agent app</button>
-      <button type="button" :data-selected="deliveryMode === 'desktop_events'" :aria-pressed="deliveryMode === 'desktop_events'" @click="emit('update:deliveryMode', 'desktop_events')">From this desktop app</button>
-    </div>
-    <p>{{ deliveryDescription }}</p>
-  </section>
-
-  <section
-    v-if="(hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider)) && permissionProfiles.length"
+  <details
+    v-if="hasSupervisedRuntime(provider) && permissionProfiles.length"
     class="desktop-add-agent-permissions"
+    :open="!selectedPermissionProfile || selectedPermissionProfile.status !== 'available'"
     aria-label="Agent permissions"
   >
-    <span>Permissions</span>
+    <summary tabindex="0">
+      <span>Access</span>
+      <span class="desktop-add-agent-access-selection">
+        {{ selectedPermissionProfile?.label || 'Choose permissions' }}
+        <em v-if="selectedPermissionProfile?.risk === 'high'">High risk</em>
+      </span>
+    </summary>
     <div class="desktop-add-agent-permission-options">
       <button
         v-for="profile in permissionProfiles"
@@ -63,50 +57,16 @@
       </button>
     </div>
     <p v-if="selectedPermissionProfile">{{ managedAgentPermissionProfileSummary(selectedPermissionProfile) }}</p>
-  </section>
+  </details>
 
-  <section v-if="showCursorPolicy" class="desktop-add-agent-delivery" aria-label="Cursor MCP tools">
-    <span>MCP tools</span>
-    <div class="desktop-add-agent-segmented">
-      <button
-        v-for="option in cursorMcpPolicyOptions"
-        :key="option.id"
-        type="button"
-        :data-selected="cursorPolicy === option.id"
-        :aria-pressed="cursorPolicy === option.id"
-        :data-testid="`desktop-add-agent-cursor-mcp-${option.id}`"
-        @click="emit('update:cursorPolicy', option.id)"
-      >{{ option.label }}</button>
-    </div>
-    <p>{{ cursorPolicyDescription }}</p>
-  </section>
-
-  <section v-if="externalPrompt" class="desktop-add-agent-external-prompt" data-testid="desktop-add-agent-external-prompt" aria-label="External agent join prompt">
-    <div class="desktop-add-agent-external-prompt-intro">
-      <div>
-        <span>External agent setup</span>
-        <p>Copy these instructions into {{ provider?.name || "the provider" }} so it can join the correct room, use a readable agent name, and keep listening for work.</p>
-      </div>
-      <button type="button" :disabled="copyingExternalPrompt" @click="emit('copy-external-prompt')">
-        {{ copyingExternalPrompt ? "Copying..." : "Copy agent instructions" }}
-      </button>
-    </div>
-    <details class="desktop-add-agent-external-prompt-details">
-      <summary>Show full instructions</summary><pre><code>{{ externalPrompt }}</code></pre>
-    </details>
-  </section>
 </template>
 
 <script setup lang="ts">
 import type {
   DesktopAgentProvider,
-  DesktopCursorMcpPolicy,
-  DesktopManagedAgentDeliveryMode,
   DesktopManagedAgentPermissionProfile,
 } from "../../../../../../electron/ipc-types";
 import {
-  cursorMcpPolicyOptions,
-  hasDesktopManagedRuntime,
   hasSupervisedRuntime,
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
@@ -114,27 +74,14 @@ import {
 
 defineProps<{
   provider: DesktopAgentProvider | null;
-  launchMode: "legacy" | "supervised";
-  lifecycleDescription: string;
+  executionDescription: string;
   charter: string;
-  showDelivery: boolean;
-  deliveryMode: DesktopManagedAgentDeliveryMode;
-  deliveryDescription: string;
   permissionProfiles: DesktopManagedAgentPermissionProfile[];
   selectedPermissionProfile: DesktopManagedAgentPermissionProfile | null;
-  showCursorPolicy: boolean;
-  cursorPolicy: DesktopCursorMcpPolicy;
-  cursorPolicyDescription: string;
-  externalPrompt: string | null;
-  copyingExternalPrompt: boolean;
 }>();
 const emit = defineEmits<{
-  "update:launchMode": [value: "legacy" | "supervised"];
   "update:charter": [value: string];
-  "update:deliveryMode": [value: DesktopManagedAgentDeliveryMode];
   "select-permission": [profile: DesktopManagedAgentPermissionProfile];
-  "update:cursorPolicy": [value: DesktopCursorMcpPolicy];
-  "copy-external-prompt": [];
 }>();
 
 function permissionOptionSummary(profile: DesktopManagedAgentPermissionProfile): string {

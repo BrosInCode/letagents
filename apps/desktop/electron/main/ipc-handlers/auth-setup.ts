@@ -9,16 +9,19 @@ import type {
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
   DesktopProvisionSupervisorGrantInput,
+  DesktopSecureStorageStatus,
   DesktopSupervisorGrantMetadata,
 } from "../../ipc-types.js";
 import {
-  clearStoredAuth,
+  cancelDeviceAuthFlow,
   getDesktopAuthStatus,
   pollDeviceAuthFlow,
   setAuthAuthorizedHandler,
   setAuthInvalidatedHandler,
+  signOutDesktopAuth,
   startDeviceAuthFlow,
 } from "../auth.js";
+import { apiUrl } from "../paths.js";
 import { openAllowedExternalUrl } from "../external-url.js";
 import {
   buildMcpInstallState,
@@ -34,13 +37,16 @@ import {
 import { clearJoinedRoomInfoCache } from "../rooms.js";
 import {
   getDesktopSupervisorGrantMetadata,
+  getDesktopSupervisorGrantStorageStatus,
   provisionDesktopSupervisorGrant,
   revokeDesktopSupervisorGrant,
 } from "../supervisor-grant.js";
+import { supervisorGrantCoordinator } from "../supervisor-grant-coordinator.js";
 
 export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): void {
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
+    supervisorGrantCoordinator.scheduleCredentialRecovery();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
     void refreshDesktopNotificationRegistration().catch(() => {});
   });
@@ -66,17 +72,21 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
       pollDeviceAuthFlow(requestId),
   );
   targetIpcMain.handle(
+    "desktop:auth:cancel-device-flow",
+    async (): Promise<DesktopAuthStatus> => cancelDeviceAuthFlow(),
+  );
+  targetIpcMain.handle(
     "desktop:auth:open-verification",
     async (_event, url: string): Promise<void> => {
-      await openAllowedExternalUrl(url, ["github.com"]);
+      await openAllowedExternalUrl(url, [new URL(apiUrl).hostname]);
     },
   );
   targetIpcMain.handle(
     "desktop:auth:sign-out",
     async (): Promise<DesktopAuthStatus> => {
       clearJoinedRoomInfoCache();
-      await unregisterDesktopNotificationAccount();
-      await clearStoredAuth();
+      await unregisterDesktopNotificationAccount().catch(() => {});
+      await signOutDesktopAuth();
       await refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
       return getDesktopAuthStatus();
     },
@@ -84,6 +94,14 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   targetIpcMain.handle(
     "desktop:supervisor-grant:get",
     async (): Promise<DesktopSupervisorGrantMetadata | null> => getDesktopSupervisorGrantMetadata(),
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor-grant:get-storage-status",
+    async (): Promise<DesktopSecureStorageStatus> => {
+      const status = getDesktopSupervisorGrantStorageStatus();
+      supervisorGrantCoordinator.observeSecureStorageAvailability(status.available);
+      return status;
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor-grant:provision",

@@ -1,4 +1,7 @@
 import type { Express } from "express";
+import { getDurableRoomWorkerSessions, getRoomWorkerNameHolders } from "../../../db/auth/room-agent-sessions.js";
+import { claimRoomParticipantOwner, getParticipantOwnersProvenByMessages } from "../../../db/participants.js";
+import { isMcpWorkerId, isMcpConnectionToken } from "../../../../shared/mcp-worker.js";
 
 import {
   createFencedRoomAgentSession,
@@ -40,6 +43,10 @@ import {
   normalizeRuntime,
 } from "./helpers.js";
 import type { RoomPresenceRouteDeps } from "./types.js";
+import {
+  allocateAgentDisplayName,
+  isNameHeldByAnotherAgent,
+} from "../../../rooms/agent-display-name-allocation.js";
 
 export function desktopManagedPausePresence(input: {
   availability?: "failure" | "room_closed";
@@ -56,8 +63,9 @@ export function desktopManagedPausePresence(input: {
 
 /**
  * True when `label` is exactly `base` plus one or more trailing space-separated
- * pure-digit groups — i.e. the shape the collision allocator produces
- * (`${base} ${offset}`), possibly compounded by the historical bug. Used to
+ * pure-digit groups — i.e. the shape the collision allocator used to produce
+ * (`${base} ${offset}`), possibly compounded by the historical bug. The
+ * allocator no longer mints these, but clients still replay stored ones. Used to
  * validate that a trusted base signal actually corresponds to the requested
  * label before reducing to it.
  */
@@ -136,6 +144,7 @@ export function registerAgentSessionRoutes(
       actor_label,
       display_name,
       requested_base_display_name,
+      connection_token,
       ide_label,
       agent_instance_id,
       session_kind,
@@ -149,6 +158,7 @@ export function registerAgentSessionRoutes(
       actor_label?: string;
       display_name?: string;
       requested_base_display_name?: string | null;
+      connection_token?: string;
       ide_label?: string;
       agent_instance_id?: string | null;
       session_kind?: string;
@@ -188,6 +198,12 @@ export function registerAgentSessionRoutes(
 
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
       const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
+      const durableWorker = isMcpWorkerId(normalizedAgentInstanceId);
+      if ((durableWorker && requestedSessionKind !== "worker") || durableWorker !== Boolean(connection_token)
+        || (connection_token !== undefined && !isMcpConnectionToken(connection_token))) {
+        res.status(400).json({ error: "A durable worker requires a valid prepared connection credential." });
+        return;
+      }
       const normalizedRegistrationLiveness = normalizeRegistrationLiveness(registration_liveness);
       const replacementSessionId = typeof replace_agent_session_id === "string"
         ? replace_agent_session_id.trim()
@@ -206,7 +222,7 @@ export function registerAgentSessionRoutes(
         });
         return;
       }
-      const [activeParticipants, activeSessionsForIdentity] = await Promise.all([
+      const [activeParticipants, activeSessionsForIdentity, durableWorkers, workerNameHolders] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
         requestedSessionKind === "worker"
           ? getActiveRoomAgentSessionsForWorkerIdentity({
@@ -214,12 +230,14 @@ export function registerAgentSessionRoutes(
               agent_key: agent.canonical_key,
             })
           : Promise.resolve([]),
+        getDurableRoomWorkerSessions(project.id),
+        getRoomWorkerNameHolders(project.id),
       ]);
       const replaceableSessionIds = new Set(
         activeSessionsForIdentity
           .filter((session) => normalizedAgentInstanceId
             && session.agent_instance_id === normalizedAgentInstanceId
-            && (session.session_id === replacementSessionId
+            && (durableWorker || session.session_id === replacementSessionId
               || isActiveRoomAgentSessionStaleForRegistration({
               active_session: session,
             })))
@@ -230,7 +248,7 @@ export function registerAgentSessionRoutes(
           && session.agent_instance_id === normalizedAgentInstanceId
           && !replaceableSessionIds.has(session.session_id)
       );
-      if (conflictingSameInstance) {
+      if (conflictingSameInstance && !durableWorker) {
         res.status(409).json({
           error: "This exact agent instance is already active on another live transport.",
           code: "agent_instance_already_active",
@@ -260,9 +278,49 @@ export function registerAgentSessionRoutes(
       let baseDisplayName = isGenericName
         ? pickLocalCodename(agent.canonical_key).display_name
         : (normalizedRequestedDisplayName || canonicalDisplayName);
+      // An agent's own history never holds a name against it. Holding an
+      // agent's past names against it is what renamed it on every reconnect:
+      // each name it was given became one more name it could not have.
+      //
+      // A row is this identity's own when it carries its key. Rows written
+      // before messages recorded their sender's key carry none, so the row
+      // for the requested name is settled by the room's messages instead: it
+      // is this identity's when every authenticated message sent under that
+      // label came from this key. The proven owner is then recorded, so the
+      // question is asked once.
+      const provenOwnParticipantKeys = new Set<string>();
+      if (requestedSessionKind === "worker") {
+        const unownedNamesakes = activeParticipants.filter((participant) =>
+          participant.kind === "agent" && !participant.agent_key && participant.actor_label
+          && participant.display_name === baseDisplayName);
+        if (unownedNamesakes.length > 0) {
+          const provenOwners = await getParticipantOwnersProvenByMessages({
+            room_id: project.id,
+            actor_labels: unownedNamesakes.map((participant) => participant.actor_label!),
+          });
+          for (const participant of unownedNamesakes) {
+            const owner = provenOwners.get(participant.actor_label!);
+            if (!owner) continue;
+            if (owner === agent.canonical_key) provenOwnParticipantKeys.add(participant.participant_key);
+            // Bookkeeping only: the registration does not depend on it.
+            await claimRoomParticipantOwner({
+              room_id: project.id, participant_key: participant.participant_key, agent_key: owner,
+            }).catch((error) => {
+              console.error(`[agent sessions] failed to record participant owner for ${project.id}`, error);
+            });
+          }
+        }
+      }
+      const isOwnParticipant = (participant: (typeof activeParticipants)[number]): boolean =>
+        participant.kind === "agent" && (participant.agent_key === agent.canonical_key
+          || provenOwnParticipantKeys.has(participant.participant_key));
+      const holdsOwnHistory = requestedSessionKind !== "worker";
       const usedDisplayNames = new Set([
-        ...activeParticipants.map((participant) => participant.display_name),
+        ...activeParticipants.filter((participant) => holdsOwnHistory || !isOwnParticipant(participant))
+          .map((participant) => participant.display_name),
         ...allocationSessions.map((session) => session.display_name),
+        ...durableWorkers.filter((session) => session.agent_instance_id !== normalizedAgentInstanceId)
+          .map((session) => session.display_name),
       ]);
 
       // Participant rows are durable room history, not proof that a label is
@@ -273,10 +331,10 @@ export function registerAgentSessionRoutes(
       if (requestedSessionKind === "worker") {
         const baseHeldByThisIdentity = allocationSessions.some(
           (session) => session.display_name === baseDisplayName
-        );
+        ) || durableWorkers.some((session) => session.display_name === baseDisplayName
+          && session.agent_instance_id !== normalizedAgentInstanceId);
         const baseBelongsToAnotherParticipant = activeParticipants.some(
-          (participant) => participant.display_name === baseDisplayName
-            && (participant.kind !== "agent" || participant.agent_key !== agent.canonical_key)
+          (participant) => participant.display_name === baseDisplayName && !isOwnParticipant(participant)
         );
         if (!baseHeldByThisIdentity && !baseBelongsToAnotherParticipant) {
           usedDisplayNames.delete(baseDisplayName);
@@ -290,7 +348,7 @@ export function registerAgentSessionRoutes(
       // guards live sessions; a genuine live collision still falls through
       // to the conflict-retry loop below).
       const priorInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
-      if (requestedSessionKind === "worker" && priorInstanceId) {
+      if (requestedSessionKind === "worker" && priorInstanceId && !durableWorker) {
         const resumableName = await getLastEndedWorkerSessionDisplayName({
           room_id: project.id,
           agent_key: agent.canonical_key,
@@ -309,23 +367,42 @@ export function registerAgentSessionRoutes(
           baseDisplayName = resumableName;
         }
       }
-      const pickSessionDisplayName = (suffixOffset: number): string => (
-        suffixOffset === 0
-          ? baseDisplayName
-          : isGenericName
-            ? pickLocalCodename(`${agent.canonical_key}:${suffixOffset}`).display_name
-            : `${baseDisplayName} ${suffixOffset}`
-      );
+      const durablePredecessor = durableWorker
+        ? durableWorkers.find((session) => session.agent_instance_id === normalizedAgentInstanceId
+          && session.agent_key === agent.canonical_key)
+        : null;
+      if (durablePredecessor) {
+        baseDisplayName = durablePredecessor.display_name;
+        usedDisplayNames.delete(baseDisplayName);
+      }
+      // Room history is matched exactly, as it always was: it records what a
+      // participant was once called and cannot make a mention ambiguous. An
+      // agent of another identity that answers to a name now is matched the
+      // way mention routing matches it, so no spelling of that name is free.
+      const ownSessions = workerNameHolders.filter((holder) =>
+        holder.agent_key === agent.canonical_key && !holder.ended_at);
+      const isHeld = (displayName: string): boolean => usedDisplayNames.has(displayName)
+        || isNameHeldByAnotherAgent({
+          display_name: displayName,
+          agent_key: agent.canonical_key,
+          own_sessions: ownSessions,
+          holders: workerNameHolders,
+        });
 
       let offset = 0;
       const normalizedRepoBranch = normalizeOptionalText(repo_branch);
       const maxRegistrationAttempts = 25;
       for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
-        let sessionDisplayName = pickSessionDisplayName(offset);
-        while (usedDisplayNames.has(sessionDisplayName)) {
-          offset++;
-          sessionDisplayName = pickSessionDisplayName(offset);
-        }
+        // A held name receives its own codename, never a numbered variant.
+        const allocated = allocateAgentDisplayName({
+          base_display_name: baseDisplayName,
+          agent_key: agent.canonical_key,
+          is_held: isHeld,
+          from_offset: offset,
+        });
+        if (!allocated) break;
+        offset = allocated.collision_offset;
+        const sessionDisplayName = allocated.display_name;
         const actorLabel = buildAgentActorLabel({
           display_name: sessionDisplayName,
           owner_label: agent.owner_label,
@@ -357,6 +434,7 @@ export function registerAgentSessionRoutes(
             // Persist the server-resolved base (before any collision suffix) as
             // durable allocation provenance for this session.
             assigned_base_display_name: baseDisplayName,
+            connection_token,
             owner_account_id: req.sessionAccount.account_id,
             owner_label: agent.owner_label,
             ide_label: resolvedIdeLabel,
@@ -368,7 +446,7 @@ export function registerAgentSessionRoutes(
           // commit succeeds, wake any already-authenticated long-poll/SSE
           // request for the stable session id before returning the successor
           // credential. The successor cannot connect until this response.
-          for (const replacedSessionId of created.replaced_session_ids) {
+          for (const replacedSessionId of durableWorker ? [] : created.replaced_session_ids) {
             await disconnectRoomAgentDeliverySession({
               room_id: project.id,
               agent_session_id: replacedSessionId,
@@ -430,6 +508,7 @@ export function registerAgentSessionRoutes(
     const hasSelfCredentials = req.authKind === "agent_session"
       || typeof body.agent_session_id === "string" || typeof body.agent_session_token === "string";
     let ownerAccountScope: string | null = null;
+    let credentialFence: ResolvedRequestAgentIdentity["credential_fence"] = null;
 
     if (hasSelfCredentials) {
       const agentSessionIdentity = await requireWorkerRequestAgentIdentity({
@@ -446,6 +525,7 @@ export function registerAgentSessionRoutes(
         return;
       }
       ownerAccountScope = req.sessionAccount?.account_id ?? null;
+      credentialFence = agentSessionIdentity.identity.credential_fence;
     } else if (!(await deps.requireAdmin(req, res, project))) {
       return;
     }
@@ -455,13 +535,16 @@ export function registerAgentSessionRoutes(
         session_id: targetSessionId,
         room_id: project.id,
         owner_account_id: ownerAccountScope,
+        credential_fence: credentialFence,
       });
       if (!endedSession) {
         res.status(404).json({ error: "Agent session not found" });
         return;
       }
 
-      const deliverySession = await disconnectRoomAgentDeliverySession({
+      // Ending already retires delivery and emits credential-scoped invalidations.
+      // A later session-id-only disconnect could hit a reconnecting successor.
+      const deliverySession = isMcpWorkerId(endedSession.agent_instance_id) ? null : await disconnectRoomAgentDeliverySession({
         room_id: project.id,
         agent_session_id: targetSessionId,
       });

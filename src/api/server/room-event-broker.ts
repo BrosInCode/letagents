@@ -22,6 +22,13 @@ export type RoomEvent =
     /** Compact owner+durable-key audience; exact generation is checked before serialization. */
     recipientAgentTargetSet: ReadonlySet<string>;
   }
+  | {
+    /** Receipts appended after commit; re-publishes the message to its new exact audience only. */
+    kind: "message_routed";
+    roomId: string;
+    message: Message;
+    recipientAgentTargetSet: ReadonlySet<string>;
+  }
   | { kind: "task_updated"; roomId: string; task: Task }
   | { kind: "github_event_updated"; roomId: string; event: GitHubRoomEvent }
   | {
@@ -33,10 +40,13 @@ export type RoomEvent =
   | { kind: "reasoning_removed"; roomId: string; sessionId: string }
   | { kind: "artifact_updated"; roomId: string; artifact: RoomSharedArtifact | null }
   | { kind: "rental_activity_created"; roomId: string; activity: ActivityEvent }
-  | { kind: "message_info_updated"; roomId: string; messageIds: string[] | null };
+  | { kind: "message_info_updated"; roomId: string; messageIds: string[] | null }
+  | { kind: "agent_work_invalidated"; roomId: string }
+  | { kind: "agent_approval_invalidated"; roomId: string }
+  | { kind: "execution_delegation_invalidated"; roomId: string };
 
 export type RoomEventKind = RoomEvent["kind"];
-export const MESSAGE_CREATED_EVENT_KINDS: ReadonlySet<RoomEventKind> = new Set(["message_created"]);
+export const MESSAGE_CREATED_EVENT_KINDS: ReadonlySet<RoomEventKind> = new Set(["message_created", "message_routed"]);
 
 export interface RoomEventEnvelope {
   cursor: string;
@@ -105,6 +115,9 @@ interface EventSourceDeps {
   artifactEvents?: EventEmitter;
   rentalActivityEvents: EventEmitter;
   messageInfoEvents: EventEmitter;
+  agentWorkEvents?: EventEmitter;
+  agentApprovalEvents?: EventEmitter;
+  executionDelegationEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
 }
 
@@ -199,6 +212,20 @@ export class RoomEventBroker {
         recipientAgentTargetSet: createRecipientAgentTargetSet(event.recipientAgentTargets ?? []),
       };
     });
+    this.addSource(deps.messageEvents, "message:routed", (payload) => {
+      const event = payload as {
+        projectId: string;
+        message: Message;
+        recipientAgentTargets?: readonly MessageRecipientAgentTarget[];
+      };
+      const recipientAgentTargetSet = createRecipientAgentTargetSet(event.recipientAgentTargets ?? []);
+      return {
+        kind: "message_routed",
+        roomId: event.projectId,
+        message: event.message,
+        recipientAgentTargetSet,
+      };
+    });
     this.addSource(deps.taskEvents, "task:updated", (payload) => {
       const event = payload as { projectId: string; task: Task };
       return { kind: "task_updated", roomId: event.projectId, task: event.task };
@@ -248,6 +275,24 @@ export class RoomEventBroker {
         messageIds: event.messageIds,
       };
     });
+    if (deps.agentWorkEvents) {
+      this.addSource(deps.agentWorkEvents, "agent_work:invalidated", (payload) => {
+        const event = payload as { projectId: string };
+        return { kind: "agent_work_invalidated", roomId: event.projectId };
+      });
+    }
+    if (deps.agentApprovalEvents) {
+      this.addSource(deps.agentApprovalEvents, "agent_approval:invalidated", (payload) => {
+        const event = payload as { projectId: string };
+        return { kind: "agent_approval_invalidated", roomId: event.projectId };
+      });
+    }
+    if (deps.executionDelegationEvents) {
+      this.addSource(deps.executionDelegationEvents, "execution_delegation:invalidated", (payload) => {
+        const event = payload as { projectId: string };
+        return { kind: "execution_delegation_invalidated", roomId: event.projectId };
+      });
+    }
     if (deps.bridgeLossEvents) {
       this.addLossSource(deps.bridgeLossEvents);
     }
@@ -718,7 +763,7 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 function serializedEventBytes(event: RoomEvent, overflowValue: number): number {
   try {
     let bytes = Buffer.byteLength(JSON.stringify(event));
-    if (event.kind === "message_created" && event.recipientAgentTargetSet.size > 0) {
+    if ((event.kind === "message_created" || event.kind === "message_routed") && event.recipientAgentTargetSet.size > 0) {
       // JSON.stringify(Set) emits `{}` and would make the broker's byte limits
       // blind to the largest retained object in a prompt event. Count the
       // UTF-16 backing store plus a conservative Set-entry allocation for each

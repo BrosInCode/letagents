@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentInspectorActivityGroupState,
+  agentInspectorLiveAnnouncement,
   agentInspectorRetryableTurnControlInput,
   agentInspectorTurnControlActionId,
   agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorTurnControlFenceMatches,
   agentInspectorActionStateForEntry,
   clearAgentInspectorActionStateIfMatching,
+  settleAgentInspectorRetirementCompletion,
+  settleAgentInspectorRetirementEvent,
   agentInspectorOverallState,
   projectAgentInspector,
   projectAgentInspectorTurnControl,
@@ -17,6 +21,7 @@ import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-ins
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
+  mergeSupervisorStateSnapshotEntries,
   supervisorEntriesResourceFreshness,
   supervisorStateRepairDelayMs,
   supervisorStateSubscriptionNeedsRepair,
@@ -61,6 +66,7 @@ function receipt(
   return {
     inboxItemId: `inbox_${sourceMessageId}`,
     sourceMessageId,
+    fifoSequence: 1,
     replyClientMessageId: `reply_${sourceMessageId}`,
     canonicalMessageId: null,
     state,
@@ -140,15 +146,41 @@ function task(id: string, status: string, overrides: Partial<DesktopTaskSummary>
   };
 }
 
-test("truthful state requires all listening authorities and preserves reconnecting", () => {
-  assert.equal(agentInspectorOverallState(entry()), "listening");
+test("truthful online state requires the exact delivery connection and preserves reconnecting", () => {
+  assert.equal(agentInspectorOverallState(entry()), "online");
+  assert.equal(agentInspectorOverallState(entry({
+    nativeLiveness: { state: "stale", observedAt: "2026-07-29T09:59:00.000Z", detail: null },
+  })), "online", "native heartbeat freshness does not own the Online state");
+  assert.equal(agentInspectorOverallState(entry({
+    nativeLiveness: { state: "active", observedAt: "2026-07-29T10:00:00.000Z", detail: null },
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: null, detail: null },
+      ingress: { state: "stopped", observedAt: null, detail: null },
+    },
+  })), "disconnected", "a native heartbeat cannot manufacture Online without message delivery");
+  assert.equal(agentInspectorOverallState(entry({
+    providerPid: null,
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: null, detail: "No live delivery owner." },
+      ingress: { state: "stopped", observedAt: null, detail: "Room observation stopped." },
+      turn: {
+        state: "retrying",
+        inboxItemId: "inbox_result_recovery",
+        sourceMessageId: "message_result_recovery",
+        providerTurnId: "turn_result_recovery",
+        detail: "Recovering a durable result.",
+      },
+    },
+  })), "disconnected", "durable result recovery without a live receiver cannot manufacture Online");
   assert.equal(agentInspectorOverallState(entry({ providerPid: null })), "disconnected");
   assert.equal(agentInspectorOverallState(entry({
     provider: "cursor",
     providerPid: null,
     providerContinuationId: "cursor-session-1",
     observedState: "idle",
-  })), "listening", "Cursor's idle lane is identified by its continuation, not a nonexistent child pid");
+  })), "online", "Cursor's online lane is identified by its continuation, not a nonexistent child pid");
   assert.equal(agentInspectorOverallState(entry({
     providerPid: null,
     roomAgentState: {
@@ -159,8 +191,20 @@ test("truthful state requires all listening authorities and preserves reconnecti
   })), "reconnecting");
 });
 
+test("a Claude usage-limit bootstrap failure explains the automatic retry instead of a raw diagnostic", () => {
+  const limited = entry({
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
+      + "Startup observations: assistant_error=rate_limit; result=success; init_ms=512; bootstrap_ms=1492; budget_ms=30000.",
+  });
+  const projection = projectAgentInspector(limited, { roomId: "focus_1", deliveryRetryAvailable: false });
+  assert.match(projection?.now?.summary ?? "", /usage limit was reached.*retries automatically/);
+});
+
 test("a stopped provider with retained historical coordinates offers recovery instead of false reconnect or delivery retry", () => {
   const stoppedProvider = entry({
+    runtimeGenerationId: "stopped-runtime",
     observedState: "recovering",
     condition: "coordination_blocked",
     lastError: "convergence scheduler failure: The saved OpenCode process is no longer running.",
@@ -201,12 +245,34 @@ test("a stopped provider with retained historical coordinates offers recovery in
     roomId: "focus_1",
     deliveryRetryAvailable: true,
   });
-  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Stopped");
+  assert.equal(projection?.overallState, "needs_attention");
   assert.match(projection?.now?.summary ?? "", /Recover the agent/);
   assert.equal(projection?.actions.find((action) => action.kind === "reconnect")?.available, false);
-  assert.equal(projection?.actions.find((action) => action.kind === "recover")?.available, true);
-  assert.equal(projection?.actions.find((action) => action.kind === "recover")?.label, "Recover agent");
+  assert.equal(projection?.actions.find((action) => action.kind === "recover")?.available, false);
+  assert.equal(projection?.actions.find((action) => action.kind === "recovery_options")?.available, true);
   assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
+});
+
+test("blocked delivery on an exact live runtime offers choices without implicit recovery", () => {
+  const live = entry({
+    provider: "claude-code", observedState: "recovering", condition: "coordination_blocked",
+    runtimeGenerationId: "runtime-current",
+    lastError: "The agent's readiness evidence is unavailable. Delivery is blocked until recovery is verified.",
+    roomAgentState: { ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: null, detail: "Readiness evidence is unavailable." },
+    },
+  });
+  for (const providerPid of [123, null]) {
+    const projection = projectAgentInspector({ ...live, providerPid }, { roomId: "focus_1" })!;
+    assert.equal(projection.overallState, "needs_attention");
+    assert.equal(projection.actions.find(action => action.kind === "recover")?.available, false,
+      "delivery admission and missing PID do not authorize implicit replacement");
+    assert.equal(projection.actions.find(action => action.kind === "recovery_options")?.available, true);
+    assert.equal(projection.actions.find(action => action.kind === "restart_runtime")?.available, true);
+  }
+  const stale = projectAgentInspector(live, { roomId: "focus_1", resourceFreshness: "stale" })!;
+  assert.ok(stale.actions.filter(action => ["recover", "recovery_options", "restart_runtime"].includes(action.kind))
+    .every(action => !action.available));
 });
 
 test("a reconnecting room keeps provider connectivity separate from delivery authority", () => {
@@ -239,7 +305,7 @@ test("a reconnecting room keeps provider connectivity separate from delivery aut
     roomId: "focus_1",
     deliveryRetryAvailable: true,
   });
-  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Connected");
+  assert.notEqual(projection?.overallLabel, "Online");
   assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
 });
 
@@ -256,7 +322,7 @@ test("overall state follows the complete product precedence table", () => {
     ["ingress blocked", withRoom({ ingress: { state: "blocked", observedAt: null, detail: null } }), "needs_attention"],
     ["reconnecting", withRoom({ connection: { state: "reconnecting", observedAt: null, detail: null } }), "reconnecting"],
     ["active turn", withRoom({ turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null } }), "responding"],
-    ["listening", entry(), "listening"],
+    ["online", entry(), "online"],
     ["starting", entry({ providerPid: null, observedState: "starting" }), "starting"],
     ["disconnected", entry({ providerPid: null, observedState: "working" }), "disconnected"],
     ["missing axes", entry({ roomAgentState: null }), "disconnected"],
@@ -265,6 +331,14 @@ test("overall state follows the complete product precedence table", () => {
   for (const [label, candidate, expected] of cases) {
     assert.equal(agentInspectorOverallState(candidate), expected, label);
   }
+  const online = projectAgentInspector(entry(), { roomId: "focus_1" });
+  assert.equal(online?.overallLabel, "Online");
+  assert.equal(online?.overallDetail, "");
+  const responding = projectAgentInspector(withRoom({
+    turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+  }), { roomId: "focus_1" });
+  assert.equal(responding?.overallLabel, "Online", "active work does not replace connection status");
+  assert.equal(responding?.overallDetail, "");
 });
 
 test("durable entries remain inspectable before room state exists", () => {
@@ -274,13 +348,119 @@ test("durable entries remain inspectable before room state exists", () => {
   }), { roomId: "focus_1" });
   assert.ok(projection);
   assert.equal(projection.overallState, "starting");
-  assert.equal(projection.readiness.find((fact) => fact.key === "inbox")?.value, "Unavailable");
-  assert.equal(projection.readiness.find((fact) => fact.key === "inbox")?.tone, "offline");
+  assert.equal(projection.overallLabel, "Starting");
+});
+
+test("an admitted startup waits for its new room binding without presenting a retained failure", () => {
+  const oldError = "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn.";
+  for (const observedState of ["starting", "recovering"] as const) {
+    for (const lastError of [null, oldError]) {
+      const current = entry({
+        observedState,
+        lastError,
+        providerPid: null,
+        agentSessionBindingState: "none",
+        roomAgentState: {
+          ...entry().roomAgentState!,
+          connection: { state: "reconnecting", observedAt: null, detail: "Restoring the provider and exact worker binding." },
+          ingress: { state: "stopped", observedAt: null, detail: "The new worker binding is not available yet." },
+          inbox: { state: "waiting_for_desktop_credentials", pendingCount: 0, blockedByMessageId: null, detail: "A current worker binding is required before delivery can start." },
+        },
+      });
+      const projection = projectAgentInspector(current, { roomId: "focus_1" });
+      assert.equal(projection?.overallState, "starting");
+      assert.equal(projection?.now, null, "normal startup does not require user intervention");
+      assert.equal(projection?.entry.lastError, lastError, "diagnostic history is retained");
+
+      const room = current.roomAgentState!;
+      const blockers: Partial<DesktopSupervisorManifestEntry>[] = [
+        { condition: "auth_blocked" },
+        { condition: "coordination_blocked" },
+        { condition: "security_blocked" },
+        { condition: "quarantined" },
+        { roomAgentState: { ...room, ingress: { ...room.ingress, state: "blocked" } } },
+        { roomAgentState: { ...room, inbox: { ...room.inbox, state: "blocked" } } },
+        { roomAgentState: { ...room, inbox: { ...room.inbox, blockedByMessageId: "message_1" } } },
+        { roomAgentState: { ...room, turn: { ...room.turn, state: "failed" } } },
+        { roomAgentState: { ...room, connection: { ...room.connection, state: "disconnected" } } },
+        { observedState: "failed" },
+        { observedState: "idle" },
+      ];
+      for (const blocker of blockers) {
+        assert.equal(agentInspectorOverallState({ ...current, ...blocker }), "needs_attention", JSON.stringify(blocker));
+      }
+      assert.equal(agentInspectorOverallState({ ...current, desiredState: "paused" }), "paused");
+      assert.equal(agentInspectorOverallState({ ...current, desiredState: "stopped" }), "retired");
+      assert.equal(agentInspectorOverallState(entry({ lastError })), "online", "the completed startup can become online with retained history");
+    }
+  }
+});
+
+test("Activity groups stale supervisor facts as unavailable", () => {
+  assert.equal(agentInspectorActivityGroupState({
+    overallState: "online",
+    resourceFreshness: "stale",
+  }), "status_unavailable");
+  assert.equal(agentInspectorActivityGroupState({
+    overallState: "recovering",
+    resourceFreshness: "fresh",
+  }), "recovering");
+  assert.equal(agentInspectorActivityGroupState({
+    overallState: "retired",
+    resourceFreshness: "fresh",
+  }), null);
+});
+
+test("Inspector live announcements distinguish responding from idle Online", () => {
+  const online = {
+    displayName: "GardenSignal",
+    overallLabel: "Online",
+    overallState: "online" as const,
+    resourceFreshness: "fresh" as const,
+  };
+  assert.equal(agentInspectorLiveAnnouncement(online), "GardenSignal: Online.");
+  assert.equal(agentInspectorLiveAnnouncement({
+    ...online,
+    overallState: "responding",
+  }), "GardenSignal: Online. Responding.");
+  assert.equal(agentInspectorLiveAnnouncement({
+    ...online,
+    resourceFreshness: "stale",
+  }), "GardenSignal: Status unavailable.");
+});
+
+test("Now shows a provider retry while the turn waits on it", () => {
+  const delivery = receipt("message_1", "awaiting_result", {
+    timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
+  });
+  const waiting = entry({
+    provider: "open-model",
+    activity: [
+      activity(3, { summary: "Checking the workspace" }),
+      activity(4, {
+        provider: "open-model",
+        kind: "provider_event",
+        method: "letagents/providerRetry",
+        summary: "The model provider returned an error. Retrying (attempt 1).",
+      }),
+      // Every other provider event stays out of Now.
+      activity(5, { provider: "open-model", kind: "provider_event", method: "letagents/turnAttention", summary: "guardrail" }),
+    ],
+    deliveryReceipts: [delivery],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: delivery.inboxItemId, sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  assert.equal(
+    projectAgentInspector(waiting, { roomId: "focus_1" })?.now?.summary,
+    "The model provider returned an error. Retrying (attempt 1).",
+  );
 });
 
 test("Now uses only sanitized activity observed after the exact turn_started event", () => {
   const delivery = receipt("message_1", "awaiting_result", {
-    timeline: [{ phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
+    timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
   });
   const responding = entry({
     activity: [
@@ -295,6 +475,23 @@ test("Now uses only sanitized activity observed after the exact turn_started eve
     },
   });
   assert.match(projectAgentInspector(responding, { roomId: "focus_1" })?.now?.summary ?? "", /Checking the workspace/);
+  assert.deepEqual(projectAgentInspector(responding, { roomId: "focus_1" })?.liveWork, {
+    active: true,
+    state: "responding",
+    startedAt: "2026-07-23T10:00:02.000Z",
+    detail: null,
+    freshness: "fresh",
+    agentState: "responding",
+  });
+
+  assert.deepEqual(projectAgentInspector(responding, { roomId: "focus_1", resourceFreshness: "stale" })?.liveWork, {
+    active: false,
+    state: "responding",
+    startedAt: null,
+    detail: null,
+    freshness: "stale",
+    agentState: "responding",
+  }, "stale last-good supervisor state cannot keep the live timer running");
 
   const withoutStart = entry({ ...responding, deliveryReceipts: [receipt("message_1", "awaiting_result")] });
   assert.equal(projectAgentInspector(withoutStart, { roomId: "focus_1" })?.now, null);
@@ -321,13 +518,21 @@ test("Now uses only sanitized activity observed after the exact turn_started eve
 
   const finished = entry({ ...responding, roomAgentState: { ...responding.roomAgentState!, turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } } });
   assert.equal(projectAgentInspector(finished, { roomId: "focus_1" })?.now, null, "completion clears active Now instead of retaining a stale progress echo");
+  assert.deepEqual(projectAgentInspector(finished, { roomId: "focus_1" })?.liveWork, {
+    active: false,
+    state: "idle",
+    startedAt: null,
+    detail: null,
+    freshness: "fresh",
+    agentState: "online",
+  }, "an open provider stream cannot keep live work active after the durable turn becomes idle");
 });
 
 test("delivery progress follows durable turn phases without duplicating the thinking surface", () => {
   const withTurn = (state: "dispatching" | "responding" | "retrying" | "publishing") => projectAgentInspector(entry({
     deliveryReceipts: state === "responding"
       ? [receipt("message_1", "awaiting_result", {
-        timeline: [{ phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
+        timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
       })]
       : [],
     roomAgentState: {
@@ -429,7 +634,6 @@ test("runtime recovery shows the live replacement and durable room-access phase"
 
   assert.equal(projection?.overallState, "recovering");
   assert.equal(projection?.overallLabel, "Recovering agent");
-  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Connected");
   assert.deepEqual(projection?.deliveryProgress, {
     kind: "runtime_recovery",
     phase: "recovering",
@@ -440,6 +644,24 @@ test("runtime recovery shows the live replacement and durable room-access phase"
   });
   assert.equal(projection?.actions.find((action) => action.kind === "reconnect")?.available, false,
     "automatic recovery owns the binding while its bounded retries remain active");
+});
+
+test("transient bearer recovery stays visible and offers reconnect during slow retries", () => {
+  const recovering = entry({
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "Restoring room access (attempt 5) failed: HTTP 500. Retrying automatically in 60 seconds. Use Reconnect to retry now.",
+    agentSessionId: null,
+    agentSessionBindingState: "none",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "waiting_for_desktop_credentials", pendingCount: 3, blockedByMessageId: null, detail: "Room delivery is paused." },
+    },
+  });
+  const projection = projectAgentInspector(recovering, { roomId: "focus_1" });
+  assert.equal(projection?.overallState, "recovering");
+  assert.equal(projection?.deliveryProgress?.label, "Restoring room access");
+  assert.equal(projection?.actions.find((action) => action.kind === "reconnect")?.available, true);
 });
 
 test("turn control is available only for the exact responding provider turn", () => {
@@ -772,6 +994,10 @@ test("Assigned work excludes terminal historical assignments while retaining exa
 });
 
 test("stale resources preserve last-good facts but disable state-dependent actions", () => {
+  const settled = projectAgentInspector(entry({ deliveryReceipts: [receipt("message_1", "acknowledged_failed")] }),
+    { roomId: "focus_1", deliveryRetryAvailable: true });
+  assert.equal(settled?.recentOutcome?.label, "Work did not finish");
+  assert.notEqual(settled?.actions.find((action) => action.kind === "retry_delivery")?.available, true);
   const blocked = entry({ deliveryReceipts: [receipt("message_1", "blocked")] });
   const mentionMap = new Map([[blocked.id, "agent:emmymay/gardensignal"]]);
   const fresh = projectAgentInspector(blocked, { roomId: "focus_1", deliveryRetryAvailable: true, mentionInsertTextByEntryId: mentionMap });
@@ -850,6 +1076,107 @@ test("missing-conversation recovery is actionable only before a provider turn st
   assert.equal(ambiguous?.continuationRecovery?.canSkip, false, "started provider work can never be silently released");
 });
 
+test("restored-conversation notices use the durable event identity and detail", () => {
+  const restoredAt = "2026-07-23T10:00:06.000Z";
+  const restoredReceipt = receipt("message_restored", "acknowledged", {
+    updatedAt: "2026-07-23T10:00:07.000Z",
+    timeline: [{
+      sequence: 3,
+      phase: "conversation_restored",
+      observedAt: restoredAt,
+      detail: "The saved conversation became available again; no replacement was created.",
+    }],
+  });
+  const first = projectAgentInspector(entry({ deliveryReceipts: [restoredReceipt] }), {
+    roomId: "focus_1",
+  });
+  assert.equal(first?.continuationRecovery?.state, "restored");
+  assert.equal(
+    first?.continuationRecovery?.noticeId,
+    `supervised_1:${restoredReceipt.inboxItemId}:3`,
+  );
+  assert.equal(
+    first?.continuationRecovery?.detail,
+    "The saved conversation became available again; no replacement was created.",
+  );
+
+  const refreshed = projectAgentInspector(entry({
+    deliveryReceipts: [{ ...restoredReceipt, updatedAt: "2026-07-23T10:01:00.000Z" }],
+  }), { roomId: "focus_1" });
+  assert.equal(
+    refreshed?.continuationRecovery?.noticeId,
+    first?.continuationRecovery?.noticeId,
+    "ordinary receipt refreshes must not create a new notice",
+  );
+
+  const restoredAgain = projectAgentInspector(entry({
+    deliveryReceipts: [{
+      ...restoredReceipt,
+      timeline: [
+        ...restoredReceipt.timeline,
+        {
+          sequence: 4,
+          phase: "conversation_restored",
+          observedAt: restoredAt,
+          detail: "A tied-time restoration completed.",
+        },
+        {
+          sequence: 5,
+          phase: "conversation_restored",
+          observedAt: "2026-07-23T09:00:00.000Z",
+          detail: "A later-sequence restoration completed.",
+        },
+      ],
+    }],
+  }), { roomId: "focus_1" });
+  assert.notEqual(
+    restoredAgain?.continuationRecovery?.noticeId,
+    first?.continuationRecovery?.noticeId,
+    "a genuinely new restoration must create a new notice",
+  );
+  assert.equal(
+    restoredAgain?.continuationRecovery?.detail,
+    "A later-sequence restoration completed.",
+    "durable sequence, not equal or decreasing timestamps, chooses the latest event",
+  );
+  assert.equal(restoredAgain?.continuationRecovery?.noticeId, `supervised_1:${restoredReceipt.inboxItemId}:5`);
+
+  const newerReceipt = receipt("message_restored_again", "acknowledged", {
+    fifoSequence: 2,
+    updatedAt: "2026-07-23T09:00:00.000Z",
+    timeline: [{
+      sequence: 1,
+      phase: "conversation_restored",
+      observedAt: "2026-07-23T09:00:00.000Z",
+      detail: "A newer receipt was restored after the clock moved backward.",
+    }],
+  });
+  const restoredOnTiedReceipt = projectAgentInspector(entry({
+    deliveryReceipts: [
+      { ...restoredReceipt, updatedAt: newerReceipt.updatedAt },
+      newerReceipt,
+    ],
+  }), { roomId: "focus_1" });
+  assert.equal(
+    restoredOnTiedReceipt?.continuationRecovery?.noticeId,
+    `supervised_1:${newerReceipt.inboxItemId}:1`,
+    "durable FIFO order, not tied wall-clock timestamps, chooses the latest receipt",
+  );
+  assert.equal(
+    restoredOnTiedReceipt?.continuationRecovery?.detail,
+    "A newer receipt was restored after the clock moved backward.",
+  );
+
+  const restoredAfterClockDecrease = projectAgentInspector(entry({
+    deliveryReceipts: [restoredReceipt, newerReceipt],
+  }), { roomId: "focus_1" });
+  assert.equal(
+    restoredAfterClockDecrease?.continuationRecovery?.noticeId,
+    `supervised_1:${newerReceipt.inboxItemId}:1`,
+    "durable FIFO order chooses the latest receipt when its wall-clock timestamp decreases",
+  );
+});
+
 test("the shell resource folds exact pushes and preserves capped activity across polls", () => {
   const first = entry({ activity: Array.from({ length: SUPERVISOR_ACTIVITY_CAP }, (_, index) => activity(index + 1)) });
   const other = entry({ id: "supervised_2", activity: [] });
@@ -887,6 +1214,80 @@ test("an activity push arriving during a poll survives the authoritative poll sn
   );
   assert.equal(afterPoll[0]?.providerPid, 456, "poll remains authoritative for non-activity fields");
   assert.deepEqual(afterPoll[0]?.activity.map((event) => event.sequence), [10, 11, 12]);
+});
+
+test("a pushed state snapshot that changes nothing renderable keeps the retained entries", () => {
+  const retained = [
+    entry({ activity: [activity(10), activity(11)] }),
+    entry({ id: "supervised_2", activity: [activity(4)] }),
+  ];
+  // The state channel carries only a summary tail, so an unchanged agent's
+  // snapshot entry is not byte-identical to what the renderer holds.
+  const snapshot = [
+    entry({ activity: [activity(11)] }),
+    entry({ id: "supervised_2", activity: [activity(4)] }),
+  ];
+
+  assert.equal(
+    mergeSupervisorStateSnapshotEntries(retained, snapshot, "focus_1"),
+    retained,
+    "an unchanged snapshot must not reassign the reactive list",
+  );
+});
+
+test("a state snapshot updates only the entries that changed and never downgrades activity detail", () => {
+  const detailed = activity(10, { payload: { tool: "bash" }, payloadTruncated: true });
+  const retained = [
+    entry({ activity: [activity(9), detailed] }),
+    entry({ id: "supervised_2", providerPid: 1, activity: [] }),
+  ];
+  const merged = mergeSupervisorStateSnapshotEntries(retained, [
+    // Same entry, but the summary tail lost the payload and the older event.
+    entry({ activity: [{ ...detailed, payload: null, payloadTruncated: false }, activity(11)] }),
+    entry({ id: "supervised_2", providerPid: 2, activity: [] }),
+  ], "focus_1");
+
+  assert.notEqual(merged, retained);
+  assert.equal(merged[1]?.providerPid, 2, "the snapshot stays authoritative for entry fields");
+  assert.deepEqual(merged[0]?.activity.map((event) => event.sequence), [9, 10, 11]);
+  assert.deepEqual(merged[0]?.activity[1], detailed, "the richer retained copy of an event wins");
+});
+
+test("a state snapshot adopts new entries, drops removed ones, and reuses unchanged objects", () => {
+  const retained = [entry({ activity: [activity(1)] })];
+  const added = mergeSupervisorStateSnapshotEntries(retained, [
+    entry({ activity: [activity(1)] }),
+    entry({ id: "supervised_3", activity: [activity(7)] }),
+  ], "focus_1");
+  assert.equal(added.length, 2);
+  assert.equal(added[0], retained[0], "the unchanged entry keeps its identity");
+  assert.deepEqual(added[1]?.activity.map((event) => event.sequence), [7]);
+
+  const removed = mergeSupervisorStateSnapshotEntries(added, [entry({ activity: [activity(1)] })], "focus_1");
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0], retained[0]);
+});
+
+test("a state snapshot caps retained activity and ignores entries from other rooms", () => {
+  const retained = [entry({
+    activity: Array.from({ length: SUPERVISOR_ACTIVITY_CAP }, (_unused, index) => activity(index + 1)),
+  })];
+  const merged = mergeSupervisorStateSnapshotEntries(
+    retained,
+    [entry({ activity: [activity(SUPERVISOR_ACTIVITY_CAP + 1)] })],
+    "focus_1",
+  );
+  assert.equal(merged[0]?.activity.length, SUPERVISOR_ACTIVITY_CAP);
+  assert.equal(merged[0]?.activity.at(-1)?.sequence, SUPERVISOR_ACTIVITY_CAP + 1);
+  assert.equal(merged[0]?.activity[0]?.sequence, 2);
+
+  const otherRoom = mergeSupervisorStateSnapshotEntries(
+    retained,
+    [entry({ roomId: "focus_2", activity: [] })],
+    "focus_1",
+  );
+  assert.equal(otherRoom[0]?.roomId, "focus_2");
+  assert.deepEqual(otherRoom[0]?.activity, [], "a foreign-room entry is not merged with this room's history");
 });
 
 test("retained supervisor data stays fresh during reconciliation", () => {
@@ -982,6 +1383,56 @@ test("switching agents hides the previous action and fences its late completion"
   }, "focus_1", 5), false);
 });
 
+test("retirement completion event settles only its exact accepted action", () => {
+  const pending: AgentInspectorActionState = {
+    operationId: "operation_retire_1",
+    entryId: "supervised_a",
+    kind: "retire_agent",
+    status: "running",
+    message: "Retirement accepted. Finishing credential cleanup…",
+    daemonGeneration: 12,
+  };
+  const event = {
+    operationId: "operation_retire_1",
+    entryId: "supervised_a",
+    daemonGeneration: 12,
+    status: "completed" as const,
+    error: null,
+    occurredAt: "2026-08-15T00:00:00.000Z",
+  };
+  assert.deepEqual(settleAgentInspectorRetirementEvent(pending, event), {
+    ...pending,
+    status: "success",
+    message: "Agent retired. Its project files and history are kept.",
+  });
+  assert.equal(settleAgentInspectorRetirementEvent(pending, { ...event, daemonGeneration: 13 }), pending);
+  assert.equal(settleAgentInspectorRetirementEvent(pending, { ...event, operationId: "operation_other" }), pending);
+});
+
+test("retirement failure and missed-event durable completion settle without a socket timeout", () => {
+  const pending: AgentInspectorActionState = {
+    operationId: "operation_retire_2",
+    entryId: "supervised_b",
+    kind: "retire_agent",
+    status: "running",
+    message: "Retiring this saved agent…",
+    daemonGeneration: 14,
+  };
+  assert.deepEqual(settleAgentInspectorRetirementEvent(pending, {
+    operationId: pending.operationId,
+    entryId: pending.entryId,
+    daemonGeneration: 14,
+    status: "failed",
+    error: "Credential revocation failed.",
+    occurredAt: "2026-08-15T00:00:00.000Z",
+  }), { ...pending, status: "error", message: "Credential revocation failed." });
+  assert.deepEqual(settleAgentInspectorRetirementCompletion(pending, {
+    operationId: pending.operationId,
+    entryId: pending.entryId,
+    daemonGeneration: 14,
+  }), { ...pending, status: "success", message: "Agent retired. Its project files and history are kept." });
+});
+
 test("duplicate supervised names resolve to exact canonical agent mentions", () => {
   const participant = (
     participantKey: string,
@@ -1010,4 +1461,17 @@ test("duplicate supervised names resolve to exact canonical agent mentions", () 
     "agent:emmymay/gardensignal",
     "agent:another/gardensignal",
   ]);
+});
+
+
+test("inspector shows current compaction during startup and work, hiding it after failure or stale reads", () => {
+  const compacting = entry({ provider: "claude-code", providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+  for (const observedState of ["starting", "working"] as const) {
+    const result = projectAgentInspector({ ...compacting, observedState }, { roomId: "focus_1" });
+    assert.equal(result?.now?.summary, "Compacting conversation");
+    assert.equal(result?.overallDetail, "Compacting conversation", "agent list shows the same current progress");
+  }
+  assert.notEqual(projectAgentInspector(compacting, { roomId: "focus_1", resourceFreshness: "stale" })?.now?.summary, "Compacting conversation");
+  assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
+  assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
 });

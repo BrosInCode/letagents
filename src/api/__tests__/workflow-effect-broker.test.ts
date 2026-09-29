@@ -8,7 +8,7 @@ import {
   type SubmitGitHubReviewVerdictInput,
   type WorkflowEffectStore,
 } from "../workflow-effects/broker.js";
-import type { GitHubReviewProvider } from "../workflow-effects/github-review-provider.js";
+import { createGitHubReviewProvider, type GitHubReviewProvider } from "../workflow-effects/github-review-provider.js";
 
 function makeMemoryStore() {
   const effects = new Map<string, WorkflowEffect>();
@@ -215,6 +215,32 @@ test("duplicate submissions with the same key create one provider effect", async
   assert.equal(first.id, second.id);
   assert.equal(second.state, "succeeded");
   assert.equal(creates, 1);
+});
+
+test("permission changes cannot hide an existing receipt or recreate an uncertain review", async () => {
+  for (const firstStatus of [201, 503]) {
+    const { store } = makeMemoryStore();
+    let permission = "write";
+    let creates = 0;
+    const provider = createGitHubReviewProvider({
+      mintCredential: async () => ({ token: "test-token", permissions: { pull_requests: permission } }),
+      fetchImpl: async (url, init) => {
+        if (init?.method === "POST") {
+          creates++;
+          return new Response(JSON.stringify({ id: 42 }), { status: firstStatus });
+        }
+        if (String(url).includes("/reviews?")) return new Response("[]", { status: 200 });
+        return new Response(JSON.stringify({ head: { sha: "a".repeat(40) } }), { status: 200 });
+      },
+    });
+    const broker = createWorkflowEffectBroker({ store, provider });
+    const first = await broker.submitGitHubReviewVerdict(submission());
+    permission = "read";
+    const replay = await broker.submitGitHubReviewVerdict(submission());
+    assert.equal(replay.id, first.id);
+    assert.equal(replay.state, firstStatus === 201 ? "succeeded" : "ambiguous");
+    assert.equal(creates, 1, "permission loss must not cause a second review create");
+  }
 });
 
 test("crash after provider commit reconciles the marker without a second create", async () => {

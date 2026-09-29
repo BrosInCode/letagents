@@ -1,0 +1,879 @@
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
+import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } from "./execution-protocol.js";
+import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
+import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
+import { recoveredRuntime } from "./runtime-recovery-journal.js";
+import { isIdleCursorConnection } from "./provider-state-policy.js";
+import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
+import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
+import { unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
+  type LifecycleCaptureAdmissionStatus, type LifecycleProjectionObservation,
+  type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
+import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema,
+  type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
+
+type Row = Record<string, string | number | null>;
+type CaptureCode = "source_gap" | "identity_unavailable" | "storage_unavailable" | "retention_limit" | "invalid_observation" | "settlement_unavailable";
+type Runtime = { id: string; generation: string; authorityMode: LifecycleAuthorityMode };
+type CaptureOptions = {
+  provider: Pick<ProviderActionPort, "onExecution">;
+  currentHandle(agentId: string): ProviderActionHandle | undefined;
+  daemonGeneration(): number;
+  diagnostic(agentId: string, code: CaptureCode): void;
+  changed?(agentId: string): void;
+};
+type Lane = {
+  agentId: string; generation: string; handle: ProviderActionHandle; installation: ProviderInstallationToken;
+  subscription: NativeExecutionSubscription | null; observer: ShadowObserver | null;
+  pending: Map<number, { event: NativeExecutionObservation; bytes: number }>; bytes: number;
+  checkpoints: Map<string, PreparedRuntime>; overflow: boolean; suspended: boolean; diagnostic: CaptureCode | null;
+  detached: boolean; frontierStored: boolean; verifiedRuntime: Runtime | null;
+  subscriptionFailed: boolean;
+  receiptCursor: number;
+  expectedAuthorityMode: LifecycleAuthorityMode | null;
+  pendingChange: boolean;
+  notifiedAdmission: string | null;
+  storageRetry: NodeJS.Timeout | null;
+  storageRetryAttempts: number;
+};
+export type PreparedRuntime = {
+  agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
+  /** Supplied only by the successful exact prepared-wrapper checkpoint. */
+  connection: ProviderActionConnectionRef; configurationRevision: number;
+};
+const QUEUE_FACTS = 256;
+const QUEUE_BYTES = 256 * 1024;
+const BATCH_FACTS = 32;
+const LIFECYCLE_PROJECTION_RETRY_MS = 25;
+const CAPTURE_RETRY_MAX_MS = 30_000;
+function lifecycleProvider(connection: ProviderActionConnectionRef | null | undefined): LifecycleProjectionProvider | null {
+  if (connection?.kind === "codex_app_server") return "codex";
+  if (connection?.kind === "claude_cli") return "claude-code";
+  if (connection?.kind === "cursor_cli") return "cursor";
+  if (connection?.kind === "opencode_server") return "open-model";
+  return null;
+}
+
+/**
+ * Structural capture, authoritative for typed lifecycle admission. Provider
+ * callbacks only enqueue bounded data; SQLite work runs on the capture owner.
+ * Neither raw streams nor provider/delivery control handles are consumed here.
+ */
+export class ExecutionCaptureCoordinator {
+  private readonly store: ExecutionShadowStore;
+  private readonly lanes = new Map<string, Lane>();
+  private readonly retiring = new Map<string, Lane>();
+  private readonly suspendedAgents = new Set<string>();
+  private readonly dirty = new Set<Lane>();
+  private readonly lifecycleProjectionPending = new Map<string, { observation: LifecycleProjectionObservation; bytes: number }>();
+  private readonly lifecycleProjectionUnavailable = new Map<LifecycleProjectionProvider, number>();
+  private lifecycleProjectionBytes = 0;
+  private lifecycleProjectionTimer: NodeJS.Timeout | null = null;
+  private scheduled: NodeJS.Immediate | null = null;
+  private closed = false;
+  private handoffSealed = false;
+
+  /** Production capture is optional; opening failure cannot prevent daemon startup. */
+  static open(path: string, provider: CaptureOptions["provider"] | undefined,
+    options: Omit<CaptureOptions, "diagnostic" | "provider">): ExecutionCaptureCoordinator | null {
+    if (!provider?.onExecution) return null;
+    try {
+      return new ExecutionCaptureCoordinator(openDaemonStateObservationDatabase(path), {
+        ...options, provider, diagnostic: (agentId, code) => console.warn("[execution_capture]", JSON.stringify({ agentId, code })),
+      });
+    } catch { console.warn("[execution_capture] storage_unavailable"); return null; }
+  }
+
+  constructor(private readonly database: DatabaseSync, private readonly options: CaptureOptions) {
+    this.store = new ExecutionShadowStore(database);
+  }
+
+  /** Discard queued callbacks only after their exact dead runtime was archived. */
+  releaseRecoveredRuntime(agentId: string, runtimeId: string, stoppedCursorGeneration?: string): void {
+    if (!recoveredRuntime(this.database, agentId, runtimeId)) throw new Error("The runtime has no verified recovery boundary.");
+    const lanes = [this.lanes.get(agentId), this.retiring.get(agentId)].filter((lane): lane is Lane => Boolean(lane));
+    for (const lane of lanes) {
+      const connection = lane.handle.providerConnection;
+      const exactProcess = connection?.pid && connection.processIdentity && executionRuntimeStorageIdentity(agentId, lane.generation,
+        connection.kind, connection.pid, connection.processIdentity) === runtimeId;
+      const exactCursor = stoppedCursorGeneration && isIdleCursorConnection(connection)
+        && (lane.observer?.observerRuntimeGenerationId === runtimeId || lane.verifiedRuntime?.id === runtimeId
+          || (lane.generation === stoppedCursorGeneration && !lane.observer && !lane.verifiedRuntime && !lane.pending.size));
+      if (!exactProcess && !exactCursor) {
+        throw new Error("Runtime recovery cannot discard a different observer.");
+      }
+    }
+    for (const lane of lanes) this.remove(lane);
+    this.suspendedAgents.delete(agentId);
+  }
+
+  /** Subscribe before raw listeners; typed admission remains gated on exact capture. */
+  install(installation: ProviderInstallationToken): () => void {
+    const { entryId: agentId, handle, executionGenerationId: generation } = installation;
+    const prior = this.lanes.get(agentId);
+    if (prior) this.detach(prior);
+    if (this.closed || this.handoffSealed || this.suspendedAgents.has(agentId) || !this.options.provider.onExecution) return () => {};
+    const lane: Lane = { agentId, generation, handle, installation, subscription: null, observer: null,
+      pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
+      detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
+      expectedAuthorityMode: installation.authorityMode, pendingChange: true, notifiedAdmission: null,
+      storageRetry: null, storageRetryAttempts: 0 };
+    this.lanes.set(agentId, lane);
+    let pending: Promise<NativeExecutionSubscription>;
+    try {
+      pending = Promise.resolve(this.options.provider.onExecution(handle, event => this.enqueue(lane, event)));
+    } catch {
+      lane.subscriptionFailed = true;
+      if (this.current(lane)) {
+        this.report(lane, "identity_unavailable");
+        if (lane.detached && !lane.pending.size) { this.remove(lane); this.refresh(); }
+      }
+      return () => this.detach(lane);
+    }
+    void pending.then((subscription) => {
+      if (!this.owns(lane)) { subscription.dispose(); return; }
+      lane.subscription = lane.detached ? this.freezeSubscription(subscription) : subscription;
+      this.schedule(lane);
+    }).catch(() => {
+      lane.subscriptionFailed = true;
+      if (this.current(lane)) {
+        this.report(lane, "identity_unavailable");
+        if (lane.detached && !lane.pending.size) { this.remove(lane); this.refresh(); }
+      }
+    });
+    return () => this.detach(lane);
+  }
+
+  /** Keep the physical subscription while advancing its committed Cursor birth token. */
+  advance(installation: ProviderInstallationToken): void {
+    const lane = this.lanes.get(installation.entryId);
+    if (!lane || !this.current(lane)
+      || lane.handle !== installation.handle
+      || lane.generation !== installation.executionGenerationId) {
+      throw new ExecutionProtocolError("identity_mismatch");
+    }
+    lane.installation = installation;
+    lane.expectedAuthorityMode = installation.authorityMode;
+    lane.pendingChange = true;
+    lane.receiptCursor = 0;
+    this.schedule(lane);
+  }
+
+  /** Drain the exact retained Cursor birth before its reusable lane drops that identity. */
+  flush(installation: ProviderInstallationToken): void {
+    const lane = this.lanes.get(installation.entryId);
+    if (!lane || !this.current(lane) || lane.installation !== installation
+      || lane.handle !== installation.handle || lane.generation !== installation.executionGenerationId
+      || !lane.subscription || lane.detached || lane.suspended || lane.subscriptionFailed || lane.overflow) {
+      throw new ExecutionProtocolError("identity_mismatch");
+    }
+    this.dirty.delete(lane);
+    while (this.drain(lane)) { /* bounded batches drain the retained source synchronously */ }
+    // Delivery admission rejects an exited runtime by design. Retirement is
+    // different: the exact child has exited, and we need proof that its final
+    // source position is durable before dropping that identity.
+    const observer = lane.observer;
+    const position = lane.subscription.position();
+    const expectedRuntime = this.knownRuntime(lane, installation.providerConnection.pid ?? undefined,
+      installation.providerConnection.processIdentity ?? undefined);
+    const durable = this.row(`SELECT execution_generation_id,runtime_generation_id,
+      observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,daemon_generation_id,
+      source_id,last_source_sequence,max_observed_sequence
+      FROM execution_observers WHERE agent_id=?`, installation.entryId);
+    if (lane.pending.size || !observer || !expectedRuntime || !durable
+      || expectedRuntime.authorityMode !== installation.authorityMode
+      || expectedRuntime.id !== observer.observerRuntimeGenerationId
+      || expectedRuntime.generation !== observer.observerExecutionGenerationId
+      || durable.execution_generation_id !== observer.executionGenerationId
+      || durable.runtime_generation_id !== observer.runtimeGenerationId
+      || durable.observer_execution_generation_id !== observer.observerExecutionGenerationId
+      || durable.observer_runtime_generation_id !== observer.observerRuntimeGenerationId
+      || durable.daemon_generation_id !== String(this.options.daemonGeneration())
+      || Number(durable.observer_epoch) !== observer.epoch
+      || durable.source_id !== lane.subscription.sourceId
+      || durable.source_id !== observer.sourceId
+      || Number(durable.last_source_sequence) !== position.latestSequence
+      || Number(durable.max_observed_sequence) !== position.latestSequence) {
+      throw new ExecutionProtocolError("source_gap");
+    }
+  }
+
+  /** A post-COMMIT hint only schedules work; it cannot reject that checkpoint. */
+  refresh(agentId?: string): void {
+    const refreshLane = (lane: Lane | undefined) => {
+      if (!lane) return;
+      // A corrected receipt can precede either lane's last settlement scan.
+      lane.receiptCursor = 0;
+      this.schedule(lane);
+    };
+    if (agentId !== undefined) {
+      refreshLane(this.retiring.get(agentId));
+      refreshLane(this.lanes.get(agentId));
+      return;
+    }
+    // Unscoped commits and recovery hints retain the conservative fleet sweep.
+    for (const lane of this.retiring.values()) refreshLane(lane);
+    for (const lane of this.lanes.values()) refreshLane(lane);
+  }
+
+  private schedule(lane: Lane): void {
+    if (!this.current(lane)) return;
+    this.dirty.add(lane);
+    if (this.closed || this.scheduled) return;
+    this.scheduled = setImmediate(() => {
+      this.scheduled = null;
+      const next = this.dirty.values().next().value;
+      if (!next) return;
+      this.dirty.delete(next);
+      let retire = false;
+      if (this.current(next) && next.subscription && (!next.suspended || next.detached)
+        && (next.detached || !this.retiring.has(next.agentId))) {
+        this.cancelStorageRetry(next);
+        try {
+          if (this.drain(next)) this.dirty.add(next);
+          else if (next.detached && next.frontierStored) retire = true;
+          next.storageRetryAttempts = 0;
+        }
+        catch (error) {
+          if (error instanceof ExecutionProtocolError) next.suspended = true;
+          this.report(next, error instanceof ExecutionProtocolError && error.code === "retention_limit"
+            ? "retention_limit" : error instanceof ExecutionProtocolError && error.code === "source_gap"
+              ? "source_gap" : error instanceof ExecutionProtocolError ? "invalid_observation" : "storage_unavailable");
+          this.retryStorage(next, error);
+        }
+      }
+      // Operational settlement is independent of native capture continuity.
+      // Suspended lanes can settle receipts; an exit tail can also create an
+      // attempt whose receipt was committed before capture caught up.
+      let receiptsPending = false;
+      if (this.current(next)) {
+        try {
+          const receipts = settleCapturedExecutionAttempts(this.database, next.agentId, { afterFifoSequence: next.receiptCursor });
+          if (receipts.changed) next.pendingChange = true;
+          if (receipts.lastFifoSequence !== null) next.receiptCursor = receipts.lastFifoSequence;
+          if (receipts.unavailable) this.report(next, "settlement_unavailable");
+          if (receipts.hasMore) { receiptsPending = true; this.dirty.add(next); }
+        } catch { this.report(next, "settlement_unavailable"); }
+        // An operational commit can change admission without adding a native
+        // fact. Compare with the last announced state, not the pre-drain state.
+        const admission = `${this.captureAdmission(next.installation)}:${this.typedLifecycleAdmission(next.installation)}`;
+        if (next.pendingChange || admission !== next.notifiedAdmission) {
+          next.pendingChange = false;
+          next.notifiedAdmission = admission;
+          // Only committed progress or an admission/diagnostic transition is
+          // a change. A refresh of every idle lane must not wake every watcher.
+          try { this.options.changed?.(next.agentId); } catch { /* optional observation */ }
+        }
+      }
+      if (retire && !receiptsPending) {
+        this.remove(next);
+        const successor = this.lanes.get(next.agentId);
+        if (successor) this.dirty.add(successor);
+      }
+      for (const candidate of this.dirty) if (!this.current(candidate)) this.dirty.delete(candidate);
+      const pending = this.dirty.values().next().value;
+      if (pending) this.schedule(pending);
+    });
+    this.scheduled.unref();
+  }
+
+  private retryStorage(lane: Lane, error: unknown): void {
+    // Only SQLite BUSY/LOCKED (including extended codes) are transient. Never
+    // timer-retry a rejected identity, sequence, fact, or unknown storage error.
+    const code = error && typeof error === "object" && "code" in error && error.code === "ERR_SQLITE_ERROR"
+      && "errcode" in error ? error.errcode : null;
+    if (!Number.isInteger(code) || ![5, 6].includes(Number(code) & 0xff)
+      || !this.current(lane) || lane.suspended || lane.storageRetry) return;
+    const delay = Math.min(CAPTURE_RETRY_MAX_MS, 25 * 2 ** Math.min(lane.storageRetryAttempts++, 11));
+    lane.storageRetry = setTimeout(() => {
+      lane.storageRetry = null;
+      if (this.current(lane) && !lane.suspended) this.schedule(lane);
+    }, delay);
+    lane.storageRetry.unref();
+  }
+
+  private cancelStorageRetry(lane: Lane): void {
+    if (lane.storageRetry) clearTimeout(lane.storageRetry);
+    lane.storageRetry = null;
+  }
+
+  /** Retains the verified birth even if Cursor advances to idle before capture runs. */
+  prepared(checkpoint: PreparedRuntime): void {
+    const lane = this.lanes.get(checkpoint.agentId);
+    if (!lane || !this.current(lane) || lane.suspended || lane.handle !== checkpoint.handle || lane.generation !== checkpoint.executionGenerationId) return;
+    const birth = checkpoint.connection.processIdentity;
+    const pid = checkpoint.connection.pid;
+    if (!birth || pid === null) return;
+    const runtime = JSON.stringify([pid, birth]);
+    if (lane.checkpoints.size >= QUEUE_FACTS && !lane.checkpoints.has(runtime)) lane.overflow = true;
+    else lane.checkpoints.set(runtime, { ...checkpoint, connection: { ...checkpoint.connection } });
+    this.schedule(lane);
+  }
+
+  /** Planned retirement seals a fixed source boundary; emergency close cannot drain. */
+  sealForPlannedHandoff(): void {
+    if (this.handoffSealed) return;
+    if (this.closed) throw new Error("Update deferred: lifecycle capture is already closed.");
+    const frozen = new Map<Lane, { sourceId: string; position: ReturnType<NativeExecutionSubscription["position"]> } | null>();
+    const unresolvedPredecessors = new Set<string>();
+    try {
+      // Retiring sources must finish before their successors can bind. A
+      // committed retired tail may be released even if another lane defers.
+      for (const lane of [...this.retiring.values(), ...this.lanes.values()]) {
+        const unavailable = !this.current(lane) || lane.suspended || lane.overflow || lane.subscriptionFailed
+          || (lane.diagnostic !== null && !["storage_unavailable", "settlement_unavailable"].includes(lane.diagnostic))
+          || unresolvedPredecessors.has(lane.agentId);
+        if (!lane.subscription) {
+          if (!unavailable) throw new Error("An execution subscription is still attaching.");
+          frozen.set(lane, null);
+          continue;
+        }
+        if (!unavailable) {
+          while (this.drain(lane)) { /* existing bounded queue, no native calls or awaits */ }
+          const position = lane.subscription.position();
+          const row = this.row("SELECT source_id,observer_epoch,daemon_generation_id,last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?", lane.agentId);
+          const exact = row && lane.observer && row.source_id === lane.subscription.sourceId
+            && Number(row.observer_epoch) === lane.observer.epoch
+            && row.daemon_generation_id === String(this.options.daemonGeneration())
+            && Number(row.last_source_sequence) === position.latestSequence
+            && Number(row.max_observed_sequence) === position.latestSequence;
+          const empty = position.latestSequence === 0 && !lane.observer && !lane.pending.size;
+          if (lane.pending.size || lane.checkpoints.size || lane.suspended || lane.overflow || (!exact && !empty)) {
+            throw new Error("An execution source has no confirmed final capture boundary.");
+          }
+          if (lane.detached) { this.remove(lane); continue; }
+          frozen.set(lane, { sourceId: lane.subscription.sourceId, position: { ...position } });
+        } else {
+          // Existing damage remains honest; it is not a global update veto.
+          if (lane.detached) unresolvedPredecessors.add(lane.agentId);
+          try { frozen.set(lane, { sourceId: lane.subscription.sourceId, position: { ...lane.subscription.position() } }); }
+          catch { frozen.set(lane, null); }
+        }
+      }
+    } catch (cause) {
+      throw new Error("Update deferred: pending agent lifecycle evidence could not be preserved. Current connections and work remain available.", { cause });
+    }
+    // No reads or writes that can fail after ownership starts retiring. Abort
+    // and cleanup callbacks may emit synchronously before the later close().
+    this.handoffSealed = true;
+    for (const [lane, snapshot] of frozen) {
+      const subscription = lane.subscription;
+      this.cancelStorageRetry(lane);
+      lane.subscription = snapshot ? { sourceId: snapshot.sourceId, position: () => snapshot.position, dispose() {} } : null;
+      try { subscription?.dispose(); } catch { /* the sealed lane rejects callbacks */ }
+    }
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.lifecycleProjectionTimer) clearTimeout(this.lifecycleProjectionTimer);
+    this.lifecycleProjectionTimer = null;
+    for (const { observation } of this.lifecycleProjectionPending.values()) {
+      this.lifecycleProjectionUnavailable.set(observation.provider,
+        (this.lifecycleProjectionUnavailable.get(observation.provider) ?? 0) + 1);
+    }
+    this.lifecycleProjectionPending.clear();
+    this.lifecycleProjectionBytes = 0;
+    for (const [provider, count] of this.lifecycleProjectionUnavailable) {
+      try { this.store.recordLifecycleProjectionUnavailable(provider, count); }
+      catch { /* shutdown cannot wait on optional observation storage */ }
+    }
+    this.lifecycleProjectionUnavailable.clear();
+    if (this.scheduled) clearImmediate(this.scheduled);
+    this.scheduled = null;
+    this.dirty.clear();
+    const closing = [...this.retiring.values(), ...this.lanes.values()];
+    const frontiers = new Map<string, { lane: Lane; source: string; latest: number; token: ShadowObserver | null }>();
+    for (const lane of closing) {
+      if (!lane.subscription) continue;
+      try {
+        const subscription = this.freezeSubscription(lane.subscription);
+        lane.subscription = subscription;
+        const key = JSON.stringify([lane.agentId, subscription.sourceId]);
+        const previous = frontiers.get(key);
+        const token = lane.observer?.sourceId === subscription.sourceId ? lane.observer : null;
+        frontiers.set(key, { lane, source: subscription.sourceId,
+          latest: Math.max(previous?.latest ?? 0, subscription.position().latestSequence),
+          token: (token?.epoch ?? 0) > (previous?.token?.epoch ?? 0) ? token : previous?.token ?? null });
+      } catch { this.report(lane, "identity_unavailable"); }
+    }
+    // Best-effort shutdown also runs after singleton fence loss. Only an
+    // already-admitted observer's CAS can preserve its final watermark; never
+    // mint identity or drain work here. Stale/unadmitted/busy stays unavailable.
+    for (const { lane, source, latest, token } of frontiers.values()) {
+      if (!token) { this.report(lane, "identity_unavailable"); continue; }
+      try { this.store.observeSourcePosition(source, token, latest); }
+      catch { this.report(lane, "storage_unavailable"); }
+    }
+    for (const lane of closing) this.remove(lane);
+    try { this.database.close(); } catch { console.warn("[execution_capture] close_failed"); }
+  }
+
+  /** Bounded raw-classifier witness; provider delivery never waits on SQLite. */
+  recordLegacyLifecycle(value: LifecycleProjectionObservation): void {
+    if (this.closed) return;
+    const provider = value?.provider;
+    if (!(provider === "codex" || provider === "claude-code" || provider === "cursor" || provider === "open-model")
+      || ![value.agentId, value.workAttemptId, value.executionGenerationId, value.nativeEventId]
+        .every(identity => executionIdentity.safeParse(identity).success)
+      || !(value.phase === "turn_active" || value.phase === "turn_terminal")
+      || !(value.state === "working" || value.state === "idle" || value.state === "terminal" || value.state === "failed")) {
+      if (provider === "codex" || provider === "claude-code" || provider === "cursor" || provider === "open-model") {
+        this.markLifecycleProjectionUnavailable(provider);
+      }
+      return;
+    }
+    try {
+      const observation = structuredClone(value);
+      const bytes = Buffer.byteLength(JSON.stringify(observation));
+      const key = JSON.stringify([observation.agentId, observation.provider, observation.workAttemptId,
+        observation.executionGenerationId, observation.nativeEventId, observation.phase, observation.state]);
+      if (this.lifecycleProjectionPending.has(key)) return;
+      if (bytes > QUEUE_BYTES || this.lifecycleProjectionPending.size >= QUEUE_FACTS
+        || this.lifecycleProjectionBytes + bytes > QUEUE_BYTES) {
+        this.markLifecycleProjectionUnavailable(provider);
+        return;
+      }
+      this.lifecycleProjectionPending.set(key, { observation, bytes });
+      this.lifecycleProjectionBytes += bytes;
+      this.scheduleLifecycleProjection();
+    } catch { this.markLifecycleProjectionUnavailable(provider); }
+  }
+
+  recordLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider): void {
+    this.markLifecycleProjectionUnavailable(provider);
+  }
+
+  lifecycleProjectionDiagnostics(): LifecycleProjectionDiagnostics {
+    if (this.closed) return unavailableLifecycleProjectionDiagnostics();
+    try {
+      const diagnostics = this.store.lifecycleProjectionDiagnostics();
+      for (const [provider, count] of this.lifecycleProjectionUnavailable) {
+        diagnostics.providers[provider].observationUnavailable += count;
+      }
+      return diagnostics;
+    }
+    catch { return unavailableLifecycleProjectionDiagnostics(); }
+  }
+
+  /**
+   * Exact, read-time admission for the current handle generation. No elapsed
+   * time can promote or demote it, and no second status is cached or persisted.
+   */
+  captureAdmission(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus {
+    const { entryId: agentId, handle, executionGenerationId: generation } = installation;
+    const lane = this.lanes.get(agentId);
+    if (!lane || !this.current(lane) || lane.handle !== handle || lane.generation !== generation
+      || lane.installation !== installation
+      || lane.detached || lane.suspended || lane.subscriptionFailed || lane.overflow
+      || (lane.diagnostic !== null && lane.diagnostic !== "settlement_unavailable")) return "unavailable";
+    if (!lane.subscription || !lane.observer) return "pending";
+    let position;
+    try {
+      position = lane.subscription.position();
+      if (!Number.isSafeInteger(position.latestSequence) || !Number.isSafeInteger(position.firstRetainedSequence)
+        || position.latestSequence < 0 || position.firstRetainedSequence < 1
+        || position.firstRetainedSequence > position.latestSequence + 1) return "unavailable";
+    }
+    catch { return "unavailable"; }
+    try {
+      const durable = this.row(`SELECT o.observer_execution_generation_id,o.observer_runtime_generation_id,
+        o.observer_epoch,o.daemon_generation_id,o.source_id,o.last_source_sequence,o.max_observed_sequence,
+        observer.authority_mode,observer.runtime_state,subject.authority_mode AS subject_authority_mode,
+        s.source_id AS admitted_source_id
+        FROM execution_observers o
+        JOIN execution_runtime_generations observer ON observer.agent_id=o.agent_id
+          AND observer.execution_generation_id=o.observer_execution_generation_id
+          AND observer.runtime_generation_id=o.observer_runtime_generation_id
+        JOIN execution_runtime_generations subject ON subject.agent_id=o.agent_id
+          AND subject.execution_generation_id=o.execution_generation_id
+          AND subject.runtime_generation_id=o.runtime_generation_id
+        JOIN execution_observer_sources s ON s.agent_id=o.agent_id AND s.source_id=o.source_id
+        WHERE o.agent_id=?`, agentId);
+      if (!durable) return "unavailable";
+      const last = Number(durable.last_source_sequence);
+      const maximum = Number(durable.max_observed_sequence);
+      const exactObserver = durable.observer_execution_generation_id === generation
+        && durable.observer_runtime_generation_id === lane.observer.observerRuntimeGenerationId
+        && durable.daemon_generation_id === String(this.options.daemonGeneration())
+        && durable.source_id === lane.subscription.sourceId
+        && durable.source_id === lane.observer.sourceId
+        && durable.admitted_source_id === durable.source_id
+        && lane.expectedAuthorityMode !== null
+        && durable.authority_mode === lane.expectedAuthorityMode
+        && isTypedCaptureAuthority(durable.authority_mode)
+        && isTypedCaptureAuthority(durable.subject_authority_mode)
+        && durable.runtime_state !== "exited";
+      const validCursor = Number.isSafeInteger(last) && Number.isSafeInteger(maximum)
+        && last >= 0 && maximum >= last && maximum <= position.latestSequence
+        && last <= position.latestSequence
+        && (position.latestSequence === last || position.firstRetainedSequence <= last + 1);
+      const observerEpoch = Number(durable.observer_epoch);
+      if (!exactObserver || !validCursor || !Number.isSafeInteger(observerEpoch) || observerEpoch < 1) {
+        return "unavailable";
+      }
+      if (lane.installation.providerConnection.kind === "codex_app_server"
+        && last !== position.latestSequence) return "unavailable";
+      return this.hasUnreconstructedCodexTurn(lane, observerEpoch) ? "unavailable" : "ready";
+    } catch { return "unavailable"; }
+  }
+
+  /** A bare attach cannot promote an unrelated latest transcript turn. */
+  private hasUnreconstructedCodexTurn(lane: Lane, observerEpoch: number): boolean {
+    if (lane.installation.providerConnection.kind !== "codex_app_server") return false;
+    return Boolean(this.row(`WITH expected(provider_turn_id) AS (
+        SELECT t.provider_turn_id FROM execution_turns t
+        JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id
+          AND g.agent_id=t.agent_id AND g.room_id=t.room_id
+          AND g.execution_generation_id=t.execution_generation_id
+        WHERE t.agent_id=? AND t.execution_generation_id=? AND t.runtime_generation_id=?
+          AND t.provider_continuation_id=? AND t.provider_turn_id IS NOT NULL
+          AND t.state IN ('none','active','lost') AND g.workspace_id=?
+        UNION
+        SELECT b.provider_turn_id FROM supervised_agent_provider_turn_bindings b
+        JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id
+          AND i.agent_id=b.agent_id AND i.room_id=b.room_id
+        WHERE b.agent_id=? AND b.work_attempt_id=? AND b.origin_execution_generation_id=?
+          AND b.provider_continuation_id=?
+          AND i.state IN ('pending','dispatching','awaiting_result','result_recovery','retryable','blocked')
+      ) SELECT 1 FROM expected e WHERE NOT EXISTS (
+        SELECT 1 FROM execution_facts f JOIN execution_turns t
+          ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
+          AND t.execution_generation_id=f.execution_generation_id
+          AND t.runtime_generation_id=f.runtime_generation_id
+        WHERE f.agent_id=? AND f.observer_epoch=? AND f.domain='turn'
+          AND f.kind='state_changed' AND t.provider_continuation_id=?
+          AND t.provider_turn_id=e.provider_turn_id
+      ) LIMIT 1`,
+    lane.agentId, lane.generation, lane.observer!.runtimeGenerationId,
+    lane.installation.providerContinuationId, lane.installation.workAttemptId,
+    lane.agentId, lane.installation.workAttemptId, lane.generation,
+    lane.installation.providerContinuationId,
+    lane.agentId, observerEpoch, lane.installation.providerContinuationId));
+  }
+
+  /**
+   * Stricter than captureAdmission: typed lifecycle effects must be fully
+   * drained for the exact source and every retained lifecycle fact must have a
+   * durable disposition. B3 may consume this witness, but B2 suppresses no raw
+   * behavior merely because it is ready.
+   */
+  typedLifecycleAdmission(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus {
+    if (installation.authorityMode !== "typed") return "unavailable";
+    const capture = this.captureAdmission(installation);
+    if (capture !== "ready") return capture;
+    const lane = this.lanes.get(installation.entryId);
+    if (!lane || lane.installation !== installation || !lane.subscription || !lane.observer) return "unavailable";
+    try {
+      const position = lane.subscription.position();
+      const durable = this.row(`SELECT observer_epoch,last_source_sequence,max_observed_sequence
+        FROM execution_observers WHERE agent_id=?`, installation.entryId);
+      if (!durable || Number(durable.observer_epoch) !== lane.observer.epoch) return "unavailable";
+      const last = Number(durable.last_source_sequence);
+      const maximum = Number(durable.max_observed_sequence);
+      if (maximum > last) return "unavailable";
+      if (last < position.latestSequence) return "pending";
+      if (last !== position.latestSequence || maximum !== last) return "unavailable";
+      const missing = this.row(`SELECT 1 FROM execution_facts f
+        LEFT JOIN execution_lifecycle_effects e ON e.fact_id=f.fact_id
+        WHERE f.agent_id=? AND f.domain<>'execution' AND e.fact_id IS NULL LIMIT 1`, installation.entryId);
+      if (missing) return "unavailable";
+      const pending = this.row(`SELECT 1 FROM execution_lifecycle_effects
+        WHERE agent_id=? AND state='pending' LIMIT 1`, installation.entryId);
+      return pending ? "pending" : "ready";
+    } catch { return "unavailable"; }
+  }
+
+  private markLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider): void {
+    if (this.closed) return;
+    const current = this.lifecycleProjectionUnavailable.get(provider) ?? 0;
+    this.lifecycleProjectionUnavailable.set(provider, Math.min(Number.MAX_SAFE_INTEGER, current + 1));
+    this.scheduleLifecycleProjection();
+  }
+
+  private scheduleLifecycleProjection(delayMs = 0): void {
+    if (this.closed || this.lifecycleProjectionTimer) return;
+    this.lifecycleProjectionTimer = setTimeout(() => {
+      this.lifecycleProjectionTimer = null;
+      this.drainLifecycleProjection();
+    }, delayMs);
+    this.lifecycleProjectionTimer.unref();
+  }
+
+  private drainLifecycleProjection(): void {
+    if (this.closed) return;
+    let processed = 0;
+    try {
+      for (const [provider, count] of this.lifecycleProjectionUnavailable) {
+        if (processed++ >= BATCH_FACTS) break;
+        this.store.recordLifecycleProjectionUnavailable(provider, count);
+        this.lifecycleProjectionUnavailable.delete(provider);
+      }
+      if (!this.lifecycleProjectionUnavailable.size) {
+        for (const [key, pending] of this.lifecycleProjectionPending) {
+          if (processed++ >= BATCH_FACTS) break;
+          this.store.recordLegacyLifecycle(pending.observation);
+          this.lifecycleProjectionPending.delete(key);
+          this.lifecycleProjectionBytes -= pending.bytes;
+        }
+      }
+    } catch {
+      this.scheduleLifecycleProjection(LIFECYCLE_PROJECTION_RETRY_MS);
+      return;
+    }
+    if (this.lifecycleProjectionUnavailable.size || this.lifecycleProjectionPending.size) this.scheduleLifecycleProjection();
+  }
+
+  private current(lane: Lane): boolean {
+    return this.owns(lane) && (lane.detached || this.options.currentHandle(lane.agentId) === lane.handle);
+  }
+  private owns(lane: Lane): boolean {
+    return !this.closed && !this.handoffSealed && (this.lanes.get(lane.agentId) === lane || this.retiring.get(lane.agentId) === lane);
+  }
+  private freezeSubscription(subscription: NativeExecutionSubscription): NativeExecutionSubscription {
+    const position = subscription.position();
+    try { subscription.dispose(); } catch { /* optional observation cleanup */ }
+    return { sourceId: subscription.sourceId, position: () => position, dispose: () => {} };
+  }
+  private detach(lane: Lane): void {
+    if (!this.owns(lane) || lane.detached) return;
+    lane.detached = true;
+    lane.pendingChange = true;
+    lane.frontierStored = false;
+    if (lane.subscription) lane.subscription = this.freezeSubscription(lane.subscription);
+    this.lanes.delete(lane.agentId);
+    if (lane.subscriptionFailed && !lane.pending.size) { this.remove(lane); return; }
+    if (this.retiring.has(lane.agentId)) {
+      // Never accumulate an unbounded retirement queue or silently skip an
+      // intermediate source. Operational replacement continues independently.
+      this.suspendedAgents.add(lane.agentId);
+      this.report(lane, "source_gap");
+      this.remove(lane);
+      return;
+    }
+    this.retiring.set(lane.agentId, lane);
+    this.schedule(lane);
+  }
+  private remove(lane: Lane): void {
+    this.cancelStorageRetry(lane);
+    this.dirty.delete(lane);
+    if (this.lanes.get(lane.agentId) === lane) this.lanes.delete(lane.agentId);
+    if (this.retiring.get(lane.agentId) === lane) this.retiring.delete(lane.agentId);
+    const subscription = lane.subscription;
+    lane.subscription = null;
+    try { subscription?.dispose(); } catch { /* optional observation cleanup */ }
+    lane.pending.clear(); lane.checkpoints.clear(); lane.bytes = 0;
+  }
+  private report(lane: Lane, code: CaptureCode): void {
+    if (code === "settlement_unavailable" && lane.diagnostic !== null && lane.diagnostic !== code) {
+      try { this.options.diagnostic(lane.agentId, code); } catch { /* optional observation */ }
+      return;
+    }
+    if (lane.diagnostic === code) return;
+    lane.diagnostic = code;
+    lane.pendingChange = true;
+    if (code !== "settlement_unavailable") {
+      const provider = lifecycleProvider(lane.handle.providerConnection);
+      if (provider) this.markLifecycleProjectionUnavailable(provider);
+    }
+    try { this.options.diagnostic(lane.agentId, code); } catch { /* never turn an observation failure into delivery failure */ }
+  }
+  private enqueue(lane: Lane, event: NativeExecutionObservation): void {
+    if (!this.current(lane) || lane.detached || lane.suspended) return;
+    try {
+      if (!Number.isSafeInteger(event.sequence) || event.sequence < 1 || !executionIdentity.safeParse(event.sourceId).success) {
+        lane.overflow = true; this.schedule(lane); return;
+      }
+      const bytes = Buffer.byteLength(JSON.stringify(event));
+      if (bytes > QUEUE_BYTES) lane.overflow = true;
+      else if (!lane.pending.has(event.sequence)) {
+        lane.pending.set(event.sequence, { event: structuredClone(event), bytes }); lane.bytes += bytes;
+        while (lane.pending.size > QUEUE_FACTS || lane.bytes > QUEUE_BYTES) {
+          const [sequence, oldest] = lane.pending.entries().next().value!;
+          lane.pending.delete(sequence); lane.bytes -= oldest.bytes; lane.overflow = true;
+        }
+      }
+      this.schedule(lane);
+    } catch { lane.overflow = true; this.schedule(lane); }
+  }
+  private row(sql: string, ...values: SQLInputValue[]): Row | undefined {
+    return this.database.prepare(sql).get(...values) as Row | undefined;
+  }
+
+  private liveRuntime(lane: Lane): Runtime | null {
+    const row = this.row(`SELECT d.provider_execution_generation_id,d.provider_work_attempt_id,d.work_attempt_id,
+      d.provider_connection_kind,d.provider_connection_pid,d.provider_process_identity,d.provider_connection_url,d.provider_server_auth_path,
+      c.delivery_mode,c.runtime_configuration_revision
+      FROM runtime_deployments d JOIN agent_configurations c USING(agent_id) WHERE d.agent_id=?`, lane.agentId);
+    if (!row || row.delivery_mode !== "daemon_inbox" || row.provider_execution_generation_id !== lane.generation
+      || row.provider_work_attempt_id !== lane.handle.workAttemptId || row.work_attempt_id !== lane.handle.workAttemptId
+      || Number(row.runtime_configuration_revision) !== lane.installation.configurationRevision) return null;
+    const connection = { kind: row.provider_connection_kind, pid: row.provider_connection_pid,
+      processIdentity: row.provider_process_identity, url: row.provider_connection_url, serverAuthPath: row.provider_server_auth_path } as ProviderActionConnectionRef;
+    if (!sameProviderActionConnectionIdentity(connection, lane.handle.providerConnection)) return null;
+    const runtime = this.knownRuntime(lane, connection.pid ?? undefined,
+      connection.processIdentity ?? undefined);
+    return runtime && (lane.expectedAuthorityMode === null
+      || runtime.authorityMode === lane.expectedAuthorityMode) ? runtime : null;
+  }
+
+  private knownRuntime(
+    lane: Lane,
+    pid: number | undefined,
+    birth: string | undefined,
+    generation = lane.generation,
+  ): Runtime | null {
+    const kind = lane.handle.providerConnection?.kind;
+    if (!birth || !kind || !Number.isSafeInteger(pid) || pid! < 1) return null;
+    const id = executionRuntimeStorageIdentity(lane.agentId, generation, kind, pid!, birth);
+    const runtime = this.row("SELECT runtime_generation_id,authority_mode,config_revision FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?", lane.agentId, generation, id);
+    const authorityMode = lifecycleAuthorityModeSchema.safeParse(runtime?.authority_mode);
+    return runtime && authorityMode.success
+      && Number(runtime.config_revision) === lane.installation.configurationRevision
+      ? { id, generation, authorityMode: authorityMode.data } : null;
+  }
+
+  private bind(lane: Lane, subject: Runtime, observer: Runtime, recovery?: NativeTurnIdentity): ShadowObserver {
+    const previous = lane.observer;
+    if (previous && previous.runtimeGenerationId === subject.id && previous.observerRuntimeGenerationId === observer.id
+      && previous.recoveryTurnId === (recovery?.turnId ?? null)) return previous;
+    const current = this.row("SELECT observer_epoch FROM execution_observers WHERE agent_id=?", lane.agentId);
+    lane.observer = this.store.bindObserver({ agentId: lane.agentId, subjectRuntimeGenerationId: subject.id,
+      observerRuntimeGenerationId: observer.id, sourceId: lane.subscription!.sourceId,
+      daemonGenerationId: String(this.options.daemonGeneration()), expectedEpoch: Number(current?.observer_epoch ?? 0), boundAtMs: Date.now(),
+      ...(recovery ? { recovery } : {}) });
+    lane.pendingChange = true;
+    return lane.observer;
+  }
+
+  private turn(lane: Lane, event: NativeExecutionObservation, observed: Runtime): { runtime: Runtime; identity: NativeTurnIdentity } | null {
+    const fact = event.fact;
+    if (fact.domain !== "turn" && fact.domain !== "execution") return null;
+    const existing = this.row(`SELECT t.turn_id,t.execution_generation_id,t.runtime_generation_id,t.provider_continuation_id,t.provider_turn_id,
+      r.authority_mode FROM execution_turns t JOIN execution_runtime_generations r USING(agent_id,execution_generation_id,runtime_generation_id)
+      WHERE t.agent_id=? AND t.provider_continuation_id=? AND t.provider_turn_id=?`, lane.agentId, fact.providerContinuationId, fact.providerTurnId);
+    const authorityMode = lifecycleAuthorityModeSchema.safeParse(existing?.authority_mode);
+    if (existing && authorityMode.success) return { runtime: { id: String(existing.runtime_generation_id), generation: String(existing.execution_generation_id),
+      authorityMode: authorityMode.data }, identity: { turnId: String(existing.turn_id), providerContinuationId: fact.providerContinuationId,
+      providerTurnId: fact.providerTurnId } };
+    if (existing) return null;
+    const binding = this.row(`SELECT b.room_id,b.work_attempt_id,b.origin_execution_generation_id,i.source_message_id,i.created_at
+      FROM supervised_agent_provider_turn_bindings b JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id AND i.agent_id=b.agent_id AND i.room_id=b.room_id
+      WHERE b.agent_id=? AND b.provider_continuation_id=? AND b.provider_turn_id=?`, lane.agentId, fact.providerContinuationId, fact.providerTurnId);
+    if (!binding || binding.work_attempt_id !== lane.handle.workAttemptId || binding.origin_execution_generation_id !== observed.generation) return null;
+    const identity = { turnId: opaque("turn", lane.agentId, fact.providerContinuationId, fact.providerTurnId),
+      providerContinuationId: fact.providerContinuationId, providerTurnId: fact.providerTurnId };
+    const tracked = this.row(`SELECT 1 FROM execution_message_attempts a
+      JOIN execution_attempt_generations g USING(attempt_id,agent_id,room_id)
+      WHERE a.agent_id=? AND a.room_id=? AND a.source_message_id=?
+        AND g.execution_generation_id=? AND g.workspace_id=?`,
+    lane.agentId, String(binding.room_id), String(binding.source_message_id), observed.generation, String(binding.work_attempt_id));
+    const attemptId = this.store.trackMessage({ agentId: lane.agentId, roomId: String(binding.room_id), sourceMessageId: String(binding.source_message_id),
+      executionGenerationId: observed.generation, workspaceId: String(binding.work_attempt_id), createdAtMs: Date.parse(String(binding.created_at)) });
+    if (!tracked) lane.pendingChange = true;
+    this.store.trackNativeTurn({ agentId: lane.agentId, roomId: String(binding.room_id), executionGenerationId: observed.generation,
+      runtimeGenerationId: observed.id, attemptId, ...identity, createdAtMs: event.observedAtMs });
+    lane.pendingChange = true;
+    // Late native evidence can materialize an attempt behind the receipt scan.
+    lane.receiptCursor = 0;
+    return { runtime: observed, identity };
+  }
+
+  private drain(lane: Lane): boolean {
+    if (lane.detached && !lane.pending.size && !lane.checkpoints.size && lane.subscription!.position().latestSequence === 0) {
+      lane.frontierStored = true; return false;
+    }
+    let checkpointCount = 0;
+    for (const [birth, checkpoint] of lane.checkpoints) {
+      if (checkpointCount++ >= BATCH_FACTS) return true;
+      const runtime = checkpoint.configurationRevision === lane.installation.configurationRevision
+        ? this.knownRuntime(lane, checkpoint.connection.pid ?? undefined,
+          checkpoint.connection.processIdentity ?? undefined)
+        : null;
+      if (runtime) {
+        lane.verifiedRuntime = runtime;
+        lane.expectedAuthorityMode = runtime.authorityMode;
+      }
+      lane.checkpoints.delete(birth);
+    }
+    const source = lane.subscription!.sourceId;
+    const prior = this.row("SELECT source_id,last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?", lane.agentId);
+    // Do not try to re-bind an exited Cursor child merely because the helper
+    // replayed its already-committed prefix. Admission below still validates
+    // the exact source witness and epoch before accepting anything new.
+    if (prior?.source_id === source) this.discardPrefix(lane, Number(prior.last_source_sequence));
+    const live = lane.detached ? lane.verifiedRuntime : this.liveRuntime(lane);
+    if (live) lane.verifiedRuntime = live;
+    const first = lane.pending.values().next().value?.event;
+    const observed = first && this.knownRuntime(lane, first.nativeProcessPid, first.nativeProcessIdentity);
+    const initial = observed || live;
+    if (!initial) {
+      if (!lane.pending.size && prior?.source_id === source && prior.last_source_sequence === lane.subscription!.position().latestSequence) {
+        lane.frontierStored = true; return false;
+      }
+      this.report(lane, "identity_unavailable"); return false;
+    }
+    let token = lane.observer ?? this.bind(lane, initial, initial);
+    const position = lane.subscription!.position();
+    if (!Number.isSafeInteger(position.latestSequence) || !Number.isSafeInteger(position.firstRetainedSequence)
+      || position.latestSequence < 0 || position.firstRetainedSequence < 1 || position.firstRetainedSequence > position.latestSequence + 1) {
+      throw new ExecutionProtocolError("invalid_fact");
+    }
+    this.store.observeSourcePosition(lane.subscription!.sourceId, token, position.latestSequence);
+    if (prior?.source_id !== source || Number(prior.max_observed_sequence) < position.latestSequence) lane.pendingChange = true;
+    lane.frontierStored = true;
+    if (lane.suspended) return false;
+    const current = this.row("SELECT last_source_sequence FROM execution_observers WHERE agent_id=?", lane.agentId)!;
+    let cursor = Number(current.last_source_sequence);
+    this.discardPrefix(lane, cursor);
+    // Queued live observations can precede the helper's bounded retained suffix.
+    const firstAvailable = lane.pending.keys().next().value ?? position.firstRetainedSequence;
+    if (lane.overflow || firstAvailable > cursor + 1) {
+      lane.suspended = true; lane.pending.clear(); lane.bytes = 0; this.report(lane, "source_gap"); return false;
+    }
+    let processed = 0;
+    for (const [sequence, queued] of lane.pending) {
+      if (processed++ >= BATCH_FACTS) return true;
+      const event = queued.event;
+      if (event.sourceId !== lane.subscription!.sourceId || sequence !== cursor + 1) {
+        lane.suspended = true; this.report(lane, "source_gap"); return false;
+      }
+      let runtime = this.knownRuntime(lane, event.nativeProcessPid, event.nativeProcessIdentity);
+      if (!runtime && (event.fact.domain === "turn" || event.fact.domain === "execution")) {
+        const known = this.row("SELECT execution_generation_id FROM execution_turns WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?", lane.agentId, event.fact.providerContinuationId, event.fact.providerTurnId);
+        if (known) runtime = this.knownRuntime(lane, event.nativeProcessPid,
+          event.nativeProcessIdentity, String(known.execution_generation_id));
+      }
+      if (!runtime) { this.report(lane, "identity_unavailable"); return false; }
+      const turn = event.fact.domain === "turn" || event.fact.domain === "execution" ? this.turn(lane, event, runtime) : null;
+      if ((event.fact.domain === "turn" || event.fact.domain === "execution") && !turn) { this.report(lane, "identity_unavailable"); return false; }
+      const subject = turn?.runtime ?? runtime;
+      token = this.bind(lane, subject, runtime, turn && subject.id !== runtime.id ? turn.identity : undefined);
+      const result = this.store.ingest(event.sourceId, token, { ...event.fact, ...(turn?.identity ?? {}),
+        factId: opaque("fact", lane.agentId, event.sourceId, String(sequence)), agentId: lane.agentId,
+        executionGenerationId: subject.generation, runtimeGenerationId: subject.id, observerEpoch: token.epoch,
+        sourceSequence: sequence, observedAtMs: event.observedAtMs });
+      if (result.status !== "accepted" && result.status !== "duplicate") {
+        lane.suspended = true; this.report(lane, result.status === "gap" ? "source_gap" : "retention_limit"); return false;
+      }
+      if (result.status === "accepted" || lane.diagnostic !== null) lane.pendingChange = true;
+      cursor = sequence; lane.pending.delete(sequence); lane.bytes -= queued.bytes; lane.diagnostic = null;
+    }
+    if (cursor < position.latestSequence) { lane.suspended = true; this.report(lane, "source_gap"); }
+    else if (lane.diagnostic === "storage_unavailable") {
+      // A successful exact source/epoch check also revalidates an empty source.
+      lane.diagnostic = null; lane.pendingChange = true;
+    }
+    return false;
+  }
+
+  private discardPrefix(lane: Lane, cursor: number): void {
+    for (const [sequence, queued] of lane.pending) {
+      if (sequence > cursor) break;
+      lane.pending.delete(sequence); lane.bytes -= queued.bytes;
+    }
+  }
+}

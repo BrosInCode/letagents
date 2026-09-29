@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createRequire } from "node:module";
 
 export type ElectronTestEnvPathKind =
   | "state"
@@ -198,4 +199,20 @@ export function createElectronTestEnv(options: ElectronTestEnvOptions): Electron
     resetState,
     cleanup,
   };
+}
+
+/** Isolated safeStorage double; production still requires the OS credential store. */
+export function installTestSecretStorage(): void {
+  const require = createRequire(import.meta.url);
+  const id = require.resolve("electron");
+  const previous = require.cache[id];
+  require.cache[id] = { id, filename: id, loaded: true, exports: { safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => Buffer.from(value),
+    decryptString: (value: Buffer) => value.toString(),
+  } } } as NodeJS.Module;
+  test.after(() => { if (previous) require.cache[id] = previous; else delete require.cache[id]; });
+}
+export function testEncryptedToken(value: string): string {
+  return `safe:${Buffer.from(value).toString("base64")}`;
 }

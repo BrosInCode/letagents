@@ -22,11 +22,11 @@ export function roomSupportsGitHubIntegration(
 function githubRoomIdentifier(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return /^github\.com\/[^/]+\/[^/]+$/.test(normalized) ||
-    /^git-room:github\.com:[^/:\s]+\/[^/:\s]+:/.test(normalized);
+    /^github\.com\/[^/]+\/[^/]+\/focus\/git:(?:branch|tag):[a-z0-9_-]+$/.test(normalized);
 }
 
 const GIT_ROOM_REF_PATTERN =
-  /^git-room:github\.com:[^/:\s]+\/([^/:\s]+):(?:branch|ref|tag):([A-Za-z0-9_-]+)$/;
+  /^github\.com\/[^/\s]+\/([^/\s]+)\/focus\/git:(?:branch|tag):([A-Za-z0-9_-]+)$/;
 
 /**
  * People recognize "repo · branch", not canonical git-room identifiers with a
@@ -35,7 +35,8 @@ const GIT_ROOM_REF_PATTERN =
 export function friendlyRoomLabel(label: string): string {
   const match = GIT_ROOM_REF_PATTERN.exec(label.trim());
   if (!match) return label;
-  const [, repo, encodedRef] = match;
+  const repo = match[1] || label;
+  const encodedRef = match[2] || "";
   const ref = decodeRoomRef(encodedRef);
   return ref ? `${repo} · ${ref}` : repo;
 }

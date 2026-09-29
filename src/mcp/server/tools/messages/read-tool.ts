@@ -22,6 +22,7 @@ import {
 } from "../../runtime.js";
 import { requireValidWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
 import { jsonToolResponse } from "./response.js";
+import { currentWorkerCall } from "../../../worker-call-context.js";
 
 export const DEFAULT_READ_MESSAGES_LIMIT = 100;
 
@@ -127,7 +128,8 @@ export function registerReadMessagesTool(server: McpServer): void {
       const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
       const sessionRoomId = targetRoomId ?? currentRoom?.room_id ?? null;
       const workerRuntime = requireValidWorkerBearerRuntime();
-      const agentSessionSnapshot = workerRuntime.mode === "owner"
+      const boundWorker = currentWorkerCall();
+      const agentSessionSnapshot = boundWorker ? { complete: true, session: boundWorker } : workerRuntime.mode === "owner"
         ? getCurrentAgentSessionSnapshot(sessionRoomId)
         : { complete: true, session: null };
       const agentSession = agentSessionSnapshot.session;
@@ -177,7 +179,9 @@ export function registerReadMessagesTool(server: McpServer): void {
         limit: effectiveLimit,
         deliveryHeaders,
       });
-      await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, await ensureAgentIdentity());
+      if (!boundWorker) {
+        await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, await ensureAgentIdentity());
+      }
 
       const bounded = boundAgentMessageOutput(
         toAgentReadableMessages(recent.messages),

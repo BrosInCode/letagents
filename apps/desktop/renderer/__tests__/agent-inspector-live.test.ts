@@ -2,8 +2,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { createSSRApp } from "vue";
+import { renderToString } from "@vue/server-renderer";
+import { createServer } from "vite";
+import { ProviderLiveDisplay } from "../../daemon/provider-live-display";
+import { sanitizeDaemonActivityEvent } from "../../daemon/credential-redaction";
+import { canPresentCurrentAgentStream, currentAgentRequest, presentAgentTrace, liveActionStatus, liveActionFailure } from "../src/domain/agent-inspector-live-trace";
 
-import { describeLiveToolCall, foldAgentStreamEvents } from "../src/domain/agent-inspector-live";
+import {
+  agentLiveAvailability,
+  describeLiveToolCall,
+  foldAgentStreamEvents,
+  formatLiveWorkDuration,
+  scopeAgentStreamEventsToWork,
+} from "../src/domain/agent-inspector-live";
 import type { DesktopAgentStreamEvent } from "../../electron/ipc-types";
 
 function source(relative: string): string {
@@ -32,6 +44,71 @@ test("fold concatenates reasoning and assistant-text deltas per part", () => {
     { kind: "reasoning", id: "r1", text: "let me think" },
     { kind: "message", id: "m1", text: "Hello there" },
   ]);
+});
+
+test("Codex commentary keeps native message blocks and turn identities separate", () => {
+  const transcript = foldAgentStreamEvents([
+    event({sequence:1,payload:{itemId:"one",threadId:"thread",turnId:"first",delta:"Checking"}}),
+    event({sequence:2,payload:{itemId:"two",threadId:"thread",turnId:"first",delta:"Result"}}),
+    event({sequence:3,payload:{itemId:"one",threadId:"thread",turnId:"first",delta:" files"}}),
+    event({sequence:4,payload:{itemId:"one",threadId:"thread",turnId:"second",delta:"New turn"}}),
+  ]);
+  assert.deepEqual(transcript.items.map(item=>item.kind === "message" ? item.text : null), ["Checking files","Result","New turn"]);
+});
+
+test("Live keeps captured actions after work finishes and separates them from a new request", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLive.vue")).default;
+    const work = { active: false, startedAt: null, state: "idle", freshness: "fresh", agentState: "online", detail: null };
+    const resource = { status: "ready", sourceMessageId: "msg_old", error: null, detail: {
+      items: [{ source_message_id: "msg_new", sender: "Emmy", text_preview: "Check the tests" }],
+    } };
+    const events = [
+      event({ sequence: 1, observedAt: "2026-09-05T10:00:01Z", payload: { partId: "old", delta: "Previous request finished" } }),
+      event({ sequence: 2, observedAt: "2026-09-05T10:01:01Z", kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "read", tool: "readToolCall", status: "pending", input: { path: "package.json" } } }),
+      event({ sequence: 3, observedAt: "2026-09-05T10:01:02Z", payload: { partId: "new", delta: "Checking the test configuration" } }),
+    ];
+    const feed = { events, ended: false, droppedEvents: 0 };
+    const render = (overrides: Record<string, unknown> = {}) => renderToString(createSSRApp(component, {
+      resource, work, feed, activeSourceMessageId: null, supportsReasoning: false, ...overrides,
+    }));
+    const idle = await render();
+    assert.match(idle, /Previous request finished/);
+    assert.match(idle, /Checking the test configuration/);
+    assert.match(idle, /Recent actions/);
+    assert.match(idle, /No finish recorded/);
+    assert.match(idle, /Last update:/);
+    assert.doesNotMatch(idle, /Recent work|Recorded actions|No reply needed|Current turn/);
+
+    const activeWork = { ...work, active: true, state: "awaiting_result", agentState: "responding", startedAt: "2026-09-05T10:01:00Z" };
+    const active = await render({ work: activeWork, activeSourceMessageId: "msg_new" });
+    assert.match(active, /Check the tests/);
+    assert.match(active, /Current request/);
+    assert.match(active, /Checking the test configuration/);
+    assert.doesNotMatch(active, /Previous request finished|Recent actions/);
+    assert.match(active.split('class="agent-inspector-live-trigger"')[0], /Requested: Reading a file · package.json/,
+      "a pending Claude action remains the current step even when commentary follows it");
+
+    const completedFeed = { ...feed, events: [...events, event({ sequence: 4, observedAt: "2026-09-05T10:01:03Z", kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "read", status: "completed", output: "Three scripts" } })] };
+    const finished = await render({ feed: completedFeed });
+    assert.match(finished, /Read a file/);
+    assert.match(finished, /Completed/);
+    assert.match(finished, /Recent actions/);
+    assert.doesNotMatch(finished, /No finish recorded/);
+
+    for (const overrides of [{ work: { ...activeWork, startedAt: null }, activeSourceMessageId: "msg_new" }, { work: activeWork }]) {
+      const unavailable = await render(overrides);
+      assert.match(unavailable, /Current activity unavailable/);
+      assert.doesNotMatch(unavailable, /Previous request finished|Checking the test configuration/);
+    }
+    assert.match(await render({ feed: { ...feed, droppedEvents: 3 } }), /Earlier live updates were omitted/);
+    assert.match(await render({ feed: { ...feed, events: [] } }), /No recent actions are available/);
+    assert.match(await render({ work: { ...work, freshness: "stale" } }), /Live status unavailable/);
+    assert.match(await render({ feed: { ...feed, ended: true } }), /Work stream closed/);
+    assert.equal(currentAgentRequest(resource as any, "msg_other"), null);
+    assert.equal(canPresentCurrentAgentStream({ active: false, startedAt: activeWork.startedAt, activeSourceMessageId: "msg_new" }), false);
+  } finally { await vite.close(); }
 });
 
 test("fold renders Codex's verbatim readable reasoning summary method", () => {
@@ -98,6 +175,57 @@ test("fold preserves first-appearance order across interleaved kinds", () => {
     event({ sequence: 3, method: "item/agentMessage/delta", payload: { partId: "m1", delta: "done" } }),
   ]);
   assert.deepEqual(transcript.items.map((item) => item.kind), ["reasoning", "tool", "message"]);
+  assert.equal(transcript.startedAt, "2026-07-31T00:00:00.000Z");
+  assert.equal(transcript.lastActivityAt, "2026-07-31T00:00:00.000Z");
+});
+
+test("live-work duration copy stays compact and freezes at the last event", () => {
+  assert.equal(formatLiveWorkDuration(
+    "2026-07-31T00:00:00.000Z",
+    null,
+    Date.parse("2026-07-31T00:00:09.900Z"),
+  ), "9s");
+  assert.equal(formatLiveWorkDuration(
+    "2026-07-31T00:00:00.000Z",
+    "2026-07-31T00:01:12.000Z",
+  ), "1m 12s");
+  assert.equal(formatLiveWorkDuration(
+    "2026-07-31T00:00:00.000Z",
+    "2026-07-31T02:04:19.000Z",
+  ), "2h 4m");
+  assert.equal(formatLiveWorkDuration("not-a-date", null), null);
+});
+
+test("live work scopes a persistent provider replay to the durable room turn", () => {
+  const prior = event({ sequence: 1, observedAt: "2026-07-31T00:00:01.000Z" });
+  const current = event({ sequence: 2, observedAt: "2026-07-31T00:01:01.000Z" });
+  assert.deepEqual(scopeAgentStreamEventsToWork([prior, current], {
+    active: true,
+    startedAt: "2026-07-31T00:01:00.000Z",
+  }), [current]);
+  assert.deepEqual(scopeAgentStreamEventsToWork([prior, current], {
+    active: true,
+    startedAt: null,
+  }), [], "an active turn without its durable boundary never replays stale work");
+  assert.deepEqual(scopeAgentStreamEventsToWork([prior, current], {
+    active: false,
+    startedAt: null,
+  }), [prior, current], "idle inspectors may retain the bounded recent-work history without claiming it is active");
+});
+
+test("live availability never presents transitional or unavailable agents as ready", () => {
+  const work = (agentState: Parameters<typeof agentLiveAvailability>[0]["agentState"], active = false) => ({
+    active,
+    freshness: "fresh" as const,
+    agentState,
+  });
+  assert.equal(agentLiveAvailability(work("online"), false), "idle");
+  assert.equal(agentLiveAvailability(work("responding", true), false), "active");
+  for (const state of ["restoring_conversation", "recovering", "reconnecting", "starting"] as const) {
+    assert.equal(agentLiveAvailability(work(state), false), "transitioning");
+  }
+  assert.equal(agentLiveAvailability(work("retired"), true), "closed", "a closed stream wins over retained agent state");
+  assert.equal(agentLiveAvailability({ ...work("responding", true), freshness: "stale" }, false), "stale");
 });
 
 test("separate Cursor assistant events preserve every content block in wire order", () => {
@@ -115,6 +243,7 @@ test("a delayed running tool replay cannot regress a terminal card", () => {
   const transcript = foldAgentStreamEvents([
     event({ sequence: 1, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "c1", tool: "bash", status: "completed", output: "done" } }),
     event({ sequence: 2, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "c1", tool: "bash", status: "running" } }),
+    event({ sequence: 3, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { callID: "c1", tool: "bash", status: "pending" } }),
   ]);
   const item = transcript.items[0];
   assert.equal(item?.kind === "tool" && item.status, "completed");
@@ -155,7 +284,7 @@ test("describeLiveToolCall unwraps Cursor's mcpToolCall and strips the per-turn 
   const reply = describeLiveToolCall("mcpToolCall", {
     name: "letagents_supervised_c0a7e4ba0ff9289147837706-complete_room_turn",
     args: { outcome: "reply", text: "Today is Sunday, August 9, 2026." },
-  });
+  }, { status: "completed", output: { result: { content: [{ text: JSON.stringify({ accepted: true }) }] } }, error: null });
   assert.equal(reply.kind, "reply");
   assert.equal(reply.headline, "Replied to the room");
   assert.equal(reply.replyText, "Today is Sunday, August 9, 2026.");
@@ -166,7 +295,7 @@ test("describeLiveToolCall reads no_reply as a closed turn with no message conte
   const closed = describeLiveToolCall("mcpToolCall", {
     name: "letagents_supervised_ab12cd34ef56-complete_room_turn",
     args: { outcome: "no_reply" },
-  });
+  }, { status: "completed", output: { accepted: true }, error: null });
   assert.equal(closed.kind, "reply");
   assert.equal(closed.headline, "Closed the turn without a reply");
   assert.equal(closed.replyText, null);
@@ -180,6 +309,25 @@ test("describeLiveToolCall gives room tools domain sentences with a salient deta
   assert.equal(status.kind, "action");
   assert.equal(status.headline, "Posted a status update");
   assert.equal(status.detail, "Reviewing PR #901 now");
+});
+
+test("complete_room_turn is a room reply only after the daemon accepted it", () => {
+  const input = {
+    name: "letagents_supervised_ab12cd34ef56-complete_room_turn",
+    args: { outcome: "reply", text: "Done." },
+  };
+  const rejected = describeLiveToolCall("mcpToolCall", input, {
+    status: "completed", output: { result: { errorMessage: "Service temporarily unavailable" } }, error: null,
+  });
+  assert.equal(rejected.kind, "action");
+  assert.equal(rejected.headline, "Tried to reply to the room");
+  assert.equal(rejected.replyText, null);
+
+  const errored = describeLiveToolCall("mcpToolCall", input, {
+    status: "error", output: null, error: "transport failed",
+  });
+  assert.equal(errored.kind, "action");
+  assert.equal(errored.headline, "Tried to reply to the room");
 });
 
 test("describeLiveToolCall degrades unknown tools to their bare name, never the transport alias", () => {
@@ -206,16 +354,286 @@ test("describeLiveToolCall truncates long details but never truncates the room r
   const reply = describeLiveToolCall("mcpToolCall", {
     name: "letagents_supervised_ab12cd34ef56-complete_room_turn",
     args: { outcome: "reply", text: longText },
-  });
+  }, { status: "completed", output: { structuredContent: { accepted: true } }, error: null });
   assert.equal(reply.replyText, longText);
 });
 
-test("the live surface renders replies as message content and keeps raw payloads behind disclosure", () => {
+test("the live surface keeps provider authority separate from presentation", () => {
   const surface = source("../src/components/desktop/content/agent-inspector/AgentInspectorLive.vue");
-  assert.match(surface, /Working aloud/);
-  assert.doesNotMatch(surface, />Response</);
-  assert.match(surface, /agent-inspector-live-reply/);
-  assert.match(surface, /<details/);
-  assert.match(surface, /Raw \{\{ entry\.tool\.toolName \}\} call/);
-  assert.match(surface, /describeLiveToolCall/);
+  assert.match(surface, /scopeAgentStreamEventsToWork\(props\.feed\.events, props\.work\)/);
+  assert.match(surface, /agentLiveAvailability\(props\.work, props\.feed\.ended\)/);
+  assert.match(surface, /availability\.value === "active" && canShowCurrent\.value/);
+  assert.match(surface, /Follow latest/);
+  assert.doesNotMatch(surface, />Thinking</);
+});
+
+test("running native actions use present-progressive copy", () => {
+  const running = describeLiveToolCall(
+    "readToolCall",
+    { path: "README.md" },
+    { status: "running", output: null, error: null },
+  );
+  const completed = describeLiveToolCall(
+    "readToolCall",
+    { path: "README.md" },
+    { status: "completed", output: null, error: null },
+  );
+  assert.equal(running.headline, "Reading a file");
+  assert.equal(completed.headline, "Read a file");
+});
+
+test("Claude room tool names read as actions without transport prefixes", () => {
+  const pending = describeLiveToolCall("mcp__letagents__update_task", { status: "in_review" }, { status: "pending", output: null, error: null });
+  assert.equal(pending.toolName, "update_task");
+  assert.equal(pending.headline, "Requested: Update a task");
+  assert.equal(pending.detail, "in_review");
+});
+
+test("recognized Claude room tools never claim completion while pending or failed", () => {
+  for (const [tool, completed] of [
+    ["send_message", "Sent a room message"], ["send_thread_message", "Sent a thread reply"],
+    ["post_status", "Posted a status update"], ["post_reasoning", "Shared reasoning in the room"],
+    ["add_task", "Added a board task"], ["get_board", "Read the room board"],
+    ["get_board_settings", "Read the board settings"], ["get_current_room", "Checked the current room"],
+    ["check_repo", "Checked the repository"], ["wait_for_messages", "Waited for new room messages"],
+    ["update_task", "Updated a task"], ["release_task_lease", "Released a task lease"],
+    ["register_task_lease_action_intent", "Registered a task lease action"],
+  ]) {
+    const describe = (status: string) => describeLiveToolCall(`mcp__letagents__${tool}`, {}, { status, output: null, error: null }).headline;
+    assert.match(describe("pending"), /^Requested:/);
+    assert.notEqual(describe("running"), completed);
+    assert.match(describe("error"), /^Failed:/);
+    assert.match(describe("interrupted"), /^Interrupted:/);
+    assert.equal(describe("completed"), completed);
+  }
+});
+
+test("Live smoothly follows growing content, yields to readers, and cleans up", async () => {
+  const { followAgentLiveScroll } = await import("../src/domain/agent-inspector-live-scroll");
+  const saved = new Map(["window", "Element", "requestAnimationFrame", "cancelAnimationFrame", "ResizeObserver"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
+  let resize: () => void = () => {};
+  let disconnected = false;
+  const motion = { matches: false };
+  const viewport = Object.assign(new EventTarget(), {
+    scrollHeight: 1000, clientHeight: 400, scrollTop: 0, style: { overflowAnchor: "auto" },
+  });
+  // Match the browser's scrollTop clamping, including the initial jump.
+  let top = 0;
+  Object.defineProperty(viewport, "scrollTop", {
+    get: () => top,
+    set: (value: number) => { top = Math.max(0, Math.min(Math.round(value), viewport.scrollHeight - viewport.clientHeight)); },
+  });
+  Object.assign(globalThis, {
+    window: Object.assign(new EventTarget(), { matchMedia: () => motion, getSelection: () => ({ isCollapsed: true }) }),
+    Element: class {},
+    requestAnimationFrame: (callback: FrameRequestCallback) => { frames.set(++nextFrame, callback); return nextFrame; },
+    cancelAnimationFrame: (id: number) => frames.delete(id),
+    ResizeObserver: class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() {}
+      disconnect() { disconnected = true; }
+    },
+  });
+  let time = performance.now();
+  function tick(interval = 16) {
+    time += interval;
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(time);
+    viewport.dispatchEvent(new Event("scroll"));
+  }
+  function settle(interval = 16) {
+    for (let count = 0; frames.size && count < 100; count++) tick(interval);
+    assert.equal(frames.size, 0, "animation settles instead of running forever");
+  }
+  let dispose: (() => void) | undefined;
+  let resume: (() => void) | undefined;
+  const followingChanges: boolean[] = [];
+  try {
+    const follower = followAgentLiveScroll(viewport as unknown as HTMLElement, {} as HTMLElement, value => followingChanges.push(value));
+    dispose = follower.dispose;
+    resume = follower.resume;
+    assert.equal(top, 600, "opening Live starts at the latest activity");
+    viewport.scrollHeight += 200;
+    resize(); tick();
+    assert.ok(top > 600 && top < 800, "new activity moves smoothly instead of jumping");
+    for (let index = 0; index < 10; index++) {
+      const previous = top;
+      viewport.scrollHeight += 50;
+      resize(); tick();
+      assert.ok(top > previous, "rapid text deltas do not restart or starve the animation");
+    }
+    settle();
+    assert.ok(Math.abs(top - 1300) < 1);
+
+    viewport.scrollHeight += 100;
+    resize(); settle(8);
+    assert.equal(top, viewport.scrollHeight - viewport.clientHeight, "high-refresh screens settle despite pixel rounding");
+
+    viewport.scrollHeight += 200;
+    resize(); tick();
+    viewport.dispatchEvent(Object.assign(new Event("wheel"), { deltaY: -10 }));
+    assert.equal(frames.size, 0, "upward wheel cancels an in-flight animation immediately");
+    viewport.scrollTop -= 200;
+    viewport.dispatchEvent(new Event("scroll"));
+    const readingTop = top;
+    viewport.scrollHeight += 200;
+    resize(); tick();
+    assert.equal(top, readingTop, "new content leaves the reader's position alone");
+    assert.equal(followingChanges.at(-1), false, "the UI can offer Follow latest while reading");
+    resume(); settle();
+    assert.equal(followingChanges.at(-1), true);
+    assert.equal(top, viewport.scrollHeight - viewport.clientHeight, "Follow latest explicitly returns to new work");
+    viewport.scrollTop -= 200;
+    viewport.dispatchEvent(new Event("scroll"));
+
+    viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight;
+    viewport.dispatchEvent(new Event("scroll"));
+    viewport.scrollHeight += 100;
+    resize(); settle();
+    assert.ok(Math.abs(top - (viewport.scrollHeight - viewport.clientHeight)) < 1, "returning to the bottom resumes following");
+
+    for (const [start, end] of [["pointerdown", "pointerup"], ["touchstart", "touchend"]]) {
+      viewport.dispatchEvent(new Event(start));
+      assert.equal(frames.size, 0);
+      window.dispatchEvent(new Event(end));
+      viewport.scrollHeight += 100;
+      resize(); settle();
+      assert.ok(Math.abs(top - (viewport.scrollHeight - viewport.clientHeight)) < 1, "a click or tap at the bottom does not leave following paused");
+    }
+
+    motion.matches = true;
+    viewport.scrollHeight += 300;
+    resize(); tick();
+    assert.equal(top, viewport.scrollHeight - viewport.clientHeight, "reduced motion follows without animation");
+    viewport.dispatchEvent(Object.assign(new Event("keydown"), { key: "PageUp" }));
+    window.dispatchEvent(new Event("pointerup"));
+    window.dispatchEvent(new Event("touchend"));
+    viewport.scrollHeight += 100;
+    resize();
+    assert.equal(frames.size, 0, "keyboard navigation stays paused even after unrelated outside clicks");
+    dispose(); dispose = undefined;
+    assert.equal(disconnected, true);
+    assert.equal(viewport.style.overflowAnchor, "auto");
+    viewport.scrollTop += 100;
+    viewport.dispatchEvent(new Event("scroll"));
+    assert.equal(frames.size, 0, "unmount removes event listeners and scheduled work");
+  } finally {
+    dispose?.();
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
+test("readable traces group only adjacent successful exploration and retain every action", () => {
+  const action = (id: string, tool = "readToolCall", status = "completed", error: string | null = null) => ({
+    kind: "tool" as const, id, tool, status, input: { path: `${id}.ts` }, output: "source", error,
+  });
+  const items = [action("a"), action("b"), { kind: "message" as const, id: "note", text: "Found it." },
+    action("c"), action("d", "readToolCall", "error", "Read failed"), action("e"),
+    action("f", "readToolCall", "running"), action("g", "editToolCall"), action("h", "editToolCall"),
+    action("i", "grepToolCall"), action("j", "globToolCall"),
+    action("k", "readToolCall", "completed", "Provider reported an error")];
+  const entries = presentAgentTrace(items, true);
+  assert.deepEqual(entries.map(entry => entry.kind === "actions" ? entry.actions.map(action => action.item.id) : entry.id),
+    [["a", "b"], "note", ["c"], ["d"], ["e"], ["f"], ["g"], ["h"], ["i", "j"], ["k"]]);
+  const flattened = entries.flatMap(entry => entry.kind === "actions" ? entry.actions.map(action => action.item) : [entry]);
+  assert.deepEqual(flattened, items, "compaction never drops evidence or changes its order");
+  assert.deepEqual(presentAgentTrace([{ kind: "reasoning", id: "r", text: "Summary" }], false), []);
+  const inspected = new Map([["b", "b"], ["c", "b"], ["d", "d"]]);
+  const before = presentAgentTrace([action("a", "readToolCall", "running"), action("b"), action("c"), action("d", "readToolCall", "running")], true, inspected);
+  const after = presentAgentTrace([action("a"), action("b"), action("c"), action("d"), action("e"), action("f")], true, inspected);
+  assert.deepEqual(before.map(entry => entry.id), ["a", "b", "d"]);
+  assert.deepEqual(after.map(entry => entry.kind === "actions" ? entry.actions.map(action => action.item.id) : entry.id),
+    [["a"], ["b", "c"], ["d"], ["e", "f"]], "inspected entries retain their keys and membership when neighboring calls finish");
+});
+
+test("native failures and unavailable pending actions never imply completed or current work", () => {
+  for (const tool of ["shellToolCall", "editToolCall", "readToolCall", "searchToolCall"]) {
+    assert.match(describeLiveToolCall(tool, {}, { status: "error", error: "failed", output: null }).headline, /failed$/);
+    assert.match(describeLiveToolCall(tool, {}, { status: "interrupted", error: null, output: null }).headline, /interrupted$/);
+  }
+  assert.equal(liveActionStatus("running", false), "No finish recorded");
+  assert.equal(liveActionStatus("pending", false), "No finish recorded");
+  assert.equal(liveActionStatus("running", true), "Running");
+  const pending = foldAgentStreamEvents([event({ sequence: 1, kind: "tool_lifecycle", method: "item/toolCall/updated",
+    payload: { callID: "pending", tool: "readToolCall", status: "pending" } })], true).items[0];
+  assert.ok(pending?.kind === "tool");
+  assert.equal(pending.status, "interrupted");
+  assert.equal(describeLiveToolCall("editToolCall", {changes: [{path: "src/auth.ts"}, {path:"src/auth.test.ts"}]}).detail, "src/auth.ts, src/auth.test.ts");
+  assert.equal(describeLiveToolCall("grepToolCall", {pattern:"timeout",path:"src"}).detail, "timeout · src");
+});
+
+test("Live renders readable markdown and expandable action groups without executing supplied HTML", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLive.vue")).default;
+    const events = [event({sequence:1,payload:{partId:"note",delta:'**Found it.** Check `auth.ts`.\n\n- Keep the count\n- Verify retries\n\n<img src=x onerror=alert(1)>'}}),
+      ...["a", "b", "c"].map((id,i) => event({sequence:i+2,kind:"tool_lifecycle",method:"item/toolCall/updated",payload:{callID:id,tool:"readToolCall",status:"completed",input:{path:`${id}.ts`},output:`export const ${id} = true;`}}))];
+    const render = (freshness = "fresh") => renderToString(createSSRApp(component, {feed:{events,ended:false,droppedEvents:0},
+      work:{active:true,startedAt:"2026-07-30T00:00:00Z",state:"awaiting_result",freshness,agentState:"responding"},
+      resource:{status:"ready",detail:null},supportsReasoning:true,activeSourceMessageId:"msg_1"}));
+    const html = await render();
+    assert.match(html, /<strong>Found it\.<\/strong>/);
+    assert.match(html, /<code>auth\.ts<\/code>/);
+    assert.match(html, /<li>Verify retries<\/li>/);
+    assert.match(html, /&lt;img/);
+    assert.doesNotMatch(html, /<img/);
+    assert.match(html, /3 file reads/);
+    assert.match(html, /aria-label="Individual actions"/);
+    for (const id of ["a", "b", "c"]) assert.match(html, new RegExp(`export const ${id} = true;`));
+    assert.match(html, /Following live/);
+    const stale = await render("stale");
+    assert.doesNotMatch(stale, /Following live|data-running="true"|data-current="true"/);
+    assert.match(stale, /Live status unavailable/);
+  } finally { await vite.close(); }
+});
+
+test("Live failures show received errors and output excerpts outside disclosure and explain missing output", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLiveActions.vue")).default;
+    const render = async (overrides: Record<string, unknown>) => {
+      const item = { kind: "tool" as const, id: "call", tool: "shellToolCall", status: "error", input: { command: "git status -sb && test -d node_modules", cwd: "/project" }, output: null, error: "Command exited with code 1.", ...overrides };
+      const entry = presentAgentTrace([item], false)[0]!;
+      assert.ok(entry.kind === "actions");
+      return { html: await renderToString(createSSRApp(component, { entry, current: true })), failure: liveActionFailure(entry.actions[0]!) };
+    };
+    const shell = await render({ output: "README.md\nzsh:1: no matches found: content/AgentInspector*\n" });
+    const visibleShell = shell.html.split('</details>')[1]!;
+    assert.match(visibleShell, /Command exited with code 1/);
+    assert.match(visibleShell, /Output excerpt/);
+    assert.match(visibleShell, /zsh:1: no matches found/);
+    assert.doesNotMatch(visibleShell, /Command output is unavailable/);
+    const missing = await render({});
+    assert.match(missing.html.split('</details>')[1]!, /Command output is unavailable/);
+    assert.match(missing.html, /git status -sb &amp;&amp; test -d node_modules/);
+    assert.match(missing.html, /\/project/);
+    assert.equal(missing.failure?.outputPreview, null);
+    const browser = await render({ tool: "list_pages", error: "Could not connect to Chrome.\nCause: http://127.0.0.1:56561/json/version", output: { content: [{ type: "text", text: "Could not connect to Chrome." }] } });
+    assert.match(browser.html.split('</details>')[1]!, /Could not connect to Chrome/);
+    assert.match(browser.html.split('</details>')[1]!, /56561/);
+    assert.doesNotMatch(browser.html, /Command output is unavailable/);
+    const hostile = await render({ error: '<img src=x onerror=alert(1)>', output: '<script>alert(1)</script>' });
+    assert.doesNotMatch(hostile.html, /<img|<script/);
+    assert.match(hostile.html, /&lt;img/);
+    const native = sanitizeDaemonActivityEvent({ provider: "codex", method: "item/completed", kind: "item_lifecycle", summary: "",
+      observed_at: "2026-09-14T14:58:30Z", sequence: 1, status: "working", payload_redacted: false, payload_truncated: false, durable_payload_ref: null,
+      payload: { threadId: "thread", turnId: "turn", item: { type: "commandExecution", id: "call", status: "failed", exitCode: 1,
+        error: { message: "Error ".repeat(300) + "full error ending" }, aggregatedOutput: "a\n".repeat(500) } },
+    });
+    const projected = new ProviderLiveDisplay("thread").project(native)[0]!.payload as Record<string, unknown>;
+    const long = await render(projected);
+    assert.ok(long.failure!.message.length <= 1_201);
+    assert.ok(long.failure!.outputPreview!.length <= 600);
+    assert.match(long.html.split('</details>')[0]!, /Full error/);
+    assert.match(long.html.split('</details>')[0]!, /full error ending/);
+    const success = await render({ status: "completed", error: null, output: "done" });
+    assert.equal(success.failure, null);
+    assert.doesNotMatch(success.html, /class="agent-live-error"/);
+  } finally { await vite.close(); }
 });

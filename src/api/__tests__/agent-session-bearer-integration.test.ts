@@ -111,9 +111,14 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["POST", "/rooms/room_1/agent-sessions/agent_session_1/disconnect", "coordination.self_write"],
     ["POST", "/rooms/room_1/agent-sessions/agent_session_1/native-activity", "coordination.self_write"],
   ];
+  allowed.push(
+    ["POST", "/rooms/github.com/org/repo/board-intents", "coordination.propose"],
+    ["POST", "/rooms/github.com/org/repo/board-intents/bi_1/approve", "coordination.self_write"],
+    ["POST", "/api/rooms/github.com/org/repo/board-intents/bi_1/deny", "coordination.self_write"],
+  );
   for (const [method, route, capability] of allowed) assert.equal(requiredAgentSessionRouteCapability(method, route), capability);
   for (const [method, route] of [
-    ["POST", "/rooms/room_1/board-intents"], ["POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute"],
+    ["POST", "/rooms/room_1/board-managers"], ["POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute"],
     ["POST", "/rooms/room_1/tasks/task_1/focus-room"], ["POST", "/rooms/room_1/participants/clear-disconnected"],
     ["PATCH", "/rooms/room_1"], ["POST", "/rooms/room_1/artifacts/future-action"],
     ["GET", "/rental/provider/requests"], ["POST", "/rental/sessions/rental_1/complete"],
@@ -141,7 +146,7 @@ test("worker bearer routes authorize multi-segment room ids exactly like the roo
   }
   for (const [method, route] of [
     ["PATCH", `/rooms/${gitRoom}`],
-    ["POST", `/rooms/${gitRoom}/board-intents`],
+    ["POST", `/rooms/${gitRoom}/board-managers`],
     ["POST", `/rooms/${gitRoom}/participants/clear-disconnected`],
   ]) assert.equal(requiredAgentSessionRouteCapability(method, route), null, `${method} ${route} must remain default-deny`);
 });
@@ -580,4 +585,218 @@ test("bearer and body credentials must identify the same worker session", { skip
     agent_session_token: second.session_token,
   });
   assert.equal(identity, null);
+});
+
+// Reproduces the Hollow Wood workflow through real HTTP middleware, worker
+// credentials, routes, and database transactions (no owner-token substitution).
+test("managed board workflow preserves retries, manager authority, and claim leases", { skip: requiresDatabase }, async () => {
+  const { default: express } = await import("express");
+  const { registerTaskRecordRoutes } = await import("../routes/rooms/tasks/task-record.js");
+  const { registerTaskListAndCreateRoutes } = await import("../routes/rooms/tasks/list-and-create.js");
+  const { registerRoomBoardRoutes } = await import("../routes/rooms/board.js");
+  const { createTaskCoordinationEnforcement } = await import("../tasks/coordination-enforcement.js");
+  const { room, session } = await seed();
+  const peer = await createRoomAgentSession!({
+    room_id: room.id, session_kind: "worker", runtime: "claude-code",
+    actor_label: "Peer | Worker Owner's agent | Agent", agent_key: "WorkerOwner/peer",
+    display_name: "Peer", owner_account_id: "acct_bearer_test", owner_label: "Worker Owner", ide_label: "Agent",
+  });
+  await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: session.session_id, assigned_by: "owner" });
+  const enforcement = createTaskCoordinationEnforcement({
+    getAgentIdentityByCanonicalKey: async () => { throw new Error("worker claims must use their authenticated identity"); },
+    createCoordinationEvent: dbModule!.createCoordinationEvent,
+    getActiveTaskLocks: dbModule!.getActiveTaskLocks,
+    getTasks: dbModule!.getTasks,
+    getFocusRoomsForParent: async () => [],
+    getActiveTaskLeases: dbModule!.getActiveTaskLeases,
+    updateTaskLeaseWorkflowRefs: dbModule!.updateTaskLeaseWorkflowRefs,
+    shouldRequireBoardIntent: async () => false,
+    verifyBoardIntentApproval: dbModule!.verifyBoardIntentApproval,
+  });
+  let failDecisionNotifications = false;
+  const decisionNotifications: string[] = [];
+  const deps = {
+    emitProjectMessage: async (_projectId: string, _sender: string, _text: string, options?: { client_message_id?: string | null }) => {
+      if (options?.client_message_id?.endsWith(":proposer_notify")) {
+        if (failDecisionNotifications) throw new Error("private transport diagnostic");
+        decisionNotifications.push(options.client_message_id);
+      }
+      return { id: "msg_notification" };
+    },
+    ...enforcement,
+    enforceTaskCreateBoardIntentAdmission: enforcement.enforceTaskAdmissionPreconditions,
+    taskEvents: { emit() {} },
+    getTaskById: dbModule!.getTaskById, getTaskOwnershipState: dbModule!.getTaskOwnershipState,
+    updateTask: dbModule!.updateTask,
+    resolveCanonicalRoomRequestId: async (id: string) => id,
+    resolveRoomOrReply: async (id: string) => id === room.id ? room : null,
+    requireParticipant, requireAdmin,
+    normalizeOptionalString: (value: unknown) => typeof value === "string" ? value.trim() || null : null,
+    enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" }),
+    isTrustedAgentCreator: async () => false,
+    emitTaskLifecycleStatusMessage: async () => {},
+  };
+  const app = express();
+  registerHttpMiddleware(app, { resolveRequestAuth });
+  registerTaskListAndCreateRoutes(app, deps as never);
+  registerTaskRecordRoutes(app, deps as never);
+  registerRoomBoardRoutes(app, deps as never);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address() as { port: number };
+  const call = async (method: string, suffix: string, body: unknown, bearer = session.worker_bearer!) => {
+    const response = await fetch(`http://127.0.0.1:${address.port}/rooms/${encodeURIComponent(room.id)}/${suffix}`, {
+      method, headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() as any };
+  };
+  try {
+    const creation = { title: "Due dates", description: "Highlight overdue", source_message_id: "msg_121", client_task_id: "due-dates" };
+    const retries = await Promise.all([call("POST", "tasks", creation), call("POST", "tasks", creation)]);
+    assert.deepEqual(retries.map((r) => r.status).sort(), [200, 201]);
+    const first = retries[0].body;
+    assert.equal(first.id, retries[1].body.id);
+    assert.equal(first.source_message_id, "msg_121");
+    const changed = await call("POST", "tasks", { ...creation, title: "Different request with reused ID" });
+    assert.equal(changed.status, 409);
+    const second = await call("POST", "tasks", { ...creation, title: "Priorities", client_task_id: "priorities" });
+    assert.equal(second.status, 201);
+    assert.notEqual(second.body.id, first.id, "one message can describe multiple tasks");
+    const separate = await call("POST", "tasks", { ...creation, client_task_id: "another-due-dates-task" });
+    assert.equal(separate.status, 201);
+    assert.notEqual(separate.body.id, first.id, "explicitly separate tasks may have identical contents");
+    const peerTask = await call("POST", "tasks", creation, peer.worker_bearer!);
+    assert.equal(peerTask.status, 201);
+    assert.notEqual(peerTask.body.id, first.id, "creation IDs are scoped to a worker");
+
+    assert.equal((await call("PATCH", `tasks/${first.id}`, { status: "accepted" }, peer.worker_bearer!)).status, 403);
+    assert.equal((await call("PATCH", `tasks/${first.id}`, { status: "accepted", pr_url: "https://example.com/pr/1" })).status, 403);
+    const accepted = await call("PATCH", `tasks/${first.id}`, { status: "accepted" });
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+    assert.equal((await call("PATCH", `tasks/${second.body.id}`, { status: "cancelled" })).status, 200);
+    const claimBody = { status: "assigned", assignee: peer.actor_label, assignee_agent_key: peer.agent_key };
+    const claimed = await call("PATCH", `tasks/${first.id}`, claimBody, peer.worker_bearer!);
+    assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+    assert.equal(claimed.body.active_leases.length, 1);
+    assert.equal(claimed.body.active_leases[0].agent_session_id, peer.session_id);
+    assert.equal((await call("PATCH", `tasks/${first.id}`, { status: "in_progress" }, peer.worker_bearer!)).status, 200);
+    assert.equal((await call("PATCH", `tasks/${first.id}`, { status: "in_review" })).status, 409, "the manager cannot take over the worker's execution");
+    assert.equal((await call("PATCH", `tasks/${first.id}`, { status: "in_review" }, peer.worker_bearer!)).status, 200);
+    assert.equal((await call("PATCH", `tasks/${first.id}`, { status: "merged" })).status, 403, "manager is not an admin");
+    await call("PATCH", `tasks/${separate.body.id}`, { status: "accepted" });
+    const competing = await Promise.all([
+      call("PATCH", `tasks/${separate.body.id}`, claimBody, peer.worker_bearer!),
+      call("PATCH", `tasks/${separate.body.id}`, { status: "assigned", assignee: session.actor_label, assignee_agent_key: session.agent_key }),
+    ]);
+    assert.equal(competing.filter((reply) => reply.status === 200).length, 1, "concurrent claims have exactly one winner");
+    const leases = await dbModule!.getActiveTaskLeases(room.id, separate.body.id);
+    assert.equal(leases.length, 1);
+    const claimedTask = await dbModule!.getTaskById(room.id, separate.body.id);
+    assert.equal(claimedTask!.assignee_agent_key, leases[0].agent_key);
+
+
+    const proposed = await call("POST", "board-intents", {
+      action_type: "task_create", payload: { title: "Testing", description: null, source_message_id: "msg_121" },
+      actor_label: "Spoofed manager", actor_key: session.agent_key, actor_instance_id: "spoofed-instance",
+    }, peer.worker_bearer!);
+    assert.equal(proposed.status, 201, JSON.stringify(proposed.body));
+    const intentId = proposed.body.intent.id;
+    assert.equal(proposed.body.intent.proposer_actor_label, peer.actor_label);
+    assert.equal(proposed.body.intent.proposer_actor_key, peer.agent_key);
+    assert.equal(proposed.body.intent.proposer_actor_instance_id, peer.agent_instance_id ?? null);
+    assert.equal(proposed.body.intent.proposer_agent_session_id, peer.session_id);
+    assert.equal((await call("POST", "board-intents", {
+      action_type: "task_create", payload: { title: "Spoofed session" },
+      agent_session_id: session.session_id, agent_session_token: session.session_token,
+    }, peer.worker_bearer!)).status, 401);
+    assert.equal((await call("POST", `board-intents/${intentId}/deny`, {}, peer.worker_bearer!)).status, 403);
+    assert.equal((await call("POST", "board-manager", { agent_session_id: peer.session_id }, peer.worker_bearer!)).status, 403);
+    assert.equal((await call("POST", `board-intents/${intentId}/approve`, {}, peer.worker_bearer!)).status, 403);
+    const approved = await call("POST", `board-intents/${intentId}/approve`, {});
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    assert.equal(approved.body.result.kind, "task_created");
+    assert.equal(approved.body.result.task.status, "proposed");
+    assert.equal((await call("PATCH", `tasks/${approved.body.result.task.id}`, { status: "accepted" })).status, 200);
+    const nextIntent = await call("POST", "board-intents", {
+      action_type: "task_create", payload: { title: "More testing", source_message_id: "msg_121" },
+    }, peer.worker_bearer!);
+    const nextApproval = await call("POST", `board-intents/${nextIntent.body.intent.id}/approve`, {});
+    assert.equal(nextApproval.status, 200, JSON.stringify(nextApproval.body));
+    assert.notEqual(nextApproval.body.result.task.id, approved.body.result.task.id);
+    const approvalPayload = { task_id: first.id, status: "in_review" };
+    const credentialIntent = await call("POST", "board-intents", {
+      action_type: "task_update", task_id: first.id, payload: approvalPayload,
+    }, peer.worker_bearer!);
+    assert.equal(credentialIntent.status, 201);
+    failDecisionNotifications = true;
+    const credentialApproval = await call("POST", `board-intents/${credentialIntent.body.intent.id}/approve`, {});
+    assert.equal(credentialApproval.status, 200);
+    assert.equal(credentialApproval.body.proposer_notification.delivered, false);
+    assert.doesNotMatch(JSON.stringify(credentialApproval.body), /private transport diagnostic/);
+    failDecisionNotifications = false;
+    const replayApproval = await call("POST", `board-intents/${credentialIntent.body.intent.id}/approve`, {});
+    assert.equal(replayApproval.status, 200);
+    assert.equal(replayApproval.body.proposer_notification.delivered, true);
+    assert.equal(replayApproval.body.approval_token, undefined, "approval retry never mints another token");
+    assert.equal(replayApproval.body.intent.approval_token_hash, credentialApproval.body.intent.approval_token_hash);
+    assert.equal(replayApproval.body.result.requires_follow_up, true);
+    await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: peer.session_id, assigned_by: "owner" });
+    assert.equal((await call("POST", `board-intents/${credentialIntent.body.intent.id}/approve`, {})).status, 403, "former manager cannot resend a decision");
+    await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: session.session_id, assigned_by: "owner" });
+    const replayCreation = await call("POST", `board-intents/${intentId}/approve`, {});
+    assert.equal(replayCreation.status, 200);
+    assert.equal(replayCreation.body.result.task.id, approved.body.result.task.id, "task-create retry returns the existing task");
+    const deniedIntent = await call("POST", "board-intents", { action_type: "task_update", task_id: first.id, payload: approvalPayload }, peer.worker_bearer!);
+    failDecisionNotifications = true;
+    const firstDenial = await call("POST", `board-intents/${deniedIntent.body.intent.id}/deny`, {});
+    assert.equal(firstDenial.status, 200);
+    assert.equal(firstDenial.body.proposer_notification.delivered, false);
+    failDecisionNotifications = false;
+    const replayDenial = await call("POST", `board-intents/${deniedIntent.body.intent.id}/deny`, {});
+    assert.equal(replayDenial.status, 200);
+    assert.equal(replayDenial.body.proposer_notification.delivered, true);
+    assert.ok(decisionNotifications.includes(`board_intent:${deniedIntent.body.intent.id}:denied:proposer_notify`));
+    const boundApproval = { room_id: room.id, action_type: "task_update" as const,
+      payload: approvalPayload, intent_id: credentialIntent.body.intent.id,
+      trusted_worker: { agent_session_id: peer.session_id, agent_key: peer.agent_key } };
+    assert.equal((await dbModule!.verifyBoardIntentApproval(boundApproval)).kind, "allow");
+    for (const invalid of [
+      { ...boundApproval, trusted_worker: undefined },
+      { ...boundApproval, trusted_worker: { ...boundApproval.trusted_worker, agent_session_id: session.session_id } },
+      { ...boundApproval, trusted_worker: { ...boundApproval.trusted_worker, agent_key: session.agent_key } },
+      { ...boundApproval, room_id: "wrong-room" },
+      { ...boundApproval, payload: { ...approvalPayload, status: "done" } },
+      { ...boundApproval, now: new Date("2099-01-01T00:00:00Z") },
+    ]) {
+      assert.equal((await dbModule!.verifyBoardIntentApproval(invalid)).kind, "deny");
+      assert.equal((await dbModule!.consumeBoardIntentApproval(invalid)).kind, "deny", "transaction repeats the exact authority fence");
+    }
+    const consumed = await Promise.all([dbModule!.consumeBoardIntentApproval(boundApproval), dbModule!.consumeBoardIntentApproval(boundApproval)]);
+    assert.deepEqual(consumed.map((result) => result.kind).sort(), ["allow", "deny"]);
+    assert.equal((await dbModule!.consumeBoardIntentApproval(boundApproval)).kind, "deny");
+    await db!.update(schemaModule!.board_intents).set({ expires_at: "2000-01-01T00:00:00Z" })
+      .where(eq(schemaModule!.board_intents.id, boundApproval.intent_id));
+    const usedReplay = await call("POST", `board-intents/${boundApproval.intent_id}/approve`, {});
+    assert.equal(usedReplay.status, 200, "used decisions retain historical replay after expiry");
+    assert.equal(usedReplay.body.result.requires_follow_up, false);
+    const expiringIntent = await call("POST", "board-intents", { action_type: "task_update", task_id: first.id, payload: approvalPayload }, peer.worker_bearer!);
+    assert.equal((await call("POST", `board-intents/${expiringIntent.body.intent.id}/approve`, {})).status, 200);
+    await db!.update(schemaModule!.board_intents).set({ expires_at: "2000-01-01T00:00:00Z" })
+      .where(eq(schemaModule!.board_intents.id, expiringIntent.body.intent.id));
+    const notificationCount = decisionNotifications.length;
+    const expiredReplay = await call("POST", `board-intents/${expiringIntent.body.intent.id}/approve`, {});
+    assert.equal(expiredReplay.status, 404);
+    assert.equal(decisionNotifications.length, notificationCount, "expired approval cannot notify the worker to continue");
+
+
+    const legacy = { title: "Legacy task", source_message_id: "msg_121" };
+    const legacyCreate = await call("POST", "tasks", legacy);
+    const legacyRetry = await call("POST", "tasks", legacy);
+    assert.equal(legacyCreate.status, 201);
+    assert.equal(legacyRetry.status, 200);
+    assert.equal(legacyRetry.body.id, legacyCreate.body.id, "legacy retries cannot alias explicit-ID tasks from the same message");
+
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });

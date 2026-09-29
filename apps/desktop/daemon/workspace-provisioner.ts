@@ -27,6 +27,96 @@ export function createGitCommand(stableCwd: string): GitCommand {
   };
 }
 
+/**
+ * A supervised launch names a source repository (the selected local project
+ * folder) that LetAgents copies into a private per-agent worktree. When that
+ * folder is not a usable git repository — the home directory, a plain folder,
+ * or one with no commits yet — we must fail
+ * with an actionable message instead of leaking a raw `git` error.
+ */
+export class UnusableSourceRepositoryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnusableSourceRepositoryError";
+  }
+}
+
+/** Temporary transport failures use the scheduler's bounded startup recovery. */
+export class RepositoryNetworkError extends Error {
+  readonly transientProviderStart = true;
+
+  constructor(cause: unknown) {
+    super("LetAgents could not reach the Git remote to prepare this workspace. Check your network or VPN connection, then recover the agent if automatic retries do not succeed.", { cause });
+    this.name = "RepositoryNetworkError";
+  }
+}
+
+/**
+ * Validate the source repository and return the identity the provisioner needs
+ * (`origin` remote URL or canonical local Git root, plus HEAD commit).
+ * Throws {@link UnusableSourceRepositoryError}
+ * — never a raw git failure — when the path cannot back a private project area.
+ */
+export async function resolveSourceRepositoryIdentity(
+  sourcePath: string,
+  gitCommand: GitCommand,
+): Promise<{ remoteUrl: string; revision: string }> {
+  let insideWorkTree = "";
+  try {
+    insideWorkTree = String(
+      (await gitCommand(["-C", sourcePath, "rev-parse", "--is-inside-work-tree"])) ?? "",
+    ).trim();
+  } catch {
+    // A missing directory or non-repo makes `git` exit non-zero; treat both as
+    // "not a usable repo" and report the path rather than the git stderr.
+    insideWorkTree = "";
+  }
+  if (insideWorkTree !== "true") {
+    throw new UnusableSourceRepositoryError(
+      `The selected project folder is not a git repository: ${sourcePath}. Choose a folder that contains a git repository (with a .git directory) for this agent — a plain folder or your home directory can't be used.`,
+    );
+  }
+
+  let remoteUrl = "";
+  try {
+    remoteUrl = String(
+      (await gitCommand(["-C", sourcePath, "remote", "get-url", "origin"])) ?? "",
+    ).trim();
+  } catch {
+    remoteUrl = "";
+  }
+  if (!remoteUrl) {
+    try {
+      // A configured but unreadable origin must not silently change identity.
+      const remotes = String((await gitCommand(["-C", sourcePath, "remote"])) ?? "").trim().split(/\s+/);
+      if (remotes.includes("origin")) throw new Error("Configured origin is unavailable.");
+      const topLevel = String((await gitCommand(["-C", sourcePath, "rev-parse", "--show-toplevel"])) ?? "").trim();
+      if (!isAbsolute(topLevel)) throw new Error("Local Git root is unavailable.");
+      remoteUrl = await realpath(topLevel);
+    } catch {
+      throw new UnusableSourceRepositoryError(
+        `LetAgents could not identify the git repository at ${sourcePath}. Check that the project folder and its Git configuration are accessible.`,
+      );
+    }
+  }
+
+  let revision = "";
+  try {
+    revision = String(
+      (await gitCommand(["-C", sourcePath, "rev-parse", "--verify", "HEAD^{commit}"])) ?? "",
+    ).trim();
+  } catch {
+    revision = "";
+  }
+  if (!revision) {
+    throw new UnusableSourceRepositoryError(
+      `The git repository at ${sourcePath} has no commits yet. Make an initial commit before starting an agent there.`,
+    );
+  }
+
+  return { remoteUrl, revision };
+}
+
 type RepositoryMarker = { version: 1; repo: string; remote_url: string };
 export type WorkspaceMarker = {
   version: 1;
@@ -128,14 +218,15 @@ export class WorkspaceProvisioner {
           await this.writeMarker(markerPath, repositoryMarker);
         }
       } else {
-        await this.run(["clone", "--bare", input.remoteUrl, bare]);
+        // Local transport must copy objects, including any borrowed through
+        // alternates, instead of hardlinking or inheriting source authority.
+        await this.runRemote(["clone", "--bare", ...(isAbsolute(remoteUrl) ? ["--no-local"] : []), input.remoteUrl, bare]);
         await this.ensureDirectory(bare, await realpath(reposRoot));
         await this.verifyBare(await realpath(bare), remoteUrl);
         await this.writeMarker(join(bare, REPOSITORY_MARKER), repositoryMarker);
       }
       const fencedBare = await realpath(bare);
       await this.verifyBare(fencedBare, remoteUrl);
-      await this.refreshBare(fencedBare);
     });
     const canonicalBare = await realpath(bare);
     await this.verifyBare(canonicalBare, remoteUrl);
@@ -153,6 +244,7 @@ export class WorkspaceProvisioner {
           await this.verifyWorkspace(workspace, identity);
           return { path: workspace, reused: true, identity };
         }
+        await this.ensureRevisionAvailable(canonicalBare, remoteUrl, input.revision);
         // A crash after worktree-add is recoverable: prove the exact expected
         // Git identity, then finish the final marker rather than orphaning it.
         const recovered = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision, input.sourceRepoPath);
@@ -167,6 +259,7 @@ export class WorkspaceProvisioner {
         }
       }
 
+      await this.ensureRevisionAvailable(canonicalBare, remoteUrl, input.revision);
       const identity = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision, input.sourceRepoPath);
       await this.run(["--git-dir", canonicalBare, "worktree", "add", "--detach", workspace, identity.resolved_revision]);
       await this.ensureDirectory(workspace, await realpath(repoWorktrees));
@@ -209,7 +302,7 @@ export class WorkspaceProvisioner {
     workAttemptId: string;
   }): Promise<string> {
     const source = await realpath(resolve(input.sourceRepoPath));
-    const sourceRemote = normalizeRemote(await this.query(["-C", source, "remote", "get-url", "origin"]));
+    const sourceRemote = normalizeRemote((await resolveSourceRepositoryIdentity(source, this.git)).remoteUrl);
     if (sourceRemote !== input.remoteUrl) throw new Error("Local source repository remote identity does not match the daemon repository.");
     const sourceRevision = await this.query(["-C", source, "rev-parse", "--verify", `${input.revision}^{commit}`]);
     const targetRef = `refs/letagents/sources/${safeSegment(input.workAttemptId, "work attempt id")}`;
@@ -247,12 +340,43 @@ export class WorkspaceProvisioner {
     // initial clone. The static
     // refspec and verified origin prevent callers from selecting another
     // remote or writing arbitrary refs; detached worktrees remain OID-pinned.
-    await this.run([
+    await this.runRemote([
       "--git-dir", bare,
       "fetch", "--prune", "--no-tags", "origin",
       "+refs/heads/*:refs/letagents/remotes/origin/*",
       "+refs/tags/*:refs/letagents/tags/*",
     ]);
+  }
+
+  private async ensureRevisionAvailable(bare: string, remoteUrl: string, revision: string): Promise<void> {
+    // Only immutable, complete object IDs may bypass a remote refresh. A
+    // symbolic revision must never silently fall back to a stale cached ref.
+    if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(revision)) {
+      try {
+        await this.run(["--git-dir", bare, "cat-file", "-e", `${revision}^{commit}`]);
+        return;
+      } catch { /* Missing object: refresh before resolving/importing it. */ }
+    }
+    await withWorkspaceFence(bare, async () => {
+      await this.verifyBare(bare, remoteUrl);
+      await this.refreshBare(bare);
+    });
+  }
+
+  private async runRemote(args: string[]): Promise<void> {
+    try {
+      await this.run(args);
+    } catch (error) {
+      // Inspect transport diagnostics, not Git's generic access-rights hint:
+      // permission, identity, and missing-repository failures are not transient.
+      const detail = error instanceof Error
+        ? String((error as Error & { stderr?: string }).stderr ?? error.message)
+        : "";
+      if (/connection timed out|operation timed out|connection reset by peer|could not resolve (?:host|hostname)|failed to connect to|network is unreachable|no route to host/i.test(detail)) {
+        throw new RepositoryNetworkError(error);
+      }
+      throw error;
+    }
   }
 
   private async verifyWorkspace(workspace: string, identity: WorkspaceMarker): Promise<void> {

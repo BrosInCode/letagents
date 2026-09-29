@@ -1,3 +1,4 @@
+import { createLocalRoom, localRoomIdentifierForStorage } from "../rooms/local-store.js";
 import type { IpcMain } from "electron";
 import { randomUUID } from "node:crypto";
 
@@ -7,6 +8,8 @@ import type {
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorRetirementInput,
+  DesktopSupervisorRetirementStatus,
 } from "../../ipc-types.js";
 import { listDesktopManagedAgentSessions, stopDesktopManagedAgent } from "../agents/codex-supervisor.js";
 import { assertManagedAgentPermissionProfileAvailable } from "../agents/managed-agent-permission-profiles.js";
@@ -35,17 +38,30 @@ import {
   supervisorDaemonClient,
 } from "../supervisor-daemon.js";
 import {
-  readDesktopSupervisorGrantAgentKeysForEntries,
+  projectDesktopSupervisorAgentKeys,
+  readDesktopSupervisorGrantRevocationAttestationForEntry,
 } from "../supervisor-grant.js";
 import { supervisorGrantCoordinator } from "../supervisor-grant-coordinator.js";
+import {
+  desktopRetirementDurablyCompleted,
+  SupervisorRetirementOperations,
+} from "../supervisor-retirement-operations.js";
 import { transferSupervisorOwnership } from "../supervisor-ownership.js";
 import { assertDesktopUpdateMutationAllowed } from "../updates.js";
-import { emitToMainWindow } from "../window.js";
+import { assertHostApprovalSender, emitToMainWindow } from "../window.js";
 
 let supervisorActivityBridgeRegistered = false;
 let supervisorStateBridgeRegistered = false;
 let supervisorLaunchBridgeRegistered = false;
 let supervisorAgentStreamBridgeRegistered = false;
+
+const supervisorRetirementOperations = new SupervisorRetirementOperations({
+  retire: (entryId, daemonGeneration) => supervisorGrantCoordinator.retireEntry(entryId, daemonGeneration),
+  emit: (event) => emitToMainWindow("desktop:supervisor:retirement", {
+    ...event,
+    error: event.error ? redactCredentialText(event.error).value : null,
+  }),
+});
 
 /** A launch id shared by the durable entry (`supervised_<id>`) and every launch
  * fact. Must satisfy the daemon's creation-request-id shape; fall back to a
@@ -59,6 +75,38 @@ function normalizeLaunchId(creationRequestId?: string | null): string {
 }
 
 export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle("desktop:supervisor:list-host-tool-rules", async (event, agentId: string) => {
+    assertHostApprovalSender(event);
+    const result = await supervisorDaemonClient.listHostToolRules(agentId);
+    assertHostApprovalSender(event);
+    return result;
+  });
+  targetIpcMain.handle("desktop:supervisor:revoke-host-tool-rule", async (event, input) => {
+    assertHostApprovalSender(event);
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.revokeHostToolRule(input, () => {
+      assertHostApprovalSender(event);
+      assertDesktopUpdateMutationAllowed();
+    });
+  });
+  targetIpcMain.handle("desktop:supervisor:list-host-approvals", async (event, roomIdentifier: string) => {
+    assertHostApprovalSender(event);
+    if (typeof roomIdentifier !== "string" || !roomIdentifier.trim() || roomIdentifier.length > 256) throw new Error("Choose an approval room.");
+    const storage = await getDesktopRoomStorage(roomIdentifier);
+    assertHostApprovalSender(event);
+    const approvalRoom = storage.effectiveMode === "local" ? localRoomIdentifierForStorage(storage, roomIdentifier) : roomIdentifier;
+    const result = await supervisorDaemonClient.listHostApprovals(approvalRoom);
+    assertHostApprovalSender(event);
+    return result;
+  });
+  targetIpcMain.handle("desktop:supervisor:decide-host-approval", async (event, input) => {
+    assertHostApprovalSender(event);
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.decideHostApproval(input, () => {
+      assertHostApprovalSender(event);
+      assertDesktopUpdateMutationAllowed();
+    });
+  });
   targetIpcMain.handle(
     "desktop:supervisor:get-status",
     async (): Promise<DesktopSupervisorDaemonStatus> => supervisorDaemonClient.ensureRunning(),
@@ -69,13 +117,7 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       const entries = isDesktopSmokeCheck()
         ? desktopSmokeSupervisorEntries().filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier)
         : await supervisorDaemonClient.list(roomIdentifier ?? null);
-      const agentKeys = await readDesktopSupervisorGrantAgentKeysForEntries(
-        entries.map((entry) => entry.id),
-      ).catch(() => new Map<string, string>());
-      return entries.map((entry) => ({
-        ...entry,
-        agentKey: entry.agentKey ?? agentKeys.get(entry.id) ?? null,
-      }));
+      return projectDesktopSupervisorAgentKeys(entries);
     },
   );
   targetIpcMain.handle(
@@ -86,7 +128,7 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       // id (`supervised_<launchId>`) — shares one stable key across retries and
       // reopen. The renderer normally supplies it; fall back defensively.
       const launchId = normalizeLaunchId(rawInput.creationRequestId);
-      const input: DesktopSupervisorCreateInput = { ...rawInput, creationRequestId: launchId };
+      const input: DesktopSupervisorCreateInput = { ...rawInput, localRoomId: undefined, creationRequestId: launchId };
       const entryId = `supervised_${launchId}`;
       const provider = input.providerId;
       const roomIdentifier = input.roomIdentifier;
@@ -100,17 +142,16 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       launchFact("launch.requested", { entryId, detail: "You asked LetAgents to add this agent." });
       try {
         const storage = await getDesktopRoomStorage(roomIdentifier);
-        if (storage.effectiveMode !== "cloud") {
-          throw new LaunchBlockedError("Supervised agents need a cloud room. Publish or join a cloud room, or use the existing local agent path.", "choose_project");
+        if (storage.effectiveMode === "local") {
+          input.localRoomId = localRoomIdentifierForStorage(storage, roomIdentifier);
+          input.roomIdentifier = input.localRoomId;
+          if (!storage.localRoom) await createLocalRoom({ roomIdentifier: input.localRoomId, displayName: roomIdentifier });
         }
         if (provider !== "codex" && provider !== "claude-code" && provider !== "cursor" && provider !== "open-model") {
           throw new LaunchBlockedError(`Supervised ${provider} is not available yet: no background lifecycle is supported for this provider.`, "retry");
         }
-        if (provider === "claude-code" && input.permissionProfileId === "ask_before_write") {
-          throw new LaunchBlockedError("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged. Choose Read-only or Full access.", "retry");
-        }
         try {
-          assertManagedAgentPermissionProfileAvailable(provider, input.permissionProfileId);
+          assertManagedAgentPermissionProfileAvailable(provider, input.permissionProfileId, "supervised");
         } catch (error) {
           throw new LaunchBlockedError(
             error instanceof Error ? error.message : "The selected permission profile is unavailable.",
@@ -186,22 +227,22 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       };
       launchFact("launch.requested", "You asked LetAgents to resume this saved launch.");
       try {
-        await supervisorDaemonClient.ensureRunning();
-        await supervisorGrantCoordinator.prepareEntryForActivation(entry);
-        launchFact("supervisor.connected", "Background agent management is available.");
-        launchFact("agent.saved", "Your saved launch is ready to resume.");
-        return await transferSupervisorOwnership({
-          claim: async () => entry,
-          listLegacy: () => listDesktopManagedAgentSessions(entry.roomId)
-            .filter((session) => session.providerId === entry.provider && !session.supervisorEntryId),
-          stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
-          activate: async (manifest) => {
-            const activated = await supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "running");
-            if (!activated) throw new Error("The saved launch changed while ownership was being resumed; it was not restarted.");
-            launchFact("launch.activated", "LetAgents resumed ownership of this agent.");
-            return activated;
-          },
-          rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
+        return await supervisorGrantCoordinator.activateEntry(entry, async () => {
+          launchFact("supervisor.connected", "Background agent management is available.");
+          launchFact("agent.saved", "Your saved launch is ready to resume.");
+          return transferSupervisorOwnership({
+            claim: async () => entry,
+            listLegacy: () => listDesktopManagedAgentSessions(entry.roomId)
+              .filter((session) => session.providerId === entry.provider && !session.supervisorEntryId),
+            stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
+            activate: async (manifest) => {
+              const activated = await supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "running");
+              if (!activated) throw new Error("The saved launch changed while ownership was being resumed; it was not restarted.");
+              launchFact("launch.activated", "LetAgents resumed ownership of this agent.");
+              return activated;
+            },
+            rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
+          });
         });
       } catch (error) {
         const failure = classifyLaunchFailure(error);
@@ -231,7 +272,10 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
         if (entry.provider !== "claude-code") {
           await refreshInstalledLetAgentsMcpServerAuth();
         }
-        await supervisorGrantCoordinator.prepareEntryForActivation(entry);
+        return supervisorGrantCoordinator.activateEntry(
+          entry,
+          () => supervisorDaemonClient.setDesiredState(id, desiredState),
+        );
       }
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
       // Cancelling belongs to launch history only when the launch never reached
@@ -300,8 +344,9 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       // Electron restores secret custody first. The daemon then proves the
       // saved provider absent, retires the exact old worker session, and only
       // afterwards permits convergence to create a successor runtime.
-      await supervisorGrantCoordinator.prepareEntryForRuntimeRecovery(entry);
-      return supervisorDaemonClient.recoverAgentRuntime(entry.id);
+      if (input.recovery?.mode === "reconnect") await supervisorGrantCoordinator.reconnectEntry(entry);
+      else await supervisorGrantCoordinator.prepareEntryForRuntimeRecovery(entry);
+      return supervisorDaemonClient.recoverAgentRuntime(entry.id, input.recovery);
     },
   );
   targetIpcMain.handle(
@@ -335,8 +380,14 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     assertDesktopUpdateMutationAllowed();
     return supervisorDaemonClient.updateAgentConfiguration(input);
   });
+  targetIpcMain.handle("desktop:supervisor:apply-agent-configuration", async (_event, input: import("../../ipc-types.js").DesktopSupervisorAgentConfigurationApplyInput) => {
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.applyAgentConfiguration(input);
+  });
   targetIpcMain.handle("desktop:supervisor:prepare-room-move", async (_event, input: import("../../ipc-types.js").DesktopSupervisorRoomMovePrepareInput) => {
     assertDesktopUpdateMutationAllowed();
+    const destination = await getDesktopRoomStorage(input.destinationRoomId);
+    if (destination.effectiveMode === "local") throw new Error("Moving an existing agent into a local room is not supported yet. Start an agent in this room.");
     return supervisorDaemonClient.prepareRoomMove(input);
   });
   targetIpcMain.handle("desktop:supervisor:commit-room-move", async (_event, input: import("../../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) => {
@@ -375,9 +426,31 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     supervisorDaemonClient.getRoomMove(input));
   targetIpcMain.handle("desktop:supervisor:get-current-room-move", async (_event, input: import("../../ipc-types.js").DesktopSupervisorCurrentRoomMoveInput) =>
     supervisorDaemonClient.getCurrentRoomMove(input));
-  targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
+  targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: DesktopSupervisorRetirementInput) => {
     assertDesktopUpdateMutationAllowed();
-    return supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration);
+    return supervisorRetirementOperations.start(input);
+  });
+  targetIpcMain.handle("desktop:supervisor:get-retirement-status", async (_event, input: { entryId: string; daemonGeneration: number }): Promise<DesktopSupervisorRetirementStatus> => {
+    if (!input || typeof input.entryId !== "string" || !input.entryId.trim()
+      || input.entryId !== input.entryId.trim()
+      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) {
+      throw new Error("Retirement status requires exact typed coordinates.");
+    }
+    const status = await supervisorDaemonClient.ensureRunning();
+    if (status.generation !== input.daemonGeneration) {
+      throw new Error("Background agent management changed generation during retirement.");
+    }
+    const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
+    if (!entry) throw new Error("The saved agent no longer exists.");
+    const revocationAttestation = entry.deliveryMode === "daemon_inbox"
+      ? await readDesktopSupervisorGrantRevocationAttestationForEntry(input.entryId)
+      : null;
+    const completed = desktopRetirementDurablyCompleted(entry, revocationAttestation !== null);
+    return {
+      entryId: input.entryId,
+      daemonGeneration: input.daemonGeneration,
+      status: completed ? "completed" : "pending",
+    };
   });
   targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
     assertDesktopUpdateMutationAllowed();
@@ -412,7 +485,11 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
   }
   if (!supervisorStateBridgeRegistered) {
     supervisorStateBridgeRegistered = true;
-    onSupervisorState((snapshot) => emitToMainWindow("desktop:supervisor:state", snapshot));
+    onSupervisorState((snapshot) => {
+      void projectDesktopSupervisorAgentKeys(snapshot.entries).then((entries) => {
+        emitToMainWindow("desktop:supervisor:state", { ...snapshot, entries });
+      });
+    });
   }
   if (!supervisorLaunchBridgeRegistered) {
     supervisorLaunchBridgeRegistered = true;

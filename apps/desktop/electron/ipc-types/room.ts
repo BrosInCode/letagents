@@ -2,6 +2,37 @@ import type { DesktopActivityEntry, DesktopAgentPresence, DesktopParticipantSumm
 import type { RepoStatus } from "./core.js";
 import type { DesktopRentalActivityEvent, DesktopRentalOwnQuotaStatus, DesktopRentalRenterTriggerSignal } from "./rental.js";
 import type { DesktopTaskSummary } from "./tasks.js";
+import type {
+  ClearedRoomAgentWorkSummary,
+  RoomAgentWorkSummary,
+} from "../../../../shared/room-agent-work.mjs";
+
+export interface DesktopRoomAgentWork {
+  attemptId: string;
+  roomId: string;
+  sourceMessageId: string;
+  agentKey: string;
+  revision: number;
+  summary: RoomAgentWorkSummary | ClearedRoomAgentWorkSummary;
+  updatedAt: string;
+}
+
+export interface DesktopRoomAgentWorkSnapshot {
+  work: DesktopRoomAgentWork[];
+  truncated: boolean;
+}
+
+export type DesktopRoomAgentWorkPollResponse = {
+  roomId: string;
+  cursor: string;
+} & (
+  | { changed: true; snapshot: DesktopRoomAgentWorkSnapshot }
+  | { changed: false; snapshot: null }
+);
+
+export type DesktopRoomAgentWorkPollResult =
+  | { status: "ready"; response: DesktopRoomAgentWorkPollResponse }
+  | { status: "local" | "access_revoked" | "invalid"; response: null };
 
 export interface DesktopRoomAccess {
   status: "ready" | "missing_room" | "auth_required" | "forbidden" | "unavailable";
@@ -208,6 +239,7 @@ export interface DesktopRoomMessageReply {
   id: string;
   sender: string;
   text: string;
+  displayText?: string | null;
   source: string | null;
   timestamp: string;
   agentIdentity?: {
@@ -281,8 +313,11 @@ export interface DesktopRoomMessage {
   id: string;
   /** Exact idempotency identity supplied by the message publisher. */
   clientMessageId?: string | null;
+  /** Renderer-only submission state; never a server message identity. */
+  outgoing?: { status: "pending" | "uncertain"; attachmentCount: number; error: string | null };
   sender: string;
   text: string;
+  displayText?: string | null;
   attachments: DesktopRoomMessageAttachment[];
   agentPromptKind: string | null;
   source: string | null;
@@ -343,6 +378,11 @@ export interface DesktopGitHubIntegrationStatus {
   connected: boolean;
   installUrlAvailable: boolean;
   repository: { fullName: string } | null;
+  /** Missing on older servers; this is recorded metadata, not a publication guarantee. */
+  reviewSubmission?: {
+    permission: "write" | "missing" | "unknown";
+    recordedAt: string | null;
+  };
 }
 
 export interface DesktopGitHubIntegrationActionResult {
@@ -619,6 +659,11 @@ export type DesktopRoomStreamEvent =
       task: DesktopTaskSummary;
     }
   | {
+      type: "task_remove";
+      roomIdentifier: string;
+      taskId: string;
+    }
+  | {
       type: "github_event";
       roomIdentifier: string;
       event: DesktopGitHubRoomEvent;
@@ -638,6 +683,11 @@ export type DesktopRoomStreamEvent =
       type: "reasoning_remove";
       roomIdentifier: string;
       sessionId: string;
+    }
+  | {
+      type: "resource_invalidation";
+      roomIdentifier: string;
+      resource: "agent_work";
     }
   | {
       type: "rental_activity";
@@ -692,6 +742,55 @@ export interface DesktopRepoRoomSelection {
   snapshot: DesktopRoomSnapshot | null;
   error: string | null;
   warning: string | null;
+  projectBinding: DesktopProjectBinding | null;
+}
+
+export type DesktopProjectBindingSource =
+  | "configured"
+  | "git_remote"
+  | "local_git"
+  | "local_folder";
+
+/**
+ * Device-local context used to resolve a room to its project folder. Branch and
+ * focus room identifiers are aliases of the same project, never independent
+ * folder selections.
+ */
+export interface DesktopProjectBindingContext {
+  roomIdentifier?: string | null;
+  gitRoom?: DesktopGitRoomInfo | null;
+}
+
+/** The durable, device-local representation of a project room. */
+export interface DesktopProjectBinding {
+  id: string;
+  /** Immutable room-side identity used to replace, never merge, bindings. */
+  identityKey: string;
+  /** Filesystem-derived identities that must still match before use. */
+  verificationKeys: string[];
+  aliases: string[];
+  rootPath: string;
+  source: DesktopProjectBindingSource;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopLegacyProjectBindingCandidate {
+  legacyKey?: string | null;
+  context: DesktopProjectBindingContext;
+  rootPath: string;
+}
+
+export interface DesktopProjectBindingMigrationResult {
+  bindings: DesktopProjectBinding[];
+  retryLegacyKeys: string[];
+}
+
+export interface DesktopProjectConnectionResult {
+  canceled: boolean;
+  binding: DesktopProjectBinding | null;
+  repoStatus: RepoStatus | null;
+  error: string | null;
 }
 
 export interface DesktopInviteRoomCreation {

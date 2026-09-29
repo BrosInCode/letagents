@@ -11,7 +11,6 @@ import {
 } from "../db.js";
 import {
   buildGitHubRefFocusKey,
-  buildGitHubRefRoomId,
 } from "./git-room-routing.js";
 
 export type EnsureTaskGitRoomSkipReason =
@@ -33,7 +32,6 @@ export interface EnsureTaskGitRoomDeps {
   getActiveTaskLeases(roomId: string, taskId: string): Promise<TaskLease[]>;
   getActiveFocusRoomForTask(parentRoomId: string, taskId: string): Promise<Project | undefined>;
   getGitChildRoom(input: {
-    roomId: string;
     parentRoomId: string;
     focusKey: string;
   }): Promise<Project | undefined>;
@@ -166,11 +164,6 @@ export async function ensureTaskGitRoomForActiveWorkLease(
     input.parentRoomId,
     input.taskId
   );
-  const branchRoomId = buildGitHubRefRoomId({
-    repositoryFullName: repoBinding.repository_full_name,
-    refType: "branch",
-    refName: branchRef,
-  });
   const branchFocusKey = buildGitHubRefFocusKey({
     refType: "branch",
     refName: branchRef,
@@ -178,7 +171,6 @@ export async function ensureTaskGitRoomForActiveWorkLease(
   const existingBranchRoom = taskFocusRoom
     ? undefined
     : await deps.getGitChildRoom({
-        roomId: branchRoomId,
         parentRoomId: input.parentRoomId,
         focusKey: branchFocusKey,
       });

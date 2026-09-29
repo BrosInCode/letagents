@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -9,9 +9,26 @@ import { randomUUID } from "node:crypto";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const bundle = join(root, "release", "LetAgents-darwin", "LetAgents.app");
 const executable = join(bundle, "Contents", "MacOS", "LetAgents");
+const developmentDaemon = join(root, "dist-daemon", "main.js");
+const daemonTypes = await import(pathToFileURL(join(root, "dist-daemon", "types.js")).href);
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
 const socketPath = join(home, ".letagents", "daemon.sock");
-const protocolVersion = 2;
+const protocolVersion = daemonTypes.DAEMON_PROTOCOL_VERSION;
+
+async function assertPackagedDaemonExecutorSeal() {
+  const appRoot = join(bundle, "Contents", "Resources", "app");
+  const verifierPath = join(appRoot, "dist-electron", "main", "agents", "letagents-mcp-runtime.js");
+  const executorPath = join(appRoot, "runtime", "letagents", "node_modules", "letagents", "dist", "mcp", "server", "daemon-tool-executor.js");
+  const loader = await import(pathToFileURL(join(appRoot, "dist-daemon", "supervised-tool-runtime.js")).href);
+  const verifier = await import(pathToFileURL(verifierPath).href);
+  const runtime = await loader.loadSupervisedToolRuntimeAt(executorPath, {
+    verifierPath,
+    expectedTreeSha256: verifier.LETAGENTS_MCP_RUNTIME_TREE_SHA256,
+  });
+  if (typeof runtime.executeDaemonTool !== "function") {
+    throw new Error("packaged daemon executor did not pass its sealed runtime contract");
+  }
+}
 
 function request(method, params) {
   return new Promise((resolveRequest, reject) => {
@@ -67,10 +84,37 @@ function launch() {
   });
 }
 
+async function launchDevelopmentDaemon() {
+  const child = spawn(process.execPath, [developmentDaemon], {
+    detached: true,
+    env: {
+      ...process.env,
+      HOME: home,
+      LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT: "packaged-smoke-stale-development-runtime",
+    },
+    stdio: "ignore",
+  });
+  child.unref();
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try { return await request("daemon.status"); }
+    catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
+  }
+  throw new Error("development daemon did not become ready");
+}
+
 try {
-  console.log("packaged-smoke: first launch");
+  console.log("packaged-smoke: sealed daemon executor");
+  await assertPackagedDaemonExecutorSeal();
+  console.log("packaged-smoke: cross-install predecessor");
+  const predecessor = await launchDevelopmentDaemon();
+  console.log(`packaged-smoke: development daemon ${predecessor.pid} generation ${predecessor.generation}`);
+  console.log("packaged-smoke: first packaged launch");
   await launch();
   const first = await request("daemon.status");
+  if (first.pid === predecessor.pid || first.generation <= predecessor.generation) {
+    throw new Error(`packaged app did not replace the development daemon: ${JSON.stringify({ predecessor, first })}`);
+  }
   console.log(`packaged-smoke: daemon ${first.pid} generation ${first.generation} survived first app exit`);
   console.log("packaged-smoke: relaunch");
   await launch();
@@ -79,8 +123,8 @@ try {
     throw new Error(`daemon did not survive packaged app relaunch: ${JSON.stringify({ first, second })}`);
   }
   console.log(JSON.stringify({ packagedApp: bundle, daemonPid: first.pid, generation: first.generation, survivedRelaunch: true }));
-  await request("daemon.prepare_handoff");
 } finally {
+  await request("daemon.prepare_handoff").catch(() => undefined);
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   await rm(home, { recursive: true, force: true });
 }

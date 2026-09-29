@@ -78,7 +78,7 @@ test("getGitHubEventLaneRoomId uses generated Git Room event lanes", () => {
   assert.equal(
     getGitHubEventLaneRoomId(
       project({
-        id: "git-room:github.com:owner/repo:branch:Y29kZXgvZ2l0LXJvb21z",
+        id: "focus_37",
         kind: "focus",
         parent_room_id: "github.com/owner/repo",
         focus_key: "git:branch:Y29kZXgvZ2l0LXJvb21z",
@@ -88,7 +88,7 @@ test("getGitHubEventLaneRoomId uses generated Git Room event lanes", () => {
       }),
       "github.com/owner/repo"
     ),
-    "git-room:github.com:owner/repo:branch:Y29kZXgvZ2l0LXJvb21z"
+    "focus_37"
   );
 });
 

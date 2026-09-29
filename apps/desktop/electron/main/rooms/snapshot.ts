@@ -1,3 +1,4 @@
+import { readLocalSupervisorPresence } from "./local-supervision-authority.js";
 import type { DesktopRoomSnapshot } from "../../ipc-types.js";
 import { basename } from "node:path";
 import { resolveWorkspaceRoom } from "../../repo-status.js";
@@ -9,7 +10,7 @@ import {
   listLocalTasks,
   resolveLocalAwareRoomStorageMode,
 } from "./local-store.js";
-import { getJoinedRoomInfo } from "./room-info.js";
+import { canonicalJoinedRoomIdentifier, getJoinedRoomInfo } from "./room-info.js";
 import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import { getLatestLocalChatMessages } from "./messages/local-store.js";
 import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
@@ -56,12 +57,13 @@ export async function fetchRoomSnapshot(
       const nextStorage = await resolveLocalAwareRoomStorageMode(
         visibleRoomIdentifier,
       );
-      const [tasks, messages] = await Promise.all([
+      const [tasks, messages, agents] = await Promise.all([
         listLocalTasks(localRoom.roomIdentifier),
         getLatestLocalChatMessages(localRoom.roomIdentifier, {
           limit: 150,
           readerKey: await resolveLocalThreadReaderKey(),
         }).then((page) => page.messages),
+        readLocalSupervisorPresence(localRoom.roomIdentifier),
       ]);
       return createLocalReadyRoomSnapshot({
         roomIdentifier: visibleRoomIdentifier,
@@ -69,13 +71,15 @@ export async function fetchRoomSnapshot(
         storage: nextStorage,
         tasks,
         messages,
+        ...agents,
       });
     }
 
     const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, roomIdentifier);
     const joined = await getJoinedRoomInfo(cloudRoomIdentifier);
-    const snapshotData = await fetchRoomSnapshotData(cloudRoomIdentifier);
-    return createReadyRoomSnapshot(cloudRoomIdentifier, joined, snapshotData, storage);
+    const canonicalRoomIdentifier = canonicalJoinedRoomIdentifier(cloudRoomIdentifier, joined);
+    const snapshotData = await fetchRoomSnapshotData(canonicalRoomIdentifier);
+    return createReadyRoomSnapshot(canonicalRoomIdentifier, joined, snapshotData, storage);
   } catch (error) {
     if (error instanceof DesktopApiError) {
       return createApiErrorRoomSnapshot(roomIdentifier, error);

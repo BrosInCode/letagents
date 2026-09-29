@@ -12,11 +12,13 @@ import {
 } from "../server/runtime/supervised-room-authority.js";
 import {
   borrowSupervisedWorkerCredential,
+  authorizeCustodialPolling,
   borrowCurrentSupervisedWorkerCredential,
   bindSupervisedWorkerSession,
   bindSupervisedWorkerSessionWithContext,
   checkpointSupervisedWorkerCursor,
   completeCurrentSupervisedEffect,
+  executeCurrentSupervisedTool,
   isRetryableSupervisorBridgeError,
   prepareCurrentSupervisedEffect,
   resolveCurrentSupervisedWorkerSession,
@@ -38,6 +40,101 @@ const session: StoredAgentSessionState = {
   updated_at: "2026-01-01T00:00:00.000Z",
   last_seen_at: "2026-01-01T00:00:00.000Z",
 };
+
+test("custodial wait negotiates receipts and release retains exact invocation, binding and generation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "custodial-gate-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  let capable = false;
+  let offersCapable = false;
+  let generation = 17;
+  let overrides: Record<string, unknown> = {};
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const negotiation = request.method === "daemon.negotiate";
+      const stale = !negotiation && request.params.daemon_generation !== generation;
+      const result = negotiation
+        ? { protocol_version: 2, generation, pid: 123, started_at: "2026-08-02T00:00:00.000Z", capabilities: { custodialPollingV1: capable, custodialPollingOffersV1: offersCapable } }
+        : { status: "authorized", contract: "custodial_polling_v1", room_id: "room_exact", agent_session_id: "session_exact", room_cursor: "msg_7", configuration_revision: 3,
+          activation_id: "activation_exact", binding_epoch: 4, ...overrides };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: !stale, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const env = {
+      LETAGENTS_EXECUTION_PROFILE: "supervised_mcp_polling", LETAGENTS_API_URL: "https://example.test",
+      LETAGENTS_SUPERVISOR_PROVIDER: "codex", LETAGENTS_SUPERVISOR_ENTRY_ID: "entry_exact",
+      LETAGENTS_SUPERVISOR_DAEMON_SOCKET: socketPath, LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt_exact",
+      LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_exact", LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "session_exact",
+      LETAGENTS_SUPERVISOR_ROOM_ID: "room_exact",
+    };
+    const options = { trustedDaemonSocketPath: socketPath, cwd: root };
+    const invocation = { mcpRequestId: 1, roomCursor: "msg_900" };
+    await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options), /MCP request id/);
+    for (const mismatched of [{ requestedRoomId: "other" }, { requestedAgentSessionId: "other" }]) {
+      await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options, { ...invocation, ...mismatched }), /exact authority/);
+    }
+    assert.equal(requests.length, 0, "missing SDK identity must fail before negotiation");
+    await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options, invocation), /does not support/);
+    assert.equal(requests.length, 1);
+    capable = true;
+    await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options, invocation), /does not support custodialPollingOffersV1/);
+    assert.equal(requests.length, 2, "no receipt capability means no wait authorization or checkpoint fallback");
+    const read = await authorizeCustodialPolling("read_messages", undefined, env, options);
+    await authorizeCustodialPolling("read_messages", read, env, options);
+    assert.equal(requests.at(-1).params.process_incarnation_id, undefined);
+    assert.equal(requests.at(-1).params.room_cursor, undefined, "read_messages never acknowledges a cursor");
+    offersCapable = true;
+    const before = await authorizeCustodialPolling("wait_for_messages", undefined, env, options, invocation);
+    assert.equal(before.roomCursor, "msg_7", "the daemon's authoritative cursor wins over the requested cursor");
+    const numericRequest = requests.at(-1);
+    assert.equal(numericRequest.params.room_cursor, "msg_900");
+    assert.equal(numericRequest.params.mcp_request_id, 1);
+    assert.match(numericRequest.params.process_incarnation_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    await authorizeCustodialPolling("wait_for_messages", undefined, env, options, { mcpRequestId: "1", roomCursor: null });
+    assert.equal(requests.at(-1).params.mcp_request_id, "1");
+    assert.equal(requests.at(-1).params.room_cursor, null);
+    assert.equal(requests.at(-1).params.process_incarnation_id, numericRequest.params.process_incarnation_id, "one incarnation spans every request in this MCP process");
+    await authorizeCustodialPolling("wait_for_messages", before, env, options, { ...invocation, offeredFrontier: "msg_19" });
+    assert.equal(requests.at(-1).params.mcp_request_id, 1);
+    assert.equal(requests.at(-1).params.process_incarnation_id, numericRequest.params.process_incarnation_id);
+    assert.equal(requests.at(-1).params.expected_activation_id, "activation_exact");
+    assert.equal(requests.at(-1).params.expected_binding_epoch, 4);
+    assert.equal(requests.at(-1).params.input_cursor, "msg_7");
+    assert.equal(requests.at(-1).params.offered_frontier, "msg_19");
+    assert.equal(requests.at(-1).params.room_cursor, undefined, "RELEASE records an offer, not another ACK");
+    const count = requests.length;
+    await assert.rejects(authorizeCustodialPolling("wait_for_messages", before, env, options, { mcpRequestId: "1", roomCursor: null, offeredFrontier: "msg_19" }), /original invocation/);
+    assert.equal(requests.length, count, "numeric and string SDK IDs cannot be substituted at release");
+    for (const malformed of [{ activation_id: null }, { binding_epoch: "4" }, { binding_epoch: 0 }, { room_cursor: null }, { room_cursor: "invalid" }]) {
+      overrides = malformed;
+      await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options, invocation), /rejected or became stale/);
+    }
+    for (const stale of [{ activation_id: "successor" }, { binding_epoch: 5 }, { room_cursor: "msg_8" }]) {
+      overrides = stale;
+      await assert.rejects(authorizeCustodialPolling("wait_for_messages", before, env, options, { ...invocation, offeredFrontier: "msg_19" }), /rejected or became stale/);
+    }
+    overrides = {};
+    const negotiations = requests.filter(r => r.method === "daemon.negotiate").length;
+    generation++;
+    await assert.rejects(authorizeCustodialPolling("wait_for_messages", before, env, options, { ...invocation, offeredFrontier: "msg_19" }), /stale/);
+    assert.equal(requests.filter((r) => r.method === "daemon.negotiate").length, negotiations, "release must not negotiate a successor");
+    assert.equal(requests.at(-1).params.daemon_generation, 17);
+    assert.equal(requests.at(-1).params.expected_configuration_revision, 3);
+    assert.equal(requests.at(-1).params.phase, "release");
+    assert.equal(requests.some(request => request.method === "supervisor.checkpoint_worker_cursor"), false);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("supervisor bridge is inert outside a daemon-supervised provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-absent-"));
@@ -174,6 +271,246 @@ test("bounded effect completion survives a real handoff socket unlink and delaye
     if (successorTimer) clearTimeout(successorTimer);
     if (!firstClosed) await new Promise<void>((resolve) => first.close(() => resolve()));
     if (successorListening) await new Promise<void>((resolve) => successor.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon-owned tool execution has a bounded handshake but no correctness timeout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-daemon-execute-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      if (request.method === "daemon.negotiate") {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+          protocol_version: 2, generation: 31, pid: 123, started_at: "2026-08-14T00:00:00.000Z",
+        } })}\n`);
+        return;
+      }
+      setTimeout(() => socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+        room_id: session.room_id, result: { content: [{ type: "text", text: "finished slowly" }] },
+      } })}\n`), 75);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_exact", session.room_id, {
+      agent_session_id: session.session_id,
+      agent_display_name: session.display_name,
+    });
+    const output = await executeCurrentSupervisedTool({
+      toolName: "read_messages", input: {}, mcpRequestId: "request_slow",
+    }, { LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn" }, {
+      cwd: root, trustedDaemonSocketPath: socketPath, requestTimeoutMs: 25,
+    });
+    assert.deepEqual(output, {
+      state: "completed", roomId: session.room_id,
+      result: { content: [{ type: "text", text: "finished slowly" }] },
+    });
+    assert.equal(requests.at(-1)?.method, "supervisor.execute_bounded_tool");
+    assert.equal("mutation" in requests.at(-1).params, false);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedEffect]) {
+  const operationName = operation === executeCurrentSupervisedTool ? "execute" : "prepare";
+  const operationResult = { state: "completed", room_id: "room_exact", result: { sent: true } };
+  const negotiationResult = { protocol_version: 2, generation: 41, pid: 123, started_at: "2026-09-22T00:00:00.000Z" };
+
+  test(`${operationName} waits through an absent daemon socket with its original invocation`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "la-prewrite-gap-"));
+    const socketPath = join(root, "daemon.sock");
+    const requests: any[] = [];
+    const server = createServer((socket) => {
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        if (!buffer.includes("\n")) return;
+        const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+        requests.push(request);
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true,
+          result: request.method === "daemon.negotiate" ? negotiationResult : operationResult })}\n`);
+      });
+    });
+    let listenTimer: NodeJS.Timeout | undefined;
+    try {
+      const env = { ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+        LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "turn_exact" };
+      const input = { toolName: "send_thread_message", input: { text: "once", thread_parent_id: "msg_9" },
+        mcpRequestId: "request_exact", mutation: true };
+      const startedAt = Date.now();
+      const pending = operation(input, env, { requestTimeoutMs: 1_000 });
+      env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID = "later_generation";
+      env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID = "later_turn";
+      input.input.text = "later text";
+      input.mcpRequestId = "later_request";
+      const listening = new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        listenTimer = setTimeout(() => server.listen(socketPath, resolve), 120);
+      });
+      const [result] = await Promise.all([pending, listening]);
+      assert.deepEqual(result, { state: "completed", roomId: "room_exact", result: { sent: true } });
+      assert.ok(Date.now() - startedAt >= 100);
+      const effects = requests.filter((request) => request.method !== "daemon.negotiate");
+      assert.equal(effects.length, 1);
+      assert.deepEqual(effects[0].params, {
+        mcp_request_id: "request_exact", tool_name: "send_thread_message",
+        input: { text: "once", thread_parent_id: "msg_9" },
+        ...(operationName === "prepare" ? { mutation: true } : {}),
+        entry_id: "manifest_exact", work_attempt_id: "attempt_exact",
+        execution_generation_id: "generation_exact", provider_turn_id: "turn_exact", daemon_generation: 41,
+      });
+    } finally {
+      clearTimeout(listenTimer);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test(`${operationName} renegotiates when the socket disappears before its write`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "la-prewrite-unlink-"));
+    const socketPath = join(root, "daemon.sock");
+    const requests: any[] = [];
+    let successorTimer: NodeJS.Timeout | undefined;
+    const successor = createServer((socket) => {
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        if (!buffer.includes("\n")) return;
+        const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+        requests.push(request);
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true,
+          result: request.method === "daemon.negotiate" ? { ...negotiationResult, generation: 42 } : operationResult })}\n`);
+      });
+    });
+    const first = createServer((socket) => {
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        if (!buffer.includes("\n")) return;
+        const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+        requests.push(request);
+        first.close(() => {
+          successorTimer = setTimeout(() => successor.listen(socketPath), 120);
+        });
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: negotiationResult })}\n`);
+      });
+    });
+    try {
+      await new Promise<void>((resolve, reject) => { first.once("error", reject); first.listen(socketPath, resolve); });
+      assert.deepEqual(await operation({ toolName: "set_reply_thread", input: { thread_parent_id: "msg_9" },
+        mcpRequestId: "request_gap", mutation: true }, {
+        ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      }, { requestTimeoutMs: 1_000 }), { state: "completed", roomId: "room_exact", result: { sent: true } });
+      assert.equal(requests.filter((request) => request.method === "daemon.negotiate").length, 2);
+      const effects = requests.filter((request) => request.method !== "daemon.negotiate");
+      assert.equal(effects.length, 1);
+      assert.equal(effects[0].params.daemon_generation, 42);
+      assert.equal(effects[0].params.mcp_request_id, "request_gap");
+    } finally {
+      clearTimeout(successorTimer);
+      await new Promise<void>((resolve) => first.close(() => resolve()));
+      await new Promise<void>((resolve) => successor.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const failure of ["post-write close", "authoritative rejection", "negotiation rejection", "post-write timeout"] as const) {
+    if (operationName === "execute" && failure === "post-write timeout") continue; // Admitted execution has no correctness timer.
+    test(`${operationName} does not retry ${failure}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "la-prewrite-no-replay-"));
+      const socketPath = join(root, "daemon.sock");
+      const requests: any[] = [];
+      const server = createServer((socket) => {
+        let buffer = "";
+        socket.setEncoding("utf8");
+        socket.on("data", (chunk: string) => {
+          buffer += chunk;
+          if (!buffer.includes("\n")) return;
+          const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+          requests.push(request);
+          if (request.method === "daemon.negotiate" && failure !== "negotiation rejection") {
+            socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: negotiationResult })}\n`);
+          } else if (failure === "post-write close") socket.destroy();
+          else if (failure !== "post-write timeout") socket.end(`${JSON.stringify({ version: 2, id: request.id,
+            ok: false, error: "Rejected stale daemon generation during handoff" })}\n`);
+        });
+      });
+      try {
+        await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+        await assert.rejects(() => operation({ toolName: "send_thread_message", input: { text: "once" },
+          mcpRequestId: "request_once", mutation: true }, {
+          ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+        }, { requestTimeoutMs: 150 }), /connection closed|Rejected stale|Timed out communicating/);
+        assert.equal(requests.filter((request) => request.method === "daemon.negotiate").length, 1);
+        assert.equal(requests.filter((request) => request.method !== "daemon.negotiate").length,
+          failure === "negotiation rejection" ? 0 : 1);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test(`${operationName} stops reconnecting when its startup budget expires`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "la-prewrite-budget-"));
+    try {
+      const startedAt = Date.now();
+      await assert.rejects(() => operation({ toolName: "send_thread_message", input: { text: "once" },
+        mcpRequestId: "request_budget", mutation: true }, {
+        ...supervisedEnv(join(root, "absent.sock")), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      }, { requestTimeoutMs: 150 }), /ENOENT|Timed out communicating/);
+      assert.ok(Date.now() - startedAt >= 125, "does not fail on the first missing socket");
+      assert.ok(Date.now() - startedAt < 1_000, "does not wait indefinitely");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("daemon-owned tool execution recognizes an old daemon and permits compatibility fallback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-old-daemon-"));
+  const socketPath = join(root, "daemon.sock");
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      if (request.method === "daemon.negotiate") {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+          protocol_version: 2, generation: 32, pid: 123, started_at: "2026-08-14T00:00:00.000Z",
+        } })}\n`);
+      } else {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: false,
+          error: "Unsupported daemon method: supervisor.execute_bounded_tool" })}\n`);
+      }
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_exact", session.room_id, {
+      agent_session_id: session.session_id,
+      agent_display_name: session.display_name,
+    });
+    assert.deepEqual(await executeCurrentSupervisedTool({
+      toolName: "get_board", input: {}, mcpRequestId: "request_old",
+    }, { LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn" }, {
+      cwd: root, trustedDaemonSocketPath: socketPath,
+    }), { state: "unsupported" });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -685,7 +1022,7 @@ test("worktree context cannot redirect a freshly minted worker credential to an 
   }
 });
 
-test("supervisor bridge binds only the exact worker session credential over the daemon socket", async () => {
+test("supervisor bridge accepts the current daemon protocol and binds only the exact worker session credential", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -697,8 +1034,8 @@ test("supervisor bridge binds only the exact worker session credential over the 
       if (!buffer.includes("\n")) return;
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
       requests.push(request);
-      const result = request.method === "daemon.negotiate" ? { protocol_version: 2 } : { bound: true };
-      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+      const result = request.method === "daemon.negotiate" ? { protocol_version: 3 } : { bound: true };
+      socket.end(`${JSON.stringify({ version: 3, id: request.id, ok: true, result })}\n`);
     });
   });
   try {
@@ -713,7 +1050,7 @@ test("supervisor bridge binds only the exact worker session credential over the 
     assert.equal(requests.length, 2);
     assert.equal(requests[0].version, 1);
     assert.equal(requests[0].method, "daemon.negotiate");
-    assert.equal(requests[1].version, 2);
+    assert.equal(requests[1].version, 3);
     assert.equal(requests[1].method, "supervisor.bind_worker_session");
     assert.deepEqual(requests[1].params, {
       entry_id: "manifest_exact",
@@ -962,7 +1299,7 @@ test("scheduled cursor checkpoints retry transient failures and keep the newest 
 test("supervisor bridge fails closed when protocol negotiation is malformed or unsupported", async () => {
   for (const { protocolVersion, responseVersion } of [
     { protocolVersion: "2", responseVersion: 2 },
-    { protocolVersion: 999, responseVersion: 2 },
+    { protocolVersion: 4, responseVersion: 4 },
     { protocolVersion: 2, responseVersion: 1 },
   ]) {
     const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-invalid-"));

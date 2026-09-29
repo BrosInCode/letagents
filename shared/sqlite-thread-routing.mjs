@@ -788,7 +788,7 @@ export function invalidateLocalThreadRoutingRoots(database, roomId, rootNumbersI
   }
 }
 
-async function ensureRequestedRootsProjected(database, roomId, rootNumbers, options = {}) {
+export async function ensureRequestedRootsProjected(database, roomId, rootNumbers, options = {}) {
   if (rootNumbers.length > LOCAL_THREAD_ROUTING_MAX_REQUESTED_ROOTS) {
     throw new LocalThreadRoutingProjectionUnavailableError();
   }
@@ -845,10 +845,8 @@ async function ensureRequestedRootsProjected(database, roomId, rootNumbers, opti
       workStartedAt = performance.now();
     }
     if (batch.processed === 0) break;
-    if (performance.now() - foregroundStartedAt >= foregroundTimeBudgetMs) {
-      if (scheduleOnTimeout) scheduleRequestedRootsRepair(database, roomId, rootNumbers);
-      throw new LocalThreadRoutingProjectionUnavailableError();
-    }
+    // Recheck completion before enforcing the next batch's deadline. A final
+    // committed batch may finish just before a long event-loop yield.
   }
 }
 
@@ -869,6 +867,33 @@ export async function getLocalThreadRoutingAgentKeysForRoots(
   if (rootNumbers.length === 0 || identities.length === 0) return new Map();
   await ensureRequestedRootsProjected(database, roomId, rootNumbers, options);
 
+  const batches = readProjectedThreadRoutingBatches(database, roomId, rootNumbers, identities);
+  for (;;) {
+    const step = batches.next();
+    if (step.done) return step.value;
+    await yieldToEventLoop();
+  }
+}
+
+/** Read prepared projections synchronously inside an existing message transaction. */
+export function readProjectedLocalThreadRoutingAgentKeys(database, roomId, rootNumbers, identities) {
+  const statements = requestedRootProjectionStatements(database);
+  const rootsJson = JSON.stringify(rootNumbers);
+  if (pendingRequestedRoots(statements, roomId, rootsJson).length
+    || statements.invalidated.all(roomId, rootsJson).length) {
+    throw new LocalThreadRoutingProjectionChangedError();
+  }
+  const batches = readProjectedThreadRoutingBatches(database, roomId, rootNumbers, identities);
+  for (;;) {
+    const step = batches.next();
+    if (step.done) return step.value;
+  }
+}
+
+export class LocalThreadRoutingProjectionChangedError extends LocalThreadRoutingProjectionUnavailableError {}
+
+function* readProjectedThreadRoutingBatches(database, roomId, rootNumbers, identities) {
+  if (!rootNumbers.length || !identities.length) return new Map();
   const keysByHash = new Map();
   const durableKeysByHash = new Map();
   for (const identity of identities) {
@@ -938,7 +963,7 @@ export async function getLocalThreadRoutingAgentKeysForRoots(
       keys.add(agentKey);
       result.set(root, keys);
     }
-    await yieldToEventLoop();
+    yield;
   }
 
   const aliasInputs = [];
@@ -1032,7 +1057,7 @@ export async function getLocalThreadRoutingAgentKeysForRoots(
       keys.add(agentKey);
       result.set(root, keys);
     }
-    await yieldToEventLoop();
+    yield;
   }
   return result;
 }

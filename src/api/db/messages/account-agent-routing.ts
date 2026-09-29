@@ -161,6 +161,59 @@ export async function getBoundedActiveWorkLeaseOwners(
   return result.rows;
 }
 
+/** Bounded send-time conversation focus, derived solely from captured receipts. */
+export async function getRecentHumanConversationRecipient(
+  executor: Pick<AccountAgentRoutingExecutor, "execute">,
+  roomId: string,
+  message: { number: number; timestamp: string; publisher_account_id: string },
+): Promise<{ agentKey: string; ownerAccountId: string } | null> {
+  const result = await executor.execute<{
+    recipient_count: number; agent_key: string | null; owner_account_id: string | null;
+    answer_count: number; answer_agent_key: string | null; answer_owner_account_id: string | null;
+  }>(sql`
+    WITH bounded AS MATERIALIZED (
+      SELECT number, source, publisher_agent_key, publisher_account_id, thread_root_number, timestamp
+        FROM ${messages}
+       WHERE room_id = ${roomId} AND number < ${message.number}
+       ORDER BY number DESC LIMIT 50
+    ), recent AS (
+      SELECT * FROM bounded
+       WHERE timestamp >= ${message.timestamp}::timestamptz - INTERVAL '30 minutes'
+    ), previous_human AS (
+      SELECT number FROM recent
+       WHERE source = 'browser' AND publisher_agent_key IS NULL
+         AND publisher_account_id = ${message.publisher_account_id}
+         AND thread_root_number IS NULL
+       ORDER BY number DESC LIMIT 1
+    ), recipient AS (
+      SELECT receipt.agent_key, captured.owner_account_id,
+             (answer.source = 'agent' AND answer.publisher_agent_key = receipt.agent_key
+               AND answer.publisher_account_id = captured.owner_account_id) AS answered
+        FROM ${message_agent_receipts} AS receipt
+        JOIN previous_human ON previous_human.number = receipt.message_number
+        JOIN ${room_agent_sessions} AS captured ON captured.session_id = receipt.agent_session_id
+          AND captured.room_id = receipt.room_id AND captured.agent_key = receipt.agent_key
+          AND captured.session_kind = 'worker'
+        LEFT JOIN recent AS answer ON answer.number = receipt.reply_message_number
+       WHERE receipt.message_room_id = ${roomId}
+    )
+    SELECT COUNT(*)::integer AS recipient_count,
+           MIN(agent_key) AS agent_key, MIN(owner_account_id) AS owner_account_id,
+           COUNT(*) FILTER (WHERE answered)::integer AS answer_count,
+           MIN(agent_key) FILTER (WHERE answered) AS answer_agent_key,
+           MIN(owner_account_id) FILTER (WHERE answered) AS answer_owner_account_id
+      FROM recipient
+  `);
+  const row = result.rows[0];
+  if (row?.recipient_count === 1 && row.agent_key && row.owner_account_id) {
+    return { agentKey: row.agent_key, ownerAccountId: row.owner_account_id };
+  }
+  if (row?.answer_count === 1 && row.answer_agent_key && row.answer_owner_account_id) {
+    return { agentKey: row.answer_agent_key, ownerAccountId: row.answer_owner_account_id };
+  }
+  return null;
+}
+
 export async function getMessageAccountAgentRoutingById(
   roomId: string,
   messageId: string,

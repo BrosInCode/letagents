@@ -2,6 +2,7 @@ export interface MessageReplyReference {
   id: string
   sender: string
   text: string
+  display_text?: string | null
   source: string | null
   timestamp: string
 }
@@ -53,6 +54,7 @@ export interface RoomMessage {
   id: string
   sender: string
   text: string
+  display_text?: string | null
   attachments?: readonly RoomMessageAttachment[]
   agent_prompt_kind?: string | null
   source: string | null

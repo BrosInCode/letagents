@@ -5,11 +5,12 @@ import { fileURLToPath } from "node:url";
 import {
   canReconnectRoomAgent,
   canRecoverSavedRoomAgent,
+  roomAgentRecoveryAction,
   roomAgentActivityProjection,
   roomAgentDeliveryGroup,
   roomAgentDeliverySummary,
 } from "../src/domain/room-agent-delivery";
-import { roomMessageRevealDestination } from "../src/domain/room-message-reveal";
+import { initialMessageInspectorRequest, roomMessageRevealDestination } from "../src/domain/room-message-reveal";
 import type {
   DesktopRoomAgentConnectionState,
   DesktopRoomAgentInboxState,
@@ -24,6 +25,43 @@ async function source(relativePath: string): Promise<string> {
 }
 
 describe("durable room delivery UI contracts", () => {
+  it("opens synthetic startup blockers in exact retained work and keeps real-message reveal", async () => {
+    const shell = await source("src/components/desktop/content/DesktopRoomShell.vue");
+    const handler = shell.slice(shell.indexOf("async function revealRoomMessage("), shell.indexOf("async function revealRecordedWorkMessage("))
+      .replace("(messageId: string): Promise<void>", "(messageId)");
+    const opened: Array<{ supervisorEntryId: string }> = [];
+    const selected: string[] = [];
+    const revealed: string[] = [];
+    const unavailable: string[] = [];
+    const initialTab = { value: "overview" };
+    const revealedMessageId = { value: null as string | null };
+    const reveal = new Function("supervisorEntries", "props", "emit", "openAgentDetailRequest",
+      "agentInspectorInitialTab", "selectAgentInspectorWorkSource", "revealMessage", "revealedMessageId", "nextTick", "initialMessageInspectorRequest",
+      `${handler}; return revealRoomMessage;`)(
+      { value: [{ id: "agent-a", roomId: "room-a", displayName: "CedarRidge" },
+        { id: "agent-b", roomId: "room-b", displayName: "CedarRidge" }] },
+      { room: { identifier: "room-a" } }, (_event: string, id: string) => unavailable.push(id),
+      (request: { supervisorEntryId: string }) => opened.push(request), initialTab,
+      (id: string) => selected.push(id), async (id: string) => { revealed.push(id); return true; },
+      revealedMessageId, async () => undefined, initialMessageInspectorRequest,
+    ) as (id: string) => Promise<void>;
+    await reveal("desktop-initial-message:agent-a");
+    assert.equal(opened[0]?.supervisorEntryId, "agent-a");
+    assert.equal(initialTab.value, "work");
+    assert.deepEqual(selected, ["desktop-initial-message:agent-a"]);
+    assert.deepEqual(revealed, []);
+    await reveal("desktop-initial-message:agent-b");
+    assert.equal(opened.length, 1, "another room's agent cannot be opened");
+    assert.deepEqual(unavailable, ["desktop-initial-message:agent-b"]);
+    await reveal("message-real");
+    assert.deepEqual(revealed, ["message-real"]);
+    assert.equal(revealedMessageId.value, "message-real");
+    const host = await source("src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
+    const surface = await source("src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue");
+    assert.match(host, /initialTab: props.initialTab/);
+    assert.match(surface, /selectedTab.value = props.initialTab \?\? "overview"/);
+  });
+
   it("classifies connection, inbox, and turn facts without inferring work from connection", () => {
     const state = (
       connection: DesktopRoomAgentConnectionState,
@@ -42,7 +80,7 @@ describe("durable room delivery UI contracts", () => {
         task: { state: "none", taskId: null, title: null },
       },
     });
-    assert.equal(roomAgentDeliveryGroup(state("connected", "empty", "idle")), "listening");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "empty", "idle")), "online");
     assert.equal(roomAgentDeliveryGroup(state("connected", "queued", "responding")), "responding");
     assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "idle")), "attention");
     assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "responding")), "attention");
@@ -53,6 +91,7 @@ describe("durable room delivery UI contracts", () => {
     assert.equal(roomAgentDeliverySummary(state("connected", "waiting_for_desktop_credentials", "idle").roomAgentState!), "Waiting for desktop credential handoff");
     assert.equal(roomAgentDeliverySummary(state("reconnecting", "queued", "idle").roomAgentState!), "Reconnecting");
     assert.equal(roomAgentDeliverySummary(state("connected", "blocked", "responding").roomAgentState!), "Delivery needs attention");
+    assert.equal(roomAgentDeliverySummary(state("connected", "empty", "idle").roomAgentState!), "Online");
   });
 
   it("keeps reconnect exact-runtime-only and routes all controls through the Inspector", async () => {
@@ -98,6 +137,17 @@ describe("durable room delivery UI contracts", () => {
     };
     assert.equal(canReconnectRoomAgent(exact as never), true);
     assert.equal(canRecoverSavedRoomAgent(exact as never), false);
+    const blockedCursor = {
+      ...exact, provider: "cursor", providerPid: null, observedState: "idle",
+      roomAgentState: { connection: { state: "connected" }, inbox: { state: "blocked" } },
+    };
+    assert.equal(canRecoverSavedRoomAgent(blockedCursor as never), true,
+      "a blocked idle Cursor lane remains recoverable despite a connected handle projection");
+    assert.equal(canRecoverSavedRoomAgent({ ...blockedCursor, providerPid: 123 } as never), false,
+      "a live Cursor wrapper cannot be replaced by this recovery action");
+    assert.equal(canRecoverSavedRoomAgent({ ...blockedCursor,
+      roomAgentState: { connection: { state: "connected" }, inbox: { state: "empty" } },
+    } as never), false, "normal processless Cursor idle periods are healthy");
     assert.equal(canReconnectRoomAgent(gone as never), false);
     assert.equal(canRecoverSavedRoomAgent(gone as never), true);
     assert.equal(canRecoverSavedRoomAgent(starting as never), false,
@@ -125,6 +175,58 @@ describe("durable room delivery UI contracts", () => {
     assert.match(inspectorDomain, /kind: "recover"/);
   });
 
+  it("keeps exact blocked Cursor recovery available while desktop credentials are missing", () => {
+    const waiting = {
+      provider: "cursor", providerPid: null, deliveryMode: "daemon_inbox",
+      desiredState: "running", observedState: "idle", condition: "coordination_blocked",
+      nativeLiveness: { state: "stale" }, lastError: "Execution evidence rejected: identity_mismatch.",
+      workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+      providerContinuationId: "continuation_1", runtimeGenerationId: null, runtimeRecovery: null,
+      roomAgentState: {
+        connection: { state: "disconnected" },
+        inbox: { state: "waiting_for_desktop_credentials", blockedByMessageId: "msg_23" },
+        turn: { state: "failed", inboxItemId: "inbox_23", sourceMessageId: "msg_23", providerTurnId: "cursor:turn_23" },
+      },
+    };
+    assert.equal(roomAgentRecoveryAction(waiting as never), "recover",
+      "credential admission must not hide recovery of the exact blocked processless lane");
+    assert.equal(roomAgentRecoveryAction({ ...waiting, runtimeGenerationId: "runtime_1" } as never), "recover");
+    assert.equal(canReconnectRoomAgent(waiting as never), false,
+      "recovery already restores credentials before its daemon ownership checks");
+    for (const turn of [
+      { ...waiting.roomAgentState.turn, state: "idle" },
+      { ...waiting.roomAgentState.turn, sourceMessageId: "different_message" },
+      { ...waiting.roomAgentState.turn, inboxItemId: null },
+      { ...waiting.roomAgentState.turn, providerTurnId: null },
+      undefined,
+    ]) {
+      assert.notEqual(roomAgentRecoveryAction({ ...waiting,
+        roomAgentState: { ...waiting.roomAgentState, turn },
+      } as never), "recover", "unbound or unrelated turn evidence does not permit legacy recovery");
+    }
+    for (const inbox of [
+      { ...waiting.roomAgentState.inbox, blockedByMessageId: null },
+      { ...waiting.roomAgentState.inbox, state: "empty" },
+    ]) {
+      assert.notEqual(roomAgentRecoveryAction({ ...waiting,
+        roomAgentState: { ...waiting.roomAgentState, inbox },
+      } as never), "recover");
+    }
+    for (const change of [
+      { providerPid: 123 }, { provider: "codex" }, { observedState: "working" },
+      { desiredState: "stopped" }, { deliveryMode: "mcp_polling" },
+      { runtimeRecovery: { mode: "resume" } },
+    ]) assert.notEqual(roomAgentRecoveryAction({ ...waiting, ...change } as never), "recover");
+    const healthyWait = { ...waiting, condition: "none", runtimeGenerationId: null,
+      roomAgentState: { ...waiting.roomAgentState,
+        inbox: { state: "waiting_for_desktop_credentials", blockedByMessageId: null },
+        turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null },
+      },
+    };
+    assert.equal(canReconnectRoomAgent(healthyWait as never), true);
+    assert.equal(canRecoverSavedRoomAgent(healthyWait as never), false);
+  });
+
   it("deduplicates only matching supervised roster rows and leaves other participants inspectable", async () => {
     const stopped = {
       roomId: "focus_37",
@@ -149,11 +251,51 @@ describe("durable room delivery UI contracts", () => {
     assert.match(activity, /!hasLiveActivity/);
     assert.match(activity, /legacyReachableAgents/);
     assert.match(activity, /legacyWorkingAgents/);
-    for (const group of ["listening", "responding", "reconnecting", "needs_attention", "starting", "paused", "disconnected"]) {
+    for (const group of ["online", "responding", "recovering", "reconnecting", "needs_attention", "starting", "paused", "disconnected", "status_unavailable"]) {
       assert.match(activity, new RegExp(`key: "${group}"`));
     }
+    assert.match(activity, /agentInspectorActivityGroupState\(agent\)/);
+    assert.match(activity, /group\.key === "status_unavailable" \? "Status unavailable" : agent\.overallLabel/);
+    assert.match(activity, /agent\.resourceFreshness === 'stale'/);
     assert.match(activity, /selectInspectorAgent\(agent\)/);
     assert.match(activity, /selectParticipantAgent\(agent\)/);
+  });
+
+  it("presents Online activity with the same connected visual treatment", async () => {
+    const [rosterStyles, sharedSurfaceStyles] = await Promise.all([
+      source("src/styles/room-activity/groups-roster.css"),
+      source("src/styles/surfaces/shared-surfaces.css"),
+    ]);
+    assert.match(rosterStyles, /\.desktop-activity-avatar\[data-state="online"\]/);
+    assert.match(sharedSurfaceStyles, /\.state-pill\[data-state="online"\]/);
+    assert.match(sharedSurfaceStyles, /\.state-pill\[data-state="responding"\]/);
+  });
+
+  it("presents retained structural work only as room History and reveals its source message", async () => {
+    const [activity, shell] = await Promise.all([
+      source("src/components/desktop/content/RoomActivityTabView.vue"),
+      source("src/components/desktop/content/DesktopRoomShell.vue"),
+    ]);
+    assert.match(activity, /Results saved from earlier work\./);
+    assert.match(activity, /data-testid="desktop-recorded-room-work"/);
+    assert.match(activity, /recordedWorkEvidenceIncomplete\(work\)/);
+    assert.match(activity, /The owner cleared this shared work history\./);
+    assert.match(activity, /emit\('reveal-message', work\.sourceMessageId\)/);
+    for (const [field, label] of [
+      ["unresolved", "unresolved"],
+      ["succeeded", "succeeded"],
+      ["failed", "failed"],
+      ["denied_before_start", "denied before start"],
+      ["cancelled_before_start", "cancelled before start"],
+      ["interrupted_after_start", "interrupted after start"],
+      ["lost_after_start", "lost after start"],
+    ]) {
+      assert.match(activity, new RegExp(`counts\\.${field}`));
+      assert.match(activity, new RegExp(label));
+    }
+    const liveActivityProjection = activity.match(/const hasLiveActivity = computed\(\(\) => Boolean\(([\s\S]*?)\n\)\);/)?.[1] || "";
+    assert.doesNotMatch(liveActivityProjection, /roomAgentWork/);
+    assert.match(shell, /async function revealRecordedWorkMessage[\s\S]*?activeTab\.value = "chat";[\s\S]*?revealRoomMessage\(messageId\)/);
   });
 
   it("routes loaded main and thread links directly, then requests bounded history for an unloaded target", () => {

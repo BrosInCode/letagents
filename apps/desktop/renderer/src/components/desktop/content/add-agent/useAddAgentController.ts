@@ -16,12 +16,10 @@ import {
 import { desktopIpc } from "../../../../ipc/index.js";
 import { useManagedAgentSessionsContext } from "./managed-agent-sessions-context";
 import { useSupervisedAgentLaunch } from "./useSupervisedAgentLaunch";
-import { useManagedAgentLaunch } from "./useManagedAgentLaunch";
 import { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import { useAddAgentSetup } from "./useAddAgentSetup";
 import { useAddAgentPresentation } from "./useAddAgentPresentation";
 import { contextualAddAgentError } from "./add-agent-errors";
-import { suggestSupervisedAgentCodename } from "../../../../domain/codenames";
 import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
@@ -29,6 +27,7 @@ import {
 
 export interface AddAgentModalProps {
   open: boolean;
+  roomStorageMode?: "local" | "cloud";
   roomIdentifier: string;
   roomGitRoom: DesktopGitRoomInfo | null;
   gitRoomMatchesActiveRepo: boolean;
@@ -39,7 +38,6 @@ export interface AddAgentModalProps {
 
 export interface AddAgentModalEvents {
   close: [];
-  "choose-repo": [];
   "choose-worktree": [rootPath: string];
   "managed-session-started": [session: DesktopManagedAgentSession];
 }
@@ -59,68 +57,38 @@ export interface SupervisedLaunchCreateSnapshot {
   providerId: DesktopAgentProviderId;
   providerName: string;
   roomIdentifier: string;
-  repoRootPath: string;
+  /** Null launches an isolated, non-Git room-only agent (private scratch workspace). */
+  repoRootPath: string | null;
   charter: string;
   permissionProfileId: DesktopManagedAgentPermissionProfileId | null;
   launchPolicy: unknown;
   model: string | null;
 }
 
-type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "listAgents" | "createAgent">;
-const SUPERVISED_NAME_LOOKUP_TIMEOUT_MS = 1_000;
-
-async function lookupExistingDisplayNames(
-  client: SupervisedCreateClient,
-  roomIdentifier: string,
-  timeoutMs: number,
-): Promise<string[]> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const entries = await Promise.race([
-      client.listAgents(roomIdentifier),
-      new Promise<null>((resolve) => {
-        timeout = setTimeout(resolve, Math.max(0, timeoutMs), null);
-      }),
-    ]);
-    return entries?.map((entry) => entry.displayName) ?? [];
-  } catch {
-    return [];
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
-}
+type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "createAgent">;
 
 /**
  * The click-time snapshot is intentionally complete: controls remain editable
- * while the name lookup awaits, but they must not change the authority of the
- * durable agent that click already requested.
+ * after the click, but they must not change the authority of the durable
+ * agent that click already requested.
+ *
+ * The request carries no name. Naming needs the names already taken in the
+ * room, and only the background service that saves the agent can read those
+ * and claim one in the same step. A name chosen here would be a guess.
  */
 export async function createSupervisedAgentFromSnapshot(
   client: SupervisedCreateClient,
   snapshot: SupervisedLaunchCreateSnapshot,
   isCurrent: () => boolean,
-  nameLookupTimeoutMs = SUPERVISED_NAME_LOOKUP_TIMEOUT_MS,
 ): Promise<DesktopSupervisorManifestEntry | null> {
-  // Friendly-name collision avoidance is optional. A slow recovery scan must
-  // never prevent the durable create request from crossing its boundary.
-  const existingDisplayNames = await lookupExistingDisplayNames(
-    client,
-    snapshot.roomIdentifier,
-    nameLookupTimeoutMs,
-  );
-  const displayName = suggestSupervisedAgentCodename(
-    existingDisplayNames,
-    snapshot.creationRequestId,
-  );
-  // listAgents is an async gap before the durable boundary. Modal close,
-  // provider switch, and request invalidation must all fence createAgent here,
-  // not only after a durable agent has already been created.
+  // Modal close, provider switch, and request invalidation must all fence
+  // createAgent before the durable boundary, not only after it.
   if (!isCurrent()) return null;
   const input: DesktopSupervisorCreateInput = {
     creationRequestId: snapshot.creationRequestId,
     providerId: snapshot.providerId,
     roomIdentifier: snapshot.roomIdentifier,
-    displayName,
+    displayName: "",
     repoRootPath: snapshot.repoRootPath,
     charter: snapshot.charter,
     permissionProfileId: snapshot.permissionProfileId,
@@ -136,9 +104,6 @@ export function useAddAgentController(
 ) {
 
 const managedSessionsContext = useManagedAgentSessionsContext();
-const managedLaunch = useManagedAgentLaunch({
-  onStarted: (session) => emit("managed-session-started", session),
-});
 
 const startingAgent = ref(false);
 let startOperationInFlight = false;
@@ -147,6 +112,7 @@ const {
   providers,
   selectedProviderId,
   preflight,
+  secureStorageStatus,
   loadingProviders,
   loadingPreflight,
   setupBusy,
@@ -158,6 +124,7 @@ const {
   setupMessage,
   setupMessageTone,
   setSetupMessage,
+  setSecureStorageRecoveryMessage,
 } = setup;
 const configuration = useAddAgentConfiguration();
 const {
@@ -186,6 +153,8 @@ const {
   canStartManagedAgent,
   authCommand,
   authCommandForProvider,
+  installCommand,
+  installUrl,
   roomLabel,
   externalJoinPrompt,
   activeSetupConfirmation,
@@ -195,6 +164,10 @@ const {
   runtimeLabel,
   bridgeLabel,
   repoLabel,
+  showSecureStorage,
+  secureStorageLabel,
+  secureStorageNeedsAttention,
+  canOpenSecureStorage,
   expectedWorktreeBranch,
   matchingWorktrees,
   showWorktreePicker,
@@ -244,6 +217,7 @@ const {
   repoRootPath: () => props.repoRootPath,
   selectedProviderId,
   selectedProvider,
+  selectedPermissionProfiles,
   selectedPermissionProfile,
   showOpenModelConfig,
   showModelSelector,
@@ -266,7 +240,10 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   authCommandForProvider,
   currentVersion: setup.currentVersion,
   isCurrentRequest: (version) => props.open && version === setup.currentVersion(),
-  onChooseRepo: () => emit("choose-repo"),
+  onChooseRepo: () => setSetupMessage(
+    "Connect this room to its local project before adding an agent.",
+    "warning",
+  ),
   onCopyAuthCommand: (command) => void setupActions.copyAgentAuthCommand(command),
   onRetry: () => retrySupervisedLaunch(),
   onMessage: setSetupMessage,
@@ -338,6 +315,41 @@ const {
   copyExternalJoinPrompt,
 } = setupActions;
 
+async function openProviderInstallGuide(): Promise<void> {
+  if (!installUrl.value) return;
+  try {
+    await desktopIpc.app?.openExternalUrl?.(installUrl.value);
+  } catch (error) {
+    setSetupMessage(
+      contextualAddAgentError(
+        "Couldn't open the installation guide",
+        error,
+        "Open the provider installation guide in your browser and check again after installing.",
+      ),
+      "error",
+    );
+  }
+}
+
+async function openSecureCredentialStorage(): Promise<void> {
+  if (!secureStorageStatus.value?.canOpenCredentialStorage) return;
+  try {
+    setupActions.armSecureStorageFocusRecheck();
+    await desktopIpc.app.openCredentialStorage();
+    if (secureStorageStatus.value?.available !== true) {
+      setSecureStorageRecoveryMessage(
+        "Unlock your login Keychain, then return to LetAgents. Setup will check it again automatically.",
+      );
+    }
+  } catch (error) {
+    setSetupMessage(contextualAddAgentError(
+      "Couldn't open secure credential storage",
+      error,
+      "Open Keychain Access, unlock your login Keychain, then choose Check again.",
+    ), "error");
+  }
+}
+
 /**
  * A launch card with a manifest entry represents a durable saved agent. Its
  * retry is an explicit same-entry convergence request, not another create
@@ -375,7 +387,12 @@ async function retrySupervisedLaunch(): Promise<void> {
 async function startManagedAgent(
   options: { retryingPreDurableLaunch?: boolean } = {},
 ): Promise<void> {
-  if (!selectedProviderId.value || !props.repoRootPath || startOperationInFlight) return;
+  // A room with no git binding and no resolved repo path is a genuine repo-less
+  // room: launching is allowed and the daemon provisions a private scratch
+  // workspace. A repo-backed room whose path has not resolved yet (gitRoom
+  // present, repoRootPath null) must still be blocked until a repo is chosen.
+  const roomOnlyLaunch = props.roomGitRoom == null && !props.repoRootPath?.trim();
+  if (!selectedProviderId.value || (!props.repoRootPath?.trim() && !roomOnlyLaunch) || startOperationInFlight) return;
   if (
     !hasDesktopManagedRuntime(selectedProvider.value)
     && !hasSupervisedRuntime(selectedProvider.value)
@@ -403,6 +420,13 @@ async function startManagedAgent(
   setSetupMessage(null);
   try {
     if (requestLaunchMode === "supervised") {
+      const latestStorageStatus = await desktopIpc.supervisorGrant.getStorageStatus();
+      if (!setupActions.isCurrentRequest(requestVersion)) return;
+      secureStorageStatus.value = latestStorageStatus;
+      if (props.roomStorageMode !== "local" && !latestStorageStatus.available) {
+        setSetupMessage(latestStorageStatus.detail, "warning");
+        return;
+      }
       const scanAllowsNewLaunch = recoveryScanAllowsNewLaunch(supervisedRecoveryScanStatus.value);
       if (!scanAllowsNewLaunch) {
         throw new Error("Check for previous supervised agents before starting a new one.");
@@ -446,8 +470,8 @@ async function startManagedAgent(
         launchPolicy: requestLaunchPolicy,
         model: requestModel,
       };
-      // A name is presentation, never identity. The helper reads the room's
-      // labels while retaining every click-time launch input above.
+      // A name is presentation, never identity, and is assigned where the
+      // agent is saved. The helper sends every click-time launch input above.
       const entry = await createSupervisedAgentFromSnapshot(
         desktopIpc.supervisor,
         creationSnapshot,
@@ -469,22 +493,7 @@ async function startManagedAgent(
       void managedSessionsContext.refresh();
       return;
     }
-    const startMessage = await managedLaunch.start({
-      providerId: selectedProviderId.value,
-      roomIdentifier: props.roomIdentifier,
-      roomGitRoom: props.roomGitRoom,
-      roomDisplayName: props.roomDisplayName,
-      repoRootPath: props.repoRootPath,
-      deliveryMode: deliveryMode.value,
-      permissionProfileId: selectedPermissionProfile.value?.id ?? null,
-      cursorMcpPolicy: selectedProviderId.value === "cursor" ? selectedCursorMcpPolicy.value : null,
-      model: selectedModel.value,
-      modelSource: selectedModelSource.value,
-      effort: selectedEffort.value || null,
-    });
-    if (!setupActions.isCurrentRequest(requestVersion)) return;
-    setSetupMessage(startMessage);
-    await setupActions.runPreflight();
+    throw new Error("Choose a provider that supports background execution, or connect your existing agent app.");
   } catch (error) {
     if (!setupActions.isCurrentRequest(requestVersion)) {
       if (
@@ -525,5 +534,5 @@ async function startManagedAgent(
   }
 }
 
-  return { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, showDeliverySelector, deliveryMode, deliveryModeDescription, selectedPermissionProfiles, selectedPermissionProfile, showCursorMcpPolicySelector, selectedCursorMcpPolicy, selectedCursorMcpPolicyDescription, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, createWorktree, startManagedAgent };
+  return { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, secureStorageStatus, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, showDeliverySelector, deliveryMode, deliveryModeDescription, selectedPermissionProfiles, selectedPermissionProfile, showCursorMcpPolicySelector, selectedCursorMcpPolicy, selectedCursorMcpPolicyDescription, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent };
 }

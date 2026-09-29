@@ -12,6 +12,9 @@ if (testDatabaseUrl) {
 
 const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
 const dbModule = testDatabaseUrl ? await import("../db.js") : null;
+const rentalProjectionModule = testDatabaseUrl
+  ? await import("../rental/room-projection.js")
+  : null;
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -25,6 +28,7 @@ const migrateGitHubRepositoryCanonicalRoom = dbModule?.migrateGitHubRepositoryCa
 const upsertGitHubAppInstallation = dbModule?.upsertGitHubAppInstallation;
 const upsertGitHubAppRepository = dbModule?.upsertGitHubAppRepository;
 const upsertGitHubRepositoryLink = dbModule?.upsertGitHubRepositoryLink;
+const provisionRentalRoom = rentalProjectionModule?.provisionRentalRoom;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
 
@@ -186,7 +190,7 @@ test(
 );
 
 test(
-  "git child room lookup survives a repo rename with an existing generated child id",
+  "opaque Git child room identity survives a repo rename and remains discoverable by parent plus focus key",
   { concurrency: false, skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed migration tests" : false },
   async () => {
     if (
@@ -201,8 +205,6 @@ test(
     const oldRoomId = "github.com/brosincode/old-child-name";
     const nextRoomId = "github.com/brosincode/letagents-child";
     const focusKey = "git:branch:Y29kZXgvZ2l0LXJvb21z";
-    const oldChildRoomId = "git-room:github.com:brosincode/old-child-name:branch:Y29kZXgvZ2l0LXJvb21z";
-    const nextChildRoomId = "git-room:github.com:brosincode/letagents-child:branch:Y29kZXgvZ2l0LXJvb21z";
 
     await seedInstalledRepository({
       installationId: "inst-child-rename",
@@ -212,7 +214,6 @@ test(
       repoName: "old-child-name",
     });
     const child = await getOrCreateGitChildRoom({
-      roomId: oldChildRoomId,
       parentRoomId: oldRoomId,
       focusKey,
       displayName: "branch: codex/git-rooms",
@@ -224,15 +225,68 @@ test(
       repo_name: "letagents-child",
     });
 
-    const storedChild = await getProjectById(oldChildRoomId);
-    assert.equal(storedChild?.id, oldChildRoomId);
+    const storedChild = await getProjectById(child.room.id);
+    assert.match(storedChild?.id || "", /^focus_\d+$/);
     assert.equal(storedChild?.parent_room_id, nextRoomId);
 
     const lookedUpByNewLocator = await getGitChildRoom({
-      roomId: nextChildRoomId,
       parentRoomId: nextRoomId,
       focusKey,
     });
     assert.equal(lookedUpByNewLocator?.id, child.room.id);
   }
+);
+
+test(
+  "rental provisioning allocates a canonical focus room and remains idempotent",
+  { concurrency: false, skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed migration tests" : false },
+  async () => {
+    if (!createProjectWithName || !getProjectById || !pool || !provisionRentalRoom) {
+      throw new Error("DB-backed rental provisioning tests require TEST_DB_URL or DB_URL");
+    }
+
+    const parentRoomId = "github.com/brosincode/rental-parent";
+    const now = new Date().toISOString();
+    await createProjectWithName(parentRoomId);
+    await pool.query(
+      `INSERT INTO accounts (id, provider, provider_user_id, login, created_at, updated_at)
+       VALUES
+         ('acct-renter', 'github', 'renter-user', 'renter', $1, $1),
+         ('acct-provider', 'github', 'provider-user', 'provider', $1, $1)`,
+      [now],
+    );
+    await pool.query(
+      `INSERT INTO rental_listings (id, provider_account_id, display_name, ide_kind)
+       VALUES ('listing-canonical-room', 'acct-provider', 'Canonical room provider', 'codex')`,
+    );
+    await pool.query(
+      `INSERT INTO rental_sessions (
+         id, listing_id, renter_account_id, provider_account_id, target_room_id,
+         task_title, task_prompt, status
+       ) VALUES (
+         'session-canonical-room', 'listing-canonical-room', 'acct-renter',
+         'acct-provider', $1, 'Canonical room task', 'Verify room allocation', 'accepted'
+       )`,
+      [parentRoomId],
+    );
+
+    const first = await provisionRentalRoom({
+      sessionId: "session-canonical-room",
+      parentRoomId,
+      providerDisplayName: "Provider",
+    });
+    const second = await provisionRentalRoom({
+      sessionId: "session-canonical-room",
+      parentRoomId,
+      providerDisplayName: "Provider",
+    });
+    const projectedRoom = await getProjectById(first.roomId);
+
+    assert.match(first.roomId, /^focus_[1-9]\d*$/);
+    assert.equal(second.roomId, first.roomId);
+    assert.equal(second.participantId, first.participantId);
+    assert.equal(projectedRoom?.kind, "focus");
+    assert.equal(projectedRoom?.parent_room_id, parentRoomId);
+    assert.equal(projectedRoom?.focus_key, "rental:session-canonical-room");
+  },
 );

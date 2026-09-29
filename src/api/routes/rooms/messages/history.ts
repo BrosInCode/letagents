@@ -1,3 +1,4 @@
+import { parseScopedId } from "../../../db/utils.js";
 import type { Express } from "express";
 
 import {
@@ -22,7 +23,7 @@ import {
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
 import { resolveMessageActivationIdentity } from "./activation-identity.js";
-import { isDesktopHumanClient } from "./request-identity.js";
+import { isAppSession } from "../../../request/app-session.js";
 import { attachReceiptAuthorityActivations } from "./receipt-activation.js";
 import { resolveParticipantRoom } from "./helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
@@ -74,18 +75,19 @@ export function registerMessageHistoryRoutes(
       }
       const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
       const accountId = req.sessionAccount?.account_id ?? null;
-      const accountAgentRouting = isDesktopHumanClient(req);
+      const accountAgentRouting = isAppSession(req);
       const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
       const result = before === "latest"
-        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting })
+        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, wait_for_routing: activationIdentity?.session_kind === "worker" })
         : before
-          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting })
+          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, wait_for_routing: activationIdentity?.session_kind === "worker" })
           : await getMessages(project.id, {
             limit,
             after,
             include_prompt_only: includePromptOnly,
             account_id: accountId,
             account_agent_routing: accountAgentRouting,
+            wait_for_routing: activationIdentity?.session_kind === "worker",
           });
 
       res.json({
@@ -112,7 +114,7 @@ export function registerMessageHistoryRoutes(
       const message = await getMessageById(project.id, messageId, {
         include_prompt_only: includePromptOnly,
         account_id: req.sessionAccount?.account_id ?? null,
-        account_agent_routing: isDesktopHumanClient(req),
+        account_agent_routing: isAppSession(req),
       });
       if (!message) {
         // Body deliberately avoids the phrase "not found" so MCP clients can
@@ -150,7 +152,7 @@ export function registerMessageHistoryRoutes(
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const accountId = req.sessionAccount?.account_id ?? null;
-    const accountAgentRouting = isDesktopHumanClient(req);
+    const accountAgentRouting = isAppSession(req);
     let settled = false;
     let resolving = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -162,7 +164,7 @@ export function registerMessageHistoryRoutes(
         project,
         accessRoomName,
         transport: "long_poll",
-        trackDelivery: !isDesktopHumanClient(req),
+        trackDelivery: !isAppSession(req),
         onSessionDisconnected: resolveDisconnectedRequest,
         onAuthorizationDenied: denyRequest,
         reauthorize: deps.reauthorizeGitRoomParticipant,
@@ -229,6 +231,15 @@ export function registerMessageHistoryRoutes(
       });
     }
 
+    // A page may carry catch-up rows older than the poller's cursor; report
+    // the cursor itself so durable progress never regresses.
+    function cursorFloor(page: readonly Message[]): { last_observed_message_id?: string } {
+      const cursorNumber = after ? parseScopedId(after, "msg") : null;
+      if (!cursorNumber) return {};
+      const highest = Math.max(0, ...page.map((message) => parseScopedId(message.id, "msg") ?? 0));
+      return cursorNumber > highest ? { last_observed_message_id: after } : {};
+    }
+
     async function resolveRequestAsync(
       msgs: Message[],
       hasMore = false,
@@ -254,6 +265,7 @@ export function registerMessageHistoryRoutes(
           room_id: projectId,
           messages: attached,
           has_more: hasMore,
+          ...cursorFloor(attached),
         });
       } catch (error) {
         console.error(`[room messages poll] failed to resolve poll for ${projectId}`, error);
@@ -301,7 +313,14 @@ export function registerMessageHistoryRoutes(
         }
         settled = true;
         await cleanup();
-        res.json({ room_id: projectId, messages: [attached], has_more: false });
+        // A re-published (routed) message can be older than the poller's
+        // cursor; never let it regress durable progress.
+        res.json({
+          room_id: projectId,
+          messages: [attached],
+          has_more: false,
+          ...cursorFloor([attached]),
+        });
       } catch (error) {
         console.error(`[room messages poll] failed to hydrate broker message for ${projectId}`, error);
         if (!settled) {
@@ -363,6 +382,7 @@ export function registerMessageHistoryRoutes(
         limit,
         includePromptOnly,
         load: deps.getMessagesAfter ?? getMessagesAfter,
+        waitForRouting: liveController.activationIdentity?.session_kind === "worker",
       });
       if (next.messages.length > 0) {
         await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
@@ -382,8 +402,9 @@ export function registerMessageHistoryRoutes(
           await refreshAfterCursor();
           continue;
         }
-        if (delivery.envelope.event.kind === "message_created") {
-          await resolveCanonicalEventAsync(delivery.envelope.event.message);
+        if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
+          if (liveController.activationIdentity?.session_kind === "worker") await refreshAfterCursor();
+          else await resolveCanonicalEventAsync(delivery.envelope.event.message);
         }
       }
     }
@@ -426,12 +447,14 @@ export function registerMessageHistoryRoutes(
         include_prompt_only: includePromptOnly,
         account_id: accountId,
         account_agent_routing: accountAgentRouting,
+        wait_for_routing: liveController.activationIdentity?.session_kind === "worker",
       });
-      if (!settled && existing.messages.length > 0) {
+      const page = existing.messages;
+      if (!settled && page.length > 0) {
         // The initial/backlog response is awaited so the route handler does
         // not return before the response body is written; only the timeout
         // and message-created event callbacks stay fire-and-forget.
-        await resolveRequestAsync(existing.messages, existing.has_more, { includeTaskOwnerLeases: false });
+        await resolveRequestAsync(page, existing.has_more, { includeTaskOwnerLeases: false });
       }
     } catch (error) {
       if (!settled) {
@@ -474,7 +497,7 @@ export function registerMessageHistoryRoutes(
         limit,
         before,
         account_id: req.sessionAccount?.account_id ?? null,
-        account_agent_routing: isDesktopHumanClient(req),
+        account_agent_routing: isAppSession(req),
       });
       const attachedRoots = await (
         deps.attachReceiptAuthorityActivations ?? attachReceiptAuthorityActivations
@@ -525,7 +548,7 @@ export function registerMessageHistoryRoutes(
         before,
         include_prompt_only: includePromptOnly,
         account_id: req.sessionAccount?.account_id ?? null,
-        account_agent_routing: isDesktopHumanClient(req),
+        account_agent_routing: isAppSession(req),
       });
       if (!page) {
         res.status(404).json({ error: "thread not found" });

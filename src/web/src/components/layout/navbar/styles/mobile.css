@@ -5,8 +5,8 @@
 }
 
 .nav-mobile-toggle {
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
@@ -22,6 +22,9 @@
   left: 0;
   right: 0;
   padding: 12px;
+  max-height: calc(100dvh - 96px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
   background: rgba(12, 12, 12, 0.96);
@@ -36,8 +39,9 @@
 
 .nav-mobile-link,
 .nav-mobile-auth-button,
+.nav-mobile-auth .nav-btn,
 .nav-mobile-signout {
-  min-height: 42px;
+  min-height: 44px;
 }
 
 .nav-mobile-link {
@@ -54,9 +58,9 @@
 }
 
 .nav-mobile-auth {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   margin-top: 10px;
   padding-top: 10px;
@@ -65,9 +69,26 @@
 
 .nav-mobile-user {
   display: flex;
+  grid-column: 1 / -1;
+  grid-row: 1;
   align-items: center;
   min-width: 0;
   gap: 8px;
+}
+
+.nav-mobile-user .nav-avatar,
+.nav-mobile-user .nav-avatar-fallback {
+  flex-shrink: 0;
+}
+
+.nav-mobile-auth-button {
+  grid-column: 1 / -1;
+  justify-content: center;
+}
+
+.nav-mobile-signout {
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.76);
 }
 
 .nav-mobile-username {

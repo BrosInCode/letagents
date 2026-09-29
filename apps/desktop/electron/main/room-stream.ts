@@ -19,6 +19,7 @@ import {
   getLocalChatThreadRoutingAgentKeysForRoots,
 } from "./rooms/messages/local-store.js";
 import { resolveLocalThreadReaderKey } from "./rooms/messages/thread-reader.js";
+import { subscribeLocalTasks } from "./rooms/local-task-subscription.js";
 import {
   mapDesktopReasoningSessionPayload,
   mapDesktopReasoningUpdatePayload,
@@ -45,6 +46,7 @@ import {
 
 let activeRoomStream: {
   roomIdentifier: string;
+  canonicalRoomIdentifier: string | null;
   abortController: AbortController;
   reconnectTimer: NodeJS.Timeout | null;
   pollAbortController: AbortController | null;
@@ -470,6 +472,8 @@ let localAccountAgentRoutingHydrator: LocalAccountAgentRoutingHydrator =
 type ManagedAgentRoomStreamDispatcher = typeof dispatchRoomStreamEventToManagedAgents;
 let managedAgentRoomStreamDispatcher: ManagedAgentRoomStreamDispatcher =
   dispatchRoomStreamEventToManagedAgents;
+type ExecutionDelegationInvalidationHandler = (roomId: string) => void | Promise<void>;
+let executionDelegationInvalidationHandler: ExecutionDelegationInvalidationHandler = () => undefined;
 
 export function setLocalAccountAgentRoutingHydratorForTest(
   hydrator: LocalAccountAgentRoutingHydrator | null,
@@ -481,6 +485,13 @@ export function setManagedAgentRoomStreamDispatcherForTest(
   dispatcher: ManagedAgentRoomStreamDispatcher | null,
 ): void {
   managedAgentRoomStreamDispatcher = dispatcher ?? dispatchRoomStreamEventToManagedAgents;
+}
+
+/** Main-process-only wake; pointer payloads never become renderer authority. */
+export function setExecutionDelegationInvalidationHandler(
+  handler: ExecutionDelegationInvalidationHandler | null,
+): void {
+  executionDelegationInvalidationHandler = handler ?? (() => undefined);
 }
 
 export function emitPersistedLocalRoomMessage(
@@ -696,6 +707,10 @@ function handleRoomStreamFrame(
     repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+    return;
+  }
 
   const eventRoomIdentifier =
     typeof payload.room_id === "string" ? payload.room_id : roomIdentifier;
@@ -727,6 +742,9 @@ function handleRoomStreamFrame(
       stageOrApplyRoomEventCursor(roomIdentifier, true, syncCursor);
     }
     if (activeRoomStream?.roomIdentifier === roomIdentifier) {
+      if (isValidStreamRoomIdentifier(payload.room_id)) {
+        activeRoomStream.canonicalRoomIdentifier = payload.room_id;
+      }
       activeRoomStream.handshakeReceived = true;
       if (activeRoomStream.handshakeTimer) clearTimeout(activeRoomStream.handshakeTimer);
       activeRoomStream.handshakeTimer = null;
@@ -893,17 +911,55 @@ function handleRoomStreamFrame(
 
   if (eventName === "message_info_updated") {
     if (
-      !Array.isArray(payload.message_ids)
-      || payload.message_ids.some((messageId) => typeof messageId !== "string" || !messageId)
+      payload.message_ids !== null && (
+        !Array.isArray(payload.message_ids)
+        || payload.message_ids.some((messageId) => typeof messageId !== "string" || !messageId)
+      )
     ) {
       repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
       return;
     }
     // Desktop Message Info is fetched on demand and has no live invalidation
-    // surface yet. Treat the bounded server invalidation as a valid no-op so
+    // surface yet. Null is the server's concealment-safe room invalidation;
+    // arrays retain their existing compatibility. Treat both as a valid no-op so
     // it advances the broker cursor without turning every read receipt into a
     // full room gap/snapshot repair. Malformed typed frames still fail closed.
     stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+    return;
+  }
+
+  if (eventName === "resource_invalidation_v1") {
+    const keys = Object.keys(payload).sort();
+    const payloadRoomIdentifier = payload.room_id;
+    const resource = payload.resource;
+    if (
+      keys.length !== 2
+      || keys[0] !== "resource"
+      || keys[1] !== "room_id"
+      || !isValidStreamRoomIdentifier(payloadRoomIdentifier)
+      || typeof resource !== "string"
+      || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(resource)
+      || payloadRoomIdentifier !== (
+        activeRoomStream?.roomIdentifier === roomIdentifier
+          ? activeRoomStream.canonicalRoomIdentifier ?? roomIdentifier
+          : roomIdentifier
+      )
+    ) {
+      repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+      return;
+    }
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+    if (resource === "agent_work") {
+      emitRoomStreamEvent({
+        type: "resource_invalidation",
+        roomIdentifier: payloadRoomIdentifier,
+        resource,
+      }, { deliverToManagedAgents: false });
+    } else if (resource === "execution_delegation") {
+      void Promise.resolve(executionDelegationInvalidationHandler(payloadRoomIdentifier)).catch((error) => {
+        console.warn(`Execution delegation invalidation failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     return;
   }
 
@@ -920,7 +976,16 @@ function handleRoomStreamFrame(
     ) {
       activeRoomStream.lastMessageId = messageId;
     }
-    const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(eventRoomIdentifier, messageId);
+    // A routed frame re-publishes an already-seen message once the server has
+    // appended routing receipts after commit. It carries new managed-agent
+    // authority, so it must pass the by-id dedupe that drops ordinary replays.
+    const routingPass = typeof payload.routing_pass === "number" && payload.routing_pass > 1
+      ? payload.routing_pass
+      : null;
+    const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(
+      eventRoomIdentifier,
+      routingPass ? `${messageId}#routing-pass-${routingPass}` : messageId,
+    );
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier: eventRoomIdentifier,
@@ -930,7 +995,23 @@ function handleRoomStreamFrame(
     }, { deliverToManagedAgents: shouldDeliverToManagedAgents });
     return;
   }
-  repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+  // Newer servers may publish event types this client does not render. A
+  // bounded, well-formed unknown event is a no-op, not evidence of a gap.
+  const bytes = Buffer.byteLength(eventName) + Buffer.byteLength(data)
+    + (eventCursor ? Buffer.byteLength(eventCursor) : 0);
+  if (bytes > MAX_NATIVE_SSE_FRAME_BYTES) {
+    repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+    return;
+  }
+  stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+}
+
+function isValidStreamRoomIdentifier(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 512
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 function queueOrHandleRoomStreamFrame(
@@ -1012,7 +1093,7 @@ async function fetchRoomMessagePollPage(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "application/json",
-    "X-LetAgents-Desktop-Client": "1",
+
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
@@ -1147,7 +1228,7 @@ async function fetchLatestRoomMessagePage(
   signal: AbortSignal,
 ): Promise<void> {
   const storedAuth = await readStoredAuth();
-  const headers = new Headers({ Accept: "application/json", "X-LetAgents-Desktop-Client": "1" });
+  const headers = new Headers({ Accept: "application/json" });
   if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
   const response = await fetch(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
@@ -1243,7 +1324,7 @@ async function emitLatestRoomMessageWindow(
   stream: NonNullable<typeof activeRoomStream>,
 ): Promise<void> {
   const storedAuth = await readStoredAuth();
-  const headers = new Headers({ Accept: "application/json", "X-LetAgents-Desktop-Client": "1" });
+  const headers = new Headers({ Accept: "application/json" });
   if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
   const response = await fetch(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
@@ -1488,7 +1569,7 @@ async function openDesktopRoomStream(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "text/event-stream",
-    "X-LetAgents-Desktop-Client": "1",
+
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
@@ -1498,10 +1579,11 @@ async function openDesktopRoomStream(
   }
 
   try {
+    const streamParams = new URLSearchParams();
+    if (stream.lastMessageId) streamParams.set("after", stream.lastMessageId);
+    streamParams.append("stream_capability", "resource_invalidation_v1");
     const response = await fetch(
-      `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/stream${
-        stream.lastMessageId ? `?after=${encodeURIComponent(stream.lastMessageId)}` : ""
-      }`,
+      `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/stream?${streamParams.toString()}`,
       {
         headers: requestHeaders,
         signal: stream.abortController.signal,
@@ -1653,11 +1735,13 @@ export async function startDesktopRoomStream(
     return;
   }
 
-  await stopDesktopRoomStream();
+  // Stop and replace synchronously so another start cannot claim the gap.
+  stopActiveRoomStream();
   let resolveReady: (() => void) | null = null;
   const readyPromise = new Promise<void>((resolve) => { resolveReady = resolve; });
   activeRoomStream = {
     roomIdentifier: trimmedRoomIdentifier,
+    canonicalRoomIdentifier: null,
     abortController: new AbortController(),
     reconnectTimer: null,
     pollAbortController: null,
@@ -1706,34 +1790,70 @@ export async function startDesktopRoomStream(
       type: "open",
       roomIdentifier: trimmedRoomIdentifier,
     });
-    activeRoomStream.resolveReady?.();
-    activeRoomStream.resolveReady = null;
+    startingStream.resolveReady?.();
+    startingStream.resolveReady = null;
     return;
   }
-  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  let storage;
+  try {
+    storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  } catch (error) {
+    if (!isCurrentRoomStream(startingStream)) return;
+    stopActiveRoomStream();
+    throw error;
+  }
+  if (!isCurrentRoomStream(startingStream)) return;
   if (storage.effectiveMode === "local") {
-    activeRoomStream.localRoomIdentifier = localRoomIdentifierForStorage(
+    startingStream.localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
       trimmedRoomIdentifier,
     );
+    let previousTasks = new Map<string, string>();
+    const reportTaskError = (error: unknown): void => {
+      if (!isCurrentRoomStream(startingStream)) return;
+      emitRoomStreamEvent({ type: "error", roomIdentifier: trimmedRoomIdentifier,
+        message: error instanceof Error ? error.message : "Local board updates disconnected." },
+      { deliverToManagedAgents: false });
+    };
+    void subscribeLocalTasks(startingStream.localRoomIdentifier, startingStream.abortController.signal,
+      tasks => {
+        if (!isCurrentRoomStream(startingStream)) return;
+        const nextTasks = new Map(tasks.map(task => [task.id, JSON.stringify(task)]));
+        for (const task of tasks) {
+          if (previousTasks.get(task.id) === nextTasks.get(task.id)) continue;
+          emitRoomStreamEvent({ type: "task_update", roomIdentifier: trimmedRoomIdentifier, task },
+            { deliverToManagedAgents: false });
+        }
+        for (const taskId of previousTasks.keys()) {
+          if (!nextTasks.has(taskId)) {
+            emitRoomStreamEvent({ type: "task_remove", roomIdentifier: trimmedRoomIdentifier, taskId },
+              { deliverToManagedAgents: false });
+          }
+        }
+        previousTasks = nextTasks;
+      }, reportTaskError).catch(reportTaskError);
     void pollLocalDesktopRoomMessages(
-      activeRoomStream,
-      activeRoomStream.localRoomIdentifier,
+      startingStream,
+      startingStream.localRoomIdentifier,
     );
-    activeRoomStream.resolveReady?.();
-    activeRoomStream.resolveReady = null;
+    startingStream.resolveReady?.();
+    startingStream.resolveReady = null;
     return;
   }
   // Cloud rooms start with SSE only. The long-poll is now a fallback that
   // `openDesktopRoomStream` brings up if/when SSE drops, and retires again on
   // reconnect — instead of running a second permanent transport per room.
-  void openDesktopRoomStream(activeRoomStream);
-  await activeRoomStream.readyPromise;
+  void openDesktopRoomStream(startingStream);
+  await startingStream.readyPromise;
 }
 
 export async function stopDesktopRoomStream(
   roomIdentifier?: string | null,
 ): Promise<void> {
+  stopActiveRoomStream(roomIdentifier);
+}
+
+function stopActiveRoomStream(roomIdentifier?: string | null): void {
   if (!activeRoomStream) return;
   if (
     roomIdentifier &&

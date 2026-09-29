@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { assertWorkerConnection } from "../../../worker-call-context.js";
 import { z } from "zod";
 import { getPollTimeoutCapMs } from "../../../../shared/poll-timeout-cap.js";
 import { encodeRoomIdPath } from "../../../room-id.js";
@@ -36,8 +37,10 @@ import {
 } from "../../runtime.js";
 import {
   requireValidWorkerBearerRuntime,
+  isCustodialPolling,
   supervisedBoundedDeliveryDisabledToolResult,
 } from "../../runtime/worker-bearer.js";
+import { resolveWorkerToolIdentity } from "../../runtime/agent-sessions.js";
 import {
   attachAgentMessageActivations,
   createGlobalAgentAddressResolver,
@@ -598,16 +601,20 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const targetProjectId = getFallbackProjectId();
       const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
       const sessionRoomId = targetRoomId ?? currentRoom?.room_id ?? localRoomId ?? null;
-      const routingStateSnapshot = getStoredAgentRoutingStateSnapshot(sessionRoomId ?? "");
+      const custodial = isCustodialPolling();
+      const routingStateSnapshot = custodial ? { complete: true } : getStoredAgentRoutingStateSnapshot(sessionRoomId ?? "");
       const localStorageEnabled = Boolean(
         localRoomId && await isLocalRoomStorageEnabled(localRoomId),
       );
       if (localStorageEnabled && !routingStateSnapshot.complete) {
         throw new Error("Local agent routing state is unavailable; retry after restoring the state file.");
       }
-      const identity = await ensureAgentIdentity();
-      const agentSession = resolveWaitAgentSession(sessionRoomId, agent_session_id);
-      if (agentSession) {
+      const exactIdentity = custodial ? await resolveWorkerToolIdentity({ roomId: sessionRoomId, agentSessionId: agent_session_id }) : null;
+      const identity = exactIdentity?.identity ?? await ensureAgentIdentity();
+      const agentSession = exactIdentity?.agentSession ?? resolveWaitAgentSession(sessionRoomId, agent_session_id);
+      if (custodial) {
+        if (!agentSession || !after_message_id) throw new Error("Custodial polling requires exact worker identity and durable cursor.");
+      } else if (agentSession) {
         // Registration (or a successor generation) must bind strictly once.
         // Later waits use a read-only exact verification capped at 250ms, so a
         // wedged daemon cannot consume the room-poll budget and an old worker
@@ -656,6 +663,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
               limit: MAX_WAIT_MESSAGES_PER_CALL,
               include_prompt_only: true,
             });
+        assertWorkerConnection(agentSession ?? undefined);
         const messages = await attachLocalActivationMetadata(effectiveLocalRoomId, result.messages, agentSession, {
           includeTaskOwnerLeases: !replayingExistingMessages,
           activeSessionRoomId: cloudRoomId || sessionRoomId,
@@ -731,6 +739,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
             appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
           project_path: (targetProjectId) =>
             appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
+          preserve_session_cursor: true,
           options: buildWaitForMessagesRequestOptions({
             deliveryHeaders,
             signal: AbortSignal.timeout(clientTimeout),
@@ -793,12 +802,14 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       if (bounded.omittedMessageCount > 0) {
         output.omitted_message_count = bounded.omittedMessageCount;
       }
-      if (apiObservedCursor) output.last_observed_message_id = apiObservedCursor;
+      // The API cursor can cover concealed messages, but not visible messages
+      // omitted by our own byte bound. Resume after the retained page instead.
+      const observedCursor = !bounded.truncated && apiObservedCursor
+        ? apiObservedCursor
+        : routing.last_observed_message_id ?? undefined;
+      if (observedCursor) output.last_observed_message_id = observedCursor;
 
       if (targetRoomId) {
-        const observedCursor = apiObservedCursor
-          ?? routing.last_observed_message_id
-          ?? getLastMessageId(output);
         touchRoomSession(targetRoomId, observedCursor);
 
         if (allMessages.length > 0 && agentSession) {

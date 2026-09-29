@@ -46,6 +46,7 @@ type ActiveRepoStatusWatch = {
   intervalTimer: NodeJS.Timeout | null;
   refreshInFlight: Promise<void> | null;
   pendingInvalidation: RepoStatusInvalidation | null;
+  pendingImmediateRefresh: boolean;
   idlePromise: Promise<void> | null;
   resolveIdle: (() => void) | null;
   lastStatusFingerprint: string | null;
@@ -75,6 +76,8 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
   try {
     const status = await repoStatusWatchHooks.buildRepoStatus(rootPath, {
       signal: abortController.signal,
+      // The full reconciliation below supplies statistics after listeners exist.
+      includeBranchDeltas: false,
     });
     abortController.signal.throwIfAborted();
     if (requestId !== watchRequestId) return status;
@@ -94,6 +97,7 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
       intervalTimer: null,
       refreshInFlight: null,
       pendingInvalidation: null,
+      pendingImmediateRefresh: false,
       idlePromise: null,
       resolveIdle: null,
       lastStatusFingerprint: repoStatusWatchFingerprint(status),
@@ -174,6 +178,7 @@ function closeActiveWatch(): void {
   watchState.debounceTimer = null;
   watchState.intervalTimer = null;
   watchState.pendingInvalidation = null;
+  watchState.pendingImmediateRefresh = false;
   resolveRepoStatusIdle(watchState);
 }
 
@@ -340,6 +345,7 @@ function requestRepoStatusRefresh(
     watchState.pendingInvalidation,
     invalidation,
   );
+  watchState.pendingImmediateRefresh ||= !debounce;
   if (!shouldScheduleRepoStatusRefreshForWindow(repoStatusWatchHooks.getMainWindow())) {
     return Promise.resolve();
   }
@@ -375,6 +381,7 @@ function startRefreshQueue(watchState: ActiveRepoStatusWatch): void {
     return;
   }
   watchState.pendingInvalidation = null;
+  watchState.pendingImmediateRefresh = false;
 
   const refreshPromise = performRepoStatusRefresh(watchState, invalidation);
   watchState.refreshInFlight = refreshPromise;
@@ -387,7 +394,13 @@ function startRefreshQueue(watchState: ActiveRepoStatusWatch): void {
       && watchState.pendingInvalidation
       && shouldScheduleRepoStatusRefreshForWindow(repoStatusWatchHooks.getMainWindow())
     ) {
-      startRefreshQueue(watchState);
+      // Signals arriving during a scan still need the same coalescing window.
+      // Explicit refreshes retain their immediate trailing scan.
+      void requestRepoStatusRefresh(
+        watchState,
+        watchState.pendingInvalidation,
+        !watchState.pendingImmediateRefresh,
+      );
       return;
     }
     resolveRepoStatusIdle(watchState);

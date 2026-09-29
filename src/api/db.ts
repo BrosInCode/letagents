@@ -15,6 +15,14 @@ export type { ReasoningSession, ReasoningSessionUpdate, Message, MessageAccountA
 export type { TaskLeaseKind, TaskLeaseStatus, TaskLockScope, TaskLockReason, CoordinationDecision, Task, TaskStalePromptState, TaskLease, TaskWorkLeaseCreationInput } from "./db/types.js";
 export type { TaskLock, StaleTaskPromptMute, CoordinationEvent, TaskOwnershipState, TaskWorkLeaseActionConflict, GitHubRoomEvent, GitHubRoomEventMetadata, TaskGitHubArtifactStatus } from "./db/types.js";
 export type { WorkflowEffect, WorkflowEffectKind, WorkflowEffectRow, WorkflowEffectState } from "./db/types.js";
+export type {
+  ExecutionDelegationCategory,
+  ExecutionDelegationDecision,
+  ExecutionDelegationDecisionChoice,
+  ExecutionDelegationDecisionForHost,
+  ExecutionDelegationGrant,
+  ExecutionDelegationRiskCeiling,
+} from "./db/types.js";
 export { createProject, createProjectWithName, getOrCreateProjectByName, getOrCreateCanonicalRoom, getOrCreateGitChildRoom, getGitChildRoom, getProjectByName, getAllProjects, getProjectByCode, getRoomAlias } from "./db/rooms.js";
 export { getProjectById, rotateProjectCode, updateProjectDisplayName, createRoomAlias } from "./db/rooms.js";
 export { getFocusRoomsForParent, getActiveFocusRoomForTask, getFocusRoomByKey, activateFocusRoom, archiveFocusRoom, claimGitRefFocusRoomLifecycleEvent, concludeFocusRoom, updateFocusRoomSettings, createFocusRoomFromIntent, createFocusRoomForTask } from "./db/focus-rooms.js";
@@ -32,18 +40,26 @@ export { upsertRoomAgentPresence, upsertRoomAgentLivenessObservation, heartbeatN
 export { setRoomLiveAgentSuppressed, getRoomAgentPresence, getRoomAgentPresenceSnapshot } from "./db/presence.js";
 export { listLivenessAnnouncementCandidates, getLivenessAnnouncementCandidate, markAgentOfflineAnnounced, markAgentRecoveryAnnounced, getRoomLiveAgentSuppressionActorLabels } from "./db/presence.js";
 export type { LivenessAnnouncementCandidate } from "./db/presence.js";
-export { upsertRoomParticipant, getRoomParticipants, getRoomParticipantsForRooms, setRoomParticipantsHidden } from "./db/participants.js";
+export { upsertRoomParticipant, getParticipantOwnersProvenByMessages, claimRoomParticipantOwner, getRoomParticipants, getRoomParticipantsForRooms, setRoomParticipantsHidden } from "./db/participants.js";
 export { createReasoningSession, getReasoningSessions, getRoomReasoningSessionCountsByActor, getReasoningSessionById, getReasoningSessionUpdates, appendReasoningSessionUpdate, updateReasoningSession } from "./db/reasoning.js";
 export { createAuthState, consumeAuthState, upsertAccount, createSession, refreshProviderAccessTokenForAccount, getSessionAccountByToken, deleteSessionByToken, createOwnerToken } from "./db/auth.js";
-export { getOwnerTokenAccountByToken, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, createFencedRoomAgentSession, createOrRotateSupervisorWorkerSession, SupervisorGrantFenceStaleError, isSupervisorGrantFenceStaleError, SupervisorGrantProvisionConflictError, isSupervisorGrantProvisionConflictError, isActiveRoomAgentSessionStaleForRegistration, isActiveAgentInstanceConflictError, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, getSupervisorRoomAgentSession, getRoomAgentSessionBearerByToken, rotateRoomAgentSessionBearer, revokeRoomAgentSessionBearer, getLastEndedWorkerSessionDisplayName, touchRoomAgentSession, createSupervisorHostGrant, getSupervisorHostGrantByToken, getSupervisorHostGrantById, rotateSupervisorHostGrant, advanceSupervisorHostGrantGeneration, revokeSupervisorHostGrant } from "./db/auth.js";
+export { getOwnerTokenAccountByToken, deleteOwnerTokenById, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, createFencedRoomAgentSession, createOrRotateSupervisorWorkerSession, SupervisorGrantFenceStaleError, isSupervisorGrantFenceStaleError, SupervisorGrantProvisionConflictError, isSupervisorGrantProvisionConflictError, isActiveRoomAgentSessionStaleForRegistration, isActiveAgentInstanceConflictError, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, getSupervisorRoomAgentSession, getRoomAgentSessionBearerByToken, rotateRoomAgentSessionBearer, revokeRoomAgentSessionBearer, getLastEndedWorkerSessionDisplayName, getRoomWorkerNameHolders, isWorkerDisplayNameExhaustedError, touchRoomAgentSession, createSupervisorHostGrant, getSupervisorHostGrantByToken, getSupervisorHostGrantById, rotateSupervisorHostGrant, advanceSupervisorHostGrantGeneration, revokeSupervisorHostGrant } from "./db/auth.js";
 export {
   endRoomAgentSession,
   assignProjectAdmin,
   assignProjectAdminIfRoomHasNoAdmins,
   isProjectAdmin,
 } from "./db/auth.js";
-export { isValidTransition, getTasksForRooms, createTask, approveTaskCreateBoardIntent, acceptProposedTaskTx, normalizeTaskCreateBoardIntentPayload, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskBySourceMessageId } from "./db/tasks.js";
-export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction } from "./db/tasks.js";
+export {
+  getSupervisorGrantOwnerAccount,
+  listSupervisorGrantAuthoritiesForRepository,
+  revokeSupervisorGrantAuthority,
+  revokeSupervisorGrantsForGitHubInstallationAccessChange,
+  revokeSupervisorGrantsForRepositoryAccessChange,
+} from "./db/supervisor-grant-revocation.js";
+export type { SupervisorGrantOwnerAccount } from "./db/supervisor-grant-revocation.js";
+export { isValidTransition, getTasksForRooms, createTask, approveTaskCreateBoardIntent, acceptProposedTaskTx, normalizeTaskCreateBoardIntentPayload, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskByClientId, findTaskBySourceMessageId } from "./db/tasks.js";
+export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction, TaskContentConflictError } from "./db/tasks.js";
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
 export { applyTaskWorkLeaseAction, updateTaskLeaseWorkflowRefs, createTaskLock, getActiveTaskLocks, clearTaskLock, createCoordinationEvent } from "./db/coordination.js";
 export { rebindTaskLease, assertLeaseEpochCurrentTx, acquireLeaseFenceTx, recordRebindAttestation, LeaseFenceStaleError, isRebindAttestationCause, isUuidShapedExecutionId, REBIND_ATTESTATION_CAUSES } from "./db/coordination.js";
@@ -65,6 +81,37 @@ export {
   workflowEffectRequestFingerprint,
 } from "./db/workflow-effects.js";
 export type { RebindTaskLeaseInput, RebindTaskLeaseResult, RebindTaskLeaseFailure, LeaseFence, RecordRebindAttestationInput, RecordRebindAttestationResult, RecordRebindAttestationFailure, RebindAttestationCause } from "./db/coordination.js";
+export {
+  ExecutionDelegationAuthorityError,
+  ExecutionDelegationIdempotencyConflictError,
+  ExecutionDelegationRevisionConflictError,
+  ExecutionDelegationTerminalError,
+  admitExecutionDelegationGrantRevision,
+  getExecutionDelegationGrantForAccount,
+  getExecutionDelegationGrantForHost,
+  getExecutionDelegationGrantForOwner,
+  listExecutionDelegationIdsForHost,
+  revokeExecutionDelegationGrant,
+} from "./db/execution-delegation-grants.js";
+export {
+  ExecutionDelegationDecisionAuthorityError,
+  ExecutionDelegationDecisionConflictError,
+  ExecutionDelegationDecisionIdempotencyConflictError,
+  ExecutionDelegationDecisionPublicationClosedError,
+  ExecutionDelegationDecisionRevisionConflictError,
+  ExecutionDelegationDecisionTerminalError,
+  admitExecutionDelegationDecision,
+  getExecutionDelegationDecisionForHost,
+  listExecutionDelegationDecisionIdsForHost,
+} from "./db/execution-delegation-decisions.js";
+export {
+  closeExecutionApprovalPublication,
+  ExecutionApprovalPublicationError,
+  getExecutionApprovalPublicationForApprover,
+  listExecutionApprovalPublicationsForApprover,
+  pruneExpiredExecutionApprovalPublications,
+  publishExecutionApprovalPublication,
+} from "./db/execution-approval-publications.js";
 export {
   assertConsumeBoardIntentApproval,
   BoardIntentApprovalConsumptionError,
@@ -90,3 +137,5 @@ export {
   verifyBoardIntentApproval,
   getBoardGovernanceSnapshot,
 } from "./db/coordination.js";
+
+export { approveTaskClaimBoardIntent, BoardIntentClaimConflictError } from "./db/coordination/board-intent-claim.js";

@@ -6,6 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { assertSquareImageDimensions, parseSipsDimensions } from "./packaging-validation.mjs";
+import {
+  assertDesktopArchitecture,
+  createDesktopUpdaterConfig,
+} from "./release-metadata.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const release = join(root, "release", "LetAgents-darwin");
@@ -18,6 +22,7 @@ const bundleIdentifier = "chat.letagents.desktop";
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const workspacePackageJson = JSON.parse(await readFile(join(root, "..", "..", "package.json"), "utf8"));
 const desktopVersion = packageJson.version;
+const desktopArch = assertDesktopArchitecture(process.arch);
 const openCodeVersion = packageJson.letagentsRuntime?.openCodeVersion;
 const mcpVersion = packageJson.letagentsRuntime?.mcpVersion;
 const execFileAsync = promisify(execFile);
@@ -56,7 +61,7 @@ async function rebrandHelper({ qualifier = "", bundleIdSuffix = "" }) {
 }
 
 async function createApplicationIcon() {
-  const source = join(root, "..", "..", "docs", "logo.png");
+  const source = join(root, "..", "..", "brand", "letagents-app-icon.png");
   const iconset = join(release, "LetAgents.iconset");
   const { stdout: sourceMetadata } = await execFileAsync("sips", ["-g", "pixelWidth", "-g", "pixelHeight", source]);
   assertSquareImageDimensions(parseSipsDimensions(sourceMetadata), source);
@@ -119,6 +124,10 @@ for (const key of [
   await removePlistKey(infoPlist, key);
 }
 await createApplicationIcon();
+await writeFile(
+  join(resources, "app-update.yml"),
+  `${JSON.stringify(createDesktopUpdaterConfig({ arch: desktopArch }), null, 2)}\n`,
+);
 await mkdir(app, { recursive: true });
 for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
   await cp(join(root, directory), join(app, directory), { recursive: true });
@@ -220,6 +229,7 @@ const requiredAppFiles = [
   "LICENSE",
   "node_modules/vue/package.json",
   "runtime/letagents/node_modules/letagents/dist/mcp/server.js",
+  "runtime/letagents/node_modules/letagents/dist/mcp/server/daemon-tool-executor.js",
   "runtime/letagents/node_modules/letagents/package.json",
   "runtime/letagents/package-lock.json",
   "runtime/opencode",
@@ -229,8 +239,14 @@ const required = [
     absolutePath: join(app, relative),
     manifestPath: relative,
   })),
+  {
+    absolutePath: join(resources, "app-update.yml"),
+    manifestPath: "Contents/Resources/app-update.yml",
+  },
   ...[
+    "shared/agent-codenames.mjs",
     "shared/message-contracts.mjs",
+    "shared/permission-review.mjs",
     "shared/routing-aliases.mjs",
     "shared/sqlite-thread-routing.mjs",
   ].map((relative) => ({

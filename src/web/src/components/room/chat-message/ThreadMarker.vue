@@ -31,7 +31,7 @@ const emit = defineEmits<{
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  max-width: min(100%, 780px);
+  max-width: min(calc(100% - 14px), 780px);
   margin-top: 8px;
   margin-left: 14px;
   padding: 7px 10px;
@@ -85,7 +85,9 @@ const emit = defineEmits<{
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
-    margin-left: 12px;
+    margin-left: 0;
+    max-width: 100%;
+    min-height: 44px;
     padding: 6px 8px;
   }
   .thread-marker::before { display: none; }

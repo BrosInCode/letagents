@@ -1,3 +1,4 @@
+import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -9,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
 import {
   ProviderContinuationMissingError,
+  sameProviderConnectionIdentity,
   synthesizeTerminalPayload,
   type ProviderActivityEvent,
   type ProviderAdapter,
@@ -39,6 +41,7 @@ import {
   defaultObserveProcessExit,
   defaultSignalProcess,
   delay,
+  redactCredentialText,
   safeStreamPayload,
   sameProcessBirthIdentity,
   terminateFreshLaunch,
@@ -52,24 +55,35 @@ import {
   openCodeAuthContent,
   openCodeConfig,
   parseConfiguredOpenModel,
+  seedOpenCodeConfigHome,
+  shieldOwnerInstructions,
   supervisedOpenCodeMcpEnvironment,
+  workspaceOpenCodeEnvironment,
+  supervisedOpenCodePermissionProfileId,
 } from "./opencode-launch-contract.js";
-import { resolveOpenCodeBinary } from "./opencode-runtime.js";
+import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
+import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
+import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
 import {
   assistantsFor,
   eventReferencesSession,
   finalAssistantFor,
   messageCompleted,
   messageError,
+  messageFinishReason,
   messageText,
   mintNativeUserMessageId,
   nativelyOrderedMessageId,
+  OpenCodePermissionReplyError,
   OpenCodeServerClient,
+  parseOpenCodePermissionEvent,
   record,
   type JsonRecord,
   type OpenCodeEvent,
   type OpenCodeMessage,
   type OpenCodePart,
+  type OpenCodePermissionRequest,
+  type OpenCodePermissionTurnCorrelation,
   type OpenCodeRuntimeAuth,
 } from "./opencode-server-client.js";
 
@@ -122,14 +136,24 @@ const CAPABILITIES: ProviderAdapterCapabilities = {
   survivesRestart: true,
   turnControl: "native_interrupt",
   continuationRepair: "same_process",
+  execution: {
+    controlProbe: "http",
+    approvals: { kinds: ["command", "file_change"], recovery: "native_instance_only", denyScope: "session" },
+  },
 };
+
+/** Native request data is host-ephemeral; it is never an execution fact or room projection. */
+export type OpenCodePermissionObservation =
+  | { type: "snapshot"; requests: OpenCodePermissionRequest[] }
+  | { type: "degraded" }
+  | { type: "unavailable"; reason: HardControlEvidence | "handle_replaced" };
 
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
-    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
-    `Your durable charter: ${request.charter?.trim() || "Help thoughtfully within the room."}`,
-    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
+    "A GitHub webfetch 404 can mean private access, not a missing PR. Check with gh using its existing authentication before concluding the PR is missing; GH_CONFIG_DIR preserves the user's configured GitHub CLI location.",
+    "An explicit git fetch may update only FETCH_HEAD. Inspect FETCH_HEAD or another verified ref before concluding a remote branch has no changes.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     `If no response should be published, return exactly ${NO_REPLY_SENTINEL} with no other text.`,
     `Inbox item: ${request.inboxItemId}`,
@@ -152,7 +176,35 @@ function safeRuntimeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160);
 }
 
+const runtimeLaunchTails = new Map<string, Promise<void>>();
+
+async function withRuntimeLaunchOwnership<T>(
+  runtimePath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = runtimeLaunchTails.get(runtimePath) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  runtimeLaunchTails.set(runtimePath, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (runtimeLaunchTails.get(runtimePath) === current) runtimeLaunchTails.delete(runtimePath);
+  }
+}
+
 type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
+  lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
+  startupIntent?: {
+    url: string;
+  };
+  startupProcess?: {
+    url: string;
+    pid: number;
+    processIdentity: string | null;
+  };
   connection?: {
     url: string;
     pid: number;
@@ -277,20 +329,55 @@ async function resolveBeforeDeadline<T>(operation: Promise<T>, deadline: number,
   }
 }
 
+/**
+ * Notice that OpenCode is waiting to re-send a failed model request, shown on
+ * the desktop that hosts the agent. The daemon classifies stream events by
+ * kind and method: a `provider_event` with this method is ordinary working
+ * activity. Under typed authority, which Open Model runs under, that is a
+ * record and nothing else. It never changes a turn's outcome or a schedule.
+ * An `error` kind, or a method that reads as a lifecycle boundary, could mark
+ * the turn failed or idle.
+ */
+export const OPEN_MODEL_PROVIDER_RETRY_METHOD = "letagents/providerRetry";
+
+/** Shown in the chat view, so it carries no provider text. */
+export function openModelProviderRetrySummary(attempt: number): string {
+  return `The model provider returned an error. Retrying (attempt ${attempt}).`;
+}
+
+type OpenCodeRetryStatus = { attempt: number; message: string | null; next: number | null };
+
+function openCodeRetryStatus(value: unknown): OpenCodeRetryStatus | null {
+  const status = record(value);
+  if (status?.type !== "retry") return null;
+  const attempt = status.attempt;
+  if (typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 1) return null;
+  return {
+    attempt,
+    message: typeof status.message === "string" ? status.message : null,
+    next: typeof status.next === "number" && Number.isFinite(status.next) ? status.next : null,
+  };
+}
+
 class OpenCodeBoundedTurnError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
 }
 
 /**
- * The fresh OpenCode server did not answer health checks inside the launch
- * budget. The launch was terminated, nothing durable changed, and another
- * attempt is expected to succeed — the daemon may retry automatically.
+ * The fresh OpenCode server did not finish starting inside the launch budget:
+ * either it never answered health checks, or it answered them and then did
+ * not prepare its first session. The launch was terminated, nothing durable
+ * changed, and another attempt is expected to succeed — the daemon may retry
+ * automatically. The phase keeps the two failures distinguishable, because
+ * they have different causes.
  */
 export class OpenCodeStartTimeoutError extends Error {
   readonly transientProviderStart = true;
 
-  constructor() {
-    super("Timed out waiting for the supervised OpenCode server.");
+  constructor(readonly phase: "health" | "session" = "health") {
+    super(phase === "session"
+      ? "Timed out waiting for the supervised OpenCode server to prepare its first session."
+      : "Timed out waiting for the supervised OpenCode server.");
     this.name = "OpenCodeStartTimeoutError";
   }
 }
@@ -313,9 +400,19 @@ export class OpenCodeRuntimeGoneError extends Error {
 
 class OpenCodeTerminalTurnError extends Error {
   // A provider-declared terminal error is authoritative evidence that this
-  // exact turn produced no publishable answer. Block it without rerunning the
-  // model; a human can correct the provider account/model and send new work.
+  // exact turn produced no publishable answer. The exact result is checkpointed
+  // before this error leaves the adapter so delivery can settle without replay.
   readonly roomTurnRecoveryOutcome = "terminal_failure" as const;
+
+  constructor(
+    message: string,
+    readonly terminalResult: (Extract<ProviderRoomTurnResult, { providerContinuationId: string }> & {
+      outcome: "failed";
+    }) | null,
+  ) {
+    super(message);
+    this.name = "OpenCodeTerminalTurnError";
+  }
 }
 
 function safeProviderErrorMessage(message: OpenCodeMessage | null): string | null {
@@ -323,13 +420,24 @@ function safeProviderErrorMessage(message: OpenCodeMessage | null): string | nul
   if (!failure) return null;
   const status = failure.statusCode ? ` (HTTP ${failure.statusCode})` : "";
   if (failure.statusCode === 402) {
-    return `Open Model request was rejected because the model provider account could not cover this turn's output budget${status}. Add provider credit or choose another model, then send a new message.`;
+    return `Open Model request was rejected because the model provider account could not cover this turn's output budget${status}. Add provider credit or choose another model, then retry the unfinished work in LetAgents.`;
   }
-  if (failure.statusCode === 401 || failure.statusCode === 403) {
-    return `Open Model authentication or model access was rejected by the provider${status}. Check the API key and model access, then send a new message.`;
+  if (failure.statusCode === 403) {
+    // A forbidden response can require account attestation or model access,
+    // not a different API key. Preserve the provider's actionable explanation
+    // without publishing credentials or arbitrary provider-supplied URLs.
+    const detail = redactCredentialText(failure.message ?? "").value
+      .replace(/https?:\/\/\S+/gi, "provider settings")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 320);
+    return `Open Model access was denied by the provider${status}${detail ? `: ${detail}` : ". Check the provider's account requirements and model permissions, then retry the unfinished work in LetAgents."}`;
+  }
+  if (failure.statusCode === 401) {
+    return `Open Model authentication or model access was rejected by the provider${status}. Check the API key and model access, then retry the unfinished work in LetAgents.`;
   }
   if (failure.statusCode === 429) {
-    return `Open Model was rate-limited by the model provider${status}. Wait for the provider limit to reset, then send a new message.`;
+    return `Open Model was rate-limited by the model provider${status}. Wait for the provider limit to reset, then retry the unfinished work in LetAgents.`;
   }
   const detail = failure.message
     ?.replace(/https?:\/\/\S+/gi, "provider settings")
@@ -360,17 +468,23 @@ class OpenModelHandle implements ProviderHandle {
   activeRoomTurnId: string | null = null;
   /** True once every user message in the session is known to use OpenCode's ascending ID scheme. */
   nativeOrderingVerified = false;
+  readonly execution: ProviderExecutionObserver;
+  controlLoss: HardControlEvidence | null = null;
+  observedTurn: { id: string; terminal: TurnOutcome | "lost" | null } | null = null;
 
   constructor(
     readonly workAttemptId: string,
     readonly pid: number,
     readonly providerContinuationId: string,
+    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
     readonly providerConnection: Extract<ProviderConnectionRef, { kind: "opencode_server" }>,
     readonly client: OpenCodeServerClient,
     readonly configuredModel: string,
     initialState: ProviderObservedState,
+    now: () => string,
   ) {
     this.observed = initialState;
+    this.execution = new ProviderExecutionObserver(now);
   }
 
   observedState(): ProviderObservedState { return this.observed; }
@@ -407,7 +521,40 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
 
   capabilities(): ProviderAdapterCapabilities { return { ...CAPABILITIES }; }
 
+  private async assertPriorStartupProcessGone(authPath: string): Promise<void> {
+    let control: OpenCodeRuntimeControl;
+    try {
+      control = await readRuntimeControl(authPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (control.startupIntent) {
+      throw new Error(
+        "The previous OpenCode startup intent has no durable process identity; refusing to start a competing runtime. An operator must verify the prior runtime is gone before clearing the sidecar.",
+      );
+    }
+    for (const process of [control.startupProcess, control.connection]) {
+      if (!process) continue;
+      const currentIdentity = this.deps.getProcessIdentity(process.pid);
+      if (currentIdentity === null) continue;
+      if (!process.processIdentity || currentIdentity === undefined) {
+        throw new Error(
+          "The previous OpenCode startup process identity could not be verified; refusing to start a competing runtime.",
+        );
+      }
+      if (!sameProcessBirthIdentity(currentIdentity, process.processIdentity)) continue;
+      throw new Error(
+        "The previous OpenCode startup process is still running; refusing to start a competing runtime.",
+      );
+    }
+  }
+
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
+    if (lifecycleAuthorityMode === "typed" && req.deliveryMode !== "daemon_inbox") {
+      throw new Error("Typed Open Model lifecycle authority requires daemon-inbox delivery.");
+    }
     if (req.deliveryMode !== "daemon_inbox") {
       throw new Error("Open Model supports daemon-owned bounded room delivery only.");
     }
@@ -415,17 +562,34 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       throw new Error("Open Model is waiting for its desktop-held endpoint credential.");
     }
     const credential = req.providerCredential;
+    const runtimeRoot = join(this.runtimeRoot, safeRuntimeId(req.workAttemptId));
+    // The daemon singleton owns one provider router per live process. This
+    // target-local queue therefore serializes every live admission for one
+    // runtime path, while startupIntent remains the cross-process crash fence.
+    return withRuntimeLaunchOwnership(runtimeRoot, () =>
+      this.spawnWithRuntimeOwnership(req, lifecycleAuthorityMode, credential, runtimeRoot));
+  }
+
+  private async spawnWithRuntimeOwnership(
+    req: ProviderSpawnRequest,
+    lifecycleAuthorityMode: NonNullable<ProviderSpawnRequest["lifecycleAuthorityMode"]>,
+    credential: NonNullable<ProviderSpawnRequest["providerCredential"]>,
+    runtimeRoot: string,
+  ): Promise<ProviderHandle> {
     const appliedConfigurationRevision = attestProviderSpawnPolicy("open-model", req);
     void appliedConfigurationRevision;
-    const runtimeRoot = join(this.runtimeRoot, safeRuntimeId(req.workAttemptId));
+    // Refused before anything is written or launched.
+    const workspaceEnvironment = workspaceOpenCodeEnvironment(req.workspaceKind);
     await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
     await chmod(runtimeRoot, 0o700);
     const authPath = join(runtimeRoot, "server-auth.json");
+    await this.assertPriorStartupProcessGone(authPath);
     const auth: OpenCodeRuntimeAuth = {
       username: OPENCODE_SERVER_USERNAME,
       password: randomBytes(32).toString("base64url"),
     };
-    await writeRuntimeControl(authPath, auth);
+    const initialControl: OpenCodeRuntimeControl = { ...auth, lifecycleAuthorityMode };
+    await writeRuntimeControl(authPath, initialControl);
     const pluginPath = join(runtimeRoot, "credential-boundary.mjs");
     await writeFile(pluginPath, credentialBoundaryPluginSource(), {
       encoding: "utf8",
@@ -445,6 +609,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       cwd: req.cwd,
       mcpCommand,
       mcpEnvironment,
+      permissionProfileId: supervisedOpenCodePermissionProfileId(req.permissionProfileId),
     });
     const port = await this.deps.allocatePort();
     const url = `http://127.0.0.1:${port}`;
@@ -455,17 +620,39 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     // where health connections can be accepted but never answered.
     const sharedCacheRoot = join(this.runtimeRoot, "shared-cache");
     await mkdir(sharedCacheRoot, { recursive: true, mode: 0o700 });
+    // The shared cache cannot cover OpenCode's plugin SDK, which installs
+    // into the isolated config directory rather than the cache.
+    const configHome = join(runtimeRoot, "config");
+    // The seed only saves time. A directory it cannot write leaves OpenCode
+    // on its own install path, which must not block the launch.
+    await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION).catch(() => undefined);
+    // This one is not best-effort: without it the owner's personal
+    // instructions reach the agent, so a launch that cannot write it fails.
+    await shieldOwnerInstructions(configHome);
     const env = minimalOpenCodeEnvironment(process.env, {
+      // Resolve gh's config before isolating OpenCode's XDG directories. Keep
+      // the existing credential store location, never copy its credentials.
+      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR || (process.env.XDG_CONFIG_HOME
+        ? join(process.env.XDG_CONFIG_HOME, "gh")
+        : process.platform === "win32" && process.env.APPDATA
+          ? join(process.env.APPDATA, "GitHub CLI")
+          : join(process.env.HOME || homedir(), ".config", "gh")),
       OPENCODE_SERVER_USERNAME: auth.username,
       OPENCODE_SERVER_PASSWORD: auth.password,
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
       OPENCODE_AUTH_CONTENT: openCodeAuthContent(credential.apiKey),
       XDG_DATA_HOME: join(runtimeRoot, "data"),
       XDG_CACHE_HOME: sharedCacheRoot,
-      XDG_CONFIG_HOME: join(runtimeRoot, "config"),
+      XDG_CONFIG_HOME: configHome,
       XDG_STATE_HOME: join(runtimeRoot, "state"),
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
+      ...workspaceEnvironment,
     });
+    const intentControl: OpenCodeRuntimeControl = {
+      ...initialControl,
+      startupIntent: { url },
+    };
+    await writeRuntimeControl(authPath, intentControl);
     const launch = this.deps.launch({
       binary: this.binary,
       args: ["serve", "--hostname", "127.0.0.1", "--port", String(port)],
@@ -474,72 +661,126 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
     if (launch.child.pid === undefined || launch.child.pid === null) {
       await launch.exited;
+      try {
+        const currentControl = await readRuntimeControl(authPath);
+        if (currentControl.username !== intentControl.username
+          || currentControl.password !== intentControl.password
+          || currentControl.lifecycleAuthorityMode !== intentControl.lifecycleAuthorityMode
+          || currentControl.startupIntent?.url !== intentControl.startupIntent?.url
+          || currentControl.startupProcess
+          || currentControl.connection) {
+          throw new Error("The durable startup intent no longer matches this launch.");
+        }
+        await writeRuntimeControl(authPath, initialControl);
+      } catch (error) {
+        throw new Error(
+          "OpenCode launch failed without a process id, but its startup intent could not be safely cleared; automatic recovery remains blocked.",
+          { cause: error },
+        );
+      }
       throw new Error("OpenCode launch did not expose a process id.");
     }
     const pid = launch.child.pid;
+    await writeRuntimeControl(authPath, {
+      ...auth,
+      lifecycleAuthorityMode,
+      startupProcess: { url, pid, processIdentity: null },
+    });
     const identity = this.deps.getProcessIdentity(pid);
     if (!identity) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
       throw new Error("OpenCode process identity could not be verified.");
     }
     const client = new OpenCodeServerClient(url, auth, this.deps.fetch);
-    const ready = await this.waitForHealth(client, launch.exited);
-    if (!ready) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
-      throw new OpenCodeStartTimeoutError();
+    let sessionId: string;
+    let connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }>;
+    // One budget covers the whole launch. The first session bootstraps the
+    // OpenCode instance, so it gets whatever the health wait left over rather
+    // than the shorter steady-state control deadline.
+    const launchDeadline = Date.now() + this.startTimeoutMs;
+    let phase: "health" | "session" = "health";
+    try {
+      await writeRuntimeControl(authPath, {
+        ...auth,
+        lifecycleAuthorityMode,
+        startupProcess: { url, pid, processIdentity: identity },
+      });
+      const ready = await this.waitForHealth(client, launch.exited, launchDeadline);
+      if (!ready) throw new OpenCodeStartTimeoutError("health");
+      phase = "session";
+      const session = await client.createSession(
+        req.agentDisplayName?.trim() || "LetAgents Open Model",
+        AbortSignal.timeout(Math.max(1, launchDeadline - Date.now())),
+      );
+      sessionId = typeof session.id === "string" ? session.id : "";
+      if (!sessionId) {
+        throw new Error("OpenCode did not return a session id.");
+      }
+      connection = {
+        kind: "opencode_server",
+        url,
+        pid,
+        processIdentity: identity,
+        serverAuthPath: authPath,
+      };
+      await writeRuntimeControl(authPath, {
+        ...auth,
+        lifecycleAuthorityMode,
+        connection: { url, pid, processIdentity: identity },
+      });
+    } catch (error) {
+      await terminateFreshLaunch({ pid, exited: launch.exited, processIdentity: identity }, this.deps, this.stopGraceMs);
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new OpenCodeStartTimeoutError(phase);
+      }
+      throw error;
     }
-    const session = await client.createSession(
-      req.agentDisplayName?.trim() || "LetAgents Open Model",
-    );
-    const sessionId = typeof session.id === "string" ? session.id : "";
-    if (!sessionId) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
-      throw new Error("OpenCode did not return a session id.");
-    }
-    const connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }> = {
-      kind: "opencode_server",
-      url,
-      pid,
-      processIdentity: identity,
-      serverAuthPath: authPath,
-    };
-    await writeRuntimeControl(authPath, {
-      ...auth,
-      connection: { url, pid, processIdentity: identity },
-    });
     const handle = new OpenModelHandle(
       req.workAttemptId,
       pid,
       sessionId,
+      lifecycleAuthorityMode,
       connection,
       client,
       credential.model,
       "idle",
+      this.deps.now,
     );
     handle.nativeOrderingVerified = true;
     this.handles.set(req.workAttemptId, handle);
     this.observeTerminal(handle, launch.exited);
+    this.emitRuntimeReady(handle);
     return handle;
   }
 
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
+    const lifecycleAuthorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
     const resolved = await this.resolveAttachConnection(ref);
     if (!resolved) return null;
     const { connection, control, recoveredLegacyConnection } = resolved;
-    const cached = this.handles.get(ref.workAttemptId);
-    if (cached
-      && cached.providerContinuationId === ref.providerContinuationId
-      && cached.providerConnection.url === connection.url
-      && cached.providerConnection.processIdentity === connection.processIdentity) return cached;
+    // Death evidence does not depend on who holds lifecycle authority. Checking
+    // it first lets the daemon settle a dead generation whose authority mode no
+    // longer matches; otherwise it stays live with no handle and never recovers.
     const identity = this.deps.getProcessIdentity(connection.pid);
     if (identity === null || (typeof identity === "string" && !sameProcessBirthIdentity(identity, connection.processIdentity))) {
-      return {
-        state: "terminal",
-        terminal: synthesizeTerminalPayload({
-          exitCode: null, signal: null, providerContinuationId: ref.providerContinuationId,
-          endedAt: this.deps.now(),
-        }),
-      } satisfies ProviderAttachTerminal;
+      const terminal = synthesizeTerminalPayload({
+        exitCode: null, signal: null, providerContinuationId: ref.providerContinuationId,
+        endedAt: this.deps.now(),
+      });
+      // A cached handle may not have observed its own exit yet; finishing it
+      // emits the lost turn/control events its observers are waiting for.
+      const stale = this.handles.get(ref.workAttemptId);
+      if (stale) this.finish(stale, terminal, true);
+      return { state: "terminal", terminal } satisfies ProviderAttachTerminal;
+    }
+    if ((control.lifecycleAuthorityMode ?? "typed_shadow") !== lifecycleAuthorityMode) return null;
+    const cached = this.handles.get(ref.workAttemptId);
+    if (cached) {
+      return cached.providerContinuationId === ref.providerContinuationId
+        && cached.lifecycleAuthorityMode === lifecycleAuthorityMode
+        && cached.providerConnection.url === connection.url
+        && cached.providerConnection.processIdentity === connection.processIdentity
+        ? cached
+        : null;
     }
     if (identity === undefined) return null;
     const auth: OpenCodeRuntimeAuth = {
@@ -554,20 +795,33 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     }
     const configuredModel = parseConfiguredOpenModel(await client.config());
     if (!configuredModel) throw new Error("The attached OpenCode runtime has no configured Open Model.");
+    // OpenCode looks for its instruction files again on every turn, so a
+    // runtime launched before the shield existed gains it here. Unlike a
+    // launch, this is best-effort: the runtime is already running, and
+    // refusing to attach would only take a working agent away. The sidecar
+    // path comes from a persisted reference, so nothing is written unless it
+    // is this adapter's own directory for the work attempt.
+    const ownRuntimeRoot = join(this.runtimeRoot, safeRuntimeId(ref.workAttemptId));
+    if (connection.serverAuthPath === join(ownRuntimeRoot, "server-auth.json")) {
+      await shieldOwnerInstructions(join(ownRuntimeRoot, "config")).catch(() => undefined);
+    }
     const handle = new OpenModelHandle(
       ref.workAttemptId,
       connection.pid,
       ref.providerContinuationId,
+      lifecycleAuthorityMode,
       connection,
       client,
       configuredModel,
       "idle",
+      this.deps.now,
     );
     this.handles.set(ref.workAttemptId, handle);
     this.observeTerminal(handle, this.deps.observeProcessExit(connection.pid, connection.processIdentity));
     if (recoveredLegacyConnection) {
       await writeRuntimeControl(connection.serverAuthPath, {
         ...auth,
+        lifecycleAuthorityMode,
         connection: {
           url: connection.url,
           pid: connection.pid,
@@ -575,6 +829,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         },
       });
     }
+    this.emitRuntimeReady(handle);
     return handle;
   }
 
@@ -641,10 +896,15 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     // never interpret that uncertainty as permission to spawn a replacement.
     // Only a terminal identity proves that the saved writer is gone.
     const attached = await this.attach(ref);
-    if (attached && !("state" in attached)) return attached;
     // Terminal identity is proof the process is gone: the daemon must recover
-    // by starting a fresh runtime, not retry resume against a corpse.
-    if (attached?.state === "terminal") throw new OpenCodeRuntimeGoneError();
+    // by starting a fresh runtime, not retry resume against a corpse. This is
+    // checked before the authority comparison so a dead runtime born under an
+    // older mode is replaced instead of refused on every attempt.
+    if (attached && "state" in attached) throw new OpenCodeRuntimeGoneError();
+    if ((ref.lifecycleAuthorityMode ?? "typed_shadow") !== (req.lifecycleAuthorityMode ?? "typed_shadow")) {
+      throw new Error("Open Model resume lifecycle authority does not match the frozen provider birth.");
+    }
+    if (attached) return attached;
     throw new Error("The saved OpenCode process could not be authenticated; refusing to start a competing runtime.");
   }
 
@@ -678,6 +938,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       throw error;
     });
     handle.activeRoomTurnId = turnId;
+    handle.observedTurn = { id: turnId, terminal: null };
+    this.emitTurnActive(handle, turnId);
     await options.checkpointTurnStarted?.(turnId);
     try {
       const result = await this.awaitExactTurn(handle, turnId, options.detachSignal);
@@ -686,6 +948,17 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.activeRoomTurnId = null;
       return result;
     } catch (error) {
+      if (error instanceof OpenCodeTerminalTurnError && error.terminalResult) {
+        try {
+          await options.checkpointTerminalResult?.(error.terminalResult);
+        } finally {
+          if (handle.activeRoomTurnId === turnId) {
+            handle.activeRoomTurnId = null;
+            handle.setState("idle");
+          }
+        }
+        throw error;
+      }
       if (error instanceof OpenCodeBoundedTurnError) {
         await this.abortBoundedTurn(handle, turnId, error);
       } else if (handle.activeRoomTurnId === turnId) {
@@ -705,6 +978,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.required(rawHandle);
     handle.activeRoomTurnId = request.providerTurnId;
+    if (handle.observedTurn?.id !== request.providerTurnId) handle.observedTurn = { id: request.providerTurnId, terminal: null };
+    this.emitTurnActive(handle, request.providerTurnId);
     try {
       const result = await this.awaitExactTurn(handle, request.providerTurnId, options.detachSignal, true);
       await options.checkpointTerminalResult?.(result);
@@ -712,6 +987,17 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.setState("idle");
       return result;
     } catch (error) {
+      if (error instanceof OpenCodeTerminalTurnError && error.terminalResult) {
+        try {
+          await options.checkpointTerminalResult?.(error.terminalResult);
+        } finally {
+          if (handle.activeRoomTurnId === request.providerTurnId) {
+            handle.activeRoomTurnId = null;
+            handle.setState("idle");
+          }
+        }
+        throw error;
+      }
       if (error instanceof OpenCodeBoundedTurnError) {
         await this.abortBoundedTurn(handle, request.providerTurnId, error);
       } else if (handle.activeRoomTurnId === request.providerTurnId) {
@@ -783,6 +1069,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.activeRoomTurnId = null;
     }
     handle.setState("idle");
+    this.emitTurnTerminal(handle, activeTurnId, "interrupted");
     return { capability: "native_interrupt", interrupted: true, resumed: false, state: "idle" };
   }
 
@@ -853,7 +1140,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     }
     const exit = await this.deps.observeProcessExit(handle.pid, handle.providerConnection.processIdentity!);
     const terminal = terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), true);
-    this.finish(handle, terminal);
+    this.finish(handle, terminal, exit.type === "exit");
     return terminal;
   }
 
@@ -876,6 +1163,232 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
+  onExecution(rawHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription {
+    return this.required(rawHandle).execution.subscribe(listener);
+  }
+
+  async probeControl(rawHandle: ProviderHandle): Promise<ControlProbeResult> {
+    const handle = this.required(rawHandle);
+    let result = this.controlProof(handle);
+    if (!result) {
+      const response = await handle.client.probeControl();
+      // A refused HTTP request alone is not proof that the native instance died.
+      result = this.controlProof(handle) ?? { state: response.state };
+    }
+    if (result.state === "lost") handle.controlLoss = result.controlEvidence;
+    this.emitExecution(handle, { domain: "control", kind: "state_changed", sideEffects: "none", ...result });
+    return result;
+  }
+
+  /** Read-only native linkage; pending-request and durable admission checks remain separate. */
+  async correlatePermissionTurn(
+    rawHandle: ProviderHandle,
+    expectedRequest: OpenCodePermissionRequest,
+  ): Promise<OpenCodePermissionTurnCorrelation> {
+    try {
+      const handle = this.required(rawHandle);
+      const sessionId = handle.providerContinuationId;
+      const connection = { ...handle.providerConnection };
+      const assertCurrentInstance = (): void => {
+        if (this.required(rawHandle) !== handle || handle.terminal || handle.observedState() === "stopping"
+          || handle.providerContinuationId !== sessionId || handle.pid !== connection.pid
+          || !sameProviderConnectionIdentity(connection, handle.providerConnection) || this.controlProof(handle)) {
+          throw new Error("OpenCode permission correlation instance could not be verified.");
+        }
+      };
+      const result = await handle.client.correlatePermissionTurn(sessionId, expectedRequest, assertCurrentInstance);
+      assertCurrentInstance();
+      return result;
+    } catch {
+      return { outcome: "correlation_unproven" };
+    }
+  }
+
+  /** Host-only native decision boundary; durable decision/retry policy belongs to the caller. */
+  async replyPermission(
+    rawHandle: ProviderHandle,
+    expectedRequest: OpenCodePermissionRequest,
+    reply: "once" | "reject",
+    options?: { beforeNativeDispatch: () => Promise<void>; assertNativeDispatch?: () => void },
+  ) {
+    const currentHandle = (): OpenModelHandle => {
+      const current = this.handles.get(rawHandle.workAttemptId);
+      if (!current || current !== rawHandle || current.terminal
+        || current.observedState() === "stopping" || this.controlProof(current)) {
+        throw new OpenCodePermissionReplyError("not_dispatched");
+      }
+      return current;
+    };
+    const handle = currentHandle();
+    let dispatched = false;
+    try {
+      return await handle.client.replyPermission(handle.providerContinuationId, expectedRequest, reply, () => {
+        currentHandle();
+        options?.assertNativeDispatch?.();
+        dispatched = true;
+      }, options?.beforeNativeDispatch);
+    } finally {
+      if (dispatched) {
+        // A replacement may answer even with 404. Neither that response nor
+        // loss of the original instance proves that the decision did not land.
+        try { currentHandle(); } catch { throw new OpenCodePermissionReplyError("uncertain"); }
+      }
+    }
+  }
+
+  async observePermissions(
+    rawHandle: ProviderHandle,
+    listener: (event: OpenCodePermissionObservation) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const handle = this.required(rawHandle);
+    const notify = (event: OpenCodePermissionObservation): void => {
+      if (!signal.aborted) { try { listener(event); } catch { /* Observation never controls native work. */ } }
+    };
+    const available = (): boolean => {
+      if (this.handles.get(handle.workAttemptId) !== handle) {
+        notify({ type: "unavailable", reason: "handle_replaced" });
+        return false;
+      }
+      const proof = this.controlProof(handle);
+      if (!proof) return true;
+      if (proof.state === "lost") {
+        handle.controlLoss = proof.controlEvidence;
+        notify({ type: "unavailable", reason: proof.controlEvidence });
+      } else notify({ type: "degraded" });
+      return false;
+    };
+    while (!signal.aborted && available()) {
+      const controller = new AbortController();
+      const abort = (): void => controller.abort();
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) controller.abort();
+      let revision = 0;
+      let pending = false;
+      let listing = false;
+      const refresh = (): void => {
+        revision += 1;
+        pending = true;
+        if (listing) return;
+        listing = true;
+        void (async () => {
+          try {
+            while (pending && !controller.signal.aborted) {
+              pending = false;
+              const observedRevision = revision;
+              const requests = await handle.client.listPendingPermissions(handle.providerContinuationId, controller.signal);
+              if (controller.signal.aborted) return;
+              if (!available()) { controller.abort(); return; }
+              // SSE is consumed while the GET runs. Never publish a snapshot
+              // overtaken by an ask/reply, nor resurrect a queued stale ask.
+              if (observedRevision === revision) notify({ type: "snapshot", requests });
+            }
+          } catch {
+            if (!controller.signal.aborted) { notify({ type: "degraded" }); controller.abort(); }
+          } finally { listing = false; }
+        })();
+      };
+      try {
+        for await (const event of handle.client.events(controller.signal)) {
+          if (controller.signal.aborted || !available()) break;
+          if (event.type === "server.instance.disposed") {
+            handle.controlLoss = "control_epoch_gone";
+            this.emitExecution(handle, { domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "control_epoch_gone" });
+            notify({ type: "unavailable", reason: "control_epoch_gone" });
+            return;
+          }
+          if (event.type === "server.connected") refresh();
+          const permission = parseOpenCodePermissionEvent(event);
+          if (permission?.properties.sessionID === handle.providerContinuationId) refresh();
+        }
+      } catch {
+        if (!signal.aborted) notify({ type: "degraded" });
+      } finally {
+        controller.abort();
+        signal.removeEventListener("abort", abort);
+      }
+      if (signal.aborted || !available()) return;
+      notify({ type: "degraded" });
+      // Reconnect the observation channel only. No prompt replay or native abort.
+      await new Promise<void>((resolve) => {
+        const finish = (): void => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); };
+        const timer = setTimeout(finish, 250);
+        signal.addEventListener("abort", finish, { once: true });
+        if (signal.aborted) finish();
+      });
+    }
+  }
+
+  private controlProof(handle: OpenModelHandle): ControlProbeResult | null {
+    if (handle.controlLoss) return { state: "lost", controlEvidence: handle.controlLoss };
+    const identity = this.deps.getProcessIdentity(handle.pid);
+    if (identity === undefined) return { state: "degraded" };
+    if (identity === null) return { state: "lost", controlEvidence: "process_exit" };
+    return sameProcessBirthIdentity(identity, handle.providerConnection.processIdentity!)
+      ? null : { state: "lost", controlEvidence: "process_birth_changed" };
+  }
+
+  private emitExecution(handle: OpenModelHandle, fact: NativeExecutionFact): void {
+    handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined,
+      handle.providerConnection.pid ?? undefined);
+  }
+
+  private emitRuntimeReady(handle: OpenModelHandle): void {
+    this.emitExecution(handle, {
+      domain: "runtime",
+      kind: "state_changed",
+      state: "ready",
+      sideEffects: "none",
+    });
+  }
+
+  private emitTurnActive(handle: OpenModelHandle, turnId: string): void {
+    if (!nativeExecutionId(turnId) || !nativeExecutionId(handle.providerContinuationId)) return;
+    const checkpoint = nativeLifecycleCheckpoint({
+      provider: "open-model",
+      workAttemptId: handle.workAttemptId,
+      phase: "turn_active",
+      providerContinuationId: handle.providerContinuationId,
+      providerTurnId: turnId,
+      nativeProcessPid: handle.providerConnection.pid ?? undefined,
+      nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
+    });
+    this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+      providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
+      nativeEventId: checkpoint.nativeEventId });
+    this.emitLifecycleProjection(handle, "turn/started", checkpoint.nativeEventId, checkpoint.phase);
+  }
+
+  private emitTurnTerminal(handle: OpenModelHandle, turnId: string, outcome: TurnOutcome): void {
+    if (!nativeExecutionId(turnId) || !nativeExecutionId(handle.providerContinuationId)
+      || (handle.observedTurn?.id === turnId && handle.observedTurn.terminal)) return;
+    handle.observedTurn = { id: turnId, terminal: outcome };
+    const checkpoint = nativeLifecycleCheckpoint({
+      provider: "open-model",
+      workAttemptId: handle.workAttemptId,
+      phase: "turn_terminal",
+      providerContinuationId: handle.providerContinuationId,
+      providerTurnId: turnId,
+      nativeProcessPid: handle.providerConnection.pid ?? undefined,
+      nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
+      terminalDiscriminator: outcome,
+    });
+    this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
+      sideEffects: "none", providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
+      nativeEventId: checkpoint.nativeEventId });
+    this.emitLifecycleProjection(handle, "turn/completed", checkpoint.nativeEventId, checkpoint.phase);
+  }
+
+  private emitLifecycleProjection(
+    handle: OpenModelHandle,
+    method: "turn/started" | "turn/completed",
+    nativeEventId: string,
+    nativeLifecyclePhase: "turn_active" | "turn_terminal",
+  ): void {
+    this.emitStream(handle, { kind: "turn_lifecycle", method, summary: null, payload: null,
+      nativeEventId, nativeLifecyclePhase, lifecycleProjectionOnly: true });
+  }
+
   private required(handle: ProviderHandle): OpenModelHandle {
     const current = this.handles.get(handle.workAttemptId);
     if (!current || current !== handle) throw new Error("Open Model handle is stale or foreign.");
@@ -887,12 +1400,16 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.workAttemptId,
       handle.pid,
       continuationId,
+      handle.lifecycleAuthorityMode,
       handle.providerConnection,
       handle.client,
       handle.configuredModel,
       "idle",
+      this.deps.now,
     );
     this.handles.set(handle.workAttemptId, replacement);
+    this.observeTerminal(replacement, this.deps.observeProcessExit(handle.pid, handle.providerConnection.processIdentity!));
+    this.emitRuntimeReady(replacement);
     return replacement;
   }
 
@@ -930,6 +1447,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     recovery = false,
   ): Promise<ProviderRoomTurnResult> {
     const deadline = Date.now() + this.turnTimeoutMs;
+    const softBounds = handle.lifecycleAuthorityMode === "typed";
+    let durationAttentionSent = false;
+    let stepAttentionSent = false;
     const emittedLengths = new Map<string, number>();
     const partTypes = new Map<string, string>();
     // callID -> last-emitted tool status. message.part.updated re-sends the
@@ -937,14 +1457,69 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     // snapshot() re-emits history on reconnect, so dedup by (callID, status).
     const toolStatuses = new Map<string, string>();
     const assistantIds = new Set<string>();
+    const typedAssistantIds = new Set<string>();
+    // Attempt numbers restart when a later step of the same turn fails, so
+    // the scheduled time is part of what makes a retry distinct.
+    const retriesNotified = new Set<string>();
     const controller = new AbortController();
     const detach = (): void => controller.abort();
     signal?.addEventListener("abort", detach, { once: true });
     if (signal?.aborted) controller.abort();
     const events = handle.client.events(controller.signal)[Symbol.asyncIterator]();
+    const emitAttention = (kind: "duration_guardrail" | "step_guardrail"): void => {
+      this.emitStream(handle, {
+        kind: "provider_event",
+        method: "letagents/turnAttention",
+        summary: kind === "duration_guardrail"
+          ? "Open Model is still working past its duration guardrail."
+          : "Open Model is still working past its step guardrail.",
+        payload: kind === "duration_guardrail"
+          ? { kind, turnId, limitMs: this.turnTimeoutMs }
+          : { kind, turnId, limit: this.maxAssistantSteps },
+      });
+    };
+    const enforceStepBound = (assistantCount: number): void => {
+      if (assistantCount <= this.maxAssistantSteps) return;
+      if (!softBounds) {
+        throw new OpenCodeBoundedTurnError(
+          `OpenCode exceeded the bounded turn limit of ${this.maxAssistantSteps} assistant steps.`,
+        );
+      }
+      if (!stepAttentionSent) {
+        stepAttentionSent = true;
+        emitAttention("step_guardrail");
+      }
+    };
+    const nextObservedEvent = async (): Promise<IteratorResult<OpenCodeEvent>> => {
+      if (!softBounds) return nextEventBefore(events, deadline);
+      if (durationAttentionSent) return events.next();
+      const pending = events.next();
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        durationAttentionSent = true;
+        emitAttention("duration_guardrail");
+        return pending;
+      }
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        const observed = await Promise.race([
+          pending.then((value) => ({ kind: "event" as const, value })),
+          new Promise<{ kind: "attention" }>((resolve) => {
+            timeout = setTimeout(() => resolve({ kind: "attention" }), remainingMs);
+          }),
+        ]);
+        if (observed.kind === "event") return observed.value;
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+      durationAttentionSent = true;
+      emitAttention("duration_guardrail");
+      return pending;
+    };
     const snapshot = async (): Promise<{
       assistantCount: number;
       result: ProviderRoomTurnResult | null;
+      terminalOutcome: TurnOutcome | null;
     }> => {
       const messages = await handle.client.messages(
         handle.providerContinuationId,
@@ -954,33 +1529,50 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       for (const assistant of assistants) {
         const info = record(assistant.info);
         if (typeof info?.id === "string") assistantIds.add(info.id);
-        this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses);
+        const exactSession = info?.sessionID === undefined || info.sessionID === handle.providerContinuationId;
+        if (exactSession && typeof info?.id === "string") typedAssistantIds.add(info.id);
+        this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses,
+          exactSession ? turnId : undefined);
       }
-      if (assistants.length > this.maxAssistantSteps) {
-        throw new OpenCodeBoundedTurnError(
-          `OpenCode exceeded the bounded turn limit of ${this.maxAssistantSteps} assistant steps.`,
-        );
-      }
+      enforceStepBound(assistants.length);
       const finalAssistant = finalAssistantFor(messages, turnId);
+      const finalInfo = record(finalAssistant?.info);
+      const exactSession = finalInfo?.sessionID === undefined || finalInfo.sessionID === handle.providerContinuationId;
       const terminalError = safeProviderErrorMessage(finalAssistant);
-      if (terminalError) throw new OpenCodeTerminalTurnError(terminalError);
+      if (terminalError) {
+        const terminalResult = exactSession ? {
+          turnId,
+          providerContinuationId: handle.providerContinuationId,
+          outcome: "failed" as const,
+          text: null,
+          evidence: "transcript" as const,
+          error: terminalError,
+        } : null;
+        if (terminalResult) this.emitTurnTerminal(handle, turnId, "failed");
+        throw new OpenCodeTerminalTurnError(terminalError, terminalResult);
+      }
+      const result = finalAssistant && messageCompleted(finalAssistant) ? classifyTurn(turnId, messageText(finalAssistant)) : null;
       return {
         assistantCount: assistants.length,
-        result: finalAssistant && messageCompleted(finalAssistant)
-          ? classifyTurn(turnId, messageText(finalAssistant))
-          : null,
+        result,
+        terminalOutcome: exactSession && result && messageFinishReason(finalAssistant) !== "tool-calls"
+          ? result.outcome === "unreadable" ? "unreadable" : "completed" : null,
       };
     };
     const resultAtSessionBoundary = (
       observed: Awaited<ReturnType<typeof snapshot>>,
-    ): ProviderRoomTurnResult => observed.result
-      ?? { turnId, outcome: "unreadable", text: null, evidence: "none" };
+    ): ProviderRoomTurnResult => {
+      // Legacy session-status fallbacks remain unchanged, but typed authority
+      // must not invent a native terminal from a missing/busy status entry.
+      if (observed.terminalOutcome) this.emitTurnTerminal(handle, turnId, observed.terminalOutcome);
+      return observed.result ?? { turnId, outcome: "unreadable", text: null, evidence: "none" };
+    };
 
     try {
       // Opening the SSE stream before the snapshot closes the completion race:
       // history repairs anything that happened before subscription, then every
       // later transition is event-driven rather than O(history) polling.
-      const connected = await nextEventBefore(events, deadline);
+      const connected = await nextObservedEvent();
       if (connected.done) throw new Error("OpenCode event stream ended before turn observation.");
       const initial = await snapshot();
       if (await handle.client.status(handle.providerContinuationId) !== "busy"
@@ -988,11 +1580,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         return resultAtSessionBoundary(initial);
       }
 
-      while (Date.now() < deadline) {
+      while (softBounds || Date.now() < deadline) {
         if (controller.signal.aborted) {
           throw new Error("OpenCode turn observation detached.");
         }
-        const next = await nextEventBefore(events, deadline);
+        const next = await nextObservedEvent();
         if (next.done) {
           const repaired = await snapshot();
           if (await handle.client.status(handle.providerContinuationId) !== "busy") {
@@ -1006,11 +1598,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         if (info?.role === "assistant" && info.parentID === turnId
           && typeof info.id === "string") {
           assistantIds.add(info.id);
-          if (assistantIds.size > this.maxAssistantSteps) {
-            throw new OpenCodeBoundedTurnError(
-              `OpenCode exceeded the bounded turn limit of ${this.maxAssistantSteps} assistant steps.`,
-            );
-          }
+          if (info.sessionID === handle.providerContinuationId) typedAssistantIds.add(info.id);
+          enforceStepBound(assistantIds.size);
         }
         if (event.type === "message.part.updated") {
           const part = record(properties?.part);
@@ -1023,6 +1612,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
               { parts: [part] as OpenCodeMessage["parts"] },
               emittedLengths,
               toolStatuses,
+              typedAssistantIds.has(part.messageID) ? turnId : undefined,
             );
           }
         }
@@ -1045,6 +1635,15 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           );
         }
         if (!eventReferencesSession(event, handle.providerContinuationId)) continue;
+        if (event.type === "session.status") {
+          const retry = openCodeRetryStatus(properties?.status);
+          const retryKey = retry ? `${retry.attempt}:${retry.next ?? ""}` : null;
+          if (retry && retryKey && !retriesNotified.has(retryKey)) {
+            retriesNotified.add(retryKey);
+            this.emitProviderRetry(handle, turnId, retry);
+          }
+          continue;
+        }
         if (event.type === "session.idle") {
           return resultAtSessionBoundary(await snapshot());
         }
@@ -1082,6 +1681,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     }
     if (handle.activeRoomTurnId === turnId) handle.activeRoomTurnId = null;
     handle.setState("idle");
+    this.emitTurnTerminal(handle, turnId, "interrupted");
     throw reason;
   }
 
@@ -1109,10 +1709,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     message: OpenCodeMessage | null,
     emittedLengths: Map<string, number>,
     toolStatuses?: Map<string, string>,
+    turnId?: string,
   ): void {
     for (const part of message?.parts ?? []) {
       if (part.type === "tool") {
-        if (toolStatuses) this.emitToolCall(handle, part, toolStatuses);
+        if (toolStatuses) this.emitToolCall(handle, part, toolStatuses, turnId);
         continue;
       }
       const id = typeof part.id === "string" ? part.id : `${part.type ?? "part"}`;
@@ -1136,6 +1737,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     handle: OpenModelHandle,
     part: OpenCodePart,
     toolStatuses: Map<string, string>,
+    turnId?: string,
   ): void {
     const state = record(part.state);
     const tool = typeof part.tool === "string" ? part.tool : "tool";
@@ -1144,6 +1746,33 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const status = typeof state?.status === "string" ? state.status : "pending";
     if (toolStatuses.get(callId) === status) return;
     toolStatuses.set(callId, status);
+    if (turnId && (nativeExecutionId(part.callID) || nativeExecutionId(part.id)) && nativeExecutionId(callId) && nativeExecutionId(turnId)
+      && nativeExecutionId(handle.providerContinuationId)
+      && (part.sessionID === undefined || part.sessionID === handle.providerContinuationId)
+      && (status === "completed" || status === "error")) {
+      const operation = tool === "bash" ? "command"
+        : ["read", "glob", "grep", "list"].includes(tool) ? "file_read"
+          : ["edit", "write", "patch", "apply_patch"].includes(tool) ? "file_change"
+            : ["webfetch", "websearch"].includes(tool) ? "network"
+              : tool === "question" ? "question" : "other";
+      // OpenCode sets running before permission evaluation. Only a terminal
+      // tool result is execution evidence here; error text cannot prove a
+      // before-start denial or distinguish it from partial side effects.
+      const exit = record(state?.metadata)?.exit;
+      const exitCode = typeof exit === "number" && Number.isSafeInteger(exit) && exit >= -2_147_483_648 && exit <= 2_147_483_647 ? exit : undefined;
+      // Pinned ShellTool metadata.exit is the actual child code, or null after
+      // native timeout/abort. Tool-call success alone says nothing about exit.
+      if (operation !== "command" || status === "error" || exit === null || exitCode !== undefined) {
+        this.emitExecution(handle, { domain: "execution", kind: "completed", executionId: callId, operation,
+          providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
+          sideEffects: operation === "file_read" || operation === "question" ? "none" : "possible",
+          outcome: status === "error" ? "failed" : operation === "command"
+            ? exit === null ? "interrupted_after_start" : exitCode === 0 ? "succeeded" : "failed"
+            : "succeeded",
+          ...(operation === "command" && exitCode !== undefined ? { exitCode } : {}),
+        });
+      }
+    }
     const title = typeof state?.title === "string" ? state.title : "";
     this.emitStream(handle, {
       kind: "tool_lifecycle",
@@ -1176,11 +1805,38 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
   }
 
+  private emitProviderRetry(handle: OpenModelHandle, turnId: string, retry: OpenCodeRetryStatus): void {
+    // The provider's own words stay in the payload, for diagnostics only.
+    // Credentials are redacted before the cut so a key cannot be split by it.
+    const redaction = retry.message === null ? null : redactCredentialText(retry.message);
+    const message = redaction === null ? null : redaction.value
+      .replace(/https?:\/\/\S+/gi, "provider settings")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 320);
+    this.emitStream(handle, {
+      kind: "provider_event",
+      method: OPEN_MODEL_PROVIDER_RETRY_METHOD,
+      summary: openModelProviderRetrySummary(retry.attempt),
+      payloadRedacted: redaction?.redacted === true,
+      payload: {
+        kind: "provider_retry",
+        turnId,
+        attempt: retry.attempt,
+        message,
+        nextRetryAt: retry.next === null ? null : new Date(retry.next).toISOString(),
+      },
+    });
+  }
+
   private emitStream(
     handle: OpenModelHandle,
-    input: Pick<ProviderStreamEvent, "kind" | "method"> & {
+    input: Pick<ProviderStreamEvent, "kind" | "method"> & Partial<Pick<ProviderStreamEvent,
+      "nativeEventId" | "nativeLifecyclePhase" | "lifecycleProjectionOnly">> & {
       summary: string | null;
       payload: unknown;
+      /** The caller already redacted part of the payload. */
+      payloadRedacted?: boolean;
     },
   ): void {
     const safe = safeStreamPayload(input.payload);
@@ -1192,10 +1848,13 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       provider: "open-model",
       kind: input.kind,
       method: input.method,
+      ...(input.nativeEventId ? { nativeEventId: input.nativeEventId } : {}),
+      ...(input.nativeLifecyclePhase ? { nativeLifecyclePhase: input.nativeLifecyclePhase } : {}),
+      ...(input.lifecycleProjectionOnly ? { lifecycleProjectionOnly: true as const } : {}),
       summary: input.summary,
       payload: safe.payload,
       payloadTruncated: safe.payloadTruncated,
-      payloadRedacted: safe.payloadRedacted,
+      payloadRedacted: safe.payloadRedacted || input.payloadRedacted === true,
       durablePayloadRef: null,
     };
     for (const listener of handle.streamListeners) listener(event);
@@ -1218,8 +1877,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   private async waitForHealth(
     client: OpenCodeServerClient,
     exited: Promise<ProviderProcessExit>,
+    deadline: number,
   ): Promise<boolean> {
-    const deadline = Date.now() + this.startTimeoutMs;
     let terminal = false;
     void exited.then(() => { terminal = true; });
     while (!terminal && Date.now() < deadline) {
@@ -1240,12 +1899,27 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
 
   private observeTerminal(handle: OpenModelHandle, exited: Promise<ProviderProcessExit>): void {
     void exited.then((exit) => {
-      this.finish(handle, terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), false));
+      this.finish(handle, terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), false), exit.type === "exit");
     });
   }
 
-  private finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload): void {
+  private finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload, processExited: boolean): void {
     if (handle.terminal) return;
+    if (this.handles.get(handle.workAttemptId) === handle) {
+      const actual = this.deps.getProcessIdentity(handle.pid);
+      const evidence = processExited || actual === null ? "process_exit"
+        : typeof actual === "string" && !sameProcessBirthIdentity(actual, handle.providerConnection.processIdentity!) ? "process_birth_changed" : null;
+      if (evidence && handle.observedTurn && !handle.observedTurn.terminal) {
+        handle.observedTurn.terminal = "lost";
+        this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none",
+          providerContinuationId: handle.providerContinuationId, providerTurnId: handle.observedTurn.id });
+      }
+      if (evidence) {
+        handle.controlLoss = evidence;
+        this.emitExecution(handle, { domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: evidence });
+        this.emitExecution(handle, { domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: evidence });
+      } else this.emitExecution(handle, { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" });
+    }
     handle.terminal = terminal;
     handle.setState("stopped");
     if (this.handles.get(handle.workAttemptId) === handle) this.handles.delete(handle.workAttemptId);
@@ -1264,6 +1938,29 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
     || typeof value.password !== "string" || !value.password) {
     throw new Error("OpenCode server authentication sidecar is malformed.");
   }
+  if (value.lifecycleAuthorityMode !== undefined
+    && value.lifecycleAuthorityMode !== "legacy"
+    && value.lifecycleAuthorityMode !== "typed_shadow"
+    && value.lifecycleAuthorityMode !== "typed") {
+    throw new Error("OpenCode server authentication sidecar contains an invalid lifecycle authority.");
+  }
+  if (value.startupIntent !== undefined
+    && (typeof value.startupIntent !== "object"
+      || typeof value.startupIntent.url !== "string"
+      || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.startupIntent.url))) {
+    throw new Error("OpenCode server authentication sidecar contains an invalid startup intent.");
+  }
+  if (value.startupProcess !== undefined
+    && (typeof value.startupProcess !== "object"
+      || typeof value.startupProcess.url !== "string"
+      || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.startupProcess.url)
+      || !Number.isSafeInteger(value.startupProcess.pid)
+      || value.startupProcess.pid < 1
+      || (value.startupProcess.processIdentity !== null
+        && (typeof value.startupProcess.processIdentity !== "string"
+          || !value.startupProcess.processIdentity)))) {
+    throw new Error("OpenCode server authentication sidecar contains invalid startup process evidence.");
+  }
   if (value.connection !== undefined
     && (typeof value.connection !== "object"
       || typeof value.connection.url !== "string"
@@ -1277,6 +1974,9 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
   return {
     username: value.username,
     password: value.password,
+    ...(value.lifecycleAuthorityMode ? { lifecycleAuthorityMode: value.lifecycleAuthorityMode } : {}),
+    ...(value.startupIntent ? { startupIntent: value.startupIntent } : {}),
+    ...(value.startupProcess ? { startupProcess: value.startupProcess } : {}),
     ...(value.connection ? { connection: value.connection } : {}),
   };
 }
@@ -1289,7 +1989,6 @@ async function writeRuntimeControl(path: string, value: OpenCodeRuntimeControl):
   });
   await chmod(temporaryPath, 0o600);
   await rename(temporaryPath, path);
-  await chmod(path, 0o600);
 }
 
 function terminalFromExit(

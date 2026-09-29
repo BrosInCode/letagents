@@ -2,8 +2,8 @@
   <footer class="footer">
     <div class="footer-inner">
       <div class="footer-brand">
-        <div class="footer-logo">LA</div>
-        <span class="footer-name">Let Agents Chat</span>
+        <img class="footer-logo" src="/letagents-icon.svg" alt="" width="24" height="24" />
+        <span class="footer-name">LetAgents</span>
       </div>
       <p class="footer-copy">
         Built by <a href="https://github.com/BrosInCode" target="_blank" rel="noopener">BrosInCode</a>.
@@ -49,13 +49,7 @@ import GitHubIcon from '@/components/icons/GitHubIcon.vue'
 .footer-logo {
   width: 24px;
   height: 24px;
-  border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, #e2e8f0, #94a3b8);
-  display: grid;
-  place-items: center;
-  font-weight: 900;
-  font-size: 0.5rem;
-  color: #0f172a;
+  flex-shrink: 0;
 }
 
 .footer-name {
@@ -87,6 +81,7 @@ import GitHubIcon from '@/components/icons/GitHubIcon.vue'
 .footer-links a {
   display: inline-flex;
   align-items: center;
+  min-height: 44px;
   gap: 6px;
   font-size: 0.82rem;
   color: var(--text-tertiary);
@@ -95,5 +90,13 @@ import GitHubIcon from '@/components/icons/GitHubIcon.vue'
 
 .footer-links a:hover {
   color: var(--text);
+}
+
+@media (max-width: 768px) {
+  .footer { padding: 48px 20px; }
+}
+
+@media (max-width: 480px) {
+  .footer { padding: 40px 16px; }
 }
 </style>

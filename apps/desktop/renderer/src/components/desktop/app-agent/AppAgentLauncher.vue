@@ -5,7 +5,7 @@
       root-class="app-agent-launcher"
       variant="launcher"
       :interactive="true"
-      :show-icon="false"
+      :show-icon="true"
       :state="surfaceState"
       data-testid="app-agent-launcher"
       @click="$emit('open')"

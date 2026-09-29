@@ -22,6 +22,7 @@ import {
 import {
   supervisorGrantCoordinator,
   type SupervisorGrantCoordinator,
+  type SupervisorGrantReconciliationObservation,
 } from "../main/supervisor-grant-coordinator.js";
 import { mapApiSession } from "./api-mapper.js";
 import type { RentalApiClient, RentalApiResult } from "./api-client.js";
@@ -126,6 +127,8 @@ export class RentalLaunchCoordinator {
   private readonly tails = new Map<string, Promise<void>>();
   private readonly deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private recoveryPass: Promise<void> | null = null;
+  private reportedGrantFailure: Promise<void> | null = null;
 
   constructor(
     private readonly api: RentalApiClient,
@@ -140,82 +143,34 @@ export class RentalLaunchCoordinator {
     return this.serialize(sessionId, () => this.acceptAndLaunchOnce(sessionId, configuration));
   }
 
-  /** Reinstall normal supervisor authority elsewhere, then restore only the
-   * rental-specific acknowledgement/deadline journal in this coordinator. */
+  /** Restore rental obligations while the grant owner restores authority.
+   * A completed pass is not a claim that permission restoration succeeded. */
   async recover(): Promise<void> {
-    await pruneRentalLaunches().catch(() => undefined);
-    const launches = await listRentalLaunches();
-    for (const launch of launches) {
-      if (launch.state === "active" || launch.state === "launching" || launch.state === "stopping") {
-        this.schedulePersistedDeadline(launch);
-      }
-    }
-    const entries = await this.daemon.list(null).catch(() => null);
-    await Promise.allSettled(launches.map(async (launch) => {
-      if (launch.state === "accepting") {
-        if (!launch.configuration) {
-          await this.record({ ...launch, state: "failed" });
-          return;
-        }
-        await this.acceptAndLaunch(launch.sessionId, launch.configuration).catch(() => undefined);
-        return;
-      }
-      const recoveredEntry = entries?.find((candidate) => candidate.id === launch.entryId);
-      // Transport failure is not proof that the worker is absent. The periodic
-      // reconciliation loop will retry once the daemon can be queried.
-      if (!entries && (launch.state === "active" || launch.state === "launching")) return;
-      if (recoveredEntry && !isRentalSafePermissionProfile(
-        recoveredEntry.provider,
-        recoveredEntry.permissionProfileId,
-      )) {
-        await this.fenceRecoveredLaunch(launch, recoveredEntry, "The stored rental permission profile is no longer safe.");
-        return;
-      }
-      if (launch.state === "active") {
-        if (!this.isHealthyRentalEntry(recoveredEntry)) {
-          await this.fenceRecoveredLaunch(launch, recoveredEntry, "The rental worker was not found during recovery.");
-          return;
-        }
-        const result = await this.api.getSession(launch.sessionId);
-        if (!result.ok) return;
-        const session = mappedSession(result.body);
-        if (TERMINAL_SESSION_STATUSES.has(session.status)) {
-          await this.teardown(launch.sessionId);
-          return;
-        }
-        this.scheduleDeadline(launch, session);
-        return;
-      }
-      if (launch.state !== "launching") return;
-      const entry = recoveredEntry;
-      if (!entry || entry.desiredState !== "running") {
-        await this.fenceRecoveredLaunch(launch, entry, "The rental worker was not found during recovery.");
-        return;
-      }
-      const ready = await this.waitForEntry(entry.id, (candidate) => this.isHealthyRentalEntry(candidate), READY_TIMEOUT_MS).catch(() => null);
-      if (!ready) {
-        await this.fenceRecoveredLaunch(launch, entry, "The rental worker did not become ready during recovery.");
-        return;
-      }
-      await this.acknowledgeRecoveredLaunch(launch, ready);
-    }));
-    this.startReconciliation();
+    if (!await this.daemon.isMaintenanceHeld()) await pruneRentalLaunches().catch(() => undefined);
+    return this.reconcileActiveSessions(true);
   }
 
   async teardown(sessionId: string): Promise<void> {
-    return this.serialize(sessionId, async () => {
-      const launch = await readRentalLaunch(sessionId);
-      if (!launch || launch.state === "stopped") return;
-      await this.record({ ...launch, state: "stopping" });
-      const timer = this.deadlineTimers.get(sessionId);
-      if (timer) clearTimeout(timer);
-      this.deadlineTimers.delete(sessionId);
-      await this.stopAndPurge(launch.entryId);
-      await this.record({ ...launch, state: "stopped" });
-    });
+    return this.serialize(sessionId, () => this.teardownOnce(sessionId));
+  }
+
+  private async teardownOnce(sessionId: string): Promise<void> {
+    const launch = await readRentalLaunch(sessionId);
+    if (!launch || launch.state === "stopped") return;
+    await this.record({ ...launch, state: "stopping" });
+    const timer = this.deadlineTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.deadlineTimers.delete(sessionId);
+    await this.stopAndPurge(launch.entryId);
+    await this.record({ ...launch, state: "stopped" });
+  }
+
+  private async assertAdmission(): Promise<void> {
+    if (await this.daemon.isMaintenanceHeld()) throw new RentalLaunchError("daemon_unavailable", "Agent supervision is paused for service maintenance.");
   }
 
   private async acceptAndLaunchOnce(sessionId: string, configuration: DesktopRentalLaunchConfiguration): Promise<DesktopRentalSession> {
+    await this.assertAdmission();
     const id = sessionId.trim();
     if (!id || !["codex", "claude-code", "cursor", "open-model"].includes(configuration.providerId)) {
       throw new RentalLaunchError("invalid_configuration", "Choose an available local runtime.", false);
@@ -255,6 +210,7 @@ export class RentalLaunchCoordinator {
       model: configuration.model?.trim() || null,
       permissionProfileId,
     };
+    await this.assertAdmission();
     await this.record({
       sessionId: id,
       launchAttempt: 0,
@@ -266,6 +222,7 @@ export class RentalLaunchCoordinator {
     });
     let acceptedBody: unknown;
     try {
+      await this.assertAdmission();
       acceptedBody = requireOk(await this.api.acceptRequest(id, {
         hostId,
         installationId: rentalProviderInstallationId(hostId),
@@ -301,11 +258,13 @@ export class RentalLaunchCoordinator {
     let activationMayHaveCommitted = false;
     try {
       await this.daemon.ensureRunning().catch(() => { throw new RentalLaunchError("daemon_unavailable", "Background agent management is unavailable."); });
+      await this.assertAdmission();
       const agentKey = await this.resolveIdentity({
         entryId,
         displayName: `Rented ${configuration.providerId}`,
         providerId: configuration.providerId,
       });
+      await this.assertAdmission();
       const authorityBody = requireOk(await this.api.requestLaunchAuthority(id, {
         agentKey,
         agentInstanceId: entryId,
@@ -339,10 +298,14 @@ export class RentalLaunchCoordinator {
             generation: grantGeneration,
             expiresAt,
           },
+          // This endpoint does not currently attest the stable owner/scope
+          // tuple, so rental grants remain ineligible for remote delegation.
+          authority: null,
           token,
         },
       });
       prepared = entry;
+      await this.assertAdmission();
       requireOk(await this.api.acknowledgeLaunch(id, {
         launchAttempt: attempt,
         state: "provisioning",
@@ -354,6 +317,7 @@ export class RentalLaunchCoordinator {
       const roomAgentSessionId = ready.agentSessionId;
       if (!roomAgentSessionId) throw new RentalLaunchError("launch_failed", "The rental worker lost its room binding before activation.");
       activationMayHaveCommitted = true;
+      await this.assertAdmission();
       const activeResult = await this.api.acknowledgeLaunch(id, {
         launchAttempt: attempt,
         state: "active",
@@ -384,7 +348,7 @@ export class RentalLaunchCoordinator {
       const activeLaunch = { sessionId: id, launchAttempt: attempt, entryId: ready.id, roomId, state: "active" as const, configuration: durableConfiguration, updatedAt: new Date().toISOString() };
       await this.record(activeLaunch);
       activationMayHaveCommitted = false;
-      this.scheduleDeadline(activeLaunch, session);
+      await this.scheduleDeadline(activeLaunch, session);
       return session;
     } catch (error) {
       const rawFailure = error instanceof RentalLaunchError
@@ -395,6 +359,7 @@ export class RentalLaunchCoordinator {
         redactCredentialText(rawFailure.message).value,
         rawFailure.retryable,
       );
+      if (await this.daemon.isMaintenanceHeld()) throw failure;
       if (activationMayHaveCommitted) {
         throw new RentalLaunchError(
           failure.code,
@@ -457,7 +422,7 @@ export class RentalLaunchCoordinator {
     await this.purge(stopped);
   }
 
-  private scheduleDeadline(launch: RentalLaunchJournalEntry, session: DesktopRentalSession): void {
+  private async scheduleDeadline(launch: RentalLaunchJournalEntry, session: DesktopRentalSession): Promise<void> {
     // A persisted deadline is authoritative across restarts and temporary API
     // outages. Recomputing it from a later refresh would silently extend the
     // renter's lease.
@@ -467,7 +432,7 @@ export class RentalLaunchCoordinator {
     const startedAt = session.startedAt ? Date.parse(session.startedAt) : Date.now();
     const deadlineAt = Number.isFinite(startedAt) ? startedAt + duration * 60_000 : Date.now() + duration * 60_000;
     this.armDeadline(launch.sessionId, deadlineAt);
-    void this.record({ ...launch, deadlineAt: new Date(deadlineAt).toISOString() }).catch(() => undefined);
+    await this.record({ ...launch, deadlineAt: new Date(deadlineAt).toISOString() }).catch(() => undefined);
   }
 
   private schedulePersistedDeadline(launch: RentalLaunchJournalEntry): boolean {
@@ -507,59 +472,105 @@ export class RentalLaunchCoordinator {
   private startReconciliation(): void {
     if (this.reconcileTimer) return;
     this.reconcileTimer = setInterval(() => {
-      void this.reconcileActiveSessions().catch(() => undefined);
+      void this.reconcileActiveSessions().catch((error) => {
+        console.warn(`Rental launch recovery unavailable: ${redactCredentialText(error instanceof Error ? error.message : String(error)).value}`);
+      });
     }, RECONCILE_MS);
     this.reconcileTimer.unref();
   }
 
-  private async reconcileActiveSessions(): Promise<void> {
+  private reconcileActiveSessions(initial = false): Promise<void> {
+    if (this.recoveryPass) return this.recoveryPass;
+    const operation = this.reconcileLaunches(initial);
+    this.recoveryPass = operation;
+    void operation.finally(() => {
+      if (this.recoveryPass === operation) this.recoveryPass = null;
+    }).catch(() => undefined);
+    return operation;
+  }
+
+  private grantRestorationSucceeded(observed: SupervisorGrantReconciliationObservation | null): boolean {
+    const latest = this.grants.getReconciliationObservation();
+    return Boolean(observed?.status === "succeeded" && observed.current
+      && latest?.attempt === observed.attempt && latest.current);
+  }
+
+  private async reconcileLaunches(initial: boolean): Promise<void> {
     const launches = await listRentalLaunches();
     for (const launch of launches) {
       if (launch.state === "active" || launch.state === "launching" || launch.state === "stopping") {
         this.schedulePersistedDeadline(launch);
       }
     }
+    if (initial) this.startReconciliation();
+    if (await this.daemon.isMaintenanceHeld()) return;
+    let grants = this.grants.getReconciliationObservation();
+    if (initial && !grants) {
+      // Startup may join/register the owner's first attempt. Periodic rental
+      // observation never retries grants, including an already failed attempt.
+      void this.grants.reconcileDesiredRunning().catch(() => undefined);
+      grants = this.grants.getReconciliationObservation();
+    }
     const entries = await this.daemon.list(null).catch(() => null);
-    await Promise.allSettled(launches.map(async (launch) => {
-      if (launch.state === "accepting") {
-        if (launch.configuration) {
-          await this.acceptAndLaunch(launch.sessionId, launch.configuration).catch(() => undefined);
+    await Promise.allSettled(launches.map(async (saved) => {
+      if (!["accepting", "active", "launching", "stopping"].includes(saved.state)) return;
+      let entry = entries?.find((candidate) => candidate.id === saved.entryId);
+      const unsafe = entry && !isRentalSafePermissionProfile(entry.provider, entry.permissionProfileId);
+      let session: DesktopRentalSession | null = null;
+      if (entries && (entry || saved.state === "stopping") && !unsafe && saved.state !== "accepting") {
+        const result = await this.api.getSession(saved.sessionId).catch(() => null);
+        if (result?.ok) session = mappedSession(result.body);
+      }
+      if (initial && saved.state === "launching" && entry?.desiredState === "running" && !unsafe
+        && !TERMINAL_SESSION_STATUSES.has(session?.status ?? "") && !this.isHealthyRentalEntry(entry)
+        && this.grantRestorationSucceeded(grants)) {
+        const ready = await this.waitForEntry(saved.entryId, (candidate) => this.isHealthyRentalEntry(candidate), READY_TIMEOUT_MS).catch(() => null);
+        if (ready) entry = ready;
+      }
+      // Reads and any readiness wait precede the session tail. Cancellation and
+      // deadlines can advance the obligation, invalidating this old snapshot.
+      await this.serialize(saved.sessionId, async () => {
+        const launch = await readRentalLaunch(saved.sessionId);
+        if (!launch || launch.sessionId !== saved.sessionId || launch.launchAttempt !== saved.launchAttempt
+          || launch.entryId !== saved.entryId || launch.roomId !== saved.roomId || launch.state !== saved.state) return;
+        if (launch.state === "accepting") {
+          if (launch.configuration) await this.acceptAndLaunchOnce(launch.sessionId, launch.configuration).catch(() => undefined);
+          else if (initial) await this.record({ ...launch, state: "failed" });
+          return;
         }
-        return;
-      }
-      if (launch.state !== "active" && launch.state !== "stopping" && launch.state !== "launching") return;
-      if (!entries) return;
-      const entry = entries.find((candidate) => candidate.id === launch.entryId);
-      if (launch.state === "launching") {
-        if (!this.isHealthyRentalEntry(entry)) {
-          await this.fenceRecoveredLaunch(launch, entry, "The rental worker is no longer available.");
-        } else {
-          await this.acknowledgeRecoveredLaunch(launch, entry);
-        }
-        return;
-      }
-      if (launch.state === "active" && !this.isHealthyRentalEntry(entry)) {
-        await this.fenceRecoveredLaunch(launch, entry, "The rental worker is no longer available.");
-        return;
-      }
-      const result = await this.api.getSession(launch.sessionId);
-      if (!result.ok) return;
-      const session = mappedSession(result.body);
-      if (TERMINAL_SESSION_STATUSES.has(session.status)) {
-        if (entry) await this.teardown(launch.sessionId);
-        else await this.record({ ...launch, state: "stopped" });
-        return;
-      }
-      if (launch.state === "stopping") {
-        const completion = await this.api.completeSession(launch.sessionId, { summary: "Rental time limit reached." });
-        if (completion.ok) {
-          if (entry) await this.teardown(launch.sessionId);
+        if (!entries) return; // A failed daemon read is not absence.
+        if (TERMINAL_SESSION_STATUSES.has(session?.status ?? "")) {
+          if (entry) await this.teardownOnce(launch.sessionId);
           else await this.record({ ...launch, state: "stopped" });
+          return;
         }
-        return;
-      }
-      this.scheduleDeadline(launch, session);
+        if (launch.state === "stopping") {
+          if (!session) return;
+          const completion = await this.api.completeSession(launch.sessionId, { summary: "Rental time limit reached." });
+          if (completion.ok) {
+            if (entry) await this.teardownOnce(launch.sessionId);
+            else await this.record({ ...launch, state: "stopped" });
+          }
+          return;
+        }
+        const independentlyUnavailable = !entry || unsafe || entry.desiredState !== "running"
+          || entry.observedState === "failed" || entry.observedState === "stopped"
+          || entry.observedState === "absent" || entry.condition === "quarantined";
+        if (independentlyUnavailable || !this.isHealthyRentalEntry(entry)) {
+          if (!independentlyUnavailable && !this.grantRestorationSucceeded(grants)) return;
+          await this.fenceRecoveredLaunch(launch, entry, unsafe
+            ? "The stored rental permission profile is no longer safe."
+            : "The rental worker is no longer available.");
+          return;
+        }
+        if (launch.state === "launching") await this.acknowledgeRecoveredLaunch(launch, entry!);
+        else if (session) await this.scheduleDeadline(launch, session);
+      });
     }));
+    if (grants?.status === "failed" && this.reportedGrantFailure !== grants.attempt) {
+      this.reportedGrantFailure = grants.attempt;
+      throw grants.error;
+    }
   }
 
   private async record(entry: RentalLaunchJournalEntry): Promise<void> {
@@ -583,7 +594,10 @@ export class RentalLaunchCoordinator {
     launch: RentalLaunchJournalEntry,
     entry: DesktopSupervisorManifestEntry,
   ): Promise<void> {
-    if (!entry.agentSessionId) return;
+    // Deadline completion may be waiting on its API response while the row is
+    // still launching. That obligation cannot authorize a fresh active ACK.
+    if (launch.deadlineAt && Date.parse(launch.deadlineAt) <= Date.now()) return;
+    if (!entry.agentSessionId || await this.daemon.isMaintenanceHeld()) return;
     const result = await this.api.acknowledgeLaunch(launch.sessionId, {
       launchAttempt: launch.launchAttempt,
       state: "active",
@@ -606,7 +620,7 @@ export class RentalLaunchCoordinator {
     const session = mappedSession(body);
     const recovered = { ...launch, state: "active" as const };
     await this.record(recovered);
-    this.scheduleDeadline(recovered, session);
+    await this.scheduleDeadline(recovered, session);
   }
 
   private async fenceRecoveredLaunch(
@@ -614,6 +628,7 @@ export class RentalLaunchCoordinator {
     entry: DesktopSupervisorManifestEntry | undefined,
     reason: string,
   ): Promise<void> {
+    if (await this.daemon.isMaintenanceHeld()) return;
     const timer = this.deadlineTimers.get(launch.sessionId);
     if (timer) clearTimeout(timer);
     this.deadlineTimers.delete(launch.sessionId);

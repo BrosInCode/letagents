@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
+import { archiveRetiredRuntimes, prepareRetiredRuntimePlan } from "../runtime-recovery-journal.js";
+import type { DaemonManifestEntry } from "../types.js";
+import type { ProcessIdentity } from "../process-identity.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-binding-sqlite-"));
@@ -31,6 +35,64 @@ function assertRedactedBackup(value: string, source: string) {
   assert.equal(evidence.bindings[0]?.entry_id, "agent_a");
   assert.doesNotMatch(value, /agent_session_token|token-session_a/);
 }
+
+test("reused binding reads observe cursor, epoch and credential replacement across independent writes", async () => {
+  const env = await fixture();
+  const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  let raw: DatabaseSync | undefined;
+  try {
+    const first = await store.bind(input());
+    assert.deepEqual(await store.get("agent_a"), first);
+    assert.deepEqual(await store.list(), [first]);
+    assert.equal(await store.credentialFor(first), "token-session_a");
+    raw = new DatabaseSync(env.database);
+    raw.prepare("UPDATE worker_session_bindings SET room_cursor='msg_42',binding_epoch=binding_epoch+1 WHERE entry_id='agent_a'").run();
+    assert.equal((await store.get("agent_a"))?.room_cursor, "msg_42");
+    assert.equal((await store.list())[0]?.room_cursor, "msg_42");
+    assert.equal(await store.credentialFor(first), null, "prepared epoch reads must not cache credential authority");
+    const second = await store.bind(input("agent_a", "run_2", "replacement"));
+    assert.deepEqual(await store.list(), [second]);
+    assert.equal(await store.credentialFor(first), null);
+    assert.equal(await store.credentialFor(second), "token-replacement");
+    await store.close();
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    try {
+      assert.deepEqual(await reopened.get("agent_a"), second);
+      assert.equal(await reopened.credentialFor(second), null, "connection reuse never persists an in-memory credential");
+    } finally { await reopened.close(); }
+    await assert.rejects(store.get("agent_a"), /closed/);
+  } finally { raw?.close(); await store.close(); await env.cleanup(); }
+});
+
+test("publication fences keep presentation hints separate from exact rejected-binding invalidation", async () => {
+  const env = await fixture();
+  const hints: Array<string | false | undefined> = [];
+  const store = new WorkerBindingStore(env.legacy, async (commit, notification) => {
+    await commit();
+    hints.push(notification?.captureAgentId);
+  }, env.database);
+  try {
+    const first = await store.bind(input());
+    assert.deepEqual(hints, ["agent_a"]);
+    hints.length = 0;
+    await store.publish("agent_a", Date.now(), async () => ({ accepted: true }));
+    assert.deepEqual(hints, [false, false], "reservation and acceptance still cross their commit fences");
+    assert.equal(await store.credentialFor(first), "token-session_a");
+    hints.length = 0;
+    await assert.rejects(store.publish("agent_a", Date.now(), async () => { throw new Error("offline"); }), /offline/);
+    assert.deepEqual(hints, [false, false]);
+    assert.ok(await store.get("agent_a"), "transport failure preserves exact binding authority");
+    hints.length = 0;
+    await store.publish("agent_a", Date.now(), async () => ({ accepted: false }));
+    assert.deepEqual(hints, [false, "agent_a"], "explicit rejection refreshes capture for the potentially revoked agent");
+    assert.equal(await store.get("agent_a"), null);
+    assert.equal(await store.credentialFor(first), null);
+    hints.length = 0;
+    await store.compactRetainedPublications(1);
+    assert.ok(hints.length > 0);
+    assert.ok(hints.every((hint) => hint === false), "publication retention still crosses a presentation-only fence");
+  } finally { await store.close(); await env.cleanup(); }
+});
 
 test("slow native publication does not block another binding checkpoint or publication", async () => {
   const env = await fixture(); try {
@@ -169,6 +231,28 @@ test("rebind preserves globally monotonic native sequence", async () => {
   } finally { await env.cleanup(); }
 });
 
+test("custodial remint retains the acknowledged cursor and refuses a missing cursor without mutation", async () => {
+  const env = await fixture();
+  let store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  try {
+    await store.bind(input());
+    const prior = await store.checkpointCursor("agent_a", "session_a", "run_1", "msg_47");
+    await assert.rejects(store.bind(input("agent_a", "run_2", "session_b"), { roomCursor: null }), /acknowledged numeric room cursor/);
+    assert.deepEqual(await store.get("agent_a"), prior);
+    assert.equal(await store.credentialFor(prior), "token-session_a", "rejected remint keeps the current credential");
+
+    await store.close();
+    store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const retained = await store.get("agent_a");
+    assert.equal(retained?.room_cursor, "msg_47");
+    const reminted = await store.bind(input("agent_a", "run_2", "session_b"), { roomCursor: retained!.room_cursor });
+    assert.equal(reminted.room_cursor, "msg_47", "new worker identity inherits only the explicitly supplied acknowledged cursor");
+    assert.equal(reminted.agent_session_id, "session_b");
+    assert.equal(reminted.execution_generation_id, "run_2");
+    assert.equal(await store.credentialFor(reminted), "token-session_b");
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("unbind and a delayed explicit rejection retain the global watermark across rebind", async () => {
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database);
@@ -195,6 +279,34 @@ test("unbind and a delayed explicit rejection retain the global watermark across
     assert.equal(live.binding_epoch, 3);
     assert.ok(watermark.last_sequence >= second!.sequence);
     db.close();
+  } finally { await env.cleanup(); }
+});
+
+test("retirement removes live worker authority while preserving publication watermarks", async () => {
+  const env = await fixture(); try {
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await store.beginSupervisedWorkerSessionMint({ agent_id: "agent_a", room_id: "room", agent_instance_id: "instance_a" });
+    await store.recordExactSupervisedWorkerSessionMint({ agent_id: "agent_a", room_id: "room", agent_instance_id: "instance_a", agent_session_id: "session_a" });
+    await store.recordSupervisedWorkerSession({
+      agent_id: "agent_a", room_id: "room", agent_session_id: "session_a",
+      execution_generation_id: "run_1", credential_ref: "credential_a", expires_at: null,
+    });
+    await store.bind(input());
+    const published = await store.publish("agent_a", 1, async () => ({ accepted: true }));
+
+    await store.retireSupervisedWorkerAuthority("agent_a", "session_a");
+    assert.equal(await store.get("agent_a"), null);
+    assert.equal(await store.supervisedWorkerSession("agent_a"), null);
+    assert.equal(await store.supervisedWorkerMintState("agent_a"), null);
+
+    await store.bind(input("agent_a", "run_2", "session_b"));
+    const resumed = await store.publish("agent_a", 1, async () => ({ accepted: true }));
+    assert.ok(resumed!.sequence > published!.sequence, "fresh resume cannot reuse the retired worker sequence");
+    await assert.rejects(
+      () => store.retireSupervisedWorkerAuthority("agent_a", "session_a"),
+      /changed before local cleanup/,
+    );
+    await store.close();
   } finally { await env.cleanup(); }
 });
 
@@ -236,6 +348,8 @@ test("a canonical v4 database with no later additive tables upgrades through the
         BEGIN IMMEDIATE;
         DROP TABLE agent_room_moves;
         DROP TABLE agent_purge_operations;
+        -- A physical v4 fixture predates the v13 continuation-repair journal.
+        DROP TABLE provider_continuation_repairs;
         DROP TABLE supervised_agent_publications;
         DROP TABLE supervised_agent_provider_turn_bindings;
         DROP TABLE supervised_agent_history_boundaries;
@@ -255,6 +369,7 @@ test("a canonical v4 database with no later additive tables upgrades through the
         ALTER TABLE agent_configurations DROP COLUMN config_revision;
         ALTER TABLE agent_configurations DROP COLUMN reasoning_effort;
         ALTER TABLE agent_configurations DROP COLUMN delivery_cutover_json;
+        ALTER TABLE agent_configurations DROP COLUMN polling_contract;
         ALTER TABLE agent_configurations DROP COLUMN delivery_mode;
         ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id;
         ALTER TABLE turn_control_journals DROP COLUMN action_sequence;
@@ -300,7 +415,7 @@ test("a canonical v4 database with no later additive tables upgrades through the
         assert.ok(current.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), `${table} was created before version markers advanced`);
       }
       const configurationColumns = new Set((current.prepare("PRAGMA table_info(agent_configurations)").all() as Array<{ name: string }>).map((column) => column.name));
-      for (const column of ["delivery_mode", "delivery_cutover_json", "reasoning_effort", "config_revision", "runtime_configuration_revision"]) {
+      for (const column of ["delivery_mode", "delivery_cutover_json", "reasoning_effort", "config_revision", "runtime_configuration_revision", "polling_contract"]) {
         assert.ok(configurationColumns.has(column), `${column} was applied during the canonical v4 upgrade`);
       }
       const bindingColumns = new Set((current.prepare("PRAGMA table_info(worker_session_bindings)").all() as Array<{ name: string }>).map((column) => column.name));
@@ -410,6 +525,77 @@ test("a sibling opener observes a durable legacy-import failure instead of retur
     assert.match(String(right.status === "rejected" && right.reason), /Legacy worker binding import/);
     await first.close(); await second.close();
   } finally { await env.cleanup(); }
+});
+
+test("concurrent failed-import cleanup requires exact retained quarantine evidence", async (t) => {
+  const cases = [
+    { boundary: "publish", retained: "matching" },
+    { boundary: "publish", retained: "missing" },
+    { boundary: "publish", retained: "mismatched" },
+    { boundary: "before-read", retained: "matching" },
+    { boundary: "retire", retained: "matching" },
+  ] as const;
+  for (const { boundary, retained } of cases) await t.test(`${boundary}: ${retained}`, async () => {
+    const env = await fixture();
+    const malformed = "{bad";
+    const quarantine = `${env.legacy}.corrupt.${checksum(malformed).slice(0, 16)}`;
+    const first = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const second = new WorkerBindingStore(env.legacy, undefined, env.database);
+    let db: DatabaseSync | null = null;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let reached!: () => void;
+    const afterSourceRead = new Promise<void>(resolve => { reached = resolve; });
+    const internals = first as unknown as { readOwnerOnly(path: string): Promise<string | undefined> };
+    const readOwnerOnly = internals.readOwnerOnly.bind(first);
+    let claimReads = 0;
+    internals.readOwnerOnly = async path => {
+      const claimedRead = path.startsWith(`${env.legacy}.claimed.`) && ++claimReads === 2;
+      if (boundary === "before-read" && claimedRead) { reached(); await held; }
+      const raw = await readOwnerOnly(path);
+      // First read parses the source. The second has the durable failure
+      // committed and is about to publish the exact quarantine hard-link.
+      if ((boundary === "publish" && claimedRead) || (boundary === "retire" && path === quarantine)) {
+        assert.equal(raw, malformed);
+        reached();
+        await held;
+      }
+      return raw;
+    };
+    try {
+      await writeFile(env.legacy, malformed, { mode: 0o600 });
+      const firstResult = Promise.allSettled([first.list()]);
+      await afterSourceRead;
+      db = new DatabaseSync(env.database);
+      const failureBefore = db.prepare("SELECT * FROM migration_failures").all();
+      assert.equal(failureBefore.length, 1, "the verdict is durable before either cleanup finishes");
+      const [right] = await Promise.allSettled([second.list()]);
+      assert.equal(right.status, "rejected");
+      assert.match(String(right.status === "rejected" && right.reason), /Legacy worker binding import/);
+      assert.equal(await readFile(quarantine, "utf8"), malformed, "the sibling retained the exact source before removing the claim");
+      if (retained === "missing") await unlink(quarantine);
+      if (retained === "mismatched") await writeFile(quarantine, "different evidence", { mode: 0o600 });
+      release();
+      const [left] = await firstResult;
+      assert.equal(left.status, "rejected");
+      assert.match(String(left.status === "rejected" && left.reason), retained === "matching" && boundary !== "before-read"
+        ? /Legacy worker binding import refused/
+        : /Legacy worker binding import integrity error/);
+      assert.deepEqual(db.prepare("SELECT * FROM migration_failures").all(), failureBefore, "cleanup never rewrites the durable verdict");
+      assert.equal((db.prepare("SELECT COUNT(*) AS n FROM migration_records").get() as { n: number }).n, 0);
+      assert.equal((db.prepare("SELECT COUNT(*) AS n FROM worker_session_bindings").get() as { n: number }).n, 0);
+      db.close(); db = null;
+      assert.equal((await readdir(env.root)).filter(name => name.includes(".claimed.")).length, 0);
+      if (retained !== "missing") {
+        assert.equal(await readFile(quarantine, "utf8"), retained === "matching" ? malformed : "different evidence");
+        assert.equal((await stat(quarantine)).mode & 0o777, 0o600);
+      }
+    } finally {
+      release();
+      db?.close();
+      await first.close(); await second.close(); await env.cleanup();
+    }
+  });
 });
 
 test("a durable malformed-A failure preserves a later public B under unique evidence", async () => {
@@ -600,4 +786,139 @@ test("v4 validator rejects generated columns and NOCASE/DESC unique terms", asyn
     const db = new DatabaseSync(env.database); db.exec("ALTER TABLE worker_session_bindings ADD COLUMN generated TEXT GENERATED ALWAYS AS ('x') VIRTUAL"); db.close();
     await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /invalid strict schema|canonical definition/);
   } finally { await env.cleanup(); }
+});
+
+function seedCustodyExecution(database: DatabaseSync, id = "run_1", generation = 1, attempt = "attempt") {
+  const task = attempt === "attempt" ? "supervised-agent" : attempt;
+  database.prepare(`INSERT OR IGNORE INTO work_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    attempt, task, task, 0, attempt === "attempt" ? "/fixture/workspace" : `/fixture/${attempt}`, "repo", "remote", "revision", "/fixture/bare", "active", "2026-09-22T00:00:00Z", null, null, null);
+  database.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,?,?,?)").run(id, attempt, "2026-09-22T00:00:00Z", "provider", generation, "{}");
+}
+const custodyBinding = { entry_id: "agent_a", room_id: "room", api_url: "https://letagents.test", grant_id: "grant-a",
+  work_attempt_id: "attempt", execution_generation_id: "run_1", agent_session_id: "session_a", agent_key: "owner/agent-a" };
+
+test("pre-spawn worker custody survives overwrite, unbind and daemon reopen without requiring a heartbeat", async () => {
+  const env = await fixture();
+  let store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  try {
+    await store.list();
+    const db = new DatabaseSync(env.database);
+    seedCustodyExecution(db); seedCustodyExecution(db, "run_2", 2);
+    db.close();
+    await store.recordExecutionBinding(custodyBinding);
+    await store.recordExecutionBinding(custodyBinding);
+    await assert.rejects(store.recordExecutionBinding({ ...custodyBinding, agent_key: "other-agent" }), /immutable/);
+    await assert.rejects(store.recordExecutionBinding({ ...custodyBinding, work_attempt_id: "other-attempt" }), /different attempt/);
+    await store.recordExecutionBinding({ ...custodyBinding, execution_generation_id: "run_2", agent_session_id: "session_b" });
+    await store.bind(input("agent_a", "run_2", "session_b"));
+    await store.unbind("agent_a");
+    await store.close();
+    store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const history = await store.executionPredecessors("agent_a", "attempt", "room");
+    assert.equal(history.length, 2);
+    assert.deepEqual(history.find(record => record.agent_session_id === "session_a")?.authority, custodyBinding);
+    assert.deepEqual(await store.executionPredecessors("agent_a", "different-attempt", "room"), []);
+    const check = new DatabaseSync(env.database);
+    assert.equal(check.prepare("SELECT count(*) AS n FROM worker_binding_publications").get()!.n, 0);
+    assert.deepEqual({ ...check.prepare("SELECT task_id,lease_id,current_lease_epoch FROM work_attempts").get()! },
+      { task_id: "supervised-agent", lease_id: "supervised-agent", current_lease_epoch: 0 });
+    check.close();
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("legacy custody retains unknown generations and only marks exact completed recovery as proven", async () => {
+  const env = await fixture();
+  const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  try {
+    await store.list();
+    const db = new DatabaseSync(env.database);
+    seedCustodyExecution(db); seedCustodyExecution(db, "run_2", 2);
+    db.prepare("INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,'resume','complete',?,?,?,?)")
+      .run("recovery-1", "agent_a", "room", "run_1", "birth-1", JSON.stringify({ work_attempt_id: "attempt" }), null, "now", "now");
+    db.close();
+    for (const generation of ["run_1", "run_2"]) {
+      await store.bind(input("agent_a", generation));
+      await store.publish("agent_a", Date.now(), async () => ({ accepted: true }));
+    }
+    await store.unbind("agent_a");
+    const history = await store.executionPredecessors("agent_a", "attempt", "room");
+    assert.equal(history.length, 2, "an unrecovered generation cannot disappear from the death-proof obligation");
+    assert.equal(history.find(record => record.execution_generation_id === "run_1")?.legacy_recovery_complete, true);
+    assert.equal(history.find(record => record.execution_generation_id === "run_2")?.legacy_recovery_complete, false);
+    assert.ok(history.every(record => record.authority === null), "legacy evidence never invents a launch grant/API receipt");
+    assert.ok((await store.executionPredecessors("agent_a", "attempt", "different-room")).every(record => !record.legacy_recovery_complete));
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("explicit recovery covers publication-only and both verification predecessors before lease continuity", async () => {
+  const env = await fixture();
+  const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  let db: DatabaseSync | undefined;
+  try {
+    await store.list();
+    db = new DatabaseSync(env.database);
+    const shadow = new ExecutionShadowStore(db);
+    const birth = "Tue Sep 22 01:00:00 2026";
+    const runtimes = new Map<string, string>();
+    for (const [index, id] of ["published", "verified-from", "verified-to", "current", "other-entry", "other-attempt", "already-bound"].entries()) {
+      seedCustodyExecution(db, id, index + 1, id === "other-attempt" ? "other-attempt" : "attempt");
+      const pid = 44001 + index;
+      const runtime = executionRuntimeStorageIdentity("agent_a", id, "codex_app_server", pid, birth);
+      runtimes.set(id, runtime);
+      shadow.registerRuntime({ agentId: "agent_a", executionGenerationId: id, runtimeGenerationId: runtime,
+        provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
+      if (index < 3) db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id=?").run(JSON.stringify({
+        actor: "provider", generation: index + 1, ended_at: "2026-09-22T02:00:00Z", terminal_cause: "crashed",
+        provider_continuation_id: "saved-conversation", native_runtime_death: { kind: "codex_app_server", pid, processIdentity: birth },
+      }), id);
+    }
+    // These reservations have no observer, turn or pending inbox. They still
+    // belong to the previous session's native-death proof obligation.
+    const publish = (reservation: string, owner: string, execution: string, sequence: number) => db!.prepare(
+      "INSERT INTO worker_binding_publications VALUES(?,?,1,?,'old-session',?,'now',100,'failed','now',NULL)")
+      .run(reservation, owner, execution, sequence);
+    publish("publication", "agent_a", "published", 1);
+    publish("unrelated-entry", "agent_b", "other-entry", 1);
+    publish("unrelated-attempt", "agent_a", "other-attempt", 2);
+    publish("exact-custody", "agent_a", "already-bound", 3);
+    await store.recordExecutionBinding({ ...custodyBinding, execution_generation_id: "already-bound", agent_session_id: "old-session" });
+    db.prepare("INSERT INTO worker_generation_verifications VALUES('verification','agent_a',1,'verified-from','verified-to','old-session',1,'now',100,'lost_race','now',NULL)").run();
+    const entry = { id: "agent_a", room_id: "room", provider: "codex", work_attempt_id: "attempt", desired_state: "running",
+      provider_ref: { work_attempt_id: "attempt", execution_generation_id: "current", provider_continuation_id: "saved-conversation",
+        provider_connection: { kind: "codex_app_server", pid: 44004, processIdentity: birth } } } as DaemonManifestEntry;
+    const request = { operationId: "explicit-restart", entryId: "agent_a", roomId: "room", mode: "resume" as const,
+      executionGenerationId: "current", runtimeGenerationId: runtimes.get("current")! };
+    let predecessorState: "gone" | "live" | "unknown" = "gone";
+    const identity: ProcessIdentity = {
+      probe: () => { if (predecessorState !== "live") throw Object.assign(new Error(predecessorState), { code: predecessorState === "gone" ? "ESRCH" : "EPERM" }); },
+      readBirthIdentity: () => birth, sameBirthIdentity: (actual, expected) => actual === expected,
+    };
+    const plan = prepareRetiredRuntimePlan(db, request, entry, [], identity);
+    assert.deepEqual(plan.evidence.map(value => value.executionGenerationId).sort(), ["published", "verified-from", "verified-to"],
+      "worker history must be included even with no unresolved execution work; unrelated entry/attempt are excluded");
+    assert.equal(plan.observerJson, null, "no observation is fabricated for worker-only history");
+    for (const state of ["live", "unknown"] as const) {
+      predecessorState = state;
+      assert.throws(() => prepareRetiredRuntimePlan(db!, request, entry, [], identity), /not been proven gone/);
+    }
+    predecessorState = "gone";
+    const exactTerminal = db.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id='published'").get()!.terminal_json;
+    db.prepare("UPDATE work_attempt_executions SET terminal_json='{}' WHERE execution_generation_id='published'").run();
+    assert.throws(() => prepareRetiredRuntimePlan(db!, request, entry, [], identity), /no exact retired execution record/);
+    db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='published'").run(exactTerminal);
+    db.exec("BEGIN IMMEDIATE");
+    archiveRetiredRuntimes(db, request, { ...entry, desired_state: "paused" }, plan, identity);
+    db.exec("COMMIT");
+    const history = await store.executionPredecessors("agent_a", "attempt", "room");
+    assert.equal(history.length, 4);
+    const legacy = history.filter(record => record.execution_generation_id !== "already-bound");
+    assert.ok(legacy.every(record => record.legacy_recovery_complete && record.authority === null),
+      "completed exact retirement is consumable by lease continuity without inventing historical launch authority");
+    assert.equal(history.find(record => record.execution_generation_id === "already-bound")?.authority?.grant_id, "grant-a");
+    assert.ok((await store.executionPredecessors("agent_a", "attempt", "different-room")).every(record => !record.legacy_recovery_complete));
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM worker_execution_bindings").get()!.n, 1, "only the existing exact receipt remains");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries").get()!.n, 3);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n, 0);
+    assert.deepEqual(prepareRetiredRuntimePlan(db, request, entry, [], identity).evidence, [], "complete archives are immutable and not repeated");
+  } finally { db?.close(); await store.close(); await env.cleanup(); }
 });

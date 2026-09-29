@@ -1,0 +1,1422 @@
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { DaemonStateSchema } from "../daemon-state-database.js";
+import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
+import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity } from "../execution-shadow-store.js";
+import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
+import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
+import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
+import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
+import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
+import { projectRoomAgentManifestEntry } from "../room-agent-state-projection.js";
+
+const now = "2026-08-31T00:00:00.000Z";
+const ready: NativeExecutionFact = { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" };
+const nativeTurn = { providerContinuationId: "continuation", providerTurnId: "native-turn" };
+const active: NativeExecutionFact = { ...nativeTurn, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none" };
+const terminal: NativeExecutionFact = { ...active, state: "terminal", turnOutcome: "completed" };
+async function flush(): Promise<void> { for (let i = 0; i < 12; i++) await new Promise<void>(resolve => setImmediate(resolve)); }
+async function delay(ms: number): Promise<void> { await new Promise(resolve => setTimeout(resolve, ms)); }
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function successor(f: ReturnType<typeof fixture>, birth: string): ProviderActionHandle {
+  const handle = { ...f.handle, appliedConfigurationRevision: 2,
+    providerConnection: { ...f.handle.providerConnection!, processIdentity: birth } };
+  f.handles.set("agent", handle);
+  f.db.prepare("UPDATE runtime_deployments SET provider_process_identity=?").run(birth);
+  new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
+    runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", handle.providerConnection!.kind,
+      handle.providerConnection!.pid!, birth),
+    provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+  return handle;
+}
+
+function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server", onExecution?: NonNullable<ProviderActionPort["onExecution"]>, changed?: (agentId: string) => void,
+  db = new DatabaseSync(":memory:"), authorityMode: "typed_shadow" | "typed" = "typed_shadow") {
+  db.exec("PRAGMA foreign_keys=ON");
+  new DaemonStateSchema().createSchema(db);
+  db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${now}',0);
+    INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
+      VALUES('agent','claude-code','charter','daemon_inbox',0,0,9,2);
+    INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+      VALUES('workspace','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${now}');
+    INSERT INTO work_attempt_executions VALUES('generation','workspace','${now}','test',1,NULL);
+    INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
+      provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_url,provider_server_auth_path,
+      provider_connection_pid,provider_process_identity_present,provider_process_identity,provider_execution_generation_id,
+      workplace_liveness_present,native_liveness_present,activity_present)
+      VALUES('agent','working',0,1,'workspace',1,'workspace','continuation','${kind}','http://localhost/runtime','/private/auth',42,1,'birth-secret','generation',0,0,0);`);
+  const connection = { kind, pid: 42, processIdentity: "birth-secret", url: "http://localhost/runtime", serverAuthPath: "/private/auth" } as ProviderActionConnectionRef;
+  const handle: ProviderActionHandle = { workAttemptId: "workspace", pid: 42, providerContinuationId: "continuation", observedState: "working", providerConnection: connection, appliedConfigurationRevision: 2 };
+  const handles = new Map([["agent", handle]]);
+  const provider = { codex_app_server: "codex", claude_cli: "claude-code", cursor_cli: "cursor", opencode_server: "open-model" } as const;
+  new ExecutionShadowStore(db).registerRuntime({
+    agentId: "agent",
+    executionGenerationId: "generation",
+    runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", kind, 42, "birth-secret"),
+    provider: provider[kind],
+    authorityMode,
+    configRevision: 2,
+    createdAtMs: Date.parse(now),
+  });
+  const observer = new ProviderExecutionObserver(() => now);
+  const diagnostics: string[] = [];
+  const capture = new ExecutionCaptureCoordinator(db, { provider: { onExecution: onExecution ?? ((_handle, listener) => observer.subscribe(listener)) },
+    currentHandle: id => handles.get(id), daemonGeneration: () => 1, diagnostic: (_id, code) => diagnostics.push(code), changed });
+  const tokens = new WeakMap<ProviderActionHandle, { identity: string; token: ProviderInstallationToken }>();
+  const tokenFor = (current = handles.get("agent")!, generation = "generation"): ProviderInstallationToken => {
+    const tokenAuthorityMode = current.providerConnection?.kind === "cursor_cli"
+      && current.providerConnection.pid === null
+      && current.providerConnection.processIdentity === null
+      ? null
+      : authorityMode;
+    const identity = JSON.stringify([generation, current.appliedConfigurationRevision, current.providerConnection, tokenAuthorityMode]);
+    const existing = tokens.get(current);
+    if (existing?.identity === identity) return existing.token;
+    const token = Object.freeze({ nonce: Symbol("test-installation"), listenerLeaseNonce: Symbol("test-listener-lease"),
+      entryId: "agent", handle: current,
+      executionGenerationId: generation, workAttemptId: current.workAttemptId,
+      providerContinuationId: current.providerContinuationId!, providerConnection: { ...current.providerConnection! },
+      configurationRevision: current.appliedConfigurationRevision!, authorityMode: tokenAuthorityMode });
+    tokens.set(current, { identity, token });
+    return token;
+  };
+  const install = (current = handles.get("agent")!, generation = "generation") => capture.install(tokenFor(current, generation));
+  const advance = (current = handles.get("agent")!, generation = "generation") => capture.advance(tokenFor(current, generation));
+  const admission = (current = handles.get("agent")!, generation = "generation") => capture.captureAdmission(tokenFor(current, generation));
+  const typedAdmission = (current = handles.get("agent")!, generation = "generation") => capture.typedLifecycleAdmission(tokenFor(current, generation));
+  const emit = (fact: NativeExecutionFact, birth = "birth-secret", pid = 42) => observer.emit(fact, birth, pid);
+  const facts = () => db.prepare("SELECT * FROM execution_facts ORDER BY sequence").all();
+  const position = () => db.prepare("SELECT last_source_sequence,max_observed_sequence FROM execution_observers").get();
+  const bindTurn = (turn = "native-turn", source = "message",
+    state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "retryable" | "blocked" = "awaiting_result") => {
+    db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+      VALUES(?,'agent','room',?,'{"text":"PRIVATE PROMPT"}','{}',?,?,1,?,?,?, ?,?)`)
+      .run(turn, source, Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1, state, `action-${turn}`, `reply-${turn}`, turn, now, now);
+    db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room','workspace','generation','continuation',?)").run(turn, turn);
+  };
+  return { db, handle, handles, observer, capture, diagnostics, install, advance, admission, typedAdmission, tokenFor, emit, facts, position, bindTurn };
+}
+
+// A second independent capture lane in the same real store/coordinator.
+function secondCaptureLane(f: ReturnType<typeof fixture>) {
+  const agentId = "second-agent";
+  const generation = "second-generation";
+  const workspace = "second-workspace";
+  for (const [table, key, original] of [
+    ["work_attempts", "work_attempt_id", "workspace"],
+    ["work_attempt_executions", "execution_generation_id", "generation"],
+    ["agent_identities", "agent_id", "agent"],
+    ["agent_configurations", "agent_id", "agent"],
+    ["runtime_deployments", "agent_id", "agent"],
+  ]) {
+    const row = f.db.prepare(`SELECT * FROM ${table} WHERE ${key}=?`).get(original)!;
+    if ("agent_id" in row) row.agent_id = agentId;
+    if ("work_attempt_id" in row) row.work_attempt_id = workspace;
+    if (table === "work_attempts") { row.task_id = agentId; row.lease_id = agentId; row.workspace_path = "/private/second-workspace"; }
+    if (table === "work_attempt_executions") row.execution_generation_id = generation;
+    if (table === "agent_identities") row.sort_order = 1;
+    if (table === "runtime_deployments") { row.provider_execution_generation_id = generation; row.provider_work_attempt_id = workspace; }
+    const columns = Object.keys(row);
+    f.db.prepare(`INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`).run(...Object.values(row));
+  }
+  const handle = { ...f.handle, workAttemptId: workspace, providerConnection: { ...f.handle.providerConnection! } };
+  f.handles.set(agentId, handle);
+  const token = Object.freeze({ ...f.tokenFor(), entryId: agentId, workAttemptId: workspace,
+    executionGenerationId: generation, handle, nonce: Symbol("second-installation") });
+  new ExecutionShadowStore(f.db).registerRuntime({ agentId, executionGenerationId: generation,
+    runtimeGenerationId: executionRuntimeStorageIdentity(agentId, generation, "codex_app_server", 42, "birth-secret"),
+    provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+  return { agentId, handle, token };
+}
+
+test("capture admission is exact, fail-closed, and never promoted by elapsed time", async () => {
+  const f = fixture();
+  try {
+    assert.equal(f.admission(), "unavailable");
+    await f.install();
+    assert.equal(f.admission(), "pending");
+    await flush();
+    assert.equal(f.admission(), "ready",
+      "an exact empty source is admitted once its durable observer exists");
+    f.emit(ready); await flush();
+    assert.equal(f.admission(), "ready");
+    assert.equal(f.admission(f.handle, "other-generation"), "unavailable");
+    assert.equal(f.admission({ ...f.handle }, "generation"), "unavailable");
+    f.db.exec("DELETE FROM execution_observer_sources");
+    assert.equal(f.admission(), "unavailable",
+      "ready is re-derived from the durable source row on every read");
+  } finally { f.capture.close(); }
+
+  const waiting = fixture("codex_app_server", () => new Promise<NativeExecutionSubscription>(() => {}));
+  try {
+    void waiting.install(); await flush();
+    assert.equal(waiting.admission(), "pending",
+      "an unresolved subscription stays pending without elapsed-time promotion");
+  } finally { waiting.capture.close(); }
+});
+
+test("Codex reattach admission requires the exact durable outstanding turn", async () => {
+  const exact = fixture();
+  try {
+    exact.bindTurn();
+    await exact.install(); await flush();
+    assert.equal(exact.admission(), "unavailable",
+      "an empty reattach source cannot erase a durable outstanding turn");
+    exact.emit(ready); await flush();
+    assert.equal(exact.admission(), "unavailable",
+      "runtime readiness alone cannot prove the native turn boundary");
+    exact.emit(active); await flush();
+    assert.equal(exact.admission(), "ready");
+    assert.equal(exact.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'")
+      .get()?.observed_state, "working", "typed-shadow reconstruction cannot mutate legacy authority");
+  } finally { exact.capture.close(); }
+
+  const mismatched = fixture();
+  try {
+    mismatched.bindTurn();
+    mismatched.bindTurn("another-native-turn", "another-message");
+    await mismatched.install();
+    mismatched.emit(ready);
+    mismatched.emit({ ...active, providerTurnId: "another-native-turn" });
+    await flush();
+    assert.deepEqual({ ...mismatched.position() }, { last_source_sequence: 2, max_observed_sequence: 2 },
+      "the unrelated turn is durably mappable and the observer is fully caught up");
+    assert.deepEqual(mismatched.diagnostics, [],
+      "the rejection comes from the missing exact expected turn, not incidental identity failure");
+    assert.equal(mismatched.admission(), "unavailable",
+      "an unrelated latest transcript turn cannot satisfy the durable binding");
+  } finally { mismatched.capture.close(); }
+
+  for (const state of ["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"] as const) {
+    const retained = fixture();
+    try {
+      retained.bindTurn("native-turn", `message-${state}`, state);
+      await retained.install(); await flush();
+      assert.equal(retained.admission(), "unavailable",
+        `a ${state} inbox item retaining a provider-turn binding cannot be admitted from an empty reattach source`);
+    } finally { retained.capture.close(); }
+  }
+});
+
+test("typed lifecycle admission requires a caught-up source and fully disposed fact journal", async () => {
+  const shadow = fixture();
+  try {
+    await shadow.install(); await flush();
+    assert.equal(shadow.typedAdmission(), "unavailable", "typed-shadow observation never grows authority");
+  } finally { shadow.capture.close(); }
+
+  const typed = fixture("codex_app_server", undefined, undefined, new DatabaseSync(":memory:"), "typed");
+  try {
+    await typed.install(); await flush();
+    assert.equal(typed.typedAdmission(), "ready", "an exact empty typed source is fully disposed");
+    typed.bindTurn(); typed.emit(active); await flush();
+    assert.equal(typed.typedAdmission(), "pending", "capture alone cannot outrun its durable effect");
+    typed.db.prepare(`UPDATE execution_lifecycle_effects SET state='applied',disposed_at_ms=created_at_ms
+      WHERE state='pending'`).run();
+    assert.equal(typed.typedAdmission(), "ready");
+    typed.db.prepare("DELETE FROM execution_lifecycle_effects").run();
+    assert.equal(typed.typedAdmission(), "unavailable", "a missing disposition fails closed");
+  } finally { typed.capture.close(); }
+});
+
+test("Cursor identity retirement synchronously captures the exact child tail", async () => {
+  const f = fixture("cursor_cli", undefined, undefined, new DatabaseSync(":memory:"), "typed");
+  try {
+    f.bindTurn();
+    await f.install();
+    f.emit(active);
+    f.emit(terminal);
+    f.emit({ domain: "runtime", kind: "state_changed", state: "exited",
+      controlEvidence: "process_exit", sideEffects: "none" });
+    f.capture.flush(f.tokenFor());
+    assert.deepEqual(f.facts().map(row => ({ domain: row.domain, state: row.state })), [
+      { domain: "turn", state: "active" },
+      { domain: "turn", state: "terminal" },
+      { domain: "runtime", state: "exited" },
+    ]);
+    assert.equal(f.admission(), "unavailable",
+      "an exited child is never delivery-ready even though its source tail is durably settled");
+    assert.throws(() => f.capture.flush(f.tokenFor({ ...f.handle })), /identity_mismatch/,
+      "the barrier cannot settle a copied or successor handle");
+  } finally { f.capture.close(); }
+});
+
+test("typed lifecycle settlement drains one agent to a durable terminal disposition", async () => {
+  let pending = Array.from({ length: 40 }, (_, index) => ({
+    factId: `settle-${index}`, agentId: "agent", factSequence: index + 1,
+    observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+    effectKind: "manifest_idle" as const, observedAtMs: 100 + index,
+  })).concat({ factId: "unrelated", agentId: "other", factSequence: 100,
+    observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+    effectKind: "manifest_idle" as const, observedAtMs: 200 });
+  const coordinator = new TypedLifecycleEffectCoordinator({
+    store: {
+      listPendingTypedLifecycleEffects: async (agentId, limit) => pending
+        .filter(effect => !agentId || effect.agentId === agentId).slice(0, limit),
+      applyTypedLifecycleEffect: async (generation, effect) => {
+        if (effect.agentId === "other") throw new Error("unrelated retry");
+        pending = pending.filter(candidate => candidate.factId !== effect.factId);
+        return { generation, disposition: "applied" as const };
+      },
+    },
+    currentInstallation: () => undefined,
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
+    isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
+  });
+  try {
+    coordinator.changed("other");
+    await Promise.all([coordinator.settle("agent"), coordinator.settle("agent")]);
+    assert.deepEqual(pending.map(effect => effect.factId), ["unrelated"],
+      "a requested settlement is serialized and cannot be blocked by another agent's retry");
+  } finally { await coordinator.close(); }
+
+  const backgroundEntered = deferred<void>();
+  const releaseBackground = deferred<void>();
+  const targetEntered = deferred<void>();
+  const releaseTarget = deferred<void>();
+  let backgroundLists = 0;
+  let activeApplies = 0;
+  let maximumConcurrentApplies = 0;
+  let targetPending = true;
+  let backgroundPending = true;
+  const serialized = new TypedLifecycleEffectCoordinator({
+    store: {
+      listPendingTypedLifecycleEffects: async (agentId) => {
+        if (agentId === "background" && backgroundLists++ === 0) {
+          backgroundEntered.resolve();
+          await releaseBackground.promise;
+          throw new Error("retry background drain");
+        }
+        if (agentId === "target" && targetPending) return [{ factId: "target", agentId: "target", factSequence: 1,
+          observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+          effectKind: "manifest_idle" as const, observedAtMs: 100 }];
+        if (agentId === "background" && backgroundPending) return [{ factId: "background", agentId: "background", factSequence: 2,
+          observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+          effectKind: "manifest_idle" as const, observedAtMs: 100 }];
+        return [];
+      },
+      applyTypedLifecycleEffect: async (generation, effect) => {
+        activeApplies += 1;
+        maximumConcurrentApplies = Math.max(maximumConcurrentApplies, activeApplies);
+        try {
+          if (effect.agentId === "target") {
+            targetEntered.resolve();
+            await releaseTarget.promise;
+            targetPending = false;
+          } else {
+            backgroundPending = false;
+          }
+          return { generation, disposition: "applied" as const };
+        } finally {
+          activeApplies -= 1;
+        }
+      },
+    },
+    currentInstallation: () => undefined,
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
+    isClosing: () => false, nowMs: () => 200, diagnostic: () => {},
+  });
+  try {
+    serialized.changed("background");
+    await delay(0);
+    await backgroundEntered.promise;
+    const settlement = serialized.settle("target");
+    releaseBackground.resolve();
+    await targetEntered.promise;
+    await delay(1_050);
+    assert.equal(maximumConcurrentApplies, 1,
+      "a retry timer scheduled by the prior drain cannot overlap the exact-agent settlement barrier");
+    releaseTarget.resolve();
+    await settlement;
+    for (let i = 0; i < 20 && backgroundPending; i += 1) await delay(10);
+    assert.equal(backgroundPending, false, "the unrelated retry resumes after exact-agent settlement");
+    assert.equal(maximumConcurrentApplies, 1);
+  } finally {
+    releaseBackground.resolve();
+    releaseTarget.resolve();
+    await serialized.close();
+  }
+
+  const blocked = new TypedLifecycleEffectCoordinator({
+    store: {
+      listPendingTypedLifecycleEffects: async () => [{ factId: "pending", agentId: "agent", factSequence: 1,
+        observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+        effectKind: "manifest_idle" as const, observedAtMs: 100 }],
+      applyTypedLifecycleEffect: async generation => ({ generation, disposition: "pending" as const }),
+    },
+    currentInstallation: () => undefined,
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
+    isClosing: () => false, nowMs: () => 200, diagnostic: () => {},
+  });
+  try {
+    await assert.rejects(() => blocked.settle("agent"), /did not settle/);
+  } finally { await blocked.close(); }
+});
+
+test("typed lifecycle startup scan advances past a full unavailable batch", async () => {
+  const effects = Array.from({ length: 33 }, (_, index) => ({
+    factId: `fact-${index + 1}`, agentId: index < 32 ? "unavailable-agent" : "later-agent",
+    factSequence: index + 1, observerExecutionGenerationId: "generation",
+    observerRuntimeGenerationId: "runtime", effectKind: "manifest_working" as const, observedAtMs: 100,
+  }));
+  const visited: string[] = [];
+  const coordinator = new TypedLifecycleEffectCoordinator({
+    store: {
+      listPendingTypedLifecycleEffects: async (agentId, limit, after) => effects
+        .filter(effect => (!agentId || effect.agentId === agentId) && effect.factSequence > (after ?? 0))
+        .slice(0, limit),
+      applyTypedLifecycleEffect: async (_generation, effect) => {
+        visited.push(effect.factId);
+        return { generation: 0, disposition: "pending" as const };
+      },
+    },
+    currentInstallation: () => undefined,
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
+    isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
+  });
+  try {
+    coordinator.start(); await delay(10); await flush();
+    assert.deepEqual(visited, effects.map(effect => effect.factId));
+  } finally { await coordinator.close(); }
+});
+
+test("capture preserves a pre-existing birth mode and rejects policy mismatch", async () => {
+  const f = fixture();
+  try {
+    const runtimeGenerationId = executionRuntimeStorageIdentity("agent", "generation", "codex_app_server", 42, "birth-secret");
+    const shadow = new ExecutionShadowStore(f.db);
+    f.db.prepare("DELETE FROM execution_runtime_generations WHERE runtime_generation_id=?").run(runtimeGenerationId);
+    assert.equal(shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId,
+      provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: 100 }), "typed");
+    await f.install(); f.emit(ready); await flush();
+    assert.equal(f.db.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
+      .get(runtimeGenerationId)?.authority_mode, "typed", "capture cannot rewrite the exact birth to the current release policy");
+    assert.equal(f.admission(), "unavailable",
+      "the installed typed-shadow expectation never silently adopts a different frozen mode");
+  } finally { f.capture.close(); }
+});
+
+test("Open Model births use the same closed typed-shadow release policy", async () => {
+  const f = fixture("opencode_server");
+  try {
+    f.bindTurn();
+    await f.install();
+    f.emit(ready);
+    f.emit({ ...active, nativeEventId: "open-model-active" });
+    f.emit({ ...terminal, nativeEventId: "open-model-terminal" });
+    await flush();
+    assert.deepEqual({ ...f.db.prepare("SELECT provider,authority_mode FROM execution_runtime_generations").get() },
+      { provider: "open-model", authority_mode: "typed_shadow" });
+    assert.equal(f.admission(), "ready");
+    assert.deepEqual(f.db.prepare(`SELECT native_event_id,typed_phase,typed_state FROM lifecycle_projection_pairs
+      ORDER BY typed_sequence`).all().map(row => ({ ...row })), [
+      { native_event_id: "open-model-active", typed_phase: "turn_active", typed_state: "working" },
+      { native_event_id: "open-model-terminal", typed_phase: "turn_terminal", typed_state: "terminal" },
+    ]);
+    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()?.observed_state,
+      "working", "Open Model shadow capture cannot become operational authority");
+  } finally { f.capture.close(); }
+});
+
+test("capture admission fails closed on durable reads and live source positions", async (t) => {
+  const readFailure = fixture();
+  try {
+    await readFailure.install(); readFailure.emit(ready); await flush();
+    assert.equal(readFailure.admission(), "ready");
+    const prepare = readFailure.db.prepare.bind(readFailure.db);
+    t.mock.method(readFailure.db, "prepare", (sql: string) => {
+      if (sql.includes("FROM execution_observers o")) throw new Error("injected admission read failure");
+      return prepare(sql);
+    });
+    assert.equal(readFailure.admission(), "unavailable");
+  } finally { readFailure.capture.close(); }
+
+  const observer = new ProviderExecutionObserver(() => now);
+  let position: "valid" | "ahead" | "throws" | "malformed" | "null" = "valid";
+  const sourcePosition = fixture("codex_app_server", (_handle, listener) => {
+    const subscription = observer.subscribe(listener);
+    return { ...subscription, position: () => {
+      if (position === "throws") throw new Error("injected position failure");
+      if (position === "malformed") return { firstRetainedSequence: 3, latestSequence: 0 };
+      if (position === "null") return null as never;
+      const current = subscription.position();
+      return position === "ahead" ? { ...current, latestSequence: current.latestSequence + 1 } : current;
+    } };
+  });
+  try {
+    await sourcePosition.install(); observer.emit(ready, "birth-secret", 42); await flush();
+    assert.equal(sourcePosition.admission(), "ready");
+    position = "ahead";
+    assert.equal(sourcePosition.admission(), "unavailable",
+      "Codex cannot admit while the live source is ahead of its durable cursor");
+    position = "throws";
+    assert.equal(sourcePosition.admission(), "unavailable");
+    position = "malformed";
+    assert.equal(sourcePosition.admission(), "unavailable");
+    position = "null";
+    assert.equal(sourcePosition.admission(), "unavailable");
+    position = "valid";
+    assert.equal(sourcePosition.admission(), "ready",
+      "read-time source evidence can recover without elapsed-time inference");
+  } finally { sourcePosition.capture.close(); }
+});
+
+test("capture admission recovers from durable observer rows after coordinator restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-capture-admission-"));
+  const path = join(root, "daemon.sqlite");
+  const first = fixture("codex_app_server", undefined, undefined, new DatabaseSync(path));
+  try {
+    await first.install(); first.emit(ready); await flush();
+    assert.equal(first.admission(), "ready");
+    first.capture.close();
+
+    const database = new DatabaseSync(path);
+    const observer = new ProviderExecutionObserver(() => now);
+    const restarted = new ExecutionCaptureCoordinator(database, {
+      provider: { onExecution: (_handle, listener) => observer.subscribe(listener) },
+      currentHandle: () => first.handle,
+      daemonGeneration: () => 2,
+      diagnostic: () => {},
+    });
+    try {
+      await restarted.install(first.tokenFor());
+      assert.equal(restarted.captureAdmission(first.tokenFor()), "pending");
+      await flush();
+      assert.equal(restarted.captureAdmission(first.tokenFor()), "ready");
+      assert.equal(database.prepare("SELECT daemon_generation_id FROM execution_observers WHERE agent_id='agent'").get()!.daemon_generation_id, "2",
+        "restart readiness is re-derived from a newly committed observer, not the old in-memory lane");
+    } finally { restarted.close(); }
+  } finally {
+    first.capture.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capture admission fences a replaced handle before admitting its successor", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
+  const original = new ProviderExecutionObserver(() => now);
+  sources.set(f.handle, original);
+  try {
+    await f.install(); original.emit(ready, "birth-secret", 42); await flush();
+    assert.equal(f.admission(), "ready");
+    const previous = f.handle;
+    const next = successor(f, "successor-birth");
+    const replacement = new ProviderExecutionObserver(() => now);
+    sources.set(next, replacement);
+    await f.install(next);
+    assert.equal(f.admission(previous), "unavailable");
+    assert.equal(f.admission(next), "pending");
+    replacement.emit(ready, "successor-birth", 42); await flush();
+    assert.equal(f.admission(next), "ready");
+    assert.equal(f.admission(previous), "unavailable");
+  } finally { f.capture.close(); }
+});
+
+test("capture replays native facts only after the exact committed turn binding, without delivery mutations", async () => {
+  const f = fixture();
+  try {
+    f.emit(ready); f.emit(active);
+    f.emit({ ...nativeTurn, domain: "execution", kind: "completed", executionId: "read", operation: "file_read", outcome: "failed", sideEffects: "none" });
+    f.emit(terminal);
+    await f.install(); await flush();
+    assert.equal(f.facts().length, 1);
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 4 });
+    assert.deepEqual(f.diagnostics, ["identity_unavailable"]);
+    f.bindTurn();
+    const receipt = f.db.prepare("SELECT * FROM supervised_agent_inbox").all();
+    f.capture.refresh(); await flush();
+    assert.equal(f.facts().length, 4);
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 4, max_observed_sequence: 4 });
+    assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), receipt);
+    assert.deepEqual({ ...f.db.prepare("SELECT provider,config_revision,runtime_state,authority_mode FROM execution_runtime_generations").get() },
+      { provider: "codex", config_revision: 2, runtime_state: "ready", authority_mode: "typed_shadow" }, "actual running provider/applied revision, not desired configuration");
+    assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "terminal");
+    assert.doesNotMatch(JSON.stringify(f.facts()), /PRIVATE|birth-secret|localhost|private/);
+    await f.install(); await flush();
+    assert.equal(f.facts().length, 4, "same-source reconnect skips the committed replay prefix");
+  } finally { f.capture.close(); }
+});
+
+test("typed and legacy lifecycle checkpoints meet in the durable comparator without changing execution", async () => {
+  const f = fixture();
+  try {
+    f.bindTurn(); await f.install(); f.emit(ready);
+    f.emit({ ...active, nativeEventId: "native-active" });
+    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
+      executionGenerationId: "generation", nativeEventId: "native-active", phase: "turn_active", state: "working" });
+    f.emit({ ...terminal, nativeEventId: "native-terminal" });
+    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
+      executionGenerationId: "generation", nativeEventId: "native-terminal", phase: "turn_terminal", state: "terminal" });
+    await flush();
+    assert.deepEqual(f.capture.lifecycleProjectionDiagnostics().providers.codex, {
+      comparedSegments: 1, matched: 2, missingInTyped: 0, missingInLegacy: 0,
+      pairedButDifferent: 0, conflicts: 0, observationUnavailable: 0,
+    });
+    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()!.observed_state, "working");
+  } finally { f.capture.close(); }
+});
+
+test("busy lifecycle storage retries the bounded raw witness without blocking or losing it", async () => {
+  const f = fixture();
+  const exec = f.db.exec.bind(f.db);
+  let busy = true;
+  try {
+    f.db.exec = sql => {
+      if (busy && sql === "BEGIN IMMEDIATE") { busy = false; throw new Error("database is locked"); }
+      return exec(sql);
+    };
+    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
+      executionGenerationId: "generation", nativeEventId: "raw-active", phase: "turn_active", state: "working" });
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0,
+      "the provider callback performs no synchronous SQLite write");
+    await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0);
+    f.db.exec = exec;
+    await delay(40); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 1);
+    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 0,
+      "a retained witness is retried rather than declared lost");
+  } finally { f.db.exec = exec; f.capture.close(); }
+});
+
+test("raw lifecycle queue overflow is bounded and becomes durable unavailability", async () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 257; index++) f.capture.recordLegacyLifecycle({
+      agentId: "agent", provider: "codex", workAttemptId: "workspace", executionGenerationId: "generation",
+      nativeEventId: `raw-${index}`, phase: "turn_active", state: "working",
+    });
+    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 1);
+    for (let attempt = 0; attempt < 30
+      && Number(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count) < 256; attempt++) {
+      await delay(5);
+    }
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 256);
+    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 1);
+  } finally { f.capture.close(); }
+});
+
+test("steady control probes coalesce while real control transitions remain durable", async () => {
+  const f = fixture();
+  try {
+    await f.install();
+    f.emit(ready);
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+    f.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" });
+    f.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" });
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+    await flush();
+    assert.deepEqual(f.facts().map(row => [row.domain, row.state]), [
+      ["runtime", "ready"], ["control", "responsive"], ["control", "degraded"], ["control", "responsive"],
+    ]);
+    assert.equal(f.db.prepare("SELECT control_state FROM execution_runtime_generations").get()!.control_state, "responsive");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 4, max_observed_sequence: 4 });
+  } finally { f.capture.close(); }
+});
+
+test("control coalescing preserves changed evidence, native events, exact process birth, and bounded replay", () => {
+  const observer = new ProviderExecutionObserver(() => now);
+  const seen: NativeExecutionObservation[] = [];
+  observer.subscribe(event => seen.push(event));
+  const responsive: NativeExecutionFact = { domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" };
+  observer.emit(responsive, "birth-one", 41);
+  observer.emit(responsive, "birth-one", 41);
+  observer.emit(responsive, "birth-one", 42);
+  observer.emit(responsive, "birth-two", 42);
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_exit" }, "birth-two", 42);
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_exit" }, "birth-two", 42);
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_birth_changed" }, "birth-two", 42);
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_birth_changed", nativeEventId: "native-one" }, "birth-two", 42);
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_birth_changed", nativeEventId: "native-two" }, "birth-two", 42);
+  assert.deepEqual(seen.map(event => ({ sequence: event.sequence, pid: event.nativeProcessPid, identity: event.nativeProcessIdentity,
+    state: event.fact.domain === "control" ? event.fact.state : null,
+    evidence: event.fact.domain === "control" && "controlEvidence" in event.fact ? event.fact.controlEvidence : undefined,
+    nativeEventId: event.fact.nativeEventId })), [
+    { sequence: 1, pid: 41, identity: "birth-one", state: "responsive", evidence: undefined, nativeEventId: undefined },
+    { sequence: 2, pid: 42, identity: "birth-one", state: "responsive", evidence: undefined, nativeEventId: undefined },
+    { sequence: 3, pid: 42, identity: "birth-two", state: "responsive", evidence: undefined, nativeEventId: undefined },
+    { sequence: 4, pid: 42, identity: "birth-two", state: "lost", evidence: "process_exit", nativeEventId: undefined },
+    { sequence: 5, pid: 42, identity: "birth-two", state: "lost", evidence: "process_birth_changed", nativeEventId: undefined },
+    { sequence: 6, pid: 42, identity: "birth-two", state: "lost", evidence: "process_birth_changed", nativeEventId: "native-one" },
+    { sequence: 7, pid: 42, identity: "birth-two", state: "lost", evidence: "process_birth_changed", nativeEventId: "native-two" },
+  ]);
+});
+
+test("scoped refresh settles receipts independently of capture gaps and late native outcomes", async () => {
+  for (const gap of [false, true]) {
+    let hints = 0;
+    const f = fixture("codex_app_server", undefined, () => { hints++; });
+    try {
+      f.bindTurn(); await f.install(); f.emit(ready); f.emit(active); await flush();
+      if (gap) {
+        for (let index = 0; index < 300; index++) f.emit(ready);
+        await flush(); assert.ok(f.diagnostics.includes("source_gap"));
+      }
+      assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts").get()!.state, "active");
+      f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',
+        outcome=?,acknowledged_at=?,updated_at=?`).run(JSON.stringify({ kind: "no_reply", text: null }), now, now);
+      const operational = f.db.prepare("SELECT * FROM supervised_agent_inbox").all();
+      const beforeSettlement = hints;
+      f.capture.refresh("agent"); await flush();
+      assert.equal(hints, beforeSettlement + 1, "receipt-only progress notifies even when capture is suspended");
+      const settled = f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get();
+      assert.deepEqual({ ...settled }, { state: "cleanly_concluded", conclusion: "acknowledged_no_reply", settled_at_ms: Date.parse(now) });
+      assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "active", "receipt settlement is not native-turn lifecycle authority");
+      if (!gap) {
+        f.emit(terminal);
+        f.emit({ ...nativeTurn, domain: "execution", kind: "completed", executionId: "late-read", operation: "file_read", outcome: "failed", sideEffects: "none" });
+        await flush(); assert.equal(f.facts().length, 4, "late exact native evidence remains ingestible after logical settlement");
+      }
+      const beforeRefresh = hints;
+      f.capture.refresh("agent"); await flush();
+      assert.equal(hints, beforeRefresh, "already settled receipts do not notify again");
+      assert.deepEqual(f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get(), settled);
+      assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), operational);
+    } finally { f.capture.close(); }
+  }
+});
+
+test("scoped refresh leaves unrelated capture lanes untouched while unscoped hints still sweep", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const reads = new Map<ProviderActionHandle, number>();
+  const f = fixture("codex_app_server", (handle, listener) => {
+    const subscription = sources.get(handle)!.subscribe(listener);
+    return { ...subscription, position: () => {
+      reads.set(handle, (reads.get(handle) ?? 0) + 1);
+      return subscription.position();
+    } };
+  });
+  const second = secondCaptureLane(f);
+  sources.set(f.handle, f.observer);
+  sources.set(second.handle, new ProviderExecutionObserver(() => now));
+  try {
+    f.install(); f.capture.install(second.token); await flush();
+    assert.equal(f.admission(), "ready");
+    assert.equal(f.capture.captureAdmission(second.token), "ready");
+    const before = f.db.prepare("SELECT * FROM execution_observers ORDER BY agent_id").all();
+    reads.clear();
+    f.capture.refresh("agent"); await flush();
+    assert.ok((reads.get(f.handle) ?? 0) > 0);
+    assert.equal(reads.get(second.handle) ?? 0, 0, "one agent's commit never rereads its peer's source");
+    reads.clear();
+    f.capture.refresh("unknown-agent"); await flush();
+    assert.equal(reads.size, 0, "an exact missing agent is not an unscoped hint");
+    f.capture.refresh(); await flush();
+    assert.ok((reads.get(f.handle) ?? 0) > 0);
+    assert.ok((reads.get(second.handle) ?? 0) > 0);
+    assert.deepEqual(f.db.prepare("SELECT * FROM execution_observers ORDER BY agent_id").all(), before);
+    assert.deepEqual(f.diagnostics, []);
+  } finally { f.capture.close(); }
+});
+
+test("capture change hints follow fact and receipt commits, survive callback failure and never run on close", async () => {
+  const snapshots: Array<{ agentId: string; facts: number; state: unknown; transaction: boolean }> = [];
+  const f = fixture("codex_app_server", undefined, agentId => {
+    snapshots.push({ agentId, facts: f.facts().length,
+      state: f.db.prepare("SELECT state FROM execution_message_attempts").get()?.state, transaction: f.db.isTransaction });
+    throw new Error("optional summary observer unavailable");
+  });
+  try {
+    f.bindTurn();
+    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?")
+      .run(JSON.stringify({ kind: "no_reply", text: null }), now);
+    await f.install(); f.emit(ready); f.emit(active); f.emit(terminal); await flush();
+    assert.deepEqual(snapshots.at(-1), { agentId: "agent", facts: 3, state: "cleanly_concluded", transaction: false },
+      "the hint sees both captured evidence and receipt settlement after their transactions");
+    assert.ok(snapshots.every(snapshot => !snapshot.transaction));
+    f.emit({ ...nativeTurn, domain: "execution", kind: "completed", executionId: "late-read", operation: "file_read", outcome: "succeeded", sideEffects: "none" });
+    await flush(); assert.equal(f.facts().length, 4, "a throwing hint cannot suspend subsequent capture");
+    assert.deepEqual(f.diagnostics, []);
+    const calls = snapshots.length;
+    for (let index = 0; index < 3; index++) { f.capture.refresh(); await flush(); }
+    assert.equal(snapshots.length, calls, "unchanged refreshes do not announce another state change");
+    f.emit(ready); f.capture.close(); f.emit(ready); await flush();
+    assert.equal(snapshots.length, calls, "shutdown frontier preservation and queued facts never request publication");
+  } finally { f.capture.close(); }
+});
+
+test("an empty capture source announces admission once, then stays quiet until progress", async () => {
+  let hints = 0;
+  const f = fixture("codex_app_server", undefined, () => { hints++; });
+  try {
+    await f.install(); await flush();
+    assert.equal(f.admission(), "ready");
+    assert.equal(hints, 1);
+    const observer = f.db.prepare("SELECT * FROM execution_observers").get();
+    for (let index = 0; index < 3; index++) { f.capture.refresh(); await flush(); }
+    assert.deepEqual(f.db.prepare("SELECT * FROM execution_observers").get(), observer);
+    assert.equal(hints, 1, "no facts, receipt settlement, or admission change means no notification");
+    f.emit(ready); await flush();
+    assert.equal(hints, 2);
+    f.bindTurn(); // External commit changes admission without a new native fact.
+    f.capture.refresh(); await flush();
+    assert.equal(f.admission(), "unavailable");
+    assert.equal(hints, 3);
+    f.capture.refresh(); await flush();
+    assert.equal(hints, 3);
+    f.emit(active); await flush();
+    assert.equal(f.admission(), "ready");
+    assert.equal(hints, 4);
+  } finally { f.capture.close(); }
+});
+
+test("capture announces partial committed progress but not repeated failed no-op retries", async () => {
+  let hints = 0;
+  const f = fixture("codex_app_server", undefined, () => { hints++; });
+  try {
+    await f.install(); await flush();
+    f.bindTurn(); f.capture.refresh(); await flush();
+    const before = hints;
+    f.db.exec(`CREATE TRIGGER reject_native_turn BEFORE INSERT ON execution_turns
+      BEGIN SELECT RAISE(ABORT,'native turn unavailable'); END`);
+    f.emit(active); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts").get()!.n, 1);
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_attempt_generations").get()!.n, 1);
+    assert.equal(f.facts().length, 0);
+    assert.equal(hints, before + 1, "the attempt committed before the native-turn write failed");
+    f.capture.refresh(); await flush();
+    assert.equal(hints, before + 1, "idempotent attempt tracking and the same diagnostic are not new progress");
+    f.db.exec("DROP TRIGGER reject_native_turn");
+    f.capture.refresh(); await flush();
+    assert.equal(f.facts().length, 1);
+    assert.equal(f.admission(), "ready");
+    assert.equal(hints, before + 2);
+  } finally { f.capture.close(); }
+});
+
+test("scoped receipt batches revisit corrected earlier receipts and settle late native attempts", async () => {
+  const f = fixture();
+  try {
+    await f.install(); f.emit(ready); await flush();
+    const runtime = String(f.db.prepare("SELECT runtime_generation_id FROM execution_runtime_generations").get()!.runtime_generation_id);
+    f.bindTurn("native-late", "late-message");
+    f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=? WHERE inbox_item_id='native-late'`)
+      .run(JSON.stringify({ kind: "no_reply", text: null }), now);
+    for (let index = 0; index < 40; index++) {
+      const turn = `native-${index}`; const source = `message-${index}`; const attempt = `attempt-${index}`;
+      f.bindTurn(turn, source);
+      f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=? WHERE inbox_item_id=?`)
+        .run(JSON.stringify({ kind: index === 0 ? "unreadable" : "no_reply", text: null }), now, turn);
+      f.db.prepare(`INSERT INTO execution_message_attempts(attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+        VALUES(?,'agent','room',?,'active',?)`).run(attempt, source, Date.parse(now));
+      f.db.prepare(`INSERT INTO execution_attempt_generations VALUES(?,'agent','room','generation','workspace',?)`).run(attempt, Date.parse(now));
+      f.db.prepare(`INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+        provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
+        VALUES(?,?,'agent','room','generation',?,'continuation',?,'terminal','none',?,?)`)
+        .run(turn, attempt, runtime, turn, Date.parse(now), Date.parse(now));
+    }
+    f.capture.refresh("agent"); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.n, 39);
+    assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id='attempt-0'").get()!.state, "active");
+    assert.ok(f.diagnostics.includes("settlement_unavailable"));
+    assert.equal(f.admission(), "ready",
+      "downstream settlement diagnostics do not revoke native capture admission");
+    // A later authoritative correction rechecks earlier receipts rather than
+    // treating the in-memory scan cursor as durable settlement authority.
+    f.db.prepare("UPDATE supervised_agent_inbox SET outcome=? WHERE inbox_item_id='native-0'").run(JSON.stringify({ kind: "no_reply", text: null }));
+    f.capture.refresh("agent"); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.n, 40);
+    // No new operational mutation: native capture itself must reconsider the
+    // older receipt once its previously missing attempt becomes available.
+    f.emit({ ...active, providerTurnId: "native-late" }); await flush();
+    assert.deepEqual({ ...f.db.prepare("SELECT state,conclusion FROM execution_message_attempts WHERE source_message_id='late-message'").get() },
+      { state: "cleanly_concluded", conclusion: "acknowledged_no_reply" });
+  } finally { f.capture.close(); }
+});
+
+test("settlement diagnostics never hide a native capture failure", async () => {
+  const f = fixture();
+  try {
+    f.bindTurn(); await f.install(); f.emit(ready); f.emit(active); await flush();
+    assert.equal(f.admission(), "ready");
+    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?")
+      .run(JSON.stringify({ kind: "no_reply", text: null }), now);
+    f.db.exec(`CREATE TRIGGER reject_capture_fact BEFORE INSERT ON execution_facts
+      BEGIN SELECT RAISE(ABORT,'injected capture failure'); END;
+      CREATE TRIGGER reject_attempt_settlement BEFORE UPDATE OF state ON execution_message_attempts
+      BEGIN SELECT RAISE(ABORT,'injected settlement failure'); END;`);
+    f.emit(ready); await flush();
+    assert.ok(f.diagnostics.includes("storage_unavailable"));
+    assert.equal(f.diagnostics.at(-1), "settlement_unavailable");
+    assert.equal(f.admission(), "unavailable",
+      "a downstream settlement warning cannot erase the native capture failure");
+    f.db.exec("DROP TRIGGER reject_capture_fact; DROP TRIGGER reject_attempt_settlement");
+    f.capture.refresh(); await flush();
+    assert.equal(f.admission(), "ready",
+      "successful exact capture recovers admission from current evidence without a cached failure status");
+  } finally { f.capture.close(); }
+});
+
+test("scoped refresh drains a detached exit before its paused successor source", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
+  const old = new ProviderExecutionObserver(() => now);
+  sources.set(f.handle, old);
+  const exec = f.db.exec.bind(f.db);
+  try {
+    f.handle.appliedConfigurationRevision = 2;
+    const detach = await f.install(); old.emit(ready, "birth-secret", 42); await flush();
+    let blocked = 0;
+    f.db.exec = sql => { if (sql === "BEGIN IMMEDIATE") { blocked++; throw new Error("database is busy"); } return exec(sql); };
+    old.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" }, "birth-secret", 42);
+    detach();
+    f.db.exec = exec;
+    const next = successor(f, "fresh-birth");
+    const fresh = new ProviderExecutionObserver(() => now); sources.set(next, fresh);
+    f.db.exec = sql => { if (sql === "BEGIN IMMEDIATE") { blocked++; throw new Error("database is busy"); } return exec(sql); };
+    await f.install(next); fresh.emit(ready, "fresh-birth", 42);
+    await flush();
+    assert.ok(blocked >= 1); assert.equal(f.facts().length, 1);
+    await flush(); assert.equal(f.facts().length, 1, "optional diagnostics cannot timer-retry operational fact capture");
+    f.db.exec = exec;
+    f.capture.refresh("unknown-agent"); await flush();
+    assert.equal(f.facts().length, 1, "another agent's hint cannot retry the retained exit or paused successor");
+    f.capture.refresh("agent"); await flush();
+    assert.equal(f.facts().length, 3);
+    const rows = f.facts();
+    assert.equal(rows[0].runtime_generation_id, rows[1].runtime_generation_id);
+    assert.notEqual(rows[1].runtime_generation_id, rows[2].runtime_generation_id);
+    assert.deepEqual(f.db.prepare("SELECT runtime_state FROM execution_runtime_generations ORDER BY rowid").all().map(row => row.runtime_state), ["exited", "ready"]);
+    const witness = fresh.subscribe(() => {}); witness.dispose();
+    assert.equal(f.db.prepare("SELECT source_id FROM execution_observers").get()!.source_id, witness.sourceId);
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 1 });
+  } finally { f.db.exec = exec; f.capture.close(); }
+});
+
+test("rapid replacement suspends capture instead of accumulating retired subscriptions", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  let subscriptions = 0; let live = 0; let maximum = 0;
+  const f = fixture("codex_app_server", (handle, listener) => {
+    subscriptions++; live++; maximum = Math.max(maximum, live);
+    const subscription = sources.get(handle)!.subscribe(listener);
+    let disposed = false;
+    return { ...subscription, dispose() { if (!disposed) { disposed = true; live--; subscription.dispose(); } } };
+  });
+  sources.set(f.handle, new ProviderExecutionObserver(() => now));
+  const exec = f.db.exec.bind(f.db);
+  try {
+    await f.install(); sources.get(f.handle)!.emit(ready, "birth-secret", 42); await flush();
+    f.db.exec = sql => { if (sql === "BEGIN IMMEDIATE") throw new Error("database is busy"); return exec(sql); };
+    sources.get(f.handle)!.emit(ready, "birth-secret", 42);
+    f.db.exec = exec;
+    const second = successor(f, "second"); sources.set(second, new ProviderExecutionObserver(() => now));
+    f.db.exec = sql => { if (sql === "BEGIN IMMEDIATE") throw new Error("database is busy"); return exec(sql); };
+    await f.install(second); await flush();
+    assert.equal(subscriptions, 2);
+    for (let index = 0; index < 20; index++) {
+      f.db.exec = exec;
+      const next = successor(f, `replacement-${index}`); sources.set(next, new ProviderExecutionObserver(() => now));
+      f.db.exec = sql => { if (sql === "BEGIN IMMEDIATE") throw new Error("database is busy"); return exec(sql); };
+      await f.install(next);
+    }
+    await flush();
+    assert.equal(subscriptions, 2); assert.equal(live, 0); assert.equal(maximum, 1);
+    assert.ok(f.diagnostics.includes("source_gap"));
+    f.db.exec = exec; f.capture.refresh(); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_observer_sources").get()!.n, 1, "no skipped intermediate source is admitted");
+    assert.equal(f.facts().length, 2, "only the retained oldest lane can finish draining");
+  } finally { f.db.exec = exec; f.capture.close(); }
+});
+
+test("planned handoff drains a valid tail and freezes its boundary before cleanup callbacks", async () => {
+  const f = fixture("codex_app_server", undefined, undefined, new DatabaseSync(":memory:"), "typed");
+  const close = f.db.close.bind(f.db);
+  let replacement: ExecutionCaptureCoordinator | undefined;
+  try {
+    f.install(); f.emit(ready); await flush();
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+    f.capture.sealForPlannedHandoff();
+    f.emit({ domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" });
+    f.db.close = () => {};
+    f.capture.close();
+    assert.equal(f.facts().length, 2);
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 2, max_observed_sequence: 2 });
+    const fresh = new ProviderExecutionObserver(() => now);
+    const diagnostics: string[] = [];
+    replacement = new ExecutionCaptureCoordinator(f.db, {
+      provider: { onExecution: (_handle, listener) => fresh.subscribe(listener) },
+      currentHandle: id => f.handles.get(id), daemonGeneration: () => 2,
+      diagnostic: (_id, code) => diagnostics.push(code),
+    });
+    replacement.install(f.tokenFor()); fresh.emit(ready, "birth-secret", 42); await flush();
+    assert.equal(replacement.captureAdmission(f.tokenFor()), "ready");
+    assert.deepEqual(diagnostics, [], "the preserved process can adopt a new source without a fabricated gap");
+  } finally { replacement?.close(); f.db.close = close; f.capture.close(); close(); }
+});
+
+test("planned capture handoff defers on a real storage lock without detaching observation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "capture-handoff-lock-"));
+  const path = join(directory, "synthetic.sqlite");
+  const f = fixture("codex_app_server", undefined, undefined, new DatabaseSync(path), "typed");
+  const competing = new DatabaseSync(path);
+  try {
+    f.install(); f.emit(ready); await flush();
+    competing.exec("BEGIN IMMEDIATE");
+    f.emit(ready);
+    assert.throws(() => f.capture.sealForPlannedHandoff(), /Update deferred/);
+    competing.exec("ROLLBACK");
+    f.emit(ready);
+    f.capture.sealForPlannedHandoff();
+    assert.equal(f.facts().length, 3, "failure preserved the old owner's subscription and queued tail");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 3, max_observed_sequence: 3 });
+  } finally {
+    if (competing.isTransaction) competing.exec("ROLLBACK");
+    competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("planned capture handoff preserves a preexisting suspended gap without requiring recovery", async () => {
+  const f = fixture();
+  try {
+    f.install(); f.emit(ready); await flush();
+    f.observer.markUnavailable(); f.emit(ready); await flush();
+    const before = { facts: f.facts(), position: f.position(), diagnostics: [...f.diagnostics] };
+    assert.equal(before.position!.last_source_sequence, 1);
+    assert.equal(before.position!.max_observed_sequence, 3);
+    assert.doesNotThrow(() => f.capture.sealForPlannedHandoff());
+    assert.deepEqual({ facts: f.facts(), position: f.position(), diagnostics: f.diagnostics }, before);
+    assert.equal(f.admission(), "unavailable");
+  } finally { f.capture.close(); }
+});
+
+test("planned handoff keeps every current subscription when a later lane fails preparation", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  let failing: ProviderActionHandle | undefined;
+  const f = fixture("codex_app_server", (handle, listener) => {
+    const subscription = sources.get(handle)!.subscribe(listener);
+    return { ...subscription, position: () => {
+      if (failing === handle) throw new Error("source position temporarily unavailable");
+      return subscription.position();
+    } };
+  });
+  const second = secondCaptureLane(f);
+  const other = new ProviderExecutionObserver(() => now);
+  sources.set(f.handle, f.observer); sources.set(second.handle, other);
+  try {
+    f.install(); f.capture.install(second.token);
+    f.emit(ready); other.emit(ready, "birth-secret", 42); await flush();
+    f.emit(ready); other.emit(ready, "birth-secret", 42); failing = second.handle;
+    assert.throws(() => f.capture.sealForPlannedHandoff(), /Update deferred/);
+    assert.equal(f.facts().filter(row => row.agent_id === "agent").length, 2,
+      "useful progress committed before the later failure is retained");
+    failing = undefined;
+    f.emit(ready); other.emit(ready, "birth-secret", 42);
+    f.capture.sealForPlannedHandoff();
+    for (const agentId of ["agent", second.agentId]) {
+      assert.equal(f.facts().filter(row => row.agent_id === agentId).length, 3,
+        "both original subscriptions survived the rejected preparation");
+    }
+  } finally { failing = undefined; f.capture.close(); }
+});
+
+test("planned handoff drains a healthy lane alongside an unchanged historical source gap", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
+  const second = secondCaptureLane(f);
+  const other = new ProviderExecutionObserver(() => now);
+  sources.set(f.handle, f.observer); sources.set(second.handle, other);
+  try {
+    f.install(); f.capture.install(second.token);
+    f.emit(ready); other.emit(ready, "birth-secret", 42); await flush();
+    other.markUnavailable(); other.emit(ready, "birth-secret", 42); await flush();
+    const damaged = () => f.db.prepare("SELECT * FROM execution_observers WHERE agent_id=?").get(second.agentId);
+    const before = damaged();
+    assert.equal(before!.last_source_sequence, 1); assert.equal(before!.max_observed_sequence, 3);
+    f.emit(ready); f.capture.sealForPlannedHandoff();
+    assert.equal(f.facts().filter(row => row.agent_id === "agent").length, 2);
+    assert.equal(f.facts().filter(row => row.agent_id === second.agentId).length, 1);
+    assert.deepEqual(damaged(), before, "planned update cannot rewrite or repair the historical gap");
+  } finally { f.capture.close(); }
+});
+
+for (const damaged of [false, true]) test(`planned handoff preserves predecessor ordering with ${damaged ? "a source gap" : "a queued exit"}`, async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
+  sources.set(f.handle, f.observer);
+  try {
+    const detach = f.install(); f.emit(ready); await flush();
+    if (damaged) { f.observer.markUnavailable(); f.emit(ready); await flush(); }
+    else f.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+    detach();
+    const next = successor(f, "successor-birth");
+    const fresh = new ProviderExecutionObserver(() => now); sources.set(next, fresh);
+    f.install(next); fresh.emit(ready, "successor-birth", 42);
+    await Promise.resolve(); // resolve subscription without running the scheduled capture drain
+    f.capture.sealForPlannedHandoff();
+    assert.equal(f.facts().length, damaged ? 1 : 3);
+    assert.deepEqual({ ...f.position() }, damaged
+      ? { last_source_sequence: 1, max_observed_sequence: 3 }
+      : { last_source_sequence: 1, max_observed_sequence: 1 });
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_observer_sources").get()!.n, damaged ? 1 : 2,
+      "a successor may bind only after its predecessor's retained tail is complete");
+  } finally { f.capture.close(); }
+});
+
+test("planned capture handoff defers an unresolved subscription without dropping its queued facts", async () => {
+  const pending = deferred<NativeExecutionSubscription>();
+  let subscription!: NativeExecutionSubscription;
+  const f = fixture("codex_app_server", (_handle, listener) => {
+    subscription = f.observer.subscribe(listener);
+    return pending.promise;
+  });
+  try {
+    f.install(); f.emit(ready);
+    assert.throws(() => f.capture.sealForPlannedHandoff(), /Update deferred/);
+    pending.resolve(subscription); await flush();
+    f.capture.sealForPlannedHandoff();
+    assert.equal(f.facts().length, 1);
+  } finally { f.capture.close(); }
+});
+
+test("administrative close records only the admitted source frontier and tolerates storage failure", async () => {
+  for (const busy of [false, true]) {
+    const f = fixture(); const close = f.db.close.bind(f.db); const exec = f.db.exec.bind(f.db);
+    try {
+      await f.install(); f.emit(ready); await flush();
+      const operational = f.db.prepare("SELECT * FROM runtime_deployments").all();
+      f.emit(ready); f.emit(ready);
+      let closes = 0; f.db.close = () => { closes++; };
+      if (busy) f.db.exec = sql => { if (sql === "BEGIN IMMEDIATE") throw new Error("database is busy"); return exec(sql); };
+      assert.doesNotThrow(() => f.capture.close());
+      assert.equal(f.admission(), "unavailable");
+      assert.equal(closes, 1);
+      assert.equal(f.facts().length, 1, "shutdown must not drain queued facts");
+      assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: busy ? 1 : 3 });
+      assert.deepEqual(f.db.prepare("SELECT * FROM runtime_deployments").all(), operational);
+      assert.equal(f.handles.get("agent"), f.handle);
+      assert.equal(f.handle.observedState, "working");
+      if (busy) assert.ok(f.diagnostics.includes("storage_unavailable"));
+      f.emit(ready); await flush(); assert.equal(f.facts().length, 1);
+    } finally { f.db.exec = exec; f.db.close = close; f.capture.close(); if (f.db.isOpen) close(); }
+  }
+});
+
+test("an empty rejected subscription does not strand a later installation", async () => {
+  let calls = 0;
+  const observer = new ProviderExecutionObserver(() => now);
+  const f = fixture("codex_app_server", (_handle, listener) => {
+    if (++calls === 1) return Promise.reject(new Error("subscription unavailable"));
+    return observer.subscribe(listener);
+  });
+  try {
+    await f.install(); await flush(); assert.equal(f.facts().length, 0);
+    assert.equal(f.admission(), "unavailable");
+    await f.install(); observer.emit(ready, "birth-secret", 42); await flush();
+    assert.equal(calls, 2); assert.equal(f.facts().length, 1);
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 1 });
+    assert.equal(f.admission(), "ready");
+  } finally { f.capture.close(); }
+});
+
+test("unverified process birth and a wrong binding cannot borrow the current FIFO identity", async () => {
+  const f = fixture();
+  try {
+    f.bindTurn("other-turn"); await f.install(); f.emit(ready); f.emit(active, "unknown-birth"); await flush();
+    assert.equal(f.facts().length, 1);
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_turns").get()!.n, 0);
+    assert.equal(f.position()!.max_observed_sequence, 2);
+    f.capture.refresh(); await flush();
+    assert.equal(f.facts().length, 1);
+  } finally { f.capture.close(); }
+});
+
+test("paused Cursor checkpoint preserves a completed child birth after the handle advances to idle", async () => {
+  const f = fixture("cursor_cli");
+  try {
+    const child = { ...f.handle.providerConnection! };
+    f.bindTurn(); await f.install();
+    f.capture.prepared({ agentId: "agent", handle: f.handle, executionGenerationId: "generation", connection: child, configurationRevision: 2 });
+    f.emit(ready); f.emit(active); f.emit(terminal);
+    f.emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
+    f.emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+    f.handle.providerConnection = { kind: "cursor_cli", pid: null, processIdentity: null };
+    f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=NULL,provider_process_identity=NULL");
+    await flush();
+    assert.equal(f.facts().length, 5);
+    assert.equal(f.db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()!.runtime_state, "exited");
+    assert.deepEqual(f.diagnostics, []);
+  } finally { f.capture.close(); }
+});
+
+test("bounded replay and queue loss preserve the missing frontier across source replacement", async () => {
+  for (const beforeSubscribe of [true, false]) {
+    const f = fixture();
+    try {
+      if (!beforeSubscribe) { await f.install(); await flush(); }
+      for (let i = 0; i < 300; i++) f.emit(ready);
+      if (beforeSubscribe) await f.install();
+      await flush();
+      assert.equal(f.facts().length, 0);
+      assert.deepEqual({ ...f.position() }, { last_source_sequence: 0, max_observed_sequence: 300 });
+      assert.equal(f.diagnostics.at(-1), "source_gap");
+      assert.equal(f.admission(), "unavailable");
+      await f.install(); await flush();
+      assert.equal(f.facts().length, 0);
+      assert.equal(f.position()!.max_observed_sequence, 300);
+    } finally { f.capture.close(); }
+  }
+});
+
+test("a bootstrap-ready replacement with a retired source gap stays visibly blocked without rewriting history", async () => {
+  const f = fixture("claude_cli", undefined, undefined, new DatabaseSync(":memory:"), "typed");
+  const close = f.db.close.bind(f.db);
+  let replacement: ExecutionCaptureCoordinator | undefined;
+  try {
+    f.install(); f.emit(ready); await flush();
+    for (let sequence = 2; sequence <= 8; sequence++) f.emit(ready);
+    f.db.close = () => {};
+    f.capture.close();
+    const oldObserver = f.db.prepare("SELECT * FROM execution_observers").get();
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 8 });
+
+    const current = { ...f.handle, providerConnection: { ...f.handle.providerConnection!, pid: 43, processIdentity: "replacement-birth" } };
+    f.handles.set("agent", current);
+    f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
+      .run(JSON.stringify({ ended_at: now, terminal_cause: "stopped", actor: "test", generation: 1,
+        provider_continuation_id: "continuation", native_runtime_death: { kind: "claude_cli", pid: 42, processIdentity: "birth-secret" } }));
+    f.db.prepare("INSERT INTO work_attempt_executions VALUES('replacement-generation','workspace',?,'test',2,NULL)").run(now);
+    f.db.exec("UPDATE runtime_deployments SET observed_state='recovering',provider_connection_pid=43,provider_process_identity='replacement-birth',provider_execution_generation_id='replacement-generation'");
+    new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "replacement-generation",
+      runtimeGenerationId: executionRuntimeStorageIdentity("agent", "replacement-generation", "claude_cli", 43, "replacement-birth"),
+      provider: "claude-code", authorityMode: "typed", configRevision: 2, createdAtMs: Date.parse(now) });
+    const source = new ProviderExecutionObserver(() => now);
+    source.emit(ready, "replacement-birth", 43);
+    const diagnostics: string[] = [];
+    replacement = new ExecutionCaptureCoordinator(f.db, {
+      provider: { onExecution: (_handle, listener) => source.subscribe(listener) },
+      currentHandle: id => f.handles.get(id), daemonGeneration: () => 2,
+      diagnostic: (_id, code) => diagnostics.push(code),
+    });
+    const token = f.tokenFor(current, "replacement-generation");
+    replacement.install(token); await flush();
+    assert.equal(replacement.typedLifecycleAdmission(token), "unavailable");
+    assert.deepEqual(diagnostics, ["source_gap"]);
+    const projected = projectRoomAgentManifestEntry({
+      entry: { id: "agent", room_id: "room", display_name: "Agent", provider: "claude-code", model: null,
+        charter: "Help", permission_profile_id: null, created_by: "owner", created_at: now,
+        desired_state: "running", observed_state: "recovering", condition: "none", delivery_mode: "daemon_inbox",
+        work_attempt_id: "workspace", provider_ref: { work_attempt_id: "workspace", provider_continuation_id: "continuation",
+          execution_generation_id: "replacement-generation", provider_connection: current.providerConnection } },
+      lifecycleAdmission: replacement.typedLifecycleAdmission(token),
+      binding: null, credentialAvailable: false, currentHostGrantAvailable: true, liveHandle: current,
+      ingressHealth: null, continuationRepair: null, receipts: [], activeTurn: null,
+      nowMs: Date.parse(now), workplaceLivenessStaleAfterMs: 210_000, nativeLivenessStaleAfterMs: 90_000,
+    });
+    assert.equal(projected.condition, "coordination_blocked");
+    assert.match(projected.last_error ?? "", /readiness evidence is unavailable/);
+    for (let index = 0; index < 3; index++) { replacement.refresh(); await flush(); }
+    assert.deepEqual(diagnostics, ["source_gap"], "unchanged evidence does not repeat the diagnostic");
+    assert.deepEqual(f.db.prepare("SELECT * FROM execution_observers").get(), oldObserver);
+    assert.equal(f.facts().length, 1, "the replacement ready fact cannot cross the missing history");
+    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments").get()?.observed_state, "recovering");
+  } finally {
+    replacement?.close(); f.capture.close(); f.db.close = close; if (f.db.isOpen) close();
+  }
+});
+
+test("same-source Cursor advance keeps identical process evidence separate when the child PID changes", async () => {
+  const f = fixture("cursor_cli");
+  try {
+    await f.install(); f.emit(ready); f.emit({ ...ready, state: "exited", controlEvidence: "process_exit" }); await flush();
+    const next = { kind: "cursor_cli" as const, pid: 43, processIdentity: "birth-secret" };
+    f.handle.providerConnection = next;
+    f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=43,provider_process_identity='birth-secret'");
+    new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
+      runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 43, "birth-secret"),
+      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+    f.advance(); f.capture.prepared({ agentId: "agent", handle: f.handle, executionGenerationId: "generation", connection: next, configurationRevision: 2 });
+    f.emit(ready, "birth-secret", 43); await flush();
+    assert.equal(f.facts().length, 3);
+    assert.deepEqual(f.db.prepare("SELECT runtime_state FROM execution_runtime_generations ORDER BY rowid").all().map(r => r.runtime_state), ["exited", "ready"]);
+    assert.deepEqual(f.diagnostics, []);
+    assert.equal(f.position()!.last_source_sequence, 3);
+  } finally { f.capture.close(); }
+});
+
+test("one idle Cursor observer advances to its first committed child without reinstalling", async () => {
+  let subscriptions = 0;
+  const observer = new ProviderExecutionObserver(() => now);
+  const f = fixture("cursor_cli", (_handle, listener) => {
+    subscriptions += 1;
+    return observer.subscribe(listener);
+  });
+  try {
+    const connection = { ...f.handle.providerConnection! };
+    f.handle.providerConnection = { kind: "cursor_cli", pid: null, processIdentity: null };
+    f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=NULL,provider_process_identity=NULL");
+    await f.install(); await flush();
+    assert.equal(subscriptions, 1);
+    f.handle.providerConnection = connection;
+    f.db.exec("UPDATE runtime_deployments SET provider_connection_pid=42,provider_process_identity='birth-secret'");
+    f.advance();
+    f.capture.prepared({ agentId: "agent", handle: f.handle, executionGenerationId: "generation", connection, configurationRevision: 2 });
+    observer.emit(ready, "birth-secret", 42); await flush();
+    assert.equal(f.facts().length, 1);
+    assert.equal(f.position()!.last_source_sequence, 1);
+    assert.equal(subscriptions, 1, "advancing the committed child birth keeps the physical observation subscription");
+  } finally { f.capture.close(); }
+});
+
+test("older-generation recovery without captured original runtime proof stays unavailable", async () => {
+  const f = fixture();
+  try {
+    f.bindTurn();
+    f.db.exec("UPDATE supervised_agent_provider_turn_bindings SET origin_execution_generation_id='uncaptured-old-generation'");
+    await f.install(); f.emit(ready); f.emit(active); await flush();
+    assert.equal(f.facts().length, 1);
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_turns").get()!.n, 0);
+    assert.equal(f.diagnostics.at(-1), "identity_unavailable");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 2 });
+  } finally { f.capture.close(); }
+});
+
+for (const initialFact of [false, true]) test(`capture automatically revalidates after a SQLite lock with ${initialFact ? "queued ready evidence" : "an empty exact source"}`, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const directory = mkdtempSync(join(tmpdir(), "capture-storage-retry-"));
+  const path = join(directory, "synthetic.sqlite");
+  const f = fixture("codex_app_server", undefined, undefined, new DatabaseSync(path), "typed");
+  const competing = new DatabaseSync(path);
+  try {
+    if (initialFact) f.emit(ready);
+    competing.exec("BEGIN IMMEDIATE");
+    f.install(); await flush();
+    assert.equal(f.admission(), "unavailable");
+    assert.equal(f.facts().length, 0);
+    competing.exec("ROLLBACK");
+    t.mock.timers.tick(25); await flush();
+    assert.equal(f.facts().length, initialFact ? 1 : 0);
+    assert.equal(f.admission(), "ready", "storage recovery must not require another provider fact or human action");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: initialFact ? 1 : 0, max_observed_sequence: initialFact ? 1 : 0 });
+    const before = f.facts();
+    t.mock.timers.tick(30_000); await flush();
+    assert.deepEqual(f.facts(), before, "the successful frontier is not repeatedly ingested");
+  } finally {
+    if (competing.isTransaction) competing.exec("ROLLBACK");
+    competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+for (const release of ["close", "replace"] as const) test(`capture storage retry cannot outlive ${release}`, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture();
+  const close = f.db.close.bind(f.db);
+  const exec = f.db.exec.bind(f.db);
+  let closed = false;
+  f.db.close = () => { closed = true; };
+  try {
+    f.db.exec = sql => {
+      if (sql === "BEGIN IMMEDIATE") throw Object.assign(new Error("database is locked"), { code: "ERR_SQLITE_ERROR", errcode: 6 });
+      return exec(sql);
+    };
+    f.emit(ready); f.install(); await flush();
+    assert.equal(f.admission(), "unavailable");
+    if (release === "close") f.capture.close();
+    else f.handles.set("agent", { ...f.handle });
+    f.db.exec = exec;
+    t.mock.timers.tick(30_000); await flush();
+    assert.equal(f.facts().length, 0, "a retry cannot admit observations for a closed or replaced owner");
+    assert.equal(f.admission(), "unavailable");
+    assert.equal(closed, release === "close");
+  } finally { f.db.exec = exec; f.capture.close(); f.db.close = close; close(); }
+});
+
+test("non-retryable storage failure retains queued facts and requires a later hint", async (t) => {
+  const f = fixture();
+  try {
+    await f.install(); await flush();
+    const exec = f.db.exec.bind(f.db);
+    let failures = 0;
+    const mock = t.mock.method(f.db, "exec", (sql: string) => {
+      if (sql === "BEGIN IMMEDIATE") { failures++; throw new Error("database is locked"); }
+      return exec(sql);
+    });
+    assert.doesNotThrow(() => f.emit(ready)); await flush();
+    assert.ok(failures >= 1);
+    assert.equal(f.facts().length, 0, "diagnostic retry cannot timer-retry operational fact capture");
+    assert.equal(f.diagnostics.at(-1), "storage_unavailable");
+    await delay(40); await flush();
+    assert.equal(f.facts().length, 0, "operational capture resumes only from an explicit later hint");
+    mock.mock.restore(); f.capture.refresh(); await flush();
+    assert.equal(f.facts().length, 1);
+  } finally { f.capture.close(); }
+});
+
+test("synchronous exit cleanup keeps final facts ahead of successor observation admission", async () => {
+  const f = fixture();
+  try {
+    f.handle.appliedConfigurationRevision = 2;
+    f.bindTurn();
+    f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?`)
+      .run(JSON.stringify({ kind: "no_reply", text: null }), now);
+    const detach = await f.install(); await Promise.resolve(); await Promise.resolve();
+    f.emit(ready);
+    f.emit(active); f.emit(terminal);
+    f.emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" });
+    f.emit({ ...ready, state: "exited", controlEvidence: "process_exit" });
+    f.handles.delete("agent"); detach();
+    assert.equal(f.facts().length, 0, "exit cleanup performs no inline SQLite capture");
+    await flush();
+    assert.equal(f.facts().length, 5);
+    assert.equal(f.db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()!.runtime_state, "exited");
+    assert.equal(f.position()!.last_source_sequence, 5);
+    assert.equal(f.db.prepare("SELECT conclusion FROM execution_message_attempts").get()!.conclusion, "acknowledged_no_reply",
+      "the detached exit tail must settle its late-captured attempt before the lane is removed");
+    assert.deepEqual(f.diagnostics, []);
+  } finally { f.capture.close(); }
+});
+
+test("terminal detach with uncommitted turn mapping records a gap rather than dropping its tail", async () => {
+  const f = fixture();
+  try {
+    const detach = await f.install(); f.emit(ready); await flush();
+    f.emit(active); f.emit({ ...ready, state: "exited", controlEvidence: "process_exit" });
+    f.handles.delete("agent"); detach(); await flush();
+    assert.equal(f.facts().length, 1);
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 3 });
+    assert.equal(f.diagnostics.at(-1), "identity_unavailable");
+  } finally { f.capture.close(); }
+});
+
+test("raw content is rejected, not persisted or promoted to an operational failure", async () => {
+  const f = fixture();
+  try {
+    await f.install(); f.emit({ ...ready, command: "PRIVATE TOKEN" } as NativeExecutionFact); await flush();
+    assert.equal(f.facts().length, 0);
+    assert.equal(f.position()!.max_observed_sequence, 1);
+    assert.equal(f.diagnostics.at(-1), "invalid_observation");
+    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments").get()!.observed_state, "working");
+  } finally { f.capture.close(); }
+});
+
+test("shutdown fences queued work and disposes a subscription that arrives late", async () => {
+  const f = fixture();
+  f.capture.close();
+  let resolve!: (value: NativeExecutionSubscription) => void;
+  const pending = new Promise<NativeExecutionSubscription>(r => { resolve = r; });
+  const db = new DatabaseSync(":memory:");
+  let disposed = 0; let subscribed = 0;
+  const capture = new ExecutionCaptureCoordinator(db, { provider: { onExecution: () => { subscribed++; return pending; } },
+    currentHandle: () => f.handle, daemonGeneration: () => 1, diagnostic: () => { throw new Error("must not run"); } });
+  await capture.install(f.tokenFor()); await Promise.resolve();
+  assert.equal(subscribed, 1); capture.close();
+  resolve({ sourceId: "source", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => { disposed++; } });
+  await flush(); assert.equal(disposed, 1);
+  assert.throws(() => db.prepare("SELECT 1"), /not open/);
+  await capture.install(f.tokenFor()); await flush(); assert.equal(subscribed, 1);
+});

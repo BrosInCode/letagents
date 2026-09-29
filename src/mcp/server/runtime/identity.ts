@@ -12,6 +12,8 @@ import {
   getLetagentsToken,
 } from "./api.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { currentWorkerCall } from "../../worker-call-context.js";
+import { identityFromAgentSession } from "./agent-sessions.js";
 import {
   detectAgentIdeLabel,
   detectAgentRuntimeLabel,
@@ -48,6 +50,8 @@ export {
 };
 
 export async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
+  const worker = currentWorkerCall();
+  if (worker) return identityFromAgentSession(worker);
   const owner = await resolveOwnerContext();
   const authAvailable = requireValidWorkerBearerRuntime().mode === "owner" && Boolean(await getLetagentsToken());
   const ideLabel = detectAgentIdeLabel();

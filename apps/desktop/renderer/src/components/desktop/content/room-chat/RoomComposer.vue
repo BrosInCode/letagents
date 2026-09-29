@@ -1,5 +1,55 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
+    <button v-if="attentionApprovalCount" type="button" class="desktop-host-approval-history"
+      :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
+      {{ `${showApprovalHistory ? 'Hide' : 'Show'} ${attentionApprovalCount} ${attentionApprovalCount === 1 ? 'approval' : 'approvals'} needing attention` }}
+    </button>
+    <section v-for="approval in visibleHostApprovals" :key="approval.id" class="desktop-composer-permission-tray desktop-host-approval"
+      data-testid="desktop-host-approval" aria-live="polite">
+      <div class="desktop-composer-permission-main">
+        <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
+        <div class="desktop-composer-permission-copy">
+          <strong>{{ approval.presentation.displayName }} · {{ approval.status === 'pending'
+            ? hostApprovalTitle(approval.presentation) : hostApprovalStatus(approval.status) }}</strong>
+        </div>
+      </div>
+      <button type="button" class="desktop-host-approval-dismiss"
+        :aria-label="`Dismiss approval from ${approval.presentation.displayName}`"
+        @click="dismissHostApproval(approval.id)">
+        <X :size="15" aria-hidden="true" />
+      </button>
+      <details class="desktop-host-approval-details">
+        <summary>Details</summary>
+        <dl>
+          <template v-for="(field, index) in hostApprovalFields(approval.presentation)" :key="index">
+            <dt>{{ field.label }}</dt>
+            <dd><pre>{{ field.value }}</pre></dd>
+          </template>
+        </dl>
+        <p v-if="approval.detail">{{ approval.detail }}</p>
+        <p v-if="approval.status === 'uncertain'">Confirmation unavailable. Your decision will not be sent again.</p>
+      </details>
+      <p v-if="approval.status === 'pending' && approval.presentation.denyScope === 'session_pending'">Deny applies to all pending permissions for this agent.</p>
+      <div v-if="approval.status === 'pending'" class="desktop-composer-permission-actions">
+        <button type="button" class="desktop-composer-permission-deny" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
+          @click="decideHostApproval(approval.id, 'deny')">Deny</button>
+        <button type="button" class="desktop-composer-permission-allow" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
+          @click="decideHostApproval(approval.id, 'allow_once')">{{ hostApprovalBusy === approval.id
+            ? 'Recording…'
+            : approval.presentation.title === 'Grant for this turn' ? 'Grant for this turn' : 'Allow once' }}</button>
+        <button v-if="approval.presentation.alwaysAllow" type="button" class="desktop-composer-permission-allow"
+          :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
+          title="Saved for this agent. Revoke in Permissions. Configured access settings are unchanged."
+          @click="decideHostApproval(approval.id, 'allow_always')">Always allow {{ approval.presentation.alwaysAllow.toolLabel }} in {{ "kind" in approval.presentation.alwaysAllow ? "this room workspace" : approval.presentation.alwaysAllow.projectName }}</button>
+      </div>
+      <div v-else-if="approval.status === 'decision_recorded' && approval.retryDecision" class="desktop-composer-permission-actions">
+        <button type="button" class="desktop-composer-permission-detail" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
+          @click="decideHostApproval(approval.id, approval.retryDecision)">Retry recorded {{ approval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button>
+      </div>
+    </section>
+    <p v-if="hostApprovalError" class="desktop-composer-permission-error" role="status">
+      {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshHostApprovals">Refresh approvals</button>
+    </p>
     <div
       v-if="primaryPermissionApproval"
       class="desktop-composer-permission-tray"
@@ -55,7 +105,7 @@
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
         <strong>{{ replyHeading }}</strong>
-        <span>{{ replyPreview(replyTo.text) }}</span>
+        <span>{{ replyPreview(replyTo.isSelection ? replyTo.text : replyTo.displayText || replyTo.text) }}</span>
       </div>
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
@@ -161,14 +211,18 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowUp, LoaderCircle, Plus } from "@lucide/vue";
+import { ArrowUp, LoaderCircle, Plus, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
+import type { DesktopHostApproval, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
+import { hostApprovalFields, hostApprovalTitle } from "./host-approval-presentation";
 import { roomMentionCandidates } from "../../../../domain/participants";
+import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
+import { desktopIpc } from "../../../../ipc";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
@@ -177,6 +231,7 @@ export interface RoomComposerReplyTarget {
   id: string;
   sender: string;
   text: string;
+  displayText?: string | null;
   isSelection?: boolean;
   sourceMessageId?: string | null;
 }
@@ -186,7 +241,7 @@ const props = defineProps<{
   attachmentDrafts: DesktopStagedAttachment[];
   attachmentError: string | null;
   eventPreviews: ComposerEventPreview[];
-  initialDraft?: string;
+  messageNamespace?: string;
   participants: DesktopParticipantSummary[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   permissionApprovals: ManagedAgentPermissionApproval[];
@@ -201,7 +256,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "clear-reply": [];
-  "draft-change": [text: string];
   "pick-attachments": [];
   "open-add-agent": [];
   "open-permission-detail": [approval: ManagedAgentPermissionApproval];
@@ -210,16 +264,84 @@ const emit = defineEmits<{
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
   ];
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
+  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
   "open-event-preview": [event: ComposerEventPreview];
   "dismiss-event-preview": [messageId: string];
 }>();
 
 const maxComposerInputHeight = 156;
-const draft = ref(props.initialDraft || "");
+const { text: draft, captureSubmittedDraft } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
+const hostApprovals = ref<DesktopHostApproval[]>([]);
+const dismissedHostApprovalIds = ref(new Set<string>());
+const showApprovalHistory = ref(false);
+const hostApprovalError = ref<string | null>(null);
+const hostApprovalBusy = ref<string | null>(null);
+const hostApprovalLoading = ref(false);
+let approvalEpoch = 0;
+let approvalMutation = 0;
+let approvalTimer: ReturnType<typeof setInterval> | null = null;
+
+function hostApprovalStatus(status: HostApprovalStatus): string {
+  return { pending: "Needs your approval", decision_recorded: "Decision recorded", decision_sent: "Decision sent",
+    uncertain: "Approval unconfirmed", request_closed: "Approval request closed", resolved: "Decision applied", unavailable: "Approval unavailable" }[status];
+}
+
+const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approval =>
+  (approval.status === "pending" || approval.status === "decision_recorded"
+    || approval.status === "unavailable" || approval.status === "uncertain")
+  && !dismissedHostApprovalIds.value.has(approval.id)));
+const attentionApprovalCount = computed(() => unresolvedHostApprovals.value.filter(approval =>
+  approval.status === "uncertain" || approval.status === "unavailable").length);
+const visibleHostApprovals = computed(() => unresolvedHostApprovals.value.filter(approval =>
+  showApprovalHistory.value || approval.status === "pending" || approval.status === "decision_recorded"));
+
+function dismissHostApproval(id: string): void {
+  dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value, id]);
+}
+
+async function refreshHostApprovals(): Promise<void> {
+  const epoch = approvalEpoch;
+  const mutation = approvalMutation;
+  const room = props.roomIdentifier;
+  const read = desktopIpc.supervisor?.listHostApprovals;
+  if (!room || !read || hostApprovalLoading.value || hostApprovalBusy.value) return;
+  hostApprovalLoading.value = true;
+  try {
+    const snapshot = await read(room);
+    if (epoch !== approvalEpoch || mutation !== approvalMutation) return;
+    if (snapshot.available) {
+      hostApprovals.value = snapshot.approvals;
+      const present = new Set(snapshot.approvals.map(approval => approval.id));
+      dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value].filter(id => present.has(id)));
+    }
+    hostApprovalError.value = snapshot.available ? snapshot.error
+      : snapshot.error ?? "Host approvals are unavailable. Decisions are disabled until the service reconnects.";
+  } catch {
+    if (epoch === approvalEpoch && mutation === approvalMutation) hostApprovalError.value = "Could not refresh host approvals. Decisions are disabled until the service reconnects.";
+  } finally { hostApprovalLoading.value = false; }
+}
+
+async function decideHostApproval(id: string, decision: HostApprovalSelection): Promise<void> {
+  const epoch = approvalEpoch;
+  const decide = desktopIpc.supervisor?.decideHostApproval;
+  if (!decide || hostApprovalBusy.value || hostApprovalError.value) return;
+  approvalMutation += 1;
+  hostApprovalBusy.value = id;
+  try {
+    const status = await decide({ id, decision });
+    if (epoch !== approvalEpoch) return;
+    const approval = hostApprovals.value.find(item => item.id === id);
+    if (approval) {
+      approval.status = status;
+      if (status !== "decision_recorded") approval.retryDecision = null;
+    }
+  } catch {
+    if (epoch === approvalEpoch) hostApprovalError.value = "Could not confirm the decision. Refresh approvals to check its recorded state.";
+  } finally { hostApprovalBusy.value = null; }
+}
 
 const canSend = computed(() =>
   Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
@@ -249,8 +371,12 @@ const mentionCandidates = computed(() => {
 watch(
   () => props.roomIdentifier,
   () => {
-    draft.value = props.initialDraft || "";
-    emit("draft-change", draft.value);
+    approvalEpoch += 1;
+    hostApprovals.value = [];
+    dismissedHostApprovalIds.value = new Set();
+    showApprovalHistory.value = false;
+    hostApprovalError.value = null;
+    void refreshHostApprovals();
     mentionQuery.value = null;
     void nextTick(syncTextareaHeight);
   },
@@ -274,41 +400,46 @@ watch(
 );
 
 onMounted(() => {
+  void refreshHostApprovals();
+  approvalTimer = setInterval(() => { void refreshHostApprovals(); }, 3_000);
   void nextTick(syncTextareaHeight);
 });
 
 onBeforeUnmount(() => {
-  emit("draft-change", draft.value);
+  approvalEpoch += 1;
+  if (approvalTimer) clearInterval(approvalTimer);
 });
 
 function submitMessage(): void {
   const text = draft.value.trim();
-  if (!text && props.attachmentDrafts.length === 0) return;
+  if ((!text && props.attachmentDrafts.length === 0) || props.sending) return;
   const replyTarget = props.replyTo;
   const messageText = replyTarget?.isSelection
     ? applySelectedTextQuoteToDraft(text, replyTarget.text, replyTarget.sourceMessageId)
     : text;
+  const clearSubmittedText = captureSubmittedDraft();
   emit(
     "send-message",
     messageText,
     replyTarget?.isSelection ? null : replyTarget?.id || null,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
+    (sent) => {
+      if (!sent) return;
+      clearSubmittedText();
+      void nextTick(() => textareaElement.value?.focus());
+    },
   );
-  draft.value = "";
-  syncDraftToShell();
 }
 
 function insertNewlineAtCursor(): void {
   const input = textareaElement.value;
   if (!input) {
     draft.value = `${draft.value}\n`;
-    syncDraftToShell();
     return;
   }
   const start = input.selectionStart ?? draft.value.length;
   const end = input.selectionEnd ?? draft.value.length;
   draft.value = `${draft.value.slice(0, start)}\n${draft.value.slice(end)}`;
-  syncDraftToShell();
   void nextTick(() => {
     input.selectionStart = start + 1;
     input.selectionEnd = start + 1;
@@ -316,6 +447,7 @@ function insertNewlineAtCursor(): void {
 }
 
 function handleEnterKey(event: KeyboardEvent): void {
+  if (event.isComposing) return;
   event.preventDefault();
   if (mentionOpen.value) {
     const candidate = mentionCandidates.value[activeMentionIndex.value];
@@ -336,7 +468,6 @@ function syncMentionQuery(): void {
 }
 
 function handleDraftInput(): void {
-  syncDraftToShell();
   syncMentionQuery();
 }
 
@@ -355,7 +486,6 @@ function closeMentionForTab(): void {
 function insertMention(mentionText: string): void {
   draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/, `$1@${mentionText} `);
   mentionQuery.value = null;
-  syncDraftToShell();
   void nextTick(() => textareaElement.value?.focus());
 }
 
@@ -364,17 +494,12 @@ function focusWithMention(mentionText: string): void {
   const separator = draft.value && !/\s$/.test(draft.value) ? " " : "";
   draft.value = `${draft.value}${separator}@${mentionText} `;
   mentionQuery.value = null;
-  syncDraftToShell();
   void nextTick(() => {
     syncTextareaHeight();
     const input = textareaElement.value;
     input?.focus();
     input?.setSelectionRange(draft.value.length, draft.value.length);
   });
-}
-
-function syncDraftToShell(): void {
-  emit("draft-change", draft.value);
 }
 
 function syncTextareaHeight(): void {

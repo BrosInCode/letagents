@@ -9,64 +9,52 @@
         @click="emit('toggle', group.status)"
       >
         <span class="board-group-heading">
-          <span class="board-group-chevron">
-            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
           <span class="board-group-dot" aria-hidden="true"></span>
           {{ group.label }}
+          <span class="board-group-count">{{ group.tasks.length }}</span>
         </span>
-        <span class="board-group-count">{{ group.tasks.length }}</span>
+        <span class="board-group-chevron" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </span>
       </button>
     </h3>
-    <div v-if="!collapsed" :id="`task-group-${group.status}`" class="board-group-list">
+    <div v-show="!collapsed" :id="`task-group-${group.status}`" class="board-group-list">
       <TaskBoardCard
         v-for="task in group.tasks"
         :key="task.id"
         :task="task"
-        :presence="presence"
-        :canManageLeases="canManageLeases"
         :githubStatus="taskGithubStatus[task.id] ?? null"
         :updating="updatingTask === task.id"
-        :updatingLease="updatingLeaseTask === task.id"
-        :updatingReviewLease="updatingReviewLeaseTask === task.id"
+        :mutation-busy="mutationBusy"
         :selected="selectedTaskId === task.id"
         @updateStatus="(taskId, status) => emit('updateStatus', taskId, status)"
-        @leaseAction="emit('leaseAction', $event)"
-        @reviewLeaseAction="emit('reviewLeaseAction', $event)"
-        @focusTask="emit('focusTask', $event)"
+        @select="emit('select', $event)"
       />
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import type { RoomAgentPresence, TaskGitHubArtifactStatus } from '@/composables/useRoom'
+import type { TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import { taskStatusAccent } from '../../../domain/taskStatus'
 import TaskBoardCard from './TaskBoardCard.vue'
 import type {
   TaskGroup,
-  TaskLeaseActionPayload,
-  TaskReviewLeaseActionPayload,
 } from './model'
 
 defineProps<{
   group: TaskGroup
   collapsed: boolean
-  presence: readonly RoomAgentPresence[]
-  canManageLeases: boolean
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
   updatingTask: string | null
-  updatingLeaseTask: string | null
-  updatingReviewLeaseTask: string | null
+  mutationBusy: boolean
   selectedTaskId?: string | null
 }>()
 
 const emit = defineEmits<{
   toggle: [status: string]
   updateStatus: [taskId: string, status: string]
-  leaseAction: [payload: TaskLeaseActionPayload]
-  reviewLeaseAction: [payload: TaskReviewLeaseActionPayload]
-  focusTask: [taskId: string]
+  select: [taskId: string]
 }>()
 </script>
 
@@ -75,12 +63,8 @@ const emit = defineEmits<{
   --task-accent: var(--text-tertiary);
   display: grid;
   align-content: start;
-  gap: 8px;
-  min-height: 252px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-subtle);
+  gap: 14px;
+  min-width: 0;
 }
 
 .board-group-title {
@@ -90,16 +74,14 @@ const emit = defineEmits<{
   gap: 6px;
   width: 100%;
   min-height: 32px;
-  padding: 0 2px 6px;
+  padding: 0 2px;
   border: 0;
-  border-bottom: 1px solid var(--border);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 0.8125rem;
+  font-weight: 550;
+  letter-spacing: 0;
 }
 
 .board-group-heading-shell {
@@ -144,8 +126,8 @@ const emit = defineEmits<{
   min-width: 24px;
   height: 22px;
   padding: 0 6px;
-  border-radius: var(--radius-pill);
-  background: var(--accent-dim);
+  border-radius: 4px;
+  background: transparent;
   color: var(--text-secondary);
   font-size: 0.7rem;
   font-variant-numeric: tabular-nums;
@@ -153,7 +135,7 @@ const emit = defineEmits<{
 
 .board-group-list {
   display: grid;
-  gap: 8px;
+  gap: 12px;
 }
 
 @media (hover: hover) and (pointer: fine) {

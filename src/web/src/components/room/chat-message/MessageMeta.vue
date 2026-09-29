@@ -66,11 +66,15 @@ const emit = defineEmits<{
   line-height: 1;
 }
 
-.message-sender { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.message-sender { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .message-sender-row {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  line-height: 1.3;
 }
 .message-meta strong { font-size: 0.84rem; font-weight: 700; letter-spacing: -0.01em; }
 .message-sender-subtitle { font-size: 0.72rem; color: var(--muted, #71717a); }
@@ -80,6 +84,8 @@ const emit = defineEmits<{
   align-items: center;
   gap: 5px;
   margin-left: auto;
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 .reply-action {
   display: inline-flex;
@@ -112,6 +118,8 @@ const emit = defineEmits<{
 }
 @media (hover: none), (pointer: coarse) {
   .reply-action {
+    width: 44px;
+    height: 44px;
     opacity: 1;
     pointer-events: auto;
     transform: none;
@@ -169,5 +177,6 @@ const emit = defineEmits<{
   .message-meta time { font-size: 0.62rem; }
   .provenance-badge { padding: 2px 6px; font-size: 0.58rem; }
   .prompt-injection-badge { font-size: 0.58rem; }
+  .reply-action { width: 44px; height: 44px; opacity: 1; pointer-events: auto; transform: none; }
 }
 </style>

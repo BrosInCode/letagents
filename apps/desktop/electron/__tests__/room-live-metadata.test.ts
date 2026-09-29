@@ -160,6 +160,49 @@ test("buildRoomLiveMetadata maps every poll-only section and preserves per-sourc
   );
 });
 
+test("focus snapshots load history and every resource from the canonical joined room", async () => {
+  const previous = globalThis.fetch;
+  const calls: string[] = [];
+  const requested = "focus_37";
+  const canonical = "github.com/owner/project/focus/focus_37";
+  const canonicalPath = encodeURIComponent(canonical);
+  const stub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    calls.push(url);
+    const path = new URL(url).pathname;
+    const json = (body: unknown) => new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+    if (init?.method === "POST" && path === `/rooms/${requested}/join`) {
+      return json({ room_id: canonical, display_name: "Focus 37", kind: "focus", authenticated: true });
+    }
+    if (!path.startsWith(`/rooms/${canonicalPath}/`)) return json({ error: `unexpected ${path}` });
+    if (path.endsWith("/messages")) return json({ messages: [{ id: "msg_1", sender: "Emmy", text: "Earlier context", timestamp: "2026-08-12T00:00:00.000Z" }] });
+    if (path.endsWith("/focus-rooms")) return json({ focus_rooms: [] });
+    if (path.endsWith("/tasks")) return json({ tasks: [] });
+    if (path.endsWith("/participants")) return json({ participants: [], hidden_count: 0 });
+    if (path.endsWith("/presence")) return json({ presence: [] });
+    if (path.endsWith("/reasoning-sessions")) return json({ sessions: [] });
+    if (path.endsWith("/activity-history")) return json({ entries: [] });
+    if (path.endsWith("/artifacts")) return json({ artifacts: [] });
+    if (path.endsWith("/board-settings")) return json({ pending_intent_count: 0 });
+    if (path.endsWith("/events")) return json({ events: [], has_more: false });
+    return json({ error: `unexpected ${path}` });
+  }) as typeof fetch;
+  (globalThis as { fetch: typeof fetch }).fetch = stub;
+  try {
+    const { fetchRoomSnapshot } = await import("../main/rooms/snapshot.js");
+    const snapshot = await fetchRoomSnapshot(requested);
+    assert.equal(snapshot.roomIdentifier, canonical);
+    assert.deepEqual(snapshot.messages.map((message) => message.id), ["msg_1"]);
+    assert.ok(calls.some((url) => url.includes(`/${canonicalPath}/messages?`)));
+    assert.equal(calls.filter((url) => url.includes(`/rooms/${requested}/`) && !url.endsWith("/join")).length, 0);
+  } finally {
+    (globalThis as { fetch: typeof fetch }).fetch = previous;
+  }
+});
+
 test("buildRoomLiveMetadata degrades a failed source to its fallback while recording the error", async () => {
   const metadata = buildRoomLiveMetadata("room_degraded", {
     focusRooms: await loadSource(Promise.resolve({ focus_rooms: [] }), { focus_rooms: [] }),
