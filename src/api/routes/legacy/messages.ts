@@ -118,6 +118,7 @@ export interface LegacyProjectMessageRouteDeps {
   rememberRoomParticipantFromMessage(input: {
     projectId: string;
     sender: string;
+    agentKey?: string | null;
     source?: string | null;
     sessionAccount?: AuthenticatedRequest["sessionAccount"];
     timestamp?: string;
@@ -220,6 +221,7 @@ export function registerLegacyProjectMessageRoutes(
       await deps.rememberRoomParticipantFromMessage({
         projectId,
         sender: normalizedSender,
+        agentKey: workerIdentity?.ok ? workerIdentity.identity.agent_key : null,
         source,
         sessionAccount: req.sessionAccount,
         timestamp: message.timestamp,

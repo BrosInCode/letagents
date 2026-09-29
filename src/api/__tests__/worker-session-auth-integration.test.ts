@@ -1331,6 +1331,184 @@ test(
 );
 
 test(
+  "an agent that registers again keeps its name, however often it has spoken",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!db || !agents || !dbModule) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { createRoomParticipantRecorder } = await import("../rooms/participants.js");
+    const { room } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    const recorder = createRoomParticipantRecorder({ upsertRoomParticipant: dbModule.upsertRoomParticipant });
+    const now = new Date().toISOString();
+    const identity = { ...agentIdentity, id: "agent_mossdawn", canonical_key: "EmmyMay/mossdawn", name: "mossdawn", display_name: "MossDawn" };
+    await db.insert(agents).values({ ...identity, created_at: now, updated_at: now });
+
+    let prior: { session_id?: string; session_token?: string } | null = null;
+    const sessionIds = new Set<string>();
+    for (let round = 0; round < 4; round += 1) {
+      const registered = await invoke(
+        registerHandler,
+        ownerTokenRequest({
+          actor_key: identity.canonical_key,
+          display_name: "MossDawn",
+          requested_base_display_name: "MossDawn",
+          ide_label: "Agent",
+          session_kind: "worker",
+          runtime: "antigravity",
+          // One process that calls register again, as an agent does whenever
+          // it starts a new turn.
+          agent_instance_id: "one-process",
+          ...(prior ? { replace_agent_session_id: prior.session_id, replace_agent_session_token: prior.session_token } : {}),
+        }, { params: { 0: room.id } }),
+      );
+      assert.equal(registered.statusCode, 201, JSON.stringify(registered.body));
+      const session = registered.body as { session_id?: string; session_token?: string; display_name?: string; actor_label?: string };
+      assert.equal(session.display_name, "MossDawn", `registration ${round + 1} keeps the name`);
+      sessionIds.add(session.session_id!);
+      prior = session;
+
+      // Speaking records the sender as a participant. An authenticated send
+      // carries the agent key; an older caller does not, and must not erase it.
+      await recorder.rememberRoomParticipantFromMessage({
+        projectId: room.id, sender: session.actor_label!, source: "agent",
+        agentKey: identity.canonical_key, timestamp: new Date().toISOString(),
+      });
+      await recorder.rememberRoomParticipantFromMessage({
+        projectId: room.id, sender: session.actor_label!, source: "agent", timestamp: new Date().toISOString(),
+      });
+      const [row] = (await dbModule.getRoomParticipants(room.id, { limit: 200 }))
+        .filter((participant) => participant.display_name === "MossDawn");
+      assert.equal(row?.agent_key, identity.canonical_key, "a participant never loses its recorded owner");
+    }
+    assert.equal(sessionIds.size, 1, "one process keeps one session");
+  },
+);
+
+test(
+  "an agent that was renamed on earlier reconnects returns to its own name",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!db || !agents || !createRoomAgentSession || !dbModule) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { room } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    const now = new Date().toISOString();
+    const identity = { ...agentIdentity, id: "agent_mossdawn", canonical_key: "EmmyMay/mossdawn", name: "mossdawn", display_name: "MossDawn" };
+    await db.insert(agents).values({ ...identity, created_at: now, updated_at: now });
+    const label = (name: string) => buildAgentActorLabel({ display_name: name, owner_label: identity.owner_label, ide_label: "Agent" });
+
+    // The state the old behaviour leaves a room in. The agent kept ONE
+    // session, renamed in place each time, so nothing in its session records
+    // the names it had before. It spoke under each name, and each time the
+    // participant row was written with no owner.
+    const live = await createRoomAgentSession({
+      room_id: room.id, runtime: "antigravity", session_kind: "worker", agent_key: identity.canonical_key,
+      agent_instance_id: "one-process", owner_account_id: ownerAccount.id, owner_label: identity.owner_label,
+      ide_label: "Agent", display_name: "WoodFjord", actor_label: label("WoodFjord"),
+    });
+    for (const name of ["MossDawn", "MossDawn 1", "MossDawn 2", "WolfRidge", "WoodFjord"]) {
+      await dbModule.addMessage(room.id, label(name), `working as ${name}`, {
+        source: "agent", publisher_agent_key: identity.canonical_key, publisher_agent_session_id: live.session_id,
+      });
+      await dbModule.upsertRoomParticipant({
+        room_id: room.id, participant_key: `agent:${label(name).toLowerCase()}`, kind: "agent",
+        actor_label: label(name), agent_key: null, display_name: name,
+        owner_label: identity.owner_label, ide_label: "Agent",
+      });
+    }
+    const register = (body: Record<string, unknown>) => invoke(
+      registerHandler,
+      ownerTokenRequest({ ide_label: "Agent", session_kind: "worker", ...body }, { params: { 0: room.id } }),
+    );
+
+    const registered = await register({
+      actor_key: identity.canonical_key, display_name: "MossDawn", requested_base_display_name: "MossDawn",
+      runtime: "antigravity", agent_instance_id: "one-process",
+      replace_agent_session_id: live.session_id, replace_agent_session_token: live.session_token,
+    });
+    assert.equal(registered.statusCode, 201, JSON.stringify(registered.body));
+    const session = registered.body as { session_id?: string; display_name?: string };
+    assert.equal(session.display_name, "MossDawn");
+    assert.equal(session.session_id, live.session_id, "it is still the one session");
+    const owned = (await dbModule.getRoomParticipants(room.id, { limit: 200 }))
+      .find((participant) => participant.display_name === "MossDawn");
+    assert.equal(owned?.agent_key, identity.canonical_key, "the proven owner is recorded, so it is proven once");
+
+    // Its history is its own, not everyone's: another agent still cannot
+    // take a name this agent is living under.
+    const other = { ...agentIdentity, id: "agent_other", canonical_key: "EmmyMay/worker-other", name: "worker-other" };
+    await db.insert(agents).values({ ...other, created_at: now, updated_at: now });
+    const newcomer = await register({
+      actor_key: other.canonical_key, display_name: "MossDawn", runtime: "claude-code", agent_instance_id: "other-process",
+    });
+    assert.equal(newcomer.statusCode, 201, JSON.stringify(newcomer.body));
+    assert.notEqual((newcomer.body as { display_name?: string }).display_name, "MossDawn");
+  },
+);
+
+test(
+  "a name with no owner on record stays taken unless the room's messages prove whose it is",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!db || !agents || !dbModule) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { room } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    const now = new Date().toISOString();
+    const mine = { ...agentIdentity, id: "agent_heron_a", canonical_key: "EmmyMay/heron", name: "heron", display_name: "Heron" };
+    const theirs = { ...agentIdentity, id: "agent_heron_b", canonical_key: "EmmyMay/worker-heron", name: "worker-heron", display_name: "Heron" };
+    await db.insert(agents).values([
+      { ...mine, created_at: now, updated_at: now },
+      { ...theirs, created_at: now, updated_at: now },
+    ]);
+    const heron = buildAgentActorLabel({ display_name: "Heron", owner_label: mine.owner_label, ide_label: "Agent" });
+    const crane = buildAgentActorLabel({ display_name: "Crane", owner_label: mine.owner_label, ide_label: "Agent" });
+    for (const [actorLabel, name] of [[heron, "Heron"], [crane, "Crane"]] as const) {
+      await dbModule.upsertRoomParticipant({
+        room_id: room.id, participant_key: `agent:${actorLabel.toLowerCase()}`, kind: "agent",
+        actor_label: actorLabel, agent_key: null, display_name: name, owner_label: mine.owner_label, ide_label: "Agent",
+      });
+    }
+    // Two agents have spoken as "Heron": the label proves nothing.
+    await dbModule.addMessage(room.id, heron, "one", { source: "agent", publisher_agent_key: mine.canonical_key });
+    await dbModule.addMessage(room.id, heron, "two", { source: "agent", publisher_agent_key: theirs.canonical_key });
+    // Nobody authenticated has spoken as "Crane": nothing to prove it with.
+    await dbModule.addMessage(room.id, crane, "three", { source: "agent" });
+
+    for (const requested of ["Heron", "Crane"]) {
+      const registered = await invoke(
+        registerHandler,
+        ownerTokenRequest({
+          actor_key: mine.canonical_key, display_name: requested, requested_base_display_name: requested,
+          ide_label: "Agent", session_kind: "worker", runtime: "antigravity", agent_instance_id: `process-${requested}`,
+        }, { params: { 0: room.id } }),
+      );
+      assert.equal(registered.statusCode, 201, JSON.stringify(registered.body));
+      assert.notEqual((registered.body as { display_name?: string }).display_name, requested,
+        `${requested} is not proven to be this agent's`);
+    }
+    const rows = await dbModule.getRoomParticipants(room.id, { limit: 200 });
+    assert.equal(rows.find((row) => row.display_name === "Heron")?.agent_key, null, "an unproven owner is never recorded");
+  },
+);
+
+test(
   "a mention that names two live agents tells the sender it reached neither",
   {
     concurrency: false,

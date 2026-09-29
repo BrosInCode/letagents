@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { getDurableRoomWorkerSessions, getRoomWorkerNameHolders } from "../../../db/auth/room-agent-sessions.js";
+import { claimRoomParticipantOwner, getParticipantOwnersProvenByMessages } from "../../../db/participants.js";
 import { isMcpWorkerId, isMcpConnectionToken } from "../../../../shared/mcp-worker.js";
 
 import {
@@ -277,10 +278,46 @@ export function registerAgentSessionRoutes(
       let baseDisplayName = isGenericName
         ? pickLocalCodename(agent.canonical_key).display_name
         : (normalizedRequestedDisplayName || canonicalDisplayName);
+      // An agent's own history never holds a name against it. Holding an
+      // agent's past names against it is what renamed it on every reconnect:
+      // each name it was given became one more name it could not have.
+      //
+      // A row is this identity's own when it carries its key. Rows written
+      // before messages recorded their sender's key carry none, so the row
+      // for the requested name is settled by the room's messages instead: it
+      // is this identity's when every authenticated message sent under that
+      // label came from this key. The proven owner is then recorded, so the
+      // question is asked once.
+      const provenOwnParticipantKeys = new Set<string>();
+      if (requestedSessionKind === "worker") {
+        const unownedNamesakes = activeParticipants.filter((participant) =>
+          participant.kind === "agent" && !participant.agent_key && participant.actor_label
+          && participant.display_name === baseDisplayName);
+        if (unownedNamesakes.length > 0) {
+          const provenOwners = await getParticipantOwnersProvenByMessages({
+            room_id: project.id,
+            actor_labels: unownedNamesakes.map((participant) => participant.actor_label!),
+          });
+          for (const participant of unownedNamesakes) {
+            const owner = provenOwners.get(participant.actor_label!);
+            if (!owner) continue;
+            if (owner === agent.canonical_key) provenOwnParticipantKeys.add(participant.participant_key);
+            // Bookkeeping only: the registration does not depend on it.
+            await claimRoomParticipantOwner({
+              room_id: project.id, participant_key: participant.participant_key, agent_key: owner,
+            }).catch((error) => {
+              console.error(`[agent sessions] failed to record participant owner for ${project.id}`, error);
+            });
+          }
+        }
+      }
+      const isOwnParticipant = (participant: (typeof activeParticipants)[number]): boolean =>
+        participant.kind === "agent" && (participant.agent_key === agent.canonical_key
+          || provenOwnParticipantKeys.has(participant.participant_key));
+      const holdsOwnHistory = requestedSessionKind !== "worker";
       const usedDisplayNames = new Set([
-        ...activeParticipants.filter((participant) => !durableWorker
-          || participant.kind !== "agent"
-          || participant.agent_key !== agent.canonical_key).map((participant) => participant.display_name),
+        ...activeParticipants.filter((participant) => holdsOwnHistory || !isOwnParticipant(participant))
+          .map((participant) => participant.display_name),
         ...allocationSessions.map((session) => session.display_name),
         ...durableWorkers.filter((session) => session.agent_instance_id !== normalizedAgentInstanceId)
           .map((session) => session.display_name),
@@ -297,8 +334,7 @@ export function registerAgentSessionRoutes(
         ) || durableWorkers.some((session) => session.display_name === baseDisplayName
           && session.agent_instance_id !== normalizedAgentInstanceId);
         const baseBelongsToAnotherParticipant = activeParticipants.some(
-          (participant) => participant.display_name === baseDisplayName
-            && (participant.kind !== "agent" || participant.agent_key !== agent.canonical_key)
+          (participant) => participant.display_name === baseDisplayName && !isOwnParticipant(participant)
         );
         if (!baseHeldByThisIdentity && !baseBelongsToAnotherParticipant) {
           usedDisplayNames.delete(baseDisplayName);

@@ -251,6 +251,7 @@ test("legacy SSE closes once and drops pending frames after authority failure", 
 
 test("legacy agent-session bearer writes cannot impersonate an ordinary sender", async () => {
   let postHandler: ((req: unknown, res: unknown) => Promise<void>) | undefined;
+  let rememberedParticipant: { sender: string; agentKey?: string | null } | null = null;
   let emitted: {
     sender: string;
     source?: string | null;
@@ -295,7 +296,9 @@ test("legacy agent-session bearer writes cannot impersonate an ordinary sender",
         timestamp: new Date(0).toISOString(),
       };
     },
-    rememberRoomParticipantFromMessage: async () => undefined,
+    rememberRoomParticipantFromMessage: async (input: { sender: string; agentKey?: string | null }) => {
+      rememberedParticipant = { sender: input.sender, agentKey: input.agentKey };
+    },
   };
   registerLegacyProjectMessageRoutes(app as never, deps as never);
   assert.ok(postHandler);
@@ -334,6 +337,10 @@ test("legacy agent-session bearer writes cannot impersonate an ordinary sender",
   }, response);
 
   assert.equal(response.statusCode, 201);
+  assert.deepEqual(rememberedParticipant, {
+    sender: "Maple | Owner's agent | Worker",
+    agentKey: "owner/maple",
+  }, "the participant is recorded with its sender's key");
   assert.deepEqual(emitted, {
     sender: "Maple | Owner's agent | Worker",
     source: "agent",
