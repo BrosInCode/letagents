@@ -103,8 +103,13 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     if (input.reasoningEffort !== null) {
       throw new Error("Open Model reasoning effort is controlled by the selected endpoint and model.");
     }
-    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write"]);
-    const permission = profile === "ask_before_write"
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review"]);
+    const permission = profile === "auto_review"
+      // OpenCode asks as it does for Ask before writes, and LetAgents answers
+      // the requests it can vouch for. Nothing outside the project is opened,
+      // because no review could see what a command does there.
+      ? { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" }
+      : profile === "ask_before_write"
       ? { "*": "allow", edit: "ask", bash: "ask" }
       : { "*": "allow" };
     requirePolicyMatch(policy, "permission", permission, provider);

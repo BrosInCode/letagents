@@ -59,6 +59,7 @@ import {
   shieldOwnerInstructions,
   supervisedOpenCodeMcpEnvironment,
   workspaceOpenCodeEnvironment,
+  supervisedOpenCodePermissionProfileId,
 } from "./opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
@@ -608,9 +609,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       cwd: req.cwd,
       mcpCommand,
       mcpEnvironment,
-      permissionProfileId: req.permissionProfileId === "ask_before_write"
-        ? "ask_before_write"
-        : "full_access",
+      permissionProfileId: supervisedOpenCodePermissionProfileId(req.permissionProfileId),
     });
     const port = await this.deps.allocatePort();
     const url = `http://127.0.0.1:${port}`;

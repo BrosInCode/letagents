@@ -97,6 +97,12 @@ const openModelProfiles: readonly SupervisedPermissionProfile[] = [
     detail: "Can read files and use LetAgents room tools without asking. Commands and file changes need approval.", isDefault: false,
   },
   {
+    id: "auto_review", label: "Auto",
+    description: "Lets LetAgents review each command before it runs. Routine commands and edits to project files run without asking.",
+    status: "available", risk: "high",
+    detail: "Each command is sent to LetAgents and to Jev, a decision model, for review. A command that deletes, publishes, installs, or reaches the network still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project.", isDefault: false,
+  },
+  {
     id: "sandboxed_write", label: "Sandboxed writes",
     description: "Restricted file editing is unavailable for OpenCode here.",
     status: "gated", risk: "medium",

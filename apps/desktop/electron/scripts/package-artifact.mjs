@@ -246,6 +246,7 @@ const required = [
   ...[
     "shared/agent-codenames.mjs",
     "shared/message-contracts.mjs",
+    "shared/permission-review.mjs",
     "shared/routing-aliases.mjs",
     "shared/sqlite-thread-routing.mjs",
   ].map((relative) => ({

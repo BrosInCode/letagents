@@ -5,7 +5,9 @@ export function executionApprovalProjectionPathsAreSafe(paths: readonly string[]
   return paths.every((path) => {
     if (occupied.some(candidate => caseInsensitive.compare(candidate, path) === 0)) return false;
     occupied.push(path);
-    const parts = path.toLowerCase().split("/");
+    // A file system can read other characters as these ones: macOS opens
+    // `.ssh` for a name written with a long s. Compare what it would open.
+    const parts = path.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase().split("/");
     const name = parts.at(-1)!;
     return !parts.some((part) => [".git", ".ssh", ".gnupg", ".aws", ".kube", "secrets", "credentials"].includes(part))
       && name !== ".env" && !name.startsWith(".env.")

@@ -1220,6 +1220,11 @@ export function supervisedPermissionProfilePresentation(
       description: "Lets Claude check each action before it runs. Actions it judges safe run without asking.",
       detail: "Claude blocks actions it judges risky. Anything a room message asks for counts as approved, including commands that reach outside your project. Other Claude settings do not apply." };
   }
+  if (profile.id === "auto_review" && providerId === "open-model") {
+    return { ...profile, status: "available",
+      description: "Lets LetAgents review each command before it runs. Routine commands and edits to project files run without asking.",
+      detail: "Each command is sent to LetAgents and to Jev, a decision model, for review. A command that deletes, publishes, installs, or reaches the network still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project." };
+  }
   if (profile.id === "auto_review" && providerId === "codex") {
     return { ...profile, status: "available",
       description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
@@ -1249,7 +1254,10 @@ export function supervisedPermissionProfilePresentation(
 }
 
 /** Shown before launch. Auto still has a reviewer, so the Full access notice would mislead. */
-export function autoReviewNotice(providerName: string): string {
+export function autoReviewNotice(providerName: string, providerId?: DesktopAgentProviderId | null): string {
+  if (providerId === "open-model") {
+    return `LetAgents decides which of ${providerName}'s commands are safe instead of asking you, and sends each command to LetAgents and Jev to do it. A command it allows can run the project's own scripts, which can do anything the project defines. Use only with projects you trust.`;
+  }
   return `${providerName} decides which actions are safe instead of asking you. Anything a room message asks for counts as approved, including commands that reach outside your project. Use only in rooms where you trust everyone who can post.`;
 }
 

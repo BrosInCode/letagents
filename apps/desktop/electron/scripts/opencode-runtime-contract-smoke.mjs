@@ -157,7 +157,10 @@ function assistantToolCall(response, name, commands = [
             type: "function",
             function: {
               name,
-              arguments: JSON.stringify({ command, description: "Verify runtime boundary" }),
+              // A fixture may give the whole tool input, to set a working directory.
+              arguments: JSON.stringify(typeof command === "string"
+                ? { command, description: "Verify runtime boundary" }
+                : command),
             },
           })),
         },
@@ -223,6 +226,18 @@ async function startFixtureProvider() {
         state.unknownFinishRequests += 1;
         assistantTextWithoutFinishReason(response, "unknown-finish-ok");
       } else assistantText(response, "contract-background-request-ok");
+      return;
+    }
+    const outsideProject = /LETAGENTS_OUTSIDE_PROJECT_FIXTURE:(workdir|path|leave)/.exec(serializedMessages)?.[1];
+    if (outsideProject || serializedMessages.includes("LETAGENTS_INSIDE_PROJECT_FIXTURE")) {
+      if (hasToolResult) assistantText(response, "project-boundary-settled");
+      else if (name) assistantToolCall(response, name, [
+        outsideProject === "workdir" ? { command: "ls", workdir: tmpdir(), description: "List another directory" }
+          : outsideProject === "path" ? "cat /etc/hosts"
+            : outsideProject === "leave" ? "cd .. && ls"
+              : "ls",
+      ]);
+      else assistantText(response, "contract-background-request-ok");
       return;
     }
     if (serializedMessages.includes("LETAGENTS_PERMISSION_REJECT_FIXTURE")
@@ -521,6 +536,117 @@ async function observeOwnerIsolation({ binary, provider, registry, runtimeRoot, 
       new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
     ]);
     if (child.exitCode === null) child.kill("SIGKILL");
+  }
+}
+
+/**
+ * The Auto access level reviews commands by their text, and that text says
+ * nothing a review could trust about a place outside the project. The pinned
+ * runtime must therefore refuse such a command itself, before any request
+ * for permission exists, and must still ask about a command inside it. A
+ * room's scratch workspace is not a Git repository, and OpenCode draws a
+ * project's edge differently there, so both kinds are launched.
+ */
+async function verifyAutoStaysInProject(binary, provider, registry, workspaceKind) {
+  // OpenCode compares against the real path, as production workspaces are given.
+  const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-opencode-auto-")));
+  const pluginPath = join(root, "credential-boundary.mjs");
+  const mcpPath = join(root, "noop-mcp.mjs");
+  const worktree = join(root, "worktree");
+  await mkdir(worktree, { recursive: true });
+  if (workspaceKind === "git_worktree") {
+    const initialized = spawnSync("git", ["init", "--quiet", worktree], {
+      encoding: "utf8",
+      env: Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))),
+    });
+    assert.equal(initialized.status, 0, `git init failed: ${initialized.error ?? initialized.stderr}`);
+  }
+  await writeFile(pluginPath, credentialBoundaryPluginSource(), { encoding: "utf8", mode: 0o600 });
+  await writeNoopMcpServer(mcpPath);
+  const port = await allocatePort();
+  const auth = { username: OPENCODE_SERVER_USERNAME, password: randomBytes(24).toString("base64url") };
+  const configHome = join(root, "config");
+  await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION);
+  await shieldOwnerInstructions(configHome);
+  const output = { value: "" };
+  const child = spawn(binary, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+    cwd: worktree,
+    env: minimalOpenCodeEnvironment(process.env, {
+      npm_config_registry: registry.url,
+      OPENCODE_SERVER_USERNAME: auth.username,
+      OPENCODE_SERVER_PASSWORD: auth.password,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify(openCodeConfig({
+        model: "contract-model",
+        baseUrl: provider.url,
+        pluginUrl: pathToFileURL(pluginPath).href,
+        cwd: worktree,
+        mcpCommand: [process.execPath, mcpPath],
+        mcpEnvironment: {},
+        permissionProfileId: "auto_review",
+      })),
+      OPENCODE_AUTH_CONTENT: openCodeAuthContent(CONTRACT_SENTINEL),
+      XDG_DATA_HOME: join(root, "data"),
+      XDG_CACHE_HOME: join(root, "cache"),
+      XDG_CONFIG_HOME: configHome,
+      XDG_STATE_HOME: join(root, "state"),
+      ...workspaceOpenCodeEnvironment(workspaceKind),
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.on("data", (chunk) => { output.value += chunk; });
+  child.stderr.on("data", (chunk) => { output.value += chunk; });
+  let observation;
+  try {
+    const client = new OpenCodeServerClient(`http://127.0.0.1:${port}`, auth, fetch);
+    await waitForHealth(client, child, output);
+    assert.deepEqual((await client.config()).permission, {
+      "*": "allow",
+      edit: "ask",
+      bash: "ask",
+      external_directory: "deny",
+    }, "the pinned runtime must retain the supervised automatic-review policy");
+    observation = await watchEvents(client, new Set());
+    const run = async (text) => {
+      const session = await client.createSession(`LetAgents project boundary ${text}`);
+      assert.equal(typeof session.id, "string");
+      const start = observation.seen.length;
+      await client.promptAsync(session.id, {
+        messageID: mintNativeUserMessageId(Date.now()),
+        model: { providerID: OPEN_MODEL_OPENCODE_PROVIDER_ID, modelID: "contract-model" },
+        parts: [{ type: "text", text }],
+      });
+      return { sessionId: session.id, start };
+    };
+    for (const kind of ["workdir", "path", "leave"]) {
+      const { sessionId, start } = await run(`LETAGENTS_OUTSIDE_PROJECT_FIXTURE:${kind}`);
+      await observation.waitFor((event) => eventReferencesSession(event, sessionId)
+        && (event.type === "session.idle" || event.type === "session.error"), start);
+      assert.deepEqual(observation.seen.slice(start).filter((event) => event.type === "permission.asked"
+        && event.properties.sessionID === sessionId), [], `a command outside a ${workspaceKind} project (${kind}) must never become a request`);
+      assert.deepEqual(await client.listPendingPermissions(sessionId), []);
+      const tools = (await client.messages(sessionId)).flatMap((message) => message.parts ?? [])
+        .filter((part) => part.type === "tool" && part.tool === "bash");
+      assert.equal(tools.length, 1);
+      assert.equal(tools[0].state?.status, "error", `a command outside a ${workspaceKind} project (${kind}) must not run`);
+    }
+    const inside = await run("LETAGENTS_INSIDE_PROJECT_FIXTURE");
+    const asked = await observation.waitFor((event) => event.type === "permission.asked"
+      && event.properties.sessionID === inside.sessionId, inside.start);
+    // Automatic review reads the whole command from here and its parts from `patterns`.
+    assert.equal(asked.properties.permission, "bash");
+    assert.deepEqual(asked.properties.patterns, ["ls"]);
+    assert.deepEqual(asked.properties.metadata, { command: "ls" });
+    assert.deepEqual(await client.replyPermission(inside.sessionId, asked.properties, "reject"),
+      { outcome: "processed", nativeScope: "session_pending" });
+  } finally {
+    await observation?.close().catch(() => {});
+    child.kill("SIGTERM");
+    await Promise.race([
+      new Promise((resolveExit) => child.once("exit", resolveExit)),
+      new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
+    ]);
+    if (child.exitCode === null) child.kill("SIGKILL");
+    await rm(root, { recursive: true, force: true });
   }
 }
 
@@ -826,6 +952,9 @@ try {
     ["agent", "plugin"],
     "OpenCode must not install into, or write to, a directory above a scratch workspace",
   );
+  for (const workspaceKind of ["git_worktree", "room_scratch"]) {
+    await verifyAutoStaysInProject(binary, provider, registry, workspaceKind);
+  }
   assert.deepEqual(
     registry.requests,
     [],
@@ -858,6 +987,7 @@ try {
     permissionRejectScope: "all_pending_in_same_session",
     permissionForeignSessionPreserved: true,
     permissionInstanceDisposalLoss: true,
+    automaticReviewStaysInProject: true,
     eventTypes: [...eventTypes].sort(),
     providerRequests: provider.state.requestCount,
     providerPaths: provider.state.paths,

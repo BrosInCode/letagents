@@ -63,6 +63,14 @@ async function assertNoSymlink(root: string, relativePath: string): Promise<void
 
 type WorkspacePath = { path: string; filesystemIdentity: string | null };
 
+/**
+ * The path inside the workspace that `input` names, with no symbolic link on
+ * the way. Rejects a path outside the workspace or one that climbs.
+ */
+export function resolveWorkspaceRelativePath(logicalRoot: string, canonicalRoot: string, input: string): Promise<WorkspacePath> {
+  return workspaceRelativePath(logicalRoot, canonicalRoot, input);
+}
+
 async function workspaceRelativePath(logicalRoot: string, canonicalRoot: string, input: string): Promise<WorkspacePath> {
   if (!input || input.includes("\\")) reject("unsafe_path");
   const normalizedInput = input.normalize("NFC");

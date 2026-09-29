@@ -93,6 +93,9 @@ jobs:
       - name: Test public desktop download routes
         run: node --import tsx --test src/api/__tests__/desktop-download.test.ts
 
+      - name: Test automatic command review
+        run: node --import tsx --test src/api/__tests__/command-review.test.ts src/api/__tests__/jev-conversation-routing.test.ts
+
       - name: Build Vue app
         run: npm run build:web
 

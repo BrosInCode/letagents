@@ -15,6 +15,7 @@ import {
 import { DaemonControlSocket } from "./control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
 import { createHostApprovalBridge } from "./host-approval-broker.js";
+import { createAutomaticPermissionReviewer } from "./automatic-permission-review.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { DaemonAuthority, type DaemonCommitNotification } from "./daemon-authority.js";
 import { DaemonReadModel } from "./daemon-read-model.js";
@@ -859,6 +860,8 @@ export class SupervisorDaemon {
         this.executionDelegations.requestDecisions(entryId);
         this.requestConvergence(entryId);
       },
+      automaticReview: createAutomaticPermissionReviewer({ custody: this.workerRuntimeCustody, isClosing: () => this.handoffScheduled,
+        daemonGeneration: () => this.singleton.currentGeneration, nowMs: () => this.nowMs() }),
     });
     this.executionDelegations = new ExecutionDelegationCoordinator({
       entries: this.store,

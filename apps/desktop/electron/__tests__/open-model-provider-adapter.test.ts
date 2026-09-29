@@ -498,6 +498,16 @@ test("Open Model launches ask-before-write with native shell and edit approvals"
   assert.deepEqual(config.permission, { "*": "allow", edit: "ask", bash: "ask" });
 });
 
+test("Open Model launches Auto asking as before and with nothing outside the project reachable", async () => {
+  const permission = { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" };
+  const { harness } = await spawnAdapter({ permissionProfileId: "auto_review", launchPolicy: { permission } });
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
+  assert.deepEqual(config.permission, permission);
+  for (const launchPolicy of [{ permission: { "*": "allow", edit: "ask", bash: "ask" } }, { permission: { "*": "allow" } }]) {
+    await assert.rejects(spawnAdapter({ permissionProfileId: "auto_review", launchPolicy }), /permission-profile authority/);
+  }
+});
+
 test("Open Model freezes lifecycle authority across spawn, attach, and resume", async () => {
   const { adapter, handle, harness, runtimeRoot } = await spawnAdapter({ lifecycleAuthorityMode: "typed" });
   const typedHandle = handle as ProviderHandle & { lifecycleAuthorityMode: string };

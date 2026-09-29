@@ -1,4 +1,5 @@
 import { HostToolRuleRevokedError, hostToolScopeSchema, resolveHostToolScope } from "./host-tool-rules.js";
+import { AUTOMATIC_REVIEW_ACTOR_ID, type AutomaticPermissionReviewer } from "./automatic-permission-review.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -74,6 +75,11 @@ type Lane = {
   connectionId: string | null; requests: readonly ProviderPermissionRequest[];
   approvalExecutions: ApprovalExecutionReconciler | null;
   rulesRunning?: boolean; rulesDirty?: boolean;
+  reviewRunning?: boolean; reviewDirty?: boolean;
+  /** Requests already reviewed once. A request is never reviewed twice. */
+  reviewed: WeakSet<object>;
+  /** Requests under review now. They are not shown until the review ends. */
+  reviewing: Set<object>;
   activityEpoch: number; activeDecisions: number;
   idleReservation?: symbol;
 };
@@ -95,7 +101,12 @@ type Options = {
   onPermissionChanged?(entryId: string): void;
   nowMs?: () => number;
   hostActorId?(): string | null;
+  /** Decides requests for agents whose owner chose automatic review. */
+  automaticReview?: Pick<AutomaticPermissionReviewer, "applies" | "review">;
+  /** How long one review may hide a request from its owner. */
+  automaticReviewTimeoutMs?: number;
 };
+const AUTOMATIC_REVIEW_TIMEOUT_MS = 10_000;
 const MAX_REQUESTS = 32;
 const MAX_PRESENTATION_BYTES = 24 * 1024;
 const CODEX_FILE_CHANGE_UNAVAILABLE = "Codex has requested file changes, but the actual edits are not available to inspect here. Decisions are disabled until those exact edits can be shown.";
@@ -176,7 +187,7 @@ export class HostApprovalBroker {
       || !["codex_app_server", "opencode_server", "claude_cli"].includes(handle.providerConnection.kind)) return () => {};
     const lane: Lane = { agentId, generation, handle, connection: { ...handle.providerConnection },
       controller: new AbortController(), revision: 0, state: "degraded", connectionId: null, requests: [],
-      approvalExecutions: null, activityEpoch: 0, activeDecisions: 0 };
+      approvalExecutions: null, activityEpoch: 0, activeDecisions: 0, reviewed: new WeakSet(), reviewing: new Set() };
     this.lanes.set(agentId, lane);
     if (["codex_app_server", "claude_cli"].includes(handle.providerConnection.kind)) {
       lane.approvalExecutions = new ApprovalExecutionReconciler({ provider, handle, store: this.options.store,
@@ -207,6 +218,7 @@ export class HostApprovalBroker {
       }
       this.options.onPermissionChanged?.(lane.agentId);
       this.queueToolRules(lane);
+      this.queueAutomaticReview(lane);
     };
     void provider.observePermissions(handle, receive, lane.controller.signal).catch(() => receive({ type: "degraded" }));
     return () => {
@@ -253,7 +265,7 @@ export class HostApprovalBroker {
           // Only a request observed while reserved needs rule matching. An
           // empty run emits a permission notification and would retry an
           // unproven native idle boundary indefinitely.
-          if (lane.requests.length > 0) this.queueToolRules(lane);
+          if (lane.requests.length > 0) { this.queueToolRules(lane); this.queueAutomaticReview(lane); }
         }
       },
     };
@@ -263,6 +275,7 @@ export class HostApprovalBroker {
   async list(roomId: string): Promise<HostApprovalCandidate[]> {
     if (!id.safeParse(roomId).success) throw new Error("An exact approval room is required.");
     const result: HostApprovalCandidate[] = [];
+    const underReview = new Set<string>();
     const durable = await this.options.store.listExecutionApprovals(roomId);
     const recoverable = new Set(durable.filter(record =>
       ["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state))
@@ -283,6 +296,11 @@ export class HostApprovalBroker {
       }
       for (const native of lane.requests) {
         if (result.length >= 64) break;
+        // A request under automatic review is shown only if the review leaves it undecided.
+        if (lane.reviewing.has(native.native)) {
+          if (lane.connectionId) underReview.add(approvalRequestId(lane.agentId, lane.connectionId, native.native.id));
+          continue;
+        }
         try {
           const candidate = (await this.prepare(lane, native)).candidate;
           if (candidate.status !== "request_closed") result.push(candidate);
@@ -304,7 +322,7 @@ export class HostApprovalBroker {
     // an absent pending request never proves that our decision was applied.
     const shown = new Set(result.flatMap(item => item.reference ? [item.reference.requestId] : []));
     for (const record of durable) {
-      if (shown.has(record.request.requestId) || record.request.closedAtMs != null
+      if (shown.has(record.request.requestId) || underReview.has(record.request.requestId) || record.request.closedAtMs != null
         || !["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state)) continue;
       const entry = await this.options.store.getEntry(record.request.agentId);
       if (!entry || entry.room_id !== roomId || !["codex", "open-model", "claude-code"].includes(entry.provider)) continue;
@@ -333,6 +351,71 @@ export class HostApprovalBroker {
     const owner = this.options.hostActorId?.();
     if (!owner) throw new Error("Host permissions are unavailable.");
     await this.options.store.revokeHostToolRule(owner, value.agentId, value.ruleId, value.revision, this.now(), this.options.fenceCommit);
+  }
+
+  /** A review that takes too long, or outlives its agent, leaves the request for a person. */
+  private async reviewWithin(lane: Lane, review: (signal: AbortSignal) => Promise<"allow" | "ask">): Promise<"allow" | "ask"> {
+    const limit = AbortSignal.any([lane.controller.signal,
+      AbortSignal.timeout(this.options.automaticReviewTimeoutMs ?? AUTOMATIC_REVIEW_TIMEOUT_MS)]);
+    if (limit.aborted) return "ask";
+    let stop!: () => void;
+    const stopped = new Promise<"ask">(resolve => { stop = () => resolve("ask"); limit.addEventListener("abort", stop, { once: true }); });
+    try { return await Promise.race([review(limit), stopped]); }
+    finally { limit.removeEventListener("abort", stop); }
+  }
+
+  /**
+   * Review each new request once for an agent whose owner chose automatic
+   * review. Only "allow" records a decision; anything else leaves the request
+   * exactly as it was, for a person.
+   */
+  private queueAutomaticReview(lane: Lane): void {
+    const reviewer = this.options.automaticReview;
+    if (!reviewer) return;
+    lane.reviewDirty = true;
+    if (lane.reviewRunning) return;
+    lane.reviewRunning = true;
+    void (async () => {
+      while (lane.reviewDirty && this.current(lane)) {
+        lane.reviewDirty = false;
+        if (lane.state !== "pending" || lane.idleReservation) continue;
+        const entry = await this.options.store.getEntry(lane.agentId);
+        if (!entry || !reviewer.applies(entry)) continue;
+        for (const native of [...lane.requests]) {
+          if (!this.current(lane)) break;
+          if (native.provider !== "open-model" || lane.reviewed.has(native.native)) continue;
+          lane.reviewing.add(native.native);
+          try {
+            // A request that cannot be prepared yet is tried again when it is next listed.
+            const prepared = await this.prepare(lane, native);
+            const expected = prepared.candidate.reference;
+            if (!expected || prepared.candidate.status !== "pending" || prepared.approval.decision
+              || prepared.approval.request.state !== "requested") continue;
+            lane.reviewed.add(native.native);
+            if (await this.reviewWithin(lane, signal => reviewer.review({ entry, request: native.native, signal })) !== "allow") continue;
+            prepared.assertCurrent();
+            // The decision names the exact request that was reviewed. A
+            // request that changed since has another digest and is refused.
+            const decisionId = `review-decision-${digest(expected)}`;
+            const projectionSha256 = digest(prepared.candidate.presentation);
+            await this.applyRecordedDecision({ ...expected, decisionId, actorId: AUTOMATIC_REVIEW_ACTOR_ID, decision: "allow_once", projectionSha256 }, async current => {
+              if (!isDeepStrictEqual(current.expected, expected) || digest(current.presentation) !== projectionSha256) {
+                throw new Error("The reviewed request changed.");
+              }
+              return this.options.store.selectHostApproval({ expected, authority: current.approvalAuthority,
+                decisionId, actorId: AUTOMATIC_REVIEW_ACTOR_ID, decision: "allow_once", projectionSha256, atMs: this.now() },
+              commit => this.options.fenceCommit(async () => { current.assertCurrent(); await commit(); }));
+            });
+          } catch { /* A request that could not be reviewed or applied stays for a person. */ }
+          finally { lane.reviewing.delete(native.native); }
+        }
+        this.options.onPermissionChanged?.(lane.agentId);
+      }
+    })().catch(() => { this.options.onPermissionChanged?.(lane.agentId); }).finally(() => {
+      lane.reviewing.clear();
+      lane.reviewRunning = false;
+      if (lane.reviewDirty && this.current(lane)) this.queueAutomaticReview(lane);
+    });
   }
 
   /** Native permission events drive rule matching even when the composer is closed. */

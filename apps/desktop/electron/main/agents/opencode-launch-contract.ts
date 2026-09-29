@@ -13,12 +13,18 @@ export const OPENCODE_SERVER_USERNAME = "opencode";
 export const SUPERVISED_OPEN_MODEL_OUTPUT_TOKEN_LIMIT = 8_192;
 
 export type OpenCodeConfig = Record<string, unknown>;
-export type SupervisedOpenCodePermissionProfileId = "full_access" | "ask_before_write";
+export type SupervisedOpenCodePermissionProfileId = "full_access" | "ask_before_write" | "auto_review";
+
+export function supervisedOpenCodePermissionProfileId(value: unknown): SupervisedOpenCodePermissionProfileId {
+  return value === "ask_before_write" || value === "auto_review" ? value : "full_access";
+}
 
 export function supervisedOpenCodePermissionPolicy(
   profileId: SupervisedOpenCodePermissionProfileId,
-): Record<string, "allow" | "ask"> {
-  return profileId === "ask_before_write"
+): Record<string, "allow" | "ask" | "deny"> {
+  return profileId === "auto_review"
+    ? { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" }
+    : profileId === "ask_before_write"
     ? { "*": "allow", edit: "ask", bash: "ask" }
     : { "*": "allow" };
 }
