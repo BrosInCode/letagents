@@ -1,0 +1,159 @@
+/* One text field. A file is only a way to fill it. */
+.room-settings-guidelines {
+  align-items: start;
+}
+
+.room-settings-guidelines-field {
+  grid-column: 1 / -1;
+  position: relative;
+  min-width: 0;
+}
+
+.room-settings-textarea {
+  display: block;
+  width: 100%;
+  min-height: 168px;
+  max-height: 360px;
+  resize: vertical;
+  padding: 12px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  color: var(--text);
+  font: 0.8125rem/1.6 var(--font-mono);
+}
+
+.room-settings-textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+.room-settings-textarea:read-only {
+  color: var(--text-secondary);
+}
+
+.room-settings-guidelines-drop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  border: 1px dashed var(--blue);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 88%, var(--blue));
+  color: var(--text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+
+.room-settings-guidelines-field[data-drop="true"] .room-settings-guidelines-drop {
+  opacity: 1;
+}
+
+.room-settings-guidelines-footer {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+}
+
+.room-settings-budget {
+  display: grid;
+  flex: 1;
+  gap: 7px;
+  min-width: 0;
+  max-width: 340px;
+}
+
+.room-settings-budget-track {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--accent-hover);
+}
+
+.room-settings-budget-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-secondary);
+  transform-origin: left;
+  transition:
+    transform 200ms var(--room-settings-ease),
+    background 200ms ease;
+}
+
+.room-settings-budget-text {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+.room-settings-budget[data-level="near"] .room-settings-budget-fill {
+  background: var(--amber-text);
+}
+
+.room-settings-budget[data-level="near"] .room-settings-budget-text {
+  color: var(--amber-text);
+}
+
+.room-settings-budget[data-level="over"] .room-settings-budget-fill {
+  background: var(--red-text);
+}
+
+.room-settings-budget[data-level="over"] .room-settings-budget-text {
+  color: var(--red-text);
+}
+
+.room-settings-guidelines-actions {
+  display: flex;
+  gap: 8px;
+  transition:
+    opacity 160ms ease,
+    transform 160ms var(--room-settings-ease);
+}
+
+.room-settings-guidelines-actions[data-visible="false"] {
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease,
+    visibility 0s linear 120ms;
+}
+
+.room-settings-guidelines-note {
+  grid-column: 1 / -1;
+  margin: -4px 0 0;
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.room-settings-guidelines-note:empty {
+  display: none;
+}
+
+.room-settings-guidelines-note[data-tone="error"] {
+  color: var(--red-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-settings-budget-fill {
+    transition: none;
+  }
+
+  .room-settings-guidelines-actions,
+  .room-settings-guidelines-actions[data-visible="false"] {
+    transform: none;
+  }
+}

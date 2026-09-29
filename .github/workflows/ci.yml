@@ -252,6 +252,9 @@ jobs:
       - name: Test room memory and human request persistence
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-knowledge-routes.test.ts src/api/__tests__/room-knowledge-db.test.ts
 
+      - name: Test room settings, event filters and agent guidelines
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-settings-routes.test.ts src/api/__tests__/room-settings-delivery.test.ts src/api/__tests__/room-settings-db.test.ts
+
       - name: Run message attachment tests
         run: >-
           node

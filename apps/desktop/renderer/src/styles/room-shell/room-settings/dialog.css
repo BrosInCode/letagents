@@ -1,0 +1,203 @@
+/* The shell and entrance match the Add agent dialog. */
+.room-settings-backdrop {
+  --room-settings-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--overlay-scrim);
+}
+
+.room-settings-modal {
+  width: min(900px, 100%);
+  height: min(640px, calc(100dvh - 48px));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  border-radius: 16px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: var(--shadow-xl);
+  transform-origin: center;
+}
+
+.room-settings-modal:focus {
+  outline: none;
+}
+
+.room-settings {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+}
+
+.room-settings-header {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 20px 18px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.room-settings-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.room-settings-header p {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.room-settings-header strong {
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* The rail is built like the Settings page sidebar. */
+.room-settings-rail {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 12px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+
+.room-settings-nav {
+  position: relative;
+  display: grid;
+  gap: 2px;
+}
+
+.room-settings-nav-indicator {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 40px;
+  border-radius: 8px;
+  background: var(--accent-active);
+  pointer-events: none;
+}
+
+.room-settings-nav-indicator[data-ready="true"] {
+  transition: transform 180ms var(--room-settings-ease);
+}
+
+.room-settings-nav-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-align: left;
+  transition: color 140ms ease;
+}
+
+.room-settings-nav-item svg {
+  width: 17px;
+  height: 17px;
+}
+
+.room-settings-nav-item[aria-current="true"] {
+  color: var(--text);
+}
+
+.room-settings-nav-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.room-settings-content {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 28px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 22px 24px 32px;
+}
+
+.room-settings-dialog-enter-active {
+  transition: opacity 200ms var(--room-settings-ease);
+}
+
+.room-settings-dialog-leave-active {
+  transition: opacity 160ms var(--room-settings-ease);
+}
+
+.room-settings-dialog-enter-active .room-settings-modal {
+  transition:
+    opacity 200ms var(--room-settings-ease),
+    transform 200ms var(--room-settings-ease);
+}
+
+.room-settings-dialog-leave-active .room-settings-modal {
+  transition:
+    opacity 160ms var(--room-settings-ease),
+    transform 160ms var(--room-settings-ease);
+}
+
+.room-settings-dialog-enter-from,
+.room-settings-dialog-leave-to,
+.room-settings-dialog-enter-from .room-settings-modal,
+.room-settings-dialog-leave-to .room-settings-modal {
+  opacity: 0;
+}
+
+.room-settings-dialog-enter-from .room-settings-modal,
+.room-settings-dialog-leave-to .room-settings-modal {
+  transform: translateY(8px) scale(0.985);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .room-settings-nav-item:hover {
+    color: var(--text);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-settings-dialog-enter-active,
+  .room-settings-dialog-leave-active,
+  .room-settings-dialog-enter-active .room-settings-modal,
+  .room-settings-dialog-leave-active .room-settings-modal {
+    transition: opacity 120ms ease;
+  }
+
+  .room-settings-dialog-enter-from .room-settings-modal,
+  .room-settings-dialog-leave-to .room-settings-modal {
+    transform: none;
+  }
+
+  .room-settings-nav-indicator[data-ready="true"] {
+    transition: none;
+  }
+}

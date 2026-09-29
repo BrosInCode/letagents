@@ -1,5 +1,8 @@
+import { githubRoomChatEventKind } from "../../../../shared/room-settings.mjs";
 import type { Project, Task } from "../../db.js";
+import type { loadGitHubRoomChatEventKinds } from "../../db/room-settings.js";
 import type { FocusGitHubRoutingContext } from "../../focus-rooms/settings.js";
+import { createGitHubChatEventGate } from "./chat-event-gate.js";
 import {
   formatRepoRoomEventMessage,
   type RepoRoomEvent,
@@ -24,6 +27,7 @@ export async function emitRepoRoomEventProjectionMessage(input: {
   isolatedFocusRoom: Project | null;
   githubRoutingContext: FocusGitHubRoutingContext;
   messageIdBase?: string | null;
+  loadChatEventKinds?: typeof loadGitHubRoomChatEventKinds;
 }): Promise<void> {
   const {
     project,
@@ -45,53 +49,50 @@ export async function emitRepoRoomEventProjectionMessage(input: {
     return;
   }
 
+  const gate = createGitHubChatEventGate({
+    eventKind: githubRoomChatEventKind(roomEvent),
+    repoRoomId: project.id,
+    load: input.loadChatEventKinds,
+  });
+  const postToEventRoom = async (clientMessageIdSuffix: string): Promise<void> => {
+    if (!await gate.accepts(eventProject)) return;
+    await emitProjectMessage(eventProject.id, "github", message, {
+      source: "github",
+      client_message_id: messageIdBase ? `${messageIdBase}:${clientMessageIdSuffix}` : null,
+    });
+  };
+
   const linkedFocusRoom = taskProjection.authoritative && linkedTask
     ? await getFocusRoomForGitHubEventTask(project.id, linkedTask)
     : null;
   const linkedTaskProject = await getProjectForResolvedTask(project, linkedTask);
-  if (taskProjection.authoritative && linkedTask) {
+  const anchorsToTask = Boolean(linkedTask) && (taskProjection.authoritative || Boolean(isolatedFocusRoom));
+  if (linkedTask && anchorsToTask) {
+    const idPrefix = taskProjection.authoritative ? "task-event" : "isolated-task-event";
+    // The task's messages land in its focus room when it has one, so the
+    // emitter asks the gate about the room it is about to post to.
     await emitTaskAnchoredMessage(linkedTaskProject.id, "github", message, linkedTask, {
       source: "github",
       parent_activity: "GitHub activity",
       parent_event_kind: "major_activity",
       event_kind: "github",
       github_routing_context: githubRoutingContext,
-      client_message_id: messageIdBase ? `${messageIdBase}:task-event` : null,
-      parent_client_message_id: messageIdBase ? `${messageIdBase}:task-event-anchor` : null,
+      client_message_id: messageIdBase ? `${messageIdBase}:${idPrefix}` : null,
+      parent_client_message_id: messageIdBase ? `${messageIdBase}:${idPrefix}-anchor` : null,
+      shouldDeliverToRoom: gate.accepts,
     });
     if (eventProject.id !== linkedTaskProject.id) {
-      await emitProjectMessage(eventProject.id, "github", message, {
-        source: "github",
-        client_message_id: messageIdBase ? `${messageIdBase}:event-room` : null,
-      });
-    }
-  } else if (linkedTask && isolatedFocusRoom) {
-    await emitTaskAnchoredMessage(linkedTaskProject.id, "github", message, linkedTask, {
-      source: "github",
-      parent_activity: "GitHub activity",
-      parent_event_kind: "major_activity",
-      event_kind: "github",
-      github_routing_context: githubRoutingContext,
-      client_message_id: messageIdBase ? `${messageIdBase}:isolated-task-event` : null,
-      parent_client_message_id: messageIdBase ? `${messageIdBase}:isolated-task-event-anchor` : null,
-    });
-    if (eventProject.id !== linkedTaskProject.id) {
-      await emitProjectMessage(eventProject.id, "github", message, {
-        source: "github",
-        client_message_id: messageIdBase ? `${messageIdBase}:event-room` : null,
-      });
+      await postToEventRoom("event-room");
     }
   } else {
-    await emitProjectMessage(eventProject.id, "github", message, {
-      source: "github",
-      client_message_id: messageIdBase ? `${messageIdBase}:event-room` : null,
-    });
+    await postToEventRoom("event-room");
   }
 
   if (!isolatedFocusRoom && eventProject.id === project.id) {
     await emitGitHubEventToAllParentRepoFocusRooms(project.id, "github", message, {
       excludeRoomIds: linkedFocusRoom ? new Set([linkedFocusRoom.id]) : undefined,
       client_message_id_base: messageIdBase,
+      filterRooms: gate.filter,
     });
   }
 }

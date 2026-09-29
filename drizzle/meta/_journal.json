@@ -715,6 +715,13 @@
       "when": 1790702049423,
       "tag": "0101_room_agent_session_process_connection",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1790725431220,
+      "tag": "0102_room_settings",
+      "breakpoints": true
     }
   ]
 }
