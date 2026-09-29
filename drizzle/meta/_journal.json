@@ -708,6 +708,13 @@
       "when": 1790030400000,
       "tag": "0100_verified_worker_claim_intents",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1790702049423,
+      "tag": "0101_room_agent_session_process_connection",
+      "breakpoints": true
     }
   ]
 }

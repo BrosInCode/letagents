@@ -124,6 +124,25 @@ export function resolveApiPath(urlOrPath: string | undefined): string {
   }
 }
 
+const BUSY_RETRY_DELAYS_MS = [1_000, 2_000] as const;
+
+/**
+ * For a request the room may turn away only because it is busy for a moment,
+ * and that changed nothing when it was turned away. The room answers 503 when
+ * another registration is still committing; asking again shortly succeeds.
+ */
+export async function apiCallWhenFree<T = unknown>(path: string, options?: RequestInit): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await apiCall<T>(path, options);
+    } catch (error) {
+      const delay = BUSY_RETRY_DELAYS_MS[attempt];
+      if (!(error instanceof ApiError) || error.status !== 503 || delay === undefined) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 export async function apiCall<T = unknown>(path: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers);
   if (!headers.has("Content-Type")) {

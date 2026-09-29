@@ -11,11 +11,12 @@ import { buildAgentActorLabel } from "../../../shared/agent-identity.js";
 import { normalizeRoutingHandle, normalizeRoutingSender } from "../../../../shared/routing-aliases.mjs";
 import { encodeRoomIdPath } from "../../room-id.js";
 import { getGitCurrentBranch } from "../../git-remote.js";
-import { apiCall, getApiUrl, getLetagentsToken } from "./api.js";
+import { apiCall, apiCallWhenFree, getApiUrl, getLetagentsToken } from "./api.js";
 import { resolveOwnerContext } from "./identity/directory.js";
 import { detectAgentIdeLabel, detectAgentRuntimeLabel } from "./identity/config.js";
-import { getSessionLivenessRegistration } from "./identity/liveness.js";
+import { getProcessHostId, getSessionLivenessRegistration } from "./identity/liveness.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { holdProcessConnection } from "./process-connection.js";
 
 type WorkerConnection = { worker: StoredMcpWorker; session: StoredAgentSessionState };
 const connecting = new Map<string, Promise<WorkerConnection>>();
@@ -94,7 +95,10 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
   const current = currentId ? snapshot().agent_sessions?.[currentId] : undefined;
   const pinned = currentId ? pinnedWorkerConnection(getLocalStatePath(), currentId) : null;
   if (pinned && current && !current.ended_at && pinned.session_token === current.session_token
-    && !worker.rooms[roomId]?.pending) return { worker, session: pinned };
+    && !worker.rooms[roomId]?.pending) {
+    if (!local) holdProcessConnection(pinned);
+    return { worker, session: pinned };
+  }
 
   const owner = await resolveOwnerContext();
   if (!local && !owner.login) throw new Error("Sign in before registering a worker in a hosted room.");
@@ -125,7 +129,7 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
         created_at: prior?.created_at ?? now, updated_at: now, last_seen_at: now, ended_at: null,
       };
     } else {
-      const created = await apiCall<StoredAgentSessionState & { assigned_base_display_name?: string; worker_bearer?: unknown }>(
+      const created = await apiCallWhenFree<StoredAgentSessionState & { assigned_base_display_name?: string; worker_bearer?: unknown }>(
         `/rooms/${encodeRoomIdPath(roomId)}/agent-sessions`, {
           method: "POST", body: JSON.stringify({
             actor_key: agent.canonical_key, agent_instance_id: worker.worker_id,
@@ -133,6 +137,7 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
             session_kind: "worker", runtime: input.runtime || detectAgentRuntimeLabel(), ide_label: ide,
             repo_branch: getGitCurrentBranch(input.cwd),
             registration_liveness: getSessionLivenessRegistration(input.runtime || detectAgentRuntimeLabel()),
+            process_host_id: getProcessHostId(),
             connection_token: operation.connection_token,
             replace_agent_session_id: operation.predecessor_id ?? null,
             replace_agent_session_token: operation.predecessor_token ?? null,
@@ -189,6 +194,7 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
   });
   const session = await finish(operation);
   pinWorkerConnection(getLocalStatePath(), session);
+  if (!local) holdProcessConnection(session);
   return { worker: getWorker(worker.worker_id, scope), session };
 }
 
