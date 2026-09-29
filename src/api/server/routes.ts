@@ -1,4 +1,5 @@
 import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
+import { registerRoomSettingsRoutes } from "../routes/rooms/settings.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import type { Express } from "express";
 
@@ -520,6 +521,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
   registerRoomPullRequestDiffRoutes(app, roomPullRequestDiffRouteDeps);
   registerConversationRoutingRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
+  registerRoomSettingsRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
   registerRentalProviderRoutes(app, {
     createListing,

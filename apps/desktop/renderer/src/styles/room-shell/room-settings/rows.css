@@ -1,0 +1,273 @@
+.room-settings-section {
+  display: grid;
+  gap: 10px;
+}
+
+.room-settings-section h3 {
+  margin: 0;
+  padding: 0 2px;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+/* Rows are built like the Settings page's control list. */
+.room-settings-list {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+}
+
+.room-settings-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 20px;
+  min-height: 72px;
+  margin: 0;
+  padding: 16px 18px;
+}
+
+/* A row may sit in a height frame, so the divider belongs to the list. */
+.room-settings-list > :not(:first-child) {
+  border-top: 1px solid var(--border);
+}
+
+.room-settings-smooth-height {
+  overflow: clip;
+}
+
+/* What is below moves with it, so the height eases in as well as out. */
+.room-settings-smooth-height[data-animated="true"] {
+  transition: height 260ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Text that changes is swapped through a short blur, so it reads as one line changing. */
+.room-settings-text-enter-active {
+  transition:
+    opacity 160ms ease,
+    filter 160ms ease;
+}
+
+.room-settings-text-leave-active {
+  transition:
+    opacity 100ms ease,
+    filter 100ms ease;
+}
+
+.room-settings-text-enter-from,
+.room-settings-text-leave-to {
+  opacity: 0;
+  filter: blur(2px);
+}
+
+.room-settings-reveal-enter-active {
+  transition: opacity 200ms ease 60ms;
+}
+
+.room-settings-reveal-leave-active {
+  transition: opacity 100ms ease;
+}
+
+.room-settings-reveal-enter-from,
+.room-settings-reveal-leave-to {
+  opacity: 0;
+}
+
+.room-settings-row-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.room-settings-row-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.room-settings-row-description {
+  max-width: 56ch;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.room-settings-row-description[data-tone="error"] {
+  color: var(--red-text);
+}
+
+.room-settings-row-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.room-settings-mono {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font: 0.75rem/1.5 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-settings-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.room-settings-pill[data-tone="amber"] {
+  border-color: transparent;
+  background: var(--amber-dim);
+  color: var(--amber-text);
+}
+
+.room-settings-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-tertiary);
+}
+
+.room-settings-dot[data-state="connected"] {
+  background: var(--green);
+}
+
+.room-settings-dot[data-state="ready"],
+.room-settings-dot[data-state="loading"] {
+  background: var(--amber-text);
+}
+
+.room-settings-dot[data-state="error"] {
+  background: var(--red-text);
+}
+
+.room-settings-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--red-dim);
+  color: var(--red-text);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.room-settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--accent-dim);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    transform 140ms var(--room-settings-ease),
+    background 140ms ease,
+    border-color 140ms ease,
+    opacity 140ms ease;
+}
+
+.room-settings-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.room-settings-button:active:not(:disabled, [aria-disabled="true"]) {
+  transform: scale(0.97);
+}
+
+.room-settings-button:disabled,
+.room-settings-button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* A save in flight keeps its button as it is; only its label changes. */
+.room-settings-guidelines-save[aria-disabled="true"]:not(:disabled),
+.room-settings-save[aria-disabled="true"][data-variant="primary"] {
+  cursor: default;
+  opacity: 1;
+}
+
+.room-settings-button[data-variant="primary"] {
+  border-color: transparent;
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.room-settings-close {
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+  color: var(--text-secondary);
+}
+
+.room-settings-close svg {
+  width: 16px;
+  height: 16px;
+}
+
+.room-settings-modal :is(button, input, textarea, [tabindex="0"]):focus-visible,
+.room-settings-check input:focus-visible + .room-settings-check-box {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .room-settings-button:hover:not(:disabled, [aria-disabled="true"]) {
+    border-color: var(--border-accent);
+    background: var(--accent-hover);
+  }
+
+  .room-settings-button[data-variant="primary"]:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--text);
+    opacity: 0.9;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-settings-button:active:not(:disabled) {
+    transform: none;
+  }
+
+  .room-settings-smooth-height[data-animated="true"] {
+    transition: none;
+  }
+
+  .room-settings-text-enter-from,
+  .room-settings-text-leave-to {
+    filter: none;
+  }
+}
