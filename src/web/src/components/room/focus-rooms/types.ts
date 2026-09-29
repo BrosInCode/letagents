@@ -38,8 +38,3 @@ export type FocusRoomsViewEmit = {
   (event: 'shareResults', summary: string, details: FocusRoomConclusionDetails | null): void
   (event: 'updateFocusSettings', focusKey: string, settings: FocusRoomSettings): void
 }
-
-export interface FocusSettingsTarget {
-  focusKey: string | null
-  settings: FocusRoomSettings
-}
