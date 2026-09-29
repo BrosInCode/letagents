@@ -318,7 +318,7 @@ export class SupervisorDaemon {
       store: this.store,
       durability: this.durability,
       bindings: this.workerBindings,
-      custody: this.workerRuntimeCustody,
+      custody: this.workerRuntimeCustody, audit: this.audit,
       inbox: this.supervisedInbox,
       supervisorGrantHttp: this.supervisorGrantHttp,
       deliveryHttp: this.supervisedDeliveryHttp,
