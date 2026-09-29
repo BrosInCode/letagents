@@ -689,6 +689,7 @@ test("worker message writes persist server-authenticated publisher identity", as
     publisher_agent_session_id?: string | null;
     account_id?: string | null;
   } | null = null;
+  let rememberedParticipant: { sender: string; agentKey?: string | null } | null = null;
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
     get() {},
@@ -729,7 +730,9 @@ test("worker message writes persist server-authenticated publisher identity", as
         timestamp: new Date().toISOString(),
       };
     },
-    rememberRoomParticipantFromMessage: async () => undefined,
+    rememberRoomParticipantFromMessage: async (input: { sender: string; agentKey?: string | null }) => {
+      rememberedParticipant = { sender: input.sender, agentKey: input.agentKey };
+    },
   };
 
   registerRoomMessageRoutes(app as never, deps as never);
@@ -775,6 +778,14 @@ test("worker message writes persist server-authenticated publisher identity", as
     (res.body as { sender?: string }).sender,
     "MapleRidge | EmmyMay's agent | Supervisor Worker",
   );
+  // The participant is recorded after the acknowledgement. It must carry the
+  // sender's key: a participant without one reads as somebody else's, and
+  // the agent's own name is then held against it when it registers again.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(rememberedParticipant, {
+    sender: "MapleRidge | EmmyMay's agent | Supervisor Worker",
+    agentKey: "owner/maple-ridge",
+  });
 });
 
 test("desktop app-session human messages can post as browser activity", async () => {
