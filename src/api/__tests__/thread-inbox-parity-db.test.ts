@@ -1777,6 +1777,17 @@ test("PG send-time routing unions rotation aliases before choosing one durable r
         'Other', 'Cursor', NOW(), NOW(), NOW())`,
     [room.id, oldAlias, newAlias, owner, conflictingOwner],
   );
+  // Mid-rotation: the old session is the one still holding a connection, so
+  // it is the one there to answer until the rotation completes.
+  await pool!.query(
+    `INSERT INTO room_agent_delivery_sessions (
+       room_id, delivery_key, actor_label, agent_key, agent_instance_id, display_name,
+       agent_session_id, session_kind, runtime, transport, active_connection_count,
+       last_connected_at, created_at, updated_at
+     ) VALUES ($1, 'agent_session:rotation_old', $2, 'test/rotated', 'rotation-old', 'RotatedOld',
+       'rotation_old', 'worker', 'test', 'long_poll', 1, NOW(), NOW(), NOW())`,
+    [room.id, oldAlias],
+  );
 
   const assertSingleRotatedReceipt = async (messageId: string, reason: string) => {
     const receipts = await pool!.query<{ agent_key: string; agent_session_id: string; activation_reason: string }>(

@@ -1571,6 +1571,129 @@ test(
   },
 );
 
+// ---------------------------------------------------------------------------
+// One agent, several live sessions: which session is asked?
+// ---------------------------------------------------------------------------
+async function restartedAgentHarness(leftLastSeen = "1 hour") {
+  if (!addMessage || !createRoomAgentSession || !pool || !markRoomAgentDeliveryConnected) {
+    throw new Error("DB-backed worker session tests require TEST_DB_URL");
+  }
+  const { room, worker } = await seedHarness();
+  const handlers = registerRoutesForRoom(room);
+  // The process restarted. Nothing ended the session it left behind, so the
+  // agent now has two live sessions under one key, the older one dead.
+  await pool.query(
+    `UPDATE room_agent_sessions SET last_seen_at = NOW() - INTERVAL '${leftLastSeen}', created_at = NOW() - INTERVAL '2 hours' WHERE session_id = $1`,
+    [worker.session_id],
+  );
+  const restarted = await createRoomAgentSession({
+    room_id: room.id, runtime: "codex", session_kind: "worker", agent_key: worker.agent_key,
+    agent_instance_id: "worker-session-test-instance-restarted", owner_account_id: ownerAccount.id,
+    owner_label: agentIdentity.owner_label, ide_label: "Codex", display_name: "OwlSolarAgain",
+    actor_label: buildAgentActorLabel({ display_name: "OwlSolarAgain", owner_label: agentIdentity.owner_label, ide_label: "Codex" }),
+  });
+  const connect = (session: CreatedSession) => markRoomAgentDeliveryConnected!({
+    room_id: room.id, actor_label: session.actor_label, agent_key: session.agent_key,
+    agent_instance_id: session.agent_instance_id, agent_session_id: session.session_id,
+    session_kind: "worker", runtime: "codex", display_name: session.display_name,
+    owner_label: "EmmyMay", ide_label: "Codex", transport: "long_poll",
+    credential_fence: { kind: "session_token", token_hash: hashToken(session.session_token) },
+  });
+  const say = (session: CreatedSession, text: string) => addMessage!(room.id, session.actor_label, text, {
+    source: "agent", publisher_agent_key: session.agent_key, publisher_agent_session_id: session.session_id,
+    account_id: ownerAccount.id,
+  });
+  const receipts = async () => (await pool!.query(
+    "SELECT agent_session_id, activation_reason FROM message_agent_receipts WHERE message_room_id = $1 ORDER BY message_number",
+    [room.id],
+  )).rows as Array<{ agent_session_id: string; activation_reason: string }>;
+  const decisions = async (session: CreatedSession) => {
+    const response = await invoke(
+      handlers.get.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/"),
+      requestWithDeliveryHeaders(session, { params: { 0: room.id }, query: { timeout: "1000" } }),
+    );
+    assert.equal(response.statusCode, 200, JSON.stringify(response.body));
+    return ((response.body as { messages?: Array<{ text?: string; activation?: { for_current_agent?: { decision?: string; reason?: string } } }> }).messages ?? [])
+      .map((message) => `${message.activation?.for_current_agent?.decision}:${message.activation?.for_current_agent?.reason}`);
+  };
+  return { room, left: worker, restarted: restarted as CreatedSession, connect, say, receipts, decisions };
+}
+
+const answeringTest = {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+};
+
+test("a restarted agent receives the messages addressed to it, not the session it left behind", answeringTest, async () => {
+  const h = await restartedAgentHarness();
+  await addMessage!(h.room.id, "Human", "@OwlSolarAgain please investigate this");
+  await addMessage!(h.room.id, "Human", "@everyone please confirm receipt");
+  assert.deepEqual(await h.receipts(), [
+    { agent_session_id: h.restarted.session_id, activation_reason: "explicit_mention" },
+    { agent_session_id: h.restarted.session_id, activation_reason: "broadcast" },
+  ], "the agent is asked once, through the session that is there to answer");
+  assert.deepEqual(await h.decisions(h.restarted), ["activate:explicit_mention", "activate:broadcast"]);
+});
+
+test("a process that died a moment ago does not take the messages meant for its replacement", answeringTest, async () => {
+  const h = await restartedAgentHarness("20 seconds");
+  if (!dbModule) throw new Error("no db");
+  // The old process was connected until it died. Its closing connection
+  // marks the session seen and leaves it within its reconnect grace, while
+  // its replacement has registered and not polled yet.
+  await h.connect(h.left);
+  await dbModule.markRoomAgentDeliveryDisconnected({
+    room_id: h.room.id, actor_label: h.left.actor_label, agent_session_id: h.left.session_id,
+    credential_fence: { kind: "session_token", token_hash: hashToken(h.left.session_token) },
+  });
+  await addMessage!(h.room.id, "Human", "@everyone please confirm receipt");
+  assert.deepEqual(await h.receipts(), [{ agent_session_id: h.restarted.session_id, activation_reason: "broadcast" }]);
+});
+
+test("a reply to what the agent said before it restarted reaches the restarted agent", answeringTest, async () => {
+  // Five minutes: long before anything would call the old session stale.
+  const h = await restartedAgentHarness("5 minutes");
+  const said = await h.say(h.left, "I will look into it.");
+  await pool!.query("UPDATE room_agent_sessions SET last_seen_at = NOW() - INTERVAL '5 minutes' WHERE session_id = $1", [h.left.session_id]);
+  await addMessage!(h.room.id, "Human", "Thanks, any update?", { reply_to_message_id: said.id });
+  assert.deepEqual(await h.receipts(), [{ agent_session_id: h.restarted.session_id, activation_reason: "reply_target" }]);
+});
+
+test("two chats that share an identity: the connected one answers, and each keeps the replies to what it said", answeringTest, async () => {
+  const h = await restartedAgentHarness("20 seconds");
+  // Not a restart after all: the older chat is alive and holding a
+  // connection open, and the newer one was merely seen more recently.
+  await h.connect(h.left);
+  await addMessage!(h.room.id, "Human", "@everyone please confirm receipt");
+
+  // The newer chat says something, then goes quiet for a long time while it
+  // works. The reply is still its own: its sibling was running all along, so
+  // it is another chat and not a restart.
+  const said = await h.say(h.restarted, "I will look into it.");
+  await pool!.query("UPDATE room_agent_sessions SET last_seen_at = NOW() - INTERVAL '45 minutes' WHERE session_id = $1", [h.restarted.session_id]);
+  await addMessage!(h.room.id, "Human", "Thanks, any update?", { reply_to_message_id: said.id });
+
+  assert.deepEqual(await h.receipts(), [
+    { agent_session_id: h.left.session_id, activation_reason: "broadcast" },
+    { agent_session_id: h.restarted.session_id, activation_reason: "reply_target" },
+  ]);
+});
+
+test("a follow-up on a task stays with the session that holds its lease", answeringTest, async () => {
+  const h = await restartedAgentHarness();
+  if (!createTask || !createTaskLease || !updateTask) throw new Error("no db");
+  await h.connect(h.restarted);
+  const task = await createTask(h.room.id, "Investigate the failure", "Human");
+  await updateTask(h.room.id, task.id, { status: "accepted" });
+  await updateTask(h.room.id, task.id, { status: "assigned", assignee: h.left.actor_label });
+  await createTaskLease({ room_id: h.room.id, task_id: task.id, kind: "work", agent_key: h.left.agent_key,
+    agent_session_id: h.left.session_id, actor_label: h.left.actor_label, created_by: "answering_session_test" });
+  await addMessage!(h.room.id, "Human", "continue");
+  // Only the lease holder may act on the task, so a sibling told it owns the
+  // task could do nothing with it.
+  assert.deepEqual(await h.receipts(), [{ agent_session_id: h.left.session_id, activation_reason: "task_owner" }]);
+});
+
 test(
   "worker-authenticated message polls attach activation metadata for direct and broadcast delivery",
   {

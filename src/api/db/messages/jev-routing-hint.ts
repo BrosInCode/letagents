@@ -17,6 +17,8 @@ import { db } from "../client.js";
 import { message_agent_receipts, messages, room_agent_sessions, rooms } from "../schema.js";
 import type { MessageRecipientAgentTarget } from "../types.js";
 import { MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
+import { chooseAnsweringSession } from "../../rooms/answering-session.js";
+import { getSessionConnections } from "./session-connections.js";
 
 /** Rooms above this size fall back to deterministic routing rather than ship a huge state. */
 const MAX_JEV_ROUTING_SESSIONS = 200;
@@ -249,6 +251,8 @@ export async function applyDeferredJevReceipts(
       agent_key: room_agent_sessions.agent_key,
       actor_label: room_agent_sessions.actor_label,
       owner_account_id: room_agent_sessions.owner_account_id,
+      created_at: room_agent_sessions.created_at,
+      last_seen_at: room_agent_sessions.last_seen_at,
     })
     .from(room_agent_sessions)
     .where(and(
@@ -259,11 +263,23 @@ export async function applyDeferredJevReceipts(
     .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id))
     .limit(MAX_JEV_ROUTING_SESSIONS + 1);
   if (sessions.length > MAX_JEV_ROUTING_SESSIONS) return [];
-  const groups = new Map<string, { representative: (typeof sessions)[number]; owners: Set<string> }>();
+  const sessionsByKey = new Map<string, (typeof sessions)[number][]>();
   for (const session of sessions) {
-    const group = groups.get(session.agent_key) ?? { representative: session, owners: new Set<string>() };
-    group.owners.add(session.owner_account_id);
-    groups.set(session.agent_key, group);
+    sessionsByKey.set(session.agent_key, [...(sessionsByKey.get(session.agent_key) ?? []), session]);
+  }
+  // The same rule as at send time, so a deferred receipt goes where an
+  // immediate one would have.
+  const { connected } = await getSessionConnections(
+    tx,
+    plan.roomId,
+    [...sessionsByKey.values()].filter((group) => group.length > 1).flat().map((session) => session.session_id),
+  );
+  const groups = new Map<string, { representative: (typeof sessions)[number]; owners: Set<string> }>();
+  for (const [agentKey, group] of sessionsByKey) {
+    groups.set(agentKey, {
+      representative: chooseAnsweringSession(group, connected)!,
+      owners: new Set(group.map((session) => session.owner_account_id)),
+    });
   }
   const now = new Date().toISOString();
   const rows = [...wanted].flatMap((agentKey) => {

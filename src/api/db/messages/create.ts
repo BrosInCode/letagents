@@ -18,7 +18,6 @@ import {
   parseSupervisedReplySourceNumber,
 } from "../../../../shared/message-contracts.mjs";
 import {
-  isAgentDeliverySessionReachable,
 } from "../../../shared/agent-presence.js";
 import {
   createGlobalAgentAddressResolver,
@@ -29,8 +28,10 @@ import {
   type ActivationIdentity,
 } from "../../../shared/activation-routing.js";
 import { RequestValidationError } from "../../validation-error.js";
+import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answering-session.js";
+import { getSessionConnections } from "./session-connections.js";
 import { db } from "../client.js";
-import { rooms, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_delivery_sessions, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
+import { rooms, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
@@ -545,6 +546,7 @@ export async function addMessageWithCreateStatus(
             session_kind: room_agent_sessions.session_kind,
             owner_account_id: room_agent_sessions.owner_account_id,
             created_at: room_agent_sessions.created_at,
+            last_seen_at: room_agent_sessions.last_seen_at,
           })
           .from(room_agent_sessions)
           .where(
@@ -555,7 +557,7 @@ export async function addMessageWithCreateStatus(
               needsCompletePopulation ? undefined : candidateCondition,
             )
           )
-          // Deterministic representative when several sessions share an agent_key.
+          // A stable order for the bound below and for routing identities.
           .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id))
           .limit(MAX_ACTIVE_ROUTING_SESSIONS + 1)
       : [];
@@ -565,39 +567,29 @@ export async function addMessageWithCreateStatus(
     }
 
     const reachableAgentKeys = new Set<string>();
-    if (activeSessions.length > 0 && routingShape.hasMention) {
-      const activeDeliveryKeys = activeSessions.map((session) =>
-        `agent_session:${session.session_id}`);
-      const deliverySessions = await tx
-        .select({
-          agent_session_id: room_agent_delivery_sessions.agent_session_id,
-          active_connection_count: room_agent_delivery_sessions.active_connection_count,
-          updated_at: room_agent_delivery_sessions.updated_at,
-          reconnect_grace_expires_at: room_agent_delivery_sessions.reconnect_grace_expires_at,
-        })
-        .from(room_agent_delivery_sessions)
-        .where(and(
-          eq(room_agent_delivery_sessions.room_id, roomId),
-          // Probe the existing (room_id, delivery_key) primary key instead of
-          // scanning the unindexed agent_session_id column. Historical
-          // delivery summaries accumulate in long-lived rooms.
-          sql`${room_agent_delivery_sessions.delivery_key} IN (
-            SELECT value
-              FROM jsonb_array_elements_text(${JSON.stringify(activeDeliveryKeys)}::jsonb)
-          )`,
-        ));
-      const routingNow = Date.now();
-      const reachableSessionIds = new Set(deliverySessions
-        .filter((delivery) => isAgentDeliverySessionReachable({
-          activeConnectionCount: delivery.active_connection_count,
-          updatedAt: delivery.updated_at,
-          reconnectGraceExpiresAt: delivery.reconnect_grace_expires_at,
-        }, routingNow))
-        .map((delivery) => delivery.agent_session_id)
-        .filter((sessionId): sessionId is string => Boolean(sessionId)));
-      for (const session of activeSessions) {
-        if (reachableSessionIds.has(session.session_id)) {
-          reachableAgentKeys.add(session.agent_key);
+    let connectedSessionIds: ReadonlySet<string> = new Set<string>();
+    // Connections settle two questions: which agent a duplicated name means,
+    // and which session answers for an agent that has several. The second
+    // needs only the sessions of agents that have more than one.
+    const sessionCountByAgentKey = new Map<string, number>();
+    for (const session of activeSessions) {
+      sessionCountByAgentKey.set(session.agent_key, (sessionCountByAgentKey.get(session.agent_key) ?? 0) + 1);
+    }
+    const sessionsNeedingConnections = routingShape.hasMention
+      ? activeSessions
+      : activeSessions.filter((session) => (sessionCountByAgentKey.get(session.agent_key) ?? 0) > 1);
+    if (sessionsNeedingConnections.length > 0) {
+      const connections = await getSessionConnections(
+        tx,
+        roomId,
+        sessionsNeedingConnections.map((session) => session.session_id),
+      );
+      connectedSessionIds = connections.connected;
+      if (routingShape.hasMention) {
+        for (const session of activeSessions) {
+          if (connections.reachable.has(session.session_id)) {
+            reachableAgentKeys.add(session.agent_key);
+          }
         }
       }
     }
@@ -686,7 +678,7 @@ export async function addMessageWithCreateStatus(
         detail: `@${handle} matches ${agentKeys.length} agents in this room, so the mention reached none of them. `
           + "Resend with the exact mention of the agent you mean.",
         candidates: agentKeys.flatMap((agentKey) => {
-          const session = sessionsByAgentKey.get(agentKey)?.sessions[0];
+          const session = chooseAnsweringSession(sessionsByAgentKey.get(agentKey)?.sessions ?? [], connectedSessionIds);
           return session ? [{
             agent_key: agentKey,
             display_name: session.display_name,
@@ -759,8 +751,9 @@ export async function addMessageWithCreateStatus(
       }
 
       // Receipts are keyed by durable agent identity: several live sessions
-      // (duplicates, mid-rotation overlap) may share one agent_key, but the
-      // agent was asked once. The earliest session represents it; the unique
+      // (a restart's leftover, mid-rotation overlap, chats sharing an
+      // identity) may share one agent_key, but the agent was asked once. The
+      // session most likely to be there represents it; the unique
       // (message, agent_key) index makes this a database invariant.
       const receiptsByAgentKey = new Map<string, {
         id: string; message_room_id: string; message_number: number; room_id: string;
@@ -773,7 +766,7 @@ export async function addMessageWithCreateStatus(
           createdMessage.source === "agent"
           && createdMessage.publisher_agent_key === agentKey
         ) continue;
-        const representative = group.sessions[0]!;
+        const representative = chooseAnsweringSession(group.sessions, connectedSessionIds)!;
         // Exact authenticated publisher identity owns self suppression. Do
         // not let a mutable/same-label sender alias suppress an unrelated
         // durable worker when that exact identity is available.
@@ -817,7 +810,7 @@ export async function addMessageWithCreateStatus(
             activation: { decision: "activate", reason: humanFallback.reason, addressed: true },
           };
         } else if (!humanFallback && taskOwnerFollowUp) {
-          selectedActivation = group.identities
+          const owners = group.identities
             .map((identity, index) => ({
               session: group.sessions[index]!,
               activation: decideAgentMessageActivation(messageForRouting, identity, {
@@ -825,16 +818,30 @@ export async function addMessageWithCreateStatus(
                 threadParticipantRootIds: new Set<string>(),
               }),
             }))
-            .find(({ activation }) =>
-              activation.decision === "activate" && activation.reason === "task_owner") as
-                typeof selectedActivation;
+            .filter(({ activation }) =>
+              activation.decision === "activate" && activation.reason === "task_owner");
+          // A lease names a session when it can. That session alone may act
+          // on the task, so it keeps the follow-up whatever its siblings are
+          // doing. A lease that names only the agent is held by whichever of
+          // its sessions answers.
+          const leaseHolder = owners.find(({ session }) =>
+            leases.some((lease) => lease.agent_session_id === session.session_id));
+          const owner = leaseHolder ?? (owners.length > 0
+            ? { session: representative, activation: owners[0]!.activation }
+            : undefined);
+          selectedActivation = owner as typeof selectedActivation;
         }
 
         if (selectedActivation) {
           const receiptSession = selectedActivation.activation.reason === "task_owner"
-            || selectedActivation.activation.reason === "reply_target"
             ? selectedActivation.session
-            : representative;
+            : selectedActivation.activation.reason === "reply_target"
+              ? chooseSessionForReply({
+                  said: selectedActivation.session,
+                  answering: representative,
+                  connectedSessionIds,
+                })
+              : representative;
           const receiptId = `rcpt_${randomUUID().replace(/-/g, "")}`;
           receiptsByAgentKey.set(agentKey, {
             id: receiptId,
