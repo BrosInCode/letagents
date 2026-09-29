@@ -254,6 +254,12 @@ export function minimalOpenCodeEnvironment(
     // so OpenCode's models.dev catalog refresh is dead weight: on degraded
     // networks it stalls startup and floods the log with fetch timeouts.
     OPENCODE_DISABLE_MODELS_FETCH: "1",
+    // OpenCode otherwise lists every skill under .claude/skills and
+    // .agents/skills (the owner's home and the project) in each system prompt
+    // and offers a tool to load them: about 14,000 characters for 18 personal
+    // skills on 1.18.20. A supervised room agent takes its instructions from
+    // LetAgents. OpenCode's own .opencode skills still load.
+    OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
     ...extra,
   };
 }
