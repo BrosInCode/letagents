@@ -1,7 +1,5 @@
 import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
 import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
-
-export const LETAGENTS_AGENT_SESSION_BEARER_ENV = "LETAGENTS_AGENT_SESSION_BEARER";
 export const LETAGENTS_SUPERVISED_BOUNDED_TURNS_ENV = "LETAGENTS_SUPERVISED_BOUNDED_TURNS";
 
 export type WorkerBearerRuntime =
@@ -89,10 +87,6 @@ export function requireValidWorkerBearerRuntime(): WorkerBearerRuntime {
     throw new WorkerBearerRuntimeConfigurationError(runtime.error);
   }
   return runtime;
-}
-
-export function isSupervisedBoundedTurn(): boolean {
-  return hasSupervisedWorkerAuthority() && !isCustodialPolling();
 }
 
 export function isCustodialPolling(): boolean {
