@@ -4,8 +4,9 @@
 }
 
 .desktop-add-agent-model-custom-input small {
-  color: var(--text-tertiary);
-  font-size: 0.74rem;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 500;
 }
 
 .desktop-add-agent-model-custom-input textarea {
@@ -13,11 +14,16 @@
   min-height: 76px;
   resize: vertical;
   padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--bg-subtle);
   color: var(--text);
   font: inherit;
   font-size: 0.8rem;
   line-height: 1.45;
+}
+
+.desktop-add-agent-model-custom-input textarea:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 2px;
 }

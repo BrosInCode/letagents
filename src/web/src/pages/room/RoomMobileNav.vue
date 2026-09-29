@@ -76,7 +76,7 @@ function selectTab(tab: RoomTab) {
   display: none;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 980px) {
   .mobile-bottom-nav {
     display: flex;
     align-items: center;
@@ -97,6 +97,8 @@ function selectTab(tab: RoomTab) {
     justify-content: center;
     gap: 2px;
     flex: 1;
+    min-width: 0;
+    min-height: 44px;
     padding: 6px 0;
     border: none;
     background: none;

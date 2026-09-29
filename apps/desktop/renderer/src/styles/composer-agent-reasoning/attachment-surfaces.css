@@ -1,0 +1,6 @@
+.desktop-room-shell .room-message-reply,
+.desktop-room-shell .room-message-attachment,
+.desktop-room-shell .desktop-attachment-draft {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.035);
+}

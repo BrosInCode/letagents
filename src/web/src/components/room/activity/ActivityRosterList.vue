@@ -119,6 +119,6 @@ function activeReasoningCount(participant: ActivityRosterParticipant): number {
 
 function activeReasoningLabel(participant: ActivityRosterParticipant): string {
   const count = activeReasoningCount(participant)
-  return count === 1 ? '1 live reasoning stream' : `${count} live reasoning streams`
+  return count === 1 ? '1 live work stream' : `${count} live work streams`
 }
 </script>

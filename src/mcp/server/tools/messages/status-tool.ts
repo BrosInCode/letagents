@@ -72,7 +72,7 @@ export function registerPostStatusTool(server: McpServer): void {
           publisher_agent_key: agentSession?.agent_key ?? null,
           publisher_agent_session_id: agentSession?.session_id ?? null,
         });
-        touchCurrentRoom(message.id);
+        touchCurrentRoom();
         return jsonToolResponse({
           success: true,
           status_posted: status,
@@ -104,7 +104,7 @@ export function registerPostStatusTool(server: McpServer): void {
           }),
         },
       });
-      touchCurrentRoom(typeof message.id === "string" ? message.id : undefined);
+      touchCurrentRoom();
 
       return jsonToolResponse({
         success: true,

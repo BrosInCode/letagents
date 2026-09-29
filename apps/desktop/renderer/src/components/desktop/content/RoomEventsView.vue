@@ -359,7 +359,7 @@ watch(() => props.linkedTaskId, (taskId) => {
 
 watch(() => props.selectedEventId, (eventId) => {
   if (eventId) selectedEventId.value = eventId;
-});
+}, { immediate: true });
 
 watch(selectedFilter, (filter) => {
   if (filter !== "all") showLowSignal.value = false;

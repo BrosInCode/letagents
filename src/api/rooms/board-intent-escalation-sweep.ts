@@ -52,7 +52,7 @@ export function buildAutoApproveAnnouncementText(input: {
   const minutes = Math.max(1, Math.floor(input.waited_for_ms / 60_000));
   const title = intentTitle(input.intent);
   const titled = title ? ` "${title}"` : " it";
-  return `[status] No Board Manager responded for ${minutes}m — auto-approving the task-create intent from ${proposerLabel(input.intent)}:${titled} is now an accepted task on the board and needs a claimant.`;
+  return `[status] No Board Manager responded for ${minutes}m. The task proposed by ${proposerLabel(input.intent)}${titled} was approved automatically and is ready to claim on the board.`;
 }
 
 export function buildHumanEscalationText(input: {
@@ -64,12 +64,13 @@ export function buildHumanEscalationText(input: {
   const minutes = Math.max(1, Math.floor(input.waited_for_ms / 60_000));
   const title = intentTitle(input.intent);
   const titled = title ? ` ("${title}")` : "";
-  const base = `[status] A ${input.intent.action_type} board intent from ${proposerLabel(input.intent)}${titled} has waited ${minutes}m with no Board Manager available. A room admin needs to approve or deny it under Board Manager > Intents.`;
+  const actionLabels = { task_create: "create a task", task_claim: "claim a task", task_close: "close a task", task_override: "change a task assignment", task_update: "update a task" };
+  const base = `[status] A request to ${actionLabels[input.intent.action_type]} from ${proposerLabel(input.intent)}${titled} has waited ${minutes}m with no Board Manager available. A room admin needs to approve or deny it under Board Manager > Requests.`;
   if (input.rate_capped) {
-    return `${base} Auto-approval is paused for this agent (rate cap reached).`;
+    return `${base} This agent has reached its automatic approval limit.`;
   }
   if (input.manager_mode === "intent_required") {
-    return `${base} This room requires intent approval, so nothing proceeds until a human decides.`;
+    return `${base} This room requires a person to approve requests before they proceed.`;
   }
   return base;
 }

@@ -1,6 +1,7 @@
 <template>
   <div class="room-message-viewport" data-testid="room-chat-viewport">
     <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
+      <p v-if="olderMessagesError" role="status" class="room-load-older-error">{{ olderMessagesError }}</p>
       <button
         v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
         class="room-load-older"
@@ -9,10 +10,10 @@
         data-testid="desktop-load-older-messages"
         @click="$emit('load-older')"
       >
-        {{ loadingOlderMessages ? "Loading earlier messages..." : "Load earlier messages" }}
+        {{ loadingOlderMessages ? "Loading earlier messages..." : olderMessagesError ? "Retry loading earlier messages" : "Load earlier messages" }}
       </button>
 
-      <template v-for="entry in timelineEntries" :key="entry.id">
+      <template v-for="entry in timelineEntries" :key="entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id">
         <div
           v-if="entry.type === 'date'"
           class="room-date-separator"
@@ -22,6 +23,7 @@
           <span>{{ entry.label }}</span>
         </div>
 
+        <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
         <DesktopChatMessage
           v-else
           :message="entry.message"
@@ -40,7 +42,7 @@
           :delivery-retry-keys="deliveryRetryKeys"
           :continuation-repair-keys="continuationRepairKeys"
           :room-delivery-skip-keys="roomDeliverySkipKeys"
-          :provider-label="resolveMessageProviderLabel(entry.message, participants, presence, supervisorEntries)"
+          :provider-label="resolveProviderLabel(entry.message)"
           @quote-reply="$emit('quote-reply', $event)"
           @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
@@ -143,9 +145,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
 import type {
   DesktopAgentPresence,
+  DesktopRoomAgentWork,
   DesktopParticipantSummary,
   DesktopRoomMessage,
   DesktopSupervisorManifestEntry,
@@ -158,12 +161,13 @@ import {
   type ManagedAgentWorkIndicator,
   type WorkIndicatorEchoState,
 } from "../../../../domain/managed-agents";
+import RoomContribution from "./RoomContribution.vue";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
-import { resolveMessageProviderLabel } from "../../../../domain/agent-provider";
+import { createMessageProviderLabelResolver } from "../../../../domain/agent-provider";
 import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
 import { buildMessageTimelineEntries } from "./timeline";
@@ -183,11 +187,14 @@ const maxAutoViewportBackfillPages = 5;
 const viewportFillSlack = 32;
 
 const props = defineProps<{
+  roomAgentWork?: DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
   active: boolean;
   activeSearchMessageId: string | null;
   activeThreadParentId: string | null;
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
+  olderMessagesError?: string | null;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
@@ -195,7 +202,7 @@ const props = defineProps<{
   participants?: DesktopParticipantSummary[];
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
-  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
@@ -213,6 +220,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "load-older": [];
+  "open-workspace": [work: DesktopRoomAgentWork];
   "open-agent": [target: AgentModalTarget];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
@@ -260,13 +268,30 @@ let shouldJumpToLatestOnActivate = false;
 let shouldRestoreKeepAliveScroll = false;
 let lastKnownScrollAnchor: ScrollAnchor | null = null;
 let lastKnownScrollTop: number | null = null;
+let anchorElements: HTMLElement[] | null = null;
+let anchorElementsById = new Map<string, HTMLElement>();
+
+// The timeline is vertically ordered. Cache its nodes between renders, but read
+// current geometry so image loads, resizing and thread-panel reflow stay correct.
+onUpdated(() => { anchorElements = null; });
+
+function getAnchorElements(): HTMLElement[] {
+  if (!anchorElements) {
+    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []);
+    anchorElementsById = new Map(anchorElements.map(element => [element.dataset.messageId!, element]));
+  }
+  return anchorElements;
+}
 let autoViewportBackfillFrame: number | null = null;
 let layoutAnchorRestoreFrame: number | null = null;
 let threadActivityNamespace = props.messageNamespace;
 let suppressNextThreadActivityNotice = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
-const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages));
+const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
+  props.participants, props.presence, props.supervisorEntries,
+));
+const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages, props.roomAgentWork));
 const messageReferenceIds = computed(() =>
   new Set(props.messages.map((message) => message.id))
 );
@@ -342,6 +367,17 @@ watch(
   { immediate: true },
 );
 
+// A no-reply turn can add a contribution without adding a chat message.
+watch(() => timelineEntries.value.filter(entry => entry.type === 'contribution').map(entry => entry.id).join('|'), async () => {
+  if (shouldRestoreInitialScroll) return;
+  const following = isScrolledToBottom;
+  const anchor = captureScrollAnchor();
+  await nextTick();
+  if (!props.active) { if (following) shouldJumpToLatestOnActivate = true; return; }
+  if (following) scrollToBottom('auto');
+  else { restoreScrollAnchor(anchor); updateScrollState(); }
+});
+
 // Rate-limit the live echo text: an entry's summary changes at most once per
 // WORK_INDICATOR_ECHO_MIN_INTERVAL_MS. State persists across polls; a trailing
 // timer flushes any summary held back inside the window so the latest value
@@ -350,6 +386,7 @@ let echoState: WorkIndicatorEchoState = {};
 let echoFlushTimer: number | null = null;
 const displayedAgentWork = ref<ManagedAgentWorkIndicator[]>([]);
 const currentLocalAgentWork = computed(() => {
+  if (!props.localAgentWork.length) return [];
   // Public room order is the causal clock here. Provider activity timestamps
   // come from the local host while message timestamps come from the server, so
   // comparing them can suppress a genuinely new turn when the clocks differ.
@@ -495,6 +532,7 @@ watch(
     () => props.roomLoading,
     () => props.hasOlderMessages,
     () => props.loadingOlderMessages,
+    () => props.olderMessagesError,
     () => props.messages.length,
     () => props.threadMessages.length,
     () => props.hasFilteredRoomActivity,
@@ -629,6 +667,7 @@ function canAutoFillViewport(): boolean {
     && !props.roomLoading
     && props.hasOlderMessages
     && !props.loadingOlderMessages
+    && !props.olderMessagesError
     && autoViewportBackfillCount.value < maxAutoViewportBackfillPages
   );
 }
@@ -683,12 +722,11 @@ function handleScroll(): void {
   shouldRestoreInitialScroll = false;
   const element = messagesElement.value;
   updateScrollState();
-  rememberScrollAnchor();
   if (isScrolledToBottom) {
     unreadCount.value = 0;
   }
   emitScrollPosition();
-  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
+  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages && !props.olderMessagesError) {
     emit("load-older");
   }
 }
@@ -805,10 +843,15 @@ function captureScrollAnchor(): ScrollAnchor | null {
   const element = messagesElement.value;
   if (!element || !isMeasurableScrollViewport(element)) return null;
   const viewportTop = element.getBoundingClientRect().top;
-  const messageElements = [...element.querySelectorAll<HTMLElement>("[data-message-id]")];
-  const anchorElement = messageElements.find((messageElement) =>
-    messageElement.getBoundingClientRect().bottom > viewportTop
-  );
+  const messageElements = getAnchorElements();
+  let low = 0;
+  let high = messageElements.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (messageElements[middle].getBoundingClientRect().bottom > viewportTop) high = middle;
+    else low = middle + 1;
+  }
+  const anchorElement = messageElements[low];
   const messageId = anchorElement?.dataset.messageId;
   if (!anchorElement || !messageId) return null;
   return {
@@ -820,8 +863,8 @@ function captureScrollAnchor(): ScrollAnchor | null {
 function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
   const element = messagesElement.value;
   if (!element || !anchor || !isMeasurableScrollViewport(element)) return false;
-  const anchorElement = [...element.querySelectorAll<HTMLElement>("[data-message-id]")]
-    .find((messageElement) => messageElement.dataset.messageId === anchor.messageId);
+  getAnchorElements();
+  const anchorElement = anchorElementsById.get(anchor.messageId);
   if (!anchorElement) return false;
   const viewportTop = element.getBoundingClientRect().top;
   const nextOffsetTop = anchorElement.getBoundingClientRect().top - viewportTop;

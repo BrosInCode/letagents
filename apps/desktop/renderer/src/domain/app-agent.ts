@@ -421,11 +421,11 @@ function actionTimelineLabel(entry: DesktopAppAgentTraceEntry): string {
 function appAgentTraceDisplayLabel(entry: DesktopAppAgentTraceEntry): string {
   const label = entry.label.toLowerCase();
   if (label.includes("asked model")) return "Understanding request";
-  if (label.includes("retried model")) return "Retried with tool guidance";
+  if (label.includes("retried model")) return "Reconsidered the request";
   if (label.includes("model setup")) return "Prepared model";
   if (label.includes("model run started")) return "Asked model";
   if (label.includes("model returned decision")) return "Planned action";
-  if (label.includes("model stopped before tool use")) return "Tool path incomplete";
+  if (label.includes("model stopped before tool use")) return "Stopped before taking action";
   if (label.includes("model timeout")) return "Model timed out";
   if (label.includes("model run failed")) return "Model run failed";
   if (label.includes("app agent failed")) return "App Agent stopped";

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DesktopApiError } from "../main/auth.js";
-import { loadSource } from "../main/rooms/snapshot/fetch-data.js";
-import { isMissingThreadRouteError } from "../main/rooms/messages.js";
+import { createElectronTestEnv } from "./harness.js";
+createElectronTestEnv({ prefix: 'letagents-universal-inbox-', paths: ['state', 'chatStorage', 'localChatDb', 'localProfile'] });
+const { DesktopApiError } = await import("../main/auth.js");
+const { loadSource } = await import("../main/rooms/snapshot/fetch-data.js");
+const { isMissingThreadRouteError } = await import("../main/rooms/messages.js");
+const { getDesktopInboxUpdates } = await import("../main/rooms/inbox.js");
 
 test("loadSource returns ready state and data when the source resolves", async () => {
   const result = await loadSource(Promise.resolve({ tasks: [{ id: "task_1" }] }), {
@@ -60,4 +63,31 @@ test("isMissingThreadRouteError surfaces auth, server, and non-API errors", () =
   assert.equal(isMissingThreadRouteError(new DesktopApiError(500, { error: "boom" })), false);
   assert.equal(isMissingThreadRouteError(new Error("offline")), false);
   assert.equal(isMissingThreadRouteError(null), false);
+});
+
+test('universal updates load bounded sources, include unassigned completions and preserve partial failures', async () => {
+  const prior = globalThis.fetch; const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input); calls.push(url);
+    let payload: unknown = {};
+    if (url.includes('/tasks?status=done')) payload = { tasks: Array.from({ length: 7 }, (_, index) => ({ id: `task_${index + 1}`, title: `Completed ${index + 1}`, status: 'done', assignee: index ? 'same-agent' : null })), has_more: true };
+    else if (url.includes('/tasks?status=merged')) payload = { tasks: [], has_more: false };
+    else if (url.includes('/messages/threads')) payload = { threads: [], has_more: false, unread_thread_count: 0 };
+    else if (url.includes('/presence?')) return new Response(JSON.stringify({ error: 'presence unavailable' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    else if (url.includes('/events?')) payload = { events: [], has_more: false };
+    else if (url.includes('/reasoning-sessions')) payload = { sessions: [] };
+    else throw new Error(`Unexpected inbox fetch: ${url}`);
+    return new Response(JSON.stringify(payload), { headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const updates = await getDesktopInboxUpdates('github.com/test/inbox');
+    assert.equal(updates.tasks.length, 7, 'includes an unassigned task and all six completions by one agent');
+    assert.equal(updates.tasks[0].assignee, null);
+    assert.equal(updates.limited, true);
+    assert.deepEqual(updates.unavailable, ['Agents']);
+    assert.equal(calls.length, 6);
+    assert.ok(calls.some(url => url.includes('filter=unread') && url.includes('limit=75')));
+    assert.ok(calls.filter(url => url.includes('/tasks?')).every(url => url.includes('limit=200') && url.includes('order=recent')));
+    assert.ok(calls.every(url => !url.includes('/messages?') && !url.includes('/activity-history')), 'does not fetch transcripts or participant snippets');
+  } finally { globalThis.fetch = prior; }
 });

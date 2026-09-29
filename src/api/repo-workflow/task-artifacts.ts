@@ -41,7 +41,7 @@ const TASK_WORKFLOW_ARTIFACT_KEYS = new Set([
   "detail",
 ]);
 
-const MAX_TASK_WORKFLOW_ARTIFACTS = 32;
+export const MAX_TASK_WORKFLOW_ARTIFACTS = 32;
 // Safety ceiling on the persisted file list. The UI collapses/expands within this
 // set; anything beyond is folded into hiddenFileCount rather than stored.
 const MAX_CHANGE_SUMMARY_FILES = 200;
@@ -234,7 +234,11 @@ export function normalizeTaskWorkflowArtifacts(input: {
     }
   }
 
-  return merged;
+  // Webhook-driven check history can revisit the same durable task for months.
+  // Keep normalization aligned with the write-time validation ceiling so old
+  // rows cannot grow without bound and make every board read progressively
+  // larger. Artifacts are appended in observation order, so retain the newest.
+  return merged.slice(-MAX_TASK_WORKFLOW_ARTIFACTS);
 }
 
 export function buildTaskWorkflowRefs(input: {

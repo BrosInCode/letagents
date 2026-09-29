@@ -54,13 +54,13 @@
       class="activity-detail-section"
     >
       <div class="activity-detail-section-header">
-        <h4>Reasoning snapshot</h4>
+        <h4>Current work</h4>
         <span>Live</span>
       </div>
 
       <AgentThinkingCard
         :card="participant.thinkingSnapshot"
-        kicker="Latest visible reasoning"
+        kicker="Latest agent update"
         :timestampLabel="formatLastSeen(participant.lastSeenAt)"
       />
     </section>
@@ -77,8 +77,8 @@
       class="activity-detail-section"
     >
       <div class="activity-detail-section-header">
-        <h4>Session liveness</h4>
-        <span>{{ participant.livenessObservation ? 'Enriched' : 'Basic' }}</span>
+        <h4>Connection details</h4>
+        <span>{{ participant.livenessObservation ? 'Desktop updates' : 'Room updates' }}</span>
       </div>
 
       <div
@@ -98,13 +98,13 @@
           <span>{{ participant.livenessObservation.host_label || participant.livenessObservation.host_kind || 'Agent host' }}</span>
         </div>
         <p>
-          Last session signal {{ formatLastSeen(participant.livenessObservation.last_observed_at) }}.
-          {{ participant.livenessObservation.detail || 'Room-scoped agent activity was observed.' }}
+          Last update {{ formatLastSeen(participant.livenessObservation.last_observed_at) }}.
+          {{ participant.livenessObservation.detail || 'The agent reported activity in this room.' }}
         </p>
       </div>
 
       <div v-else class="activity-detail-empty">
-        This agent is reporting standard room presence only. LetAgents Desktop can enrich this with host-level session activity.
+        Only room connection updates are available. Run LetAgents Desktop on the agent’s Mac to see more activity details.
       </div>
     </section>
 
@@ -113,7 +113,7 @@
       class="activity-detail-section"
     >
       <div class="activity-detail-section-header">
-        <h4>Live reasoning</h4>
+        <h4>Active work streams</h4>
         <span>{{ participant.activeReasoning.length }}</span>
       </div>
 
@@ -121,7 +121,7 @@
         v-if="participant.activeReasoning.length === 0"
         class="activity-detail-empty"
       >
-        No active reasoning streams are exposed for this agent right now.
+        No active work streams are available for this agent right now.
       </div>
 
       <div v-else class="activity-reasoning-list">
@@ -144,7 +144,7 @@
             type="button"
             @click="emit('openReasoning', session.id)"
           >
-            Open reasoning
+            Open work stream
           </button>
         </article>
       </div>
@@ -155,7 +155,7 @@
       class="activity-detail-section"
     >
       <div class="activity-detail-section-header">
-        <h4>Reasoning trail</h4>
+        <h4>Work log</h4>
         <span>{{ participant.thinkingTimeline.length }}</span>
       </div>
 
@@ -216,7 +216,7 @@
             <span>{{ message.source === 'browser' ? 'Browser' : 'Agent message' }}</span>
             <span>{{ formatLastSeen(message.timestamp) }}</span>
           </div>
-          <p>{{ previewMessage(message.text) }}</p>
+          <p>{{ previewMessage(message.display_text || message.text) }}</p>
         </article>
       </div>
     </section>

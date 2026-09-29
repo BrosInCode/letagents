@@ -103,7 +103,7 @@ export async function decideDesktopBoardIntent(
       method: "POST",
       body: JSON.stringify({
         reason: input.reason ?? undefined,
-        desktop_human_client: true,
+
       }),
     },
   );

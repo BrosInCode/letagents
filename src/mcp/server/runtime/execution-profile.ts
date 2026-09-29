@@ -1,5 +1,6 @@
 export const EXECUTION_PROFILES = [
   "supervised_room_turn",
+  "supervised_mcp_polling",
   "autonomous_mcp_worker",
   "interactive_desktop",
 ] as const;

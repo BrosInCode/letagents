@@ -1,7 +1,7 @@
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { room_participants } from "./schema.js";
+import { messages, room_participants } from "./schema.js";
 import { clampLimit } from "./utils.js";
 import { toRoomParticipant } from "./mappers.js";
 import type { RoomParticipant, RoomParticipantRow } from "./types.js";
@@ -45,7 +45,12 @@ export async function upsertRoomParticipant(input: {
       set: {
         kind: input.kind,
         actor_label: input.actor_label ?? null,
-        agent_key: input.agent_key ?? null,
+        // A caller that does not know the owner must not erase one that is
+        // already recorded: registration reads it to tell an agent's own
+        // history from another agent's.
+        agent_key: input.kind === "human"
+          ? null
+          : (input.agent_key || sql`${room_participants.agent_key}`),
         github_login: input.github_login ?? null,
         display_name: input.display_name,
         owner_label: input.owner_label ?? null,
@@ -61,6 +66,59 @@ export async function upsertRoomParticipant(input: {
     .returning();
 
   return toRoomParticipant(participant as RoomParticipantRow);
+}
+
+/**
+ * Owners of participant rows that were recorded without one, proven by the
+ * room's own messages. A label is proven only when every authenticated
+ * message sent under it came from one agent key; a label two agents have
+ * spoken under proves nothing and is left out.
+ *
+ * This reads the room's messages, so call it only for the few labels a
+ * decision depends on.
+ */
+export async function getParticipantOwnersProvenByMessages(input: {
+  room_id: string;
+  actor_labels: readonly string[];
+}): Promise<Map<string, string>> {
+  const labels = [...new Set(input.actor_labels.filter(Boolean))].slice(0, 32);
+  if (labels.length === 0) return new Map();
+  const rows = await db
+    .selectDistinct({ sender: messages.sender, agent_key: messages.publisher_agent_key })
+    .from(messages)
+    .where(and(
+      eq(messages.room_id, input.room_id),
+      inArray(messages.sender, labels),
+      isNotNull(messages.publisher_agent_key),
+    ));
+  const keysByLabel = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (!row.agent_key) continue;
+    const keys = keysByLabel.get(row.sender) ?? new Set<string>();
+    keys.add(row.agent_key);
+    keysByLabel.set(row.sender, keys);
+  }
+  const proven = new Map<string, string>();
+  for (const [label, keys] of keysByLabel) {
+    if (keys.size === 1) proven.set(label, keys.values().next().value!);
+  }
+  return proven;
+}
+
+/** Record a proven owner on a participant row that has none. Never replaces one. */
+export async function claimRoomParticipantOwner(input: {
+  room_id: string;
+  participant_key: string;
+  agent_key: string;
+}): Promise<void> {
+  await db.update(room_participants)
+    .set({ agent_key: input.agent_key })
+    .where(and(
+      eq(room_participants.room_id, input.room_id),
+      eq(room_participants.participant_key, input.participant_key),
+      eq(room_participants.kind, "agent"),
+      isNull(room_participants.agent_key),
+    ));
 }
 
 export async function getRoomParticipants(

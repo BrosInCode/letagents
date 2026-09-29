@@ -194,7 +194,9 @@ test("unconfigured open model settings report configured=false", async () => {
   assert.equal(status.baseUrl, DEFAULT_OPEN_MODEL_BASE_URL);
 });
 
-test("Open Model preflight checks OpenCode and accepts a per-agent model", async () => {
+test("Open Model preflight checks OpenCode and accepts a per-agent model", async (t) => {
+  const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
+  t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);
   const settingsPath = await tempSettingsPath();
   const bin = join(tmpdir(), `letagents-opencode-${Date.now()}`);
   const previousSettingsPath = process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH;
@@ -269,6 +271,7 @@ test("OpenCode config exposes product tools without embedding the provider key",
   assert.equal(config.share, "disabled");
   assert.equal(config.formatter, false);
   assert.equal(config.lsp, false);
+  assert.deepEqual(config.permission, { "*": "allow" });
   assert.equal((provider.options as Record<string, unknown>).baseURL, "https://openrouter.ai/api/v1");
   assert.equal(
     (configuredModel.limit as Record<string, unknown>).output,
@@ -281,6 +284,16 @@ test("OpenCode config exposes product tools without embedding the provider key",
   );
   assert.equal((mcp.environment as Record<string, string>).OPENCODE_AUTH_CONTENT, "");
   assert.doesNotMatch(serialized, /provider-secret|apiKey|api_key/);
+
+  assert.deepEqual(openCodeConfig({
+    model: "qwen/qwen3-coder",
+    baseUrl: "https://openrouter.ai/api/v1",
+    pluginUrl: "file:///tmp/credential-boundary.mjs",
+    cwd: "/repo",
+    mcpCommand: ["node", "/app/mcp.js"],
+    mcpEnvironment: {},
+    permissionProfileId: "ask_before_write",
+  }).permission, { "*": "allow", edit: "ask", bash: "ask" });
 });
 
 test("OpenCode runtime resolution and install command stay pinned", () => {
@@ -304,6 +317,10 @@ test("open-model permission profiles default to honestly-labeled full access", (
   assert.equal(defaultManagedAgentPermissionProfileId("open-model"), "full_access");
   const fullAccess = assertManagedAgentPermissionProfileAvailable("open-model", "full_access");
   assert.equal(fullAccess.risk, "high");
+  assert.equal(
+    assertManagedAgentPermissionProfileAvailable("open-model", "ask_before_write", "supervised").status,
+    "available",
+  );
   assert.throws(
     () => assertManagedAgentPermissionProfileAvailable("open-model", "read_only"),
     /not available/,

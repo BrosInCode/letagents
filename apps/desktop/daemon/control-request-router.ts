@@ -1,13 +1,27 @@
+import { retiredRuntimeEvidenceListSchema } from "./runtime-recovery-journal.js";
 import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
+import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
+import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
+import type { createHostApprovalBridge } from "./host-approval-broker.js";
 
 /**
  * The socket router owns protocol parsing and response shaping. Operations are
  * bound by SupervisorDaemon, which remains the authority owner.
  */
 export interface DaemonControlOperations {
+  mutateLocalBoard(input: unknown): Promise<unknown>;
+  watchLocalBoard(input: unknown, signal: AbortSignal): Promise<unknown>;
+  hostApprovals: Pick<ReturnType<typeof createHostApprovalBridge>, "challenge" | "verify" | "list" | "decide" | "listToolRules" | "revokeToolRule">;
+  activateCustodialPolling(input: PollingActivationRequest): unknown;
+  getPollingActivation(input: DeliveryDrainIdentity): unknown;
+  cancelPollingActivation(input: DeliveryDrainIdentity): unknown;
+  prepareDeliveryDrain(input: DeliveryDrainRequest | CustodialForwardRequest): unknown;
+  getDeliveryDrain(input: DeliveryDrainIdentity): unknown;
+  cancelDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   status(): unknown;
   prepareHandoff(): unknown;
-  listManifest(): unknown;
+  /** Null lists every entry; a room identifier scopes the read to that room. */
+  listManifest(roomId: string | null): unknown;
   watchState(input: { afterDaemonGeneration: number; afterSequence: number; waitMs: number }): unknown;
   watchAgentStream(input: { entryId: string; afterSequence: number; waitMs: number }): unknown;
   retryRoomDelivery(input: RoomDeliveryControl): unknown;
@@ -18,6 +32,10 @@ export interface DaemonControlOperations {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown; mutation: boolean;
   }): unknown;
+  executeBoundedTool(input: {
+    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown;
+  }): unknown;
   completeBoundedEffect(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string; effectId: string; result: unknown; error?: string;
@@ -26,14 +44,17 @@ export interface DaemonControlOperations {
   updateAgentConfiguration(input: {
     entryId: string; daemonGeneration: number; expectedRevision: number; configuration: Record<string, unknown>;
   }): unknown;
+  applyAgentConfiguration(input: {
+    entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
+  }): unknown;
   prepareInspectorRoomMove(input: { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }): unknown;
   commitInspectorRoomMove(input: RoomMoveIdentity): unknown;
   acknowledgeInspectorRoomMoveSourceRevocation(input: RoomMoveIdentity & { sourceAgentSessionId: string }): unknown;
   rollbackInspectorRoomMove(input: RoomMoveIdentity & { detail: string }): unknown;
   getInspectorRoomMove(input: RoomMoveIdentity): unknown;
   getCurrentInspectorRoomMove(input: { entryId: string; daemonGeneration: number }): unknown;
-  recoverAgentRuntime(entryId: string, daemonGeneration: number): unknown;
-  retireAgent(entryId: string, daemonGeneration: number): unknown;
+  recoverAgentRuntime(entryId: string, daemonGeneration: number, recovery?: import("./runtime-recovery-coordinator.js").AgentRuntimeRecoveryRequest): unknown;
+  retireAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
   purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
   putManifestEntry(entry: DaemonManifestEntry): unknown;
   setDesiredState(id: string, desiredState: DesiredState): Promise<DaemonManifestEntry>;
@@ -63,13 +84,16 @@ export interface DaemonControlOperations {
   installHostGrant(input: {
     entry_id: string; room_id: string; agent_key: string; grant_id: string; supervisor_grant: string;
     grant_generation: number; api_url: string; host_id: string; installation_id: string;
+    owner_account_id: string | null; scope_key: string | null;
     grant_expires_at: string; daemon_generation: number; credential_only: boolean; recovery_only: boolean;
   }): unknown;
+  syncExecutionDelegations(input: { room_id: string; daemon_generation: number }): unknown;
   installOpenModelCredential(input: {
     entry_id: string; api_key: string | null; base_url: string; model: string; daemon_generation: number;
   }): unknown;
-  bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number }): unknown;
+  bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }): unknown;
   borrowWorkerCredential(input: WorkerSessionCoordinates & { daemon_generation: number; provider_turn_id: string; api_url: string }): unknown;
+  authorizeCustodialPolling(input: CustodialPollingAuthorizationInput): unknown;
   checkpointWorkerCursor(input: Omit<WorkerSessionCoordinates, "room_id"> & { room_cursor: string }): unknown;
   readAttempt(id: string): unknown;
 }
@@ -90,8 +114,24 @@ export interface DaemonControlContext {
   assertCurrent(): Promise<void>;
   currentGeneration(): number;
   isHandoffScheduled(): boolean;
+  isHandoffDraining?(): boolean;
   requestBarrier?: (request: DaemonRequest) => Promise<void>;
 }
+
+// During the reversible drain, current-turn tools, approvals and observations
+// retain authority. New owner lifecycle actions wait until the update is deferred.
+const HANDOFF_DRAIN_METHODS = new Set<string>([
+  "daemon.negotiate", "daemon.status", "daemon.prepare_handoff",
+  "manifest.list", "manifest.watch_state", "manifest.append_activity", "manifest.update_workplace_liveness",
+  "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.get_agent_inspector_detail",
+  "supervisor.get_agent_configuration", "supervisor.get_room_move", "supervisor.get_current_room_move",
+  "supervisor.get_delivery_drain", "supervisor.get_polling_activation",
+  "supervisor.host_approval_challenge", "supervisor.host_approval_request",
+  "supervisor.prepare_bounded_effect", "supervisor.execute_bounded_tool", "supervisor.complete_bounded_effect",
+  "supervisor.borrow_worker_credential", "supervisor.verify_worker_session", "supervisor.checkpoint_worker_cursor",
+  "supervisor.install_host_grant", "supervisor.install_worker_credential", "supervisor.bind_worker_session",
+  "supervisor.authorize_custodial_polling", "supervisor.sync_execution_delegations",
+]);
 
 function paramsRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Daemon request params must be an object.");
@@ -116,6 +156,26 @@ function desiredStateParam(params: Record<string, unknown>, key: string, error: 
   return value;
 }
 
+function runtimeRecoveryMode(params: Record<string, unknown>, error: string): "reconnect" | "resume" | "fresh" {
+  const mode = params.mode;
+  if (mode !== "reconnect" && mode !== "resume" && mode !== "fresh") throw new Error(error);
+  return mode;
+}
+
+/**
+ * `manifest.list` is the full-history read, so it is also the expensive one.
+ * An optional room scope lets the daemon project and serialize only the room
+ * the caller will keep. Absent or null params preserve the whole-manifest
+ * answer every existing caller depends on.
+ */
+function optionalRoomScopeParam(value: unknown, error: string): string | null {
+  if (value === undefined || value === null) return null;
+  const roomId = paramsRecord(value).room_id;
+  if (roomId === undefined || roomId === null) return null;
+  if (typeof roomId !== "string" || !roomId.trim() || roomId !== roomId.trim()) throw new Error(error);
+  return roomId;
+}
+
 function paramsEntry(value: unknown): DaemonManifestEntry {
   const params = paramsRecord(value);
   const entry = params.entry;
@@ -126,8 +186,8 @@ function paramsEntry(value: unknown): DaemonManifestEntry {
 export function createDaemonControlRequestHandler(
   context: DaemonControlContext,
   operations: DaemonControlOperations,
-): (request: DaemonRequest) => Promise<unknown> {
-  return async (request) => {
+): (request: DaemonRequest, disconnected?: AbortSignal) => Promise<unknown> {
+  return async (request, disconnected) => {
     await context.assertCurrent();
     const isLifecycleRequest = request.method === "daemon.negotiate"
       || request.method === "daemon.status"
@@ -136,7 +196,14 @@ export function createDaemonControlRequestHandler(
     if (context.isHandoffScheduled() && !isLifecycleRequest) {
       throw new Error("Supervisor handoff has fenced new daemon mutations.");
     }
+    const assertDrainAdmission = () => {
+      if (context.isHandoffDraining?.() && !HANDOFF_DRAIN_METHODS.has(request.method)) {
+        throw new Error("An update is waiting for current agent work to finish. Try this action after the update completes or is deferred.");
+      }
+    };
+    assertDrainAdmission();
     await context.requestBarrier?.(request);
+    assertDrainAdmission();
     // A request may have been admitted before prepare_handoff and paused in
     // an injected/native barrier. Re-check after that await so it cannot
     // perform provider effects once handoff begins.
@@ -149,7 +216,75 @@ export function createDaemonControlRequestHandler(
       await operations.prepareHandoff();
       return { accepted: true, generation: context.currentGeneration() };
     }
-    if (request.method === "manifest.list") return operations.listManifest();
+    if (request.method === "manifest.list") {
+      return operations.listManifest(optionalRoomScopeParam(
+        request.params,
+        "manifest.list room_id must be an exact non-empty room identifier.",
+      ));
+    }
+    if (request.method === "local_board.mutate") return operations.mutateLocalBoard(request.params);
+    if (request.method === "local_board.watch") {
+      if (!disconnected) throw new Error("A board subscription requires a live connection.");
+      const result = await operations.watchLocalBoard(request.params, disconnected);
+      await context.assertCurrent();
+      if (context.isHandoffScheduled()) throw new Error("The board service is restarting.");
+      return result;
+    }
+    if (request.method === "supervisor.host_approval_challenge") return operations.hostApprovals.challenge();
+    if (request.method === "supervisor.host_approval_request") {
+      const authenticated = operations.hostApprovals.verify(request.params);
+      if (!authenticated) throw new Error("Host approvals are unavailable or this request could not be authenticated.");
+      const input = authenticated.input as Record<string, unknown> | null;
+      if (authenticated.operation === "list") {
+        if (!input || Object.keys(input).length !== 1 || typeof input.roomId !== "string") throw new Error("An exact approval room is required.");
+        return operations.hostApprovals.list(input.roomId);
+      }
+      if (authenticated.operation === "list_tool_rules") return operations.hostApprovals.listToolRules(input);
+      if (authenticated.operation === "revoke_tool_rule") return operations.hostApprovals.revokeToolRule(input);
+      if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
+      return operations.hostApprovals.decide(input);
+    }
+    if (request.method === "supervisor.activate_custodial_polling"
+      || request.method === "supervisor.get_polling_activation"
+      || request.method === "supervisor.cancel_polling_activation") {
+      const params = paramsRecord(request.params);
+      const error = "Polling activation requires exact typed coordinates and the current daemon generation.";
+      if (positiveIntegerParam(params, "daemon_generation", error) !== context.currentGeneration()) throw new Error(error);
+      const identity = {
+        entryId: requiredStringParam(params, "entry_id", error),
+        operationId: requiredStringParam(params, "operation_id", error),
+      };
+      if (request.method === "supervisor.get_polling_activation") return operations.getPollingActivation(identity);
+      if (request.method === "supervisor.cancel_polling_activation") return operations.cancelPollingActivation(identity);
+      return operations.activateCustodialPolling({ ...identity,
+        requestId: requiredStringParam(params, "request_id", error),
+        roomId: requiredStringParam(params, "room_id", error),
+        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
+        reverseOperationId: requiredStringParam(params, "reverse_operation_id", error),
+      });
+    }
+    if (request.method === "supervisor.prepare_delivery_drain"
+      || request.method === "supervisor.prepare_custodial_forward"
+      || request.method === "supervisor.get_delivery_drain"
+      || request.method === "supervisor.cancel_delivery_drain") {
+      const params = paramsRecord(request.params);
+      const error = "Delivery drain requires exact typed coordinates and the current daemon generation.";
+      if (positiveIntegerParam(params, "daemon_generation", error) !== context.currentGeneration()) throw new Error(error);
+      const identity = {
+        entryId: requiredStringParam(params, "entry_id", error),
+        operationId: requiredStringParam(params, "operation_id", error),
+      };
+      if (request.method === "supervisor.get_delivery_drain") return operations.getDeliveryDrain(identity);
+      if (request.method === "supervisor.cancel_delivery_drain") return operations.cancelDeliveryDrain(identity);
+      const coordinates = { ...identity,
+        requestId: requiredStringParam(params, "request_id", error),
+        roomId: requiredStringParam(params, "room_id", error),
+        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
+      };
+      return request.method === "supervisor.prepare_custodial_forward"
+        ? operations.prepareDeliveryDrain({ ...coordinates, reverseOperationId: requiredStringParam(params, "reverse_operation_id", error) })
+        : operations.prepareDeliveryDrain(coordinates);
+    }
     if (request.method === "manifest.watch_state") {
       const params = paramsRecord(request.params);
       return operations.watchState({
@@ -227,6 +362,20 @@ export function createDaemonControlRequestHandler(
         input: params.input, mutation: params.mutation === true,
       });
     }
+    if (request.method === "supervisor.execute_bounded_tool") {
+      const params = paramsRecord(request.params);
+      const error = "Supervised tool execution requires exact typed coordinates.";
+      return operations.executeBoundedTool({
+        entryId: requiredStringParam(params, "entry_id", error),
+        workAttemptId: requiredStringParam(params, "work_attempt_id", error),
+        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
+        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
+        providerTurnId: typeof params.provider_turn_id === "string" ? params.provider_turn_id : "",
+        mcpRequestId: requiredStringParam(params, "mcp_request_id", error),
+        toolName: requiredStringParam(params, "tool_name", error),
+        input: params.input,
+      });
+    }
     if (request.method === "supervisor.complete_bounded_effect") {
       const params = paramsRecord(request.params);
       return operations.completeBoundedEffect({
@@ -252,6 +401,19 @@ export function createDaemonControlRequestHandler(
         daemonGeneration: positiveIntegerParam(params, "daemon_generation", "Agent configuration update requires exact typed coordinates."),
         expectedRevision: positiveIntegerParam(params, "expected_revision", "Agent configuration update requires exact typed coordinates."),
         configuration: paramsRecord(params.configuration),
+      });
+    }
+    if (request.method === "supervisor.apply_agent_configuration") {
+      const params = paramsRecord(request.params);
+      const error = "Agent configuration apply requires exact typed coordinates.";
+      return operations.applyAgentConfiguration({
+        entryId: requiredStringParam(params, "entry_id", error),
+        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
+        expectedConfigurationRevision: positiveIntegerParam(
+          params,
+          "expected_configuration_revision",
+          error,
+        ),
       });
     }
     if (request.method === "supervisor.prepare_room_move") {
@@ -313,17 +475,38 @@ export function createDaemonControlRequestHandler(
     if (request.method === "supervisor.recover_agent_runtime") {
       const params = paramsRecord(request.params);
       const error = "Agent runtime recovery requires exact typed coordinates.";
+      if (params.retired_runtime_evidence !== undefined && !["resume", "fresh"].includes(String(params.mode))) throw new Error(error);
       return operations.recoverAgentRuntime(
         requiredStringParam(params, "entry_id", error),
         positiveIntegerParam(params, "daemon_generation", error),
+        params.mode === undefined ? undefined : {
+          ...(params.retired_runtime_evidence === undefined ? {} : {
+            retiredRuntimeEvidence: retiredRuntimeEvidenceListSchema.parse(params.retired_runtime_evidence),
+          }),
+          mode: runtimeRecoveryMode(params, error),
+          operationId: requiredStringParam(params, "operation_id", error),
+          roomId: requiredStringParam(params, "room_id", error),
+          executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
+          runtimeGenerationId: requiredStringParam(params, "runtime_generation_id", error),
+        },
       );
     }
     if (request.method === "supervisor.retire_agent") {
       const params = paramsRecord(request.params);
       const error = "Retire requires exact typed coordinates.";
+      if (!(params.revoked_agent_session_id === undefined || params.revoked_agent_session_id === null
+        || (typeof params.revoked_agent_session_id === "string" && params.revoked_agent_session_id.trim()
+          && params.revoked_agent_session_id === params.revoked_agent_session_id.trim()))) throw new Error(error);
+      if (!(params.grant_revoked_without_worker_session === undefined || params.grant_revoked_without_worker_session === false
+        || params.grant_revoked_without_worker_session === true)
+        || (typeof params.revoked_agent_session_id === "string" && params.grant_revoked_without_worker_session === true)) {
+        throw new Error(error);
+      }
       return operations.retireAgent(
         requiredStringParam(params, "entry_id", error),
         positiveIntegerParam(params, "daemon_generation", error),
+        typeof params.revoked_agent_session_id === "string" ? params.revoked_agent_session_id : null,
+        params.grant_revoked_without_worker_session === true,
       );
     }
     if (request.method === "supervisor.purge_agent") {
@@ -476,10 +659,19 @@ export function createDaemonControlRequestHandler(
         grant_id: String(params.grant_id ?? ""), supervisor_grant: String(params.supervisor_grant ?? ""),
         grant_generation: Number(params.grant_generation ?? NaN), api_url: String(params.api_url ?? ""),
         host_id: String(params.host_id ?? ""), installation_id: String(params.installation_id ?? ""),
+        owner_account_id: typeof params.owner_account_id === "string" ? params.owner_account_id : null,
+        scope_key: typeof params.scope_key === "string" ? params.scope_key : null,
         grant_expires_at: String(params.grant_expires_at ?? ""),
         daemon_generation: Number(params.daemon_generation ?? NaN),
         credential_only: params.credential_only === true,
         recovery_only: params.recovery_only === true,
+      });
+    }
+    if (request.method === "supervisor.sync_execution_delegations") {
+      const params = paramsRecord(request.params);
+      return operations.syncExecutionDelegations({
+        room_id: requiredStringParam(params, "room_id", "Execution delegation sync requires a room."),
+        daemon_generation: positiveIntegerParam(params, "daemon_generation", "Execution delegation sync requires a daemon generation."),
       });
     }
     if (request.method === "supervisor.install_open_model_credential") {
@@ -497,6 +689,7 @@ export function createDaemonControlRequestHandler(
       return operations.bootstrapRoomIngress({
         entry_id: String(params.entry_id ?? ""),
         daemon_generation: Number(params.daemon_generation ?? NaN),
+        ...(typeof params.initial_message === "string" ? { initial_message: params.initial_message } : {}),
       });
     }
     if (request.method === "supervisor.borrow_worker_credential") {
@@ -507,6 +700,28 @@ export function createDaemonControlRequestHandler(
         agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? 0),
         provider_turn_id: String(params.provider_turn_id ?? ""),
         api_url: String(params.api_url ?? ""),
+      });
+    }
+    if (request.method === "supervisor.authorize_custodial_polling") {
+      const params = paramsRecord(request.params);
+      if (params.room_cursor !== undefined && params.room_cursor !== null && typeof params.room_cursor !== "string") {
+        throw new Error("Custodial polling cursor must be a string or null.");
+      }
+      return operations.authorizeCustodialPolling({
+        entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
+        work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
+        agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? NaN),
+        api_url: String(params.api_url ?? ""), contract: String(params.contract ?? ""),
+        phase: String(params.phase ?? ""), tool_name: String(params.tool_name ?? ""),
+        expected_configuration_revision: Number(params.expected_configuration_revision ?? NaN),
+        process_incarnation_id: typeof params.process_incarnation_id === "string" ? params.process_incarnation_id : undefined,
+        // JSON-RPC numeric and string request IDs belong to different invocations.
+        mcp_request_id: typeof params.mcp_request_id === "string" || typeof params.mcp_request_id === "number" ? params.mcp_request_id : undefined,
+        room_cursor: params.room_cursor as string | null | undefined,
+        expected_activation_id: typeof params.expected_activation_id === "string" ? params.expected_activation_id : undefined,
+        expected_binding_epoch: typeof params.expected_binding_epoch === "number" ? params.expected_binding_epoch : undefined,
+        input_cursor: typeof params.input_cursor === "string" ? params.input_cursor : undefined,
+        offered_frontier: typeof params.offered_frontier === "string" ? params.offered_frontier : undefined,
       });
     }
     if (request.method === "supervisor.checkpoint_worker_cursor") {

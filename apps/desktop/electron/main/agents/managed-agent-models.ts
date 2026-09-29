@@ -13,6 +13,7 @@ import { resolveCodexExecutable } from "./codex-executable.js";
 import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
+import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
 
 type ModelListCacheEntry = {
   expiresAt: number;
@@ -92,6 +93,7 @@ export async function listDesktopAgentProviderModels(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},
 ): Promise<DesktopAgentProviderModelsResult> {
+  await desktopShellEnvironmentReady();
   if (providerId === "cursor") {
     return listCursorModels(input);
   }
@@ -110,7 +112,8 @@ export async function listDesktopAgentProviderModels(
 async function listCodexModels(
   input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopAgentProviderModelsResult> {
-  const command = resolveCodexExecutable();
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const command = resolveCodexExecutable({ env: runtimeEnv });
   const cacheKey = `codex:${command}`;
   const forceRefresh = Boolean(input.refreshModels);
   const cached = modelListCache.get(cacheKey);
@@ -118,13 +121,13 @@ async function listCodexModels(
     return cloneModelResult(cached.result);
   }
 
-  const refreshed = await execFileWithTimeout(command, ["debug", "models"]);
+  const refreshed = await execFileWithTimeout(command, ["debug", "models"], { env: runtimeEnv });
   let models = parseCodexModelsOutput(refreshed.stdout);
   let next: DesktopAgentProviderModelsResult | null = null;
   if (refreshed.ok && models.length) {
     next = modelResult("codex", "ready", models, codexDefaultModel(models), null);
   } else {
-    const bundled = await execFileWithTimeout(command, ["debug", "models", "--bundled"]);
+    const bundled = await execFileWithTimeout(command, ["debug", "models", "--bundled"], { env: runtimeEnv });
     models = parseCodexModelsOutput(bundled.stdout);
     next = bundled.ok && models.length
       ? modelResult("codex", "ready", models, codexDefaultModel(models), null)

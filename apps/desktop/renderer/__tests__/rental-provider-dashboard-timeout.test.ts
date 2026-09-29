@@ -28,3 +28,22 @@ test("a hung dashboard IPC expires and does not poison later rental refreshes", 
     Object.assign(globalThis, { window: previousWindow });
   }
 });
+
+test('account invalidation prevents coalescing or publishing a previous account dashboard', async () => {
+  const previousWindow = globalThis.window;
+  const pending: Array<(value: any) => void> = [];
+  Object.assign(globalThis, { window: { letagentsDesktop: { rental: { getProviderDashboard: () => new Promise(resolve => pending.push(resolve)) } } } });
+  const { invalidateRentalProviderDashboard, loadRentalProviderDashboard } = await import('../src/composables/useRentalProviderEvents');
+  try {
+    invalidateRentalProviderDashboard();
+    const accountA = loadRentalProviderDashboard();
+    const rejectedA = assert.rejects(accountA, /Account changed/);
+    invalidateRentalProviderDashboard();
+    const accountB = loadRentalProviderDashboard();
+    assert.equal(pending.length, 2, 'new account starts its own IPC request');
+    pending[0]({ pendingRequests: [{ taskPrompt: 'Account A private request' }] });
+    await rejectedA;
+    pending[1]({ pendingRequests: [] });
+    assert.deepEqual((await accountB).pendingRequests, []);
+  } finally { invalidateRentalProviderDashboard(); Object.assign(globalThis, { window: previousWindow }); }
+});

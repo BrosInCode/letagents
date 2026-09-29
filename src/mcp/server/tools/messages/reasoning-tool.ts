@@ -103,7 +103,7 @@ export function registerPostReasoningTool(server: McpServer): void {
             publisher_agent_session_id: agentSession?.session_id ?? null,
           });
           milestoneMessageId = milestoneMessage.id;
-          touchCurrentRoom(milestoneMessageId);
+          touchCurrentRoom();
         }
 
         await syncRoomPresence(effectiveLocalRoomId, identity, {
@@ -235,7 +235,7 @@ export function registerPostReasoningTool(server: McpServer): void {
         });
         milestoneMessageId =
           typeof milestoneMessage.id === "string" ? milestoneMessage.id : null;
-        touchCurrentRoom(milestoneMessageId ?? undefined);
+        touchCurrentRoom();
       }
 
       if (status) {

@@ -36,6 +36,7 @@ interface RepoRoomAccessDecisionDeps {
     login: string;
     accessToken: string;
     bypassCache?: boolean;
+    throwOnIndeterminate?: boolean;
   }) => Promise<boolean>;
 }
 
@@ -230,12 +231,10 @@ export async function getGitHubRepoVisibility(
   options: { bypassCache?: boolean } = {},
 ): Promise<GitHubRepoVisibility> {
   if (options.bypassCache) {
-    const anonymousVisibility = await loadGitHubRepoVisibility(roomName, undefined, "fresh-anonymous");
-    if (anonymousVisibility !== "unknown") return anonymousVisibility;
     if (accessToken) {
       return loadGitHubRepoVisibility(roomName, accessToken, "fresh-authenticated");
     }
-    return "unknown";
+    return loadGitHubRepoVisibility(roomName, undefined, "fresh-anonymous");
   }
 
   // A definitive visibility value is safe to share across every account. An
@@ -303,6 +302,10 @@ export async function isGitHubRepoCollaborator(input: {
   // decision reflects live GitHub access — used for source-diff requests where a
   // revoked collaborator must lose access immediately, not up to 30 minutes later.
   bypassCache?: boolean;
+  // Authority-revalidation callers must distinguish a definitive denial from
+  // GitHub throttling/outage responses. Throwing preserves the current grant
+  // for retry instead of destructively treating uncertainty as access loss.
+  throwOnIndeterminate?: boolean;
   // Injectable for tests; production uses the global fetch (bounded by a deadline).
   fetchImpl?: typeof fetch;
 }): Promise<boolean> {
@@ -329,7 +332,12 @@ export async function isGitHubRepoCollaborator(input: {
     if (!repo) return false;
 
     const ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
-    if (!ownerResponse.ok) return false;
+    if (!ownerResponse.ok) {
+      if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(ownerResponse)) {
+        throw new Error(`GitHub repo access revalidation was indeterminate (${ownerResponse.status}).`);
+      }
+      return false;
+    }
 
     const repoPayload = (await ownerResponse.json()) as GitHubRepo;
     let allowed = repoPayload.owner?.login?.toLowerCase() === loginKey;
@@ -342,7 +350,12 @@ export async function isGitHubRepoCollaborator(input: {
         fetchImpl: doFetch,
         timeoutMs: GITHUB_ACCESS_FETCH_TIMEOUT_MS,
       });
-      if (!permissionResponse.ok) return false;
+      if (!permissionResponse.ok) {
+        if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(permissionResponse)) {
+          throw new Error(`GitHub collaborator revalidation was indeterminate (${permissionResponse.status}).`);
+        }
+        return false;
+      }
       const permissionPayload = (await permissionResponse.json()) as GitHubPermissionResponse;
       allowed = Boolean(permissionPayload.permission);
     }
@@ -363,6 +376,14 @@ export async function isGitHubRepoCollaborator(input: {
   });
   repoAccessInflight.set(flightKey, { roomKey, loginKey, promise: pending });
   return pending;
+}
+
+function isIndeterminateGitHubAccessResponse(response: Response): boolean {
+  return response.status === 401
+    || response.status === 403
+    || response.status === 408
+    || response.status === 429
+    || response.status >= 500;
 }
 
 export async function isGitHubRepoAdmin(input: {
@@ -409,6 +430,7 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   roomName: string;
   sessionAccount: RepoRoomAccessIdentity | null | undefined;
   freshCollaboratorCheck?: boolean;
+  throwOnIndeterminate?: boolean;
 }, deps: RepoRoomAccessDecisionDeps = {
   getVisibility: getGitHubRepoVisibility,
   isCollaborator: isGitHubRepoCollaborator,
@@ -443,6 +465,7 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
     login: input.sessionAccount.login,
     accessToken: input.sessionAccount.provider_access_token,
     bypassCache: input.freshCollaboratorCheck,
+    throwOnIndeterminate: input.throwOnIndeterminate,
   });
 
   return allowed ? { kind: "allow" } : { kind: "private_repo_no_access" };

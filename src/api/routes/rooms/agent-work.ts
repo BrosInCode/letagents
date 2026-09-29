@@ -1,0 +1,235 @@
+import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Express, Response } from "express";
+import { isSupervisorHostGrantFeatureEnabled } from "../../../shared/agent-session-bearer.js";
+import type { RoomAgentWorkPollResponse } from "../../../../shared/room-agent-work.mjs";
+import { clearRoomAgentWork, publishRoomAgentWork, publishIndependentWorkspace, readRoomAgentWork, readRoomAgentWorkReviewPage, RoomAgentWorkError } from "../../db/room-agent-work.js";
+import { requireWorkerRequestAgentIdentity } from "../../request/agent-identity.js";
+import { parsePollTimeout, respondWithInternalError, type AuthenticatedRequest } from "../../http/helpers.js";
+import { resolveRequestAuth } from "../../request/auth.js";
+import { reauthorizeGitRoomParticipant, resolveRequestProjectRepoAccessRoomName } from "../../rooms/access.js";
+import { acquireLiveRoomAuthorization, type LiveRoomAuthorizationLease } from "../../rooms/live-authorization.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
+import { requireCurrentSupervisorGrant, respondToStaleSupervisorGrantFence, type RoomResolverDeps } from "../supervisor-host-grants.js";
+import { resolveParticipantRoom, routeParam } from "./messages/helpers.js";
+import type { RoomMessageRouteDeps } from "./messages/types.js";
+import { queueAgentWorkInvalidation } from "../../server/events.js";
+
+export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageRouteDeps, supervisorDeps: RoomResolverDeps): void {
+  app.post(/^\/rooms\/(.+)\/agent-work$/, async (req: AuthenticatedRequest, res) => {
+    // Independent local MCP uses its owner's account token plus its pinned
+    // worker credential. Supervised publishers keep the existing grant route.
+    if (req.authKind !== "owner_token" || !req.sessionAccount?.account_id) {
+      res.status(403).json({ error: "An authenticated independent MCP worker is required." }); return;
+    }
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body)
+      || Object.keys(body).some(key => !["source_message_id", "summary", "review_page", "agent_session_id", "agent_session_token"].includes(key))
+      || typeof body.source_message_id !== "string" || !/^msg_[1-9]\d{0,9}$/.test(body.source_message_id)
+      || Number(body.source_message_id.slice(4)) > 2147483647) {
+      res.status(400).json({ error: "Invalid workspace publication." }); return;
+    }
+    try {
+      const room = await resolveParticipantRoom(req, res, roomDeps);
+      if (!room) return;
+      const resolved = await requireWorkerRequestAgentIdentity({ req, body, room_id: room.id });
+      if (!resolved.ok) { res.status(resolved.status).json({ error: resolved.error }); return; }
+      const identity = resolved.identity;
+      if (!identity.agent_session_id || identity.credential_fence?.kind !== "session_token") {
+        res.status(403).json({ error: "A current independent worker connection is required." }); return;
+      }
+      const result = await publishIndependentWorkspace({ room_id: room.id, source_message_number: Number(body.source_message_id.slice(4)),
+        session_id: identity.agent_session_id, owner_account_id: req.sessionAccount.account_id,
+        token_hash: identity.credential_fence.token_hash, summary: body.summary,
+        ...(body.review_page !== undefined ? { review_page: body.review_page } : {}) });
+      if (result.status === "created") queueAgentWorkInvalidation(room.id);
+      res.setHeader("Cache-Control", "no-store");
+      res.status(result.status === "created" ? 201 : 200).json(result);
+    } catch (error) {
+      if (error instanceof RoomAgentWorkError) {
+        const status = error.code === "payload_cleared" ? 410 : error.code === "publisher_not_authorized" ? 403 : error.code === "invalid_summary" ? 400 : 409;
+        res.status(status).json({ error: "Workspace publication was not accepted.", code: error.code }); return;
+      }
+      respondWithInternalError(res, "room-agent-work.independent", error, "Could not publish workspace changes.");
+    }
+  });
+  // Reads remain available when grant rollout is disabled. These are retained
+  // host reports, not current liveness. Register poll before the detail route.
+  app.get(/^\/rooms\/(.+)\/agent-work\/poll$/, (req: AuthenticatedRequest, res) => pollRoomAgentWork(req, res, roomDeps));
+  app.get(/^\/rooms\/(.+)\/agent-work(?:\/([^/]+))?$/, async (req: AuthenticatedRequest, res) => {
+    if (!req.sessionAccount?.account_id || (req.authKind !== "session" && req.authKind !== "owner_token")) {
+      res.status(401).json({ error: "Room work history requires human account authentication." }); return;
+    }
+    const room = await resolveParticipantRoom(req, res, roomDeps);
+    if (!room) return;
+    const attemptId = routeParam(req, 1);
+    if (attemptId && !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(attemptId)) {
+      res.status(404).json({ error: "Work evidence is not available in this room." }); return;
+    }
+    try {
+      const result = await readRoomAgentWork({ room_id: room.id, include_workspace: req.query?.include_workspace === "1", include_contribution: req.query?.include_contribution === "1", ...(attemptId ? { attempt_id: attemptId } : {}) });
+      if (attemptId && result.work.length === 0) {
+        res.status(404).json({ error: "Work evidence is not available in this room." }); return;
+      }
+      res.setHeader("Cache-Control", "no-store");
+      if (req.query?.review_page !== undefined) {
+        const page = String(req.query.review_page);
+        if (!attemptId || !/^(0|[1-9]\d{0,3})$/.test(page) || Number(page) >= 2048) {
+          res.status(400).json({ error: "Invalid review page." }); return;
+        }
+        if ('availability' in result.work[0].summary) { res.status(404).json({ error: "Review is no longer available." }); return; }
+        res.json(await readRoomAgentWorkReviewPage(attemptId, Number(page))); return;
+      }
+      res.json(attemptId ? result.work[0] : result);
+    } catch (error) { respondWithInternalError(res, "room-agent-work.read", error, "Could not read room work evidence."); }
+  });
+
+  // Report custody, not room governance: admins cannot clear another owner's
+  // report. Keep this human operation available when publisher rollout is off.
+  app.delete(/^\/rooms\/(.+)\/agent-work\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+    if (!req.sessionAccount?.account_id || (req.authKind !== "session" && req.authKind !== "owner_token")) {
+      res.status(401).json({ error: "Clearing work history requires human account authentication." }); return;
+    }
+    const room = await resolveParticipantRoom(req, res, roomDeps);
+    if (!room) return;
+    const attemptId = routeParam(req, 1);
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(attemptId)) {
+      res.status(404).json({ error: "Work evidence is not available in this room." }); return;
+    }
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1
+      || !Number.isSafeInteger(body.revision) || body.revision < 1) {
+      res.status(400).json({ error: "The exact work revision is required." }); return;
+    }
+    try {
+      const result = await clearRoomAgentWork({ room_id: room.id, attempt_id: attemptId,
+        owner_account_id: req.sessionAccount.account_id, revision: body.revision });
+      if (!result) { res.status(404).json({ error: "Work evidence is not available in this room." }); return; }
+      if (result.status === "cleared") queueAgentWorkInvalidation(room.id);
+      res.setHeader("Cache-Control", "no-store"); res.json(result);
+    } catch (error) {
+      if (error instanceof RoomAgentWorkError) {
+        res.status(409).json({ error: "Work evidence could not be cleared.", code: error.code }); return;
+      }
+      respondWithInternalError(res, "room-agent-work.clear", error, "Could not clear room work evidence.");
+    }
+  });
+
+  if (!isSupervisorHostGrantFeatureEnabled()) return;
+  app.post("/supervisor-host-grants/:grantId/worker-sessions/:sessionId/agent-work", async (req: AuthenticatedRequest, res) => {
+    if (req.authKind !== "supervisor_grant" || req.supervisorGrant?.grant_id !== req.params.grantId) {
+      res.status(403).json({ error: "A current supervisor grant is required." }); return;
+    }
+    const body = req.body as Record<string, unknown> | null;
+    if (!body || typeof body !== "object" || Array.isArray(body)
+      || Object.keys(body).some((key) => !["room_id", "source_message_id", "revision", "summary", "generation", "review_page"].includes(key))
+      || typeof body.room_id !== "string" || body.room_id.length > 512 || !body.room_id.trim()
+      || typeof body.source_message_id !== "string" || !/^msg_[1-9]\d{0,9}$/.test(body.source_message_id)
+      || Number(body.source_message_id.slice(4)) > 2147483647) {
+      res.status(400).json({ error: "Invalid room work snapshot." }); return;
+    }
+    try {
+      const roomId = await supervisorDeps.resolveCanonicalRoomRequestId(normalizeRoomId(body.room_id));
+      const grant = await requireCurrentSupervisorGrant(req, res, supervisorDeps, { kind: "rooms", room_ids: [roomId] });
+      if (!grant) return;
+      const result = await publishRoomAgentWork({
+        fence: { grant_id: grant.grant_id, generation: grant.current_generation, token_version: grant.token_version },
+        room_id: roomId, session_id: String(req.params.sessionId), source_message_number: Number(body.source_message_id.slice(4)),
+        revision: body.revision as number, summary: body.summary, ...(body.review_page !== undefined ? { review_page: body.review_page } : {}),
+      });
+      if (result.status === "created" || result.status === "updated") {
+        queueAgentWorkInvalidation(roomId);
+      }
+      res.status(result.status === "created" ? 201 : 200).json({ ...result,
+        ...(body.review_page && !('availability' in result.work.summary) ? {
+          review_digest: (body.review_page as { digest: string }).digest,
+          review_page: (body.review_page as { index: number }).index,
+        } : {}) });
+    } catch (error) {
+      if (respondToStaleSupervisorGrantFence(res, error)) return;
+      if (error instanceof RoomAgentWorkError) {
+        res.status(error.code === "invalid_summary" ? 400 : error.code === "publisher_not_authorized" ? 403 : 409)
+          .json({ error: "Room work snapshot was not accepted.", code: error.code }); return;
+      }
+      respondWithInternalError(res, "room-agent-work.publish", error, "Could not store room work evidence.");
+    }
+  });
+}
+
+async function pollRoomAgentWork(req: AuthenticatedRequest, res: Response, deps: RoomMessageRouteDeps): Promise<void> {
+  const cancellation = new AbortController();
+  const onClose = () => cancellation.abort();
+  res.once("close", onClose);
+  let authorization: LiveRoomAuthorizationLease | undefined;
+  let authorizationEpoch = 0;
+  let stopInvalidation: (() => void) | undefined;
+  const closed = () => cancellation.signal.aborted || res.destroyed;
+  const accountId = req.sessionAccount?.account_id;
+  try {
+    if (closed()) return;
+    if (!accountId || (req.authKind !== "session" && req.authKind !== "owner_token")) {
+      res.status(401).json({ error: "Room work history requires human account authentication." }); return;
+    }
+    const room = await resolveParticipantRoom(req, res, deps);
+    if (!room || closed()) return;
+    const after = req.query.after;
+    const prefix = `rw1.${createHash("sha256").update(JSON.stringify([room.id, accountId])).digest("hex")}.`;
+    if (after !== undefined && (typeof after !== "string" || !/^rw1\.[a-f0-9]{64}\.[a-f0-9]{64}$/.test(after) || !after.startsWith(prefix))) {
+      res.status(409).json({ error: "Room work cursor is not valid for this view.", code: "invalid_cursor" }); return;
+    }
+    const accessRoomName = await (deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName)(req, room);
+    if (closed()) return;
+    authorization = acquireLiveRoomAuthorization({
+      req, roomId: room.id, accessRoomName,
+      authorize: () => (deps.reauthorizeGitRoomParticipant ?? reauthorizeGitRoomParticipant)(req, room),
+    });
+    stopInvalidation = authorization.onInvalidated(() => { authorizationEpoch++; });
+    // Bound intentional waiting, not the duration of database/upstream checks.
+    const deadline = performance.now() + Math.min(30_000, parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined));
+    const currentReaderEpoch = async (): Promise<number | null> => {
+      // Shared repository leases may originate from a public-room message
+      // stream whose callback skips credential checks. Keep this check outside
+      // that lease and after any upstream refresh, even for public rooms.
+      const epoch = authorizationEpoch;
+      if (closed() || !(await authorization!.check())) return null;
+      const fresh = await resolveRequestAuth(req);
+      return !closed() && fresh.account?.account_id === accountId && fresh.authKind === req.authKind
+        ? epoch : null;
+    };
+    while (!closed()) {
+      if ((await currentReaderEpoch()) !== authorizationEpoch) {
+        if (!closed()) res.status(403).json({ error: "Room access is no longer authorized." });
+        return;
+      }
+      if (closed()) return;
+      // One SQL snapshot filters visibility before ordering and LIMIT. The
+      // digest covers precisely that canonical public body, including truncation.
+      const snapshot = await readRoomAgentWork({ room_id: room.id, include_workspace: req.query?.include_workspace === "1", include_contribution: req.query?.include_contribution === "1" });
+      if (closed()) return;
+      const cursor = prefix + createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+      if (after !== cursor || performance.now() >= deadline) {
+        // A repository invalidation during the final credential lookup also
+        // fails closed. No asynchronous work follows this fence before JSON.
+        if ((await currentReaderEpoch()) !== authorizationEpoch) {
+          if (!closed()) res.status(403).json({ error: "Room access is no longer authorized." });
+          return;
+        }
+        if (closed()) return;
+        const response: RoomAgentWorkPollResponse = after !== cursor
+          ? { room_id: room.id, cursor, changed: true, snapshot }
+          : { room_id: room.id, cursor, changed: false, snapshot: null };
+        res.setHeader("Cache-Control", "no-store");
+        res.json(response); return;
+      }
+      // No broker subscription: hidden activity cannot wake a response or
+      // reset its deadline. Periodic authoritative reads also survive event loss.
+      await delay(Math.min(1_000, Math.max(0, deadline - performance.now())), undefined, { signal: cancellation.signal });
+    }
+  } catch (error) {
+    if (!closed()) respondWithInternalError(res, "room-agent-work.poll", error, "Could not read room work evidence.");
+  } finally {
+    stopInvalidation?.();
+    authorization?.release();
+    res.off("close", onClose);
+  }
+}

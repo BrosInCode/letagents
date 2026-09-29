@@ -1,5 +1,20 @@
 import type { RepoStatus } from "../../../electron/ipc-types";
 
+export function preserveRoomRepoStatistics(
+  current: RepoStatus | null,
+  opening: RepoStatus | null,
+): RepoStatus | null {
+  // Room opening omits comparisons. Do not erase a watcher result that arrived
+  // before the room response, or statistics for an unchanged reopened room.
+  // Authoritative watcher/getStatus results must still be applied directly.
+  if (!current?.isGitRepo || !opening?.isGitRepo
+    || current.rootPath !== opening.rootPath
+    || current.branch !== opening.branch
+    || current.defaultBranch !== opening.defaultBranch
+    || opening.branchDelta || opening.branchDeltas?.length) return opening;
+  return { ...opening, branchDelta: current.branchDelta, branchDeltas: current.branchDeltas };
+}
+
 export function repoChangedFileCount(repoStatus: Pick<RepoStatus, "changes">): number {
   const changes = repoStatus.changes;
   return changes

@@ -321,6 +321,20 @@ test("normalizeTaskWorkflowArtifacts deduplicates repeated persisted artifacts",
   );
 });
 
+test("normalizeTaskWorkflowArtifacts bounds accumulated history to the newest 32 artifacts", () => {
+  const normalized = normalizeTaskWorkflowArtifacts({
+    artifacts: Array.from({ length: 40 }, (_, index) => ({
+      provider: "github" as const,
+      kind: "check_run" as const,
+      id: `run-${index}`,
+    })),
+  });
+
+  assert.equal(normalized.length, 32);
+  assert.equal(normalized[0]?.id, "run-8");
+  assert.equal(normalized.at(-1)?.id, "run-39");
+});
+
 test("validateTaskWorkflowArtifactsInput rejects unsupported keys", () => {
   assert.throws(
     () =>

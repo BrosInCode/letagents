@@ -1,18 +1,23 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { ProviderActionFailure, type ProviderActionPort } from "../provider-action-port.js";
+import { ProviderActionFailure, type ProviderActionHandle, type ProviderActionPort } from "../provider-action-port.js";
+import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
-import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
+import {
+  SupervisedAgentDelivery,
+  supervisedReplyTargetForSourceMessage,
+} from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { DAEMON_PROTOCOL_VERSION } from "../types.js";
+import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 
 const agent = {
   agentId: "stone", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
@@ -88,6 +93,91 @@ test("daemon delivery treats an absent mode as historical mcp_polling", async ()
   }
 });
 
+test("the central delivery lifecycle rejects every start until the exact provider birth is admitted", async () => {
+  let admitted = false;
+  let revokeWhileLoading = false;
+  let lifecycleActive = false;
+  let handoffScheduled = false;
+  let whileCheckingAuthority = () => {};
+  let refreshes = 0;
+  const entry: DaemonManifestEntry = {
+    id: "stone", room_id: "room", display_name: "Stone", provider: "codex", model: null,
+    charter: "test", desired_state: "running", observed_state: "working", condition: "none",
+    permission_profile_id: "supervised", created_by: "test", created_at: new Date().toISOString(),
+    work_attempt_id: "attempt", delivery_mode: "daemon_inbox",
+    provider_ref: {
+      work_attempt_id: "attempt", execution_generation_id: "generation-1",
+      provider_continuation_id: "thread", provider_connection: agent.providerConnection,
+    },
+  };
+  const binding = {
+    entry_id: "stone", room_id: "room", work_attempt_id: "attempt",
+    execution_generation_id: "generation-1", agent_session_id: "session-1",
+    credential_ref: "credential", api_url: "https://letagents.test", updated_at: new Date().toISOString(),
+    room_cursor: null,
+  };
+  const lifecycle = new SupervisedDeliveryLifecycleCoordinator({
+    isHandoffScheduled: () => handoffScheduled,
+    supportsRoomTurns: () => true,
+    isLifecycleActive: () => lifecycleActive,
+    isOperationallyAdmitted: () => admitted,
+    currentDaemonGeneration: () => 1,
+    delivery: {
+      activeTurn: () => null,
+      ensureStarted: async () => { refreshes += 1; },
+      refresh: async () => { refreshes += 1; },
+      wake: () => {},
+    },
+    manifest: {
+      unresolvedDeliveryDrain: async () => null,
+      getEntry: async () => entry,
+      getAgentConfiguration: async () => ({}),
+      pendingRoomMoves: async () => [],
+    },
+    roomMoves: { reconcile: async move => move },
+    cutovers: { start: async () => {} },
+    inbox: {
+      get: async () => null,
+      preparedRoomMove: async () => null,
+      providerTurnBinding: async () => null,
+      receipts: async () => [],
+    },
+    bindings: {
+      get: async () => {
+        if (revokeWhileLoading) admitted = false;
+        return binding;
+      },
+      credentialFor: async () => "memory",
+    },
+    liveHandle: () => agent.handle,
+    providerAuthority: { isExactAuthority: async () => { whileCheckingAuthority(); return true; } },
+    scheduleRecovery: () => {},
+  });
+
+  await lifecycle.start("stone");
+  assert.equal(refreshes, 0, "worker bind, restart, wake, and recovery share this inert gate");
+  admitted = true;
+  revokeWhileLoading = true;
+  await lifecycle.start("stone");
+  assert.equal(refreshes, 0,
+    "a birth replaced while durable identity loads cannot cross the final delivery gate");
+  admitted = true;
+  revokeWhileLoading = false;
+  for (const mode of ["refresh", "ensure", "wake"] as const) {
+    whileCheckingAuthority = () => { lifecycleActive = true; };
+    await lifecycle.start("stone", mode);
+    assert.equal(refreshes, 0, "a start suspended before lifecycle admission must remain fenced");
+    lifecycleActive = false;
+    whileCheckingAuthority = () => { handoffScheduled = true; };
+    await lifecycle.start("stone", mode);
+    assert.equal(refreshes, 0, "handoff during authority reads must prevent delivery admission");
+    handoffScheduled = false;
+  }
+  whileCheckingAuthority = () => {};
+  await lifecycle.start("stone");
+  assert.equal(refreshes, 1);
+});
+
 test("daemon delivery admits a non-Codex provider that owns daemon_inbox", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-provider-neutral-"));
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
@@ -99,6 +189,162 @@ test("daemon delivery admits a non-Codex provider that owns daemon_inbox", async
     await delivery.poll({ ...agent, provider: "claude-code", deliveryMode: "daemon_inbox" });
     assert.equal(polls, 1);
   } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("idle-only stop refuses both sides of native turn admission without aborting work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-idle-stop-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const delivery = new SupervisedAgentDelivery(
+      store,
+      provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })),
+      { poll: async () => ({}), publish: async () => {} },
+      currentAuthority,
+    );
+    const internals = delivery as unknown as {
+      activeTurnAborts: Map<string, { inboxItemId: string; controller: AbortController }>;
+      activeTurns: Map<string, unknown>;
+      stoppingAgents: Set<string>;
+    };
+    const preNative = new AbortController();
+    internals.activeTurnAborts.set(agent.agentId, { inboxItemId: "item-1", controller: preNative });
+    assert.equal(await delivery.stopIfIdle(agent.agentId), false);
+    assert.equal(preNative.signal.aborted, false, "a rejected apply cannot interrupt pre-native work");
+
+    internals.activeTurnAborts.delete(agent.agentId);
+    internals.activeTurns.set(agent.agentId, {});
+    assert.equal(await delivery.stopIfIdle(agent.agentId), false);
+    internals.activeTurns.delete(agent.agentId);
+
+    const stopped = delivery.stopIfIdle(agent.agentId);
+    assert.equal(internals.stoppingAgents.has(agent.agentId), true,
+      "the idle lane is fenced synchronously before its drain crosses an await");
+    assert.equal(await stopped, true);
+    assert.equal(internals.stoppingAgents.has(agent.agentId), false);
+    await store.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("idle reservation keeps delayed and new delivery starts fenced until replacement settles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-idle-reservation-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const entered = deferred<void>();
+  const proceed = deferred<void>();
+  let suspend = true;
+  let polls = 0;
+  const delivery = new SupervisedAgentDelivery(store,
+    provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })),
+    { poll: async () => { polls += 1; return {}; }, publish: async () => {} },
+    async () => {
+      if (suspend) { suspend = false; entered.resolve(); await proceed.promise; }
+      return true;
+    });
+  try {
+    const delayed = delivery.ensureStarted(agent);
+    await entered.promise;
+    const release = await delivery.reserveIdle(agent.agentId);
+    assert.ok(release);
+    assert.equal(await delivery.reserveIdle(agent.agentId), null, "one lifecycle owner per agent");
+    proceed.resolve();
+    await delayed;
+    await delivery.ensureStarted(agent);
+    await delivery.refresh(agent);
+    await delivery.poll(agent);
+    assert.equal(polls, 0, "neither a paused predecessor nor a fresh caller may restart intake");
+    release();
+    release();
+    await delivery.poll(agent);
+    assert.equal(polls, 1, "normal delivery can resume after release");
+  } finally {
+    proceed.resolve();
+    await delivery.stop(agent.agentId);
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor delivery exposes the exact-agent lifecycle settlement barrier to the adapter", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-settlement-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const recordCompletion = installCursorCompletionProjectionFixture(store);
+  const settledAgents: string[] = [];
+  const cursorAgent = { ...agent, provider: "cursor" };
+  const delivery = new SupervisedAgentDelivery(
+    store,
+    provider(async (_handle, request, options) => {
+      assert.equal(typeof options?.settleLifecycleBeforeIdle, "function");
+      await options!.settleLifecycleBeforeIdle!();
+      recordCompletion(request.inboxItemId, { outcome: "no_reply" });
+      return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+    }),
+    { poll: async () => ({}), publish: async () => { throw new Error("no-reply must not publish"); } },
+    currentAuthority,
+    50,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async (settledAgent) => { settledAgents.push(settledAgent.agentId); },
+  );
+  try {
+    await ingest(store);
+    await delivery.pump(cursorAgent);
+    assert.deepEqual(settledAgents, [cursorAgent.agentId]);
+    assert.equal((await store.receipts(cursorAgent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally {
+    await delivery.fenceAndDrain().catch(() => undefined);
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor recovery receives the same exact-agent lifecycle settlement barrier", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-recovery-settlement-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const recordCompletion = installCursorCompletionProjectionFixture(store);
+  const settledAgents: string[] = [];
+  const cursorAgent = { ...agent, provider: "cursor" };
+  const delivery = new SupervisedAgentDelivery(
+    store,
+    provider(
+      async () => { throw new Error("recovery must not redispatch the Cursor turn"); },
+      async (_handle, request, options) => {
+        assert.equal(typeof options?.settleLifecycleBeforeIdle, "function");
+        await options!.settleLifecycleBeforeIdle!();
+        recordCompletion(request.providerTurnId, { outcome: "no_reply" });
+        return { turnId: request.providerTurnId, outcome: "no_reply", text: null };
+      },
+    ),
+    { poll: async () => ({}), publish: async () => { throw new Error("no-reply must not publish"); } },
+    currentAuthority,
+    50,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async (settledAgent) => { settledAgents.push(settledAgent.agentId); },
+  );
+  try {
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "cursor:recover-settlement", TEST_PROVIDER_TURN_AUTHORITY);
+    await delivery.pump(cursorAgent);
+    assert.deepEqual(settledAgents, [cursorAgent.agentId]);
+    assert.equal((await store.receipts(cursorAgent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally {
+    await delivery.fenceAndDrain().catch(() => undefined);
     await store.close();
     await rm(root, { recursive: true, force: true });
   }
@@ -202,6 +448,56 @@ test("ingress keeps observing and queues routed work without a provider handle",
   }
 });
 
+test("new-source custody is selected before the asynchronous poll and never refreshed for a replay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-source-custody-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const entered = deferred<void>(); const release = deferred<void>();
+  let custody = "original-grant"; let selections = 0;
+  const observed: Array<{ custody: string; origin: string; session: string; ids: string[] }> = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+    poll: async () => { assert.ok(selections > 0, "custody must be frozen before HTTP starts"); entered.resolve(); await release.promise;
+      return { messages: [{ id: "msg_1", activation: { for_current_agent: { decision: "activate" } } }] }; },
+    publish: async () => { throw new Error("ingress-only observation must not publish"); },
+  }, currentAuthority, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, candidate => {
+    selections++;
+    const snapshot = { custody, origin: candidate.apiUrl, session: candidate.agentSessionId };
+    return ids => observed.push({ ...snapshot, ids: [...ids] });
+  });
+  try {
+    await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: null });
+    const ingress = { ...agent, handle: null, providerConnection: null };
+    const pending = delivery.poll(ingress); await entered.promise;
+    custody = "replacement-grant"; release.resolve(); await pending;
+    assert.deepEqual(observed, [{ custody: "original-grant", origin: agent.apiUrl, session: agent.agentSessionId, ids: ["msg_1"] }]);
+    await delivery.poll(ingress);
+    assert.equal(selections, 2); assert.equal(observed.length, 1, "a later current grant cannot reattribute existing work");
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("throwing source observation hooks cannot block native delivery", async () => {
+  for (const failure of ["selection", "notification"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-delivery-source-hint-failure-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    let selections = 0; let notifications = 0; let turns = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      turns++; await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.("native-turn");
+      return { turnId: "native-turn", outcome: "no_reply", text: null, evidence: "stream" };
+    }), {
+      poll: async () => ({ messages: [{ id: "msg_1", activation: { for_current_agent: { decision: "activate" } } }] }),
+      publish: async () => { throw new Error("no-reply delivery must not publish"); },
+    }, currentAuthority, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, () => {
+      selections++; if (failure === "selection") throw new Error("optional source snapshot unavailable");
+      return () => { notifications++; throw new Error("optional publication receipt unavailable"); };
+    });
+    try {
+      await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: null });
+      await delivery.poll(agent);
+      assert.equal(selections, 1); assert.equal(notifications, failure === "notification" ? 1 : 0);
+      assert.equal(turns, 1); assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
 async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!check()) {
@@ -278,6 +574,64 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
   });
 }
 
+async function installExactTestProviderBirth(
+  internals: {
+    store: ManifestStore;
+    manifestGeneration: number;
+    providerStreams: {
+      install(
+        entryId: string,
+        handle: ProviderActionHandle,
+        executionGenerationId: string,
+        mayStartDelivery: () => boolean,
+      ): Promise<void>;
+    };
+  },
+  entryId: string,
+  handle: ProviderActionHandle,
+  executionGenerationId: string,
+): Promise<void> {
+  const entry = await internals.store.getEntry(entryId);
+  assert.ok(entry?.work_attempt_id && entry.workspace_path && handle.providerConnection);
+  const database = (internals.store as unknown as { database: DatabaseSync }).database;
+  database.prepare(`INSERT OR IGNORE INTO work_attempts(
+    work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
+    workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at
+  ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+    entry.work_attempt_id,
+    `task:${entryId}`,
+    `lease:${entryId}`,
+    1,
+    entry.workspace_path,
+    "repo",
+    "remote",
+    "revision",
+    `${entry.workspace_path}/.bare`,
+    "active",
+    new Date().toISOString(),
+  );
+  database.prepare(`INSERT OR IGNORE INTO work_attempt_executions(
+    execution_generation_id,work_attempt_id,started_at,actor,generation,terminal_json
+  ) VALUES(?,?,?,?,?,NULL)`).run(
+    executionGenerationId,
+    entry.work_attempt_id,
+    new Date().toISOString(),
+    "test",
+    1,
+  );
+  const snapshot = await internals.store.load();
+  const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+    entry,
+    executionGenerationId,
+    providerConnection: handle.providerConnection,
+    appliedRevision: handle.appliedConfigurationRevision ?? 1,
+    requestedAuthorityMode: "typed_shadow",
+    observedAtMs: Date.now(),
+  });
+  internals.manifestGeneration = birth.generation;
+  await internals.providerStreams.install(entryId, handle, executionGenerationId, () => false);
+}
+
 test("Cursor dynamic checkpoint converges after manifest commit but attempt durability failure", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-cursor-provider-checkpoint-"));
   let daemon: SupervisorDaemon | null = null;
@@ -297,11 +651,14 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
       pid: 43141,
       processIdentity: "pid:43141:birth:exact",
     };
+    const terminalAt = new Date().toISOString();
+    let liveContinuation = pendingContinuation;
     const liveHandle = {
       workAttemptId,
-      providerContinuationId: realContinuation,
+      get providerContinuationId() { return liveContinuation; },
       pid: providerConnection.pid,
       providerConnection,
+      appliedConfigurationRevision: 1,
       observedState: () => "working" as const,
     };
     const ingressAgent = {
@@ -351,9 +708,23 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     let checkpointCalls = 0;
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof liveHandle>;
+      manifestGeneration: number;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: ProviderActionHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+        currentInstallation(entryId: string): ProviderInstallationToken | undefined;
+      };
+      providerTerminals: { handleTerminal(installation: ProviderInstallationToken, terminal: {
+        endedAt: string; exitCode: number; signal: null; terminalCause: "crashed";
+        providerContinuationId: string;
+      }): Promise<void> };
       workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
       supervisedInbox: SupervisedAgentInboxStore;
-      store: { getEntry(id: string): Promise<{ provider_ref: { provider_continuation_id: string } } | null> };
+      store: ManifestStore;
       durability: {
         getAttempt(id: string): Promise<{
           checkpoints: Array<{ provider_continuation_id: string | null }>;
@@ -361,33 +732,27 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
             execution_generation_id: string;
             actor: string;
             generation: number;
-            terminal: { terminal_cause: "crashed" };
+            terminal: import("../types.js").ExecutionTerminalPayload;
           }>;
         }>;
         checkpoint(id: string, input: { provider_continuation_id: string | null }): Promise<void>;
       };
-      checkpointDynamicProviderState(input: {
-        agent: typeof ingressAgent;
-        inboxItemId: string;
-        providerTurnId: string;
-        providerContinuationId: string;
-        providerConnection: typeof providerConnection;
-      }): Promise<void>;
-      handleProviderTerminal(
-        entryId: string,
-        handle: typeof liveHandle,
-        executionGenerationId: string,
-        terminalBinding: undefined,
-        terminal: {
-          endedAt: string;
-          exitCode: number;
-          signal: null;
-          terminalCause: "crashed";
+      providerCheckpoints: {
+        checkpointDynamicState(input: {
+          agent: typeof ingressAgent;
+          inboxItemId: string;
+          providerTurnId: string;
           providerContinuationId: string;
-        },
-      ): Promise<void>;
+          providerConnection: typeof providerConnection;
+        }): Promise<void>;
+      };
     };
-    internals.liveHandles.set(ingressAgent.agentId, liveHandle);
+    await installExactTestProviderBirth(
+      internals,
+      ingressAgent.agentId,
+      liveHandle,
+      executionGenerationId,
+    );
     await internals.workerBindings.bind({
       entry_id: ingressAgent.agentId,
       room_id: ingressAgent.roomId,
@@ -418,7 +783,8 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
         execution_generation_id: executionGenerationId,
         actor: "test",
         generation: 1,
-        terminal: { terminal_cause: "crashed" },
+        terminal: { ended_at: terminalAt, exit_code: 1, signal: null, terminal_cause: "crashed",
+          provider_continuation_id: realContinuation, actor: "test", generation: 1, stdio_archive_ref: null, stdio_tail: "" },
       }],
     });
     internals.durability.checkpoint = async (_id, checkpoint) => {
@@ -428,7 +794,8 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
       durableCheckpoints.push(realContinuation);
     };
 
-    await internals.checkpointDynamicProviderState({
+    liveContinuation = realContinuation;
+    await internals.providerCheckpoints.checkpointDynamicState({
       agent: ingressAgent,
       inboxItemId: inboxItem.inbox_item_id,
       providerTurnId,
@@ -443,7 +810,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     assert.equal(ingressAgent.providerContinuationId, realContinuation, "ingress authority converges to the committed manifest");
     assert.equal(liveHandle.providerContinuationId, realContinuation);
 
-    await internals.checkpointDynamicProviderState({
+    await internals.providerCheckpoints.checkpointDynamicState({
       agent: ingressAgent,
       inboxItemId: inboxItem.inbox_item_id,
       providerTurnId,
@@ -452,22 +819,18 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     });
     assert.deepEqual(durableCheckpoints, [realContinuation], "retry finishes only the missing idempotent checkpoint");
 
-    await internals.handleProviderTerminal(
-      ingressAgent.agentId,
-      liveHandle,
-      executionGenerationId,
-      undefined,
-      {
-        endedAt: new Date().toISOString(),
+    const installation = internals.providerStreams.currentInstallation(ingressAgent.agentId);
+    assert.ok(installation);
+    await internals.providerTerminals.handleTerminal(installation, {
+        endedAt: terminalAt,
         exitCode: 1,
         signal: null,
         terminalCause: "crashed",
         providerContinuationId: realContinuation,
-      },
-    );
+      });
     assert.equal(internals.liveHandles.has(ingressAgent.agentId), false, "terminal notification retires the live handle");
     await assert.rejects(
-      internals.checkpointDynamicProviderState({
+      internals.providerCheckpoints.checkpointDynamicState({
         agent: ingressAgent,
         inboxItemId: inboxItem.inbox_item_id,
         providerTurnId,
@@ -504,6 +867,7 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
       get pid() { return connection.pid; },
       get providerContinuationId() { return continuation; },
       get providerConnection() { return connection; },
+      appliedConfigurationRevision: 1,
       observedState: () => connection.pid === null ? "idle" as const : "working" as const,
     };
     const order: string[] = [];
@@ -569,6 +933,15 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
       startSupervisedDelivery(entryId: string): Promise<void>;
       setDisplayName(entryId: string, displayName: string): Promise<unknown>;
       store: ManifestStore;
+      manifestGeneration: number;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: ProviderActionHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+      };
     };
     await daemon.start();
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
@@ -584,7 +957,12 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
       },
     } });
     assert.equal(put.ok, true, put.error);
-    internals.liveHandles.set("cursor-atomic", liveHandle);
+    await installExactTestProviderBirth(
+      internals,
+      "cursor-atomic",
+      liveHandle,
+      executionGenerationId,
+    );
     await internals.workerBindings.bind({
       entry_id: "cursor-atomic", room_id: "room", work_attempt_id: workAttemptId,
       execution_generation_id: executionGenerationId, agent_session_id: "cursor-agent-session",
@@ -667,6 +1045,7 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
         get pid() { return connection.pid; },
         get providerContinuationId() { return continuation; },
         get providerConnection() { return connection; },
+        appliedConfigurationRevision: 1,
         observedState: () => connection.pid === null ? "idle" as const : "working" as const,
       };
       const nativeReleased = deferred<void>();
@@ -703,7 +1082,16 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
           supervisedInbox: SupervisedAgentInboxStore;
           supervisedDelivery: SupervisedAgentDelivery;
           startSupervisedDelivery(entryId: string): Promise<void>;
-          store: { getEntry(id: string): Promise<{ provider_ref?: { provider_continuation_id: string; provider_connection: unknown } | null } | undefined> };
+          store: ManifestStore;
+          manifestGeneration: number;
+          providerStreams: {
+            install(
+              entryId: string,
+              handle: ProviderActionHandle,
+              executionGenerationId: string,
+              mayStartDelivery: () => boolean,
+            ): Promise<void>;
+          };
         };
         await daemon.start();
         const agentId = `cursor-init-handoff:${initial}`;
@@ -718,7 +1106,12 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
           },
         } });
         assert.equal(put.ok, true, put.error);
-        internals.liveHandles.set(agentId, liveHandle);
+        await installExactTestProviderBirth(
+          internals,
+          agentId,
+          liveHandle,
+          executionGenerationId,
+        );
         await internals.workerBindings.bind({
           entry_id: agentId, room_id: "room", work_attempt_id: workAttemptId,
           execution_generation_id: executionGenerationId, agent_session_id: `session:${initial}`,
@@ -775,20 +1168,464 @@ async function ingest(store: SupervisedAgentInboxStore, id = "1") {
   await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id, messages: [{ source_message_id: id, source_message: { id }, activation: {} }] });
 }
 
+test("a transient provider failure continues its unfinished task without another room message", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-task-continuity-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let runs = 0;
+  let partialWrites = 0;
+  let completed = false;
+  const task = { id: "task_1", title: "Finish the existing change", leaseId: "lease-1", epoch: 0 };
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    const turnId = `turn-${runs}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    if (runs === 1) {
+      partialWrites += 1;
+      return { turnId, providerContinuationId: "thread", outcome: "failed", text: null,
+        evidence: "stream", error: "HTTP 503 Service Unavailable" };
+    }
+    assert.match(JSON.stringify(request.sourceMessage), /task_1/);
+    assert.match(JSON.stringify(request.sourceMessage), /existing work/i);
+    completed = true;
+    return { turnId, outcome: "reply", text: "The remaining work is finished." };
+  }), {
+    poll: async () => ({}),
+    ownedTasks: async () => completed ? [] : [task],
+    publish: async () => ({ roomId: agent.roomId, messageId: "msg_2" }),
+  }, currentAuthority, 0, async () => {});
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    assert.equal(runs, 2, "the failed turn must not strand the task when the room stays quiet");
+    assert.equal(partialWrites, 1, "the original turn and its completed work must not be replayed");
+    assert.equal(completed, true);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "1");
+  } finally {
+    await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+  }
+});
+
+const continuityTask = { id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 };
+
+test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-restart-"));
+  const path = join(root, "state.sqlite");
+  let store = new SupervisedAgentInboxStore(path);
+  const effectRequest = { agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: "generation-1",
+    provider_turn_id: "failed-turn", work_attempt_id: "attempt", current_execution_generation_id: "generation-2",
+    provider_continuation_id: "thread", mcp_request_id: "publish-pr", tool_name: "publish_room_artifact",
+    request: { url: "https://github.com/example/repo/pull/1" }, mutation: true };
+  const http = { poll: async () => ({}), ownedTasks: async () => [continuityTask],
+    publish: async () => ({ roomId: agent.roomId, messageId: "published" }) };
+  let runs = 0;
+  let delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs++;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("failed-turn");
+    await writeFile(join(root, "work.txt"), "partial implementation\n");
+    // An already executed external mutation has its durable receipt before the provider fails.
+    const db = new DatabaseSync(path);
+    db.prepare(`INSERT INTO supervised_agent_effects
+      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+      VALUES ('effect',?,?,?,?,?,?,?,1,'completed',?,NULL,?,?)`).run(agent.agentId, agent.roomId, "generation-1",
+      "failed-turn", effectRequest.mcp_request_id, effectRequest.tool_name, JSON.stringify(effectRequest.request),
+      JSON.stringify({ artifact_id: "pr-1" }), new Date().toISOString(), new Date().toISOString());
+    db.close();
+    const failed = { turnId: "failed-turn", providerContinuationId: "thread", outcome: "failed" as const,
+      text: null, evidence: "stream" as const, error: "HTTP 503 unavailable" };
+    await options?.checkpointTerminalResult?.(failed);
+    delivery.fence(); // Crash window: native failure is saved, child continuation does not yet exist.
+    return failed;
+  }), http, currentAuthority, 0);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    await delivery.fenceAndDrain(); await store.close();
+    store = new SupervisedAgentInboxStore(path);
+    const afterRestart = { ...agent, executionGenerationId: "generation-2", daemonGeneration: 2 };
+    delivery = new SupervisedAgentDelivery(store, provider(async (handle, request, options) => {
+      runs++;
+      assert.equal(handle.providerContinuationId, "thread");
+      assert.equal(request.activation.task_continuity !== undefined, true);
+      assert.equal(await readFile(join(root, "work.txt"), "utf8"), "partial implementation\n");
+      const replay = await store.prepareEffect(effectRequest);
+      assert.equal(replay.created, false);
+      assert.equal(replay.effect.state, "completed");
+      assert.deepEqual(replay.effect.result, { artifact_id: "pr-1" });
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.("new-continuation");
+      await writeFile(join(root, "work.txt"), "partial implementation\nremaining implementation\n");
+      return { turnId: "new-continuation", outcome: "reply", text: "Finished the existing task." };
+    }, async () => { throw new Error("The failed native turn must never be replayed or reattached."); }), http, currentAuthority, 0);
+    await delivery.pump(afterRestart);
+    await delivery.pump(afterRestart);
+    assert.equal(runs, 2);
+    assert.equal(await readFile(join(root, "work.txt"), "utf8"), "partial implementation\nremaining implementation\n");
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "1");
+    const receipts = await store.receipts(agent.agentId);
+    assert.deepEqual(receipts.map(r => r.state), ["acknowledged_failed", "acknowledged"]);
+    assert.equal((await store.taskContinuation(receipts[1]!.inbox_item_id))?.agentSessionId, "session-1");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("recovering a failed turn under a replacement worker session cannot inherit its task", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-recovered-owner-"));
+  const path = join(root, "state.sqlite"); let store = new SupervisedAgentInboxStore(path);
+  let nativeStarts = 0; let ownershipReads = 0;
+  const http = { poll: async () => ({}), publish: async () => {},
+    ownedTasks: async () => { ownershipReads++; return [continuityTask]; } };
+  let delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.(); nativeStarts++;
+    await options?.checkpointTurnStarted?.("old-turn");
+    delivery.fence();
+    return { turnId: "old-turn", outcome: "unreadable", text: null, evidence: "none" };
+  }), http, currentAuthority, 0);
+  try {
+    await ingest(store); await delivery.pump(agent);
+    await delivery.fenceAndDrain(); await store.close(); store = new SupervisedAgentInboxStore(path);
+    delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      nativeStarts++; throw new Error("must not run another native turn");
+    }, async () => ({ turnId: "old-turn", providerContinuationId: "thread", outcome: "failed", text: null,
+      evidence: "transcript", error: "HTTP 503" })), http, currentAuthority, 0);
+    await delivery.pump({ ...agent, daemonGeneration: 2, executionGenerationId: "generation-2", agentSessionId: "replacement-worker" });
+    assert.equal(nativeStarts, 1);
+    assert.equal(ownershipReads, 0);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
+    assert.equal(await store.head(agent.agentId), null);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("task continuity persists its delay and three-continuation budget across restarts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-budget-"));
+  const path = join(root, "state.sqlite");
+  let now = Date.parse("2026-09-09T00:00:00Z");
+  let store = new SupervisedAgentInboxStore(path, () => new Date(now).toISOString());
+  let runs = 0;
+  const port = provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.();
+    const turnId = `failed-${++runs}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    return { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 429 rate limit" };
+  });
+  const http = { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] };
+  let delivery: SupervisedAgentDelivery;
+  const makeDelivery = () => new SupervisedAgentDelivery(store, port, http, currentAuthority, 1, async () => {}, async () => { delivery.fence(); });
+  delivery = makeDelivery();
+  try {
+    await ingest(store);
+    for (let expected = 1; expected <= 4; expected++) {
+      await delivery.pump({ ...agent, daemonGeneration: expected });
+      assert.equal(runs, expected);
+      const head = (await store.head(agent.agentId))!;
+      if (expected < 4) {
+        const delay = 10_000 * 2 ** (expected - 1);
+        assert.equal(head.next_attempt_at_ms, now + delay);
+        await delivery.fenceAndDrain(); await store.close();
+        store = new SupervisedAgentInboxStore(path, () => new Date(now).toISOString());
+        assert.equal(await store.claimHead(agent.agentId), null, "restart cannot bypass the persisted due time");
+        now += delay;
+        delivery = makeDelivery();
+      } else {
+        assert.equal(head.state, "blocked");
+        assert.match(head.last_error!, /three continuations/);
+        await delivery.pump(agent);
+        assert.equal(runs, 4, "the original turn plus three automatic continuations is the hard bound");
+      }
+    }
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const [error, explanation] of [["HTTP 402 insufficient credits", /credit/], ["HTTP 401 unauthorized", /authentication/],
+  ["HTTP 429 insufficient_quota", /credit/], ["Unclassified native failure", /could not be established/]] as const) {
+  test(`task continuity pauses ${error} and resumes existing work through Retry delivery`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "continuity-account-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    let runs = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.();
+      const turnId = `turn-${++runs}`;
+      await options?.checkpointTurnStarted?.(turnId);
+      return runs === 1 ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error }
+        : { turnId, outcome: "no_reply", text: null };
+    }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] }, currentAuthority, 0);
+    try {
+      await ingest(store); await delivery.pump(agent);
+      const head = (await store.head(agent.agentId))!;
+      assert.equal(runs, 1); assert.equal(head.state, "blocked");
+      assert.match(head.last_error!, explanation); assert.match(head.last_error!, /Retry delivery/);
+      await store.retryBlocked(head.inbox_item_id); await delivery.pump(agent);
+      assert.equal(runs, 2);
+      assert.equal(await store.head(agent.agentId), null);
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("continuation survives an unavailable ownership snapshot and drops only tasks no longer owned", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-snapshot-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const second = { ...continuityTask, id: "task_2", leaseId: "lease-2" };
+  let owned = [continuityTask, second]; let unavailable = true; let runs = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    const turnId = `turn-${++runs}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    if (runs === 1) return { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 503" };
+    assert.match(JSON.stringify(request.sourceMessage), /task_2/);
+    assert.doesNotMatch(JSON.stringify(request.sourceMessage), /task_1/);
+    return { turnId, outcome: "no_reply", text: null };
+  }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async input => {
+    assert.ok(input.heldBefore);
+    if (unavailable) throw new Error("room offline");
+    return owned;
+  } }, currentAuthority, 0);
+  try {
+    await ingest(store); await delivery.pump(agent);
+    const head = (await store.head(agent.agentId))!;
+    assert.equal((await store.taskContinuation(head.inbox_item_id))?.tasks, null);
+    unavailable = false;
+    await store.retryBlocked(head.inbox_item_id);
+    await store.refreshTaskContinuationSnapshot(head.inbox_item_id, owned);
+    owned = [second];
+    await delivery.pump(agent);
+    assert.equal(runs, 2);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const changed of ["session", "workAttempt", "conversation", "lease", "epoch", "finished", "agentInstance"] as const) {
+  test(`task continuity refuses changed ${changed} after restart`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "continuity-owner-"));
+    const path = join(root, "state.sqlite"); let store = new SupervisedAgentInboxStore(path);
+    let runs = 0; let owned = [continuityTask];
+    const port = provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.(); runs++;
+      await options?.checkpointTurnStarted?.("failed");
+      return { turnId: "failed", providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 402" };
+    });
+    const http = { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => owned };
+    let delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority, 0);
+    try {
+      await ingest(store); await delivery.pump(agent);
+      const head = (await store.head(agent.agentId))!;
+      await store.retryBlocked(head.inbox_item_id);
+      await delivery.fenceAndDrain(); await store.close(); store = new SupervisedAgentInboxStore(path);
+      if (changed === "lease") owned = [{ ...continuityTask, leaseId: "new-lease" }];
+      if (changed === "epoch") owned = [{ ...continuityTask, epoch: 3 }];
+      if (changed === "finished") owned = [];
+      const nextAgent = { ...agent,
+        ...(changed === "session" ? { agentSessionId: "session-2" } : {}),
+        ...(changed === "workAttempt" ? { workAttemptId: "attempt-2" } : {}),
+        ...(changed === "conversation" ? { providerContinuationId: "thread-2" } : {}),
+        ...(changed === "agentInstance" ? { agentId: "another-stone" } : {}) };
+      delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority, 0);
+      await delivery.pump(nextAgent);
+      assert.equal(runs, 1);
+      owned = [{ ...continuityTask, id: "task-new" }];
+      await delivery.pump(nextAgent);
+      assert.equal(runs, 1, "an old failure cannot acquire subsequently assigned work");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("an uncertain mutation prevents automatic continuation across restart without blocking new instructions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "continuity-uncertain-"));
+  const path = join(root, "state.sqlite"); let store = new SupervisedAgentInboxStore(path);
+  let runs = 0;
+  const port = provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.(); runs++;
+    await options?.checkpointTurnStarted?.("failed");
+    const db = new DatabaseSync(path);
+    db.prepare(`INSERT INTO supervised_agent_effects
+      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+      VALUES ('effect',?,?,?,'failed','request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
+      .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString()); db.close();
+    return { turnId: "failed", providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 503" };
+  });
+  const http = { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] };
+  let delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority, 0);
+  try {
+    await ingest(store); await delivery.pump(agent);
+    assert.equal(await store.head(agent.agentId), null);
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(receipt.state, "acknowledged_failed"); assert.match(receipt.last_error!, /uncertain result/);
+    await delivery.fenceAndDrain(); await store.close(); store = new SupervisedAgentInboxStore(path);
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.(); runs++;
+      await options?.checkpointTurnStarted?.("human-follow-up");
+      return { turnId: "human-follow-up", outcome: "no_reply", text: null };
+    }), http, currentAuthority, 0);
+    await delivery.pump(agent);
+    assert.equal(runs, 1);
+    await ingest(store, "2"); await delivery.pump(agent);
+    assert.equal(runs, 2, "the uncertain result cannot silently replay work or deadlock later human instructions");
+    assert.equal(await store.head(agent.agentId), null);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("supervised reply targets inherit true threads but not top-level quote replies", () => {
+  assert.deepEqual(
+    supervisedReplyTargetForSourceMessage({
+      id: "msg_45",
+      reply_to: { id: "msg_44" },
+      thread_root_id: "msg_44",
+      thread: { root_message_id: "msg_44", is_thread_reply: true },
+    }),
+    { replyTo: "msg_45", threadRootId: "msg_44" },
+  );
+  assert.deepEqual(
+    supervisedReplyTargetForSourceMessage({
+      id: "msg_49",
+      reply_to: { id: "msg_48" },
+      thread_root_id: "msg_49",
+      thread: { root_message_id: "msg_49", is_thread_reply: false },
+    }),
+    { replyTo: null, threadRootId: null },
+  );
+});
+
+async function recordThreadIntent(path: string, store: SupervisedAgentInboxStore, turnId: string): Promise<void> {
+  const manifest = new ManifestStore(path);
+  try {
+    const loaded = await manifest.load();
+    await manifest.write(loaded.generation, [{
+      id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: "codex", model: null,
+      charter: "test", desired_state: "running", observed_state: "working", condition: "none",
+      permission_profile_id: null, delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
+      created_at: new Date().toISOString(), work_attempt_id: agent.workAttemptId,
+      provider_ref: { work_attempt_id: agent.workAttemptId, execution_generation_id: agent.executionGenerationId,
+        provider_continuation_id: agent.providerContinuationId, provider_connection: agent.providerConnection },
+    }]);
+  } finally { await manifest.close(); }
+  const intent = await store.prepareEffect({ agent_id: agent.agentId, room_id: agent.roomId,
+    execution_generation_id: agent.executionGenerationId, current_execution_generation_id: agent.executionGenerationId,
+    provider_turn_id: turnId, provider_continuation_id: agent.providerContinuationId, work_attempt_id: agent.workAttemptId,
+    mcp_request_id: "thread-choice", tool_name: "set_reply_thread", request: {}, mutation: true });
+  assert.equal(intent.effect.state, "completed");
+}
+
+test("an intercepted thread choice survives publication failure and restart without another provider turn", async () => {
+  for (const { toolName, effectState, existingRoot } of [
+    ...["send_thread_message", "send_message"].flatMap(toolName => ["prepared", "failed"].map(effectState => ({ toolName, effectState, existingRoot: null }))),
+    { toolName: "set_reply_thread", effectState: "completed", existingRoot: null },
+    { toolName: "set_reply_thread", effectState: "completed", existingRoot: "msg_70" },
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-thread-intent-"));
+    const path = join(root, "state.sqlite");
+    let store = new SupervisedAgentInboxStore(path);
+    let runs = 0;
+    let ownsLane = true;
+    const publications: Array<{ clientMessageId: string; replyTo: string | null; threadRootId: string | null }> = [];
+    const http = {
+      poll: async () => ({}),
+      publish: async (input: { clientMessageId: string; roomId: string; replyTo: string | null; threadRootId: string | null }) => {
+        publications.push({ clientMessageId: input.clientMessageId, replyTo: input.replyTo, threadRootId: input.threadRootId });
+        if (publications.length === 1) { ownsLane = false; throw new Error("publication acknowledgement lost during handoff"); }
+        return { messageId: "published", roomId: input.roomId };
+      },
+    };
+    let delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      runs++;
+      await options?.checkpointTurnStarted?.("native-turn");
+      if (toolName === "set_reply_thread") {
+        await recordThreadIntent(path, store, "native-turn");
+      } else {
+        // The coordinator retains the intercepted request before returning USE_FINAL_ANSWER.
+        const db = new DatabaseSync(path);
+        try {
+          db.prepare(`INSERT INTO supervised_agent_effects
+            (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+            VALUES ('thread-choice',?,?,?,'native-turn','request',?,?,1,?,NULL,NULL,?,?)`)
+            .run(agent.agentId, agent.roomId, "generation-1", toolName,
+              JSON.stringify({ thread_parent_id: "msg_72", text: "draft" }), effectState, new Date().toISOString(), new Date().toISOString());
+        } finally { db.close(); }
+      }
+      return { turnId: "native-turn", outcome: "reply", text: "final answer" };
+    }), http, async () => ownsLane, 0);
+    try {
+      await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "msg_72",
+        messages: [{ source_message_id: "msg_72", source_message: { id: "msg_72", thread_root_id: existingRoot }, activation: {} }] });
+      await delivery.pump(agent);
+      assert.equal(publications.length, 1);
+      assert.deepEqual(publications[0], {
+        clientMessageId: "supervised-room:stone:room:msg_72:reply:v1", replyTo: "msg_72", threadRootId: existingRoot ?? "msg_72",
+      });
+      await delivery.fenceAndDrain(); await store.close();
+      store = new SupervisedAgentInboxStore(path);
+      ownsLane = true;
+      delivery = new SupervisedAgentDelivery(store, provider(async () => {
+        runs++; throw new Error("must not rerun the provider");
+      }), http, currentAuthority, 0);
+      await delivery.pump(agent);
+      assert.equal(runs, 1);
+      assert.deepEqual(publications, [publications[0], publications[0]]);
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("unrelated or non-thread message effects cannot redirect the daemon's activating reply", async () => {
+  for (const variation of ["agent", "room", "generation", "turn", "parent", "quote", "tool", "executing", "completed", "uncertain"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-thread-fence-"));
+    const path = join(root, "state.sqlite");
+    const store = new SupervisedAgentInboxStore(path);
+    let published = false;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.checkpointTurnStarted?.("native-turn");
+      const db = new DatabaseSync(path);
+      try {
+        db.prepare(`INSERT INTO supervised_agent_effects
+          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+          VALUES ('other-effect',?,?,?,?,'request',?,?,1,?,NULL,NULL,?,?)`)
+          .run(variation === "agent" ? "other-agent" : agent.agentId,
+            variation === "room" ? "other-room" : agent.roomId,
+            variation === "generation" ? "old-generation" : "generation-1",
+            variation === "turn" ? "other-turn" : "native-turn",
+            variation === "tool" ? "publish_room_artifact" : "send_message",
+            JSON.stringify(variation === "quote" ? { reply_to: "msg_72" }
+              : { thread_parent_id: variation === "parent" ? "msg_71" : "msg_72" }),
+            ["executing", "completed", "uncertain"].includes(variation) ? variation : "prepared",
+            new Date().toISOString(), new Date().toISOString());
+      } finally { db.close(); }
+      return { turnId: "native-turn", outcome: "reply", text: "final answer" };
+    }), {
+      poll: async () => ({}),
+      publish: async input => {
+        assert.equal(input.replyTo, null, variation);
+        assert.equal(input.threadRootId, null, variation);
+        published = true;
+        return { messageId: "published", roomId: input.roomId };
+      },
+    }, currentAuthority, 0);
+    try {
+      await ingest(store, "msg_72"); await delivery.pump(agent);
+      assert.equal(published, true, variation);
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
 test("worker-authenticated activation ingress deduplicates replay and publishes one bounded reply", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    const polls: unknown[] = []; const published: string[] = [];
+    const polls: unknown[] = [];
+    const published: Array<{ clientMessageId: string; replyTo: string | null; threadRootId: string | null }> = [];
     const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "hello" })), {
-      poll: async (input) => { polls.push(input); return { messages: [{ id: "1", activation: { for_current_agent: { decision: "activate", reason: "server" } }, text: "hi" }, { id: "2", text: "ignored" }] }; },
-      publish: async (input) => { published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+      poll: async (input) => { polls.push(input); return { messages: [{ id: "1", thread_root_id: "root", thread: { root_message_id: "root", is_thread_reply: true }, activation: { for_current_agent: { decision: "activate", reason: "server" } }, text: "hi" }, { id: "2", text: "ignored" }] }; },
+      publish: async (input) => {
+        published.push({ clientMessageId: input.clientMessageId, replyTo: input.replyTo, threadRootId: input.threadRootId });
+        return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId };
+      },
     }, currentAuthority, 0);
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 5));
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(polls.length, 2);
     assert.equal((await store.receipts("stone")).length, 1);
-    assert.deepEqual(published, ["supervised-room:stone:room:1:reply:v1"]);
+    assert.deepEqual(published, [{
+      clientMessageId: "supervised-room:stone:room:1:reply:v1",
+      replyTo: "1",
+      threadRootId: "root",
+    }]);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -819,15 +1656,15 @@ test("a publish response without a nonempty matching canonical room identity nev
   }
 });
 
-test("each new bounded turn resolves the latest durable charter without restarting the provider", async () => {
+test("bounded room turns never resolve or inject the legacy charter", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-charter-refresh-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-  let charter = "first durable charter";
-  const seen: Array<string | undefined> = [];
+  let resolverCalls = 0;
+  const seen: Array<{ source: unknown; hasCharter: boolean }> = [];
   const delivery = new SupervisedAgentDelivery(
     store,
     provider(async (_handle, request) => {
-      seen.push(request.charter);
+      seen.push({ source: request.sourceMessage, hasCharter: Object.hasOwn(request, "charter") });
       return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
     }),
     { poll: async () => ({}), publish: async () => { throw new Error("no-reply turn must not publish"); } },
@@ -836,29 +1673,32 @@ test("each new bounded turn resolves the latest durable charter without restarti
     undefined,
     undefined,
     undefined,
-    async () => ({ charter }),
+    async () => { resolverCalls += 1; return { charter: "must never be injected" }; },
   );
   try {
     await ingest(store, "1");
     await delivery.pump(agent);
-    charter = "second durable charter";
     await ingest(store, "2");
     await delivery.pump(agent);
-    assert.deepEqual(seen, ["first durable charter", "second durable charter"]);
+    assert.equal(resolverCalls, 0);
+    assert.deepEqual(seen.map((turn) => turn.hasCharter), [false, false]);
+    assert.deepEqual(seen.map((turn) => (turn.source as { id?: string }).id), ["1", "2"]);
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("result recovery uses bounded backoff and blocks instead of hot-looping forever", async () => {
+for (const initialState of ["dispatching", "result_recovery"] as const) test(`exact result recovery from ${initialState} uses its own bounded backoff`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-result-recovery-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const item = await enqueue(store);
     await store.checkpointTurnStarted(item.inbox_item_id, "turn-unreadable", TEST_PROVIDER_TURN_AUTHORITY);
-    await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-unreadable" });
-    await store.transition(item.inbox_item_id, "result_recovery", { outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }) });
+    if (initialState === "result_recovery") {
+      await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-unreadable" });
+      await store.transition(item.inbox_item_id, "result_recovery", { outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }) });
+    }
     let recoveries = 0;
     const delays: number[] = [];
     const delivery = new SupervisedAgentDelivery(store, provider(
@@ -870,6 +1710,8 @@ test("result recovery uses bounded backoff and blocks instead of hot-looping for
     assert.equal(recoveries, 3);
     assert.deepEqual(delays, [25, 50]);
     assert.equal(receipt.state, "blocked");
+    assert.equal(receipt.provider_turn_id, "turn-unreadable", "recovery never clears its native turn");
+    assert.equal(receipt.attempt_count, 1, "recovery failures are not new model turns");
     assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 3);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -881,7 +1723,8 @@ test("a fresh agent observes history at the tail, advances across silent message
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const dispatched: string[] = [];
     const cursors: Array<string | null> = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.();
       dispatched.push(request.sourceMessage.id as string);
       return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
     }), {
@@ -904,6 +1747,9 @@ test("a fresh agent observes history at the tail, advances across silent message
     await delivery.poll(agent);
     assert.deepEqual(cursors, ["99"]);
     assert.deepEqual(dispatched, ["101"]);
+    const detail = await store.detail(agent.agentId, agent.roomId, "101");
+    assert.deepEqual(detail.prepared_context?.messages.map(message => message.id), ["100", "101"]);
+    assert.equal(detail.prepared_context?.messages[0]?.text, "ordinary room context");
     assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "101");
     assert.deepEqual((await store.receipts(agent.agentId)).map((item) => item.source_message_id), ["101"]);
     await delivery.fenceAndDrain();
@@ -1043,14 +1889,111 @@ test("a server-hidden prompt advances the durable daemon cursor without entering
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("a publish retry reuses the persisted terminal reply without rerunning the turn", async () => {
+test("uncertain native dispatch without a durable turn id blocks instead of replaying, including after restart", async (t) => {
+  for (const candidate of ["codex", "open-model"]) {
+    for (const failure of ["lost acknowledgement", "failed checkpoint"]) {
+      await t.test(`${candidate}: ${failure}`, async (t) => {
+        const root = await mkdtemp(join(tmpdir(), "letagents-delivery-uncertain-dispatch-"));
+        const databasePath = join(root, "daemon.sqlite");
+        let store = new SupervisedAgentInboxStore(databasePath);
+        const currentAgent = { ...agent, provider: candidate };
+        let runs = 0;
+        let recoveries = 0;
+        const adapter = provider(async (_handle, _request, options) => {
+          runs += 1;
+          await options?.beforeNativeDispatch?.();
+          // Both providers may admit native work before the daemon can save
+          // its exact recovery key. Neither failure proves the prompt unsent.
+          if (failure === "failed checkpoint") await options?.checkpointTurnStarted?.("native-turn");
+          throw new Error("native dispatch acknowledgement was lost");
+        }, async () => {
+          recoveries += 1;
+          throw new Error("no exact durable turn exists to recover");
+        });
+        const transport = { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } };
+        let delivery = new SupervisedAgentDelivery(store, adapter, transport, currentAuthority, 0, async () => {});
+        try {
+          if (failure === "failed checkpoint") {
+            t.mock.method(store, "checkpointTurnStarted", async () => { throw new Error("checkpoint write failed"); });
+          }
+          await delivery.pump(currentAgent);
+          await ingest(store, "1");
+          await ingest(store, "2");
+          await delivery.pump(currentAgent);
+          assert.equal(runs, 1, "an uncertain native send must not be automatically sent again");
+          assert.equal(recoveries, 0);
+          const receipts = await store.receipts(agent.agentId);
+          assert.deepEqual(receipts.map((receipt) => receipt.receipt_state), ["blocked", "queued_behind_blocked"]);
+          assert.equal(receipts[0]?.provider_turn_id, null);
+          assert.match(receipts[0]?.last_error ?? "", /may have started/);
+
+          await delivery.fenceAndDrain();
+          await store.close();
+          store = new SupervisedAgentInboxStore(databasePath);
+          delivery = new SupervisedAgentDelivery(store, adapter, transport, currentAuthority, 0, async () => {});
+          await delivery.pump({ ...currentAgent, daemonGeneration: 2 });
+          assert.equal(runs, 1, "a replacement daemon preserves the ambiguity instead of replaying");
+          assert.equal(recoveries, 0);
+          assert.deepEqual((await store.receipts(agent.agentId)).map((receipt) => receipt.receipt_state), ["blocked", "queued_behind_blocked"]);
+        } finally {
+          await delivery.fenceAndDrain();
+          await store.close();
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+});
+
+test("a generic failure after an exact turn checkpoint recovers that turn without resending", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-exact-recovery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let runs = 0;
+  const recovered: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("native-turn");
+    throw new Error("control connection interrupted after the exact turn was saved");
+  }, async (_handle, request) => {
+    recovered.push(request.providerTurnId);
+    return { turnId: request.providerTurnId, outcome: "no_reply", text: null };
+  }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 0, async () => {});
+  try {
+    await delivery.pump(agent);
+    await ingest(store);
+    await delivery.pump(agent);
+    assert.equal(runs, 1);
+    assert.deepEqual(recovered, ["native-turn"]);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally {
+    await delivery.fenceAndDrain();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publication exhausts only its own budget and explicit Retry reuses the saved reply", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    let turns = 0; let publishes = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: `turn:${++turns}`, outcome: "reply", text: "durable" })), { poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }), publish: async (input) => { if (++publishes === 1) throw new Error("crash before ack"); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; } }, currentAuthority, 0);
-    await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(turns, 1); assert.equal(publishes, 2);
+    let turns = 0; let publishes = 0; const clientIds: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: `turn:${++turns}`, outcome: "reply", text: "durable" })), {
+      poll: async () => ({}), publish: async (input) => {
+        clientIds.push(input.clientMessageId);
+        if (++publishes <= 3) throw new Error("crash before ack");
+        return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId };
+      },
+    }, currentAuthority, 0);
+    await delivery.pump(agent); await ingest(store); await delivery.pump(agent);
+    assert.equal(turns, 1); assert.equal(publishes, 3);
+    const blocked = (await store.receipts("stone"))[0]!;
+    assert.equal(blocked.state, "blocked");
+    assert.equal(JSON.parse(blocked.outcome!).text, "durable");
+    await delivery.retry(agent, "1");
+    await waitForAsync(async () => (await store.receipts("stone"))[0]?.state === "acknowledged");
+    assert.equal(turns, 1); assert.equal(publishes, 4, "manual Retry admits an attempt without erasing durable debt");
+    assert.deepEqual(clientIds, Array(4).fill(blocked.reply_client_message_id));
     assert.equal((await store.receipts("stone"))[0]?.state, "acknowledged");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -1109,8 +2052,8 @@ test("a normalized no-reply terminal survives partial provider-journal retiremen
     await store.transition(item.inbox_item_id, "result_recovery", {
       outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }),
     });
-    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior recovery failure one");
-    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior recovery failure two");
+    await store.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "prior recovery failure one" });
+    await store.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "prior recovery failure two" });
     let recoveries = 0;
     const delivery = new SupervisedAgentDelivery(store, provider(
       async () => { throw new Error("must not start a new turn"); },
@@ -1145,20 +2088,21 @@ test("a normalized no-reply terminal survives partial provider-journal retiremen
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("a normalized reply in result recovery publishes before consulting a partially retired provider journal", async () => {
+for (const cleanupFails of [false, true]) test(`a saved reply has its own publication budget after recovery (cleanup fails: ${cleanupFails})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-reply-recovery-retirement-"));
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const store = new SupervisedAgentInboxStore(join(root, `daemon-${cleanupFails}.sqlite`));
     const item = await enqueue(store);
     await store.checkpointTurnStarted(item.inbox_item_id, "cursor:recover-reply", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(item.inbox_item_id, "awaiting_result");
     await store.transition(item.inbox_item_id, "result_recovery", {
       outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }),
     });
-    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior reply recovery failure one");
-    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior reply recovery failure two");
+    await store.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "prior reply recovery failure one" });
+    await store.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "prior reply recovery failure two" });
     let recoveries = 0;
     const published: string[] = [];
+    const clientIds: string[] = [];
     const delivery = new SupervisedAgentDelivery(store, provider(
       async () => { throw new Error("must not start a new turn"); },
       async (_handle, request) => {
@@ -1174,21 +2118,25 @@ test("a normalized reply in result recovery publishes before consulting a partia
           evidence: "stream",
           terminal_evidence: terminal,
         });
-        throw new Error("reply recovery journal was partially retired after normalized checkpoint");
+        if (cleanupFails) throw new Error("reply recovery journal was partially retired after normalized checkpoint");
+        return terminal;
       },
     ), {
       poll: async () => ({}),
       publish: async (input) => {
         published.push(input.text);
+        clientIds.push(input.clientMessageId);
+        if (published.length < 3) throw new Error("publication acknowledgement unavailable");
         return { messageId: "message:normalized-reply", roomId: input.roomId };
       },
     }, currentAuthority, 0);
     await delivery.pump({ ...agent, provider: "cursor" });
     assert.equal((await store.get(item.inbox_item_id))?.state, "acknowledged");
-    assert.deepEqual(published, ["Durable normalized reply."]);
+    assert.deepEqual(published, Array(3).fill("Durable normalized reply."));
+    assert.deepEqual(clientIds, Array(3).fill(item.reply_client_message_id), "all publication retries keep the same idempotency key");
     assert.equal(recoveries, 1);
-    assert.equal((await store.receipts(agent.agentId))[0]?.timeline.filter((event) => event.phase === "retry_scheduled").length, 2,
-      "accepted reply publishes without spending the last recovery retry on provider-journal cleanup");
+    assert.equal((await store.receipts(agent.agentId))[0]?.timeline.filter((event) => event.phase === "retry_scheduled").length, 4,
+      "two prior recovery failures leave all three publication attempts; journal cleanup spends neither budget");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -1353,7 +2301,7 @@ test("@everyone delivery is per-agent and one blocked FIFO cannot stall another 
     const healthyReceipts = await store.receipts(agents.healthy.agentId);
     assert.deepEqual(blockedReceipts.map((receipt) => receipt.receipt_state), ["blocked", "queued_behind_blocked"]);
     assert.deepEqual(healthyReceipts.map((receipt) => receipt.state), ["acknowledged_no_reply", "acknowledged_no_reply"]);
-    assert.equal(blockedTurns, 3, "the blocked agent exhausts only its own bounded retry budget");
+    assert.equal(blockedTurns, 1, "the uncertain native send blocks only its own FIFO without replay");
     assert.equal(healthyTurns, 2, "each @everyone activation independently reaches the healthy Codex worker");
   } finally {
     firstBlockedTurn.resolve({ turnId: "cleanup", outcome: "no_reply", text: null });
@@ -1361,6 +2309,139 @@ test("@everyone delivery is per-agent and one blocked FIFO cannot stall another 
     await store.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("room intake continues through a held provider turn while FIFO execution stays serial", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-independent-intake-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const firstTurn = deferred<void>(); const release = deferred<void>();
+  let polls = 0; let concurrent = 0; let peak = 0;
+  const turns: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    concurrent += 1; peak = Math.max(peak, concurrent); turns.push((request.sourceMessage as { id: string }).id);
+    if (turns.length === 1) { firstTurn.resolve(); await release.promise; }
+    concurrent -= 1;
+    return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+  }), {
+    poll: async ({ signal }) => {
+      polls += 1;
+      if (polls <= 3) {
+        if (polls > 1) await firstTurn.promise;
+        return { messages: [{ id: String(polls), activation: { for_current_agent: { decision: "activate" } } }] };
+      }
+      return new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true }));
+    },
+    publish: async () => { throw new Error("no-reply must not publish"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.start(agent); await firstTurn.promise;
+    await waitForAsync(async () => (await store.cursor(agent.agentId))?.last_observed_message_id === "3");
+    assert.equal((await store.receipts(agent.agentId)).length, 3, "later messages are durable before the held turn ends");
+    assert.deepEqual(turns, ["1"]);
+    assert.equal(peak, 1);
+    const internal = delivery as unknown as { pumpWakeups: Map<string, unknown> };
+    assert.equal(internal.pumpWakeups.size, 1, "repeated intake coalesces one settlement wake");
+    release.resolve();
+    await waitForAsync(async () => (await store.receipts(agent.agentId)).every(item => item.state === "acknowledged_no_reply"));
+    assert.deepEqual(turns, ["1", "2", "3"]);
+    assert.equal(peak, 1);
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const intakeState of ["observing", "backoff"] as const) {
+  test(`delivery recovery preserves ${intakeState} health while room polling hangs`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-delivery-independent-recovery-"));
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await ingest(store, "1");
+    const normalize = store.normalizeStartupRecovery.bind(store);
+    const hangingPoll = deferred<void>();
+    const expectedHealth = { room_id: agent.roomId, state: intakeState,
+      detail: intakeState === "backoff" ? "temporary poll failure" : null,
+      execution_generation_id: agent.executionGenerationId };
+    let normalizations = 0; let turns = 0; let polls = 0;
+    store.normalizeStartupRecovery = async (...args) => {
+      await hangingPoll.promise;
+      assert.deepEqual(await store.ingressHealth(agent.agentId), expectedHealth);
+      if (++normalizations <= 2) throw new Error("temporary store failure password=synthetic-secret");
+      return normalize(...args);
+    };
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => { warnings.push(message); });
+    const delays: number[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+      turns += 1; return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+    }), {
+      poll: async ({ signal }) => {
+        if (++polls === 1) {
+          if (intakeState === "backoff") throw new Error("temporary poll failure");
+          return {};
+        }
+        hangingPoll.resolve();
+        return new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true }));
+      },
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    }, currentAuthority, 0, undefined, async delay => { delays.push(delay); });
+    try {
+      await delivery.start(agent);
+      await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
+      assert.equal(normalizations, 3); assert.equal(turns, 1);
+      assert.deepEqual(delays.slice(-2), [250, 500]);
+      assert.deepEqual(await store.ingressHealth(agent.agentId), expectedHealth,
+        "delivery recovery must not change the independent observation state");
+      assert.deepEqual(warnings, ["Room delivery recovery for stone: temporary store failure password=[REDACTED]"],
+        "one redacted diagnostic covers the recovery episode");
+    } finally { hangingPoll.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("an intake commit racing an empty pump still wakes delivery without another message", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-empty-wake-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const emptyClaim = deferred<void>(); const release = deferred<void>();
+  const claim = store.claimHead.bind(store); let claims = 0; let polls = 0; let turns = 0;
+  store.claimHead = async (...args) => {
+    const result = await claim(...args);
+    if (++claims === 1) { assert.equal(result, null); emptyClaim.resolve(); await release.promise; }
+    return result;
+  };
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    turns += 1; return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+  }), {
+    poll: async ({ signal }) => {
+      if (++polls === 1) {
+        await emptyClaim.promise;
+        return { messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] };
+      }
+      return new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true }));
+    }, publish: async () => { throw new Error("no-reply must not publish"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.start(agent);
+    await waitForAsync(async () => (await store.cursor(agent.agentId))?.last_observed_message_id === "1");
+    release.resolve();
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
+    assert.equal(turns, 1);
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("handoff aborts delivery recovery backoff and cannot create a successor pump", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-recovery-drain-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let normalizations = 0; let aborted = false;
+  const waiting = deferred<void>();
+  store.normalizeStartupRecovery = async () => { normalizations += 1; throw new Error("store offline"); };
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("no native turn expected"); }), {
+    poll: ({ signal }) => new Promise(resolve => signal.addEventListener("abort", () => resolve({}), { once: true })),
+    publish: async () => { throw new Error("must not publish"); },
+  }, currentAuthority, 0, undefined, (_delay, signal) => new Promise(resolve => {
+    waiting.resolve(); signal.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true });
+  }));
+  try {
+    await delivery.start(agent); await waiting.promise;
+    await delivery.fenceAndDrain();
+    assert.equal(aborted, true); assert.equal(normalizations, 1);
+    assert.equal(delivery.wake(agent), false);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("the supervised runtime continuously polls and delivers a later activation", async () => {
@@ -1405,6 +2486,12 @@ test("the supervised runtime backs off after a poll error and resumes intake", a
     }, currentAuthority, 0);
     void delivery.start(agent);
     await waitFor(() => polls >= 3);
+    assert.deepEqual(await store.ingressHealth(agent.agentId), {
+      room_id: agent.roomId,
+      state: "observing",
+      detail: null,
+      execution_generation_id: agent.executionGenerationId,
+    }, "the successful recovery poll clears backoff before the received turn is exposed");
     await delivery.fenceAndDrain();
     assert.equal((await store.receipts(agent.agentId)).length, 1);
     await store.close();
@@ -1446,7 +2533,7 @@ test("successful polling cycles release backoff listeners instead of accumulatin
     void delivery.start(agent);
     await waitFor(() => internals.loops.has(agent.agentId));
     const controller = internals.loopControllers.get(agent.agentId)!;
-    await waitFor(() => !internals.loops.has(agent.agentId));
+    await waitFor(() => !internals.loops.has(agent.agentId), 5_000);
     assert.equal(polls, 15);
     assert.equal(getEventListeners(controller.signal, "abort").length, 0);
     await store.close();
@@ -1479,6 +2566,97 @@ test("fence aborts a pending error backoff and releases its listener", async () 
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const phase of ["preflight", "admitted"] as const) {
+  test(`duplicate same-owner start preserves Codex ${phase} and publishes exactly once`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-delivery-duplicate-start-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const release = deferred<void>();
+    let calls = 0; let recovered = 0; let published = 0; let normalizations = 0; let entered = false;
+    let turnSignal: AbortSignal | undefined;
+    const normalize = store.normalizeStartupRecovery.bind(store);
+    store.normalizeStartupRecovery = async (...args) => { normalizations += 1; return normalize(...args); };
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      calls += 1;
+      turnSignal = options?.detachSignal;
+      if (phase === "admitted") {
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.("turn:one");
+      }
+      entered = true;
+      await Promise.race([release.promise, new Promise<void>(resolve => {
+        options?.detachSignal?.addEventListener("abort", () => resolve(), { once: true });
+      })]);
+      if (options?.detachSignal?.aborted) throw new Error("delivery detached during preflight");
+      if (phase === "preflight") {
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.("turn:one");
+      }
+      return { turnId: "turn:one", outcome: "reply", text: "Ready." };
+    }, async () => { recovered += 1; return { turnId: "turn:one", outcome: "unreadable", text: null }; }), {
+      poll: ({ signal }) => new Promise(resolve => {
+        if (signal.aborted) resolve({});
+        else signal.addEventListener("abort", () => resolve({}), { once: true });
+      }),
+      publish: async input => { published += 1; return { messageId: "reply:one", roomId: input.roomId }; },
+    }, currentAuthority);
+    try {
+      await ingest(store);
+      await delivery.start(agent);
+      await waitFor(() => entered);
+      const duplicate = delivery.refresh({ ...agent });
+      await Promise.race([duplicate, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("duplicate start did not settle")), 1000))]);
+      await delivery.refresh({ ...agent });
+      assert.equal(turnSignal?.aborted, false, "duplicate readiness must not detach the existing turn");
+      assert.equal(normalizations, 1, "a live owner must not be mistaken for crash recovery");
+      release.resolve();
+      await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged");
+      assert.equal(calls, 1); assert.equal(recovered, 0); assert.equal(published, 1);
+    } finally {
+      release.resolve(); await delivery.fenceAndDrain(); await store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("refresh still replaces changed ownership, including mutated credentials and provider-less lanes", async (t) => {
+  for (const coordinate of ["handle", "agentSessionId", "executionGenerationId", "daemonGeneration", "bearer", "no-provider-api", "no-provider-workspace"] as const) {
+    await t.test(coordinate, async () => {
+      const root = await mkdtemp(join(tmpdir(), "letagents-delivery-owner-change-"));
+      const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+      const original = { ...agent, handle: coordinate.startsWith("no-provider") ? null : agent.handle };
+      const pollSignals: AbortSignal[] = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("no work queued"); }), {
+        poll: ({ signal }) => new Promise(resolve => {
+          pollSignals.push(signal);
+          if (signal.aborted) resolve({});
+          else signal.addEventListener("abort", () => resolve({}), { once: true });
+        }),
+        publish: async () => { throw new Error("no reply expected"); },
+      }, currentAuthority);
+      try {
+        await delivery.start(original);
+        await waitFor(() => pollSignals.length === 1);
+        if (coordinate === "handle") original.handle = { ...agent.handle };
+        if (coordinate === "agentSessionId") original.agentSessionId = "new-worker";
+        if (coordinate === "executionGenerationId") original.executionGenerationId = "new-execution";
+        if (coordinate === "daemonGeneration") original.daemonGeneration = 2;
+        if (coordinate === "bearer") original.bearer = "rotated-memory-only-token";
+        if (coordinate === "no-provider-api") original.apiUrl = "https://other.letagents.test";
+        if (coordinate === "no-provider-workspace") original.workAttemptId = "new-attempt";
+        await delivery.refresh(original);
+        await waitFor(() => pollSignals.length === 2);
+        assert.equal(pollSignals[0]?.aborted, true, "changed owner must retire the registered lane");
+        assert.equal(pollSignals[1]?.aborted, false);
+        await delivery.refresh({ ...original });
+        assert.equal(pollSignals.length, 2, "the new exact owner is idempotent too");
+      } finally {
+        await delivery.fenceAndDrain(); await store.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   }
 });
 
@@ -1526,8 +2704,8 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const successorPoll = deferred<void>();
-    const ingest = store.ingestPoll.bind(store);
-    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+    const ingest = store.ingestSuccessfulPoll.bind(store);
+    (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; let turns = 0; const turnHandles: unknown[] = [];
@@ -1552,9 +2730,10 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
     assert.equal(refreshed, false, "refresh waits for the old poll's ingest commit");
     releaseIngest.resolve();
     await refresh; await successorPoll.promise;
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
     assert.equal(turns, 1, "the stopped poll cannot launch a stale delivery pump after ingest");
     assert.equal(turnHandles[0], successor.handle, "only the successor context may run the recovered delivery turn");
-    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply", "successor recovery and delivery happen before its hanging poll");
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply", "successor recovery and delivery finish independently of its hanging poll");
     await delivery.fenceAndDrain();
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -1677,8 +2856,8 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const currentPoll = deferred<void>();
-    const ingest = store.ingestPoll.bind(store);
-    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+    const ingest = store.ingestSuccessfulPoll.bind(store);
+    (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; const turnHandles: unknown[] = [];
@@ -1704,6 +2883,7 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
     const currentRefresh = delivery.refresh(current);
     releaseIngest.resolve();
     await Promise.all([staleRefresh, currentRefresh]); await currentPoll.promise;
+    await waitForAsync(async () => (await store.receipts(agent.agentId)).every(item => item.state === "acknowledged_no_reply"));
     assert.deepEqual(turnHandles, [current.handle, current.handle], "the stale refresh cannot own either recovered FIFO turn");
     const internals = delivery as unknown as { loops: Map<string, Promise<void>>; loopEpochs: Map<string, number> };
     assert.equal(internals.loops.has(agent.agentId), true, "the current successor remains in its long poll");
@@ -1719,8 +2899,8 @@ test("an external stop invalidates a refresh reservation still waiting on drain"
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>();
-    const ingest = store.ingestPoll.bind(store);
-    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+    const ingest = store.ingestSuccessfulPoll.bind(store);
+    (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; let turns = 0;
@@ -1806,17 +2986,27 @@ test("SupervisorDaemon stop fences and drains its production-owned delivery befo
     const internals = daemon as unknown as {
       putManifestEntry(entry: Record<string, unknown>): Promise<void>;
       startSupervisedDelivery(entryId: string): Promise<void>;
-      liveHandles: Map<string, typeof agent.handle>;
       workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
+      store: ManifestStore;
+      manifestGeneration: number;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: ProviderActionHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+      };
     };
     await daemon.start();
     await internals.putManifestEntry({
       id: "stone", room_id: "room", display_name: "Stone", provider: "codex", model: null, charter: "supervised test", desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null,
       delivery_mode: "daemon_inbox",
-      created_by: "test", created_at: new Date().toISOString(), work_attempt_id: "attempt",
+      created_by: "test", created_at: new Date().toISOString(), workspace_path: root, work_attempt_id: "attempt",
       provider_ref: { work_attempt_id: "attempt", provider_continuation_id: "thread", provider_connection: agent.providerConnection, execution_generation_id: "generation-1" },
     });
-    internals.liveHandles.set("stone", agent.handle);
+    const exactHandle = { ...agent.handle, appliedConfigurationRevision: 1 };
+    await installExactTestProviderBirth(internals, "stone", exactHandle, "generation-1");
     await internals.workerBindings.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "generation-1", agent_session_id: "session-1", agent_session_token: "memory", api_url: "https://letagents.test" });
     void internals.startSupervisedDelivery("stone"); await entered.promise;
     let stopped = false; const stopping = daemon.stop().then(() => { stopped = true; });
@@ -2617,6 +3807,7 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       providerContinuationId: "thread-missing",
       pid: connection.pid,
       providerConnection: connection,
+      appliedConfigurationRevision: 1,
       observedState: "idle" as const,
     };
     let repairs = 0;
@@ -2663,6 +3854,8 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
     );
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof liveHandle>;
+      store: ManifestStore;
+      manifestGeneration: number;
       supervisedInbox: SupervisedAgentInboxStore;
       workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
       durability: {
@@ -2683,8 +3876,7 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       assert.ok(checkpoint.provider_continuation_id);
       durableCheckpoints.push(checkpoint.provider_continuation_id);
     };
-    const put = await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: {
+    const manifestEntry = {
         id: "stone", room_id: "room", display_name: "Stone", provider: "codex",
         model: "gpt-5.6-sol", charter: "test", desired_state: "running",
         observed_state: "idle", condition: "none", permission_profile_id: null,
@@ -2696,9 +3888,45 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
           provider_connection: connection,
           execution_generation_id: identity.execution,
         },
-      },
-    });
+      } as const;
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: manifestEntry });
     assert.equal(put.ok, true, put.error);
+    const manifestDatabase = (internals.store as unknown as { database: DatabaseSync }).database;
+    manifestDatabase.prepare(`INSERT INTO work_attempts(
+      work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
+      workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+      identity.attempt,
+      "task-restore",
+      "lease-restore",
+      1,
+      root,
+      "repo",
+      "remote",
+      "revision",
+      root,
+      "active",
+      new Date().toISOString(),
+    );
+    manifestDatabase.prepare(`INSERT INTO work_attempt_executions(
+      execution_generation_id,work_attempt_id,started_at,actor,generation,terminal_json
+    ) VALUES(?,?,?,?,?,NULL)`).run(
+      identity.execution,
+      identity.attempt,
+      new Date().toISOString(),
+      "test",
+      1,
+    );
+    const snapshot = await internals.store.load();
+    const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+      entry: manifestEntry,
+      executionGenerationId: identity.execution,
+      providerConnection: connection,
+      appliedRevision: 1,
+      requestedAuthorityMode: "typed_shadow",
+      observedAtMs: Date.now(),
+    });
+    internals.manifestGeneration = birth.generation;
     internals.liveHandles.set("stone", liveHandle);
     await internals.workerBindings.bind({
       entry_id: "stone", room_id: "room", work_attempt_id: identity.attempt,
@@ -2793,6 +4021,110 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
     await daemon?.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("exact native failure settles once, advances FIFO, and survives cleanup errors and restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-native-terminal-"));
+  try {
+    for (const outcome of ["failed", "interrupted"] as const) {
+      for (const cleanupFails of [false, true]) {
+        const path = join(root, `${outcome}-${cleanupFails}.sqlite`);
+        let store = new SupervisedAgentInboxStore(path);
+        let runs = 0;
+        let recoveries = 0;
+        const port = provider(async (_handle, _request, options) => {
+          runs += 1;
+          await options?.beforeNativeDispatch?.();
+          const turnId = `turn-${runs}`;
+          await options?.checkpointTurnStarted?.(turnId);
+          if (runs > 1) return { turnId, outcome: "no_reply", text: null };
+          const result = { turnId, providerContinuationId: "thread", outcome, text: null, evidence: "stream" as const };
+          const checkpoint = await options?.checkpointTerminalResult?.(result);
+          assert.equal(checkpoint?.acceptedResult.outcome, outcome);
+          assert.equal(checkpoint?.cleanupRecoveryEvidence, true);
+          if (cleanupFails) throw new Error("native journal cleanup unavailable after terminal commit");
+          return result;
+        }, async () => { recoveries += 1; throw new Error("must not re-read a settled native failure"); });
+        const http = { poll: async () => ({}), publish: async () => { throw new Error("failure has no room reply"); } };
+        const snapshots: string[] = [];
+        const delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority,
+          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+          async (_agent, source) => { snapshots.push(source); });
+        try {
+          await delivery.pump(agent);
+          await ingest(store, "1"); await ingest(store, "2");
+          await delivery.pump(agent);
+          const receipts = await store.receipts(agent.agentId);
+          assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
+          assert.deepEqual(snapshots, ["1", "2"], "settled failures capture changes even when adapter cleanup rejects");
+          assert.equal(JSON.parse(receipts[0]!.outcome!).kind, outcome);
+          assert.equal(receipts[0]!.canonical_message_id, null);
+          assert.equal(receipts[0]!.attempt_count, 1);
+          assert.equal(receipts[0]!.timeline.filter((event) => event.phase === "turn_finished").length, 1);
+          assert.equal(receipts[0]!.timeline.some((event) => ["retry_scheduled", "published", "no_reply"].includes(event.phase)), false);
+          await delivery.fenceAndDrain(); await store.close();
+          store = new SupervisedAgentInboxStore(path);
+          const reopened = new SupervisedAgentDelivery(store, port, http, currentAuthority);
+          await reopened.pump({ ...agent, executionGenerationId: "generation-2", daemonGeneration: 2 });
+          assert.equal(runs, 2); assert.equal(recoveries, 0);
+          assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
+          await reopened.fenceAndDrain();
+        } finally { await delivery.fenceAndDrain(); await store.close(); }
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("native failure cannot invent a dispatch checkpoint or use another continuation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-invalid-terminal-"));
+  try {
+    for (const defect of ["missing_dispatch", "wrong_continuation"] as const) {
+      const store = new SupervisedAgentInboxStore(join(root, `${defect}.sqlite`));
+      let runs = 0;
+      const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+        runs += 1;
+        if (defect !== "missing_dispatch") await options?.checkpointTurnStarted?.("turn");
+        return { turnId: "turn", providerContinuationId: defect === "wrong_continuation" ? "other" : "thread",
+          outcome: "failed", text: null, evidence: "stream" };
+      }, async () => { throw Object.assign(new Error("exact native state unknown"), { roomTurnRecoveryOutcome: "ambiguous" }); }),
+      { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 1, async () => {});
+      try {
+        await delivery.pump(agent); await ingest(store); await delivery.pump(agent);
+        const receipt = (await store.receipts(agent.agentId))[0]!;
+        assert.equal(receipt.state, "blocked"); assert.equal(receipt.outcome, null); assert.equal(runs, 1);
+        assert.equal(await store.nativeFailure(receipt.inbox_item_id), null);
+      } finally { await delivery.fenceAndDrain(); await store.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a saved reply or Cursor completion proposal wins a late exact native failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-terminal-winner-"));
+  try {
+    for (const candidate of ["codex", "cursor"]) {
+      const store = new SupervisedAgentInboxStore(join(root, `${candidate}.sqlite`));
+      const recordCompletion = installCursorCompletionProjectionFixture(store);
+      const published: string[] = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+        await options?.checkpointTurnStarted?.("turn");
+        if (candidate === "cursor") {
+          recordCompletion("turn", { outcome: "reply", text: "Saved answer." });
+        } else {
+          await options?.checkpointTerminalResult?.({ turnId: "turn", outcome: "reply", text: "Saved answer.", evidence: "stream" });
+        }
+        const failure = { turnId: "turn", providerContinuationId: "thread", outcome: "failed" as const, text: null, evidence: "stream" as const };
+        const accepted = await options?.checkpointTerminalResult?.(failure);
+        assert.equal(accepted?.acceptedResult.outcome, "reply");
+        return failure;
+      }), { poll: async () => ({}), publish: async ({ text, roomId }) => { published.push(text); return { roomId, messageId: "published" }; } }, currentAuthority);
+      try {
+        const currentAgent = { ...agent, provider: candidate };
+        await delivery.pump(currentAgent); await ingest(store); await delivery.pump(currentAgent);
+        assert.deepEqual(published, ["Saved answer."], candidate);
+        assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+      } finally { await delivery.fenceAndDrain(); await store.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("startup recovery republishes a durable publishing outcome without rerunning its provider turn", async () => {
@@ -2986,7 +4318,7 @@ test("startup recovery retries exactly once when wrapper evidence proves native 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("persistent undispatched wrapper failures back off and block after the bounded retry budget", async () => {
+for (const admitted of [false, true]) test(`persistent undispatched wrapper failures are bounded (turn admitted: ${admitted})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-not-dispatched-cap-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
@@ -2997,7 +4329,7 @@ test("persistent undispatched wrapper failures back off and block after the boun
       async (_handle, _request, options) => {
         turns += 1;
         await options?.beforeNativeDispatch?.();
-        await options?.checkpointTurnStarted?.(`cursor:prepared-only:${turns}`);
+        if (admitted) await options?.checkpointTurnStarted?.(`cursor:prepared-only:${turns}`);
         throw Object.assign(new Error("persistent pre-release provider checkpoint failure"), {
           roomTurnRecoveryOutcome: "not_dispatched" as const,
         });
@@ -3007,33 +4339,92 @@ test("persistent undispatched wrapper failures back off and block after the boun
       publish: async () => { throw new Error("an undispatched turn cannot publish"); },
     }, currentAuthority, 10, async (ms) => { delays.push(ms); });
 
-    await delivery.pump(agent);
+    await delivery.pump({ ...agent, provider: "cursor" });
 
     const receipt = (await store.receipts(agent.agentId))[0]!;
     assert.equal(turns, 3, "safe redispatch is capped at the same three-attempt budget as ordinary delivery");
     assert.deepEqual(delays, [10, 20], "undispatched retries use exponential backoff");
     assert.equal(receipt.state, "blocked");
-    assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 2);
-    assert.match(receipt.last_error ?? "", /failed 3 times without native dispatch/);
+    assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 3,
+      "the exhausted failure is journaled atomically with its block");
+    assert.match(receipt.last_error ?? "", /failed 3 times/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("a terminal provider rejection blocks once without result recovery or model rerun", async () => {
+test("failed Cursor idle compensation spends only recovery budget and retains exact authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-compensation-budget-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  try {
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "cursor:prepared", TEST_PROVIDER_TURN_AUTHORITY);
+    const binding = await store.providerTurnBinding(item.inbox_item_id);
+    let recoveries = 0; let compensations = 0; const delays: number[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async () => { throw new Error("must never redispatch before compensation succeeds"); },
+      async () => {
+        recoveries += 1;
+        throw Object.assign(new Error("wrapper never released"), { roomTurnRecoveryOutcome: "not_dispatched" });
+      },
+    ), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority,
+    10, async (ms) => { delays.push(ms); }, undefined, undefined, undefined, undefined,
+    async () => { compensations += 1; throw new Error("idle checkpoint unavailable"); });
+    await delivery.pump({ ...agent, provider: "cursor" });
+    assert.equal(recoveries, 3); assert.equal(compensations, 3);
+    assert.deepEqual(delays, [10, 20]);
+    const blocked = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(blocked.state, "blocked"); assert.equal(blocked.provider_turn_id, "cursor:prepared");
+    assert.deepEqual(await store.providerTurnBinding(item.inbox_item_id), binding);
+    const inspection = new DatabaseSync(join(root, "daemon.sqlite"));
+    try {
+      const events = inspection.prepare("SELECT idempotency_key FROM supervised_agent_inbox_events WHERE phase='retry_scheduled'").all();
+      assert.deepEqual(events.map((event) => event.idempotency_key), [1, 2, 3].map((ordinal) => `retry_failure:result_recovery:${ordinal}`));
+    } finally { inspection.close(); }
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a checkpointed terminal provider rejection settles failed and advances FIFO without replay", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-terminal-provider-failure-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    await ingest(store);
+    const bidiControls = [
+      "\u061c", "\u200e", "\u200f",
+      "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+      "\u2066", "\u2067", "\u2068", "\u2069",
+    ];
+    const disguisedCredentials = bidiControls.map((control, index) => (
+      index % 2 === 0
+        ? `to${control}ken=secret-${index}-value`
+        : `api_${control}key=secret-${index}-value`
+    )).join(" ");
+    const redactedCredentials = bidiControls.map((_control, index) => (
+      index % 2 === 0 ? "token=[REDACTED]" : "api_key=[REDACTED]"
+    )).join(" ");
+    const expectedProviderError = `Open Model request failed at the model provider (HTTP 404): expired model. ${redactedCredentials}`;
     let turns = 0;
+    let recoveries = 0;
     const delivery = new SupervisedAgentDelivery(
       store,
       provider(async (_handle, _request, options) => {
         turns += 1;
         await options?.beforeNativeDispatch?.();
-        await options?.checkpointTurnStarted?.("turn-provider-rejected");
+        const turnId = `turn-${turns}`;
+        await options?.checkpointTurnStarted?.(turnId);
+        if (turns > 1) return { turnId, outcome: "no_reply", text: null };
+        await options?.checkpointTerminalResult?.({
+          turnId,
+          providerContinuationId: "thread",
+          outcome: "failed",
+          text: null,
+          evidence: "transcript",
+          error: `\u001b[31mOpen Model request failed\u001b[0m at the model provider (HTTP 404):\u0000 expired model. ${disguisedCredentials}`,
+        });
         throw Object.assign(
-          new Error("Open Model request was rejected because the provider account has insufficient credit."),
+          new Error("The provider completed, but its final answer could not be read."),
           { roomTurnRecoveryOutcome: "terminal_failure" as const },
         );
+      }, async () => {
+        recoveries += 1;
+        throw new Error("must not recover a checkpointed terminal provider rejection");
       }),
       {
         poll: async () => ({}),
@@ -3043,20 +4434,158 @@ test("a terminal provider rejection blocks once without result recovery or model
       0,
     );
 
-    await delivery.pump(agent);
+    const openModelAgent = { ...agent, provider: "open-model" };
+    await delivery.pump(openModelAgent);
+    await ingest(store, "1");
+    await ingest(store, "2");
+    await delivery.pump(openModelAgent);
 
-    const receipt = (await store.receipts(agent.agentId))[0];
-    assert.equal(turns, 1);
-    assert.equal(receipt?.state, "blocked");
-    assert.match(receipt?.last_error ?? "", /insufficient credit/);
+    const receipts = await store.receipts(agent.agentId);
+    assert.equal(turns, 2);
+    assert.equal(recoveries, 0);
+    assert.deepEqual(receipts.map((receipt) => receipt.state), [
+      "acknowledged_failed",
+      "acknowledged_no_reply",
+    ]);
+    assert.deepEqual(JSON.parse(receipts[0]!.outcome!), {
+      kind: "failed",
+      text: null,
+      evidence: "transcript",
+    });
     assert.equal(
-      receipt?.timeline.some((event) => event.phase === "retry_scheduled"),
+      receipts[0]!.last_error,
+      expectedProviderError,
+      "the failed receipt retains an actionable provider explanation without credentials or display controls",
+    );
+    const inspection = new DatabaseSync(join(root, "daemon.sqlite"));
+    try {
+      const persisted = inspection.prepare("SELECT terminal_evidence_json FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(receipts[0]!.inbox_item_id) as { terminal_evidence_json: string };
+      assert.equal(
+        (JSON.parse(persisted.terminal_evidence_json) as { error?: string }).error,
+        expectedProviderError,
+        "durable terminal evidence contains only the same safe display text",
+      );
+    } finally {
+      inspection.close();
+    }
+    assert.equal(
+      receipts[0]?.timeline.some((event) => event.phase === "retry_scheduled"),
       false,
     );
     await store.close();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("pending new turns wait for managed runtime admission without claiming the FIFO head", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-runtime-admission-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let invocations = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    invocations += 1;
+    return { turnId: "unexpected", outcome: "no_reply", text: null };
+  }), { poll: async () => ({}), publish: async () => {} }, currentAuthority,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  undefined, undefined, undefined, undefined, undefined, undefined, async () => false);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    assert.equal(invocations, 0);
+    const head = await store.head(agent.agentId);
+    assert.equal(head?.state, "pending");
+    assert.equal(head?.attempt_count, 0);
+    assert.equal(head?.provider_turn_id, null);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a delivery wake during admission survives the active pump and internal restarts retain its demand", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-admission-wake-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const demands: object[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    throw new Error("unadmitted delivery cannot reach the provider");
+  }), { poll: async () => ({}), publish: async () => {} }, currentAuthority,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  undefined, undefined, undefined, undefined, undefined, undefined, async (_agent, demand) => {
+    demands.push(demand);
+    if (demands.length === 1) { entered.resolve(); await release.promise; }
+    return false;
+  });
+  try {
+    await ingest(store);
+    const first = delivery.pump(agent);
+    await entered.promise;
+    assert.equal(delivery.wake(agent), true);
+    release.resolve();
+    await first;
+    await waitFor(() => demands.length === 2);
+    await delivery.drainAdmittedTurns([agent.agentId]);
+    assert.notEqual(demands[0], demands[1], "the independent wake has its own captured demand");
+    await delivery.pump(agent);
+    assert.equal(demands[2], demands[1], "internal restart must not create recursive refresh demand");
+    await delivery.poll(agent);
+    assert.notEqual(demands[3], demands[2], "a completed independent poll can retry a deferred native boundary");
+    assert.equal((await store.head(agent.agentId))!.state, "pending");
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("missing Codex room tools retain the exact inbox item without spending a model attempt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-room-tools-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  try {
+    await ingest(store);
+    let ready = false;
+    let invocations = 0;
+    const published: string[] = [];
+    const detail = "LetAgents room tools could not be verified. No model turn was started. Restart and resume, then retry the message.";
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      invocations += 1;
+      if (!ready) throw Object.assign(new Error(detail), { providerFailureCode: "provider_room_tools_unavailable" });
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.("turn-tools-restored");
+      return { turnId: "turn-tools-restored", outcome: "reply", text: "Board checked." };
+    }), { poll: async () => ({}), publish: async input => {
+      published.push(input.clientMessageId);
+      return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId };
+    } }, currentAuthority);
+    await delivery.pump(agent);
+    const blocked = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(blocked.state, "blocked");
+    assert.equal(blocked.last_error, detail);
+    assert.equal(blocked.attempt_count, 0);
+    assert.equal(blocked.provider_turn_id, null);
+    assert.equal(blocked.outcome, null);
+    assert.equal(invocations, 1, "no automatic retry loop while tools are unavailable");
+    assert.deepEqual(published, []);
+    ready = true;
+    await store.retryBlocked(blocked.inbox_item_id);
+    await delivery.pump(agent);
+    const finished = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(finished.inbox_item_id, blocked.inbox_item_id);
+    assert.equal(finished.state, "acknowledged");
+    assert.equal(finished.attempt_count, 1);
+    assert.deepEqual(published, [blocked.reply_client_message_id]);
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("room-tool failure after dispatch intent cannot claim that no model turn started", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-room-tools-late-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  try {
+    await ingest(store);
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.();
+      throw Object.assign(new Error("late tool failure"), { providerFailureCode: "provider_room_tools_unavailable" });
+    }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+    await delivery.pump(agent);
+    const blocked = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(blocked.state, "blocked");
+    assert.match(blocked.last_error!, /provider may have started this work/);
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("a typed pre-turn missing conversation restores the same inbox item before one real turn", async () => {
@@ -3444,6 +4973,8 @@ test("a frozen pre-checkpoint Cursor Stop cannot roll the reserved invocation ba
     const reservation = delivery.captureActiveDeliveryInterrupt(cursorAgent, "stop-precheckpoint");
     assert.ok(reservation);
     delivery.resolveActiveDeliveryInterrupt(reservation, "freeze");
+    delivery.resolveActiveDeliveryInterrupt(reservation, "resume");
+    delivery.finishActiveDeliveryInterrupt(reservation, "resume");
     releaseProvider.resolve();
     await poll;
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -3682,7 +5213,8 @@ test("a failed durable cancellation neither aborts the turn nor strands the FIFO
 
 test("a Stop that loses to an interrupt-rejection retryable still settles — it is not reported published and the turn does not rerun", async () => {
   // claude-code's native interrupt REJECTS the in-flight turn, so deliver()'s
-  // catch can commit `retryable` before the Stop's settlement lands. The Stop
+  // exact turn is already checkpointed before stdin writes. Its catch can
+  // commit `retryable` for exact recovery before the Stop's settlement lands. The Stop
   // must still settle that head cancelled_by_user (not map it to "published"),
   // and the stopped turn must NOT be re-dispatched.
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retryable-race-"));
@@ -3690,8 +5222,9 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const published: string[] = [];
     let calls = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
       calls += 1;
+      await options?.checkpointTurnStarted?.(request.inboxItemId);
       if (calls === 1) throw new Error(`Claude bounded room turn ${request.inboxItemId} failed: Claude command ended interrupted.`);
       return { turnId: request.inboxItemId, outcome: "reply", text: "rerun reply after the Stop" };
     }), {
@@ -3711,3 +5244,179 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('every provider waits for the workspace snapshot before advancing to its next turn', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'letagents-workspace-boundary-'));
+  try {
+    for (const candidate of ['codex', 'claude-code', 'cursor', 'open-model']) {
+      const store = new SupervisedAgentInboxStore(join(root, `${candidate}.sqlite`));
+      const entered = deferred<void>(), release = deferred<void>();
+      const events: string[] = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+        await options?.beforeNativeDispatch?.();
+        events.push(`turn:${request.sourceMessage.id}`);
+        await options?.checkpointTurnStarted?.(request.inboxItemId);
+        return { turnId: request.inboxItemId, outcome: 'no_reply', text: null, publicationContract: 'legacy_cursor_aggregate_v0' };
+      }), { poll: async () => ({}), publish: async () => { throw new Error('no reply'); } }, currentAuthority,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      async (_agent, source) => {
+        events.push(`snapshot:${source}`);
+        if (source === '1') { entered.resolve(); await release.promise; }
+        // Optional review failure must not retry the agent's completed work.
+        if (source === '2') throw new Error('snapshot unavailable');
+      }, async (_agent, source) => { events.push(`baseline:${source}`); return 'a'.repeat(40); },
+      async (_agent, source) => { events.push(`release:${source}`); });
+      try {
+        const currentAgent = { ...agent, provider: candidate };
+        await delivery.pump(currentAgent);
+        await ingest(store, '1'); await ingest(store, '2');
+        const pumping = delivery.pump(currentAgent);
+        await entered.promise;
+        assert.deepEqual(events, ['baseline:1', 'turn:1', 'snapshot:1']);
+        release.resolve(); await pumping;
+        assert.deepEqual(events, ['baseline:1', 'turn:1', 'snapshot:1', 'release:1', 'baseline:2', 'turn:2', 'snapshot:2', 'release:2']);
+        assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.state), ['acknowledged_no_reply', 'acknowledged_no_reply']);
+      } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test("recorded reply-thread intent cannot publish a stopped, failed, silent or authority-lost turn", async () => {
+  for (const outcome of ["stop", "failed", "no_reply", "authority_lost"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-thread-no-publish-"));
+    const path = join(root, "state.sqlite");
+    const store = new SupervisedAgentInboxStore(path);
+    const recorded = deferred<void>(); const release = deferred<void>();
+    let ownsLane = true; let publications = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.checkpointTurnStarted?.("native-turn");
+      await recordThreadIntent(path, store, "native-turn");
+      recorded.resolve(); await release.promise;
+      if (outcome === "authority_lost") ownsLane = false;
+      return { turnId: "native-turn", outcome: outcome === "failed" ? "failed" : outcome === "no_reply" ? "no_reply" : "reply",
+        text: outcome === "failed" || outcome === "no_reply" ? null : "must not be sent" };
+    }), { poll: async () => ({}), publish: async () => { publications++; } }, async () => ownsLane, 0);
+    try {
+      await ingest(store, "msg_72");
+      const pumping = delivery.pump(agent);
+      await recorded.promise;
+      if (outcome === "stop") assert.equal(await delivery.interruptActiveDelivery(agent), "settled");
+      release.resolve(); await pumping;
+      assert.equal(publications, 0, outcome);
+      if (outcome === "stop") assert.equal((await store.receipts(agent.agentId))[0]?.state, "cancelled_by_user");
+    } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+for (const change of ["authority", "handoff", "epoch"] as const) {
+  test(`managed admission cannot dispatch after ${change} changes during its await`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-admission-fence-"));
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const entered = deferred<void>(); const gate = deferred<boolean>();
+    let current = true; let calls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      calls += 1; return { turnId: "unexpected", outcome: "no_reply", text: null };
+    }), { poll: async () => ({}), publish: async () => {} }, async () => current,
+    0, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { entered.resolve(); return gate.promise; });
+    try {
+      await ingest(store);
+      const pending = delivery.pump(agent);
+      await entered.promise;
+      if (change === "authority") current = false;
+      if (change === "handoff") delivery.fence();
+      if (change === "epoch") delivery.pauseIngress(agent.agentId);
+      gate.resolve(true);
+      await pending;
+      assert.equal(calls, 0);
+      assert.equal((await store.head(agent.agentId))!.state, "pending");
+    } finally { gate.resolve(false); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const kind of ["exact-turn", "publication", "ambiguous"] as const) {
+  test(`managed admission leaves ${kind} recovery on its existing path`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-admission-recovery-"));
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let gates = 0; let newTurns = 0; let recovered = 0; let published = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      newTurns += 1; throw new Error("must not replay");
+    }, async (_handle, request) => {
+      recovered += 1; assert.equal(request.providerTurnId, "saved-turn");
+      return { turnId: "saved-turn", outcome: "reply", text: "saved reply" };
+    }), { poll: async () => ({}), publish: async input => {
+      published += 1; return { messageId: "saved-publication", roomId: input.roomId };
+    } }, currentAuthority, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { gates += 1; return false; });
+    try {
+      const item = await enqueue(store);
+      if (kind !== "ambiguous") await store.checkpointTurnStarted(item.inbox_item_id, "saved-turn", TEST_PROVIDER_TURN_AUTHORITY);
+      if (kind === "publication") {
+        await store.transition(item.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "saved reply" }) });
+        await store.transition(item.inbox_item_id, "publishing");
+      }
+      await delivery.pump(agent);
+      assert.equal(gates, 0);
+      assert.equal(newTurns, 0);
+      assert.equal(recovered, kind === "exact-turn" ? 1 : 0);
+      assert.equal(published, kind === "ambiguous" ? 0 : 1);
+      const receipt = (await store.receipts(agent.agentId))[0]!;
+      assert.equal(receipt.state, kind === "ambiguous" ? "blocked" : "acknowledged");
+      if (kind === "ambiguous") {
+        assert.equal(receipt.attempt_count, 0);
+        assert.equal(receipt.provider_turn_id, null);
+        assert.match(receipt.last_error!, /without authoritative terminal/);
+      }
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const race of ["retry", "arrival", "successor"] as const) {
+  test(`managed admission rechecks ${race} that changes the inspected FIFO head`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-admission-claim-race-"));
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let calls = 0; let gates = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      calls += 1; throw new Error("uninspected pending work must not run");
+    }), { poll: async () => ({}), publish: async () => {} }, currentAuthority,
+    0, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { gates += 1; return false; });
+    try {
+      if (race !== "arrival") {
+        const item = await enqueue(store);
+        if (race === "retry") await store.transition(item.inbox_item_id, "blocked");
+        else {
+          await store.checkpointTurnStarted(item.inbox_item_id, "saved-turn", TEST_PROVIDER_TURN_AUTHORITY);
+          await store.transition(item.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "saved" }) });
+          await store.normalizeStartupRecovery(agent.agentId);
+          await ingest(store, "2");
+        }
+      }
+      const head = store.head.bind(store);
+      let raced = false;
+      store.head = async id => {
+        const inspected = await head(id);
+        if (!raced) {
+          raced = true;
+          if (race === "arrival") await ingest(store);
+          else if (race === "retry") await store.retryBlocked(inspected!.inbox_item_id);
+          else {
+            await store.transition(inspected!.inbox_item_id, "dispatching");
+            await store.transition(inspected!.inbox_item_id, "awaiting_result");
+            await store.transition(inspected!.inbox_item_id, "publishing");
+            await store.transition(inspected!.inbox_item_id, "acknowledged");
+          }
+        }
+        return inspected;
+      };
+      await delivery.pump(agent);
+      assert.equal(calls, 0);
+      assert.equal(gates, 1, "the changed pending head must pass admission");
+      assert.equal((await head(agent.agentId))!.state, "pending");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}

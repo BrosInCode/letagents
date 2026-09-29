@@ -23,6 +23,39 @@ export interface TaskGroup {
 export type TaskLease = NonNullable<RoomTask['active_leases']>[number]
 export type { TaskLeaseActionPayload, TaskReviewLeaseActionPayload } from './types'
 
+export function isCloseoutTask(task: RoomTask): boolean {
+  return ['merged', 'done', 'cancelled'].includes(task.status)
+}
+
+export function filterBoardTasks(
+  tasks: readonly RoomTask[],
+  filter: 'open' | 'review' | 'closeout' | 'all',
+  searchQuery: string,
+  options: { owner?: string; status?: string; sort?: 'recent' | 'oldest' | 'title' } = {},
+): RoomTask[] {
+  const query = searchQuery.trim().toLowerCase()
+  return tasks.filter(task => {
+    if (filter === 'open' && isCloseoutTask(task)) return false
+    if (filter === 'closeout' && !isCloseoutTask(task)) return false
+    if (filter === 'review' && task.status !== 'in_review') return false
+    if (options.owner && boardOwnerKey(task) !== options.owner) return false
+    if (options.status && task.status !== options.status) return false
+    return !query || [
+      task.id, formatTaskShortId(task.id), task.title, task.assignee, task.description,
+      task.pr_url, ...(task.workflow_refs ?? []).map(ref => `${ref.label} ${ref.url}`),
+    ].join(' ').toLowerCase().includes(query)
+  }).sort((a, b) => {
+    if (!options.sort) return 0
+    if (options.sort === 'title') return a.title.localeCompare(b.title)
+    const date = (task: RoomTask) => Date.parse(options.sort === 'oldest' ? task.created_at : task.updated_at || task.created_at) || 0
+    return options.sort === 'oldest' ? date(a) - date(b) : date(b) - date(a)
+  })
+}
+
+export function boardOwnerKey(task: RoomTask): string {
+  return task.assignee ? `owner:${task.assignee}` : 'unassigned'
+}
+
 export function useTaskGroups(tasks: Ref<readonly RoomTask[]>) {
   return computed<TaskGroup[]>(() => {
     const groups = new Map<string, RoomTask[]>()
@@ -50,14 +83,14 @@ export function getTaskActions(task: RoomTask): TaskAction[] {
     case 'proposed':
       return [
         { label: 'Accept', cls: 'accept', status: 'accepted' },
-        { label: 'Cancel', cls: 'cancel', status: 'cancelled' },
+        { label: 'Cancel task', cls: 'cancel', status: 'cancelled' },
       ]
     case 'in_review':
       return [{ label: 'Mark Merged', cls: 'merge', status: 'merged' }]
     case 'merged':
       return [{ label: 'Mark Done', cls: 'merge', status: 'done' }]
     case 'accepted':
-      return [{ label: 'Cancel', cls: 'cancel', status: 'cancelled' }]
+      return [{ label: 'Cancel task', cls: 'cancel', status: 'cancelled' }]
     default:
       return []
   }

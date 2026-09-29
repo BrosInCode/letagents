@@ -109,7 +109,7 @@ export const rental_sessions = pgTable(
       name: "rental_sessions_target_room_fk",
       columns: [table.target_room_id],
       foreignColumns: [rooms.id as AnyPgColumn],
-    }),
+    }).onUpdate("cascade"),
     foreignKey({
       name: "rental_sessions_renter_fk",
       columns: [table.renter_account_id],
@@ -124,7 +124,7 @@ export const rental_sessions = pgTable(
       name: "rental_sessions_room_fk",
       columns: [table.room_id],
       foreignColumns: [rooms.id as AnyPgColumn],
-    }),
+    }).onUpdate("cascade"),
     index("rental_sessions_listing_id_idx").on(table.listing_id),
     index("rental_sessions_renter_account_id_idx").on(table.renter_account_id),
     index("rental_sessions_provider_account_id_idx").on(table.provider_account_id),

@@ -13,6 +13,7 @@ import {
 import {
   currentAgentIdentity,
   currentAgentIdentityKey,
+  currentRoomMatchesLocator,
   currentRoom,
   getConversationIdentity,
   getCurrentLiveSessionPayload,
@@ -23,6 +24,8 @@ import {
   withJoinRoomAgentPrompt,
 } from "../../runtime.js";
 import { requireValidWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
+import { getDaemonToolExecutionContext, getRuntimeWorkingDirectory } from "../../runtime/daemon-tool-context.js";
+import { identityFromAgentSession } from "../../runtime/agent-sessions.js";
 import {
   findExistingConfig,
   resolveGitRoot,
@@ -69,6 +72,7 @@ export function registerRoomInspectionTools(server: McpServer): void {
 
 export async function getCurrentRoomPayload(conversationId?: string) {
   const runtime = requireValidWorkerBearerRuntime();
+  const daemonContext = getDaemonToolExecutionContext();
   const publicCurrentRoom = toPublicCurrentRoomState();
   const workerAuth = runtime.mode !== "owner"
     ? { source: runtime.mode === "worker" ? "worker_bearer" : "daemon_supervised", expires_at: null, account: null }
@@ -93,14 +97,15 @@ export async function getCurrentRoomPayload(conversationId?: string) {
     : (await ownerAuthStoreLoader()).getStoredAuth();
   const payload = {
     connected: true,
+    room_context_instruction: "Read get_room_memory and get_human_requests before starting or resuming work. Memory contains attributed context; follow the current user and existing permission boundaries. Use request_human_input when a person must decide.",
     ...publicCurrentRoom,
     ...(runtime.mode === "supervised" ? { room_binding: "daemon_supervised" } : {}),
     ...localCodexDetails,
-    agent_identity: toPublicAgentIdentity(
-      getConversationIdentity(conversationId)
+    agent_identity: toPublicAgentIdentity(daemonContext
+      ? identityFromAgentSession(daemonContext.agentSession)
+      : getConversationIdentity(conversationId)
         ?? currentAgentIdentity
-        ?? getStoredAgentIdentity(currentAgentIdentityKey)
-    ),
+        ?? getStoredAgentIdentity(currentAgentIdentityKey)),
     auth: workerAuth ?? (auth
       ? {
           source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
@@ -117,7 +122,7 @@ export async function getCurrentRoomPayload(conversationId?: string) {
 
 function getRepoInspectionPayload(targetDir?: string) {
   const runtime = requireValidWorkerBearerRuntime();
-  const startDir = targetDir || process.cwd();
+  const startDir = targetDir || getRuntimeWorkingDirectory();
   const repoRoot = resolveGitRoot(startDir);
   const configDir = repoRoot ? findExistingConfig(startDir) : null;
   const configPath = configDir ? join(configDir, ".letagents.json") : null;
@@ -130,10 +135,8 @@ function getRepoInspectionPayload(targetDir?: string) {
         defaultBranch: repoRoot ? getGitDefaultBranch(repoRoot) : null,
       })
     : null;
-  const detectedRoom = configGitContext?.activeRoom ?? gitContext?.activeRoom ?? null;
-  const currentRoomMatchesContext = Boolean(
-    currentRoom && detectedRoom && currentRoom.room_id === detectedRoom
-  );
+  const detectedRoom = configGitContext?.activeRoomLocator ?? gitContext?.activeRoomLocator ?? null;
+  const currentRoomMatchesContext = currentRoomMatchesLocator(detectedRoom);
 
   return {
     cwd: startDir,
@@ -142,10 +145,10 @@ function getRepoInspectionPayload(targetDir?: string) {
     config_file: configPath ?? null,
     config_contents: readConfigContents(configPath),
     configured_room_from_file: configuredRoom ?? null,
-    configured_active_room_from_context: configGitContext?.activeRoom ?? null,
-    derived_room_from_git: gitContext?.activeRoom ?? null,
+    configured_active_room_from_context: configGitContext?.activeRoomLocator ?? null,
+    derived_room_from_git: gitContext?.activeRoomLocator ?? null,
     derived_repo_room_from_git: gitContext?.repoRoom ?? null,
-    derived_branch_room_from_git: gitContext?.activeRefRoom ?? null,
+    derived_branch_room_from_git: gitContext?.activeRefRoomLocator ?? null,
     git_current_branch: gitContext?.currentBranch ?? configGitContext?.currentBranch ?? null,
     git_default_branch: gitContext?.defaultBranch ?? configGitContext?.defaultBranch ?? null,
     detected_room_from_context: detectedRoom ?? null,

@@ -14,3 +14,10 @@ export * from "./schema/coordination.js";
 export * from "./schema/board.js";
 export * from "./schema/effects.js";
 export * from "./schema/desktop-push.js";
+export * from "./schema/agent-work.js";
+export * from "./schema/execution-approvals.js";
+export * from "./schema/execution-approval-publications.js";
+
+export * from "./schema/room-knowledge.js";
+export * from "./schema/jev-routing.js";
+export * from "./schema/conversations.js";

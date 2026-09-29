@@ -15,10 +15,9 @@
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 16px;
-  background: rgba(17, 17, 18, 0.97);
+  background: var(--bg-elevated);
   color: var(--text, #fafafa);
   box-shadow: -18px 0 48px rgba(0, 0, 0, 0.3), 0 22px 64px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(22px) saturate(1.06);
 }
 
 @media (max-width: 719px) {
@@ -56,6 +55,10 @@
 
 .room-message-info-close {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
   padding: 6px;
   border: 0;
   border-radius: 8px;
@@ -145,6 +148,9 @@
   gap: 10px;
 }
 .room-message-info-disclosure li { justify-content: space-between; }
+.room-message-info-section li.room-message-info-agent { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 6px 10px; }
+.room-message-info-agent-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; }
+.room-message-info-agent-actions button { min-height: 44px; }
 
 .room-message-info-avatar {
   display: grid;
@@ -269,5 +275,5 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .room-message-info-surface { background: #151516; backdrop-filter: none; }
+  .room-message-info-surface { background: #151516; }
 }

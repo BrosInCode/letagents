@@ -7,6 +7,8 @@ import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
+import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
+import { hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
 
 interface HostNode {
   kind: "element" | "text" | "comment";
@@ -15,9 +17,11 @@ interface HostNode {
   children: HostNode[];
   parent: HostNode | null;
   props: Record<string, unknown>;
+  getRootNode: () => { activeElement: null };
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  style: Record<string, string>;
   classList: { add: (...names: string[]) => void; remove: (...names: string[]) => void };
   focus: (_options?: FocusOptions) => void;
   scrollTo: (_options?: ScrollToOptions) => void;
@@ -28,7 +32,8 @@ interface HostNode {
 
 function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
   return {
-    kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+    getRootNode: () => ({ activeElement: null }),
+    kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, style: {},
     classList: { add: () => undefined, remove: () => undefined }, focus: () => undefined, scrollTo: () => undefined,
     querySelector: () => null,
     addEventListener: () => undefined, removeEventListener: () => undefined,
@@ -40,6 +45,8 @@ const teleportTarget = hostNode("element", "body");
 // shims cover lifecycle cleanup and scroll helpers while leaving all DOM
 // assertions below against the renderer's own host tree.
 Object.assign(globalThis, {
+  Document: class Document {},
+  ShadowRoot: class ShadowRoot {},
   window: {
     setTimeout, clearTimeout, addEventListener: () => undefined, removeEventListener: () => undefined,
     requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
@@ -126,6 +133,9 @@ let RoomMessageViewport: object;
 let RoomThreadPanel: object;
 let DesktopLongMessageContent: object;
 let DesktopAttachmentDrafts: object;
+let RoomComposer: object;
+let RoomComposerEventChips: object;
+let messageDrafts: typeof import("../src/domain/desktop-message-drafts");
 
 async function attachClientRender(component: object, modulePath: string): Promise<void> {
   const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
@@ -150,12 +160,15 @@ before(async () => {
     root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent",
     server: { middlewareMode: true },
   });
-  [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts] = await Promise.all([
+  messageDrafts = await vite.ssrLoadModule("/renderer/src/domain/desktop-message-drafts.ts");
+  [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomComposerEventChips] = await Promise.all([
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomThreadPanel.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopLongMessageContent.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopAttachmentDrafts.vue").then((module) => module.default),
+    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposer.vue").then((module) => module.default),
+    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposerEventChips.vue").then((module) => module.default),
   ]);
   await Promise.all([
     attachClientRender(DesktopChatMessage, "components/desktop/content/DesktopChatMessage.vue"),
@@ -163,10 +176,299 @@ before(async () => {
     attachClientRender(RoomThreadPanel, "components/desktop/content/room-chat/RoomThreadPanel.vue"),
     attachClientRender(DesktopLongMessageContent, "components/desktop/content/DesktopLongMessageContent.vue"),
     attachClientRender(DesktopAttachmentDrafts, "components/desktop/content/DesktopAttachmentDrafts.vue"),
+    attachClientRender(RoomComposer, "components/desktop/content/room-chat/RoomComposer.vue"),
+    attachClientRender(RoomComposerEventChips, "components/desktop/content/room-chat/RoomComposerEventChips.vue"),
   ]);
 });
 
 after(async () => { await vite?.close(); });
+
+function composerProps() {
+  return { attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], participants: [],
+    pendingAttachmentDrafts: [], permissionApprovals: [], permissionError: null, replyTo: null, resolvingPermissionIds: {},
+    roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
+}
+
+function hostApproval(): DesktopHostApproval {
+  return { id: "presentation-1", presentation: { agentId: "agent-a", displayName: "GardenPoint", provider: "open-model",
+    title: "Run a command", details: '<script>notExecutable()</script>\n{"command":"npm test"}', denyScope: "session_pending" },
+    status: "pending", detail: null, retryDecision: null };
+}
+
+async function flushHostApprovals(): Promise<void> {
+  await new Promise(resolve => setImmediate(resolve));
+  await nextTick();
+}
+
+test("composer presents literal host-only native requests and sends only the selected presentation handle", async () => {
+  const requests: unknown[] = [];
+  const api = { supervisor: {
+    listHostApprovals: async (room: string) => { assert.equal(room, "room-a"); return { available: true, approvals: [hostApproval()], error: null }; },
+    decideHostApproval: async (input: { id: string; decision: HostApprovalChoice }) => { requests.push(input); return "uncertain"; },
+  } };
+  Object.assign(window, { letagentsDesktop: api });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.ok(descendants(root).some(node => node.text.includes('<script>notExecutable()</script>')));
+    assert.equal(descendants(root).some(node => node.type === "script" || node.props.innerHTML), false);
+    assert.ok(descendants(root).some(node => node.text.includes("Deny applies to all pending permissions for this agent.")));
+    assert.equal(buttonByText(root, "Allow once").props.type, "button");
+    await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
+    assert.equal(buttons(root).some(node => descendants(node).some(child => child.text === "Allow once")), false);
+    assert.ok(buttonByText(root, "Show 1 approval needing attention"),
+      "an uncertain decision remains accessible without offering another approval");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer labels a generic Codex grant as turn-scoped", async () => {
+  const approval = hostApproval();
+  approval.presentation = { ...approval.presentation, provider: "codex", title: "Grant for this turn", denyScope: "request" };
+  const requests: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [approval], error: null }),
+    decideHostApproval: async (input: unknown) => { requests.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (buttonByText(root, "Grant for this turn").props.onClick as () => Promise<void>)();
+    assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer retries only the recorded choice and disables stale cards during a connection failure", async () => {
+  const approval = hostApproval(); approval.status = "decision_recorded"; approval.retryDecision = "deny";
+  let snapshot: DesktopHostApprovalSnapshot = { available: true, approvals: [approval], error: null };
+  const decisions: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => snapshot,
+    decideHostApproval: async (input: unknown) => { decisions.push(input); throw new Error("transport missing"); },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (buttonByText(root, "Retry recorded denial").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(decisions, [{ id: "presentation-1", decision: "deny" }]);
+    assert.equal(buttonByText(root, "Retry recorded denial").props.disabled, true);
+    snapshot = { available: false, approvals: [], error: "Host approvals are unavailable. Restart the background service." };
+    await (buttonByText(root, "Refresh approvals").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.equal(buttonByText(root, "Retry recorded denial").props.disabled, true);
+    assert.ok(descendants(root).some(node => node.text.includes("Restart the background service")));
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer shows unavailable approval authority and discards late results after unmount", async () => {
+  let resolve!: (snapshot: DesktopHostApprovalSnapshot) => void;
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: () => new Promise(done => { resolve = done; }) } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  await flushHostApprovals();
+  resolve({ available: false, approvals: [], error: "Host approval key is unavailable." });
+  await flushHostApprovals();
+  assert.equal(descendants(root).some(node => node.text.includes("Host approval key")), true);
+  assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+  app.unmount();
+  const late = mount(RoomComposer, composerProps());
+  await flushHostApprovals();
+  late.app.unmount();
+  resolve({ available: true, approvals: [hostApproval()], error: null });
+  await flushHostApprovals();
+  assert.equal(descendants(late.root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+  delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+test("composer rejects stale refreshes and removes retry controls after an uncertain recorded decision", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval"] });
+  let resolveRefresh!: (snapshot: DesktopHostApprovalSnapshot) => void;
+  let reads = 0;
+  const approval = hostApproval(); approval.status = "decision_recorded"; approval.retryDecision = "allow_once";
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: () => ++reads === 1 ? Promise.resolve({ available: true, approvals: [approval], error: null })
+      : new Promise(resolve => { resolveRefresh = resolve; }),
+    decideHostApproval: async () => "uncertain",
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    await (buttonByText(root, "Retry recorded approval").props.onClick as () => Promise<void>)();
+    await nextTick();
+    resolveRefresh({ available: true, approvals: [hostApproval()], error: null });
+    await flushHostApprovals();
+    assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Retry recorded approval)$/.test(child.text))), false);
+    assert.ok(buttonByText(root, "Show 1 approval needing attention"));
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer keeps unresolved approval failures visible and dismisses cards locally", async () => {
+  const pending = hostApproval();
+  const unavailable = { ...hostApproval(), id: "presentation-2", status: "unavailable" as const,
+    detail: "No decision was recorded for this request.",
+    presentation: { ...hostApproval().presentation, displayName: "UnavailableAgent" } };
+  const uncertain = { ...hostApproval(), id: "presentation-3", status: "uncertain" as const };
+  const resolved = { ...hostApproval(), id: "presentation-4", status: "resolved" as const };
+  const closed = { ...hostApproval(), id: "presentation-5", status: "request_closed" as const };
+  const decisions: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [pending, unavailable, uncertain, resolved, closed], error: null }),
+    decideHostApproval: async (input: unknown) => { decisions.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 1);
+    await (buttonByText(root, "Show 2 approvals needing attention").props.onClick as () => void)();
+    await nextTick();
+    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 3);
+    const unavailableCard = descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval"
+      && descendants(node).some(child => child.text.includes("UnavailableAgent")))!;
+    const unavailableText = descendants(unavailableCard).map(node => node.text).join("\n");
+    assert.match(unavailableText, /UnavailableAgent · Approval unavailable/);
+    assert.match(unavailableText, /No decision was recorded for this request\./);
+    assert.doesNotMatch(unavailableText, /unconfirmed|Your decision will not be sent again/);
+    assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 1);
+    const dismiss = descendants(root).find(node => node.props["aria-label"] === "Dismiss approval from GardenPoint");
+    assert.ok(dismiss?.props.onClick);
+    (dismiss.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 2);
+    assert.deepEqual(decisions, [], "dismissal is local presentation state and never changes the recorded approval");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("approval details show tool inputs and exact edits without transport JSON", async () => {
+  const approval = hostApproval();
+  approval.presentation = { ...approval.presentation, provider: "claude-code", denyScope: "request",
+    details: JSON.stringify({ id: "private-request-id", request: { subtype: "can_use_tool", tool_use_id: "private-tool-id",
+      tool_name: "Bash", decision_reason: "Runs in another directory", blocked_path: "/project/.git",
+      permission_suggestions: [{ type: "addRules", destination: "localSettings", behavior: "allow" }],
+      decision_reason_type: "subcommandResults",
+      input: { command: "git status\nprintf '<script>\\u202e'", description: "Inspect repository", cwd: "/project" } } }) };
+  assert.equal(hostApprovalTitle(approval.presentation), "Run a command");
+  assert.deepEqual(hostApprovalFields(approval.presentation).map(field => field.label), ["Tool", "Command", "Description", "Cwd", "Decision reason", "Blocked path"]);
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [approval], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    const content = descendants(root).map(node => node.text).join("\n");
+    assert.match(content, /git status\nprintf/);
+    assert.match(content, /Runs in another directory/);
+    assert.match(content, /\/project\/\.git/);
+    assert.doesNotMatch(content, /private-request-id|private-tool-id|can_use_tool|visible only on this computer|addRules|localSettings|subcommandResults/);
+    assert.equal(descendants(root).some(node => node.type === "script" || node.props.innerHTML), false);
+    assert.equal(descendants(root).find(node => node.type === "details")?.props.open, undefined);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+  const codex = { ...approval.presentation, provider: "codex" as const, details: JSON.stringify({ request: {
+    id: 12, params: { threadId: "thread", turnId: "turn", itemId: "item", cwd: "/repo", command: "npm test", reason: "Verify" } },
+    changes: [{ path: "test.ts", kind: { type: "update", move_path: "new.ts" }, diff: "-old\n+new" }] }) };
+  const fields = hostApprovalFields(codex);
+  assert.deepEqual(fields.map(field => field.label), ["Cwd", "Command", "Reason", "Changes"]);
+  assert.match(fields.at(-1)!.value, /test.ts/); assert.match(fields.at(-1)!.value, /new.ts/);
+  assert.match(fields.at(-1)!.value, /-old\n\+new/);
+  const controls = { ...approval.presentation, details: JSON.stringify({ request: { tool_name: "Read", input: { file_path: "a\u202eb\u001b" } } }) };
+  assert.equal(hostApprovalFields(controls)[1]!.value, "a\\u202eb\\u001b");
+  const openCode = { ...approval.presentation, provider: "open-model" as const, details: JSON.stringify({
+    id: "request-2", sessionID: "session-2", permission: "bash", patterns: ["npm test"],
+    metadata: { command: "npm test", cwd: "/repo", arguments: ["--run", "unit"] }, always: ["npm *"],
+  }) };
+  assert.deepEqual(hostApprovalFields(openCode), [{ label: "Permission", value: "bash" },
+    { label: "Applies to", value: "1. npm test" }, { label: "Command", value: "npm test" },
+    { label: "Cwd", value: "/repo" }, { label: "Arguments", value: "1. --run\n2. unit" }]);
+});
+
+test("native command approval keeps the full action and drops protocol bookkeeping", () => {
+  const native = { id: 41, method: "item/commandExecution/requestApproval", params: {
+    threadId: "thread", turnId: "turn", itemId: "item", kind: "command", startedAtMs: 1790023138137,
+    environmentId: "local", reason: "Verify the combined revision", command: "npm test\nprintf '<script>'",
+    cwd: "/project", commandActions: [{ type: "unknown", command: "npm test" }],
+    proposedExecpolicyAmendment: ["npm", "test"], availableDecisions: ["accept", "cancel"],
+  } };
+  const presentation = { ...hostApproval().presentation, provider: "codex" as const,
+    title: "Run a command" as const, details: JSON.stringify(native) };
+  const unchanged = presentation.details;
+  assert.deepEqual(hostApprovalFields(presentation), [
+    { label: "Reason", value: "Verify the combined revision" },
+    { label: "Command", value: "npm test\nprintf '<script>'" }, { label: "Cwd", value: "/project" },
+  ]);
+  assert.equal(presentation.details, unchanged, "display never changes the signed request");
+  const unfamiliar = { ...native, params: { ...native.params, environmentId: "remote-worker",
+    networkContext: { host: "example.com", protocol: "https" }, newPermissionScope: "retain this" } };
+  const fields = hostApprovalFields({ ...presentation, details: JSON.stringify(unfamiliar) });
+  assert.ok(fields.some(field => field.label === "Environment Id" && field.value === "remote-worker"));
+  assert.ok(fields.some(field => field.label === "Network Context" && field.value.includes("example.com")));
+  assert.ok(fields.some(field => field.value === "retain this"), "unknown scope must remain reviewable");
+  const noCommand = { ...native, params: { ...native.params, command: null } };
+  assert.ok(hostApprovalFields({ ...presentation, details: JSON.stringify(noCommand) })
+    .some(field => field.label === "Command Actions"), "keep the action if there is no full command");
+});
+
+test("native MCP approval shows the action and complete inputs without protocol metadata", () => {
+  const presentation = { ...hostApproval().presentation, provider: "codex" as const, title: "Run a tool" as const,
+    details: JSON.stringify({ request: { method: "mcpServer/elicitation/request", params: {
+      threadId: "private-thread", turnId: "private-turn", serverName: "letagents", mode: "form",
+      message: 'Allow the letagents MCP server to run tool "send_thread_message"?',
+      _meta: { codex_approval_kind: "mcp_tool_call", persist: ["session", "always"],
+        tool_description: "Protocol description that should not swamp the actual request.",
+        tool_params: { room_id: "room-1", thread_parent_id: "msg_3", text: "A complete proposed message. ".repeat(50) },
+        tool_params_display: [{ name: "text", value: "duplicate message" }] },
+      requestedSchema: { type: "object", properties: {} },
+    } } }) };
+  const unchanged = presentation.details;
+  assert.equal(hostApprovalTitle(presentation), "Send thread message");
+  assert.deepEqual(hostApprovalFields(presentation), [
+    { label: "Service", value: "letagents" }, { label: "Tool", value: "send_thread_message" },
+    { label: "Room id", value: "room-1" }, { label: "Thread parent id", value: "msg_3" },
+    { label: "Text", value: "A complete proposed message. ".repeat(50) },
+  ]);
+  assert.equal(presentation.details, unchanged, "formatting never changes the signed native presentation");
+  const unfamiliar = JSON.parse(presentation.details);
+  unfamiliar.request.params.message = "Please permit this operation";
+  assert.equal(hostApprovalFields({ ...presentation, details: JSON.stringify(unfamiliar) })[1]!.value,
+    "Please permit this operation", "an unfamiliar native message remains visible without inventing a tool name");
+  const edit = { ...presentation, provider: "claude-code" as const, details: JSON.stringify({ request: {
+    tool_name: "Edit", input: { file_path: "/repo/src/TaskList.tsx", old_string: "old", new_string: "new" },
+  } }) };
+  assert.equal(hostApprovalTitle(edit), "Edit TaskList.tsx");
+  assert.equal(hostApprovalTitle({ ...edit, title: "Approval unavailable" }), "Approval unavailable");
+});
+
+test("composer shows approval-service failure when no request cards have arrived", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: false, approvals: [], error: "Approval connection unavailable" }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.ok(descendants(root).some(node => node.text.includes("Approval connection unavailable")));
+    assert.ok(buttonByText(root, "Refresh approvals"));
+    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer disables existing approvals when the bridge becomes unavailable without an error", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval"] });
+  let available = true;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available, approvals: available ? [hostApproval()] : [], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    available = false;
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true);
+    assert.ok(descendants(root).some(node => node.text.includes("Host approvals are unavailable")));
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
 
 function mount(component: object, props: Record<string, unknown>): { root: HostNode; app: App } {
   const root = hostNode("element", "root");
@@ -268,6 +570,86 @@ test("missing-conversation controls render only before provider work starts", ()
   ambiguous.app.unmount();
 });
 
+test("history failure offers explicit retry without viewport or scroll retries", async () => {
+  let calls = 0;
+  const viewport = mount(RoomMessageViewport, {
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: true,
+    loadingOlderMessages: false, olderMessagesError: "Earlier messages could not be loaded. Retry to load them.",
+    messages: [], threadMessages: [], messageNamespace: "history-retry", localAgentWork: [],
+    hasFilteredRoomActivity: true, roomIdentifier: "room", githubActivityAvailable: false,
+    roomLoading: false, searchQuery: "", taskReferenceIds: new Set(), onLoadOlder: () => { calls += 1; },
+  });
+  try {
+    const list = descendants(viewport.root).find(node => node.props["data-testid"] === "room-chat-list")!;
+    Object.assign(list, {
+      isConnected: true, getClientRects: () => [{}], getBoundingClientRect: () => ({ top: 0 }),
+      querySelectorAll: () => [],
+    });
+    list.clientHeight = 500;
+    list.scrollHeight = 200;
+    await nextTick();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(calls, 0, "a short viewport must not retry failed history automatically");
+    (list.props.onScroll as () => void)();
+    assert.equal(calls, 0, "scrolling near the top must not retry failed history");
+    assert.ok(descendants(viewport.root).some(node => node.props.role === "status"));
+    const retry = buttonByText(viewport.root, "Retry loading earlier messages");
+    assert.equal(retry.props.disabled, false);
+    (retry.props.onClick as () => void)();
+    assert.equal(calls, 1);
+  } finally { viewport.app.unmount(); }
+});
+
+test("an idle viewport skips work history tracking and resumes causal reply suppression when work starts", async () => {
+  const props = Vue.reactive({
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
+    loadingOlderMessages: false, messages: [message("msg_1")], threadMessages: [message("msg_1")],
+    messageNamespace: "work-activity", localAgentWork: [] as Array<{
+      id: string; displayName: string; summary: string; startedAt: string;
+      agentSessionId: string; sourceMessageId: string;
+    }>,
+    deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
+    roomIdentifier: "room", githubActivityAvailable: false, roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
+  });
+  const viewport = mount({ setup: () => () => Vue.h(RoomMessageViewport, { ...props }) }, {});
+  const instance = viewport.app._instance!.subTree.component!;
+  const setup = (instance as unknown as {
+    devtoolsRawSetupState: { currentLocalAgentWork: Vue.ComputedRef & { onTrack?: (event: Vue.DebuggerEvent) => void } };
+  }).devtoolsRawSetupState;
+  let historyReads = 0;
+  setup.currentLocalAgentWork.onTrack = (event) => {
+    if (event.key === "messages" || event.key === "threadMessages") historyReads += 1;
+  };
+  const echoes = () => descendants(viewport.root).filter(node => node.props["data-testid"] === "room-local-agent-work-echo");
+  try {
+    props.localAgentWork = [];
+    await nextTick();
+    props.messages = [message("msg_1"), message("msg_2")];
+    props.threadMessages = [...props.messages];
+    await nextTick();
+    assert.equal(historyReads, 0, "no work means the suppression computed does not read either message history");
+    assert.equal(echoes().length, 0);
+
+    props.localAgentWork = [{ id: "agent-a", displayName: "Agent A", summary: "Working", startedAt: "2026-07-20T12:00:00Z",
+      agentSessionId: "session-a", sourceMessageId: "msg_2" }];
+    await nextTick();
+    assert.equal(echoes().length, 1, "new work is visible even after idle history updates");
+    assert.ok(historyReads > 0, "active work resumes observing causal room history");
+
+    const reply = { ...message("msg_3"), agentIdentity: { agentSessionId: "session-a" } };
+    props.threadMessages = [reply, message("msg_2"), message("msg_1")] as typeof props.threadMessages;
+    await nextTick();
+    assert.equal(echoes().length, 0, "a later exact-agent reply clears work even when input history is unordered");
+
+    props.localAgentWork = [];
+    await nextTick();
+    historyReads = 0;
+    props.threadMessages = [message("msg_4")];
+    await nextTick();
+    assert.equal(historyReads, 0, "returning to idle drops history dependencies again");
+  } finally { viewport.app.unmount(); }
+});
+
 test("mounted main viewport and thread panel forward the same retry event contract", async () => {
   const mainCalls: Array<[string, string]> = [];
   const viewport = mount(RoomMessageViewport, {
@@ -321,4 +703,359 @@ test("retry coordinator suppresses duplicate receipts and isolates concurrent su
   assert.equal(pineResult.ok, false);
   if (!pineResult.ok && pineResult.started) assert.equal(pineResult.error, failure);
   assert.equal(coordinator.retryingKeys.value.size, 0);
+});
+
+test("viewport bounds scroll geometry work and preserves reading offsets through reflow and prepend", async () => {
+  const props = Vue.reactive({
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
+    loadingOlderMessages: false, messages: [message()], threadMessages: [], messageNamespace: "scroll-test",
+    localAgentWork: [], deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
+    roomIdentifier: "room", githubActivityAvailable: false, roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
+  });
+  let afterRender = () => {};
+  const visible = Vue.ref(true);
+  const component = { setup() {
+    Vue.onUpdated(() => afterRender());
+    return () => {
+      const viewportProps = { ...props };
+      return Vue.h(Vue.KeepAlive, null, { default: () => visible.value ? Vue.h(RoomMessageViewport, viewportProps) : null });
+    };
+  } };
+  const { root, app } = mount(component, {});
+  await nextTick();
+  const list = descendants(root).find(node => node.props["data-testid"] === "room-chat-list")!;
+  let geometryReads = 0;
+  let queries = 0;
+  let layoutShift = 0;
+  const nodes = Array.from({ length: 5_000 }, (_, index) => ({
+    dataset: { messageId: `message_${index}` },
+    getBoundingClientRect: () => {
+      geometryReads++;
+      const top = index * 40 + layoutShift - list.scrollTop;
+      return { top, bottom: top + 40 };
+    },
+  }));
+  let currentNodes = nodes;
+  Object.assign(list, {
+    isConnected: true, clientHeight: 600, scrollHeight: 200_000, scrollTop: 198_015,
+    getClientRects: () => [{}],
+    getBoundingClientRect: () => { geometryReads++; return { top: 0 }; },
+    querySelectorAll: () => { queries++; return currentNodes; },
+  });
+  const scroll = list.props.onScroll as () => void;
+  try {
+    scroll();
+    assert.ok(geometryReads <= 16, `one scroll used ${geometryReads} geometry reads`);
+    await nextTick();
+    scroll();
+    const previousQueries = queries;
+    geometryReads = 0;
+    for (let index = 0; index < 10; index++) { list.scrollTop -= 1; scroll(); }
+    assert.equal(queries, previousQueries, "steady scrolling reuses the DOM node index");
+    assert.ok(geometryReads <= 160, `ten scrolls used ${geometryReads} geometry reads`);
+
+    const viewportInstance = app._instance!.subTree.component!.subTree.component!;
+    const exposed = viewportInstance.exposed as { preserveScrollAnchorOnNextLayout: () => void };
+    const readingPosition = list.scrollTop;
+    exposed.preserveScrollAnchorOnNextLayout();
+    layoutShift = 135;
+    await nextTick();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(list.scrollTop, readingPosition + 135, "thread/resize reflow preserves the visible message offset");
+
+    const beforePrepend = list.scrollTop;
+    const beforeQuery = queries;
+    afterRender = () => {
+      layoutShift += 80;
+      currentNodes = [{ dataset: { messageId: "older" }, getBoundingClientRect: () => ({ top: -list.scrollTop, bottom: 80 - list.scrollTop }) }, ...nodes];
+      afterRender = () => {};
+    };
+    props.messages = [message("older"), message()];
+    await nextTick();
+    await nextTick();
+    assert.equal(list.scrollTop, beforePrepend + 80, "prepend preserves the original anchor offset");
+    assert.ok(queries > beforeQuery, "a changed timeline refreshes the DOM index");
+
+    props.active = false;
+    await nextTick();
+    const inactiveReads = geometryReads;
+    scroll();
+    assert.equal(geometryReads, inactiveReads, "inactive rooms ignore scroll events");
+    props.active = true;
+    await nextTick();
+    scroll();
+    assert.equal(list.scrollTop, beforePrepend + 80, "reactivation retains the reading position");
+
+    visible.value = false;
+    await nextTick();
+    Object.assign(list, { isConnected: false });
+    layoutShift += 50;
+    Object.assign(list, { isConnected: true });
+    visible.value = true;
+    await nextTick();
+    await nextTick();
+    assert.equal(list.scrollTop, beforePrepend + 130, "KeepAlive restores the message offset after reactivation reflow");
+
+    let smoothScroll: ScrollToOptions | undefined;
+    list.scrollTo = options => { smoothScroll = options; };
+    const latest = descendants(root).find(node => node.props["data-testid"] === "desktop-new-messages-pill")!;
+    (latest.props.onClick as () => void)();
+    assert.deepEqual(smoothScroll, { top: list.scrollHeight, behavior: "smooth" });
+    // The browser produces intermediate scroll events during smooth follow.
+    list.scrollTop = list.scrollHeight - list.clientHeight;
+    scroll();
+    props.messages = [...props.messages, { ...message("message_z"), timestamp: "2026-07-20T12:01:00.000Z" }];
+    await nextTick();
+    await nextTick();
+    assert.equal(list.scrollTop, list.scrollHeight, "new messages continue following the bottom");
+  } finally { app.unmount(); }
+});
+
+test("main and thread composers preserve failed drafts and only clear acknowledged text", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  for (const thread of [false, true]) {
+    let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
+    const props = thread ? {
+      parent: message(), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
+      sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
+      pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, revealMessageId: null,
+      searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(),
+      deliveryReceiptsByMessage: {}, deliveryRecoveryAvailable: true, deliveryRetryKeys: new Set(),
+    } : composerProps();
+    const mounted = mount(thread ? RoomThreadPanel : RoomComposer, {
+      ...props,
+      [thread ? "onSendThreadMessage" : "onSendMessage"]: (...args: unknown[]) => { complete = args.at(-1) as typeof complete; },
+    });
+    try {
+      const input = descendants(mounted.root).find(node => node.type === "textarea")!;
+      let focusCount = 0;
+      input.focus = () => { focusCount++; };
+      const form = descendants(mounted.root).find(node => node.type === "form")!;
+      const setDraft = input.props["onUpdate:modelValue"] as (text: string) => void;
+      const submit = () => (form.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+      setDraft("入力中"); await nextTick();
+      let prevented = 0;
+      const enter = input.props.onKeydown as ((event: unknown) => void) | Array<(event: unknown) => void>;
+      const pressEnter = (isComposing: boolean) => {
+        const event = { key: "Enter", isComposing, preventDefault: () => { prevented += 1; } };
+        for (const handler of Array.isArray(enter) ? enter : [enter]) handler(event);
+      };
+      pressEnter(true);
+      assert.equal(prevented, 0, "IME confirmation remains under composition control");
+      assert.equal((input as unknown as { value: string }).value, "入力中");
+      pressEnter(false);
+      assert.equal(prevented, 1);
+      complete(true); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "", "normal Enter submits the draft");
+      setDraft("Investigate the flaky worker"); await nextTick(); submit(); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "Investigate the flaky worker");
+      complete(false); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "Investigate the flaky worker");
+      submit(); setDraft("A newer instruction"); complete(true); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "A newer instruction");
+      submit(); complete(true); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "");
+      assert.ok(focusCount > 0, "accepted send returns focus to the composer");
+      assert.equal(Boolean(input.props.disabled), false);
+      setDraft("Next message while the accepted message is in flight"); await nextTick();
+      assert.equal((input as unknown as { value: string }).value, "Next message while the accepted message is in flight");
+    } finally { mounted.app.unmount(); }
+  }
+  delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+test("outgoing row exposes sending, uncertain retry, and confirmed state without server actions", async () => {
+  const outbox = await vite.ssrLoadModule("/renderer/src/domain/message-outbox.ts");
+  outbox.clearDesktopMessageOutbox();
+  let reject!: (error: Error) => void;
+  let resolve!: (value: { message: DesktopRoomMessage }) => void;
+  const calls: unknown[][] = [];
+  Object.assign(window, { letagentsDesktop: { room: {
+    sendMessage: (...args: unknown[]) => { calls.push(args); return new Promise((done, fail) => { resolve = done; reject = fail; }); },
+  } } });
+  const id = outbox.enqueueDesktopMessage({ roomIdentifier: "room", messageNamespace: null, text: "Hello", replyTo: null, threadRootId: null, attachments: [], replyPreview: null, onConfirmed() {} });
+  const component = { setup: () => () => Vue.h(DesktopChatMessage, {
+    message: outbox.desktopMessageOutbox.value[0].message, threadSummary: emptyThreadSummary,
+    deliveryReceipts: [], activeThreadRoot: false, highlightQuery: "",
+  }) };
+  const { root, app } = mount(component, {});
+  try {
+    const sending = outbox.retryDesktopOutgoingMessage(id);
+    await nextTick();
+    assert.ok(descendants(root).some(node => node.text.includes("Sending…")));
+    assert.equal(buttons(root).some(node => node.props["aria-label"] === "Quote reply"), false);
+    reject(new Error("Timed out")); await sending; await nextTick();
+    assert.ok(descendants(root).some(node => node.text.includes("Delivery not confirmed")));
+    const retry = (buttonByText(root, "Retry safely").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(calls[0], calls[1]);
+    resolve({ message: { ...message("msg_2"), clientMessageId: id } }); await retry; await nextTick();
+    assert.equal(descendants(root).some(node => node.props.class === "room-message-outgoing"), false);
+    assert.equal(buttons(root).some(node => node.props["aria-label"] === "Quote reply"), true);
+  } finally { app.unmount(); outbox.clearDesktopMessageOutbox(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("room drafts survive switching and remount, stay account isolated, and never auto-send", async () => {
+  messageDrafts.clearDesktopMessageDrafts();
+  messageDrafts.setDesktopMessageDraftAccount("alice");
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  let sends = 0;
+  let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
+  const open = (room: string) => mount(RoomComposer, { ...composerProps(), roomIdentifier: room, messageNamespace: `${room}:cloud:cloud`, onSendMessage: (...args: unknown[]) => { sends += 1; complete = args.at(-1) as typeof complete; } });
+  const input = (view: ReturnType<typeof mount>) => descendants(view.root).find(node => node.type === "textarea")!;
+  const value = (view: ReturnType<typeof mount>) => (input(view) as unknown as { value: string }).value;
+  let view = open("Messaging-QA");
+  try {
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Keep my investigation notes");
+    await nextTick();
+    view.app.unmount();
+    view = open("sky-lake");
+    assert.equal(value(view), "");
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Different room");
+    view.app.unmount();
+    view = open("messaging-qa");
+    assert.equal(value(view), "Keep my investigation notes");
+    assert.equal(sends, 0, "switching never submits a draft");
+    (descendants(view.root).find(node => node.type === "form")!.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+    view.app.unmount();
+    complete(true);
+    view = open("messaging-qa");
+    assert.equal(value(view), "", "acceptance still clears the captured draft after composer disposal");
+    messageDrafts.setDesktopMessageDraftAccount("bob");
+    await nextTick();
+    assert.equal(value(view), "");
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Bob draft");
+    messageDrafts.clearDesktopMessageDrafts();
+    await nextTick();
+    assert.equal(value(view), "", "signout clears currently mounted text as well as saved drafts");
+    messageDrafts.setDesktopMessageDraftAccount("alice");
+    await nextTick();
+    assert.equal(value(view), "", "previous account drafts do not return after account transition");
+    assert.equal(sends, 1);
+  } finally {
+    view.app.unmount(); messageDrafts.clearDesktopMessageDrafts();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+  }
+});
+
+test("thread reopen restores text and selection quote and accepted send clears only its submitted draft", async () => {
+  messageDrafts.clearDesktopMessageDrafts();
+  messageDrafts.setDesktopMessageDraftAccount("alice");
+  const saved = messageDrafts.useDesktopMessageDraft(() => "room:cloud:cloud", () => "message_1");
+  saved.quote.value = { ...message("quoted"), text: "Earlier instruction" };
+  saved.selectedQuoteText.value = "Earlier";
+  let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
+  const sends: unknown[][] = [];
+  const open = (id = "message_1") => mount(RoomThreadPanel, {
+    parent: message(id), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
+    messageNamespace: "room:cloud:cloud", sending: false, sendError: null, attaching: false,
+    attachmentDrafts: [], attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false,
+    loadingOlderReplies: false, revealMessageId: null, searchQuery: "", activeSearchMessageId: null,
+    taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
+    onSendThreadMessage: (...args: unknown[]) => { sends.push(args); complete = args.at(-1) as typeof complete; },
+  });
+  const input = (view: ReturnType<typeof mount>) => descendants(view.root).find(node => node.type === "textarea")!;
+  const value = (view: ReturnType<typeof mount>) => (input(view) as unknown as { value: string }).value;
+  const submit = (view: ReturnType<typeof mount>) => (descendants(view.root).find(node => node.type === "form")!.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+  let view = open();
+  try {
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Follow up");
+    await nextTick();
+    view.app.unmount(); view = open("other-thread");
+    assert.equal(value(view), "");
+    view.app.unmount(); view = open();
+    assert.equal(value(view), "Follow up");
+    assert.ok(descendants(view.root).some(node => node.text.includes("Earlier")));
+    assert.equal(sends.length, 0, "reopening must not submit");
+    submit(view);
+    assert.match(sends[0][0] as string, /Earlier/);
+    complete(false); await nextTick();
+    assert.equal(value(view), "Follow up");
+    submit(view);
+    (input(view).props["onUpdate:modelValue"] as (text: string) => void)("Next instruction");
+    complete(true); await nextTick();
+    assert.equal(value(view), "Next instruction");
+    submit(view); complete(true); await nextTick();
+    assert.equal(value(view), "");
+    view.app.unmount(); view = open();
+    assert.equal(value(view), "");
+    assert.equal(saved.quote.value, null);
+  } finally { view.app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
+});
+
+
+test("acceptance after switching threads clears only the original submitted text and quote", async () => {
+  messageDrafts.clearDesktopMessageDrafts();
+  messageDrafts.setDesktopMessageDraftAccount("alice");
+  const threadId = Vue.ref("thread-a");
+  const savedA = messageDrafts.useDesktopMessageDraft(() => "room", () => "thread-a");
+  const savedB = messageDrafts.useDesktopMessageDraft(() => "room", () => "thread-b");
+  savedA.text.value = "A reply";
+  savedA.quote.value = message("quote-a");
+  savedA.selectedQuoteText.value = "Selection A";
+  savedB.text.value = "B reply";
+  savedB.quote.value = message("quote-b");
+  let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
+  const component = { setup: () => () => Vue.h(RoomThreadPanel, {
+    parent: message(threadId.value), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
+    sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
+    pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, searchQuery: "",
+    activeSearchMessageId: null, taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
+    onSendThreadMessage: (...args: unknown[]) => { complete = args.at(-1) as typeof complete; },
+  }) };
+  const view = mount(component, {});
+  try {
+    (descendants(view.root).find(node => node.type === "form")!.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+    threadId.value = "thread-b"; await nextTick();
+    complete(true); await nextTick();
+    assert.equal(savedA.text.value, "");
+    assert.equal(savedA.quote.value, null);
+    assert.equal(savedA.selectedQuoteText.value, null);
+    assert.equal(savedB.text.value, "B reply");
+    assert.equal(savedB.quote.value?.id, "quote-b");
+    threadId.value = "thread-a"; await nextTick();
+    assert.equal(descendants(view.root).some(node => node.props["data-testid"] === "room-thread-quote-preview"), false);
+  } finally { view.app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
+});
+
+test("attachment-only thread acceptance restores composer focus without requiring stored text", async () => {
+  messageDrafts.clearDesktopMessageDrafts();
+  const { root, app } = mount(RoomThreadPanel, {
+    parent: message(), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "attachment-focus", messageNamespace: "attachment-focus:cloud:cloud",
+    sending: false, sendError: null, attaching: false,
+    attachmentDrafts: [{ uploadId: "upload-focus", fileName: "note.txt", mimeType: "text/plain", sizeBytes: 3, previewDataUrl: null }],
+    attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false,
+    searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
+    onSendThreadMessage: (...args: unknown[]) => (args.at(-1) as (accepted: boolean) => void)(true),
+  });
+  try {
+    await nextTick();
+    const input = descendants(root).find(node => node.type === "textarea")!;
+    let focused = false;
+    input.focus = () => { focused = true; };
+    const form = descendants(root).find(node => node.type === "form")!;
+    (form.props.onSubmit as (event: unknown) => void)({ preventDefault() {} });
+    await nextTick();
+    assert.equal(focused, true);
+  } finally { app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
+});
+
+for (const roomWorkspace of [false, true]) test(`composer names the saved permission scope before sending Always allow (room: ${roomWorkspace})`, async () => {
+  const approval = hostApproval();
+  approval.presentation.alwaysAllow = roomWorkspace ? { kind: "room_workspace", version: 1, agentId: "agent-a", accountId: "owner",
+    roomId: "room", workAttemptId: "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a", workspacePath: "/private/workspace", canonicalWorkspacePath: "/private/workspace",
+    provider: "open-model", toolId: "opencode:bash", toolLabel: "Bash", policySha256: "b".repeat(64) } : { agentId: "agent-a", accountId: "owner", projectId: "a".repeat(64), projectName: "Do App",
+    sourceRepoPath: "/projects/do-app", canonicalSourcePath: "/projects/do-app", repository: "do-app", remoteUrl: "/projects/do-app",
+    provider: "open-model", toolId: "opencode:bash", toolLabel: "Bash", policySha256: "b".repeat(64) };
+  const requests: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [approval], error: null }),
+    decideHostApproval: async (input: unknown) => { requests.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (buttonByText(root, roomWorkspace ? "Always allow Bash in this room workspace" : "Always allow Bash in Do App").props.onClick as () => Promise<void>)();
+    assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_always" }]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });

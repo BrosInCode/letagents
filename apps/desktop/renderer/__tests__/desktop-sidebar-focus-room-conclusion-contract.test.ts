@@ -85,12 +85,13 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.match(appSource, /if \(toast\) pushActionToast\(toast\.message, toast\.state\)/);
   });
 
-  it("identifies the IPC mutation as an authenticated desktop-human write", () => {
+  it("uses the app session for human Focus Room actions", () => {
     assert.match(
       mainFocusRoomsSource,
-      /conclusion_details: conclusionDetails,[\s\S]*?quick_close: quickClose,[\s\S]*?desktop_human_client: true/,
+      /conclusion_details: conclusionDetails,[\s\S]*?quick_close: quickClose,/,
     );
-    assert.match(mainFocusRoomsSource, /"X-LetAgents-Desktop-Client": "1"/);
+    assert.doesNotMatch(mainFocusRoomsSource, /desktop_human_client|X-LetAgents-Desktop-Client/);
+    assert.match(mainFocusRoomsSource, /import \{ apiFetch \} from "..\/auth.js"/);
   });
 
   it("removes displacement for reduced-motion users", () => {

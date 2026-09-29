@@ -8,6 +8,7 @@ import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../../shared/request-headers.js
 import { requiredAgentSessionRouteCapability } from "../request/agent-session-route-capabilities.js";
 import { isSupervisorGrantRouteAllowed } from "../request/supervisor-grant-route-registry.js";
 import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
+import { parseBearerAuthorization } from "../request/bearer-authorization.js";
 
 export interface HttpMiddlewareDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
@@ -52,6 +53,14 @@ export function registerHttpMiddleware(
       req.authKind = auth.authKind;
       req.agentSession = auth.agentSession ?? null;
       req.supervisorGrant = auth.supervisorGrant ?? null;
+      // A rejected credential must not inherit anonymous room permissions.
+      // The sign-in probe reports authenticated:false so clients can clear
+      // expired saved credentials; it exposes no room access or mutations.
+      const isAuthStatusProbe = req.method === "GET" && req.path === "/auth/session";
+      if (!req.authKind && !isAuthStatusProbe && parseBearerAuthorization(req.headers.authorization).kind !== "none") {
+        _res.status(401).json({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." });
+        return;
+      }
       if (req.authKind === "supervisor_grant") {
         if (!isSupervisorHostGrantFeatureEnabled() || !isSupervisorGrantRouteAllowed(req.method, req.path)) {
           _res.status(403).json({ error: "This supervisor grant is not authorized for the requested route." });

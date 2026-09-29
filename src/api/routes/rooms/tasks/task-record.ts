@@ -4,6 +4,7 @@ import {
   BoardIntentApprovalConsumptionError,
   getActiveTaskLeases,
   LeaseFenceStaleError,
+  TaskContentConflictError,
   type BoardIntentConsumptionInput,
   type TaskStatus,
 } from "../../../db.js";
@@ -23,6 +24,7 @@ import {
 import { findBoardReviewLeaseForMerge } from "../../../coordination-policy.js";
 import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import { attachTaskDetails } from "./task-details.js";
+import { authorizeBoardDecision } from "../board.js";
 import type { RoomTaskRouteDeps } from "./types.js";
 
 export function registerTaskRecordRoutes(
@@ -77,6 +79,9 @@ export function registerTaskRecordRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const editsContent = Object.prototype.hasOwnProperty.call(requestBody, "title")
+      || Object.prototype.hasOwnProperty.call(requestBody, "description");
+    if (editsContent && !(await deps.requireAdmin(req, res, project))) return;
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
@@ -85,13 +90,20 @@ export function registerTaskRecordRoutes(
     });
     if (workerWriteIdentity.kind === "responded") return;
     const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
-    const workflow_artifacts = validateTaskWorkflowArtifactsInput(
-      requestBody.workflow_artifacts
-    );
-    const patch = buildTaskUpdatePatch({
-      body: requestBody,
-      workflowArtifacts: workflow_artifacts,
-    });
+    if (editsContent && workerIdentity) {
+      res.status(403).json({ error: "Task content edits require a human room admin." });
+      return;
+    }
+    let patch: ReturnType<typeof buildTaskUpdatePatch>;
+    try {
+      patch = buildTaskUpdatePatch({
+        body: requestBody,
+        workflowArtifacts: validateTaskWorkflowArtifactsInput(requestBody.workflow_artifacts),
+      });
+    } catch (error) {
+      respondWithBadRequest(res, "PATCH /rooms/:room_id/tasks/:task_id", error, "Invalid task update.");
+      return;
+    }
     const { updates } = patch;
     const actorLabel = workerIdentity?.actor_label ?? patch.actorLabel;
     const actorKey = workerIdentity?.agent_key ?? patch.actorKey;
@@ -105,12 +117,23 @@ export function registerTaskRecordRoutes(
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
       if (updates.status && adminOnlyStatuses.has(updates.status)) {
-        if (!(await deps.requireAdmin(req, res, project))) return;
+        if (workerIdentity && (updates.status === "accepted" || updates.status === "cancelled")) {
+          if (Object.keys(updates).some((key) => key !== "status")) {
+            res.status(403).json({ error: "Board Manager task decisions can only change status." });
+            return;
+          }
+          if (!(await authorizeBoardDecision({
+            req, res, project, workerIdentity, requireAdmin: deps.requireAdmin,
+            getActiveBoardManagerForRoom: deps.getActiveBoardManagerForRoom,
+          }))) return;
+        } else if (!(await deps.requireAdmin(req, res, project))) return;
       }
 
       const isReviewChangeRequest = updates.status === "blocked" && task.status === "in_review";
       const reviewDecisionOnly =
         isReviewChangeRequest &&
+        updates.title === undefined &&
+        updates.description === undefined &&
         updates.assignee === undefined &&
         updates.assignee_agent_key === undefined &&
         updates.pr_url === undefined &&
@@ -227,22 +250,42 @@ export function registerTaskRecordRoutes(
         }
       );
       if (updated && updates.status && updates.status !== task.status) {
-        await deps.emitTaskLifecycleStatusMessage(project.id, updated);
+        try {
+          await deps.emitTaskLifecycleStatusMessage(project.id, updated, {
+            client_message_id: `task-status:${updated.id}:${Date.parse(updated.updated_at)}:${updated.status}`,
+            parent_client_message_id: `task-status-parent:${updated.id}:${Date.parse(updated.updated_at)}:${updated.status}`,
+          });
+        } catch {
+          // The task is committed. A notification failure cannot undo it or
+          // truthfully turn the successful mutation into a bad request.
+          console.warn("Task lifecycle notification failed after committed update", { roomId: project.id, taskId });
+        }
       }
 
       if (updated) {
-        await deps.ensureTaskGitRoomForActiveWorkLease?.({
-          parentRoomId: project.id,
-          taskId: updated.id,
-        });
-        const taskWithDetails = await attachTaskDetails(project.id, updated);
-        deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+        try {
+          await deps.ensureTaskGitRoomForActiveWorkLease?.({ parentRoomId: project.id, taskId: updated.id });
+        } catch {
+          console.warn("Task Git room enrichment failed after committed update", { roomId: project.id, taskId });
+        }
+        let taskWithDetails: typeof updated | Awaited<ReturnType<typeof attachTaskDetails>> = updated;
+        try {
+          taskWithDetails = await attachTaskDetails(project.id, updated);
+        } catch {
+          // Preserve the committed result without inventing unknown lease/lock state.
+          console.warn("Task detail enrichment failed after committed update", { roomId: project.id, taskId });
+        }
+        try {
+          deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+        } catch {
+          console.warn("Task event delivery failed after committed update", { roomId: project.id, taskId });
+        }
         res.json({ ...taskWithDetails, room_id: project.id });
       } else {
         res.status(404).json({ error: "Task not found" });
       }
     } catch (error) {
-      if (error instanceof LeaseFenceStaleError) {
+      if (error instanceof LeaseFenceStaleError || error instanceof TaskContentConflictError) {
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }

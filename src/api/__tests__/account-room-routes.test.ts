@@ -95,7 +95,7 @@ test("account room route returns parent rooms with nested focus rooms", async ()
   const app = captureAccountRoomHandlers();
   const calls: unknown[] = [];
   const bindingCalls: string[][] = [];
-  const branchRoomId = "git-room:github.com:owner/repo:branch:Y29kZXgvR2l0Um9vbXM";
+  const branchRoomId = "focus_37";
   registerAccountRoomRoutes(app as never, {
     archiveAccountRoomForAccount: async () => {
       throw new Error("not invoked");

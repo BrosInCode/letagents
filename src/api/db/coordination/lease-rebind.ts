@@ -59,7 +59,7 @@ export type RebindTaskLeaseFailure =
   | "predecessor_live"   // the from-session is not ended (not terminal)
   | "kind_not_rebindable" // only work leases are rebindable; review leases must be released
   | "attestation_missing" // no un-consumed terminal attestation for this predecessor tuple
-  | "attestation_stale"   // attestation exists but was authored by a different/older grant generation
+  | "attestation_stale"   // attestation belongs to a different grant or a future generation
   | "attestation_mismatch"; // attestation exists but is not the exact execution proof presented
 
 export interface RebindTaskLeaseInput {
@@ -203,7 +203,7 @@ export async function rebindTaskLease(input: RebindTaskLeaseInput): Promise<Rebi
       // the authorizing proof is a server-persisted attestation that the SAME grant
       // observed THIS predecessor execution terminate. Require exactly one
       // un-consumed attestation for the {lease, epoch, from-session} tuple, authored
-      // by this grant at its current generation, AND require the caller to name it
+      // by this same grant at its current or an earlier generation, AND require the caller to name it
       // exactly: attestation id + work-attempt + execution-generation must all
       // match, so the consumed proof is the precise execution the supervisor
       // observed terminate — never "whichever pending proof exists".
@@ -218,8 +218,11 @@ export async function rebindTaskLease(input: RebindTaskLeaseInput): Promise<Rebi
         ))
         .limit(1);
       if (!attestation) abort("attestation_missing");
+      // Death cannot become undone by a daemon handoff. The grant fence above
+      // proves this caller's current authority; the immutable proof separately
+      // proves the predecessor's death. An older caller still fails the fence.
       if (attestation!.grant_id !== grant!.grant_id
-        || attestation!.supervisor_generation !== input.supervisor_grant_fence.generation) {
+        || attestation!.supervisor_generation > input.supervisor_grant_fence.generation) {
         abort("attestation_stale");
       }
       if (attestation!.id !== input.attestation_id
@@ -411,10 +414,11 @@ export type RecordRebindAttestationResult =
 // it records the exact predecessor execution tuple the supervisor observed as
 // terminal.
 //
-// Evidence is IMMUTABLE: the insert is insert-or-return-identical. An identical
-// retry returns the existing pending row untouched (created:false); a retry
-// carrying ANY differing evidence (grant, generation, execution ids, cause)
-// fails with `evidence_conflict` — recorded evidence is never overwritten.
+// Death evidence is IMMUTABLE: an identical retry returns the pending row
+// untouched, including its original authoring generation. A successor under
+// the SAME grant can use that historical fact after a handoff, but must prove
+// its CURRENT authority below and again at rebind. Future-generation evidence
+// and differing grant/execution/cause are rejected; evidence is never rewritten.
 //
 // Authority is validated INSIDE the same locked transaction as the insert
 // (default-deny even for internal callers): the grant fence must be current,
@@ -539,7 +543,7 @@ export async function recordRebindAttestation(
       .limit(1);
     if (!existing) return { ok: false as const, reason: "evidence_conflict" as const };
     const identical = existing.grant_id === grant.grant_id
-      && existing.supervisor_generation === input.supervisor_grant_fence.generation
+      && existing.supervisor_generation <= input.supervisor_grant_fence.generation
       && existing.work_attempt_id === input.work_attempt_id
       && existing.execution_generation_id === input.execution_generation_id
       && existing.cause === input.cause;

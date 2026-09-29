@@ -270,6 +270,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   const collapsedProjects = ref<Record<string, boolean>>({});
 
   function findSidebarEntryById(entryId: string): SidebarEntry | null {
+    if (entryId === "messages") return { id: "messages", type: "messages", title: "Messages", description: "Private conversations", sectionLabel: "LetAgents" };
     if (entryId === pinnedRoom.value.id) return pinnedRoom.value;
     if (entryId === currentParentRoom.value.id) return currentParentRoom.value;
 

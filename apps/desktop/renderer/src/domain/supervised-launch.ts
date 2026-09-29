@@ -1,6 +1,7 @@
 import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
+import { agentCompactionProgress } from "./managed-agents";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
@@ -43,6 +44,8 @@ export interface SupervisedLaunchPhase {
 }
 
 export interface SupervisedLaunchProgress {
+  /** Current compaction while the launch is still progressing. */
+  compacting: boolean;
   phases: SupervisedLaunchPhase[];
   /** The phase currently active, failed, or (once ready) the terminal phase. */
   currentPhaseId: SupervisedLaunchPhaseId;
@@ -88,6 +91,7 @@ type LaunchFields = Pick<
   | "id"
   | "displayName"
   | "provider"
+  | "providerProgress"
   | "desiredState"
   | "observedState"
   | "condition"
@@ -116,6 +120,24 @@ function isBlockingCondition(entry: LaunchFields): boolean {
     || entry.condition === "security_blocked"
     || entry.condition === "quarantined"
     || (entry.condition === "coordination_blocked" && !isExpectedCoordinationWait(entry.lastError));
+}
+
+function missingProviderRuntimeDetail(entry: LaunchFields, providerLabel: string): string | null {
+  const detail = entry.lastError?.trim();
+  if (!detail || !/\bspawn\b.*\bENOENT\b/i.test(detail)) return null;
+  return `The background service could not find a command needed to start ${providerLabel}. Check setup again after installing or moving the required command.`;
+}
+
+/** The user-visible detail for a workspace-provisioning failure. Surface an
+ * actionable daemon message (e.g. "not a git repository: <path>" when the user
+ * picked a non-Git source folder) but never leak an internal scheduler-failure
+ * string — the daemon wraps generic convergence faults as "convergence
+ * scheduler failure: ..." which are meaningless to the user, so those fall back
+ * to friendly, retryable copy. */
+const INTERNAL_SCHEDULER_FAILURE = /^convergence scheduler failure:/i;
+function provisioningFailureDetail(lastError: string | null | undefined, fallback: string): string {
+  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) return fallback;
+  return safeUserVisibleErrorDetail(lastError, fallback);
 }
 
 export function supervisedLaunchProviderLabel(provider: string): string {
@@ -160,6 +182,8 @@ function reachedIndex(entry: LaunchFields): number {
 
 export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchProgress {
   const providerLabel = supervisedLaunchProviderLabel(entry.provider);
+  const compacting = agentCompactionProgress(entry);
+  const missingRuntimeDetail = missingProviderRuntimeDetail(entry, providerLabel);
   const agentDisplayName = supervisedAgentDisplayLabel(entry.displayName, entry.id);
   const reached = reachedIndex(entry);
   const ownershipPaused = entry.desiredState === "paused";
@@ -197,7 +221,7 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
       return { id: phase.id, label: phase.label, state: "done" };
     }
     if (index === activeIndex) {
-      return { id: phase.id, label: phase.label, state: failed ? "failed" : "active" };
+      return { id: phase.id, label: compacting && !failed ? "Compacting conversation" : phase.label, state: failed ? "failed" : "active" };
     }
     return { id: phase.id, label: phase.label, state: "pending" };
   });
@@ -213,8 +237,9 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
         ? `LetAgents can't currently reconnect to the previous ${providerLabel} process. It may still reconnect; you can wait or cancel this launch and start a new agent.`
         : entry.condition === "coordination_blocked"
         ? entry.workspacePath == null
-          ? "LetAgents couldn't prepare the private project area. Try this launch again or cancel it and start a new agent."
-          : `LetAgents couldn't start ${providerLabel} in the private project area. Try this launch again or cancel it and start a new agent.`
+          ? provisioningFailureDetail(entry.lastError, "LetAgents couldn't prepare the private project area. Try this launch again or cancel it and start a new agent.")
+          : missingRuntimeDetail
+            ?? `LetAgents couldn't start ${providerLabel} in the private project area. Try this launch again or cancel it and start a new agent.`
         : safeUserVisibleErrorDetail(entry.lastError, blockedConditionDetail(entry.condition)))
     : null;
 
@@ -233,12 +258,15 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     headline = `${providerLabel} needs help reconnecting`;
   } else if (failed) {
     headline = `${providerLabel} agent needs attention`;
+  } else if (compacting) {
+    headline = "Compacting conversation";
   } else {
     headline = `Starting ${providerLabel} agent`;
   }
 
   return {
     phases,
+    compacting: Boolean(compacting) && !ready && !failed && !stopping && !stopped,
     currentPhaseId,
     ready,
     failed,
@@ -251,7 +279,8 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     providerLabel,
     headline,
     failureDetail,
-    joinHint: ready || failed || stopping || stopped ? null : JOIN_HINT,
+    joinHint: ready || failed || stopping || stopped ? null : compacting
+      ? "Claude is summarizing the conversation so it can continue." : JOIN_HINT,
   };
 }
 

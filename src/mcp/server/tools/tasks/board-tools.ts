@@ -16,6 +16,36 @@ import {
 import { jsonToolResponse, taskToolError } from "./response.js";
 import { boardIntentApprovalSchema, TASK_STATUSES, workerTaskIdentitySchema } from "./schemas.js";
 
+export const MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK = 4;
+export const MAX_BOARD_WORKFLOW_REFS_PER_TASK = 4;
+
+function compactBoardWorkflowArtifact(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const artifact = value as Record<string, unknown>;
+  // A change-summary detail may itself contain hundreds of files. The board is
+  // an index; callers that need complete artifact detail use get_room_artifacts.
+  return Object.fromEntries(Object.entries(artifact).filter(([key]) => key !== "detail"));
+}
+
+export function compactTaskForBoard(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const task = value as Record<string, unknown>;
+  const artifacts = Array.isArray(task.workflow_artifacts) ? task.workflow_artifacts : [];
+  const refs = Array.isArray(task.workflow_refs) ? task.workflow_refs : [];
+
+  return {
+    ...task,
+    workflow_artifacts: artifacts
+      .slice(-MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK)
+      .map(compactBoardWorkflowArtifact),
+    workflow_refs: refs.slice(-MAX_BOARD_WORKFLOW_REFS_PER_TASK),
+    workflow_artifact_count: artifacts.length,
+    workflow_ref_count: refs.length,
+    workflow_artifacts_truncated: artifacts.length > MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK,
+    workflow_refs_truncated: refs.length > MAX_BOARD_WORKFLOW_REFS_PER_TASK,
+  };
+}
+
 export function registerTaskBoardTools(server: McpServer): void {
   server.tool(
     "add_task",
@@ -30,14 +60,16 @@ export function registerTaskBoardTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
+      client_task_id: z.string().trim().min(1).describe("Unique ID for this intended task. Reuse it on every retry; use a different ID for a separate task with identical contents."),
       source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
       ...workerTaskIdentitySchema,
       ...boardIntentApprovalSchema,
     },
-    async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
+    async ({ title, description, created_by: _createdBy, source_message_id, client_task_id, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
       const target = resolveTaskToolTarget(room_id);
       if (!target) return taskToolError("Not in a room. Join one first.");
 
+      if (!client_task_id?.trim()) return taskToolError("client_task_id is required. Choose one ID for this intended task and reuse it on every retry.");
       const { identity, agentSession } = await resolveTaskToolIdentity(target, agent_session_id);
       const task = await createTask(target, {
         title,
@@ -45,6 +77,7 @@ export function registerTaskBoardTools(server: McpServer): void {
         created_by: identity.actor_label,
         ...taskActorPayload(identity, agentSession),
         source_message_id,
+        client_task_id,
         board_intent_id,
         board_approval_token,
       });
@@ -54,7 +87,7 @@ export function registerTaskBoardTools(server: McpServer): void {
         identity,
         getRememberedRoomPresence(target.effectiveRoomId, identity),
         agentSession
-      );
+      ).catch((error) => console.error("[tasks] Task created; presence update failed:", String(error)));
 
       return jsonToolResponse(
         { success: true, task, agent_identity: toPublicAgentIdentity(identity) },
@@ -92,7 +125,7 @@ export function registerTaskBoardTools(server: McpServer): void {
         const result = await listTasks(target, qs);
 
         const tasks = result.tasks ?? [];
-        allTasks.push(...tasks);
+        allTasks.push(...tasks.map(compactTaskForBoard));
 
         if (!result.has_more || tasks.length === 0) break;
         const lastTask = tasks[tasks.length - 1];
@@ -102,7 +135,12 @@ export function registerTaskBoardTools(server: McpServer): void {
 
       await heartbeatRoomPresence(target.effectiveRoomId, await ensureAgentIdentity());
 
-      return jsonToolResponse({ success: true, tasks: allTasks }, 2);
+      return jsonToolResponse({
+        success: true,
+        tasks: allTasks,
+        artifact_detail_instruction:
+          "Board tasks contain bounded artifact summaries. Use get_room_artifacts for complete workflow artifact detail.",
+      }, 2);
     }
   );
 }

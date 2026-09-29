@@ -6,7 +6,7 @@ import {
   createTaskFocusRoom,
   patchFocusRoomSettings,
 } from './focusRooms'
-import { room, upsertFocusRoom } from './state'
+import { room, roomSessionVersion, upsertFocusRoom } from './state'
 import type {
   FocusRoomConclusionDetails,
   FocusRoomInfo,
@@ -18,10 +18,13 @@ export function createRoomFocusActions() {
     taskId: string,
   ): Promise<FocusRoomInfo | null> {
     if (!room.value) return null
+    const origin = room.value.identifier
+    const version = roomSessionVersion
     try {
       const focusRoom = await createTaskFocusRoom(room.value.identifier, taskId)
       if (!focusRoom?.room_id) return null
-      upsertFocusRoom(focusRoom)
+      if (roomSessionVersion === version && room.value?.identifier === origin)
+        upsertFocusRoom(focusRoom)
       return focusRoom
     } catch {
       return null
@@ -32,6 +35,8 @@ export function createRoomFocusActions() {
     title: string,
   ): Promise<FocusRoomInfo | null> {
     if (!room.value) return null
+    const origin = room.value.identifier
+    const version = roomSessionVersion
     const trimmedTitle = title.trim()
     if (!trimmedTitle) return null
 
@@ -41,7 +46,8 @@ export function createRoomFocusActions() {
         trimmedTitle,
       )
       if (!focusRoom?.room_id) return null
-      upsertFocusRoom(focusRoom)
+      if (roomSessionVersion === version && room.value?.identifier === origin)
+        upsertFocusRoom(focusRoom)
       return focusRoom
     } catch {
       return null
@@ -51,8 +57,13 @@ export function createRoomFocusActions() {
   async function shareFocusRoomResult(
     summary: string,
     conclusionDetails: FocusRoomConclusionDetails | null = null,
-  ): Promise<{ focusRoom: FocusRoomInfo; parentMessagePosted: boolean } | null> {
+  ): Promise<{
+    focusRoom: FocusRoomInfo
+    parentMessagePosted: boolean
+  } | null> {
     if (!room.value || room.value.kind !== 'focus') return null
+    const origin = room.value.identifier
+    const version = roomSessionVersion
     const trimmedSummary = summary.trim()
     const parentRoomId = room.value.parentRoomId
     const focusKey = room.value.focusKey || room.value.sourceTaskId
@@ -68,13 +79,15 @@ export function createRoomFocusActions() {
       const focusRoom = result.focusRoom
       if (!focusRoom?.room_id) return null
 
-      upsertFocusRoom(focusRoom)
-      room.value = applyFocusRoomConclusion(
-        room.value,
-        focusRoom,
-        trimmedSummary,
-        conclusionDetails,
-      )
+      if (roomSessionVersion === version && room.value?.identifier === origin)
+        upsertFocusRoom(focusRoom)
+      if (roomSessionVersion === version && room.value?.identifier === origin)
+        room.value = applyFocusRoomConclusion(
+          room.value,
+          focusRoom,
+          trimmedSummary,
+          conclusionDetails,
+        )
 
       return {
         focusRoom,
@@ -90,6 +103,8 @@ export function createRoomFocusActions() {
     settings: FocusRoomSettingsPatch,
   ): Promise<FocusRoomInfo | null> {
     if (!room.value) return null
+    const origin = room.value.identifier
+    const version = roomSessionVersion
     const parentRoomId =
       room.value.kind === 'focus'
         ? room.value.parentRoomId
@@ -104,8 +119,11 @@ export function createRoomFocusActions() {
       )
       if (!focusRoom?.room_id) return null
 
-      upsertFocusRoom(focusRoom)
+      if (roomSessionVersion === version && room.value?.identifier === origin)
+        upsertFocusRoom(focusRoom)
       if (
+        roomSessionVersion === version &&
+        room.value?.identifier === origin &&
         room.value.kind === 'focus' &&
         room.value.projectId === focusRoom.room_id
       ) {

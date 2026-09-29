@@ -13,6 +13,7 @@
       :can-install="setupApiAvailable"
       :feedback="firstRunFeedback"
       :room-selected="firstRunRoomSelected"
+      :created-invite-code="firstRunInviteCode"
       :selected-room-name="firstRunRoomSelected ? (rootRoomSnapshot?.room?.displayName || repoName) : null"
       :selected-room-identifier="firstRunRoomSelected ? (rootRoomSnapshot?.roomIdentifier || null) : null"
       :selected-room-access-status="firstRunRoomSelected ? (rootRoomSnapshot?.access.status || null) : null"
@@ -27,13 +28,30 @@
       @start-auth="startAuthFlow"
       @open-verification="openVerification"
       @poll-auth="pollAuthFlow"
+      @cancel-auth="cancelAuthFlow"
       @sign-out="signOut"
       @continue-to-room="continueToRoomConfirmation"
       @connect-room-auth="startFirstRunRoomAuth"
       @pick-repo="pickRepoRoom"
+      @create-room="createFirstRunInviteRoom"
       @join-room-code="joinRoomCode"
       @back="goBackFirstRun"
       @finish="finishFirstRunOnboarding"
+    />
+  </main>
+
+  <main
+    v-else-if="showSignedOutGate"
+    class="desktop-onboarding-shell desktop-signed-out-shell"
+    data-testid="desktop-signed-out-gate"
+  >
+    <DesktopSignedOutView
+      :auth-status="authStatus"
+      :busy="authBusy || loading"
+      :feedback="authFeedback"
+      @start-auth="startSignedOutAuthFlow"
+      @open-verification="openVerification"
+      @poll-auth="pollAuthFlow"
     />
   </main>
 
@@ -58,6 +76,8 @@
           :project-entries="sidebarProjectEntries"
           :settings-entry="settingsEntry"
           :rental-request-count="rentalRequestCount"
+          :needs-you-count="needsYouCount"
+          :messages-unread="messagesUnread"
           :pinned-collapsed="pinnedCollapsed"
           :rooms-collapsed="roomsCollapsed"
           :collapsed-projects="collapsedProjects"
@@ -65,10 +85,17 @@
           :selected-entry-ids="sidebarSelectedEntryIds"
           :batch-action-busy="sidebarBatchActionBusy"
           :update-status="updateStatus"
+          :auth-status="authStatus"
+          :auth-busy="authBusy || loading"
           @cycle-sidebar="cycleSidebar"
           @new-room="selectNewRoomEntry"
           @open-rent="openRentMarketplace"
+          @open-needs-you="openNeedsYou"
+          @open-messages="openMessages"
           @open-updates="openUpdatesSurface"
+          @open-settings="openSettingsSurface"
+          @connect-account="openAccountAuthFlow"
+          @sign-out="signOut"
           @archive-room="archiveSidebarRoom"
           @archive-focus-room="archiveSidebarFocusRoom"
           @conclude-focus-room="openSidebarFocusRoomConclusion"
@@ -104,9 +131,9 @@
       @pointerdown="startSidebarResize"
       @keydown="handleSidebarResizeKeydown"
     ></div>
-    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
+    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" :data-messages-entry="activeEntry.type === 'messages'" data-testid="desktop-main">
       <DesktopTopbar
-        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && !isSettingsSurface"
+        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && activeEntry.type !== 'messages' && !isSettingsSurface"
         :active-entry="activeEntry"
         :sidebar-mode="sidebarMode"
         :loading="loading"
@@ -115,6 +142,7 @@
         @refresh="refresh"
       />
 
+      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event" />
       <AuthOnboardingView
         v-if="activeEntry.type === 'room' && selectedNeedsAccess"
         :sidebar-mode="sidebarMode"
@@ -148,6 +176,9 @@
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :room-artifacts="selectedSnapshot?.roomArtifacts || []"
+          :room-agent-work="roomAgentWork"
+          :room-agent-work-status="roomAgentWorkStatus"
+          :room-agent-work-truncated="roomAgentWorkTruncated"
           :board-settings="selectedSnapshot?.boardSettings || null"
           :messages="selectedSnapshot?.messages || []"
           :github-events="selectedSnapshot?.githubEvents || null"
@@ -155,11 +186,13 @@
           :repo-status="repoStatusValue"
           :git-room-matches-active-repo="selectedGitRoomMatchesActiveRepo"
           :durable-project-root-path="selectedRoomProjectRootPath"
-          :home-path="appInfo?.homePath || null"
+          :project-room="selectedRoomIsProject"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
           :notification-reveal-message-id="notificationRevealMessageId"
           :notification-reveal-nonce="notificationRevealNonce"
+          :attention-intent="attentionIntent"
+          @attention-opened="attentionIntent = null"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
           :on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @chat-scroll-position="rememberChatScrollPosition"
@@ -168,11 +201,12 @@
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
-          @open-rental-request="openRentalRequestInbox"
+          :attention-count="needsYouData?.rooms.find(room => room.roomIdentifier === selectedRoomInfo.identifier)?.records.filter(record => !record.response).length ?? 0"
+          @open-inbox="openNeedsYou(selectedRoomInfo.identifier)"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
           @cycle-sidebar="cycleSidebar"
-          @choose-repo="pickRepoRoomForAgent"
+          @connect-project="connectActiveRoomProject"
           @choose-worktree="openWorktreeForAgent"
           @open-repo-root="openWorkspaceGitRoom"
           @add-agent-open-request-consumed="openAddAgentAfterRepoPick = false"
@@ -227,8 +261,10 @@
         @toggle-pin-room="toggleAccountRoomPin"
         @refresh="refreshSettingsSurface"
         @sign-out="signOut"
-        @start-auth="startAuthFlow"
+        @start-auth="openAccountAuthFlow"
       />
+
+      <InboxView v-else-if="activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" v-model:rooms="inboxRooms" v-model:section="inboxSection" :storage-key="String(authStatus?.account?.id ?? 'local')" :data="needsYouData" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" @refresh="refreshNeedsYou" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
 
       <RentMarketplaceView
         v-else-if="activeEntry.type === 'marketplace'"
@@ -239,6 +275,7 @@
     </section>
 
     <DesktopAppAgent
+      v-if="appAgentSettingsStatus?.enabled === true && activeEntry.type !== 'messages'"
       :active-room-display-name="selectedRoomInfo.displayName || activeEntry.title"
       :active-room-identifier="selectedRoomIdentifier || selectedRootRoomIdentifier"
       :active-room-pinned="activeEntry.type === 'room' && activeEntry.pinned"
@@ -306,6 +343,17 @@
       @after-leave="handleSidebarBatchDialogAfterLeave"
     />
 
+    <DesktopDeviceAuthDialog
+      :open="authDialogOpen"
+      :auth-status="authStatus"
+      :busy="authBusy"
+      :feedback="authFeedback"
+      @close="authDialogOpen = false"
+      @start-auth="startAuthFlow"
+      @open-verification="openVerification"
+      @poll-auth="pollAuthFlow"
+    />
+
     <div
       class="desktop-action-toasts"
       role="status"
@@ -327,6 +375,7 @@
 </template>
 
 <script setup lang="ts">
+import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -343,9 +392,11 @@ import type {
   DesktopMcpInstallTargetId,
   DesktopUpdateStatus,
   DesktopNotificationTarget,
+  DesktopProjectBinding,
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
+  DesktopRoomStreamEvent,
   DiagnosticsSnapshot,
   RepoStatus,
   WorkerSnapshot,
@@ -354,16 +405,25 @@ import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
+import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "./domain/desktop-message-drafts";
+import { preserveRoomRepoStatistics } from "./domain/repo-status";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
+import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboarding";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
-import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
+import {
+  activeRepoRoomContext,
+  readRepositoryRootBindings,
+  resolveActiveProjectRootPath,
+  roomWithInheritedProjectContext,
+} from "./domain/room-project-context";
 import type {
   FocusRoomConcludedEvent,
   FocusRoomConclusionInput,
@@ -376,14 +436,15 @@ import {
 } from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
+import { clearDesktopMessageOutbox } from "./domain/message-outbox";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
-import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
+import { invalidateRentalProviderDashboard, loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
-import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, needsYouEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
   deriveSidebarLatestMessages,
@@ -420,8 +481,12 @@ import {
   appAgentRefreshTargets,
 } from "./domain/app-agent";
 import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
-import { APP_IDLE_ATTRIBUTE, isAppIdle } from "./domain/app-idle";
 import { shouldSkipPollTick } from "./domain/visibility-polling";
+import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
+import InboxView from "./components/desktop/content/InboxView.vue";
+import type { InboxSection } from "./components/desktop/content/room-inbox/universal";
+import type { DesktopRentalRequest } from "../../electron/ipc-types.js";
+import { useNeedsYou } from "./composables/useNeedsYou";
 import { desktopIpc } from "./ipc/index.js";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -432,17 +497,18 @@ const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
 const updateStatus = ref<DesktopUpdateStatus | null>(null);
 const repoStatus = ref<RepoStatus | null>(null);
-// Canonical status of the launched desktop workspace, used only to identity-match
-// a repo-backed room's self-heal target so it never inherits an unrelated repo.
-const workspaceRepoStatus = ref<RepoStatus | null>(null);
-let workspaceRepoStatusRootPath: string | null = null;
 const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
+watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
+  setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
+const sessionGeneration = ref(0);
+const authDialogOpen = ref(false);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
 const activeEntryStorageKey = "letagents-desktop:active-entry";
 const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
+const legacyRepositoryRootBindingsStorageKey = "letagents-desktop:repository-root-bindings";
 const readRoomMessagesStorageKey = "letagents-desktop:read-room-message-ids";
 const sidebarWidthStorageKey = "letagents-desktop:sidebar-width";
 const sidebarRoomOrderStorageKey = "letagents-desktop:sidebar-room-order";
@@ -456,6 +522,12 @@ const sidebarDefaultWidth = 296;
 const SIDEBAR_METADATA_REFRESH_INTERVAL_MS = 15_000;
 const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedRootRoomStorageKey));
 const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
+const legacyRepositoryRootBindings = readRepositoryRootBindings(
+  window.localStorage,
+  legacyRepositoryRootBindingsStorageKey,
+  recentRootRooms.value,
+);
+const projectBindings = ref<DesktopProjectBinding[]>([]);
 const readRoomMessageIds = ref(readStoredRoomMessageIds(window.localStorage, readRoomMessagesStorageKey));
 const sidebarWidth = ref(readStoredSidebarWidth());
 const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
@@ -466,6 +538,28 @@ const loadingChatScrollRoomIdentifiers = ref<Set<string>>(new Set());
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const rentalRequestCount = ref(0);
+const inboxRentals = ref<DesktopRentalRequest[]>([]);
+const inboxRentalError = ref('');
+const inboxRooms = ref<string[]>([]);
+const messagesUnread = ref(0);
+const openConversationId = ref<string | null>(null);
+const openConversationNonce = ref(0);
+function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; openConversationNonce.value += 1; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
+const inboxSection = ref<InboxSection>('needs-you');
+const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
+const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value);
+const attentionIntent = ref<AttentionNavigationIntent | null>(null);
+let needsYouInterval: number | null = null;
+async function openNeedsYouRoom(intent: AttentionNavigationIntent) {
+  attentionIntent.value = null;
+  notificationRevealMessageId.value = null;
+  try {
+    await openRoomFromAppAgent(intent.roomIdentifier);
+    attentionIntent.value = intent;
+  } catch (error) { needsYouError.value = String(error); }
+}
+function openNeedsYou(room?: string) { inboxRooms.value = typeof room === 'string' ? [room] : []; inboxSection.value = 'needs-you'; activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
+async function refreshNeedsYou() { await Promise.all([loadNeedsYou(activeEntry.value.type === 'inbox'), refreshRentalRequestCount()]); }
 const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
 const notificationRevealMessageId = ref<string | null>(null);
@@ -604,6 +698,19 @@ const selectedGitRoomMatchesActiveRepo = computed(() => {
 });
 
 const selectedRoomProjectRootPath = computed(() => activeProjectRootPath());
+const selectedRoomIsProject = computed(() => {
+  if (selectedRoomWithProjectContext.value.gitRoom || selectedRoomProjectRootPath.value) return true;
+  const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
+  const identifier = normalizeRoomIdentifier(
+    context?.roomIdentifier
+      ?? selectedRootRoomIdentifier.value
+      ?? rootRoomSnapshot.value?.roomIdentifier,
+  );
+  if (!identifier) return false;
+  return recentRootRooms.value.some((room) =>
+    room.kind === "project" && normalizeRoomIdentifier(room.identifier) === identifier
+  );
+});
 
 function gitRoomsShareRepo(
   left: NonNullable<DesktopRoomSnapshot["room"]>["gitRoom"],
@@ -741,7 +848,7 @@ function setSidebarWidth(value: number): void {
 }
 
 async function refreshSidebarRoomMetadata(): Promise<void> {
-  if (showFirstRunGate.value || sidebarMetadataRefreshInFlight) return;
+  if (showFirstRunGate.value || !authStatus.value?.authenticated || sidebarMetadataRefreshInFlight) return;
   sidebarMetadataRefreshInFlight = true;
   try {
     await refreshAccountRooms().catch(() => undefined);
@@ -752,13 +859,16 @@ async function refreshSidebarRoomMetadata(): Promise<void> {
 }
 
 async function refreshActiveRepoStatus(): Promise<void> {
-  if (showFirstRunGate.value || repoStatusRefreshInFlight) return;
+  if (showFirstRunGate.value || !authStatus.value?.authenticated || repoStatusRefreshInFlight) return;
   const rootPath = activeProjectRootPath();
   if (!rootPath) return;
   repoStatusRefreshInFlight = true;
+  const generation = sessionGeneration.value;
   try {
     const nextRepoStatus = await desktopIpc.repos.getStatus(rootPath).catch(() => null);
-    if (nextRepoStatus) repoStatus.value = nextRepoStatus;
+    if (generation === sessionGeneration.value && authStatus.value?.authenticated && nextRepoStatus) {
+      repoStatus.value = nextRepoStatus;
+    }
   } finally {
     repoStatusRefreshInFlight = false;
   }
@@ -779,26 +889,60 @@ function activeProjectRootPath(): string | null {
     activeRootIdentifier: context
       ? context.roomIdentifier
       : selectedRootRoomIdentifier.value ?? rootRoomSnapshot.value?.roomIdentifier,
-    // A repo-backed room whose durable root was lost self-heals from the
-    // workspace ONLY when their canonical Git identity matches; otherwise it
-    // fails closed so a focus room never launches in an unrelated repo.
     activeRootGitRoom: context
       ? context.gitRoom
       : rootRoomSnapshot.value?.room?.gitRoom ?? null,
-    recentRootRooms: recentRootRooms.value,
-    workspaceRepoStatus: workspaceRepoStatus.value,
+    projectBindings: projectBindings.value,
   });
 }
 
-async function refreshWorkspaceRepoStatus(force = false): Promise<void> {
-  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
-  if (!workspaceRoot) return;
-  // Re-probe on force (e.g. window focus) so a branch/worktree switch can't leave
-  // a stale identity authorizing the wrong ref; otherwise load once per workspace.
-  if (!force && workspaceRepoStatusRootPath === workspaceRoot && workspaceRepoStatus.value) return;
-  workspaceRepoStatusRootPath = workspaceRoot;
-  const status = await desktopIpc.repos.getStatus(workspaceRoot).catch(() => null);
-  if (workspaceRepoStatusRootPath === workspaceRoot) workspaceRepoStatus.value = status;
+async function refreshProjectBindings(): Promise<void> {
+  if (!desktopIpc.repos?.listProjectBindings) return;
+  const generation = sessionGeneration.value;
+  const nextBindings = await desktopIpc.repos.listProjectBindings().catch(() => projectBindings.value);
+  if (generation !== sessionGeneration.value) return;
+  projectBindings.value = nextBindings;
+}
+
+async function initializeProjectBindings(): Promise<void> {
+  const generation = sessionGeneration.value;
+  if (!desktopIpc.repos?.migrateProjectBindings) {
+    await refreshProjectBindings();
+    return;
+  }
+  const candidates = [
+    ...Object.entries(legacyRepositoryRootBindings).map(([roomIdentifier, rootPath]) => ({
+      legacyKey: roomIdentifier,
+      context: { roomIdentifier },
+      rootPath,
+    })),
+    ...recentRootRooms.value.flatMap((room) => room.rootPath ? [{
+      context: { roomIdentifier: room.identifier },
+      rootPath: room.rootPath,
+    }] : []),
+  ];
+  try {
+    const migration = await desktopIpc.repos.migrateProjectBindings(candidates);
+    if (generation !== sessionGeneration.value) return;
+    projectBindings.value = migration.bindings;
+    const retryBindings = Object.fromEntries(
+      migration.retryLegacyKeys.flatMap((key) => {
+        const rootPath = legacyRepositoryRootBindings[key];
+        return rootPath ? [[key, rootPath]] : [];
+      }),
+    );
+    if (Object.keys(retryBindings).length) {
+      window.localStorage.setItem(
+        legacyRepositoryRootBindingsStorageKey,
+        JSON.stringify(retryBindings),
+      );
+    } else {
+      window.localStorage.removeItem(legacyRepositoryRootBindingsStorageKey);
+    }
+  } catch {
+    if (generation !== sessionGeneration.value) return;
+    await refreshProjectBindings();
+  }
 }
 
 async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
@@ -817,22 +961,17 @@ async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
 }
 
 function handleRepoStatusChanged(nextStatus: RepoStatus): void {
-  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
-  if (workspaceRoot && nextStatus.rootPath === workspaceRoot) {
-    workspaceRepoStatusRootPath = workspaceRoot;
-    workspaceRepoStatus.value = nextStatus;
-  }
   const rootPath = activeProjectRootPath();
   if (rootPath && nextStatus.rootPath !== rootPath) return;
   repoStatus.value = nextStatus;
 }
 
 function refreshForegroundData(): void {
+  if (!authStatus.value?.authenticated || authSessionLocked.value) return;
   // The main-process Git watcher retains invalidations while hidden and drains
   // them on BrowserWindow focus/show. Avoid racing it with a second full status
   // reconstruction from the renderer.
-  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
-  void refreshWorkspaceRepoStatus(repoStatusWatchRootPath !== workspaceRoot);
+  void refreshProjectBindings();
   void refreshSidebarRoomMetadata();
   // Poll-only metadata catch-up: the periodic tick early-returns while hidden,
   // so refresh once on foreground return. Metadata-only, NOT the full snapshot —
@@ -852,12 +991,21 @@ function openRentalRequestInbox(): void {
 }
 
 async function refreshRentalRequestCount(): Promise<void> {
+  if (!authStatus.value?.authenticated || authSessionLocked.value) {
+    rentalRequestCount.value = 0; inboxRentals.value = []; inboxRentalError.value = '';
+    return;
+  }
   if (!desktopIpc.rental?.getProviderDashboard) return;
+  const generation = sessionGeneration.value;
+  const accountId = authStatus.value?.account?.id;
   try {
     const dashboard = await loadRentalProviderDashboard();
-    rentalRequestCount.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests.length : 0;
+    if (generation !== sessionGeneration.value || accountId !== authStatus.value?.account?.id || !authStatus.value?.authenticated) return;
+    inboxRentals.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests : [];
+    rentalRequestCount.value = inboxRentals.value.length; inboxRentalError.value = '';
   } catch {
-    rentalRequestCount.value = 0;
+    if (generation !== sessionGeneration.value || accountId !== authStatus.value?.account?.id) return;
+    rentalRequestCount.value = 0; inboxRentals.value = []; inboxRentalError.value = 'Rental requests could not be checked.';
   }
 }
 
@@ -875,7 +1023,7 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
       return false;
     }
     if (selection.repoStatus) {
-      repoStatus.value = selection.repoStatus;
+      repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, selection.repoStatus);
     }
     openRoomSnapshot(selection.snapshot, {
       aliasIdentifiers: [selection.roomIdentifier],
@@ -893,32 +1041,16 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
 }
 
 function handleVisibilityChange(): void {
-  syncAppIdleAttribute();
   if (document.visibilityState !== "visible") return;
   refreshForegroundData();
 }
 
 function handleWindowFocus(): void {
-  syncAppIdleAttribute();
   refreshForegroundData();
 }
 
-function handleWindowBlur(): void {
-  syncAppIdleAttribute();
-}
-
-// Pause the launcher orb's decorative ink animations while the window is hidden
-// or blurred (see domain/app-idle + styles/app-agent.css). Toggling one
-// attribute on the document root keeps the choreography in one place and lets
-// CSS scope the paused state to the launcher ink animations.
-function syncAppIdleAttribute(): void {
-  document.documentElement.toggleAttribute(
-    APP_IDLE_ATTRIBUTE,
-    isAppIdle({ hidden: document.hidden, focused: document.hasFocus() }),
-  );
-}
-
 async function refreshSidebarLatestMessages(): Promise<void> {
+  const generation = sessionGeneration.value;
   const roomIdentifiers = sidebarRoomIdentifiers();
   if (!roomIdentifiers.length) {
     sidebarLatestMessages.value = {};
@@ -950,6 +1082,7 @@ async function refreshSidebarLatestMessages(): Promise<void> {
     }
   }
 
+  if (generation !== sessionGeneration.value || !authStatus.value?.authenticated) return;
   sidebarLatestMessages.value = nextLatestMessages;
   seedReadMarkersForKnownRooms();
   markActiveRoomRead();
@@ -1176,13 +1309,20 @@ function rememberRoomMessageIds(): void {
 const {
   clearLiveMetadataRefreshInterval,
   clearLiveMetadataRefreshTimer,
+  clearSelectedRoomAgentWork,
+  invalidateSelectedRoomAgentWork,
   refreshSelectedRoomLiveMetadata,
+  roomAgentWork,
+  roomAgentWorkStatus,
+  roomAgentWorkTruncated,
   scheduleLiveMetadataRefresh,
   syncSelectedRoomStream: syncDesktopRoomStream,
 } = useDesktopRoomLiveSync({
+  accountId: computed(() => authStatus.value?.account?.id || null),
   rootRoomSnapshot,
   selectedRoomIdentifier,
   selectedSnapshot,
+  sessionGeneration,
   workers,
 });
 
@@ -1192,6 +1332,7 @@ const {
   handleRefreshRoom,
   handleRoomRenamed,
   handleRoomStreamEvent,
+  invalidateSession,
   refresh,
   refreshAccountRooms,
   refreshSelectedSnapshot,
@@ -1215,6 +1356,7 @@ const {
   resolveSelectedRoomIdentifier,
   rootRoomSnapshot,
   scheduleLiveMetadataRefresh,
+  sessionGeneration,
   selectedMcpTargetIds,
   selectedRootRoomIdentifier,
   selectedSnapshot,
@@ -1222,6 +1364,14 @@ const {
   syncRoomStream: syncDesktopRoomStream,
   workers,
 });
+
+function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+  if (event.type === "resource_invalidation") {
+    invalidateSelectedRoomAgentWork(event.roomIdentifier);
+    return;
+  }
+  handleRoomStreamEvent(event);
+}
 
 const authSnapshotPending = computed(() =>
   isAuthSnapshotPending({
@@ -1234,6 +1384,8 @@ const authSnapshotPending = computed(() =>
 const {
   authBusy,
   authFeedback,
+  authSessionLocked,
+  cancelAuthFlow,
   clearAuthPollTimer,
   openVerification,
   pollAuthFlow,
@@ -1248,8 +1400,54 @@ const {
     firstRunStage.value = "room";
   },
   onAuthorized: () => refresh(),
-  onSignedOut: () => refresh(),
+  onSigningOut: clearDesktopSessionState,
+  onSignedOut: async () => undefined,
 });
+
+watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
+  if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; inboxRooms.value = []; inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); if (next) void refreshNeedsYou(); }
+}, { flush: "sync" });
+
+const showSignedOutGate = computed(() => (
+  authSessionLocked.value || !authStatus.value?.authenticated
+));
+
+function startSignedOutAuthFlow(): Promise<void> {
+  return startAuthFlow(null);
+}
+
+function clearDesktopSessionState(): void {
+  invalidateRentalProviderDashboard();
+  attentionIntent.value = null;
+  inboxRentals.value = []; inboxRentalError.value = ''; inboxRooms.value = []; inboxSection.value = 'needs-you';
+  resetNeedsYou();
+  clearDesktopMessageOutbox();
+  clearDesktopMessageDrafts();
+  invalidateSession();
+  clearLiveMetadataRefreshTimer();
+  clearLiveMetadataRefreshInterval();
+  clearSelectedRoomAgentWork();
+  rootRoomSnapshot.value = null;
+  selectedSnapshot.value = null;
+  workers.value = [];
+  accountRooms.value = [];
+  settingsAccountRooms.value = [];
+  sidebarLatestMessages.value = {};
+  rentalRequestCount.value = 0;
+  repoStatus.value = null;
+  authDialogOpen.value = false;
+  void syncSelectedRoomStream(null).catch(() => undefined);
+  void restartRepoStatusWatch(null);
+}
+
+async function openAccountAuthFlow(): Promise<void> {
+  authDialogOpen.value = true;
+  if (authStatus.value?.pendingDeviceAuth) {
+    scheduleAuthPoll();
+    return;
+  }
+  await startAuthFlow();
+}
 
 const {
   backFromSubstep,
@@ -1284,7 +1482,7 @@ const {
 } = useDesktopNewRoomModal({
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
   setRepoStatus: (status) => {
-    if (status) repoStatus.value = status;
+    if (status) repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, status);
   },
   getDefaultStorageMode: () =>
     chatStorageSettings.value?.defaultMode === "local" || chatStorageSettings.value?.mode === "local"
@@ -1335,6 +1533,10 @@ const {
 
 async function handleSidebarBatchAction(action: SidebarRoomBatchActionId): Promise<void> {
   if (sidebarBatchActionBusy.value) return;
+  if (action !== "mark-read" && !authStatus.value?.authenticated) {
+    pushActionToast("Connect GitHub from the account menu to manage rooms.", "info");
+    return;
+  }
   const resolution = resolveSidebarRoomBatchAction({
     action,
     entries: sidebarSelectedEntries.value,
@@ -1508,6 +1710,10 @@ const sidebarFocusRoomConclusionBusy = computed(() => {
 });
 
 function openSidebarFocusRoomConclusion(entry: RoomEntry): void {
+  if (!authStatus.value?.authenticated) {
+    pushActionToast("Connect GitHub from the account menu to conclude this Focus Room.", "info");
+    return;
+  }
   if (
     entry.kind !== "focus"
     || entry.focusStatus === "concluded"
@@ -1593,7 +1799,9 @@ const {
   completeMcpOnboarding,
   continueMcpOnboarding,
   continueToRoomConfirmation,
+  createFirstRunInviteRoom,
   finishFirstRunOnboarding,
+  firstRunInviteCode,
   firstRunRoomSelected,
   firstRunFeedback,
   goBackFirstRun,
@@ -1632,12 +1840,30 @@ async function startFirstRunRoomAuth(): Promise<void> {
   await startAuthFlow();
 }
 
-async function pickRepoRoomForAgent(): Promise<void> {
-  openAddAgentAfterRepoPick.value = false;
-  const openedRoom = await pickRepoRoom();
-  if (openedRoom) {
-    openAddAgentAfterRepoPick.value = true;
+async function connectActiveRoomProject(): Promise<void> {
+  const groupedContext = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
+  const context = groupedContext || {
+    roomIdentifier: selectedRoomWithProjectContext.value.identifier,
+    gitRoom: selectedRoomWithProjectContext.value.gitRoom,
+  };
+  if (!desktopIpc.repos?.connectProject) {
+    pushActionToast("Restart LetAgents Desktop to connect this project.", "error");
+    return;
   }
+  const result = await desktopIpc.repos.connectProject(context).catch((error) => ({
+    canceled: false,
+    binding: null,
+    repoStatus: null,
+    error: error instanceof Error ? error.message : "LetAgents could not connect that project.",
+  }));
+  if (result.canceled) return;
+  if (result.error || !result.binding) {
+    pushActionToast(result.error || "LetAgents could not connect that project.", "error", 6_000);
+    return;
+  }
+  await refreshProjectBindings();
+  if (result.repoStatus) repoStatus.value = result.repoStatus;
+  pushActionToast("This room is now connected to its local project.", "success");
 }
 
 async function openWorktreeForAgent(rootPath: string): Promise<void> {
@@ -1977,6 +2203,8 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
 
 async function handleNotificationActivation(target: DesktopNotificationTarget): Promise<void> {
   try {
+    if (target.conversationId) { openMessages(target.conversationId); return; }
+    if (!target.roomIdentifier) return;
     await openRoomFromAppAgent(target.roomIdentifier);
     notificationRevealMessageId.value = target.messageId;
     notificationRevealNonce.value += 1;
@@ -2195,20 +2423,16 @@ watch(
 );
 
 watch(
-  () => appInfo.value?.workspaceRoot || null,
-  () => {
-    void refreshWorkspaceRepoStatus();
-  },
-  { immediate: true }
-);
-
-watch(
   () => activeProjectRootPath(),
   (rootPath) => {
     void restartRepoStatusWatch(rootPath);
   },
   { immediate: true }
 );
+
+watch(recentRootRooms, () => {
+  void refreshProjectBindings();
+}, { deep: true });
 
 watch(
   [
@@ -2249,10 +2473,20 @@ watch(
   }
 );
 
+watch(
+  () => authStatus.value?.authenticated,
+  (authenticated) => {
+    if (authenticated) authDialogOpen.value = false;
+  },
+);
+
 onMounted(() => {
-  unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
+  void refreshNeedsYou();
+  needsYouInterval = window.setInterval(() => { if (!document.hidden) void refreshNeedsYou(); }, 60_000);
+  unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
   unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
   unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
+  void desktopIpc.maintenance?.getStatus().then(status => { if (status.held) openUpdatesSurface(); }).catch(() => undefined);
   unsubscribeUpdateStatus = desktopIpc.updates?.onStatusChanged?.((status) => {
     updateStatus.value = status;
   }) || null;
@@ -2268,18 +2502,17 @@ onMounted(() => {
     void refreshSidebarRoomMetadata();
   }, SIDEBAR_METADATA_REFRESH_INTERVAL_MS);
   window.addEventListener("focus", handleWindowFocus);
-  window.addEventListener("blur", handleWindowBlur);
   document.addEventListener("visibilitychange", handleVisibilityChange);
-  syncAppIdleAttribute();
   void loadChatStorageSettings();
   void loadAppAgentSettingsStatus();
   void loadAppAgentActions();
-  void loadFirstRunSetup();
+  void loadFirstRunSetup(initializeProjectBindings());
   void refreshRentalRequestCount();
   void refreshDesktopUpdateStatus();
 });
 
 onBeforeUnmount(() => {
+  if (needsYouInterval) window.clearInterval(needsYouInterval);
   clearAuthPollTimer();
   clearLiveMetadataRefreshTimer();
   clearLiveMetadataRefreshInterval();
@@ -2288,9 +2521,7 @@ onBeforeUnmount(() => {
     accountRoomsRefreshInterval = null;
   }
   window.removeEventListener("focus", handleWindowFocus);
-  window.removeEventListener("blur", handleWindowBlur);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
-  document.documentElement.removeAttribute(APP_IDLE_ATTRIBUTE);
   unsubscribeRoomStream?.();
   unsubscribeRoomStream = null;
   unsubscribeOpenSettings?.();

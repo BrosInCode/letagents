@@ -20,6 +20,7 @@ export const tasks = pgTable(
     assignee_agent_key: text("assignee_agent_key"),
     created_by: text("created_by").notNull(),
     source_message_id: text("source_message_id"),
+    client_task_id: text("client_task_id"),
     pr_url: text("pr_url"),
     workflow_artifacts: jsonb("workflow_artifacts")
       .$type<TaskWorkflowArtifact[]>()
@@ -38,7 +39,10 @@ export const tasks = pgTable(
     ),
     room_source_message_id_unique_idx: uniqueIndex("tasks_room_source_message_id_unique_idx")
       .on(table.room_id, table.source_message_id)
-      .where(sql`${table.source_message_id} IS NOT NULL`),
+      .where(sql`${table.source_message_id} IS NOT NULL AND ${table.client_task_id} IS NULL`),
+    room_client_task_id_unique_idx: uniqueIndex("tasks_room_client_task_id_unique_idx")
+      .on(table.room_id, table.client_task_id)
+      .where(sql`${table.client_task_id} IS NOT NULL`),
   })
 );
 

@@ -104,6 +104,8 @@ export const board_intents = pgTable(
       () => room_agent_sessions.session_id,
       { onDelete: "set null", onUpdate: "cascade" }
     ),
+    // Server-owned authentication provenance. Legacy/body-supplied identities stay unverified.
+    proposer_worker_auth_kind: text("proposer_worker_auth_kind").$type<"bearer" | "session_token">(),
     decision_by: text("decision_by"),
     decision_reason: text("decision_reason"),
     approval_token_hash: text("approval_token_hash"),
@@ -137,6 +139,8 @@ export const board_intents = pgTable(
     expiry_due_idx: index("board_intents_expiry_due_idx")
       .on(table.expires_at, table.id, table.room_id)
       .where(sql`${table.status} IN ('pending', 'approved') AND ${table.expires_at} IS NOT NULL`),
+    worker_auth_kind_check: check("board_intents_proposer_worker_auth_kind_check",
+      sql`${table.proposer_worker_auth_kind} IN ('bearer', 'session_token')`),
     status_check: check(
       "board_intents_status_check",
       sql`${table.status} IN ('pending', 'approved', 'denied', 'expired', 'used')`

@@ -5,7 +5,7 @@ import type { Express } from "express";
 import { db } from "../db/client.js";
 import { desktop_push_devices } from "../db/schema.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
-import { resolveRequestAuth } from "../request/auth.js";
+import { requireAppSession } from "../request/app-session.js";
 import { respondWithInternalError } from "../http/helpers.js";
 
 const DESKTOP_BUNDLE_ID = "chat.letagents.desktop";
@@ -21,11 +21,8 @@ function normalizeString(value: unknown, maxLength: number): string | null {
 export function registerDesktopPushRoutes(app: Express): void {
   app.post("/desktop/push/devices", async (req: AuthenticatedRequest, res) => {
     try {
-      const auth = await resolveRequestAuth(req);
-      if (!auth.account) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      const accountId = requireAppSession(req, res);
+      if (!accountId) return;
 
       const installationId = normalizeString(req.body?.installation_id, 128);
       const rawDeviceToken = normalizeString(req.body?.device_token, 512);
@@ -52,7 +49,7 @@ export function registerDesktopPushRoutes(app: Express): void {
       }
 
       const now = new Date().toISOString();
-      const accountId = auth.account.account_id;
+      const sessionId = "id" in req.sessionAccount! ? req.sessionAccount.id : null;
       const tokenHash = createHash("sha256").update(deviceToken.toLowerCase()).digest("hex");
       const device = await db.transaction(async (tx) => {
         await tx.execute(sql`
@@ -74,6 +71,7 @@ export function registerDesktopPushRoutes(app: Express): void {
             id: randomUUID(),
             account_id: accountId,
             installation_id: installationId,
+            app_session_id: sessionId,
             device_token: deviceToken.toLowerCase(),
             token_hash: tokenHash,
             bundle_id: bundleId,
@@ -94,6 +92,7 @@ export function registerDesktopPushRoutes(app: Express): void {
               desktop_push_devices.environment,
             ],
             set: {
+              app_session_id: sessionId,
               device_token: deviceToken.toLowerCase(),
               token_hash: tokenHash,
               bundle_id: bundleId,
@@ -130,18 +129,15 @@ export function registerDesktopPushRoutes(app: Express): void {
 
   app.delete("/desktop/push/devices/:installationId", async (req: AuthenticatedRequest, res) => {
     try {
-      const auth = await resolveRequestAuth(req);
-      if (!auth.account) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      const accountId = requireAppSession(req, res);
+      if (!accountId) return;
       const installationId = normalizeString(req.params.installationId, 128);
       if (!installationId || !INSTALLATION_ID_PATTERN.test(installationId)) {
         res.status(400).json({ error: "installation_id is invalid" });
         return;
       }
       await db.delete(desktop_push_devices).where(and(
-        eq(desktop_push_devices.account_id, auth.account.account_id),
+        eq(desktop_push_devices.account_id, accountId),
         eq(desktop_push_devices.installation_id, installationId),
       ));
       res.status(204).end();

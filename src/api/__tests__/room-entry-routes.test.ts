@@ -12,6 +12,7 @@ const {
 function createDeps() {
   return {
     getProjectById: async () => null,
+    resolveExistingRoomRequest: async () => null,
     isRepoBackedRoomId: () => false,
     resolveGitHubRoomEntryDecision: async () => ({ kind: "allow" as const }),
     resolveProjectRoomEntryDecision: async () => ({ kind: "allow" as const }),
@@ -51,11 +52,48 @@ test("buildRoomEntryPath preserves the original room query string", () => {
   );
 });
 
+test("focus locator entry redirects to the canonical opaque room id", async () => {
+  const handlers: Array<(req: any, res: any) => Promise<void> | void> = [];
+  const app = {
+    get(_path: RegExp | string, handler: (req: any, res: any) => Promise<void> | void) {
+      handlers.push(handler);
+    },
+  };
+  registerRoomEntryRoutes(app as never, {
+    ...createDeps(),
+    resolveExistingRoomRequest: async () => ({ id: "focus_37" }) as never,
+  } as never);
+
+  let redirect: { status: number; location: string } | null = null;
+  await handlers[2]?.({
+    params: { 0: "github.com/owner/repo/focus/git:branch:RmVhdHVyZQ" },
+    originalUrl: "/in/github.com/owner/repo/focus/git:branch:RmVhdHVyZQ?tab=chat",
+    sessionAccount: null,
+  }, {
+    redirect(status: number, location: string) { redirect = { status, location }; },
+  });
+
+  assert.deepEqual(redirect, { status: 301, location: "/in/focus_37?tab=chat" });
+});
+
+test("public room resolution hands a focus locator off as its canonical room id", async () => {
+  const payload = await buildPublicRoomResolvePayload(
+    "github.com/owner/repo/focus/git:branch:RmVhdHVyZQ",
+    {
+      resolveExistingRoomRequest: async () => ({ id: "focus_37" }) as never,
+      getGitRoomBindingForRoom: async () => null,
+    },
+  );
+
+  assert.equal(payload.canonical_room_id, "focus_37");
+  assert.equal(payload.room_exists, true);
+});
+
 test("buildApiRoomResolvePayload includes public persisted Git Room metadata", async () => {
   const payload = await buildApiRoomResolvePayload(
     "github.com/BrosInCode/letagents",
     {
-      getProjectById: async () => ({
+      resolveExistingRoomRequest: async () => ({
         id: "github.com/brosincode/letagents",
       }) as never,
       getGitRoomBindingForRoom: async (roomId) => {
@@ -118,7 +156,7 @@ test("buildApiRoomResolvePayload redacts private persisted Git Room metadata", a
   const payload = await buildApiRoomResolvePayload(
     "github.com/BrosInCode/letagents",
     {
-      getProjectById: async () => ({
+      resolveExistingRoomRequest: async () => ({
         id: "github.com/brosincode/letagents",
       }) as never,
       getGitRoomBindingForRoom: async (roomId) => ({
@@ -177,7 +215,7 @@ test("buildPublicRoomResolvePayload derives Git Room metadata for repo-shaped ro
   const payload = await buildPublicRoomResolvePayload(
     "https://github.com/BrosInCode/letagents.git",
     {
-      getProjectById: async () => null,
+      resolveExistingRoomRequest: async () => null,
       getGitRoomBindingForRoom: async () => null,
     }
   );

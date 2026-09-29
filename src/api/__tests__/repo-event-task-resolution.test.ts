@@ -386,3 +386,36 @@ test("resolveLinkedTaskForRepoRoomEvent returns empty resolution without matches
   assert.deepEqual(resolution, emptyRepoRoomEventTaskResolution());
   assert.deepEqual(taskByIdCalls, []);
 });
+
+for (const [label, title, body] of [
+  ["quoted notification", "Make board notifications readable", "For example: Your request to claim task_19: Tests and CI was approved."],
+  ["another room", "Keep MCP worker identities stable", "Agent Execution room: https://letagents.chat/in/focus_83 (task_1)."],
+  ["bare title reference", "Fix task_1", null],
+] as const) {
+  for (const kind of ["pull_request", "pull_request_review"] as const) {
+    test(`${kind} does not select a room task from ${label}`, async () => {
+      const { resolver, taskByIdCalls } = createHarness({
+        tasksById: { task_1: makeTask("task_1"), task_19: makeTask("task_19") },
+      });
+      const base = kind === "pull_request" ? makePullRequestEvent() : makePullRequestReviewEvent();
+      assert.ok(base.kind === "pull_request" || base.kind === "pull_request_review");
+      const event = { ...base, pullRequest: { ...base.pullRequest, title, body } };
+      const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, event);
+      assert.deepEqual(resolution, emptyRepoRoomEventTaskResolution());
+      assert.deepEqual(taskByIdCalls, []);
+    });
+  }
+}
+
+test("a matching focus-room lease wins over an unrelated task number in PR prose", async () => {
+  const task = makeTask("task_7", { room_id: "focus_83" });
+  const { resolver, taskByIdCalls } = createHarness({
+    activeWorkflowLeaseTask: task,
+    tasksById: { task_1: makeTask("task_1") },
+  });
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, makePullRequestEvent());
+  assert.equal(resolution.task, task);
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+  assert.equal(resolution.matchedByTaskReference, false);
+  assert.deepEqual(taskByIdCalls, []);
+});

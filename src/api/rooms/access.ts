@@ -50,6 +50,7 @@ export interface ProjectRepoAccessDeps {
     roomName: string;
     sessionAccount: RequestAccount;
     freshCollaboratorCheck?: boolean;
+    throwOnIndeterminate?: boolean;
   }): Promise<RepoRoomAccessDecision>;
 }
 
@@ -87,9 +88,9 @@ function gitRoomBindingRepoRoomName(binding: GitRoomBinding): string | null {
   return `${binding.host}/${binding.repository_full_name}`;
 }
 
-async function resolveProjectRepoAccessTarget(
+export async function resolveProjectRepoAccessTarget(
   project: Project,
-  deps: Pick<ProjectRepoAccessDeps, "getGitRoomBindingForRoom">
+  deps: Pick<ProjectRepoAccessDeps, "getGitRoomBindingForRoom"> = { getGitRoomBindingForRoom },
 ): Promise<{
   roomName: string;
   repoRoomName: string;
@@ -183,6 +184,7 @@ export async function resolveRepoRoomAccessDecision(input: {
   roomName: string;
   sessionAccount: RequestAccount;
   freshCollaboratorCheck?: boolean;
+  throwOnIndeterminate?: boolean;
 }): Promise<RepoRoomAccessDecision> {
   if (!isRepoBackedRoomId(input.roomName)) {
     return { kind: "allow" };
@@ -195,6 +197,7 @@ export async function resolveProjectRepoRoomAccessDecision(input: {
   project: Project;
   sessionAccount: RequestAccount;
   freshCollaboratorCheck?: boolean;
+  throwOnIndeterminate?: boolean;
 }, deps: ProjectRepoAccessDeps = {
   getGitRoomBindingForRoom,
   resolveRepoRoomAccessDecision,
@@ -219,6 +222,7 @@ export async function resolveProjectRepoRoomAccessDecision(input: {
       roomName: target.repoRoomName,
       sessionAccount: input.sessionAccount,
       freshCollaboratorCheck: input.freshCollaboratorCheck,
+      throwOnIndeterminate: input.throwOnIndeterminate,
     }),
   };
 }
@@ -369,7 +373,7 @@ export async function requireGitRoomParticipant(
   req: AuthenticatedRequest,
   res: Response,
   project: Project,
-  options: { freshCollaboratorCheck?: boolean } = {}
+  options: { freshCollaboratorCheck?: boolean; throwOnIndeterminate?: boolean } = {}
 ): Promise<boolean> {
   // Worker bearers are already authenticated, capability-checked, and scoped
   // to one exact room by the request middleware. They intentionally have no
@@ -383,6 +387,7 @@ export async function requireGitRoomParticipant(
     project,
     sessionAccount: req.sessionAccount,
     freshCollaboratorCheck: options.freshCollaboratorCheck,
+    throwOnIndeterminate: options.throwOnIndeterminate,
   });
   requestRepoAccessRoomNames.set(
     req,

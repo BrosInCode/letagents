@@ -1,4 +1,5 @@
 import type { Request } from "express";
+import { parseBearerAuthorization } from "./bearer-authorization.js";
 
 import {
   getOwnerTokenAccountByToken,
@@ -20,21 +21,16 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
     cookieSessionAccount = await getSessionAccountByToken(sessionToken);
   }
 
-  const authHeader = req.headers?.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
+  const authorization = parseBearerAuthorization(req.headers?.authorization);
+  if (authorization.kind === "none") {
     return {
       account: cookieSessionAccount,
       authKind: cookieSessionAccount ? "session" : null,
     };
   }
 
-  const providerToken = authHeader.slice("Bearer ".length).trim();
-  if (!providerToken) {
-    return {
-      account: cookieSessionAccount,
-      authKind: cookieSessionAccount ? "session" : null,
-    };
-  }
+  if (authorization.kind === "invalid") return { account: null, authKind: null };
+  const providerToken = authorization.token;
 
   const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
   if (ownerTokenAccount) {
@@ -42,6 +38,14 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
       account: ownerTokenAccount,
       authKind: "owner_token",
     };
+  }
+
+  const appSession = await getSessionAccountByToken(providerToken);
+  if (appSession) {
+    if (cookieSessionAccount && cookieSessionAccount.id !== appSession.id) {
+      return { account: null, authKind: null };
+    }
+    return { account: appSession, authKind: "session" };
   }
 
   const supervisorGrant = await getSupervisorHostGrantByToken(providerToken);

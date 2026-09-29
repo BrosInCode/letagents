@@ -36,7 +36,7 @@ withDefaults(defineProps<{
   max-width: var(--max-width);
   margin: 0 auto;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3xl);
   align-items: center;
 }
@@ -51,6 +51,7 @@ withDefaults(defineProps<{
 }
 
 .use-case-content {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
@@ -79,12 +80,15 @@ withDefaults(defineProps<{
 }
 
 .use-case-visual {
+  min-width: 0;
   display: flex;
   justify-content: center;
   align-items: center;
 }
 
 @media (max-width: 768px) {
+  .use-case { padding: 64px 20px; }
+
   .use-case-inner {
     grid-template-columns: 1fr;
     gap: var(--space-2xl);
@@ -97,5 +101,10 @@ withDefaults(defineProps<{
   .use-case-title {
     font-size: 1.6rem;
   }
+}
+
+@media (max-width: 480px) {
+  .use-case { padding: 48px 16px; }
+  .use-case-inner { gap: 28px; }
 }
 </style>

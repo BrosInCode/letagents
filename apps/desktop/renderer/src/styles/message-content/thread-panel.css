@@ -261,6 +261,21 @@
   width: 100%;
 }
 
+.room-thread-panel .room-chat-message.is-thread-context .room-chat-message-content {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.room-thread-panel .room-chat-message.is-thread-context .room-message-author-block {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.room-thread-panel .room-chat-message.is-thread-context .room-message-reply {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .room-thread-panel .room-chat-message.is-thread-context :is(.room-message-author-block strong, .room-message-author-button) {
   font-size: 0.82rem;
   font-weight: 760;

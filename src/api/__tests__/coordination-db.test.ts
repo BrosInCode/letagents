@@ -1,3 +1,4 @@
+import "./coordination-db/server-lifecycle-scenarios.js";
 import "./coordination-db/lease-expiry-scenarios.js";
 import "./coordination-db/owner-token-scenarios.js";
 import "./coordination-db/lease-action-scenarios.js";

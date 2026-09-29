@@ -1,7 +1,7 @@
 import type { Express, Response } from "express";
 
 import type { GitRoomBinding, Project } from "../../db.js";
-import { parseGitHubRefRoomId } from "../../github/git-room-routing.js";
+import { parseGitHubRefRoomLocator } from "../../github/git-room-routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
@@ -93,7 +93,7 @@ function getJoinAccessRoomName(roomId: string, deps: RoomJoinRouteDeps): string 
     return roomId;
   }
 
-  const gitRefRoom = parseGitHubRefRoomId(roomId);
+  const gitRefRoom = parseGitHubRefRoomLocator(roomId);
   if (gitRefRoom) {
     return `github.com/${gitRefRoom.repositoryFullName}`;
   }

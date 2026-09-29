@@ -24,6 +24,14 @@ import { safeUserVisibleErrorDetail } from "./user-visible-error";
 import { normalizeAgentKey } from "./agents";
 import { supervisedAgentDisplayLabel } from "./codenames";
 
+/** Current native-owner progress, never inferred from saved activity or a timer. */
+export function agentCompactionProgress(entry: Pick<DesktopSupervisorManifestEntry,
+  "provider" | "providerProgress" | "desiredState" | "observedState" | "condition">) {
+  return entry.provider === "claude-code" && entry.desiredState === "running"
+    && entry.condition === "none" && !["stopped", "stopping", "failed"].includes(entry.observedState)
+    && entry.providerProgress?.state === "compacting" ? entry.providerProgress : null;
+}
+
 export interface AgentSetupConfirmation {
   providerId: DesktopAgentProviderId;
   action: DesktopAgentProviderSetupAction;
@@ -83,7 +91,6 @@ export function managedAgentRootPathForRoom(input: {
   repoStatus: Pick<RepoStatus, "rootPath" | "mainRootPath" | "worktrees" | "defaultBranch"> | null | undefined;
   gitRoomMatchesActiveRepo: boolean;
   durableProjectRootPath?: string | null;
-  homePath?: string | null;
 }): string | null {
   const durableProjectRoot = input.durableProjectRootPath?.trim() || null;
   const hasProjectContext = Boolean(input.room.gitRoom || durableProjectRoot);
@@ -102,7 +109,11 @@ export function managedAgentRootPathForRoom(input: {
   // repo selection rather than silently launching against HOME.
   if (hasProjectContext) return null;
 
-  return input.homePath?.trim() || null;
+  // A room with no project context at all (no git room, no durable project) is
+  // genuinely repo-less. The agent must NOT be pointed at HOME: returning null
+  // declares "no source repo" so the daemon provisions a private, empty scratch
+  // workspace for it instead (see ensureWorkAttempt's ephemeral branch).
+  return null;
 }
 
 export function branchScopedGitRoomExpectedBranch(
@@ -166,8 +177,15 @@ export function supervisedProviderLaunchPolicy(
 ): Record<string, unknown> | undefined {
   if (providerId !== "claude-code") return undefined;
   switch (permissionProfileId) {
-    case "read_only": return { permissionMode: "plan" };
+    case "read_only": return {
+      permissionMode: "dontAsk",
+      dangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep"],
+      allowedTools: ["mcp__letagents__*"],
+      settingSources: "",
+    };
     case "ask_before_write": return { permissionMode: "default" };
+    case "auto_review": return { permissionMode: "auto" };
     case "full_access": return { permissionMode: "bypassPermissions" };
     default: throw new Error("Choose an available Claude Code permission profile before supervised launch.");
   }
@@ -348,6 +366,7 @@ export function supervisedAgentWorkIndicators(
   entries: readonly DesktopSupervisorManifestEntry[],
   presence: readonly Pick<DesktopAgentPresence, "agentSessionId" | "displayName" | "actorLabel">[],
   roomIdentifier: string | null | undefined,
+  resourceFreshness: "fresh" | "stale" = "fresh",
 ): ManagedAgentWorkIndicator[] {
   const room = normalizeManagedAgentRoomIdentifier(roomIdentifier);
   return entries
@@ -386,7 +405,7 @@ export function supervisedAgentWorkIndicators(
           boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
           entry.id,
         ),
-        summary: latest
+        summary: resourceFreshness === "fresh" && agentCompactionProgress(entry) ? "Compacting conversation" : latest
           ? humanFacingSupervisorActivitySummary(latest)
           : roomTurnFallbackSummary(turn.state),
         startedAt: turnStartedAt
@@ -430,6 +449,13 @@ function roomTurnFallbackSummary(state: string): string {
   return "Thinking";
 }
 
+/** An agent waiting on its model provider is not working, and looks stuck
+ * unless its owner is told. The adapter sends this as a `provider_event`,
+ * which the daemon treats as ordinary activity; it is the one such event
+ * shown. */
+const PROVIDER_RETRY_METHOD = "letagents/providerretry";
+const PROVIDER_RETRY_SUMMARY = /^The model provider returned an error\. Retrying \(attempt \d{1,3}\)\.$/;
+
 /** Provider transport/account notifications remain in diagnostics, but they
  * are not evidence that an agent is doing work for the room. */
 export function isHumanVisibleSupervisorActivity(
@@ -441,6 +467,7 @@ export function isHumanVisibleSupervisorActivity(
     || method === "account/ratelimitsupdated"
     || method === "thread/read"
   ) return false;
+  if (method === PROVIDER_RETRY_METHOD) return true;
   return event.kind !== "usage" && event.kind !== "provider_event";
 }
 
@@ -452,6 +479,12 @@ export function humanFacingSupervisorActivitySummary(
 ): string {
   const kind = event.kind.trim().toLowerCase();
   const method = event.method.trim().toLowerCase();
+  if (method === PROVIDER_RETRY_METHOD) {
+    // Only the adapter's own sentence is shown. Anything else under this
+    // method gets fixed copy, so provider text cannot be shown here.
+    const summary = event.summary.trim();
+    return PROVIDER_RETRY_SUMMARY.test(summary) ? summary : "Waiting for the model provider";
+  }
   if (method === "item/reasoning/summarytextdelta") {
     // The Codex adapter places only the provider-approved reasoning summary in
     // this field. Older/fallback daemon events contain the protocol label, so
@@ -466,6 +499,8 @@ export function humanFacingSupervisorActivitySummary(
   if (kind === "text_delta" || method.includes("agentmessage") || method === "assistant") return "Writing a response";
   if (kind === "tool_lifecycle" || /(?:toolcall|tool_use|websearch|filechange)/i.test(method)) return "Using a tool";
   if (kind === "command_output" || /(?:command|process|terminal)/i.test(method)) return "Working in the project";
+  // The provider's own review decides these; nobody is being asked.
+  if (/(?:autoapprovalreview|guardianwarning)/.test(method)) return "Checking an action";
   if (kind === "approval") return "Waiting for approval";
   if (kind === "turn_lifecycle" || kind === "item_lifecycle") return "Thinking";
   return liveActivityEchoText(event.summary);
@@ -1070,9 +1105,7 @@ export function agentSetupConfirmationMessage(
 ): string {
   const name = provider?.name?.trim() || "this provider";
   if (action === "install_runtime") {
-    return provider?.id === "codex"
-      ? "LetAgents will install the official Codex CLI runtime on this machine after confirmation."
-      : `LetAgents will install the official ${name} runtime on this machine after confirmation.`;
+    return `LetAgents will install its managed ${name} execution engine on this machine after confirmation. External provider CLIs remain user-managed.`;
   }
   return `LetAgents will update ${name}'s agent app configuration to add the LetAgents connection after confirmation.`;
 }
@@ -1128,7 +1161,7 @@ export function managedAgentPermissionProfileStatusLabel(
   status: DesktopManagedAgentPermissionProfile["status"],
 ): string {
   if (status === "available") return "Available";
-  if (status === "gated") return "Gated";
+  if (status === "gated") return "Not available yet";
   return "Unsupported";
 }
 
@@ -1148,16 +1181,16 @@ export function supervisedCursorPermissionProfilePresentation(
     return {
       ...profile,
       label: "Workspace writes",
-      description: "Inspects, edits source files, and runs repository tools in a private turn workspace.",
-      detail: "Cursor's sandbox stays enabled. LetAgents carries conflict-checked, nonignored file edits back after the turn; ignored dependencies remain read-only and Git history is not changed.",
+      description: "Can inspect files, edit code, and run project tools in a separate copy of your project.",
+      detail: "Cursor restricts file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and Git history is kept.",
     };
   }
   if (profile.id === "full_access") {
     return {
       ...profile,
       label: "Workspace writes (compatibility)",
-      description: "Runs repository tools with Cursor's inner sandbox disabled when a project needs broader tool compatibility.",
-      detail: "Cursor's inner sandbox is disabled inside a private turn workspace. Direct host writes remain blocked; LetAgents carries back only conflict-checked, nonignored file edits and does not change Git history.",
+      description: "Turns off Cursor’s own command restrictions so more project tools can run.",
+      detail: "Cursor still works in a separate copy of your project and cannot write directly to files on this Mac. LetAgents checks for conflicts before copying changes back. Files ignored by Git are not copied back, and Git history is kept.",
     };
   }
   if (profile.id === "read_only") {
@@ -1168,6 +1201,64 @@ export function supervisedCursorPermissionProfilePresentation(
     };
   }
   return profile;
+}
+
+export function supervisedPermissionProfilePresentation(
+  providerId: DesktopAgentProviderId | null | undefined,
+  profile: DesktopManagedAgentPermissionProfile,
+  context?: { hasProject: boolean },
+): DesktopManagedAgentPermissionProfile {
+  if (providerId === "cursor") {
+    const presented = supervisedCursorPermissionProfilePresentation(profile);
+    if (context?.hasProject === false && (profile.id === "sandboxed_write" || profile.id === "full_access")) {
+      return { ...presented, status: "unsupported", detail: "Connect a project to use workspace writes." };
+    }
+    return presented;
+  }
+  if (profile.id === "auto_review" && providerId === "claude-code") {
+    return { ...profile, status: "available",
+      description: "Lets Claude check each action before it runs. Actions it judges safe run without asking.",
+      detail: "Claude blocks actions it judges risky. Anything a room message asks for counts as approved, including commands that reach outside your project. Other Claude settings do not apply." };
+  }
+  if (profile.id === "auto_review" && providerId === "open-model") {
+    return { ...profile, status: "available",
+      description: "Lets LetAgents review each command before it runs. Routine commands and edits to project files run without asking.",
+      detail: "Each command is sent to LetAgents and to Jev, a decision model, for review. A command that deletes, publishes, installs, or reaches the network still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project." };
+  }
+  if (profile.id === "auto_review" && providerId === "codex") {
+    return { ...profile, status: "available",
+      description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
+      detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project." };
+  }
+  if (profile.id !== "ask_before_write"
+    || (providerId !== "codex" && providerId !== "open-model" && providerId !== "claude-code")) return profile;
+  if (providerId === "claude-code") {
+    return { ...profile, status: "available",
+      description: "Requires approval before Claude can change files or run write-capable commands.",
+      detail: "Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available." };
+  }
+  if (providerId === "open-model") {
+    return {
+      ...profile,
+      status: "available",
+      description: "Requires approval before OpenCode can run shell commands or change files.",
+      detail: "Commands and file changes need approval. Reading files and using LetAgents room tools do not.",
+    };
+  }
+  return {
+    ...profile,
+    status: "available",
+    description: "Requires approval before Codex can run write-capable commands or apply file changes.",
+    detail: "Starts with read-only file access and no network access. Requests approval when it needs more access.",
+  };
+}
+
+/** Shown before launch. Auto still has a reviewer, so the Full access notice would mislead. */
+export function autoReviewNotice(providerName: string, providerId?: DesktopAgentProviderId | null): string {
+  if (providerId === "open-model") {
+    return `LetAgents decides which of ${providerName}'s commands are safe instead of asking you, and sends each command to LetAgents and Jev to do it. A command it allows can run the project's own scripts, which can do anything the project defines. Use only with projects you trust.`;
+  }
+  return `${providerName} decides which actions are safe instead of asking you. Anything a room message asks for counts as approved, including commands that reach outside your project. Use only in rooms where you trust everyone who can post.`;
 }
 
 export type ManagedAgentPermissionProfileSelections =
@@ -1361,9 +1452,17 @@ export function mergeReachableAgentPresenceParticipants(
       continue;
     }
 
-    const existingIndex = merged.findIndex((participant) =>
-      participantMatchesAgentPresence(participant, presence)
-    );
+    const canonicalIndex = merged.findIndex((participant) =>
+      participant.kind === "agent" && sameSpecificAgentKey(participant.agentKey, presence.agentKey));
+    const actorIndex = canonicalIndex === -1 ? merged.findIndex((participant) =>
+      sameNormalized(participant.actorLabel, presence.actorLabel)
+      && participantMatchesAgentPresence(participant, presence)) : -1;
+    const fallbackIndices = canonicalIndex === -1 && actorIndex === -1
+      ? merged.flatMap((participant, index) => participantMatchesAgentPresence(participant, presence) ? [index] : [])
+      : [];
+    const existingIndex = canonicalIndex !== -1 ? canonicalIndex
+      : actorIndex !== -1 ? actorIndex
+      : fallbackIndices.length === 1 ? fallbackIndices[0] : -1;
     if (existingIndex === -1) {
       merged.push(agentPresenceToParticipant(presence));
       continue;
@@ -1516,8 +1615,12 @@ function participantMatchesAgentPresence(
   presence: DesktopAgentPresence,
 ): boolean {
   if (participant.kind !== "agent") return false;
+  const participantKey = specificAgentKey(participant.agentKey);
+  const presenceKey = specificAgentKey(presence.agentKey);
+  if (participantKey && presenceKey) return participantKey === presenceKey;
+  if (participant.ownerLabel?.trim() && presence.ownerLabel?.trim()
+    && !sameNormalized(participant.ownerLabel, presence.ownerLabel)) return false;
   if (sameNormalized(participant.actorLabel, presence.actorLabel)) return true;
-  if (sameSpecificAgentKey(participant.agentKey, presence.agentKey)) return true;
   if (!sameNormalized(participant.displayName, presence.displayName)) return false;
   return Boolean(
     sameNormalized(participant.ideLabel, presence.ideLabel)

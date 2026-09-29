@@ -35,6 +35,7 @@
         type="text"
         class="input"
         placeholder="Search messages..."
+        aria-label="Search messages"
         autocomplete="off"
         :value="searchQuery"
         @input="$emit('update:searchQuery', ($event.target as HTMLInputElement).value)"
@@ -45,7 +46,7 @@
 
     <div class="header-actions">
       <!-- Search toggle -->
-      <button v-if="canSearch" class="action-btn" @click="toggleSearch" type="button" aria-label="Search messages" title="Search messages">
+      <button v-if="canSearch && !searchActive" class="action-btn" @click="toggleSearch" type="button" aria-label="Search messages" title="Search messages">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       </button>
 
@@ -151,6 +152,7 @@ function closeSearch() {
 }
 
 .menu-btn {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -172,7 +174,7 @@ function closeSearch() {
   stroke-linecap: round;
 }
 
-.chat-title { flex: 1; min-width: 120px; }
+.chat-title { flex: 1; min-width: 0; }
 .chat-title-heading {
   display: flex;
   align-items: center;
@@ -180,6 +182,7 @@ function closeSearch() {
   min-width: 0;
 }
 .chat-title h2 {
+  min-width: 0;
   font-size: 0.92rem;
   font-weight: 700;
   letter-spacing: 0;
@@ -220,6 +223,7 @@ function closeSearch() {
 /* ── Inline search ── */
 .header-search {
   flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -234,6 +238,8 @@ function closeSearch() {
 .header-search svg { flex-shrink: 0; opacity: 0.5; width: 14px; height: 14px; }
 .header-search .input {
   flex: 1;
+  min-width: 0;
+  width: 100%;
   border: none;
   background: none;
   color: var(--text, #fafafa);
@@ -255,11 +261,12 @@ function closeSearch() {
 }
 .search-close:hover { color: var(--text, #fafafa); }
 
-.header-git-room {
+.chat-header .header-git-room {
   flex: 0 1 auto;
+  max-width: min(320px, 24vw);
 }
 
-.header-actions { display: flex; align-items: center; gap: 4px; }
+.header-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 
 .action-btn {
   display: flex;
@@ -272,7 +279,7 @@ function closeSearch() {
   border: none;
   cursor: pointer;
   color: var(--muted, #71717a);
-  transition: all 150ms;
+  transition: background 150ms, color 150ms;
 }
 .action-btn:hover { background: var(--surface, #18181b); color: var(--text, #fafafa); }
 
@@ -339,12 +346,27 @@ function closeSearch() {
 .presence[data-state="live"]::before { background: var(--success, #34d399); }
 .presence[data-state="error"]::before { background: var(--danger, #f87171); }
 
-@media (max-width: 768px) {
-  .chat-header { padding: 0 12px; gap: 6px; height: 48px; }
+@media (max-width: 1120px) {
+  .header-git-room { display: none; }
+}
+
+@media (max-width: 980px) {
+  .chat-header { padding: 0 8px; gap: 4px; height: 56px; }
   .tab-bar { display: none; }
   .chat-title h2 { font-size: 0.84rem; }
   .chat-title p { font-size: 0.66rem; }
-  .title-rename-btn { width: 24px; height: 24px; opacity: 1; }
-  .presence { padding: 4px 6px; font-size: 0.66rem; }
+  .menu-btn, .action-btn, .title-rename-btn, .search-close { width: 44px; height: 44px; flex-shrink: 0; }
+  .title-rename-btn { opacity: 1; }
+  .presence { width: 12px; padding: 0; font-size: 0; gap: 0; }
+  .header-search { height: 44px; padding: 0 0 0 10px; gap: 6px; }
+  .header-search .input { font-size: 16px; }
+  .search-count { font-size: 0.66rem; }
+}
+
+@media (pointer: coarse) and (min-width: 981px) {
+  .menu-btn, .action-btn, .title-rename-btn, .search-close { min-width: 44px; min-height: 44px; }
+  .tab-bar button { min-height: 44px; padding-inline: 10px; }
+  .header-search { height: 44px; }
+  .header-search .input { font-size: 16px; }
 }
 </style>

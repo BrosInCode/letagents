@@ -9,6 +9,7 @@ import {
   getTaskOwnershipState,
   getTasks,
   LeaseFenceStaleError,
+  TaskContentConflictError,
   updateTask,
   type BoardIntentConsumptionInput,
   type LeaseFence,
@@ -353,6 +354,9 @@ export function registerLegacyProjectTaskRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const editsContent = Object.prototype.hasOwnProperty.call(requestBody, "title")
+      || Object.prototype.hasOwnProperty.call(requestBody, "description");
+    if (editsContent && !(await deps.requireAdmin(req, res, project))) return;
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
@@ -361,13 +365,20 @@ export function registerLegacyProjectTaskRoutes(
     });
     if (workerWriteIdentity.kind === "responded") return;
     const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
-    const workflow_artifacts = validateTaskWorkflowArtifactsInput(
-      requestBody.workflow_artifacts
-    );
-    const patch = buildTaskUpdatePatch({
-      body: requestBody,
-      workflowArtifacts: workflow_artifacts,
-    });
+    if (editsContent && workerIdentity) {
+      res.status(403).json({ error: "Task content edits require a human room admin." });
+      return;
+    }
+    let patch: ReturnType<typeof buildTaskUpdatePatch>;
+    try {
+      patch = buildTaskUpdatePatch({
+        body: requestBody,
+        workflowArtifacts: validateTaskWorkflowArtifactsInput(requestBody.workflow_artifacts),
+      });
+    } catch (error) {
+      respondWithBadRequest(res, "PATCH /projects/:project_id/tasks/:task_id", error, "Invalid task update.");
+      return;
+    }
     const { updates } = patch;
     const actorLabel = workerIdentity?.actor_label ?? patch.actorLabel;
     const actorKey = workerIdentity?.agent_key ?? patch.actorKey;
@@ -467,7 +478,7 @@ export function registerLegacyProjectTaskRoutes(
       }
       res.json(updated);
     } catch (error) {
-      if (error instanceof LeaseFenceStaleError) {
+      if (error instanceof LeaseFenceStaleError || error instanceof TaskContentConflictError) {
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }

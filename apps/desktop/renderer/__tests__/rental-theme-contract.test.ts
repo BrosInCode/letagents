@@ -24,7 +24,7 @@ const segmentedControl = source("../src/components/desktop/controls/DesktopSegme
 
 describe("Rent theme contract", () => {
   it("derives marketplace and modal materials from the shell palette", () => {
-    assert.match(marketplaceStyles, /--rent-surface: color-mix\(in srgb, var\(--bg-card\)/);
+    assert.match(marketplaceStyles, /--rent-surface: var\(--bg-card\)/);
     assert.match(marketplaceStyles, /background: var\(--rent-surface\)/);
     assert.match(marketplaceStyles, /color: var\(--text\)/);
     assert.doesNotMatch(marketplaceStyles, /rgba\(20,\s*23,\s*28|#17191d|#dff5ff|#d8f3ff/);

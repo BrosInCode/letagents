@@ -21,7 +21,7 @@
         type="button"
         class="agent-inspector-continuation-dismiss"
         aria-label="Dismiss conversation restored notice"
-        @click="dismissed = true"
+        @click="dismiss"
       >
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
       </button>
@@ -40,6 +40,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
+import {
+  isAgentInspectorRecoveryDismissed,
+  rememberAgentInspectorRecoveryDismissal,
+  type AgentInspectorRecoveryDismissalStorage,
+} from "../../../../domain/agent-inspector-recovery-dismissals";
 
 const props = defineProps<{
   entryId: string;
@@ -57,8 +62,26 @@ const title = computed(() => {
   return "Couldn’t restore this agent’s Codex conversation";
 });
 
+function dismissalStorage(): AgentInspectorRecoveryDismissalStorage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function dismiss(): void {
+  const noticeId = props.recovery?.noticeId;
+  if (!noticeId) return;
+  dismissed.value = true;
+  rememberAgentInspectorRecoveryDismissal(dismissalStorage(), noticeId);
+}
+
 watch(
-  () => [props.entryId, props.recovery?.sourceMessageId, props.recovery?.state] as const,
-  () => { dismissed.value = false; },
+  () => props.recovery?.noticeId ?? null,
+  (noticeId) => {
+    dismissed.value = isAgentInspectorRecoveryDismissed(dismissalStorage(), noticeId);
+  },
+  { immediate: true },
 );
 </script>

@@ -375,6 +375,7 @@
 }
 
 .desktop-activity-avatar[data-state="active"],
+.desktop-activity-avatar[data-state="online"],
 .desktop-activity-avatar[data-state="working"],
 .desktop-activity-avatar[data-state="reviewing"],
 .desktop-activity-avatar[data-state="responding"] {

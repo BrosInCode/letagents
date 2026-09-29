@@ -5,13 +5,13 @@
         <section ref="dialog" class="rent-review-sheet" role="dialog" aria-modal="true" aria-labelledby="rent-review-title" tabindex="-1" @keydown="onKeydown">
           <header><div><p>Manual review</p><h2 id="rent-review-title">{{ request?.taskTitle || 'Review request' }}</h2></div><button type="button" aria-label="Close review" @click="close">×</button></header>
           <p v-if="error" class="rent-request-error" role="alert">{{ error }}</p>
-          <div v-if="!session" class="rent-review-loading">Loading the requested room and scope…</div>
+          <div v-if="!session" class="rent-review-loading">Loading the request and allowed access…</div>
           <template v-else>
-            <div class="rent-review-copy"><strong>{{ request?.renterDisplayName || 'Unknown renter' }}</strong><p>{{ request?.taskPrompt }}</p><dl><div><dt>Room</dt><dd>{{ session.roomIdentifier || 'No room selected' }}</dd></div><div><dt>History</dt><dd>{{ historyAccessLabel }}</dd></div><div><dt>Workspace</dt><dd>{{ session.repoName ? `${session.repoOwner || ''}/${session.repoName} · isolated sandbox` : 'Room-only ephemeral workspace' }}</dd></div><div><dt>Duration</dt><dd>{{ session.timeLimitMinutes || request?.requestedTimeLimitMinutes || '—' }} min</dd></div></dl></div>
-            <p v-if="usableRuntimes.length === 0" class="rent-review-loading">No authenticated runtime with a rental-safe sandbox is ready. Finish setup in Settings → Renting.</p>
-            <label v-else>Runtime<select v-model="configuration.providerId"><option v-for="runtime in usableRuntimes" :key="runtime.providerId" :value="runtime.providerId">{{ runtime.label }}</option></select></label>
-            <label>Model<input v-model.trim="configuration.model" placeholder="Use the runtime default" /></label>
-            <label>Sandbox profile<select v-model="configuration.permissionProfileId"><option v-for="profile in selectedRuntime?.permissionProfileIds || []" :key="profile" :value="profile">{{ profileLabel(profile) }}</option></select></label>
+            <div class="rent-review-copy"><strong>{{ request?.renterDisplayName || 'Unknown renter' }}</strong><p>{{ request?.taskPrompt }}</p><dl><div><dt>Room</dt><dd>{{ session.roomIdentifier || 'No room selected' }}</dd></div><div><dt>History</dt><dd>{{ historyAccessLabel }}</dd></div><div><dt>Workspace</dt><dd>{{ session.repoName ? `${session.repoOwner || ''}/${session.repoName} · isolated sandbox` : 'Temporary workspace for this room' }}</dd></div><div><dt>Duration</dt><dd>{{ session.timeLimitMinutes || request?.requestedTimeLimitMinutes || '—' }} min</dd></div></dl></div>
+            <p v-if="usableRuntimes.length === 0" class="rent-review-loading">No agent is ready to rent out. Finish setup in Settings → Renting.</p>
+            <label v-else>Agent app<select v-model="configuration.providerId"><option v-for="runtime in usableRuntimes" :key="runtime.providerId" :value="runtime.providerId">{{ runtime.label }}</option></select></label>
+            <label>Model<input v-model.trim="configuration.model" placeholder="Use the default model" /></label>
+            <label>File and command access<select v-model="configuration.permissionProfileId"><option v-for="profile in selectedRuntime?.permissionProfileIds || []" :key="profile" :value="profile">{{ profileLabel(profile) }}</option></select></label>
             <footer><button type="button" class="rent-refresh-button" :disabled="busy" @click="emit('decline')">Decline</button><button type="button" class="rent-refresh-button" :disabled="busy" @click="close">Cancel</button><button type="button" class="rent-refresh-button rent-action-accept" :disabled="busy || !canLaunch" @click="emit('launch', configuration)">{{ busy ? 'Launching…' : 'Accept & launch' }}</button></footer>
           </template>
         </section>

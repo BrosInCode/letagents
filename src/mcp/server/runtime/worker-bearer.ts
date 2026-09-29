@@ -1,4 +1,5 @@
-export const LETAGENTS_AGENT_SESSION_BEARER_ENV = "LETAGENTS_AGENT_SESSION_BEARER";
+import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
+import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
 export const LETAGENTS_SUPERVISED_BOUNDED_TURNS_ENV = "LETAGENTS_SUPERVISED_BOUNDED_TURNS";
 
 export type WorkerBearerRuntime =
@@ -20,16 +21,21 @@ export class WorkerBearerRuntimeConfigurationError extends Error {
 }
 
 export function getWorkerBearerRuntime(): WorkerBearerRuntime {
+  if (getDaemonToolExecutionContext()) return { mode: "supervised" };
   const bearer = process.env.LETAGENTS_AGENT_SESSION_BEARER?.trim();
   const supervised = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() === "1";
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
+  const polling = profile === "supervised_mcp_polling";
   if (supervised !== (profile === "supervised_room_turn")) {
     return {
       mode: "invalid",
       error: "LETAGENTS_EXECUTION_PROFILE=supervised_room_turn and LETAGENTS_SUPERVISED_BOUNDED_TURNS=1 must be configured together.",
     };
   }
-  if (!bearer && !supervised) return { mode: "owner" };
+  if (polling && (bearer || process.env.LETAGENTS_TOKEN?.trim())) {
+    return { mode: "invalid", error: "Custodial polling refuses environment credentials; borrow exact daemon worker authority." };
+  }
+  if (!bearer && !supervised && !polling) return { mode: "owner" };
 
   if (bearer && supervised) {
     return {
@@ -47,6 +53,7 @@ export function getWorkerBearerRuntime(): WorkerBearerRuntime {
   }
   try {
     const parsed = new URL(apiUrl);
+    if (isLocalRoomApi(apiUrl) && supervised && profile === "supervised_room_turn" && !bearer) return { mode: "supervised" };
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("unsupported protocol");
     }
@@ -82,7 +89,12 @@ export function requireValidWorkerBearerRuntime(): WorkerBearerRuntime {
   return runtime;
 }
 
-export function isSupervisedBoundedTurn(): boolean {
+export function isCustodialPolling(): boolean {
+  return process.env.LETAGENTS_EXECUTION_PROFILE?.trim() === "supervised_mcp_polling";
+}
+
+/** Credential custody is independent of who owns room delivery. */
+export function hasSupervisedWorkerAuthority(): boolean {
   return requireValidWorkerBearerRuntime().mode === "supervised";
 }
 
@@ -113,7 +125,8 @@ export function workerModeDisabledToolResult(
 export function supervisedBoundedDeliveryDisabledToolResult(
   toolName = "wait_for_messages",
 ): Record<string, unknown> | null {
-  if (process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
+  if (!getDaemonToolExecutionContext()
+    && process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
     return null;
   }
   return {

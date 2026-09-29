@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type {
@@ -42,6 +43,9 @@ import {
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
   supervisedCursorPermissionProfilePresentation,
+  supervisedPermissionProfilePresentation,
+  supervisedProviderLaunchPolicy,
+  autoReviewNotice,
   managedAgentPermissionRequestTargetLabel,
   managedAgentDetailSelection,
   managedAgentProviderIdentityForTarget,
@@ -709,7 +713,7 @@ test("supervisor native activity drives the chat work indicator for the bound ro
       blockedByMessageId: null,
       error: null,
       updatedAt: "2026-07-15T18:00:00.500Z",
-      timeline: [{ phase: "turn_started", observedAt: "2026-07-15T18:00:00.500Z", detail: null }],
+      timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-15T18:00:00.500Z", detail: null }],
     }],
     nativeLiveness: { state: "active", observedAt: "2026-07-15T18:00:01.000Z", detail: "tool running" },
     activity: [{
@@ -805,6 +809,11 @@ test("provider activity becomes product language instead of a protocol trace", (
   assert.equal(humanFacingSupervisorActivitySummary({ kind: "text_delta", method: "item/agentMessage/delta", summary: "codex · item/agentMessage/delta" }), "Writing a response");
   assert.equal(humanFacingSupervisorActivitySummary({ kind: "item_lifecycle", method: "item/reasoning/summaryTextDelta", summary: "codex · item/reasoning/summaryTextDelta" }), "Thinking through the request");
   assert.equal(humanFacingSupervisorActivitySummary({ kind: "tool_lifecycle", method: "item/mcpToolCall/progress", summary: "codex · item/mcpToolCall/progress" }), "Using a tool");
+  // Codex's own review asks nobody, so it must not read as a request waiting on the host.
+  for (const method of ["item/autoApprovalReview/started", "item/autoApprovalReview/completed", "guardianWarning"]) {
+    assert.equal(humanFacingSupervisorActivitySummary({ kind: "approval", method, summary: `codex · ${method}` }), "Checking an action");
+  }
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "approval", method: "item/permissions/requestApproval", summary: "codex" }), "Waiting for approval");
 });
 
 test("a successful first supervised Start has an immediate non-recovery runtime label", () => {
@@ -1002,7 +1011,7 @@ test("managedAgentRepoStatusForRoom requires verified repo identity for branch r
   );
 });
 
-test("managedAgentRootPathForRoom requires repo selection instead of falling back to HOME", () => {
+test("managedAgentRootPathForRoom never falls back to HOME", () => {
   // Regression (task_60): a repo-backed focus room whose durable root was lost
   // (an account/app-agent reopen wiped it) must resolve to null so Add Agent
   // requires an explicit repo — never HOME. HOME is not a Git repo and the daemon
@@ -1013,7 +1022,6 @@ test("managedAgentRootPathForRoom requires repo selection instead of falling bac
       repoStatus: null,
       gitRoomMatchesActiveRepo: false,
       durableProjectRootPath: null,
-      homePath: "/Users/emmy",
     }),
     null,
   );
@@ -1025,20 +1033,21 @@ test("managedAgentRootPathForRoom requires repo selection instead of falling bac
       repoStatus: null,
       gitRoomMatchesActiveRepo: false,
       durableProjectRootPath: "/Users/emmy/Projects/letagents",
-      homePath: "/Users/emmy",
     }),
     "/Users/emmy/Projects/letagents",
   );
-  // Only a room with no project context at all resolves to HOME.
+  // A room with no project context at all is genuinely repo-less: it resolves to
+  // null so the daemon provisions a private, empty scratch workspace — the agent
+  // is NEVER pointed at HOME (which is not a Git repo and would leak the whole
+  // home directory into the agent's reach).
   assert.equal(
     managedAgentRootPathForRoom({
       room: { gitRoom: null },
       repoStatus: null,
       gitRoomMatchesActiveRepo: false,
       durableProjectRootPath: null,
-      homePath: "/Users/emmy",
     }),
-    "/Users/emmy",
+    null,
   );
 });
 
@@ -1374,25 +1383,32 @@ test("agent setup confirmation is scoped to the selected provider and action", (
 });
 
 test("agent setup action labels and confirmation copy are provider-aware", () => {
+  const openModel = provider({
+    id: "open-model",
+    name: "Open Model",
+    capabilities: ["desktop_managed_runtime", "installable_runtime"],
+    runtimeCommand: "opencode",
+    mcpTargetId: null,
+  });
   assert.equal(
-    agentSetupActionButtonLabel("install_runtime", provider(), false, false),
-    "Install Codex",
+    agentSetupActionButtonLabel("install_runtime", openModel, false, false),
+    "Install Open Model",
   );
   assert.equal(
-    agentSetupActionButtonLabel("install_runtime", provider(), true, false),
-    "Confirm install Codex",
+    agentSetupActionButtonLabel("install_runtime", openModel, true, false),
+    "Confirm install Open Model",
   );
   assert.equal(
     agentSetupActionButtonLabel("install_mcp_bridge", provider(), true, false),
     "Confirm connection install",
   );
   assert.equal(
-    agentSetupActionButtonLabel("install_runtime", provider(), true, true),
+    agentSetupActionButtonLabel("install_runtime", openModel, true, true),
     "Installing...",
   );
   assert.equal(
-    agentSetupConfirmationMessage("install_runtime", provider()),
-    "LetAgents will install the official Codex CLI runtime on this machine after confirmation.",
+    agentSetupConfirmationMessage("install_runtime", openModel),
+    "LetAgents will install its managed Open Model execution engine on this machine after confirmation. External provider CLIs remain user-managed.",
   );
   assert.equal(
     agentSetupConfirmationMessage("install_mcp_bridge", provider({
@@ -1538,7 +1554,7 @@ test("managed permission profile helpers present available and gated modes", () 
   const running = session();
   assert.equal(managedAgentPermissionProfileLabel(running), "Full access");
   assert.equal(managedAgentPermissionProfileStatusLabel("available"), "Available");
-  assert.equal(managedAgentPermissionProfileStatusLabel("gated"), "Gated");
+  assert.equal(managedAgentPermissionProfileStatusLabel("gated"), "Not available yet");
   assert.equal(managedAgentPermissionProfileSummary({
     id: "sandboxed_write",
     label: "Sandboxed writes",
@@ -1547,7 +1563,7 @@ test("managed permission profile helpers present available and gated modes", () 
     risk: "medium",
     detail: "Needs config isolation.",
     isDefault: false,
-  }), "Gated: Needs config isolation.");
+  }), "Not available yet: Needs config isolation.");
 });
 
 test("supervised Cursor permission copy describes workspace scope instead of machine-wide access", () => {
@@ -1562,8 +1578,8 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
   };
   const compatibility = supervisedCursorPermissionProfilePresentation(base);
   assert.equal(compatibility.label, "Workspace writes (compatibility)");
-  assert.match(compatibility.detail ?? "", /private turn workspace/i);
-  assert.match(compatibility.detail ?? "", /does not change Git history/i);
+  assert.match(compatibility.detail ?? "", /separate copy of your project/i);
+  assert.match(compatibility.detail ?? "", /Git history is kept/i);
 
   const writable = supervisedCursorPermissionProfilePresentation({
     ...base,
@@ -1572,7 +1588,39 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
     risk: "medium",
   });
   assert.equal(writable.label, "Workspace writes");
-  assert.match(writable.description, /private turn workspace/i);
+  assert.match(writable.description, /separate copy of your project/i);
+});
+
+test("supervised Codex presents ask-before-write without changing the legacy catalog", () => {
+  const legacy = {
+    id: "ask_before_write" as const,
+    label: "Ask before writes",
+    description: "Not wired.",
+    status: "gated" as const,
+    risk: "medium" as const,
+    detail: "Requires an approval bridge.",
+    isDefault: false,
+  };
+  const supervised = supervisedPermissionProfilePresentation("codex", legacy);
+  assert.equal(legacy.status, "gated");
+  assert.equal(supervised.status, "available");
+  assert.match(supervised.detail ?? "", /read-only file access and no network access/);
+});
+
+test("supervised Open Model presents its native approval bridge without changing the legacy catalog", () => {
+  const legacy = {
+    id: "ask_before_write" as const,
+    label: "Ask before writes",
+    description: "Not wired.",
+    status: "gated" as const,
+    risk: "medium" as const,
+    detail: "Requires an approval bridge.",
+    isDefault: false,
+  };
+  const supervised = supervisedPermissionProfilePresentation("open-model", legacy);
+  assert.equal(legacy.status, "gated");
+  assert.equal(supervised.status, "available");
+  assert.match(supervised.detail ?? "", /Commands and file changes need approval/);
 });
 
 test("managed permission profile selection is scoped by provider", () => {
@@ -1831,6 +1879,104 @@ test("supervisor reachability preserves server-owned attribution while replacing
   assert.deepEqual(participants[0]?.sourceFlags, ["messages", "delivery", "presence"]);
 });
 
+test("presence restores message-history identity before supervisor rows are projected", () => {
+  const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
+  assert.match(shell, /const roomParticipants = computed\(\(\) =>\s*mergeDesktopSupervisorAgentParticipants\(\s*mergeDesktopManagedAgentParticipants\(\s*(?:\/\/[^\n]*\n\s*)*mergeReachableAgentPresenceParticipants\(props\.participants,/);
+  const history = [participant({
+    participantKey: "agent:dawnhaven | emmymay's agent | codex",
+    displayName: "DawnHaven",
+    actorLabel: "DawnHaven | EmmyMay's agent | Codex",
+    agentKey: null,
+    ownerLabel: "EmmyMay",
+  })];
+  const live = [presence({
+    displayName: "DawnHaven",
+    actorLabel: history[0].actorLabel,
+    agentKey: "EmmyMay/desktop-codex-dawn",
+    ownerLabel: "EmmyMay",
+    freshness: "active",
+    activityState: "active",
+    sourceFlags: ["delivery", "presence"],
+  })];
+  const entries = [supervisorEntry({
+    displayName: "DawnHaven",
+    agentKey: live[0].agentKey,
+    roomAgentState: {
+      connection: { state: "connected", detail: null },
+      inbox: { state: "idle", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+      task: { state: "none", taskId: null, title: null },
+    },
+  })];
+  const participants = mergeDesktopSupervisorAgentParticipants(
+    mergeDesktopManagedAgentParticipants(
+      mergeReachableAgentPresenceParticipants(history, live, "room_1"),
+      [],
+      "room_1",
+    ),
+    entries,
+    "room_1",
+  );
+
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0].agentKey, live[0].agentKey);
+  assert.equal(participants[0].participantKey, "desktop-supervisor-agent:supervised_1");
+  assert.equal(participants[0].ownerLabel, "EmmyMay");
+  assert.deepEqual(participants[0].sourceFlags, ["messages", "delivery", "presence"]);
+  assert.equal(roomMentionCandidates(participants, "dawn")[0]?.insertText, "DawnHaven");
+
+  const differentAgent = mergeDesktopSupervisorAgentParticipants(participants, [
+    { ...entries[0], id: "supervised_other", agentKey: "OtherOwner/desktop-codex-dawn" },
+  ], "room_1");
+  assert.equal(differentAgent.length, 2);
+  assert.deepEqual(roomMentionCandidates(differentAgent, "dawn").map((item) => item.insertText), [
+    "agent:EmmyMay/desktop-codex-dawn",
+    "agent:OtherOwner/desktop-codex-dawn",
+  ]);
+
+  const owners = ["Alice", "Bob"];
+  const ownerHistory = owners.map((owner) => ({
+    ...history[0],
+    participantKey: `agent:dawnhaven:${owner}`,
+    actorLabel: `DawnHaven | ${owner}'s agent | Codex`,
+    ownerLabel: owner,
+    activityState: "offline" as const,
+  }));
+  const ownerPresence = ownerHistory.map((item) => ({
+    ...live[0], actorLabel: item.actorLabel, ownerLabel: item.ownerLabel,
+    agentKey: `${item.ownerLabel}/dawn`,
+  })).reverse();
+  const ownerEntries = owners.map((owner) => ({
+    ...entries[0], id: `supervised_${owner}`, agentKey: `${owner}/dawn`,
+  }));
+  const ownerParticipants = mergeDesktopSupervisorAgentParticipants(
+    mergeDesktopManagedAgentParticipants(
+      mergeReachableAgentPresenceParticipants(ownerHistory, ownerPresence, "room_1"), [], "room_1",
+    ), ownerEntries, "room_1",
+  );
+  assert.deepEqual(ownerParticipants.map((item) => [item.ownerLabel, item.agentKey]), [
+    ["Alice", "Alice/dawn"], ["Bob", "Bob/dawn"],
+  ]);
+  assert.deepEqual(roomMentionCandidates(ownerParticipants, "dawn").map((item) => item.insertText), [
+    "agent:Alice/dawn", "agent:Bob/dawn",
+  ]);
+});
+
+test("presence matches canonical identity before ambiguous actor labels", () => {
+  const participants = ["Alice", "Bob"].map((owner) => participant({
+    participantKey: `agent:${owner}`, displayName: "DawnHaven", actorLabel: "DawnHaven",
+    agentKey: `${owner}/dawn`, ownerLabel: owner, activityState: "offline",
+  }));
+  const result = mergeReachableAgentPresenceParticipants(participants, [presence({
+    actorLabel: "DawnHaven", displayName: "DawnHaven", agentKey: "Bob/dawn", ownerLabel: "Bob",
+    freshness: "active", activityState: "active", status: "working", sourceFlags: ["delivery", "presence"],
+  })], "room_1");
+  assert.equal(result.length, 2);
+  assert.equal(result[0].activityState, "offline");
+  assert.equal(result[1].activityState, "active");
+  assert.equal(result[1].agentKey, "Bob/dawn");
+});
+
 test("Open Model supervisor participants use the product provider label", () => {
   const participants = mergeDesktopSupervisorAgentParticipants([], [supervisorEntry({
     id: "supervised_open_model",
@@ -2013,4 +2159,61 @@ test("unregistered agents stay hidden while unknown agents remain visible but un
   assert.equal(unknownPresence.length, 1);
   assert.equal(unknownPresence[0]?.freshness, "stale");
   assert.equal(unknownPresence[0]?.activityState, "offline");
+});
+
+test("supervised Claude exposes one-time native approval without enabling its legacy profile", () => {
+  const legacy = { id: "ask_before_write", label: "Ask before writes", description: "Unavailable", status: "gated", risk: "medium", detail: "Unavailable", isDefault: false } as const;
+  const supervised = supervisedPermissionProfilePresentation("claude-code", legacy);
+  assert.equal(supervised.status, "available");
+  assert.match(supervised.description, /Claude.*change files/);
+  assert.match(supervised.detail!, /Each approval allows one action.*Other Claude settings do not apply/);
+  assert.equal(legacy.status, "gated");
+});
+
+test("supervised Claude, Codex, and Open Model expose Auto, and Cursor leaves it as it found it", () => {
+  const legacy = { id: "auto_review", label: "Auto", description: "Unavailable", status: "gated", risk: "medium", detail: "Unavailable", isDefault: false } as const;
+  const claude = supervisedPermissionProfilePresentation("claude-code", legacy);
+  assert.equal(claude.status, "available");
+  assert.match(claude.detail!, /Anything a room message asks for counts as approved, including commands that reach outside your project/);
+  const codex = supervisedPermissionProfilePresentation("codex", legacy);
+  assert.equal(codex.status, "available");
+  assert.match(codex.detail!, /only in its working folder and temporary folders, with no network access, until Codex approves more/);
+  assert.match(codex.detail!, /Anything a room message asks for counts as approved/);
+  const openModel = supervisedPermissionProfilePresentation("open-model", legacy);
+  assert.equal(openModel.status, "available");
+  assert.match(openModel.detail!, /Each command is sent to LetAgents and to Jev.*Reading project files and looking things up on the web are not reviewed\..*cannot open files outside the project\./);
+  assert.equal(supervisedPermissionProfilePresentation("cursor", legacy).status, "gated");
+  assert.match(autoReviewNotice("Open Model", "open-model"), /sends each command to LetAgents and Jev.*run the project's own scripts/);
+  assert.doesNotMatch(autoReviewNotice("Open Model", "open-model"), /room message/);
+  assert.equal(autoReviewNotice("Codex", "codex"), autoReviewNotice("Codex"));
+  assert.equal(legacy.status, "gated");
+  assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "auto_review"), { permissionMode: "auto" });
+  assert.match(autoReviewNotice("Codex"), /^Codex decides which actions are safe instead of asking you\..*trust everyone who can post\.$/);
+  assert.equal(supervisedProviderLaunchPolicy("codex", "auto_review"), undefined);
+});
+
+test("repo-less Cursor setup offers read-only and reserves write profiles for a connected project", () => {
+  for (const id of ["read_only", "sandboxed_write", "full_access"] as const) {
+    const profile = { id, label: id, description: "", detail: "", status: "available" as const, risk: "medium" as const, isDefault: false };
+    const scratch = supervisedPermissionProfilePresentation("cursor", profile, { hasProject: false });
+    assert.equal(scratch.status, id === "read_only" ? "available" : "unsupported");
+    if (id !== "read_only") assert.equal(scratch.detail, "Connect a project to use workspace writes.");
+    assert.equal(supervisedPermissionProfilePresentation("cursor", profile, { hasProject: true }).status, "available");
+    assert.equal(supervisedPermissionProfilePresentation("claude-code", profile, { hasProject: false }).status, "available");
+  }
+});
+
+
+test("room work indicator reflects current compaction but cannot invent a room turn", () => {
+  const base = supervisorEntry({ provider: "claude-code", desiredState: "running", observedState: "working", condition: "none",
+    agentSessionBindingState: "active", providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" },
+    roomAgentState: { connection: { state: "connected", observedAt: null, detail: null },
+      ingress: { state: "observing", observedAt: null, detail: null },
+      inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "responding", inboxItemId: "inbox", sourceMessageId: "msg", providerTurnId: "turn", detail: null },
+      task: { state: "none", taskId: null, title: null } } });
+  assert.equal(supervisedAgentWorkIndicators([base], [], "room_1")[0]?.summary, "Compacting conversation");
+  assert.notEqual(supervisedAgentWorkIndicators([base], [], "room_1", "stale")[0]?.summary, "Compacting conversation");
+  assert.notEqual(supervisedAgentWorkIndicators([{ ...base, providerProgress: null }], [], "room_1")[0]?.summary, "Compacting conversation");
+  assert.deepEqual(supervisedAgentWorkIndicators([{ ...base, roomAgentState: { ...base.roomAgentState!, turn: { ...base.roomAgentState!.turn, state: "idle" } } }], [], "room_1"), []);
 });

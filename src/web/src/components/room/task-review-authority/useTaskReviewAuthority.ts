@@ -98,7 +98,7 @@ export function useTaskReviewAuthority(
     canAssignReview,
     canAssignSelectedReviewer,
     formatActorName: formatAuthorityActorName,
-    formatCandidate: formatWorkerCandidate,
+    formatCandidate: (candidate: RoomAgentPresence) => formatWorkerCandidate(candidate, reviewCandidates.value),
     getCandidateKey: getWorkerCandidateKey,
     handleAssignReviewer,
     handleReleaseReviewLease,

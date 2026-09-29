@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { boolean, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import type { FocusRoomConclusionDetails } from "../../focus-rooms/conclusion.js";
 import type {
   FocusActivityScope,
@@ -17,6 +17,7 @@ export const rooms = pgTable(
   {
     id: text("id").primaryKey(),
     display_name: text("display_name").notNull(),
+    jev_routing_enabled: boolean("jev_routing_enabled").notNull().default(false),
     kind: text("kind").notNull().default("main"),
     parent_room_id: text("parent_room_id").references((): AnyPgColumn => rooms.id, {
       onDelete: "cascade",
@@ -48,6 +49,10 @@ export const rooms = pgTable(
       .on(table.parent_room_id, table.source_task_id)
       .where(sql`${table.kind} = 'focus' AND ${table.focus_status} = 'active' AND ${table.focus_archived_at} IS NULL`),
     kind_check: check("rooms_kind_check", sql`${table.kind} IN ('main', 'focus')`),
+    focus_id_check: check(
+      "rooms_focus_id_check",
+      sql`${table.kind} <> 'focus' OR ${table.id} ~ '^focus_[1-9][0-9]*$'`
+    ),
     focus_status_check: check(
       "rooms_focus_status_check",
       sql`${table.focus_status} IS NULL OR ${table.focus_status} IN ('active', 'concluded')`

@@ -5,6 +5,7 @@ import { reactive } from 'vue'
 import type { RoomAgentPresence, RoomTask } from '../src/composables/useRoom'
 import {
   formatAuthorityActorName,
+  formatWorkerCandidate,
   getReachableWorkerCandidates,
   toLeaseActionTarget,
 } from '../src/components/room/task-authority/shared'
@@ -20,6 +21,17 @@ import { useTaskLeaseAuthority } from '../src/components/room/task-lease-authori
 import { useTaskReviewAuthority } from '../src/components/room/task-review-authority/useTaskReviewAuthority'
 
 type TaskLease = NonNullable<RoomTask['active_leases']>[number]
+
+test('duplicate candidate names remain distinct without exposing session IDs', () => {
+  const first = presence({ agent_session_id: 'session_a' })
+  const second = presence({ agent_session_id: 'session_b' })
+  const peers = [second, first]
+  assert.equal(formatWorkerCandidate(first), 'Ada · Emmy · codex')
+  assert.equal(formatWorkerCandidate(first, peers), 'Ada · Emmy · codex · Connection 1')
+  assert.equal(formatWorkerCandidate(second, peers), 'Ada · Emmy · codex · Connection 2')
+  assert.equal(formatWorkerCandidate(first, [...peers].reverse()), formatWorkerCandidate(first, peers))
+  assert.equal(toLeaseActionTarget(second).target_agent_session_id, 'session_b')
+})
 
 function task(overrides: Partial<RoomTask> = {}): RoomTask {
   return {

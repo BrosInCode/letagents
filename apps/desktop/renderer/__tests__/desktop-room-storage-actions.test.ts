@@ -83,7 +83,6 @@ async function renderPanel(overrides: Record<string, unknown> = {}): Promise<str
     soundEnabled: true,
     notificationsEnabled: true,
     notificationPermission: "granted",
-    liquidGlassEnabled: false,
     renameBusy: false,
     renameError: null,
     githubStatus: null,
@@ -102,7 +101,7 @@ test("local Git Rooms disable Cloud and explain how to unlock it", async () => {
 
   assert.match(html, /No Git provider is attached to this room/);
   assert.match(html, /Add an origin remote, then reopen the repository to use Cloud/);
-  assert.match(html, /This local Git Room needs a provider-backed remote before it can use cloud storage/);
+  assert.match(html, /Connect this project to a repository hosted online before sharing its room/);
   assert.match(
     html,
     /<button type="button" data-testid="desktop-room-storage-cloud" data-active="false" disabled>/,
@@ -139,4 +138,22 @@ test("provider-backed rooms keep the Cloud control enabled", async () => {
     /<button type="button" data-testid="desktop-room-storage-cloud" data-active="false">/,
   );
   assert.doesNotMatch(html, /No Git provider is attached to this room/);
+});
+
+test("GitHub connection displays review permission evidence separately without promising publication", async () => {
+  for (const [permission, label] of [["write", "write permission recorded"], ["missing", "Pull requests (write) permission missing"],
+    ["unknown", "permission unknown"], [undefined, "permission unknown"]] as const) {
+    const html = await renderPanel({
+      room: { ...localGitRoom, identifier: "github.com/example/project",
+        gitRoom: { ...localGitRoom.gitRoom, provider: "github", host: "github.com", visibility: "private", accessMode: "private", source: "git_remote" } },
+      githubStatus: { connected: true, configured: true, installUrlAvailable: true,
+        repository: { fullName: "example/project" },
+        ...(permission ? { reviewSubmission: { permission, recordedAt: "2026-09-22T12:00:00Z" } } : {}) },
+    });
+    assert.match(html, />Connected</);
+    assert.ok(html.includes(`Reviews: ${label}`));
+    assert.doesNotMatch(html, /Reviews: ready|Reviews: enabled|Review publication available/i);
+    if (permission === "write") assert.match(html, /GitHub confirms authorization when a review is published/);
+    else assert.match(html, /Ask the repository owner/);
+  }
 });

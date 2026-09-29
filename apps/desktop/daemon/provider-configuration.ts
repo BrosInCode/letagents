@@ -27,7 +27,7 @@ type ConfigurationInput = {
 export type ProviderConfigurationSelection = Omit<ConfigurationInput, "launchPolicy">;
 
 const efforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low", "medium", "high", "xhigh", "max"]);
-const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort"]);
+const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort", "sandbox"]);
 
 /**
  * Admission may share a room/provider lane only when every durable entry owns
@@ -68,12 +68,33 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
 
   if (provider === "codex") {
     for (const key of reservedCodexPolicy) if (Object.hasOwn(policy, key)) throw new Error(`Codex launch policy cannot override '${key}'.`);
-    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access"]);
-    requirePolicyMatch(policy, "approvalPolicy", "never", provider);
-    requirePolicyMatch(policy, "sandboxPolicy", { type: "dangerFullAccess" }, provider);
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review"]);
+    const authority = profile === "auto_review"
+      ? {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "workspaceWrite", networkAccess: false },
+        // Codex routes its own escalations to its reviewer instead of the host.
+        approvalsReviewer: "auto_review",
+      }
+      : profile === "ask_before_write"
+      ? {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
+      : {
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      };
+    // Only the Auto profile may hand approvals to a reviewer other than the host.
+    if (profile !== "auto_review" && Object.hasOwn(policy, "approvalsReviewer") && policy.approvalsReviewer !== "user") {
+      throw new Error(`Provider '${provider}' launch policy conflicts with permission-profile authority at 'approvalsReviewer'.`);
+    }
+    for (const [key, value] of Object.entries(authority)) {
+      requirePolicyMatch(policy, key, value, provider);
+    }
     return {
       provider, model: normalizedModel, reasoningEffort: input.reasoningEffort, permissionProfileId: profile,
-      launchPolicy: { ...policy, approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+      launchPolicy: { ...policy, ...authority },
       configurationRevision: input.configurationRevision,
     };
   }
@@ -82,14 +103,22 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     if (input.reasoningEffort !== null) {
       throw new Error("Open Model reasoning effort is controlled by the selected endpoint and model.");
     }
-    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access"]);
-    requirePolicyMatch(policy, "permission", { "*": "allow" }, provider);
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review"]);
+    const permission = profile === "auto_review"
+      // OpenCode asks as it does for Ask before writes, and LetAgents answers
+      // the requests it can vouch for. Nothing outside the project is opened,
+      // because no review could see what a command does there.
+      ? { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" }
+      : profile === "ask_before_write"
+      ? { "*": "allow", edit: "ask", bash: "ask" }
+      : { "*": "allow" };
+    requirePolicyMatch(policy, "permission", permission, provider);
     return {
       provider,
       model: normalizedModel,
       reasoningEffort: null,
       permissionProfileId: profile,
-      launchPolicy: { ...policy, permission: { "*": "allow" } },
+      launchPolicy: { ...policy, permission },
       configurationRevision: input.configurationRevision,
     };
   }
@@ -97,14 +126,38 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   if (input.reasoningEffort !== null) throw new Error(`Provider '${provider}' does not support reasoning effort.`);
   if (provider === "claude-code" || provider === "claude") {
     scalarCliPolicy(policy, "Claude");
-    const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "full_access"]);
+    const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "auto_review", "full_access"]);
     const authority = profile === "read_only"
-      ? { permissionMode: "plan", dangerouslySkipPermissions: false }
+      ? {
+        permissionMode: "dontAsk",
+        dangerouslySkipPermissions: false,
+        // Own the complete low-risk native surface instead of trusting prompts
+        // to keep an unsandboxed CLI read-only. The strict daemon-owned MCP
+        // config is the boundary behind this wildcard: adding a tool there
+        // deliberately widens what a read-only Claude agent may do.
+        tools: ["Read", "Glob", "Grep"],
+        allowedTools: ["mcp__letagents__*"],
+        settingSources: "",
+      }
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
-        : { permissionMode: "acceptEdits", dangerouslySkipPermissions: false };
-    requirePolicyMatch(policy, "permissionMode", authority.permissionMode, provider);
-    requirePolicyMatch(policy, "dangerouslySkipPermissions", authority.dangerouslySkipPermissions, provider);
+        : {
+          // Auto differs from asking only in who decides: Claude's own review
+          // instead of the host. The tool surface and ignored settings match.
+          permissionMode: profile === "auto_review" ? "auto" : "default", dangerouslySkipPermissions: false,
+          allowDangerouslySkipPermissions: false,
+          tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
+          allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+        };
+    if (profile === "ask_before_write" || profile === "auto_review") {
+      const authorityFlags = new Set(Object.keys(authority).map(key => key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)));
+      for (const key of Object.keys(policy)) {
+        if (key.includes("-") && authorityFlags.has(key)) throw new Error(`Claude approval profile cannot override '${key}'.`);
+      }
+    }
+    for (const [key, value] of Object.entries(authority)) {
+      requirePolicyMatch(policy, key, value, provider);
+    }
     return {
       provider: "claude-code", model: normalizedModel, reasoningEffort: null, permissionProfileId: profile,
       launchPolicy: { ...policy, ...authority }, configurationRevision: input.configurationRevision,
@@ -169,7 +222,7 @@ export function deriveProviderConfigurationSnapshot(
   const provider = selection.provider.trim().toLowerCase();
   const permissionProfileId = assertSupervisedPermissionProfileAvailable(provider, selection.permissionProfileId);
   const existing = plainPolicy(currentTrustedLaunchPolicy, provider);
-  const stripped = stripProfileAuthority(provider, existing);
+  const stripped = stripProfileAuthority(provider, existing, permissionProfileId);
   return resolveProviderConfigurationSnapshot({
     ...selection,
     provider,
@@ -178,13 +231,30 @@ export function deriveProviderConfigurationSnapshot(
   });
 }
 
-function stripProfileAuthority(provider: string, policy: Record<string, unknown>): Record<string, unknown> {
+function stripProfileAuthority(
+  provider: string,
+  policy: Record<string, unknown>,
+  nextPermissionProfileId: string,
+): Record<string, unknown> {
+  const previousClaudeProfileWasReadOnly = (policy.permissionMode === "plan" || policy.permissionMode === "dontAsk")
+    && policy.dangerouslySkipPermissions === false;
+  const previousClaudeProfileAsked = (policy.permissionMode === "default" || policy.permissionMode === "auto")
+    && policy.dangerouslySkipPermissions === false;
+  const nextClaudeProfileAsks = nextPermissionProfileId === "ask_before_write" || nextPermissionProfileId === "auto_review";
   const authorityKeys = provider === "codex"
-    ? ["approvalPolicy", "sandboxPolicy"]
+    ? ["approvalPolicy", "sandboxPolicy", "approvalsReviewer"]
     : provider === "open-model"
       ? ["permission"]
     : provider === "claude-code" || provider === "claude"
-      ? ["permissionMode", "dangerouslySkipPermissions"]
+      ? [
+        "permissionMode",
+        "dangerouslySkipPermissions",
+        ...(nextPermissionProfileId === "read_only" || nextClaudeProfileAsks || previousClaudeProfileWasReadOnly || previousClaudeProfileAsked
+          ? ["tools", "allowedTools", "settingSources"]
+          : []),
+        ...(nextClaudeProfileAsks || previousClaudeProfileAsked
+          ? ["settings", "allowDangerouslySkipPermissions"] : []),
+      ]
       : provider === "cursor"
         ? ["mode", "force", "sandbox"]
         : [];

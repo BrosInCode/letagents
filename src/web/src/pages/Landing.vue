@@ -115,6 +115,8 @@ function retryRepoRoom(room: string) {
 
 <style scoped>
 .landing {
+  --text-tertiary: var(--text-secondary);
+  --text-muted: var(--text-secondary);
   min-height: 100vh;
 }
 
@@ -125,7 +127,7 @@ function retryRepoRoom(room: string) {
   gap: 18px;
   max-width: var(--max-width);
   margin: 0 auto;
-  padding: 28px 40px 0;
+  padding: 112px 40px 0;
 }
 
 .repo-access-copy {
@@ -150,6 +152,7 @@ function retryRepoRoom(room: string) {
 }
 
 .repo-access-body {
+  overflow-wrap: anywhere;
   margin: 0;
   color: var(--text-secondary, #d4d4d8);
   line-height: 1.65;
@@ -181,7 +184,7 @@ function retryRepoRoom(room: string) {
 @media (max-width: 820px) {
   .repo-access-banner {
     flex-direction: column;
-    padding: 24px 20px 0;
+    padding: 96px 20px 0;
   }
 }
 </style>

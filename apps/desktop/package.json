@@ -2,7 +2,7 @@
   "name": "letagents-desktop",
   "productName": "LetAgents",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.101",
   "description": "A desktop control plane for collaborating AI agents.",
   "license": "BUSL-1.1",
   "repository": {
@@ -11,8 +11,8 @@
   },
   "type": "module",
   "letagentsRuntime": {
-    "openCodeVersion": "1.18.9",
-    "mcpVersion": "0.12.12"
+    "openCodeVersion": "1.18.20",
+    "mcpVersion": "0.12.30"
   },
   "main": "dist-electron/main.js",
   "scripts": {
@@ -26,8 +26,8 @@
     "serve:electron": "wait-on tcp:5174 ../../dist/mcp/server.js dist-electron/main.js dist-daemon/main.js && cross-env LETAGENTS_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:5174 electron .",
     "build": "npm run build:renderer && npm run build:electron && npm run build:daemon",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p tsconfig.electron.json",
-    "build:daemon": "tsc -p tsconfig.daemon.json",
+    "build:electron": "node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json",
+    "build:daemon": "node -e \"require('node:fs').rmSync('dist-daemon', { recursive: true, force: true })\" && tsc -p tsconfig.daemon.json",
     "package:artifact": "npm run build && node electron/scripts/package-artifact.mjs",
     "package:mac": "npm run package:artifact && node electron/scripts/package-macos.mjs",
     "package:mac:local": "cross-env MACOS_SKIP_SIGNING=1 npm run package:mac",
@@ -43,7 +43,7 @@
     "test": "npm run test:renderer && npm run test:electron && npm run test:daemon && npm run test:packaging",
     "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
     "test:electron": "node --import tsx --test --test-concurrency=1 --experimental-test-module-mocks electron/__tests__/*.test.ts",
-    "test:daemon": "node --import tsx --test daemon/__tests__/*.test.ts",
+    "test:daemon": "node --import tsx --test --test-timeout=180000 daemon/__tests__/*.test.ts",
     "test:packaging": "node --test electron/scripts/*.test.mjs",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
@@ -53,10 +53,10 @@
     "@openai/agents": "0.11.6",
     "@openai/agents-extensions": "0.11.6",
     "@openrouter/ai-sdk-provider": "2.9.1",
-    "ai": "6.0.207",
+    "ai": "6.0.214",
     "cuelume": "0.1.0",
     "electron-updater": "6.8.9",
-    "undici": "7.29.0",
+    "undici": "7.29.1",
     "vue": "3.5.33",
     "zod": "4.4.3"
   },
@@ -70,6 +70,7 @@
     "electron": "42.8.1",
     "eslint": "10.6.0",
     "eslint-plugin-vue": "10.9.2",
+    "monaco-editor": "0.56.0",
     "tsx": "4.23.0",
     "typescript": "5.9.3",
     "vite": "6.4.3",
@@ -77,13 +78,18 @@
     "wait-on": "8.0.5"
   },
   "overrides": {
+    "monaco-editor": {
+      "dompurify": "3.4.15"
+    },
     "brace-expansion": "5.0.9",
-    "nanoid": "3.3.17",
+    "nanoid": "3.3.18",
     "postcss": "8.5.23",
     "@hono/node-server": "2.0.10",
-    "fast-uri": "3.1.5",
-    "hono": "4.12.34",
-    "ip-address": "10.3.1",
-    "builder-util-runtime": "9.7.0"
+    "fast-uri": "3.1.7",
+    "hono": "4.13.5",
+    "ip-address": "10.5.1",
+    "builder-util-runtime": "9.7.0",
+    "joi": "18.2.5",
+    "js-yaml": "4.3.2"
   }
 }

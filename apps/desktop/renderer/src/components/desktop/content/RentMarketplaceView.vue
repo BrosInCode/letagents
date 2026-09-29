@@ -32,7 +32,7 @@
       <div v-else-if="providers.length === 0" class="rent-marketplace-empty">
         <span class="rent-marketplace-empty-mark" aria-hidden="true"><span></span></span>
         <h2>No one is available right now.</h2>
-        <p>Providers appear here when they make an authenticated runtime available from their desktop.</p>
+        <p>Agents appear here when someone makes them available to rent.</p>
         <button type="button" class="rent-button rent-button-secondary" @click="refresh">Refresh availability</button>
       </div>
 

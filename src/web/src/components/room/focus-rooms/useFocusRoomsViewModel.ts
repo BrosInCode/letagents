@@ -4,16 +4,19 @@ import {
   focusRoomSettingsFrom,
   type FocusRoomConclusionDetails,
   type FocusRoomSettings,
-} from '@/composables/useRoom'
+} from '@/composables/room/types/focus'
+import {
+  roomDisplayTitle,
+  type DirectoryRoom,
+  type DirectoryTask,
+} from '../../../../../../shared/rooms/directory'
 import {
   createEmptyCloseoutDetails,
-  focusStatusLabel as formatFocusStatusLabel,
   focusRoomOpenKey,
+  gitRoomRefLabel,
+  gitRoomRefTypeLabel,
 } from './options'
-import type {
-  FocusRoomsViewEmit,
-  FocusRoomsViewProps,
-} from './types'
+import type { FocusRoomsViewEmit, FocusRoomsViewProps } from './types'
 
 export function useFocusRoomsViewModel(
   props: FocusRoomsViewProps,
@@ -21,179 +24,171 @@ export function useFocusRoomsViewModel(
 ) {
   const resultSummary = ref('')
   const shareAttempted = ref(false)
-  const settingsDraft = ref<FocusRoomSettings>({ ...DEFAULT_FOCUS_ROOM_SETTINGS })
-  const closeoutDetails = ref<FocusRoomConclusionDetails>(createEmptyCloseoutDetails())
-  const adHocTitle = ref('')
-  const adHocAttempted = ref(false)
+  const settingsDraft = ref<FocusRoomSettings>({
+    ...DEFAULT_FOCUS_ROOM_SETTINGS,
+  })
+  const closeoutDetails = ref<FocusRoomConclusionDetails>(
+    createEmptyCloseoutDetails(),
+  )
   const selectedFocusRoomId = ref<string | null>(null)
-
-  const candidateTasks = computed(() =>
-    props.tasks.filter(task => !['done', 'cancelled'].includes(task.status))
+  const selectedFocusRoom = computed(
+    () =>
+      props.focusRooms.find(
+        (room) => room.room_id === selectedFocusRoomId.value,
+      ) ?? null,
   )
-
-  const openFocusRooms = computed(() =>
-    props.focusRooms.filter(room => room.kind === 'focus' && room.focus_status !== 'concluded')
+  const directoryRooms = computed<DirectoryRoom[]>(() =>
+    props.focusRooms
+      .filter((room) => room.kind === 'focus')
+      .map((room) => ({
+        id: room.room_id,
+        title: roomDisplayTitle(room.display_name),
+        kind: room.git_room ? 'branch' : room.source_task_id ? 'task' : 'topic',
+        kindLabel: room.git_room
+          ? gitRoomRefTypeLabel(room.git_room)
+          : undefined,
+        closed: room.focus_status === 'concluded',
+        description:
+          room.focus_status === 'concluded'
+            ? room.conclusion_summary || ''
+            : room.git_room
+              ? gitRoomRefLabel(room.git_room)
+              : props.tasks.find((task) => task.id === room.source_task_id)
+                  ?.title || '',
+        createdAt: room.created_at,
+        closedAt: room.concluded_at,
+        searchText: `${room.source_task_id || ''} ${room.git_room?.repository.full_name || ''}`,
+      })),
   )
-
-  const concludedFocusRooms = computed(() =>
-    props.focusRooms.filter(room => room.kind === 'focus' && room.focus_status === 'concluded')
+  const directoryTasks = computed<DirectoryTask[]>(() =>
+    props.tasks
+      .filter((task) => !['done', 'cancelled'].includes(task.status))
+      .map((task) => {
+        const existing =
+          props.focusRooms.find(
+            (room) =>
+              room.source_task_id === task.id &&
+              room.focus_status !== 'concluded',
+          ) || props.focusRooms.find((room) => room.source_task_id === task.id)
+        return {
+          id: task.id,
+          title: task.title,
+          description: task.description || '',
+          status: task.status,
+          roomId: existing?.room_id,
+          roomClosed: existing?.focus_status === 'concluded',
+        }
+      }),
   )
-
-  const selectedFocusRoom = computed(() =>
-    selectedFocusRoomId.value
-      ? props.focusRooms.find(room => room.room_id === selectedFocusRoomId.value) ?? null
-      : null
-  )
-
-  const selectedFocusRoomSettings = computed(() =>
-    selectedFocusRoom.value
-      ? focusRoomSettingsFrom(selectedFocusRoom.value)
-      : DEFAULT_FOCUS_ROOM_SETTINGS
-  )
-
-  const selectedFocusRoomDetailCopy = computed(() => {
-    const room = selectedFocusRoom.value
-    if (!room) return ''
-    if (room.focus_status === 'concluded') {
-      return 'This Focus Room is closed; review the outcome before relying on the parent-room summary.'
-    }
-    return 'This Focus Room is still active; inspect the record first, then enter the room when you need the live thread.'
-  })
-
-  const focusRoomByTask = computed(() => {
-    const entries = props.focusRooms
-      .filter(room => room.source_task_id)
-      .map(room => [room.source_task_id as string, room] as const)
-    return new Map(entries)
-  })
-
-  const currentTask = computed(() => {
-    const selected = props.selectedTaskId
-      ? candidateTasks.value.find(task => task.id === props.selectedTaskId)
-      : null
-    return selected ?? candidateTasks.value[0] ?? null
-  })
-
-  const currentFocusRoom = computed(() => {
-    const taskId = currentTask.value?.id
-    return taskId ? focusRoomByTask.value.get(taskId) ?? null : null
-  })
-
   const settingsTarget = computed(() => {
-    if (props.isFocusRoom) {
+    if (props.isFocusRoom)
       return {
         focusKey: props.focusKey || props.sourceTaskId,
         settings: props.focusSettings,
       }
-    }
-    if (!currentFocusRoom.value) return null
-    return {
-      focusKey: currentFocusRoom.value.focus_key || currentFocusRoom.value.source_task_id,
-      settings: focusRoomSettingsFrom(currentFocusRoom.value),
-    }
+    const selected = selectedFocusRoom.value
+    return selected
+      ? {
+          focusKey: selected.focus_key || selected.source_task_id,
+          settings: focusRoomSettingsFrom(selected),
+        }
+      : null
   })
-
   const isConcluded = computed(() => props.focusStatus === 'concluded')
-  const conclusionSummaryText = computed(() => props.conclusionSummary?.trim() || '')
-  const requiresCloseoutDetails = computed(() => props.isFocusRoom && Boolean(props.sourceTaskId))
-  const showCloseoutDetails = computed(() => requiresCloseoutDetails.value || Boolean(props.conclusionDetails))
+  const requiresCloseoutDetails = computed(
+    () => props.isFocusRoom && Boolean(props.sourceTaskId),
+  )
+  const showCloseoutDetails = computed(() =>
+    isConcluded.value
+      ? Boolean(props.conclusionDetails)
+      : requiresCloseoutDetails.value || Boolean(props.conclusionDetails),
+  )
   const closeoutDetailsComplete = computed(() =>
-    closeoutDetails.value.artifact.trim().length > 0 &&
-    closeoutDetails.value.next_owner.trim().length > 0
+    Boolean(
+      closeoutDetails.value.artifact.trim() &&
+        closeoutDetails.value.next_owner.trim(),
+    ),
   )
   const focusStatusLabel = computed(() =>
-    props.focusStatus ? formatFocusStatusLabel(props.focusStatus) : 'active'
+    isConcluded.value ? 'Closed' : 'Open',
   )
   const focusContextCopy = computed(() =>
-    props.gitRoom
-      ? isConcluded.value
-        ? 'Git work has been closed; review the branch outcome before reopening it.'
-        : 'Keep branch-specific planning, code activity, and artifacts here.'
-      : isConcluded.value
-        ? 'Result shared with the parent room.'
-        : 'Keep task-specific work here, then bring the outcome back to the parent room.'
+    isConcluded.value
+      ? 'This conversation is closed. Its history and outcome are still available.'
+      : props.gitRoom
+        ? 'A conversation for this Git branch. Keep its work and decisions together.'
+        : 'Work together here. Record the outcome when it is ready.',
   )
   const sharePlaceholder = computed(() =>
     isConcluded.value
-      ? 'Result already shared.'
-      : 'Summarize the decision, implementation, blocker, or next action for the parent room.'
+      ? 'No outcome recorded.'
+      : 'What changed, what was decided, and what happens next?',
   )
-  const canShareResults = computed(() =>
-    !isConcluded.value &&
-    !props.isSharingFocusResult &&
-    resultSummary.value.trim().length > 0 &&
-    (!requiresCloseoutDetails.value || closeoutDetailsComplete.value)
+  const canShareResults = computed(
+    () =>
+      !isConcluded.value &&
+      !props.isSharingFocusResult &&
+      Boolean(resultSummary.value.trim()) &&
+      (!requiresCloseoutDetails.value || closeoutDetailsComplete.value),
   )
-  const shareButtonLabel = computed(() => {
-    if (isConcluded.value) return 'Results shared'
-    if (props.isSharingFocusResult) return 'Sharing...'
-    if (settingsDraft.value.parent_visibility === 'silent') return 'Save result'
-    return 'Share results'
-  })
+  // Closing uses saved server settings, never the unsaved settings draft.
+  const shareButtonLabel = computed(() =>
+    isConcluded.value
+      ? 'Room closed'
+      : props.isSharingFocusResult
+        ? 'Closing…'
+        : props.focusSettings.parent_visibility === 'silent'
+          ? 'Save outcome and close'
+          : 'Share outcome and close',
+  )
   const shareHelpText = computed(() => {
-    if (isConcluded.value) {
-      return conclusionSummaryText.value || 'The parent room has the outcome.'
-    }
-    if (shareAttempted.value && !resultSummary.value.trim()) {
-      return 'Write a short outcome before sharing.'
-    }
-    if (shareAttempted.value && requiresCloseoutDetails.value && !closeoutDetailsComplete.value) {
-      return 'Add the artifact and next owner before concluding this task room.'
-    }
-    if (settingsDraft.value.parent_visibility === 'silent') {
-      return 'Conclude this Focus Room without posting the summary into the parent room.'
-    }
-    return requiresCloseoutDetails.value
-      ? 'Close the loop with artifact, review state, blocker state, parent task next step, and next owner.'
-      : 'Send a concise outcome to the parent room.'
-  })
-  const canCreateAdHocFocusRoom = computed(() =>
-    !props.isCreatingAdHocFocusRoom && adHocTitle.value.trim().length > 0
-  )
-  const adHocButtonLabel = computed(() =>
-    props.isCreatingAdHocFocusRoom ? 'Opening...' : 'Branch room'
-  )
-  const shareBackLabel = computed(() => {
-    if (!currentFocusRoom.value) return 'Outcome summary'
-    return currentFocusRoom.value.focus_status === 'concluded' ? 'Shared' : 'Ready'
-  })
-  const actionLabel = computed(() => {
-    if (props.isFocusRoom) return 'Focus Room active'
-    if (currentFocusRoom.value?.focus_status === 'concluded') return 'View shared result'
-    if (currentFocusRoom.value) return 'Open Focus Room'
-    if (props.isCreatingFocusRoom) return 'Opening...'
-    return 'Focus on this'
-  })
-  const actionNote = computed(() => {
-    if (props.isFocusRoom) return 'Open new Focus Rooms from the parent room.'
-    if (currentFocusRoom.value?.focus_status === 'concluded') return 'This task already has a shared result.'
-    if (currentFocusRoom.value) return 'This task already has a Focus Room.'
-    return 'This opens a dedicated room for task-level execution.'
-  })
-  const hasSettingsChanges = computed(() => {
-    const target = settingsTarget.value
-    if (!target) return false
-    const current = target.settings
+    if (isConcluded.value)
+      return 'You can return to this conversation at any time.'
+    if (shareAttempted.value && !resultSummary.value.trim())
+      return 'Write a short outcome before closing.'
+    if (
+      shareAttempted.value &&
+      requiresCloseoutDetails.value &&
+      !closeoutDetailsComplete.value
+    )
+      return 'Add the result and next owner before closing this task room.'
+    const consequence =
+      props.focusSettings.parent_visibility === 'silent'
+        ? 'Closes this room and saves the outcome here without posting it to the main room.'
+        : 'Closes this room and shares the outcome with the main room.'
     return (
-      settingsDraft.value.parent_visibility !== current.parent_visibility ||
-      settingsDraft.value.activity_scope !== current.activity_scope ||
-      settingsDraft.value.github_event_routing !== current.github_event_routing
+      consequence +
+      (requiresCloseoutDetails.value
+        ? ' The task next step is a recommendation; its status will not change automatically.'
+        : '')
     )
   })
-  const canSaveSettings = computed(() =>
-    Boolean(settingsTarget.value?.focusKey) &&
-    hasSettingsChanges.value &&
-    !props.isUpdatingFocusSettings
+  const hasSettingsChanges = computed(() =>
+    Boolean(
+      settingsTarget.value &&
+        JSON.stringify(settingsDraft.value) !==
+          JSON.stringify(settingsTarget.value.settings),
+    ),
+  )
+  const canSaveSettings = computed(
+    () =>
+      Boolean(settingsTarget.value?.focusKey) &&
+      hasSettingsChanges.value &&
+      !props.isUpdatingFocusSettings,
   )
   const settingsButtonLabel = computed(() =>
-    props.isUpdatingFocusSettings ? 'Saving...' : hasSettingsChanges.value ? 'Save settings' : 'Saved'
+    props.isUpdatingFocusSettings
+      ? 'Saving…'
+      : hasSettingsChanges.value
+        ? 'Save settings'
+        : 'Saved',
   )
   const parentVisibilityDescription = computed(() => {
     switch (settingsDraft.value.parent_visibility) {
       case 'silent':
-        return 'Keep the parent quiet unless you share an outcome yourself.'
+        return 'Save the outcome in this room without posting it to the main room.'
       case 'all_activity':
-        return 'Let every update appear in the parent room.'
+        return 'Let every update appear in the main room.'
       case 'major_activity':
         return 'Share only task, pull request, and completion milestones.'
       case 'summary_only':
@@ -213,11 +208,11 @@ export function useFocusRoomsViewModel(
   const githubEventRoutingDescription = computed(() => {
     switch (settingsDraft.value.github_event_routing) {
       case 'off':
-        return 'Hide code activity from this Focus Room.'
+        return 'Hide code activity from this room.'
       case 'focus_owned_only':
         return 'Keep matching PRs, reviews, and checks here without echoing them to the parent.'
       case 'all_parent_repo':
-        return 'Show every code update from the parent repository here.'
+        return 'Show every code update from the main repository here.'
       case 'task_only':
         return 'Show only code updates that name this task.'
       case 'task_and_branch':
@@ -225,52 +220,73 @@ export function useFocusRoomsViewModel(
     }
   })
 
+  const roomIdentity = computed(
+    () =>
+      `${props.roomAddress}:${props.isFocusRoom ? props.focusKey || props.sourceTaskId || props.roomLabel : ''}`,
+  )
   watch(
-    conclusionSummaryText,
-    (summary) => {
-      if (summary) {
+    () =>
+      [
+        roomIdentity.value,
+        props.conclusionSummary || '',
+        props.focusStatus,
+      ] as const,
+    ([id, summary, status], previous) => {
+      if (
+        status === 'concluded' ||
+        !previous ||
+        id !== previous[0] ||
+        resultSummary.value === previous[1]
+      )
         resultSummary.value = summary
-      }
+      if (!previous || id !== previous[0]) shareAttempted.value = false
     },
     { immediate: true },
   )
-
   watch(
-    () => props.conclusionDetails,
-    (details) => {
-      closeoutDetails.value = details ? { ...details } : createEmptyCloseoutDetails()
+    () =>
+      [
+        roomIdentity.value,
+        JSON.stringify(props.conclusionDetails || createEmptyCloseoutDetails()),
+        props.focusStatus,
+      ] as const,
+    ([id, details, status], previous) => {
+      if (
+        status === 'concluded' ||
+        !previous ||
+        id !== previous[0] ||
+        JSON.stringify(closeoutDetails.value) === previous[1]
+      )
+        closeoutDetails.value = JSON.parse(details)
     },
     { immediate: true },
   )
-
   watch(
-    settingsTarget,
-    (target) => {
-      settingsDraft.value = target
-        ? { ...target.settings }
-        : { ...DEFAULT_FOCUS_ROOM_SETTINGS }
+    () =>
+      [
+        roomIdentity.value,
+        settingsTarget.value?.focusKey,
+        JSON.stringify(
+          settingsTarget.value?.settings || DEFAULT_FOCUS_ROOM_SETTINGS,
+        ),
+      ] as const,
+    ([id, key, settings], previous) => {
+      if (
+        !previous ||
+        id !== previous[0] ||
+        key !== previous[1] ||
+        JSON.stringify(settingsDraft.value) === previous[2]
+      )
+        settingsDraft.value = JSON.parse(settings)
     },
     { immediate: true },
   )
-
-  watch(
-    () => props.focusRooms,
-    (rooms) => {
-      if (selectedFocusRoomId.value && !rooms.some(room => room.room_id === selectedFocusRoomId.value)) {
-        selectedFocusRoomId.value = null
-      }
-    },
-  )
-
+  watch(roomIdentity, () => {
+    selectedFocusRoomId.value = null
+  })
   function submitShareResults() {
     shareAttempted.value = true
-    const trimmedSummary = resultSummary.value.trim()
-    if (
-      !trimmedSummary ||
-      isConcluded.value ||
-      props.isSharingFocusResult ||
-      (requiresCloseoutDetails.value && !closeoutDetailsComplete.value)
-    ) return
+    if (!canShareResults.value) return
     const details = requiresCloseoutDetails.value
       ? {
           ...closeoutDetails.value,
@@ -278,63 +294,27 @@ export function useFocusRoomsViewModel(
           next_owner: closeoutDetails.value.next_owner.trim(),
         }
       : null
-    emit('shareResults', trimmedSummary, details)
+    emit('shareResults', resultSummary.value.trim(), details)
   }
-
   function submitFocusSettings() {
     const target = settingsTarget.value
-    if (!target?.focusKey || !canSaveSettings.value) return
-    emit('updateFocusSettings', target.focusKey, { ...settingsDraft.value })
+    if (target?.focusKey && canSaveSettings.value)
+      emit('updateFocusSettings', target.focusKey, { ...settingsDraft.value })
   }
-
-  function submitAdHocFocusRoom() {
-    adHocAttempted.value = true
-    const trimmedTitle = adHocTitle.value.trim()
-    if (!trimmedTitle || props.isCreatingAdHocFocusRoom) return
-    emit('createAdHocFocusRoom', trimmedTitle)
+  function openDirectoryRoom(id: string) {
+    const room = props.focusRooms.find((room) => room.room_id === id)
+    if (room) emit('openFocusRoom', focusRoomOpenKey(room))
   }
-
-  function selectFocusRoomById(roomId: string) {
-    selectedFocusRoomId.value = roomId
-  }
-
-  function selectTask(taskId: string) {
-    selectedFocusRoomId.value = null
-    emit('selectTask', taskId)
-  }
-
-  function openSelectedFocusRoom() {
-    if (!selectedFocusRoom.value) return
-    emit('openFocusRoom', focusRoomOpenKey(selectedFocusRoom.value))
-  }
-
-  function openCurrentTaskFocusRoom() {
-    if (!currentTask.value) return
-    if (currentFocusRoom.value) {
-      emit('openFocusRoom', focusRoomOpenKey(currentFocusRoom.value))
-      return
-    }
-    emit('createFocusRoom', currentTask.value.id)
-  }
-
   return {
     resultSummary,
     settingsDraft,
     closeoutDetails,
-    adHocTitle,
-    adHocAttempted,
     selectedFocusRoomId,
-    candidateTasks,
-    openFocusRooms,
-    concludedFocusRooms,
+    directoryRooms,
+    directoryTasks,
     selectedFocusRoom,
-    selectedFocusRoomSettings,
-    selectedFocusRoomDetailCopy,
-    currentTask,
-    currentFocusRoom,
     settingsTarget,
     isConcluded,
-    requiresCloseoutDetails,
     showCloseoutDetails,
     focusStatusLabel,
     focusContextCopy,
@@ -342,11 +322,7 @@ export function useFocusRoomsViewModel(
     canShareResults,
     shareButtonLabel,
     shareHelpText,
-    canCreateAdHocFocusRoom,
-    adHocButtonLabel,
-    shareBackLabel,
-    actionLabel,
-    actionNote,
+    hasSettingsChanges,
     canSaveSettings,
     settingsButtonLabel,
     parentVisibilityDescription,
@@ -354,10 +330,6 @@ export function useFocusRoomsViewModel(
     githubEventRoutingDescription,
     submitShareResults,
     submitFocusSettings,
-    submitAdHocFocusRoom,
-    selectFocusRoomById,
-    selectTask,
-    openSelectedFocusRoom,
-    openCurrentTaskFocusRoom,
+    openDirectoryRoom,
   }
 }

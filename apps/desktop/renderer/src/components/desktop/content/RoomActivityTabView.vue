@@ -35,7 +35,7 @@
             class="desktop-activity-group"
             :data-room-agent-state="group.key"
           >
-            <header><div><h3>{{ group.label }}</h3><p>{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
+            <header><div><h3>{{ group.label }}</h3><p v-if="group.description">{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
             <button
               v-for="agent in group.agents"
               :key="agent.entryId"
@@ -46,8 +46,16 @@
               @click="selectInspectorAgent(agent)"
             >
               <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(agent.displayName) }}</span>
-              <span><strong>{{ agent.displayName }}</strong><small>{{ agent.overallDetail }}</small></span>
-              <span class="desktop-activity-row-meta"><span class="state-pill" :data-state="group.key">{{ agent.overallLabel }}</span></span>
+              <span>
+                <strong>{{ agent.displayName }}</strong>
+                <small v-if="agent.resourceFreshness === 'stale'">Reconnecting to this agent…</small>
+                <small v-else-if="agent.overallDetail">{{ agent.overallDetail }}</small>
+              </span>
+              <span class="desktop-activity-row-meta">
+                <span class="state-pill" :data-state="group.key">
+                  {{ group.key === "status_unavailable" ? "Status unavailable" : agent.overallLabel }}
+                </span>
+              </span>
             </button>
           </section>
 
@@ -121,6 +129,57 @@
 
     <div v-else class="desktop-activity-layout">
       <div class="desktop-activity-groups">
+        <section
+          v-if="roomAgentWorkStatus !== 'unavailable' && (roomAgentWorkStatus !== 'idle' || roomAgentWork.length)"
+          class="desktop-activity-group"
+          data-testid="desktop-recorded-room-work"
+        >
+          <header>
+            <div>
+              <h3>Recorded work</h3>
+              <p>
+                Results saved from earlier work.
+                <template v-if="roomAgentWorkTruncated"> Showing the latest 50 records.</template>
+              </p>
+            </div>
+            <span class="desktop-activity-artifact-header-actions">
+              <span v-if="roomAgentWorkStatus === 'stale'" class="desktop-activity-mini-pill">Refresh pending</span>
+              <strong>{{ roomAgentWork.length }}</strong>
+            </span>
+          </header>
+
+          <button
+            v-for="work in roomAgentWork"
+            :key="`${work.attemptId}:${work.agentKey}`"
+            class="desktop-activity-roster-item"
+            data-state="recorded"
+            type="button"
+            @click="emit('reveal-message', work.sourceMessageId)"
+          >
+            <span class="desktop-activity-avatar" data-state="recorded">{{ initials(recordedAgentName(work.agentKey)) }}</span>
+            <span>
+              <strong>{{ recordedAgentName(work.agentKey) }}</strong>
+              <small>{{ recordedWorkDetail(work) }}</small>
+            </span>
+            <span class="desktop-activity-row-meta">
+              <span class="desktop-activity-mini-pill">{{ recordedWorkStateLabel(work) }}</span>
+              <span
+                v-if="recordedWorkEvidenceIncomplete(work)"
+                class="desktop-activity-mini-pill"
+              >
+                Some details missing
+              </span>
+              <small>{{ formatRelativeTime(work.updatedAt) }}</small>
+            </span>
+          </button>
+
+          <article v-if="!roomAgentWork.length" class="desktop-activity-empty">
+            <template v-if="roomAgentWorkStatus === 'loading'">Loading work history…</template>
+            <template v-else-if="roomAgentWorkStatus === 'error'">Work history is temporarily unavailable.</template>
+            <template v-else>No work results have been shared in this room yet.</template>
+          </article>
+        </section>
+
         <section v-if="artifactTimeline.length || artifactTaskFilterId" class="desktop-activity-group">
           <header>
             <div>
@@ -182,7 +241,7 @@
             </li>
           </ol>
           <article v-else class="desktop-activity-empty">
-            No artifacts are linked to this task yet.
+            No changes or pull requests are linked to this task yet.
           </article>
         </section>
 
@@ -273,7 +332,7 @@
             </a>
             <span v-else>{{ taskStatusLabel(task.status) }}</span>
           </article>
-          <p v-if="!selectedHistoryEntry.currentTasks.length" class="desktop-activity-muted">No open tasks linked in this room history scope.</p>
+          <p v-if="!selectedHistoryEntry.currentTasks.length" class="desktop-activity-muted">No open tasks found in this room or its related rooms.</p>
         </section>
 
         <section class="desktop-activity-detail-section">
@@ -300,13 +359,18 @@ import type {
   DesktopGitRoomInfo,
   DesktopParticipantSummary,
   DesktopReasoningSession,
+  DesktopRoomAgentWork,
   DesktopRoomMessage,
   DesktopRoomSharedArtifact,
   DesktopSupervisorManifestEntry,
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
-import type { AgentInspectorProjection } from "../../../domain/agent-inspector";
+import {
+  agentInspectorActivityGroupState,
+  type AgentInspectorActivityGroupState,
+  type AgentInspectorProjection,
+} from "../../../domain/agent-inspector";
 import { activityParticipantToAgentTarget, ownerAttribution } from "./room-activity/agentTarget";
 import {
   participantAgentInspectorRequest,
@@ -332,6 +396,9 @@ const props = defineProps<{
   roomGitRoom: DesktopGitRoomInfo | null;
   roomIdentifier: string | null;
   roomArtifacts: DesktopRoomSharedArtifact[];
+  roomAgentWork: DesktopRoomAgentWork[];
+  roomAgentWorkStatus: "idle" | "loading" | "ready" | "stale" | "error" | "unavailable";
+  roomAgentWorkTruncated: boolean;
   activityHistoryRequest: number;
   artifactTaskFilterId: string | null;
   tasks: DesktopTaskSummary[];
@@ -346,8 +413,16 @@ const emit = defineEmits<{
   "open-add-agent": [];
   "open-agent-detail": [request: AgentInspectorRequest];
   "refresh-room": [];
+  "reveal-message": [messageId: string];
   "clear-artifact-task-filter": [];
 }>();
+
+function recordedAgentName(agentKey: string): string {
+  return props.supervisorEntries.find(entry => entry.agentKey === agentKey)?.displayName
+    || props.presence.find(entry => entry.agentKey === agentKey)?.displayName
+    || props.participants.find(entry => entry.agentKey === agentKey)?.displayName
+    || "Agent";
+}
 
 const expandedChangeArtifacts = ref<Set<string>>(new Set());
 // Globally-unique, collision-safe DOM ids: an SSR-stable per-instance base
@@ -433,17 +508,28 @@ const hasLiveActivity = computed(() => Boolean(
     || legacyWorkingAgents.value.length,
 ));
 const inspectorTruthfulGroups = computed(() => {
-  const groups = [
-    { key: "listening", label: "Listening", description: "Connected and ready for a routed room message.", agents: [] as AgentInspectorProjection[] },
+  const groups: Array<{
+    key: AgentInspectorActivityGroupState;
+    label: string;
+    description: string | null;
+    agents: AgentInspectorProjection[];
+  }> = [
+    { key: "online", label: "Online", description: null, agents: [] as AgentInspectorProjection[] },
     { key: "responding", label: "Responding", description: "A bounded room turn is in progress.", agents: [] as AgentInspectorProjection[] },
     { key: "restoring_conversation", label: "Restoring conversation", description: "Recovering a missing private conversation without restarting the provider.", agents: [] as AgentInspectorProjection[] },
+    { key: "recovering", label: "Recovering agent", description: "Restoring room access for the running provider.", agents: [] as AgentInspectorProjection[] },
     { key: "reconnecting", label: "Reconnecting", description: "Restoring the room observation path.", agents: [] as AgentInspectorProjection[] },
     { key: "needs_attention", label: "Needs attention", description: "A runtime or delivery step needs your input.", agents: [] as AgentInspectorProjection[] },
     { key: "starting", label: "Starting", description: "Preparing the provider and room observation path.", agents: [] as AgentInspectorProjection[] },
     { key: "paused", label: "Paused", description: "Room work is held until the agent resumes.", agents: [] as AgentInspectorProjection[] },
     { key: "disconnected", label: "Disconnected", description: "The provider is not currently reachable.", agents: [] as AgentInspectorProjection[] },
+    { key: "status_unavailable", label: "Status unavailable", description: "Reconnecting to this agent…", agents: [] as AgentInspectorProjection[] },
   ];
-  for (const agent of inspectorTruthfulAgents.value) groups.find((group) => group.key === agent.overallState)!.agents.push(agent);
+  for (const agent of inspectorTruthfulAgents.value) {
+    const groupState = agentInspectorActivityGroupState(agent);
+    const group = groups.find((candidate) => candidate.key === groupState);
+    if (group) group.agents.push(agent);
+  }
   return groups;
 });
 const selectedInspectorAgent = computed(() => inspectorTruthfulAgents.value.find((agent) => agent.entryId === selectedTruthfulId.value) || null);
@@ -494,6 +580,37 @@ watch(() => props.activityHistoryRequest, (request) => {
 
 function refreshActivity(): void {
   emit("refresh-room");
+}
+
+function recordedWorkEvidenceIncomplete(work: DesktopRoomAgentWork): boolean {
+  return !("availability" in work.summary) && work.summary.evidence_incomplete;
+}
+
+function recordedWorkStateLabel(work: DesktopRoomAgentWork): string {
+  if ("availability" in work.summary) return "History cleared";
+  return work.summary.recorded_state.replaceAll("_", " ");
+}
+
+function recordedWorkDetail(work: DesktopRoomAgentWork): string {
+  if ("availability" in work.summary) return "The owner cleared this shared work history.";
+  const counts = work.summary.operation_counts;
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  const parts = [`${total} recorded ${total === 1 ? "operation" : "operations"}`];
+  if (counts.unresolved) parts.push(`${counts.unresolved} unresolved`);
+  if (counts.succeeded) parts.push(`${counts.succeeded} succeeded`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  if (counts.denied_before_start) parts.push(`${counts.denied_before_start} denied before start`);
+  if (counts.cancelled_before_start) parts.push(`${counts.cancelled_before_start} cancelled before start`);
+  if (counts.interrupted_after_start) parts.push(`${counts.interrupted_after_start} interrupted after start`);
+  if (counts.lost_after_start) parts.push(`${counts.lost_after_start} lost after start`);
+  if (work.summary.elapsed_ms !== null) parts.push(formatRecordedElapsed(work.summary.elapsed_ms));
+  return parts.join(" · ");
+}
+
+function formatRecordedElapsed(elapsedMs: number): string {
+  if (elapsedMs < 1_000) return `${elapsedMs}ms recorded`;
+  const seconds = elapsedMs / 1_000;
+  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s recorded`;
 }
 
 function branchLabel(participant: Parameters<typeof activityParticipantToAgentTarget>[0]): string | null {

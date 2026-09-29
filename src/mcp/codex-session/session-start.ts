@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { resolve } from "path";
+import { CODEX_THREAD_HISTORY_MODE } from "../../../shared/codex-thread-history.mjs";
 
 import {
   getCurrentCodexLiveSession,
@@ -170,7 +171,7 @@ export async function startLocalCodexSession(
     });
     await client.connect();
 
-    const threadStart = await client.request<ThreadStartResult>("thread/start", {});
+    const threadStart = await client.request<ThreadStartResult>("thread/start", { historyMode: CODEX_THREAD_HISTORY_MODE });
     const threadId = threadStart.thread?.id;
     if (!threadId) {
       throw new Error("Codex app-server did not return a thread id.");

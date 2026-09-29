@@ -6,6 +6,8 @@ type Row = Record<string, unknown>;
 export const RETAINED_TERMINAL_RECEIPTS_PER_AGENT = 200;
 /** Ambiguous mutating tool outcomes remain visible without pinning live work forever. */
 export const RETAINED_UNCERTAIN_EFFECTS_PER_AGENT = 32;
+export const RETAINED_TERMINAL_TIMELINE_EVENTS = 64;
+export const RETAINED_TERMINAL_CONTINUATION_REPAIRS = 4;
 const RETAINED_OBSERVED_MESSAGES_PER_AGENT = 500;
 const RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT = 2_000;
 
@@ -13,14 +15,194 @@ function run(statement: StatementSync, ...values: unknown[]): void {
   statement.run(...values as never[]);
 }
 
+/** Operator-stop settlement shared by turn control and atomic runtime recovery. Caller owns the transaction. */
+export function cancelInterruptedSupervisedTurn(
+  database: DatabaseSync,
+  inboxItemId: string,
+  detail: string,
+  timestamp: string,
+  expected?: { agent_id: string; room_id: string },
+): Row | null {
+  const item = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+  if (!item) return null;
+  if (expected && (item.agent_id !== expected.agent_id || item.room_id !== expected.room_id)) {
+    throw new Error("Interrupted-turn settlement does not match the exact active delivery identity.");
+  }
+  if (!["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"].includes(String(item.state))) return item;
+  const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=?
+    AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+    ORDER BY fifo_sequence LIMIT 1`).get(String(item.agent_id)) as Row | undefined;
+  if (head?.inbox_item_id !== inboxItemId) throw new Error("Only the current FIFO head may change delivery state.");
+  if (readDurableNativeFailure(database, inboxItemId)) {
+    run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',
+      failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
+  } else {
+    run(database.prepare(`UPDATE supervised_agent_inbox
+      SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
+      WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
+    const key = `user_cancelled:${item.fifo_sequence}`;
+    run(database.prepare(`INSERT INTO supervised_agent_inbox_events(inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+      SELECT ?,COALESCE((SELECT MAX(event_sequence) FROM supervised_agent_inbox_events WHERE inbox_item_id=?),0)+1,?,'user_cancelled',?,?
+      WHERE NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key=?)`),
+    inboxItemId, inboxItemId, key, timestamp, detail, inboxItemId, key);
+  }
+  settleSupervisedTerminalItem(database, { inboxItemId, agentId: String(item.agent_id),
+    providerTurnId: item.provider_turn_id === null ? null : String(item.provider_turn_id) }, timestamp);
+  pruneSupervisedAgentHistory(database, String(item.agent_id), () => timestamp);
+  return database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row;
+}
+
+/** Only the exact operational terminal journal may authorize failed settlement. */
+export function readDurableNativeFailure(database: DatabaseSync, inboxItemId: string): "failed" | "interrupted" | null {
+  const item = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+  if (!item) return null;
+  let outcome: { kind?: unknown; text?: unknown; evidence?: unknown } | null = null;
+  try { outcome = item.outcome ? JSON.parse(String(item.outcome)) : null; } catch { /* Invalid outcomes are not authority. */ }
+  // Read independently of the binding join: a missing binding must not hide a
+  // retained failure and turn inconsistent state into retry/publication authority.
+  const recorded = database.prepare("SELECT outcome FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+    .get(inboxItemId) as Row | undefined;
+  if (outcome?.kind !== "failed" && outcome?.kind !== "interrupted") {
+    if (item.state === "acknowledged_failed" || recorded?.outcome === "failed" || recorded?.outcome === "interrupted") {
+      throw new Error("Failed delivery has no exact native terminal evidence.");
+    }
+    return null;
+  }
+  const terminal = database.prepare(`SELECT t.*,b.provider_continuation_id
+    FROM supervised_agent_terminal_results t
+    JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=t.inbox_item_id
+      AND b.agent_id=t.agent_id AND b.origin_execution_generation_id=t.execution_generation_id
+      AND b.provider_turn_id=t.provider_turn_id
+    WHERE t.inbox_item_id=? AND t.agent_id=? AND b.room_id=? AND t.provider_turn_id=?`)
+    .get(inboxItemId, String(item.agent_id), String(item.room_id), item.provider_turn_id as string | null) as Row | undefined;
+  let evidence: Record<string, unknown> | null = null;
+  try { evidence = terminal ? JSON.parse(String(terminal.terminal_evidence_json)) : null; } catch { /* Fail closed below. */ }
+  if (!terminal || terminal.outcome !== outcome.kind || terminal.normalized_text !== null
+    || !["stream", "transcript"].includes(String(terminal.evidence_source))
+    || outcome.text !== null || outcome.evidence !== terminal.evidence_source
+    || !evidence || evidence.outcome !== outcome.kind || evidence.text !== null
+    || evidence.turnId !== item.provider_turn_id || evidence.evidence !== terminal.evidence_source
+    || evidence.providerContinuationId !== terminal.provider_continuation_id) {
+    throw new Error("Failed delivery does not match its exact native terminal and provider-turn binding.");
+  }
+  return outcome.kind;
+}
+
+/** Copy only a committed receipt's conclusion, never provider lifecycle authority.
+ * The savepoint joins an operational prune transaction or owns a scheduled
+ * batch. Ordinary optional write failures are isolated; transaction loss or
+ * unrecoverable savepoint cleanup must stop the authoritative caller. */
+export function settleCapturedExecutionAttempts(database: DatabaseSync, agentId: string, options: {
+  inboxItemId?: string; afterFifoSequence?: number;
+} = {}): { lastFifoSequence: number | null; hasMore: boolean; unavailable: boolean; changed: boolean } {
+  const unavailable = { lastFifoSequence: null, hasMore: false, unavailable: true, changed: false };
+  const after = options.afterFifoSequence ?? 0;
+  if (!agentId || !Number.isSafeInteger(after) || after < 0
+    || (options.inboxItemId !== undefined && !options.inboxItemId)) return unavailable;
+  const callerTransaction = database.isTransaction;
+  let savepoint = false;
+  try {
+    database.exec("SAVEPOINT captured_execution_settlement");
+    savepoint = true;
+    const rows = database.prepare(`SELECT i.inbox_item_id,i.agent_id,i.room_id,i.source_message_id,i.fifo_sequence,
+      i.state,i.provider_turn_id,i.outcome,i.terminal_reason,i.acknowledged_at,i.reply_client_message_id,a.attempt_id,a.created_at_ms
+      FROM supervised_agent_inbox i JOIN execution_message_attempts a
+        ON a.agent_id=i.agent_id AND a.room_id=i.room_id AND a.source_message_id=i.source_message_id
+      WHERE i.agent_id=? AND a.state='active'
+        AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user')
+        AND i.fifo_sequence>? ${options.inboxItemId === undefined ? "" : "AND i.inbox_item_id=?"}
+      ORDER BY i.fifo_sequence LIMIT 33`).all(agentId, after,
+      ...(options.inboxItemId === undefined ? [] : [options.inboxItemId])) as Row[];
+    const result = { lastFifoSequence: null as number | null, hasMore: rows.length > 32, unavailable: false, changed: false };
+    for (const row of rows.slice(0, 32)) {
+      result.lastFifoSequence = Number(row.fifo_sequence);
+      const conclusion = capturedReceiptConclusion(database, row);
+      const settledAt = typeof row.acknowledged_at === "string" ? Date.parse(row.acknowledged_at) : NaN;
+      if (!conclusion || !Number.isSafeInteger(settledAt) || settledAt < Number(row.created_at_ms)) {
+        result.unavailable = true;
+        continue;
+      }
+      const update = database.prepare(`UPDATE execution_message_attempts SET state=?,conclusion=?,settled_at_ms=?
+        WHERE attempt_id=? AND agent_id=? AND room_id=? AND source_message_id=? AND state='active'`).run(
+        conclusion === "replied" || conclusion === "acknowledged_no_reply" ? "cleanly_concluded" : conclusion,
+        conclusion, settledAt, String(row.attempt_id), agentId, String(row.room_id), String(row.source_message_id));
+      if (Number(update.changes) > 0) result.changed = true;
+    }
+    database.exec("RELEASE captured_execution_settlement");
+    savepoint = false;
+    if (callerTransaction && !database.isTransaction) throw new Error("Captured settlement lost its caller's transaction.");
+    return result;
+  } catch (error) {
+    if (savepoint) {
+      try { database.exec("ROLLBACK TO captured_execution_settlement; RELEASE captured_execution_settlement"); } catch {
+        if (!callerTransaction && database.isTransaction) {
+          try { database.exec("ROLLBACK"); } catch { /* Propagate the original failure below. */ }
+        }
+        throw error;
+      }
+    }
+    if (callerTransaction && !database.isTransaction) throw error;
+    return unavailable;
+  }
+}
+
+function capturedReceiptConclusion(database: DatabaseSync, row: Row): "replied" | "acknowledged_no_reply" | "failed" | "interrupted" | null {
+  if (row.terminal_reason !== null || !row.provider_turn_id) return null;
+  // The independent capture graph must agree with the original operational
+  // turn, including workspace and generation, not merely its source message.
+  // Keep this SQL set aligned with isTypedCaptureAuthority in lifecycle-authority-mode.ts;
+  // legacy and any unknown future mode must remain fail-closed here.
+  const binding = database.prepare(`SELECT b.origin_execution_generation_id,b.provider_continuation_id
+    FROM supervised_agent_provider_turn_bindings b
+    JOIN execution_turns t ON t.attempt_id=? AND t.agent_id=b.agent_id AND t.room_id=b.room_id
+      AND t.execution_generation_id=b.origin_execution_generation_id
+      AND t.provider_continuation_id=b.provider_continuation_id AND t.provider_turn_id=b.provider_turn_id
+    JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
+      AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id AND g.workspace_id=b.work_attempt_id
+    JOIN execution_runtime_generations r ON r.agent_id=t.agent_id AND r.execution_generation_id=t.execution_generation_id
+      AND r.runtime_generation_id=t.runtime_generation_id AND r.authority_mode IN ('typed_shadow','typed')
+    WHERE b.inbox_item_id=? AND b.agent_id=? AND b.room_id=? AND b.provider_turn_id=?`)
+    .get(String(row.attempt_id), String(row.inbox_item_id), String(row.agent_id), String(row.room_id), String(row.provider_turn_id)) as Row | undefined;
+  if (!binding) return null;
+  let nativeFailure: "failed" | "interrupted" | null;
+  try { nativeFailure = readDurableNativeFailure(database, String(row.inbox_item_id)); } catch (error) {
+    if (!database.isTransaction) throw error;
+    return null;
+  }
+  if (row.state === "acknowledged_failed") return nativeFailure;
+  if (nativeFailure) return null;
+  if (row.state === "cancelled_by_user") return "interrupted";
+  let outcome: { kind?: unknown; text?: unknown; evidence?: unknown } | null;
+  try { outcome = row.outcome ? JSON.parse(String(row.outcome)) : null; } catch { return null; }
+  if (!outcome) return null;
+  const terminal = database.prepare(`SELECT agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text,evidence_source
+    FROM supervised_agent_terminal_results WHERE inbox_item_id=?`)
+    .get(String(row.inbox_item_id)) as Row | undefined;
+  if (terminal && (terminal.agent_id !== row.agent_id || terminal.execution_generation_id !== binding.origin_execution_generation_id
+    || terminal.provider_turn_id !== row.provider_turn_id || terminal.outcome !== outcome.kind
+    || terminal.normalized_text !== outcome.text || terminal.evidence_source !== outcome.evidence)) return null;
+  if (row.state === "acknowledged_no_reply") return outcome.kind === "no_reply" && outcome.text === null ? "acknowledged_no_reply" : null;
+  if (outcome.kind !== "reply" || typeof outcome.text !== "string" || !outcome.text.trim()) return null;
+  const publication = database.prepare(`SELECT 1 FROM supervised_agent_publications
+    WHERE inbox_item_id=? AND agent_id=? AND room_id=? AND client_message_id=? AND length(trim(canonical_message_id))>0`)
+    .get(String(row.inbox_item_id), String(row.agent_id), String(row.room_id), String(row.reply_client_message_id));
+  return publication ? "replied" : null;
+}
+
 /**
  * Terminal inbox ownership proves that an ordinary prepared effect never won
- * its execution CAS. Settle those effects in the same SQLite transaction as
- * the terminal transition so they cannot become immortal retention pins or
- * exhaust the per-agent unresolved-effect budget. Room moves are excluded:
- * their prepared effect is the durable move journal until reconciliation.
+ * its execution CAS. It also makes an executing read irrelevant: reads are
+ * safely repeatable and cannot outlive their completed provider turn. Settle
+ * both in the same SQLite transaction so they cannot become immortal retention
+ * pins or exhaust the per-agent unresolved-effect budget. Executing mutations
+ * remain untouched because their outcome may be externally uncertain. Room
+ * moves are excluded: their prepared effect is the durable move journal until
+ * reconciliation. Already-captured attempts separately receive the exact
+ * receipt conclusion; that optional projection neither controls providers nor
+ * supplies native terminal evidence. Ordinary projection failures are isolated;
+ * database or transaction loss still fails closed.
  */
-export function settlePreparedSupervisedEffectsForTerminalItem(
+export function settleSupervisedTerminalItem(
   database: DatabaseSync,
   item: {
     inboxItemId: string;
@@ -35,10 +217,12 @@ export function settlePreparedSupervisedEffectsForTerminalItem(
     .get(item.inboxItemId) as Row | undefined;
   if (!binding) return;
   run(database.prepare(`UPDATE supervised_agent_effects
-    SET state='failed',error='The provider turn settled before this effect acquired execution authority.',updated_at=?
+    SET state='failed',error='The provider turn settled before this effect completed.',updated_at=?
     WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-      AND state='prepared' AND tool_name<>'join_room'`),
+      AND (state='prepared' OR (state='executing' AND mutation=0))
+      AND tool_name<>'join_room'`),
   timestamp, item.agentId, String(binding.origin_execution_generation_id), item.providerTurnId);
+  settleCapturedExecutionAttempts(database, item.agentId, { inboxItemId: item.inboxItemId });
 }
 
 /**
@@ -95,15 +279,21 @@ export function pruneSupervisedAgentHistory(
   // binding that validates those coordinates on reopen, so retention must keep
   // that row until a later control replaces the journal. Count the pin inside
   // the fixed receipt budget rather than growing history around it.
+  // A native drain also needs its exact admitted receipt after settlement to
+  // distinguish finished A from missing evidence; release that pin at its end.
   const pinnedTerminalCount = Number((database.prepare(`SELECT COUNT(*) AS count
     FROM supervised_agent_inbox i
     WHERE i.agent_id=?
-      AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
-      AND EXISTS (
+      AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+      AND (EXISTS (
         SELECT 1 FROM turn_control_journals j
         WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
           AND j.inbox_item_id=i.inbox_item_id
-      )`).get(agentId) as Row).count);
+      ) OR EXISTS (
+        SELECT 1 FROM execution_cutover_v2 c
+        WHERE c.agent_id=i.agent_id AND c.admitted_inbox_item_id=i.inbox_item_id
+          AND c.phase NOT IN ('complete','cancelled','failed')
+      ))`).get(agentId) as Row).count);
   const retainedUnpinnedReceipts = Math.max(
     0,
     RETAINED_TERMINAL_RECEIPTS_PER_AGENT - pinnedTerminalCount,
@@ -113,11 +303,16 @@ export function pruneSupervisedAgentHistory(
     FROM supervised_agent_inbox i
     LEFT JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
     WHERE i.agent_id=?
-      AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+      AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       AND NOT EXISTS (
         SELECT 1 FROM turn_control_journals j
         WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
           AND j.inbox_item_id=i.inbox_item_id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM execution_cutover_v2 c
+        WHERE c.agent_id=i.agent_id AND c.admitted_inbox_item_id=i.inbox_item_id
+          AND c.phase NOT IN ('complete','cancelled','failed')
       )
       AND NOT EXISTS (
         SELECT 1 FROM supervised_agent_effects e
@@ -157,19 +352,32 @@ export function pruneSupervisedAgentHistory(
       run(deleteEffects, agentId, String(row.origin_execution_generation_id), String(row.provider_turn_id));
       run(deleteEffectTombstones, agentId, String(row.origin_execution_generation_id), String(row.provider_turn_id));
     }
+    settleCapturedExecutionAttempts(database, agentId, { inboxItemId: String(row.inbox_item_id) });
     run(deleteInbox, String(row.inbox_item_id));
   }
+  compactSupervisedTerminalHistory(database, agentId);
+  // Active turns retain their observed-message provenance even when newer
+  // silent messages fill the rolling window. Synthetic inbox rows have none.
   const observedStale = database.prepare(`SELECT room_id,source_message_id
     FROM supervised_agent_observed_messages
     WHERE agent_id=? AND rowid NOT IN (
       SELECT rowid FROM supervised_agent_observed_messages
       WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
-    ) ORDER BY rowid DESC`).all(agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT) as Row[];
+    ) AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i
+      WHERE i.agent_id=supervised_agent_observed_messages.agent_id
+        AND i.room_id=supervised_agent_observed_messages.room_id
+        AND i.source_message_id=supervised_agent_observed_messages.source_message_id
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user'))
+    ORDER BY rowid DESC`).all(agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT) as Row[];
   run(database.prepare(`DELETE FROM supervised_agent_observed_messages
     WHERE agent_id=? AND rowid NOT IN (
       SELECT rowid FROM supervised_agent_observed_messages
       WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
-    )`), agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT);
+    ) AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i
+      WHERE i.agent_id=supervised_agent_observed_messages.agent_id
+        AND i.room_id=supervised_agent_observed_messages.room_id
+        AND i.source_message_id=supervised_agent_observed_messages.source_message_id
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user'))`), agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT);
   const rooms = database.prepare(`SELECT DISTINCT room_id FROM supervised_agent_inbox WHERE agent_id=?
     UNION SELECT DISTINCT room_id FROM supervised_agent_observed_messages WHERE agent_id=?`)
     .all(agentId, agentId) as Row[];
@@ -191,6 +399,62 @@ export function pruneSupervisedAgentHistory(
       SELECT rowid FROM supervised_agent_pruned_sources
       WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
     )`), agentId, agentId, RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT);
+}
+
+/** Caller owns the transaction. Active events are retry/replay authority, and
+ * room-move cancellations remain revivable until their exact move settles.
+ * Compact only diagnostic children; receipt, binding, outcome and effect
+ * authority stay under their existing retention policy. */
+export function compactSupervisedTerminalHistory(database: DatabaseSync, agentId: string): void {
+  const items = database.prepare(`SELECT i.inbox_item_id,
+      (SELECT ev.idempotency_key FROM agent_room_moves m JOIN supervised_agent_inbox_events ev
+        ON ev.inbox_item_id=i.inbox_item_id
+        AND ev.idempotency_key=('room_move_cancelled:' || m.operation_id || ':' || i.fifo_sequence)
+        WHERE m.agent_id=i.agent_id AND m.source_room_id=i.room_id AND m.phase IN ('active','failed')
+        ORDER BY ev.event_sequence DESC LIMIT 1) AS retained_move_key
+    FROM supervised_agent_inbox i
+    LEFT JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+    WHERE i.agent_id=? AND (
+      i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user')
+      OR (i.state='cancelled_by_room_move' AND EXISTS (
+        SELECT 1 FROM agent_room_moves m JOIN supervised_agent_inbox_events ev
+          ON ev.inbox_item_id=i.inbox_item_id
+          AND ev.idempotency_key=('room_move_cancelled:' || m.operation_id || ':' || i.fifo_sequence)
+        WHERE m.agent_id=i.agent_id AND m.source_room_id=i.room_id AND m.phase IN ('active','failed')
+      )))
+      AND NOT EXISTS (SELECT 1 FROM agent_room_moves m JOIN supervised_agent_inbox_events ev
+        ON ev.inbox_item_id=i.inbox_item_id
+        AND ev.idempotency_key=('room_move_cancelled:' || m.operation_id || ':' || i.fifo_sequence)
+        WHERE m.agent_id=i.agent_id AND m.source_room_id=i.room_id AND m.phase NOT IN ('active','failed'))
+      AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.agent_id=i.agent_id
+        AND j.inbox_item_id=i.inbox_item_id AND j.turn_control_present=1
+        AND j.status NOT IN ('completed','failed'))
+      AND NOT EXISTS (SELECT 1 FROM execution_cutover_v2 c WHERE c.agent_id=i.agent_id
+        AND c.admitted_inbox_item_id=i.inbox_item_id AND c.phase NOT IN ('complete','cancelled','failed'))
+      AND NOT EXISTS (SELECT 1 FROM supervised_agent_effects e WHERE e.agent_id=i.agent_id
+        AND e.provider_turn_id=i.provider_turn_id
+        AND (b.origin_execution_generation_id IS NULL OR e.execution_generation_id=b.origin_execution_generation_id)
+        AND e.state IN ('prepared','executing'))
+      AND NOT EXISTS (SELECT 1 FROM provider_continuation_repairs r WHERE r.inbox_item_id=i.inbox_item_id
+        AND r.phase NOT IN ('committed','failed'))`).all(agentId) as Row[];
+  // Keep ingress context and the latest ordinal as well as the visible tail.
+  // Range deletion avoids revisiting a large journal on every later prune.
+  const trimEvents = database.prepare(`DELETE FROM supervised_agent_inbox_events
+    WHERE inbox_item_id=? AND event_sequence < (
+      SELECT event_sequence FROM supervised_agent_inbox_events WHERE inbox_item_id=?
+      ORDER BY event_sequence DESC LIMIT 1 OFFSET ?)
+    AND event_sequence > (SELECT event_sequence FROM supervised_agent_inbox_events WHERE inbox_item_id=?
+      ORDER BY event_sequence LIMIT 1 OFFSET 1)
+    AND (? IS NULL OR idempotency_key<>?)`);
+  const trimRepairs = database.prepare(`DELETE FROM provider_continuation_repairs
+    WHERE inbox_item_id=? AND phase IN ('committed','failed') AND rowid NOT IN (
+      SELECT rowid FROM provider_continuation_repairs WHERE inbox_item_id=?
+      ORDER BY created_at DESC,rowid DESC LIMIT ?)`);
+  for (const item of items) {
+    const id = String(item.inbox_item_id);
+    trimEvents.run(id, id, RETAINED_TERMINAL_TIMELINE_EVENTS - 1, id, item.retained_move_key as string | null, item.retained_move_key as string | null);
+    trimRepairs.run(id, id, RETAINED_TERMINAL_CONTINUATION_REPAIRS);
+  }
 }
 
 function updateHistoryBoundary(

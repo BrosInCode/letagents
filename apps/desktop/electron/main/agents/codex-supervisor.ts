@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 
 import type {
   DesktopAgentProviderId,
@@ -15,7 +16,7 @@ import type {
   DesktopRoomStorageState,
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
-import { apiFetch } from "../auth.js";
+import { agentApiFetch as apiFetch } from "../auth.js";
 import { buildRepoStatus } from "../../repo-status.js";
 import { emitPersistedLocalRoomMessage } from "../room-stream.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
@@ -34,6 +35,7 @@ import {
   waitForLaunchedCodexAppServer,
 } from "./codex-app-server.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
 import {
   buildCodexStartPrompt,
   DEFAULT_CODEX_STOP_PHRASE,
@@ -191,7 +193,7 @@ const desktopManagedAgentRuntimes = new DesktopManagedAgentRuntimeRegistry();
 const CODEX_EXTERNAL_WAIT_ITEM_PATTERN = /(command|exec|tool|mcp|collab|web.?search)/i;
 let cleanupRegistered = false;
 const CODEX_WORKER_REGISTRATION_ERROR =
-  "Codex did not get a LetAgents room worker identity. Sign into LetAgents Desktop, then try starting the agent again.";
+  "Codex could not connect to the room. Sign in to LetAgents Desktop, then try starting the agent again.";
 
 desktopManagedAgentRuntimes.register({
   providerId: "codex",
@@ -1071,7 +1073,7 @@ async function startDesktopManagedCodexEngineAgent(
   const repoBranch = await buildRepoStatus(cwd)
     .then((status) => status.branch)
     .catch(() => null);
-  const codexBin = resolveCodexExecutable();
+  const codexBin = resolveCodexExecutable({ env: desktopRuntimeEnvironment() });
   const permissionProfile = assertManagedAgentPermissionProfileAvailable(engine.providerId, input.permissionProfileId);
   const preflight = await runDesktopAgentProviderPreflight(engine.providerId, {
     roomIdentifier,
@@ -1131,7 +1133,7 @@ async function startDesktopManagedCodexEngineAgent(
     });
     await client.connect();
 
-    const threadStart = await client.request<ThreadStartResult>("thread/start", {});
+    const threadStart = await client.request<ThreadStartResult>("thread/start", { historyMode: CODEX_THREAD_HISTORY_MODE });
     const threadId = threadStart.thread?.id;
     if (!threadId) {
       throw new Error("Codex app-server did not return a thread id.");
@@ -1238,6 +1240,7 @@ async function startDesktopManagedCodexEngineAgent(
 export async function startDesktopManagedAgent(
   input: DesktopManagedAgentStartInput,
 ): Promise<DesktopManagedAgentStartResult> {
+  await desktopShellEnvironmentReady();
   if (input.supervisorEntryId || (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1")) {
     return desktopManagedAgentRuntimes.start(input);
   }

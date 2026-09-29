@@ -21,10 +21,9 @@
   padding: 20px;
   border: 1px solid var(--rent-dialog-border);
   border-radius: 18px;
-  background: var(--rent-dialog-surface);
+  background: var(--bg-elevated);
   color: var(--text);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.38);
-  backdrop-filter: blur(20px) saturate(140%);
   outline: none;
 }
 
@@ -220,7 +219,6 @@
 @media (prefers-reduced-transparency: reduce) {
   .rent-review-sheet {
     background: var(--bg-elevated);
-    backdrop-filter: none;
   }
 }
 

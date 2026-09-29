@@ -18,13 +18,11 @@
       @retry="emit('retry-turn-control')"
       @resolve="emit('resolve-turn-control', $event)"
     />
-    <AgentInspectorReadinessRail :facts="projection.readiness" />
-
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-charter-title">
       <div class="agent-inspector-section-heading">
-        <p id="agent-inspector-charter-title">Charter</p>
+        <p id="agent-inspector-charter-title">Initial message</p>
       </div>
-      <p class="agent-inspector-charter">{{ projection.charter || "No charter has been set for this agent." }}</p>
+      <p class="agent-inspector-charter">{{ projection.charter || "No initial message was recorded for this agent." }}</p>
     </section>
 
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-context-title">
@@ -32,7 +30,15 @@
         <p id="agent-inspector-context-title">Room and work</p>
       </div>
       <dl class="agent-inspector-context-list">
-        <div><dt>Current room</dt><dd>{{ projection.roomId }}</dd></div>
+        <div>
+          <dt>Agent app status</dt>
+          <dd class="agent-inspector-provider-status" :data-state="runtimeControl?.state ?? 'unavailable'" :title="runtimeControl?.observedAt || undefined">
+            <strong>{{ runtimeControl?.label ?? (runtimeControlPending ? "Checking agent app" : "Agent app status unavailable") }}</strong>
+            <span>{{ runtimeControl?.detail ?? (runtimeControlPending ? "Checking whether the agent app is responding." : "The agent app has not been checked yet.") }}</span>
+            <small :aria-hidden="!runtimeControl?.observedAt || undefined">{{ runtimeControl?.observedAt ? `Checked ${formatFullTimestamp(runtimeControl.observedAt)}` : "\u00a0" }}</small>
+          </dd>
+        </div>
+        <div><dt>Current room</dt><dd>{{ roomName || friendlyRoomLabel(projection.roomId) }}</dd></div>
         <div>
           <dt>Assigned work</dt>
           <dd v-if="projection.assignedWork.length">
@@ -50,14 +56,25 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
+import { friendlyRoomLabel } from "../../../../domain/git-rooms";
+import type { DesktopSupervisorAgentInspectorDetail } from "../../../../../../electron/ipc-types";
 import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
+import { describeAgentInspectorRuntimeControl } from "../../../../domain/agent-inspector-work";
+import { formatFullTimestamp } from "../../../../domain/time";
 import AgentInspectorDeliveryProgress from "./AgentInspectorDeliveryProgress.vue";
 import AgentInspectorNow from "./AgentInspectorNow.vue";
 import AgentInspectorContinuationRecovery from "./AgentInspectorContinuationRecovery.vue";
-import AgentInspectorReadinessRail from "./AgentInspectorReadinessRail.vue";
 import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
 
-defineProps<{ projection: AgentInspectorProjection; busy: boolean }>();
+const props = defineProps<{
+  projection: AgentInspectorProjection;
+  roomName?: string;
+  busy: boolean;
+  runtimeControl: DesktopSupervisorAgentInspectorDetail["runtime_control"] | null;
+  runtimeControlPending: boolean;
+}>();
+const runtimeControl = computed(() => describeAgentInspectorRuntimeControl(props.runtimeControl));
 const emit = defineEmits<{
   "stop-turn": [];
   "correct-turn": [correction: string];

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -282,6 +282,45 @@ export function cursorSandboxPathVariants(path: string): string[] {
 }
 
 const CURSOR_TURN_RUNTIME_DATA_PATTERN = /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/;
+
+/** Cursor's UUID resume preflight ignores TMPDIR and always takes a short-lived
+ * ownership lock here, even for headless sessions that have never used tmux.
+ * Prepare the structural parents outside the sandbox; native code only needs
+ * write/read access to its exact conversation's lock. Never grant the shared
+ * root, bindings, other conversations or persistent-session sockets. */
+export function prepareCursorResumeOwnershipLock(
+  sessionId: string,
+  temporaryRoot = realpathSync("/tmp"),
+): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+    throw new Error("Cursor resume ownership requires an exact native conversation UUID.");
+  }
+  if (typeof process.getuid !== "function") {
+    throw new Error("Cursor resume ownership requires a verified local account.");
+  }
+  const uid = process.getuid();
+  const root = join(realpathSync(temporaryRoot), `cursor-agent-persist-${uid}`);
+  for (const directory of [root, join(root, "claim-locks"), join(root, "bindings")]) {
+    try { mkdirSync(directory, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o777) !== 0o700) {
+      throw new Error("Cursor resume ownership directory is not private to this account.");
+    }
+  }
+  const lock = join(root, "claim-locks", `${sessionId.toLowerCase()}.lock`);
+  for (const occupied of [lock, join(root, "bindings", `${sessionId.toLowerCase()}.json`)]) {
+    try { lstatSync(occupied); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    // Do not guess that an existing lock/binding is stale, delete native state,
+    // or attach to a same-UID tmux session outside the supervised process tree.
+    throw new Error("Cursor cannot resume while native session ownership is already recorded. Stop the owning session before retrying.");
+  }
+  return lock;
+}
 
 export function prepareCursorTurnRuntimeDataDir(): string {
   const root = mkdtempSync(join(realpathSync("/tmp"), "letagents-cursor-data-"));

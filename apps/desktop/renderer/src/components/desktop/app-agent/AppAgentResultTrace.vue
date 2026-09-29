@@ -11,8 +11,7 @@
     >
       <AppAgentOrb
         :label="currentPhase.label"
-        root-class="app-agent-liquid-orb"
-        :show-icon="false"
+        :show-icon="true"
         :state="liveOrbState"
         decorative
         variant="live"

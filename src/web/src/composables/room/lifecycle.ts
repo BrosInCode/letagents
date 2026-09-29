@@ -32,6 +32,7 @@ import {
   resetRoomState,
   room,
   roomArtifacts,
+  setLastActivityHistoryRequest,
   taskGithubStatus,
   tasks,
 } from './state'
@@ -47,6 +48,7 @@ interface RoomLifecycleDeps {
 export function createRoomLifecycle(deps: RoomLifecycleDeps) {
   async function joinRoom(roomIdentifier: string) {
     let bootstrapStreamStarted = false
+    let streamingRoomIdentifier = roomIdentifier
     deps.stopStreaming()
     resetRoomState({
       activityHistoryLoading: true,
@@ -62,16 +64,23 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
 
     try {
       const joinedRoom = await joinRoomSession(roomIdentifier)
+      const canonicalIdentifier = joinedRoom.identifier
+      streamingRoomIdentifier = canonicalIdentifier
+      const canonicalActivityHistoryRequest = {
+        ...getLastActivityHistoryRequest(),
+        roomId: canonicalIdentifier,
+      }
+      setLastActivityHistoryRequest(canonicalActivityHistoryRequest)
       room.value = joinedRoom
       isConnected.value = true
       persistRoomSession(room.value)
       bootstrapStreamStarted = true
-      await deps.startStreaming(roomIdentifier, true)
+      await deps.startStreaming(canonicalIdentifier, true)
       const bootstrapActivityHistoryRequestId =
         getActivityHistoryRequestSequence()
       const bootstrap = await loadRoomBootstrap(
         joinedRoom,
-        getLastActivityHistoryRequest(),
+        canonicalActivityHistoryRequest,
       )
       replaceRoomMessages(mergeMessages([], bootstrap.messagePage.messages))
       messagesHasOlder.value = bootstrap.messagePage.hasOlder
@@ -86,7 +95,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       if (
         bootstrapActivityHistoryRequestId ===
           getActivityHistoryRequestSequence() &&
-        room.value?.identifier === roomIdentifier
+        room.value?.identifier === canonicalIdentifier
       ) {
         activityHistory.value = bootstrap.activityHistory
         activityHistoryLoading.value = false
@@ -101,16 +110,16 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       githubEventsError.value = bootstrap.githubEvents.error
       githubEventsLoading.value = false
 
-      deps.finishStreamingBootstrap(roomIdentifier, true)
+      deps.finishStreamingBootstrap(canonicalIdentifier, true)
       bootstrapStreamStarted = false
 
-      deps.startPresenceRefreshLoop(roomIdentifier)
-      deps.startParticipantRefreshLoop(roomIdentifier)
+      deps.startPresenceRefreshLoop(canonicalIdentifier)
+      deps.startParticipantRefreshLoop(canonicalIdentifier)
       connectionState.value = 'live'
       return true
     } catch (err) {
       if (bootstrapStreamStarted) {
-        deps.finishStreamingBootstrap(roomIdentifier, false)
+        deps.finishStreamingBootstrap(streamingRoomIdentifier, false)
       }
       deps.stopStreaming()
       connectionState.value = 'error'

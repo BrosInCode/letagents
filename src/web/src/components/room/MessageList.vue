@@ -101,7 +101,7 @@ const matchedIds = computed(() => {
   if (!q) return new Set<string>()
   const ids = new Set<string>()
   for (const msg of props.messages) {
-    if ((msg.text || '').toLowerCase().includes(q) || (msg.sender || '').toLowerCase().includes(q)) {
+    if ((msg.display_text || msg.text || '').toLowerCase().includes(q) || (msg.sender || '').toLowerCase().includes(q)) {
       ids.add(msg.id)
     }
   }
@@ -345,11 +345,12 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 </script>
 
 <style scoped>
-.messages-wrap { position: relative; min-height: 0; overflow: hidden; flex: 1; }
+.messages-wrap { position: relative; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
 
 .messages {
   height: 100%;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 16px 20px;
   scroll-behavior: smooth;
 }
@@ -454,11 +455,15 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   font-size: 0.75rem;
   font-weight: 600;
   border: none;
+  white-space: nowrap;
+  max-width: calc(100% - 24px);
   cursor: pointer;
   transition: transform 250ms ease, opacity 250ms ease;
 }
 
 .empty-state {
+  position: absolute;
+  inset: 0;
   display: grid;
   place-items: center;
   height: 100%;
@@ -473,6 +478,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   .messages { padding: 12px 12px; }
   .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
+  .load-older-btn, .new-messages-pill { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

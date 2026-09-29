@@ -36,6 +36,7 @@ export type TaskAdmissionGuardDecision =
 
 export interface RoomTaskRouteDeps {
   taskEvents: EventEmitter;
+  getActiveBoardManagerForRoom?: typeof import("../../../db.js").getActiveBoardManager;
   // DB accessors injected (not direct imports) so the route's fence-forwarding
   // and 409 mapping can be unit-tested without a database.
   getTaskById: typeof import("../../../db.js").getTaskById;
@@ -91,7 +92,8 @@ export interface RoomTaskRouteDeps {
       title: string;
       status: TaskStatus;
       assignee: string | null;
-    }
+    },
+    options?: { client_message_id?: string | null; parent_client_message_id?: string | null }
   ): Promise<unknown>;
   validateOwnerTokenTaskActorKey(input: {
     req: AuthenticatedRequest;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -33,16 +34,18 @@ const { roomScopedApiCall } = await import("../server/runtime/room-api.js");
 const { autoJoinFromContext } = await import("../server/runtime/rooms.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
+const { profileAwareToolServer } = await import("../server/supervised-tool-facade.js");
 const { registerDeviceAuthTools } = await import("../server/tools/onboarding/device-auth-tools.js");
 const { registerRoomJoinTools } = await import("../server/tools/rooms/join-tools.js");
+const { registerTaskVerdictTools } = await import("../server/tools/tasks/verdict-tools.js");
 
 function toolHandler(
   register: (server: McpServer) => void,
   name: string,
-): (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> {
-  let handler: ((input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>) | null = null;
-  register({ tool(toolName: string, _description: string, _schema: unknown, callback: unknown) {
-    if (toolName === name) handler = callback as typeof handler;
+): (input: Record<string, unknown>, extra?: { requestId?: string | number }) => Promise<{ content: Array<{ text: string }> }> {
+  let handler: ((input: Record<string, unknown>, extra?: { requestId?: string | number }) => Promise<{ content: Array<{ text: string }> }>) | null = null;
+  register({ tool(toolName: string, ...registration: unknown[]) {
+    if (toolName === name) handler = registration.at(-1) as typeof handler;
   } } as unknown as McpServer);
   assert.ok(handler, `missing ${name} handler`);
   return handler;
@@ -113,6 +116,58 @@ function withAuthEnv<T>(
     }
   });
 }
+
+test("review verdicts report publication from the durable effect, including failed and uncertain outcomes", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-review-status-"));
+  process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+  try {
+    await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
+      const submit = toolHandler(registerTaskVerdictTools, "submit_review_verdict");
+      for (const state of ["succeeded", "failed", "pending", "ambiguous"] as const) {
+        let statusText = "";
+        const effect = { id: `effect-${state}`, state, correlation_key: "exact-correlation",
+          external_id: state === "succeeded" ? "42" : null,
+          last_error: state === "failed" ? "GitHub review request failed with 403: Resource not accessible by integration" : null };
+        globalThis.fetch = async (url, init) => {
+          if (String(url).endsWith("/presence")) {
+            statusText = JSON.parse(String(init?.body)).status_text;
+            return new Response(null, { status: 204 });
+          }
+          assert.ok(String(url).endsWith("/tasks/task_1/review-verdict"));
+          const body = JSON.parse(String(init?.body));
+          assert.equal(body.expected_head_sha, "a".repeat(40));
+          assert.equal(body.idempotency_key, "same-verdict");
+          return new Response(JSON.stringify({ room_id: "room_review", task_id: "task_1", effect }), { status: state === "succeeded" ? 200 : 202 });
+        };
+        const result = JSON.parse((await submit({ room_id: "room_review", task_id: "task_1", verdict: "request_changes",
+          expected_head_sha: "a".repeat(40), idempotency_key: "same-verdict", body: "Fix the storage warning." })).content[0]!.text);
+        assert.equal(result.success, state === "succeeded", JSON.stringify(result));
+        assert.deepEqual(result.effect, effect);
+        assert.doesNotMatch(statusText, /submitted/);
+        if (state === "succeeded") assert.match(statusText, /published request_changes/);
+        else {
+          assert.match(statusText, state === "ambiguous" ? /outcome unknown/ : new RegExp(state));
+          assert.match(result.message, /do not submit a new idempotency key/);
+        }
+      }
+      globalThis.fetch = async (url) => String(url).endsWith("/presence")
+        ? new Response("presence unavailable", { status: 503 })
+        : new Response(JSON.stringify({ room_id: "room_review", task_id: "task_1",
+          effect: { id: "published-despite-presence", state: "succeeded", external_id: "42" } }), { status: 200 });
+      const result = JSON.parse((await submit({ room_id: "room_review", task_id: "task_1", verdict: "approve",
+        expected_head_sha: "a".repeat(40), idempotency_key: "same-verdict" })).content[0]!.text);
+      assert.equal(result.success, true);
+      assert.equal(result.effect.id, "published-despite-presence");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("worker bearer mode uses the worker Authorization header without owner credentials", async () => {
   const originalFetch = globalThis.fetch;
@@ -313,6 +368,22 @@ test("blank worker bearer does not activate worker mode", async () => {
   });
 });
 
+test("local room origin is admitted only for credential-free bounded supervision", async () => {
+  await withAuthEnv({ apiUrl: "letagents-local://rooms", boundedTurns: "1", supervisorRoomId: "local_room" }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), { mode: "supervised" });
+  });
+  for (const apiUrl of ["letagents-local://other", "letagents-local://rooms/path", "letagents-local://rooms#fragment", "letagents-local://user@rooms"]) {
+    await withAuthEnv({ apiUrl, boundedTurns: "1", supervisorRoomId: "local_room" }, async () => {
+      assert.equal(getWorkerBearerRuntime().mode, "invalid");
+    });
+  }
+  for (const values of [{ bearer: "worker-secret" }, { executionProfile: "supervised_mcp_polling" }]) {
+    await withAuthEnv({ apiUrl: "letagents-local://rooms", ...values }, async () => {
+      assert.equal(getWorkerBearerRuntime().mode, "invalid");
+    });
+  }
+});
+
 test("worker bearer mode requires an explicit valid API URL", async () => {
   await withAuthEnv({ bearer: "worker-secret", owner: undefined, apiUrl: null }, async () => {
     assert.deepEqual(getWorkerBearerRuntime(), {
@@ -398,6 +469,131 @@ test("worker bearer mode disables local Codex session orchestration", async () =
       message: "Local Codex session orchestration is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
     });
   });
+});
+
+test("custodial polling borrows authority and cannot fall back to owner or environment bearer", async () => {
+  for (const credentials of [{ owner: "owner-secret" }, { bearer: "worker-secret" }]) {
+    await withAuthEnv({ ...credentials, executionProfile: "supervised_mcp_polling" }, async () => {
+      assert.equal(getWorkerBearerRuntime().mode, "invalid");
+      assert.throws(requireValidWorkerBearerRuntime, /Custodial polling refuses/);
+    });
+  }
+  const originalFetch = globalThis.fetch;
+  try {
+    await withAuthEnv({ executionProfile: "supervised_mcp_polling", supervisorRoomId: "room_exact" }, async () => {
+      assert.equal(getWorkerBearerRuntime().mode, "supervised");
+      setOwnerAuthStoreLoaderForTest(async () => { throw new Error("must not load owner auth"); });
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" }));
+      globalThis.fetch = async () => assert.fail("stale borrowed authority must fail before HTTP");
+      await assert.rejects(apiCall("/rooms/room_exact/messages"), SupervisedWorkerCredentialError);
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "borrowed-exact" }));
+      globalThis.fetch = async (_url, init) => {
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer borrowed-exact");
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      };
+      await runWithCurrentSupervisedRoom("room_exact", () => roomScopedApiCall({
+        room_id: "room_exact", project_id: null, room_path: () => "/rooms/room_exact/messages", project_path: () => "unused",
+      }));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    setOwnerAuthStoreLoaderForTest(null);
+    setSupervisedCredentialBorrowerForTest(null);
+  }
+});
+
+test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE without legacy checkpoints", async () => {
+  const root = mkdtempSync(join(tmpdir(), "custodial-wait-"));
+  const socketPath = join(root, "daemon.sock");
+  const phases: string[] = [];
+  const requests: any[] = [];
+  let rejectRelease = false;
+  let returnedPage: Record<string, unknown> = { messages: [], last_observed_message_id: "msg_99" };
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      let result: unknown;
+      let ok = true;
+      if (request.method === "daemon.negotiate") result = { protocol_version: 2, generation: 17, pid: 123, started_at: "now", capabilities: { custodialPollingV1: true, custodialPollingOffersV1: true } };
+      else if (request.method === "supervisor.authorize_custodial_polling") {
+        phases.push(request.params.phase);
+        ok = !(rejectRelease && request.params.phase === "release");
+        result = { status: "authorized", contract: "custodial_polling_v1", room_id: "room_exact", agent_session_id: "session_exact", room_cursor: "msg_7", configuration_revision: 3,
+          activation_id: "activation_exact", binding_epoch: 4 };
+      } else if (request.method === "supervisor.checkpoint_worker_cursor") {
+        phases.push("legacy-ack"); result = { checkpointed: true };
+      } else throw new Error(`Unexpected request ${request.method}`);
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok, result })}\n`);
+    });
+  });
+  const originalFetch = globalThis.fetch;
+  try {
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    await withAuthEnv({ executionProfile: "supervised_mcp_polling", supervisorRoomId: "room_exact" }, async () => {
+      process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET = socketPath;
+      process.env.LETAGENTS_SUPERVISOR_PROVIDER = "codex";
+      setOwnerAuthStoreLoaderForTest(async () => { throw new Error("owner auth forbidden"); });
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "exact-worker" }));
+      globalThis.fetch = async (url, init) => {
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer exact-worker");
+        if (String(url).includes("/messages/poll?")) {
+          phases.push("poll");
+          assert.equal(new URL(String(url)).searchParams.get("after"), "msg_7");
+          return new Response(JSON.stringify({ room_id: "room_exact", ...returnedPage }), { status: 200 });
+        }
+        return new Response(null, { status: 204 });
+      };
+      const wait = toolHandler((recorder) => registerWaitForMessagesTool(profileAwareToolServer(recorder, "supervised_mcp_polling")), "wait_for_messages");
+      for (const mismatched of [{ room_id: "other" }, { agent_session_id: "other" }]) {
+        await assert.rejects(wait(mismatched, { requestId: "wrong-identity" }), /exact authority/);
+      }
+      assert.equal(requests.length, 0, "wrong room or session must fail before BEFORE could acknowledge a cursor");
+      assert.deepEqual(phases, []);
+      const silent = await wait({}, { requestId: 1 });
+      assert.equal(JSON.parse(silent.content[0]!.text).last_observed_message_id, "msg_99");
+      assert.deepEqual(phases, ["before", "poll", "release"]);
+      assert.equal(requests.find(request => request.params?.phase === "before").params.room_cursor, null);
+      assert.equal(requests.at(-1).params.offered_frontier, "msg_99", "silent-page progress still needs a durable offer");
+      const incarnation = requests.at(-1).params.process_incarnation_id;
+      const extra = { requestId: "1" };
+      phases.length = 0;
+      returnedPage = { messages: [] };
+      await wait({ after_message_id: "msg_900" }, extra);
+      assert.deepEqual(phases, ["before", "poll", "release"]);
+      assert.equal(requests.at(-2).params.room_cursor, "msg_900", "BEFORE sees the caller's requested ACK");
+      assert.equal(requests.at(-1).params.input_cursor, "msg_7", "callback always polls from returned authoritative cursor");
+      assert.equal(requests.at(-1).params.offered_frontier, "msg_7", "empty no-progress still validates RELEASE, without fabricating progress");
+      assert.equal(requests.at(-1).params.mcp_request_id, "1");
+      assert.equal(requests.at(-1).params.process_incarnation_id, incarnation);
+      phases.length = 0;
+      returnedPage = { messages: Array.from({ length: 3 }, (_, index) => ({
+        id: `msg_${8 + index}`, source: "human", text: "x".repeat(950_000),
+      })), last_observed_message_id: "msg_99" };
+      const bounded = JSON.parse((await wait({}, { requestId: 2 })).content[0]!.text);
+      assert.equal(bounded.truncated, true);
+      assert.equal(requests.at(-1).params.offered_frontier, bounded.last_observed_message_id);
+      assert.notEqual(requests.at(-1).params.offered_frontier, "msg_99", "never receipt omitted visible messages using the API's larger frontier");
+      phases.length = 0;
+      rejectRelease = true;
+      returnedPage = { messages: [], last_observed_message_id: "msg_99" };
+      await assert.rejects(wait({ after_message_id: "msg_8" }, { requestId: 3 }), /stale/);
+      assert.deepEqual(phases, ["before", "poll", "release"]);
+      assert.equal(requests.some(request => request.method === "supervisor.checkpoint_worker_cursor"), false);
+      assert.ok(requests.filter(request => request.params?.phase === "release").every(request =>
+        request.params.expected_activation_id === "activation_exact" && request.params.expected_binding_epoch === 4
+        && request.params.expected_configuration_revision === 3 && request.params.input_cursor === "msg_7"));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    setOwnerAuthStoreLoaderForTest(null); setSupervisedCredentialBorrowerForTest(null);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("supervised bounded turns refuse wait_for_messages before any local or network work", async () => {
@@ -587,21 +783,64 @@ test("ordinary worker bearer mode retains wait_for_messages when bounded deliver
   globalThis.fetch = originalFetch;
 });
 
+test("wait_for_messages does not advance past messages omitted by its byte bound", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    await withAuthEnv({ bearer: "worker-secret", owner: undefined, boundedTurns: "0" }, async () => {
+      const messages = Array.from({ length: 8 }, (_, index) => ({
+        id: `msg_${index + 1}`,
+        text: "x".repeat(950_000),
+      }));
+      globalThis.fetch = async (url) => {
+        const requestUrl = String(url);
+        if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
+        if (requestUrl.includes("/messages/poll")) {
+          return new Response(JSON.stringify({
+            messages,
+            last_observed_message_id: "msg_8",
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      };
+
+      const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
+      const result = JSON.parse((await wait({
+        room_id: "room_bounded_cursor",
+        after_message_id: "msg_0",
+        timeout: 1,
+      })).content[0]!.text);
+
+      assert.deepEqual(result.messages.map((message: { id: string }) => message.id), ["msg_1", "msg_2"]);
+      assert.equal(result.truncated, true);
+      assert.equal(result.omitted_message_count, 6);
+      assert.equal(result.last_observed_message_id, "msg_2");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("worker bearer startup binds its configured room locally for omitted-room tools", async () => {
   const originalCwd = process.cwd();
   const originalFetch = globalThis.fetch;
   const originalStatePath = process.env.LETAGENTS_STATE_PATH;
   const tempDir = mkdtempSync(join(tmpdir(), "letagents-worker-bearer-"));
   const requests: string[] = [];
+  const locator = "github.com/brosincode/letagents/focus/git:branch:Y29kZXgvY2Fub25pY2Fs";
   try {
-    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "room_autobind" }));
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: locator }));
     process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
     process.chdir(tempDir);
     await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
       globalThis.fetch = async (url) => {
         const requestUrl = String(url);
         requests.push(requestUrl);
-        assert.doesNotMatch(requestUrl, /\/(?:join|projects)(?:\/|$)/, "worker auto-bind must not join or create");
+        if (requestUrl.endsWith(`/rooms/resolve/${encodeURIComponent(locator)}`)) {
+          return new Response(JSON.stringify({
+            canonical_room_id: "focus_37",
+            room_exists: true,
+          }), { status: 200 });
+        }
         if (requestUrl.includes("room_outside_scope")) {
           return new Response(JSON.stringify({ error: "worker bearer room scope mismatch" }), { status: 403 });
         }
@@ -628,11 +867,13 @@ test("worker bearer startup binds its configured room locally for omitted-room t
         (error: unknown) => error instanceof ApiError && error.status === 403,
       );
     });
-    assert.ok(requests.some((url) => url.includes("/rooms/room_autobind/messages")));
+    assert.ok(requests.some((url) => url.includes("/rooms/focus_37/messages")));
+    assert.ok(requests.some((url) => url.endsWith(`/rooms/resolve/${encodeURIComponent(locator)}`)));
+    assert.ok(!requests.some((url) => url.includes("/join?create=false")));
     // No-cursor wait autobinds to the configured room and reads its bounded
     // recent tail (before=/limit=), not the long-poll endpoint.
     assert.ok(requests.some((url) =>
-      url.includes("/rooms/room_autobind/messages?") && url.includes("before=") && url.includes("limit=")
+      url.includes("/rooms/focus_37/messages?") && url.includes("before=") && url.includes("limit=")
     ));
   } finally {
     globalThis.fetch = originalFetch;

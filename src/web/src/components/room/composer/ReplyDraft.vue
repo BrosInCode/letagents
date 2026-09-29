@@ -36,6 +36,9 @@ const emit = defineEmits<{
   min-width: 0;
 }
 .reply-draft-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.74rem;
   color: var(--text, #fafafa);
 }
@@ -45,8 +48,13 @@ const emit = defineEmits<{
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .reply-draft-clear {
+  flex-shrink: 0;
   border: none;
   background: transparent;
   color: var(--muted, #71717a);
@@ -61,5 +69,6 @@ const emit = defineEmits<{
 
 @media (max-width: 768px) {
   .reply-draft { padding: 8px 10px 6px; }
+  .reply-draft-clear { min-width: 44px; min-height: 44px; }
 }
 </style>

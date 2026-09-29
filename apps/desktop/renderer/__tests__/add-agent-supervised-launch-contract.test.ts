@@ -48,6 +48,10 @@ const configurationSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/useAddAgentConfiguration.ts",
   import.meta.url,
 )), "utf8");
+const runtimeSettingsSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/AddAgentRuntimeSettings.vue",
+  import.meta.url,
+)), "utf8");
 const presentationSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/useAddAgentPresentation.ts",
   import.meta.url,
@@ -113,6 +117,22 @@ test("the sign-in recovery performs a real provider-auth action and does not sta
   assert.match(recoverBody, /creationRequestId\.value = activeLaunchId\.value;[\s\S]*?options\.onRetry\(\)/);
 });
 
+test("Keychain recovery opens the native credential manager without weakening storage", () => {
+  const recoverBody = launchSource.slice(launchSource.indexOf("async function handleRecover"));
+  assert.match(recoverBody, /action === "open_keychain"/);
+  assert.match(recoverBody, /desktopIpc\.app\.openCredentialStorage\(\)/);
+  assert.match(recoverBody, /unlock the login keychain/i);
+  assert.match(progressSource, /Open Keychain Access/);
+  assert.match(progressSource, /supervised-launch-keychain-retry/);
+});
+
+test("a concurrent successful storage recheck cannot be overwritten by stale recovery guidance", () => {
+  assert.match(
+    controllerSource,
+    /await desktopIpc\.app\.openCredentialStorage\(\);[\s\S]*?if \(secureStorageStatus\.value\?\.available !== true\) \{[\s\S]*?setSecureStorageRecoveryMessage/,
+  );
+});
+
 test("Try again converges a durable launch entry instead of creating a second agent", () => {
   assert.match(controllerSource, /onRetry: \(\) => retrySupervisedLaunch\(\)/);
   const retryBody = controllerSource.slice(
@@ -176,7 +196,7 @@ test("Add Agent modal requires first recovery consent and restores previously at
 });
 
 test("failed recovery scans allow a new launch without hiding real setup blockers", () => {
-  assert.match(actionBarSource, /recoveryScanStatus\.value === "error"[\s\S]*?"Start new supervised agent"/);
+  assert.match(actionBarSource, /recoveryScanStatus\.value === "error"[\s\S]*?"Start new agent"/);
   assert.ok(
     actionBarSource.indexOf('v-else-if="launchMode === \'supervised\' && charterMissing"')
       < actionBarSource.indexOf('recoveryScanStatus !== \'ready\''),
@@ -209,8 +229,10 @@ test("a ready supervised launch can start another without stopping the completed
   );
   assert.match(releaseBody, /dismiss\(\);/);
   assert.doesNotMatch(releaseBody, /stop\(/);
-  assert.match(controllerSource, /suggestSupervisedAgentCodename\([\s\S]*?existingDisplayNames,[\s\S]*?snapshot\.creationRequestId/);
-  assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName,/);
+  // The renderer sends no name: the background service assigns one from the
+  // names already taken in the room.
+  assert.doesNotMatch(controllerSource, /suggestSupervisedAgentCodename|lookupExistingDisplayNames/);
+  assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName: "",/);
 });
 
 test("bounded supervised defaults never tell providers to own polling and Claude exposes no ignored effort control", () => {
@@ -218,19 +240,28 @@ test("bounded supervised defaults never tell providers to own polling and Claude
   assert.match(presentationSource, /return "Managed at launch"/);
   assert.match(
     configurationSource,
-    /Work from the room board, coordinate through the room, and help move assigned work forward/,
+    /Join the room, check the board, and help move the available work forward/,
   );
   assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\)/);
   assert.doesNotMatch(presentationSource, /showEffortSelector[\s\S]{0,160}claude-code/);
 });
 
-test("supervised Cursor exposes the provider permission profiles instead of forcing read-only", () => {
+test("supervised creation presents the first task as a one-time message", () => {
+  assert.match(runtimeSettingsSource, /<small>First task<\/small>/);
+  assert.match(runtimeSettingsSource, /It is sent once/);
+  assert.doesNotMatch(runtimeSettingsSource, /<small>Charter<\/small>/);
+  assert.match(actionBarSource, /Add a first task to start the agent/);
+});
+
+test("supervised providers expose their supervised permission presentation instead of forcing read-only", () => {
   assert.match(presentationSource, /const profiles = selectedProvider\.value\?\.permissionProfiles \?\? \[\]/);
-  assert.match(presentationSource, /profiles\.map\(supervisedCursorPermissionProfilePresentation\)/);
+  assert.match(presentationSource, /profiles\.map\(\(profile\) => supervisedPermissionProfilePresentation\(selectedProviderId\.value, profile, \{ hasProject: Boolean\(props\.repoRootPath\?\.trim\(\)\) \}\)\)/);
+  assert.match(configurationSource, /const permissionProfiles = bindings\.selectedPermissionProfiles\.value/);
+  assert.match(controllerSource, /selectedPermissionProfiles,[\s\S]*?selectedPermissionProfile,/);
   assert.doesNotMatch(presentationSource, /profiles\.filter\(\(profile\) => profile\.id === "read_only"\)/);
-  assert.match(presentationSource, /private turn workspace/);
-  assert.match(presentationSource, /Git history and ignored output are not persisted/);
-  assert.match(presentationSource, /Daemon-mediated LetAgents room tools remain available/);
+  assert.match(presentationSource, /separate copy of your project/);
+  assert.match(presentationSource, /files ignored by Git and changes to Git history are not copied back/);
+  assert.match(presentationSource, /LetAgents room tools remain available/);
 });
 
 test("the supervised action island owns complete responsive interaction styles", () => {
@@ -243,15 +274,27 @@ test("the supervised action island owns complete responsive interaction styles",
   assert.match(launchActionStyles, /@media \(max-width: 680px\)[\s\S]*?\.actions/);
 });
 
-test("legacy start feedback is assigned only after the modal request guard", () => {
-  assert.match(controllerSource, /const startMessage = await managedLaunch\.start\([\s\S]*?if \(!setupActions\.isCurrentRequest\(requestVersion\)\) return;[\s\S]*?setSetupMessage\(startMessage\);/);
+test("new launches cannot call the desktop-owned execution path", () => {
+  assert.doesNotMatch(controllerSource, /managedLaunch\.start|useManagedAgentLaunch/);
   assert.match(controllerSource, /const requestLaunchMode = launchMode\.value;/);
   assert.match(setupSource, /onBeforeUnmount\(resetTransientState\)/);
 });
 
+test("supervised start rechecks secure storage before creating a launch", () => {
+  const storageCheck = controllerSource.indexOf("await desktopIpc.supervisorGrant.getStorageStatus()");
+  const launchBoundary = controllerSource.indexOf("supervisedLaunch.begin()", storageCheck);
+  assert.ok(storageCheck >= 0, "supervised Start should perform a secure-storage round-trip");
+  assert.ok(launchBoundary > storageCheck, "secure storage must be checked before the launch boundary");
+  assert.match(controllerSource, /if \(props\.roomStorageMode !== "local" && !latestStorageStatus\.available\) \{[\s\S]*?return;/);
+});
+
 test("an in-flight Start remains fenced across modal close and provider reset", () => {
   assert.match(controllerSource, /let startOperationInFlight = false/);
-  assert.match(controllerSource, /if \(!selectedProviderId\.value \|\| !props\.repoRootPath \|\| startOperationInFlight\) return/);
+  // A repo-less room (no git binding, no resolved repo path) is allowed to
+  // launch — the daemon provisions a private scratch workspace — but a
+  // repo-backed room with an unresolved path is still fenced.
+  assert.match(controllerSource, /const roomOnlyLaunch = props\.roomGitRoom == null && !props\.repoRootPath\?\.trim\(\)/);
+  assert.match(controllerSource, /if \(!selectedProviderId\.value \|\| \(!props\.repoRootPath\?\.trim\(\) && !roomOnlyLaunch\) \|\| startOperationInFlight\) return/);
   assert.match(controllerSource, /onResetStartingAgent: \(\) => \{ startingAgent\.value = startOperationInFlight; \}/);
   assert.match(controllerSource, /finally \{[\s\S]*?startOperationInFlight = false;[\s\S]*?startingAgent\.value = false;/);
 });
@@ -277,7 +320,8 @@ test("the launch progress component exposes phased, accessible, honest UI hooks"
   assert.match(progressSource, /data-testid="supervised-launch-failure-impact"/);
   assert.match(progressSource, /v-for="phase in visiblePhases"/);
   assert.match(progressSource, /progress\.failureDiagnostic/);
-  assert.match(progressSource, /recovering \? "Trying again…"/);
+  assert.match(progressSource, /recovering \? recoveryPendingLabel/);
+  assert.match(progressSource, /"open_keychain" \? "Opening…" : "Trying again…"/);
   assert.match(progressSource, /progress\.durable/);
   assert.match(progressSource, /data-testid="supervised-launch-ready-name"/);
   assert.doesNotMatch(recoveryNoticeSource, /aria-live=/);

@@ -6,7 +6,7 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
 
-export type RoomAgentDeliveryGroup = "listening" | "responding" | "restoring" | "attention" | "disconnected";
+export type RoomAgentDeliveryGroup = "online" | "responding" | "restoring" | "attention" | "disconnected";
 
 type RoomAgentActivityEntry = Pick<
   DesktopSupervisorManifestEntry,
@@ -115,7 +115,7 @@ export function roomAgentDeliveryGroup(
   if (ingressState !== "observing") return "disconnected";
   if (state.inbox.state === "blocked" || state.turn.state === "failed") return "attention";
   if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "responding";
-  return "listening";
+  return "online";
 }
 
 export function roomAgentDeliverySummary(
@@ -136,7 +136,7 @@ export function roomAgentDeliverySummary(
   if (ingressState !== "observing") return "Starting room observation";
   if (state.inbox.state === "blocked" || state.turn.state === "failed") return "Delivery needs attention";
   if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "Responding to a room message";
-  return "Connected · Listening";
+  return "Online";
 }
 
 /**
@@ -150,7 +150,8 @@ export function canReconnectRoomAgent(
     | "agentSessionId" | "agentSessionBindingState" | "executionGenerationId"
     | "providerContinuationId" | "providerPid" | "lastError">,
 ): boolean {
-  const automaticRecoveryIsActive = /retrying automatically/i.test(agent.lastError ?? "");
+  const automaticRecoveryIsActive = /retrying automatically/i.test(agent.lastError ?? "")
+    && !/use reconnect to retry now/i.test(agent.lastError ?? "");
   const providerIsKnownStopped = /saved OpenCode process is no longer running|previous provider runtime is unavailable/i
     .test(agent.lastError ?? "");
   return agent.deliveryMode === "daemon_inbox"
@@ -159,6 +160,7 @@ export function canReconnectRoomAgent(
     && agent.nativeLiveness?.state !== "terminal"
     && !providerIsKnownStopped
     && agent.roomAgentState?.inbox.state === "waiting_for_desktop_credentials"
+    && !isBlockedIdleCursor(agent)
     && !automaticRecoveryIsActive
     && (Boolean(agent.providerPid) || agent.provider === "cursor")
     && Boolean(agent.workAttemptId)
@@ -166,22 +168,53 @@ export function canReconnectRoomAgent(
     && Boolean(agent.providerContinuationId);
 }
 
-/** Explicit recovery restarts the same durable agent entry, never a reconnect fallback. */
-export function canRecoverSavedRoomAgent(
-  agent: Pick<DesktopSupervisorManifestEntry,
-    "deliveryMode" | "desiredState" | "observedState" | "condition"
-    | "nativeLiveness" | "roomAgentState" | "executionGenerationId" | "providerContinuationId">,
-): boolean {
+type RoomAgentRecoveryEntry = Pick<DesktopSupervisorManifestEntry,
+  "provider" | "providerPid" | "deliveryMode" | "desiredState" | "observedState" | "condition"
+  | "nativeLiveness" | "roomAgentState" | "executionGenerationId" | "providerContinuationId"
+  | "runtimeGenerationId" | "runtimeRecovery">;
+
+function isBlockedIdleCursor(agent: Pick<RoomAgentRecoveryEntry,
+  "provider" | "providerPid" | "observedState" | "roomAgentState">): boolean {
+  const inbox = agent.roomAgentState?.inbox;
+  const turn = agent.roomAgentState?.turn;
+  // Credential admission can mask the blocked FIFO state after a restart.
+  // Retain its exact failed-message boundary; the daemon still owns recovery.
+  const blockedWhileWaiting = inbox?.state === "waiting_for_desktop_credentials"
+    && Boolean(inbox.blockedByMessageId)
+    && turn?.state === "failed"
+    && turn.sourceMessageId === inbox.blockedByMessageId
+    && Boolean(turn.inboxItemId && turn.providerTurnId);
+  return agent.provider === "cursor" && agent.providerPid === null
+    && agent.observedState === "idle" && (inbox?.state === "blocked" || blockedWhileWaiting);
+}
+
+/** An exact runtime requires a deliberate recovery choice, never implicit replacement. */
+export function roomAgentRecoveryAction(agent: RoomAgentRecoveryEntry): "recover" | "recovery_options" | null {
+  if (agent.deliveryMode !== "daemon_inbox" || agent.desiredState === "stopped") return null;
   const recoveryState = ["absent", "paused", "failed", "recovering"].includes(agent.observedState)
     || agent.condition === "coordination_blocked"
     || agent.condition === "auth_blocked";
-  const runtimeAbsent = !agent.executionGenerationId
+  // A recorded recovery must continue its exact operation, even after a fresh
+  // start cleared the old provider reference. Never fall back to legacy recovery.
+  if (agent.runtimeRecovery) return "recovery_options";
+  // The daemon has a separately fenced repair for a processless blocked Cursor
+  // lane. Retain it; a missing PID on any other provider is not proof of absence.
+  if (isBlockedIdleCursor(agent)) return "recover";
+  if (!recoveryState) return null;
+  const legacyRecoveryCandidate = !agent.executionGenerationId
     || !agent.providerContinuationId
     || agent.observedState === "failed"
-    || agent.nativeLiveness?.state === "terminal"
-    || agent.roomAgentState?.connection?.state === "disconnected";
-  return agent.deliveryMode === "daemon_inbox"
-    && agent.desiredState !== "stopped"
-    && recoveryState
-    && runtimeAbsent;
+    || agent.nativeLiveness?.state === "terminal";
+  if (agent.executionGenerationId && agent.runtimeGenerationId) {
+    const needsChoice = legacyRecoveryCandidate || agent.condition === "coordination_blocked"
+      || agent.condition === "auth_blocked" || agent.roomAgentState?.connection.state === "disconnected";
+    return needsChoice ? "recovery_options" : null;
+  }
+  // Room connection describes delivery admission, not native runtime custody.
+  return legacyRecoveryCandidate ? "recover" : null;
+}
+
+/** Legacy saved-agent recovery is available only outside the exact-runtime choice path. */
+export function canRecoverSavedRoomAgent(agent: RoomAgentRecoveryEntry): boolean {
+  return roomAgentRecoveryAction(agent) === "recover";
 }

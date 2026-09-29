@@ -1,5 +1,5 @@
 <template>
-  <div id="composer-mention-listbox" class="composer-mention-panel" role="listbox" aria-label="Mention suggestions">
+  <div ref="panelEl" id="composer-mention-listbox" class="composer-mention-panel" role="listbox" aria-label="Mention suggestions">
     <button
       v-for="(candidate, index) in candidates"
       :key="candidate.key"
@@ -22,12 +22,25 @@
 </template>
 
 <script setup lang="ts">
+import { ref, watch } from 'vue'
 import type { MentionCandidate } from '../reachability'
 
-defineProps<{
+const props = defineProps<{
   candidates: readonly MentionCandidate[]
   activeIndex: number
 }>()
+
+const panelEl = ref<HTMLElement | null>(null)
+
+watch(() => [props.activeIndex, props.candidates], () => {
+  const panel = panelEl.value
+  const selected = panel?.querySelector<HTMLElement>('[aria-selected="true"]')
+  if (!panel || !selected) return
+  const bounds = panel.getBoundingClientRect()
+  const option = selected.getBoundingClientRect()
+  if (option.top < bounds.top) panel.scrollTop += option.top - bounds.top
+  else if (option.bottom > bounds.bottom) panel.scrollTop += option.bottom - bounds.bottom
+}, { flush: 'post' })
 
 const emit = defineEmits<{
   select: [candidate: MentionCandidate]
@@ -36,9 +49,21 @@ const emit = defineEmits<{
 
 <style scoped>
 .composer-mention-panel {
+  position: absolute;
+  bottom: calc(100% - 12px);
+  left: 24px;
+  right: 24px;
+  z-index: 25;
   display: grid;
   gap: 4px;
-  padding: 0 8px 8px;
+  padding: 6px;
+  max-height: min(240px, max(72px, calc(var(--room-viewport-height, 100dvh) * 0.35 - 20px)));
+  border: 1px solid var(--line, #27272a);
+  border-radius: 12px;
+  background: var(--bg-1, #0f0f11);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   transform-origin: 24px 100%;
   animation: composer-mention-panel-enter 170ms cubic-bezier(0.23, 1, 0.32, 1) both;
 }
@@ -65,6 +90,8 @@ const emit = defineEmits<{
 .composer-mention-copy {
   display: grid;
   gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .composer-mention-copy strong {
   font-size: 0.8rem;
@@ -95,7 +122,7 @@ const emit = defineEmits<{
 }
 
 @media (max-width: 768px) {
-  .composer-mention-panel { padding: 0 6px 6px; }
+  .composer-mention-panel { left: 12px; right: 12px; }
   .composer-mention-option { padding: 8px 10px; }
 }
 </style>

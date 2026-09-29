@@ -171,7 +171,7 @@ export function registerPresenceReadRoutes(
       ] = await Promise.all([
         getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true }),
         getTasksForRooms([selectedRoom.id]),
-        getRoomAgentPresenceSnapshot(selectedRoom.id).catch(() => []),
+        getRoomAgentPresenceSnapshot(selectedRoom.id, { includeEndedSessions: true }).catch(() => []),
         getRoomMessageCountsBySender(selectedRoom.id).catch(() => []),
         getRoomReasoningSessionCountsByActor(selectedRoom.id).catch(() => []),
       ]);

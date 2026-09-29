@@ -20,7 +20,7 @@ import { emitRoomStreamEvent, getActiveRoomIdentifier } from "../room-stream.js"
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
 import { emitToMainWindow } from "../window.js";
 
-export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): void {
+export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): () => void {
   const renterTriggerRuntime = new RenterTriggerRuntime({
     getRoomIdentifier: getActiveRoomIdentifier,
     emitRoomStreamEvent,
@@ -35,16 +35,14 @@ export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): 
     async getAuthToken() {
       try {
         const stored = await readStoredAuth();
-        return stored.token ?? null;
+        // Rental host polling and launches run as delegated agent activity.
+        return stored.agentToken ?? null;
       } catch {
         return null;
       }
     },
   });
   const rentalLaunchCoordinator = new RentalLaunchCoordinator(rentalApiClient);
-  void rentalLaunchCoordinator.recover().catch((error) => {
-    console.warn(`Rental launch recovery unavailable: ${error instanceof Error ? error.message : String(error)}`);
-  });
   const rentalProviderEventPoller = new RentalProviderEventPoller(
     rentalApiClient,
     (event) => emitToMainWindow("desktop:rental:provider-event", event),
@@ -65,11 +63,21 @@ export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): 
       else await rentalProviderEventPoller.stop();
     },
   );
-  setActiveRentalProviderHostManager(rentalProviderHostManager);
   registerDesktopRentalIpcHandlers(targetIpcMain, {
     renterTriggerRuntime,
     apiClient: rentalApiClient,
     launchCoordinator: rentalLaunchCoordinator,
     providerHostManager: rentalProviderHostManager,
   });
+  let started = false;
+  return () => {
+    if (started) return;
+    started = true;
+    void rentalLaunchCoordinator.recover().catch((error) => {
+      console.warn(`Rental launch recovery unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    void supervisorDaemonClient.isMaintenanceHeld().then(held => {
+      if (!held) setActiveRentalProviderHostManager(rentalProviderHostManager);
+    }).catch(() => undefined);
+  };
 }

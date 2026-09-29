@@ -6,9 +6,11 @@ import { registerTools } from "./server/register-tools.js";
 import { attachMcpServer, autoJoinFromContext, shutdownRuntime } from "./server/runtime.js";
 import { requireValidWorkerBearerRuntime } from "./server/runtime/worker-bearer.js";
 import { executionProfile } from "./server/runtime/execution-profile.js";
+import { WORKSPACE_CAPTURE_INSTRUCTIONS } from "./server/tools/workspace.js";
 import {
   LETAGENTS_RUNTIME_CONTRACT_ARG,
   letAgentsRuntimeContract,
+  registerRuntimeReadinessResource,
 } from "./server/runtime-contract.js";
 
 async function main() {
@@ -16,14 +18,16 @@ async function main() {
     process.stdout.write(`${JSON.stringify(letAgentsRuntimeContract())}\n`);
     return;
   }
+  const profile = executionProfile();
+  const supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null;
   const server = new McpServer({
     name: "letagents",
     version: "0.2.0",
-  });
+  }, { instructions: profile === "autonomous_mcp_worker" || profile === "interactive_desktop" ? WORKSPACE_CAPTURE_INSTRUCTIONS : undefined });
   attachMcpServer(server);
   registerRoomResources(server);
-  const profile = executionProfile();
-  registerTools(server, profile);
+  registerTools(server, profile, supervisedProvider);
+  registerRuntimeReadinessResource(server, profile, supervisedProvider);
   requireValidWorkerBearerRuntime();
   const transport = new StdioServerTransport();
   await server.connect(transport);

@@ -7,6 +7,7 @@ import {
 } from "../db.js";
 import { normalizeGitRoomVisibility } from "../db/git-room-bindings.js";
 import type { GitRoomRefType } from "../db/types.js";
+import { parseFocusRoomLocator } from "../rooms/routing.js";
 import {
   buildGitHubRepoRoomId,
   type GitHubWebhookPayload,
@@ -58,36 +59,34 @@ function refRoomTarget(
   return { refType, refName: normalizedRefName };
 }
 
-export function buildGitHubRefRoomId(input: {
+export function buildGitHubRefRoomLocator(input: {
   repositoryFullName: string;
   refType: RefRoomType;
   refName: string;
 }): string {
-  const repositoryKey = input.repositoryFullName.trim().toLowerCase();
-  return `git-room:github.com:${repositoryKey}:${input.refType}:${encodeRefForRoomId(input.refName)}`;
+  const parentRoomLocator = buildGitHubRepoRoomId(input.repositoryFullName);
+  return `${parentRoomLocator}/focus/${buildGitHubRefFocusKey(input)}`;
 }
 
-export function parseGitHubRefRoomId(roomId: string): {
+export function parseGitHubRefRoomLocator(roomLocator: string): {
   repositoryFullName: string;
   refType: RefRoomType;
   refName: string;
 } | null {
-  const match = /^git-room:github\.com:([^/:\s]+\/[^/:\s]+):(branch|tag):([A-Za-z0-9_-]+)$/.exec(
-    roomId.trim()
-  );
-  if (!match) {
+  const focusLocator = parseFocusRoomLocator(roomLocator.trim());
+  if (!focusLocator) {
     return null;
   }
 
-  const refName = decodeRefFromRoomId(match[3]);
-  if (!refName) {
+  const parentMatch = /^github\.com\/([^/\s]+\/[^/\s]+)$/.exec(focusLocator.parentRoomId);
+  const ref = parseGitHubRefFocusKey(focusLocator.focusKey);
+  if (!parentMatch || !ref) {
     return null;
   }
 
   return {
-    repositoryFullName: match[1].toLowerCase(),
-    refType: match[2] as RefRoomType,
-    refName,
+    repositoryFullName: parentMatch[1].toLowerCase(),
+    ...ref,
   };
 }
 
@@ -98,14 +97,24 @@ export function buildGitHubRefFocusKey(input: {
   return `git:${input.refType}:${encodeRefForRoomId(input.refName)}`;
 }
 
+export function parseGitHubRefFocusKey(focusKey: string): GitHubRefRoomTarget | null {
+  const match = /^git:(branch|tag):([A-Za-z0-9_-]+)$/.exec(focusKey.trim());
+  if (!match) {
+    return null;
+  }
+
+  const refName = decodeRefFromRoomId(match[2]);
+  return refName ? { refType: match[1] as RefRoomType, refName } : null;
+}
+
 function gitRefRoomDisplayName(target: GitHubRefRoomTarget): string {
   return `${target.refType === "branch" ? "Branch" : "Tag"}: ${target.refName}`;
 }
 
-export async function getOrCreateGitHubRefRoomFromId(
-  roomId: string
+export async function getOrCreateGitHubRefRoomFromLocator(
+  roomLocator: string
 ): Promise<Project | null> {
-  const parsed = parseGitHubRefRoomId(roomId);
+  const parsed = parseGitHubRefRoomLocator(roomLocator);
   if (!parsed) {
     return null;
   }
@@ -115,12 +124,10 @@ export async function getOrCreateGitHubRefRoomFromId(
     return null;
   }
 
-  const canonicalRoomId = buildGitHubRefRoomId(parsed);
   const { room: repoRoom } = await getOrCreateCanonicalRoom(
     buildGitHubRepoRoomId(parsed.repositoryFullName)
   );
   const { room } = await getOrCreateGitChildRoom({
-    roomId: canonicalRoomId,
     parentRoomId: repoRoom.id,
     focusKey: buildGitHubRefFocusKey(parsed),
     displayName: gitRefRoomDisplayName(parsed),
@@ -298,15 +305,9 @@ export async function getExistingGitHubEventRefRoom(input: {
     return null;
   }
 
-  const roomId = buildGitHubRefRoomId({
-    repositoryFullName: repository.full_name,
-    refType: target.refType,
-    refName: target.refName,
-  });
   const parentRoomId = buildGitHubRepoRoomId(repository.full_name);
   const focusKey = buildGitHubRefFocusKey(target);
   const room = await deps.getGitChildRoom({
-    roomId,
     parentRoomId,
     focusKey,
   });

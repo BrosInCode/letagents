@@ -1,4 +1,4 @@
-import type { MarketplaceEntry, SystemEntry } from "../components/desktop/types";
+import type { MarketplaceEntry, NeedsYouEntry, SystemEntry } from "../components/desktop/types";
 
 export const rentMarketplaceEntry: MarketplaceEntry = {
   id: "marketplace:rent",
@@ -20,7 +20,7 @@ export const appAgentEntry: SystemEntry = {
   id: "system:app-agent",
   type: "system",
   title: "App Agent",
-  description: "Typed app control",
+  description: "Help using LetAgents",
   sectionLabel: "System",
 };
 
@@ -64,3 +64,5 @@ export const systemEntries: SystemEntry[] = [
   settingsEntry,
   diagnosticsEntry,
 ];
+
+export const needsYouEntry: NeedsYouEntry = { id: "inbox:needs-you", type: "inbox", title: "Inbox", description: "Requests and updates across your rooms", sectionLabel: "LetAgents" };

@@ -3,7 +3,7 @@
     ref="surfaceElement"
     class="agent-inspector-surface"
     :data-compact="compact"
-    :data-state="projection.overallState"
+    :data-state="projection.overallState" :data-tab="selectedTab"
     :role="compact ? 'dialog' : 'complementary'"
     :aria-modal="compact ? 'true' : undefined"
     aria-labelledby="agent-inspector-title"
@@ -15,7 +15,7 @@
         <div>
           <div class="agent-inspector-name-line">
             <h2 id="agent-inspector-title">{{ projection.displayName }}</h2>
-            <span class="agent-inspector-state-label" :data-state="projection.overallState">
+            <span class="agent-inspector-state-label" :data-state="projection.overallState" :data-tab="selectedTab">
               <span aria-hidden="true"></span>{{ projection.overallLabel }}
             </span>
           </div>
@@ -30,24 +30,25 @@
       </button>
     </header>
 
-    <p class="agent-inspector-status-copy">{{ projection.overallDetail }}</p>
+    <p v-if="projection.overallDetail && selectedTab !== 'diagnostics'" class="agent-inspector-status-copy">{{ projection.overallDetail }}</p>
 
     <p v-if="projection.resourceFreshness === 'stale'" class="agent-inspector-stale-banner" role="status">
-      Showing the last known agent state. Controls that depend on live state are unavailable until the supervisor reconnects.
+      Showing the last known status. Agent controls will be available when LetAgents reconnects.
     </p>
 
     <AgentInspectorLifecycleActions
+      v-if="selectedTab !== 'diagnostics'"
       :entry-id="projection.entryId"
       :room-id="projection.roomId"
       :actions="projection.actions"
       :busy="lifecycleActionBusy"
       :busy-kind="lifecycleBusyKind"
       :compact="compact"
-      @action="emit('action', $event)"
+      @action="handleLifecycleAction"
     />
 
     <p
-      v-if="visibleActionMessage"
+      v-if="visibleActionMessage && selectedTab !== 'diagnostics'"
       class="agent-inspector-action-message"
       :data-state="actionState?.status"
     >
@@ -57,7 +58,8 @@
     <div class="agent-inspector-tabs" role="tablist" aria-label="Agent inspector sections" @keydown="handleTabKeydown">
       <button ref="overviewTab" id="agent-inspector-overview-tab" type="button" role="tab" :aria-selected="selectedTab === 'overview'" aria-controls="agent-inspector-overview-panel" :tabindex="selectedTab === 'overview' ? 0 : -1" @click="selectTab('overview')">Overview</button>
       <button id="agent-inspector-live-tab" type="button" role="tab" :aria-selected="selectedTab === 'live'" aria-controls="agent-inspector-live-panel" :tabindex="selectedTab === 'live' ? 0 : -1" @click="selectTab('live')">Live</button>
-      <button id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
+      <button ref="workTab" id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
+      <button id="agent-inspector-workspace-tab" type="button" role="tab" :aria-selected="selectedTab === 'workspace'" aria-controls="agent-inspector-workspace-panel" :tabindex="selectedTab === 'workspace' ? 0 : -1" @click="selectTab('workspace')">Workspace</button>
       <button id="agent-inspector-settings-tab" type="button" role="tab" :aria-selected="selectedTab === 'settings'" aria-controls="agent-inspector-settings-panel" :tabindex="selectedTab === 'settings' ? 0 : -1" @click="selectTab('settings')">Settings</button>
       <button id="agent-inspector-diagnostics-tab" type="button" role="tab" :aria-selected="selectedTab === 'diagnostics'" aria-controls="agent-inspector-diagnostics-panel" :tabindex="selectedTab === 'diagnostics' ? 0 : -1" @click="selectTab('diagnostics')">Diagnostics</button>
     </div>
@@ -65,8 +67,11 @@
     <div class="agent-inspector-scroll-region">
       <div v-if="selectedTab === 'overview'" id="agent-inspector-overview-panel" role="tabpanel" aria-labelledby="agent-inspector-overview-tab">
         <AgentInspectorOverview
+          :room-name="roomDisplayName"
           :projection="projection"
           :busy="actionState?.status === 'running'"
+          :runtime-control="workResource.detail?.runtime_control ?? null"
+          :runtime-control-pending="workResource.status === 'loading' || workResource.status === 'refreshing'"
           @stop-turn="emitTurnControl('stop_turn')"
           @correct-turn="emitTurnControl('steer_turn', $event)"
           @retry-turn-control="emitTurnControl('retry_turn_control')"
@@ -74,65 +79,70 @@
           @restore-conversation="emitRecoveryControl('restore_conversation', $event)"
           @skip-message="emitRecoveryControl('skip_message', $event)"
         />
+        <section v-if="retireAction" class="agent-inspector-overview-retire" aria-labelledby="agent-inspector-retire-title">
+          <div class="agent-inspector-overview-retire-copy">
+            <p id="agent-inspector-retire-title">Retire agent</p>
+            <span>Retire this agent while keeping its history and worktree.</span>
+          </div>
+          <button
+            v-if="!confirmRetire"
+            ref="retireButton"
+            type="button"
+            class="danger"
+            :disabled="lifecycleActionBusy"
+            data-action="retire_agent"
+            @click="openRetireConfirmation"
+          >
+            Retire agent
+          </button>
+          <div v-else class="agent-inspector-overview-retire-confirmation" role="alert">
+            <p>{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
+            <div>
+              <button ref="keepAgentButton" type="button" :disabled="lifecycleActionBusy" @click="cancelRetireConfirmation">Keep agent</button>
+              <button type="button" class="danger" :disabled="lifecycleActionBusy" data-action="retire_agent" @click="handleRetire">
+                Confirm retire agent
+              </button>
+            </div>
+          </div>
+        </section>
       </div>
       <AgentInspectorLive
         v-else-if="selectedTab === 'live'" id="agent-inspector-live-panel" role="tabpanel" aria-labelledby="agent-inspector-live-tab"
         :feed="liveFeed"
+        :work="projection.liveWork"
         :supports-reasoning="liveSupportsReasoning"
+        :resource="workResource"
+        :active-source-message-id="projection.liveWork.active ? projection.entry.roomAgentState?.turn.sourceMessageId ?? null : null"
       />
       <AgentInspectorWork
         v-else-if="selectedTab === 'work'" id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"
         :resource="workResource" :selected-source-message-id="selectedWorkSourceMessageId" :tasks="projection.assignedWork" :artifacts="workArtifacts"
         @retry="emit('work-retry')" @select-source="emit('work-source-select', $event)" @reveal="emit('reveal-message', $event)"
       />
+      <AgentInspectorWorkspace v-else-if="selectedTab === 'workspace'" id="agent-inspector-workspace-panel" role="tabpanel" aria-labelledby="agent-inspector-workspace-tab"
+        :work="roomAgentWork ?? []" :agent-key="projection.entry.agentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :request-version="requestVersion" />
       <AgentInspectorSettings
         v-else-if="selectedTab === 'settings'" id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
-        :entry-id="projection.entryId" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
+        :entry-id="projection.entryId" :display-name="projection.displayName" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
         :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
-        :busy="actionState?.status === 'running'" :conflict="settingsConflict"
-        @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @reload="emit('settings-reload')"
+        :busy="actionState?.status === 'running'" :apply-pending="actionState?.kind === 'apply_settings' && actionState.status === 'success' && configurationHasRuntimeLag(settingsResource.configuration)" :conflict="settingsConflict"
+        @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @apply="emit('settings-apply')" @reload="emit('settings-reload')"
         @prepare-move="emit('room-move-prepare', $event)" @commit-move="emit('room-move-commit')"
         @retire="emit('retire')" @purge="emit('purge')"
       />
       <AgentInspectorDiagnostics
         v-else id="agent-inspector-diagnostics-panel" role="tabpanel" aria-labelledby="agent-inspector-diagnostics-tab"
-        :projection="projection"
-        :work-resource="workResource"
+        :projection="projection" :initial-recovery-options="recoveryOptionsRequested"
+        :work-resource="workResource" :daemon-status="daemonStatus" :action-state="actionState" :busy="lifecycleActionBusy" :refresh-diagnostics="refreshDiagnostics"
+        @action="handleLifecycleAction" @navigate="navigateFromDiagnostics"
       />
     </div>
 
-    <!-- Retiring an agent is a deliberate lifecycle decision, not a routine
-         action: it lives as an always-visible destructive footer instead of
-         inside the overflow menu, whose contents re-render on every live-facts
-         refresh and closed under the pointer. The confirm state resets only
-         when the inspected agent changes, so a poll tick cannot cancel it. -->
-    <footer v-if="retireAction" class="agent-inspector-danger-footer">
-      <p v-if="confirmRetire" role="alert">{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
-      <div class="agent-inspector-danger-footer-actions">
-        <button
-          v-if="confirmRetire"
-          type="button"
-          :disabled="lifecycleActionBusy"
-          @click="confirmRetire = false"
-        >
-          Keep agent
-        </button>
-        <button
-          type="button"
-          class="danger"
-          :disabled="lifecycleActionBusy"
-          data-action="retire_agent"
-          @click="handleRetire"
-        >
-          {{ confirmRetire ? "Confirm retire agent" : retireAction.label }}
-        </button>
-      </div>
-    </footer>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import type {
   AgentInspectorActionIntent,
   AgentInspectorActionState,
@@ -142,14 +152,15 @@ import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspec
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
-import { AGENT_INSPECTOR_RETIRE_CONFIRMATION } from "../../../../domain/agent-inspector-settings";
+import { AGENT_INSPECTOR_RETIRE_CONFIRMATION, configurationHasRuntimeLag } from "../../../../domain/agent-inspector-settings";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
+import AgentInspectorWorkspace from "./AgentInspectorWorkspace.vue";
 import AgentInspectorWork from "./AgentInspectorWork.vue";
 import AgentInspectorSettings from "./AgentInspectorSettings.vue";
 
-type InspectorTab = "overview" | "live" | "work" | "settings" | "diagnostics";
+type InspectorTab = "overview" | "live" | "work" | "workspace" | "settings" | "diagnostics";
 
 /** Diagnostics and Live stay out of the normal inspector path until opened. */
 const AgentInspectorDiagnostics = defineAsyncComponent(() => import("./AgentInspectorDiagnostics.vue"));
@@ -157,6 +168,14 @@ const AgentInspectorLive = defineAsyncComponent(() => import("./AgentInspectorLi
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
+  roomDisplayName?: string;
+  daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
+  refreshDiagnostics?: () => Promise<boolean>;
+  initialTab?: "overview" | "work" | "workspace";
+  roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
+  workspaceSourceMessageId?: string | null;
+  requestVersion?: number;
   actionState: AgentInspectorActionState | null;
   compact: boolean;
   workResource: AgentInspectorWorkResource;
@@ -182,6 +201,7 @@ const emit = defineEmits<{
   "settings-selected": [];
   "settings-patch": [patch: Partial<import("../../../../domain/agent-inspector-settings").AgentInspectorConfigurationDraft>];
   "settings-save": [overwrite: boolean];
+  "settings-apply": [];
   "settings-reload": [];
   "room-move-prepare": [destination: string];
   "room-move-commit": [];
@@ -192,7 +212,10 @@ const emit = defineEmits<{
 const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
-const selectedTab = ref<InspectorTab>("overview");
+const workTab = ref<HTMLButtonElement | null>(null);
+const retireButton = ref<HTMLButtonElement | null>(null);
+const keepAgentButton = ref<HTMLButtonElement | null>(null);
+const selectedTab = ref<InspectorTab>(props.initialTab ?? "overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
 const liveSupportsReasoning = computed(() => {
   const provider = props.providers.find((candidate) => candidate.id === props.projection.provider);
@@ -210,17 +233,32 @@ const visibleActionMessage = computed(() => {
   return props.actionState.message;
 });
 const retireAction = computed(() =>
-  props.projection.actions.find((action) => action.available && action.danger) ?? null);
+  props.projection.actions.find((action) => action.available && action.kind === "retire_agent") ?? null);
 const confirmRetire = ref(false);
-watch(() => props.projection.entryId, () => { confirmRetire.value = false; });
+const recoveryOptionsRequested = ref(false);
+
+function handleLifecycleAction(intent: AgentInspectorActionIntent): void {
+  if (intent.kind !== "recovery_options") { emit("action", intent); return; }
+  if (lifecycleActionBusy.value || props.projection.resourceFreshness !== "fresh"
+    || intent.entryId !== props.projection.entryId || intent.roomId !== props.projection.roomId
+    || !props.projection.actions.some(action => action.kind === intent.kind && action.available)) return;
+  recoveryOptionsRequested.value = true;
+  selectTab("diagnostics");
+}
+
+function openRetireConfirmation(): void {
+  confirmRetire.value = true;
+  void nextTick(() => keepAgentButton.value?.focus({ preventScroll: true }));
+}
+
+function cancelRetireConfirmation(): void {
+  confirmRetire.value = false;
+  void nextTick(() => retireButton.value?.focus({ preventScroll: true }));
+}
 
 function handleRetire(): void {
   const action = retireAction.value;
   if (!action) return;
-  if (!confirmRetire.value) {
-    confirmRetire.value = true;
-    return;
-  }
   confirmRetire.value = false;
   emit("action", {
     entryId: props.projection.entryId,
@@ -240,15 +278,26 @@ function containsFocus(): boolean {
 
 defineExpose({ focusInitial, containsFocus });
 
-watch(() => props.projection.entryId, () => { selectedTab.value = "overview"; });
+watch([() => props.projection.entryId, () => props.requestVersion, () => props.initialTab], () => {
+  selectedTab.value = props.initialTab ?? "overview";
+  confirmRetire.value = false;
+  recoveryOptionsRequested.value = false;
+});
 
 function selectTab(tab: InspectorTab): void {
   if (selectedTab.value === tab) return;
   if (selectedTab.value === "live" && tab !== "live") emit("live-dismissed");
+  if (tab !== "overview") confirmRetire.value = false;
   selectedTab.value = tab;
+  if (tab !== "diagnostics") recoveryOptionsRequested.value = false;
   if (tab === "live") emit("live-selected");
-  if (tab === "work") emit("work-selected");
+  if (tab === "work" || tab === "diagnostics") emit("work-selected");
   if (tab === "settings") emit("settings-selected");
+}
+
+function navigateFromDiagnostics(tab: "overview" | "work"): void {
+  selectTab(tab);
+  void nextTick(() => (tab === "work" ? workTab.value : overviewTab.value)?.focus());
 }
 
 function emitTurnControl(
@@ -280,7 +329,7 @@ function emitRecoveryControl(
 function handleTabKeydown(event: KeyboardEvent): void {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
-  const tabs: InspectorTab[] = ["overview", "live", "work", "settings", "diagnostics"];
+  const tabs: InspectorTab[] = ["overview", "live", "work", "workspace", "settings", "diagnostics"];
   const current = tabs.indexOf(selectedTab.value);
   const next = event.key === 'Home' ? 'overview' : event.key === 'End' ? 'diagnostics' : tabs[(current + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length]!;
   selectTab(next);
@@ -295,8 +344,8 @@ function handleKeydown(event: KeyboardEvent): void {
   }
   if (!props.compact || event.key !== "Tab" || !surfaceElement.value) return;
   const focusable = [...surfaceElement.value.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  )];
+    'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+  )].filter(element => element.tabIndex >= 0 && element.checkVisibility({ visibilityProperty: true }));
   if (!focusable.length) return;
   const first = focusable[0]!;
   const last = focusable.at(-1)!;

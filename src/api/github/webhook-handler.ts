@@ -1,9 +1,15 @@
 import {
   getGitHubAppRepositoryByFullName,
+  getSupervisorGrantOwnerAccount,
+  getSupervisorHostGrantById,
   getProjectById,
+  listSupervisorGrantAuthoritiesForRepository,
   markGitHubAppInstallationUninstalled,
   markGitHubAppRepositoryRemoved,
   migrateGitHubRepositoryCanonicalRoom,
+  revokeSupervisorGrantAuthority,
+  revokeSupervisorGrantsForGitHubInstallationAccessChange,
+  revokeSupervisorGrantsForRepositoryAccessChange,
   setGitHubAppInstallationSuspended,
   upsertGitHubAppInstallation,
   upsertGitHubAppRepository,
@@ -19,6 +25,7 @@ import {
 import {
   clearGitHubRepoAccessCacheForLogin,
   clearGitHubRepoAccessCacheForRoom,
+  resolveGitHubRepoRoomAccessDecision,
 } from "./repo-access.js";
 import {
   createGitHubAppSync,
@@ -46,11 +53,100 @@ interface GitHubWebhookProcessingOptions {
   retryFailedDelivery?: boolean;
 }
 
+export interface SupervisorAccessRevocationTarget {
+  repository_full_name: string;
+  canonical_room_id: string;
+  owner_login: string | null;
+}
+
+interface SupervisorGrantRevalidationDeps {
+  listAuthorities: typeof listSupervisorGrantAuthoritiesForRepository;
+  getGrant: typeof getSupervisorHostGrantById;
+  getOwner: typeof getSupervisorGrantOwnerAccount;
+  resolveAccess: typeof resolveGitHubRepoRoomAccessDecision;
+  revokeAuthority: typeof revokeSupervisorGrantAuthority;
+}
+
+export async function revalidateSupervisorGrantsForRepositoryAccessChange(
+  target: SupervisorAccessRevocationTarget,
+  deps: SupervisorGrantRevalidationDeps = {
+    listAuthorities: listSupervisorGrantAuthoritiesForRepository,
+    getGrant: getSupervisorHostGrantById,
+    getOwner: getSupervisorGrantOwnerAccount,
+    resolveAccess: resolveGitHubRepoRoomAccessDecision,
+    revokeAuthority: revokeSupervisorGrantAuthority,
+  },
+): Promise<void> {
+  const authorities = await deps.listAuthorities(target);
+  let indeterminate = false;
+  for (const authority of authorities) {
+    const grant = await deps.getGrant(authority.grant_id);
+    if (!grant) continue;
+    // Redelivery must finish teardown after a crash between grant revocation
+    // and worker-session cleanup; no provider check is needed once revoked.
+    if (grant.revoked_at) {
+      await deps.revokeAuthority(authority);
+      continue;
+    }
+    const owner = await deps.getOwner(grant.owner_account_id);
+    if (!owner?.provider_access_token) {
+      indeterminate = true;
+      continue;
+    }
+    try {
+      const decision = await deps.resolveAccess({
+        roomName: target.canonical_room_id,
+        sessionAccount: owner,
+        freshCollaboratorCheck: true,
+        throwOnIndeterminate: true,
+      });
+      if (decision.kind !== "allow") {
+        await deps.revokeAuthority(authority);
+      }
+    } catch {
+      indeterminate = true;
+    }
+  }
+  if (indeterminate) {
+    throw new Error("Supervisor grant access revalidation was indeterminate; retry webhook delivery.");
+  }
+}
+
+/** Only definitive GitHub authorization-boundary events revoke live grants. */
+export function getSupervisorAccessRevocationTarget(
+  eventName: string,
+  payload: GitHubWebhookPayload,
+): SupervisorAccessRevocationTarget | null {
+  const repositoryFullName = payload.repository?.full_name?.trim();
+  if (!repositoryFullName) return null;
+  if (eventName === "repository" && payload.action === "privatized") {
+    return {
+      repository_full_name: repositoryFullName,
+      canonical_room_id: buildGitHubRepoRoomId(repositoryFullName),
+      owner_login: null,
+    };
+  }
+  const memberLogin = payload.member?.login?.trim();
+  if (
+    eventName === "member"
+    && payload.action === "removed"
+    && memberLogin
+    && payload.repository?.private !== false
+  ) {
+    return {
+      repository_full_name: repositoryFullName,
+      canonical_room_id: buildGitHubRepoRoomId(repositoryFullName),
+      owner_login: memberLogin,
+    };
+  }
+  return null;
+}
+
 function clearRepoAccessCacheForWebhookPayload(payload: GitHubWebhookPayload): void {
   if (payload.repository?.full_name) {
     clearGitHubRepoAccessCacheForRoom(buildGitHubRepoRoomId(payload.repository.full_name));
   }
-  const memberLogin = (payload as { member?: { login?: unknown } }).member?.login;
+  const memberLogin = payload.member?.login;
   if (typeof memberLogin === "string" && memberLogin.trim()) {
     clearGitHubRepoAccessCacheForLogin(memberLogin);
   }
@@ -198,6 +294,11 @@ export async function handleGitHubWebhookEvent(
     clearRepoAccessCacheForWebhookPayload(payload);
   }
 
+  const accessRevocationTarget = getSupervisorAccessRevocationTarget(eventName, payload);
+  if (accessRevocationTarget) {
+    await revalidateSupervisorGrantsForRepositoryAccessChange(accessRevocationTarget);
+  }
+
   if (eventName === "ping") {
     return {
       status: "processed",
@@ -208,6 +309,14 @@ export async function handleGitHubWebhookEvent(
   }
 
   switch (eventName) {
+    case "member":
+      return {
+        status: accessRevocationTarget ? "processed" : "ignored",
+        installationId,
+        githubRepoId,
+        roomId,
+      };
+
     case "installation": {
       if (!installationId || !payload.action) {
         return {
@@ -222,6 +331,12 @@ export async function handleGitHubWebhookEvent(
       const now = new Date().toISOString();
       if (payload.action === "deleted") {
         await markGitHubAppInstallationUninstalled(installationId, now);
+        await revokeSupervisorGrantsForGitHubInstallationAccessChange({
+          installation_id: installationId,
+          repositories: (payload.repositories ?? []).map((repository) => ({
+            full_name: repository.full_name,
+          })),
+        });
         if (materializedEvent) {
           await persistMaterializedGitHubRoomEvent(materializedEvent, {
             deliveryId,
@@ -243,6 +358,12 @@ export async function handleGitHubWebhookEvent(
         if (!payload.installation?.account) {
           await setGitHubAppInstallationSuspended(installationId, now);
         }
+        await revokeSupervisorGrantsForGitHubInstallationAccessChange({
+          installation_id: installationId,
+          repositories: (payload.repositories ?? []).map((repository) => ({
+            full_name: repository.full_name,
+          })),
+        });
         if (materializedEvent) {
           await persistMaterializedGitHubRoomEvent(materializedEvent, {
             deliveryId,
@@ -321,6 +442,10 @@ export async function handleGitHubWebhookEvent(
         }
 
         await markGitHubAppRepositoryRemoved(repositoryId);
+        await revokeSupervisorGrantsForRepositoryAccessChange({
+          repository_full_name: repository.full_name,
+          canonical_room_id: buildGitHubRepoRoomId(repository.full_name),
+        });
       }
 
       const materializedEvent = materializeGitHubWebhookEvent(eventName, payload, deliveryId);
@@ -434,7 +559,7 @@ export async function handleGitHubWebhookEvent(
       );
 
       return {
-        status: "ignored",
+        status: accessRevocationTarget ? "processed" : "ignored",
         installationId: syncedInstallationId,
         githubRepoId: repositorySync.githubRepoId,
         roomId: repositorySync.roomId,

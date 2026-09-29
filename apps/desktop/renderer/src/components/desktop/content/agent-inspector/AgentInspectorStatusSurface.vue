@@ -25,6 +25,9 @@
       <strong>{{ heading }}</strong>
       <p>{{ detail }}</p>
     </div>
+    <div v-if="canRetry" class="agent-inspector-actions agent-inspector-status-actions">
+      <button type="button" @click="emit('retry')">Try again</button>
+    </div>
   </aside>
 </template>
 
@@ -37,8 +40,9 @@ const props = defineProps<{
   eyebrow: string;
   heading: string;
   detail: string;
+  canRetry: boolean;
 }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; retry: [] }>();
 const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 

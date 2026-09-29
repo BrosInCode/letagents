@@ -1,4 +1,7 @@
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
+import { currentWorkerCall } from "../../worker-call-context.js";
+import { LETAGENTS_AGENT_SESSION_TOKEN_HEADER } from "../../../shared/request-headers.js";
+import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import {
   borrowCurrentSupervisedWorkerCredential,
@@ -33,6 +36,8 @@ export class SupervisedWorkerCredentialError extends Error {
 }
 
 async function getSupervisedCredential(): Promise<string> {
+  const daemonContext = getDaemonToolExecutionContext();
+  if (daemonContext) return daemonContext.bearer;
   const result = await supervisedCredentialBorrower();
   if (result.state === "available") return result.credential;
   throw new SupervisedWorkerCredentialError(
@@ -41,6 +46,10 @@ async function getSupervisedCredential(): Promise<string> {
 }
 
 export const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
+
+export function getApiUrl(): string {
+  return getDaemonToolExecutionContext()?.apiUrl.replace(/\/+$/, "") ?? API_URL;
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -102,8 +111,9 @@ export function resolveApiPath(urlOrPath: string | undefined): string {
   }
 
   try {
-    const parsed = new URL(urlOrPath, `${API_URL}/`);
-    const apiBase = new URL(`${API_URL}/`);
+    const apiUrl = getApiUrl();
+    const parsed = new URL(urlOrPath, `${apiUrl}/`);
+    const apiBase = new URL(`${apiUrl}/`);
     if (parsed.origin !== apiBase.origin) {
       return "/auth/device/start";
     }
@@ -136,14 +146,16 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
     }
   }
 
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await fetch(`${getApiUrl()}${path}`, {
     ...options,
     headers,
   });
 
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 401 && requireValidWorkerBearerRuntime().mode === "owner") {
+    const hasWorkerCredential = currentWorkerCall() || headers.has(LETAGENTS_AGENT_SESSION_TOKEN_HEADER)
+      || (typeof options?.body === "string" && /"(?:agent_session_token|replace_agent_session_token|connection_token)"\s*:/.test(options.body));
+    if (res.status === 401 && requireValidWorkerBearerRuntime().mode === "owner" && !hasWorkerCredential) {
       // Only clear on 401 (invalid/expired credential), NOT on 403
       // (valid credential but insufficient permissions, e.g., private repo access)
       const { clearStoredAuth } = await ownerAuthStoreLoader();

@@ -19,6 +19,8 @@ import { createServer, type ViteDevServer } from "vite";
 let vite: ViteDevServer;
 let AddAgentSupervisedLaunch: Component;
 let AddAgentActionBar: Component;
+let AddAgentSetupStatus: Component;
+let AddAgentRuntimeSettings: Component;
 let AddAgentSupervisedLaunchActions: Component;
 let managedAgentSessionsKey: InjectionKey<unknown>;
 let actionStyleNames: Record<string, string>;
@@ -41,6 +43,12 @@ before(async () => {
       "/renderer/src/components/desktop/content/add-agent/AddAgentActionBar.vue",
     )
   ).default;
+  AddAgentSetupStatus = (await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/add-agent/AddAgentSetupStatus.vue",
+  )).default;
+  AddAgentRuntimeSettings = (await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/add-agent/AddAgentRuntimeSettings.vue",
+  )).default;
   AddAgentSupervisedLaunchActions = (
     await vite.ssrLoadModule(
       "/renderer/src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.ts",
@@ -282,7 +290,7 @@ test("mounted ready supervised button dispatches dismiss and restores Start with
   assert.match(beforeRelease, /desktop-add-agent-add-another-supervised/);
   assert.match(beforeRelease, /Add another Codex agent/);
   assert.doesNotMatch(beforeRelease, /desktop-add-agent-stop-supervised-runtime/);
-  assert.doesNotMatch(beforeRelease, />Start supervised agent</);
+  assert.doesNotMatch(beforeRelease, />Start agent</);
 
   const root = hostNode("root");
   const app = testRenderer.createApp(defineComponent({
@@ -320,7 +328,7 @@ test("mounted ready supervised button dispatches dismiss and restores Start with
   assert.equal(ready.counts().dismissCalls, 1);
   assert.equal(ready.counts().stopCalls, 0);
   assert.doesNotMatch(afterRelease, /desktop-add-agent-add-another-supervised/);
-  assert.match(afterRelease, />Start supervised agent</);
+  assert.match(afterRelease, />Start agent</);
 });
 
 test("pre-durable failures are compact, actionable, and explicit that nothing changed", async () => {
@@ -336,4 +344,108 @@ test("pre-durable failures are compact, actionable, and explicit that nothing ch
   assert.match(html, /desktop-add-agent-dismiss-launch/);
   assert.doesNotMatch(html, /Saving your agent/, "unreachable future steps should not remain in a terminal card");
   assert.match(html, /<summary[^>]*>Details<\/summary>/);
+});
+
+test("Keychain failures render self-service recovery and a separate retry", async () => {
+  const failed = failedController();
+  Object.assign(failed.controller.launch.view.value, {
+    currentPhaseId: "saving_agent",
+    headline: "Unlock Keychain to finish setup",
+    failureDetail: "LetAgents needs access to your Mac login keychain to save this agent securely.",
+    recovery: "open_keychain",
+  });
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentSupervisedLaunch, { controller: failed.controller }),
+  }));
+
+  assert.match(html, /Unlock Keychain to finish setup/);
+  assert.match(html, /Open Keychain Access<\/button>/);
+  assert.match(html, /supervised-launch-keychain-retry/);
+  assert.match(html, /Try again<\/button>/);
+  assert.match(html, /desktop-add-agent-dismiss-launch/);
+});
+
+const setupPresentationProps = {
+  providerName: "Codex",
+  preflight: { status: "ready", nextAction: null },
+  loading: false,
+  error: null,
+  statusTitle: "Choose how it works here",
+  statusDescription: "Choose a model and give it a task.",
+  runtimeLabel: "codex-cli 0.153.4",
+  bridgeLabel: "Managed at launch",
+  repoLabel: "/project",
+  showSecureStorage: true,
+  secureStorageLabel: "Available",
+  secureStorageNeedsAttention: false,
+  canOpenSecureStorage: false,
+  showWorktrees: false,
+  worktrees: [],
+  worktreeDescription: "",
+  authCommand: "codex login",
+  installCommand: null,
+};
+
+test("successful setup keeps diagnostics collapsed and the launch form prominent", async () => {
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentSetupStatus, setupPresentationProps, {
+      default: () => h("textarea", { "aria-label": "First task" }),
+      actions: () => h("button", "Start agent"),
+    }),
+  }));
+  const details = html.match(/<details[^>]*>/)?.[0] || "";
+  assert.ok(details);
+  assert.doesNotMatch(details, /\bopen\b/);
+  assert.doesNotMatch(html, /desktop-add-agent-status-header|status-pill|Choose how it works here/);
+  assert.match(html, /<summary tabindex="0"[^>]*>Setup details<\/summary>/);
+  assert.match(html, /codex-cli 0.153.4/);
+  assert.ok(html.indexOf("First task") < html.indexOf("Start agent"));
+});
+
+test("setup problems expand diagnostics and retain their actionable instructions", async () => {
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentSetupStatus, {
+      ...setupPresentationProps,
+      preflight: { status: "auth_required", nextAction: "authenticate" },
+      statusTitle: "Sign in to Codex",
+      statusDescription: "Sign in to your agent app, then check again.",
+    }),
+  }));
+  assert.match(html, /<details[^>]*\bopen\b/);
+  assert.match(html, /Sign in to Codex/);
+  assert.match(html, /codex login/);
+  assert.match(html, /Check again/);
+});
+
+test("locked credentials remain visible even when provider preflight succeeds", async () => {
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentSetupStatus, {
+      ...setupPresentationProps,
+      secureStorageNeedsAttention: true,
+      canOpenSecureStorage: true,
+      secureStorageLabel: "Unlock required",
+      statusTitle: "Unlock secure credential storage",
+    }),
+  }));
+  assert.match(html, /<details[^>]*\bopen\b/);
+  assert.match(html, /Unlock secure credential storage/);
+  assert.match(html, /Open Keychain Access/);
+});
+
+test("collapsed access options still disclose the selected high-risk permissions", async () => {
+  const profile = { id: "full-access", label: "Full access", risk: "high", status: "available", description: "Can run commands outside this project." };
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentRuntimeSettings, {
+      provider: { id: "codex", capabilities: ["supervised_runtime"] },
+      executionDescription: "Runs on this Mac.",
+      charter: "Inspect this project.",
+      permissionProfiles: [profile],
+      selectedPermissionProfile: profile,
+    }),
+  }));
+  const details = html.match(/<details[^>]*>/)?.[0] || "";
+  assert.ok(details);
+  assert.doesNotMatch(details, /\bopen\b/);
+  assert.match(html, /<summary tabindex="0"[^>]*>[\s\S]*?Full access[\s\S]*?High risk[\s\S]*?<\/summary>/);
+  assert.match(html, /<small[^>]*>First task<\/small>/);
 });

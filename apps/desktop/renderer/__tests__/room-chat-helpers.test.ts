@@ -412,6 +412,19 @@ describe("room chat helpers", () => {
     assert.equal(search.activeSearchMessageId.value, "msg_2");
   });
 
+  it("searches and quotes readable board approval copy", () => {
+    const approval = roomMessage("msg_approval", null, "2026-09-07T00:00:00Z");
+    approval.text = "@agent:owner/lumen Board intent bi_123 was approved.";
+    approval.displayText = "@LumenRiver — Your request to claim task_19: Tests and CI was approved.";
+    const search = useDesktopRoomSearch(ref([approval]));
+    search.searchQuery.value = "Tests and CI";
+    assert.equal(search.searchResults.value[0]?.id, approval.id);
+    assert.equal(threadQuotePreview(approval), approval.displayText);
+    search.searchQuery.value = "bi_123";
+    assert.equal(search.searchResults.value.length, 0);
+    assert.match(approval.text, /bi_123/);
+  });
+
   it("finds and scrolls the requested thread message through its shared DOM contract", () => {
     const calls: ScrollIntoViewOptions[] = [];
     const elements = ["msg_root", "msg_reply"].map((messageId) => ({
@@ -817,6 +830,34 @@ describe("room chat helpers", () => {
     );
   });
 
+  it("renders local-file Markdown as clean filenames in full chat messages", () => {
+    const path = "/Users/emmy/.letagents/worktrees/todo-app/workspace-file-open-qa-20260908.md";
+    const html = renderMessageText(`### Workspace file QA\n- Created [test file](${path}).\n- Everything else was preserved.`, "");
+    assert.equal(html, '<h3>Workspace file QA</h3><ul><li>Created <code>workspace-file-open-qa-20260908.md</code>.</li><li>Everything else was preserved.</li></ul>');
+    assert.doesNotMatch(html, /href|\/Users|\[test file\]/);
+    for (const target of ["./src/App.tsx", "../src/App.tsx", "src/App.tsx", "App.tsx", "file:///Users/emmy/App.tsx", "C:\\project\\App.tsx"]) {
+      assert.equal(renderMessageText(`[file](${target})`, ""), '<p><code>App.tsx</code></p>');
+    }
+    assert.equal(renderMessageText('[file](<./My Project/My File.md>) and [build](Dockerfile)', ""), '<p><code>My File.md</code> and <code>Dockerfile</code></p>');
+  });
+
+  it("shortens standalone file paths without changing executable code or web links", () => {
+    assert.equal(renderMessageText('Path: `/Users/emmy/project/App.tsx` and ./src/test.ts.', ""), '<p>Path: <code>App.tsx</code> and <code>test.ts</code>.</p>');
+    for (const command of ["/usr/bin/python3 script.py", "./scripts/run.sh input.txt", "/bin/cat /tmp/App.tsx"]) {
+      assert.equal(renderMessageText("`" + command + "`", ""), `<p><code>${command}</code></p>`);
+    }
+    assert.equal(renderMessageText('Run `cat /Users/emmy/project/App.tsx`. Route /api/health.', ""), '<p>Run <code>cat /Users/emmy/project/App.tsx</code>. Route /api/health.</p>');
+    assert.equal(renderMessageText('```sh\ncat /Users/emmy/project/App.tsx\n```', ""), '<pre><code class="language-sh">cat /Users/emmy/project/App.tsx</code></pre>');
+    assert.equal(renderMessageText('[PR](https://github.com/owner/repo/pull/1)', ""), '<p><a href="https://github.com/owner/repo/pull/1" target="_blank" rel="noopener noreferrer">PR</a></p>');
+  });
+
+  it("escapes file names and never creates local or executable URL links", () => {
+    const html = renderMessageText('Created /tmp/%3Cimg%20src=x%20onerror=alert(1)%3E.md [x](javascript:alert) [x](file:///tmp/%3Cscript%3E.md)', "");
+    assert.doesNotMatch(html, /<img|<script|href=/);
+    assert.match(html, /&lt;script&gt;\.md/);
+    assert.doesNotMatch(renderMessageText('[bad](./a\"onmouseover=evil.md)', ""), /<code>[^<]*"/);
+  });
+
   it("links loaded message id references in desktop message text", () => {
     assert.equal(
       renderMessageText("See msg_6's note, not msg_99.", "", new Set(["msg_6"])),
@@ -922,6 +963,15 @@ describe("room chat helpers", () => {
       ].join("\n"), ""),
       '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><pre><code class="language-ts">const safe = &quot;&lt;ok&gt;&quot;</code></pre>',
     );
+  });
+
+  it("preserves complete file paths in ticket Markdown without making them links", () => {
+    const html = renderDesktopMarkdown('`src/api/auth.ts` and src/web/auth.ts. [file](</tmp/test/auth.ts>)', {
+      block: true, mentions: false, preservePaths: true,
+    });
+    assert.equal(html, '<p><code>src/api/auth.ts</code> and src/web/auth.ts. <code>/tmp/test/auth.ts</code></p>');
+    assert.doesNotMatch(html, /href=/);
+    assert.equal(renderDesktopMarkdown('`src/api/auth.ts`'), '<code>auth.ts</code>');
   });
 
   it("bounds adversarial blockquote nesting in desktop messages", () => {
@@ -1072,3 +1122,62 @@ function presenceEntry(overrides: Partial<DesktopAgentPresence> = {}): DesktopAg
     ...overrides,
   };
 }
+
+it('places only turn contributions beside their visible conversation and never presents cumulative snapshots as turns', () => {
+  const message = roomMessage('msg_1', null, '2026-05-28T12:00:00Z');
+  const snapshot = { captured_at: '2026-05-28T12:01:00Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready' as const,
+    files: [{ path: 'app.ts', previous_path: null, status: 'modified' as const, additions: 1, deletions: 1, binary: false }],
+    additions: 1, deletions: 1, hidden_files: 0, patch: '', patch_truncated: false };
+  const work = { attemptId: 'attempt', roomId: 'room', sourceMessageId: 'msg_1', agentKey: 'Emmy/agent', revision: 1, updatedAt: snapshot.captured_at,
+    summary: { version: 3 as const, recorded_state: 'completed' as const, evidence_incomplete: false, elapsed_ms: 1,
+      operation_counts: { unresolved: 0, succeeded: 1, failed: 0, denied_before_start: 0, cancelled_before_start: 0, interrupted_after_start: 0, lost_after_start: 0 },
+      workspace: snapshot, contribution: { changes: snapshot, summary: 'Saved tasks' } } };
+  const entries = buildMessageTimelineEntries([message, roomMessage('msg_2', null, '2026-05-28T12:02:00Z')], [work]);
+  assert.deepEqual(entries.map(entry => entry.type), ['date', 'message', 'contribution', 'message']);
+  const skewed = { ...work, summary: { ...work.summary, contribution: { ...work.summary.contribution, changes: { ...snapshot, captured_at: '2026-05-27T12:00:00Z' } } } };
+  assert.deepEqual(buildMessageTimelineEntries([message], [skewed]).map(entry => entry.type), ['date', 'message', 'contribution']);
+  assert.equal(buildMessageTimelineEntries([], [work]).length, 0, 'hidden/absent sources cannot leave receipts in the conversation');
+  const empty = { ...snapshot, files: [], additions: 0, deletions: 0, patch: '' };
+  const unavailable = { ...empty, state: 'unavailable' as const };
+  for (const changes of [empty, unavailable]) {
+    const noReview = { ...work, summary: { ...work.summary, workspace: unavailable, contribution: { changes, summary: null } } };
+    assert.equal(buildMessageTimelineEntries([message], [noReview]).some(entry => entry.type === 'contribution'), false,
+      'empty and unavailable legacy captures are evidence, not review cards');
+  }
+  const readyEmpty = { ...work, summary: { ...work.summary, contribution: { changes: empty, summary: null } } };
+  assert.equal(buildMessageTimelineEntries([message], [readyEmpty]).some(entry => entry.type === 'contribution'), false,
+    'known empty turn cannot claim earlier cumulative edits');
+  const unknownTurn = { ...work, summary: { ...work.summary, contribution: { changes: unavailable, summary: null } } };
+  assert.equal(buildMessageTimelineEntries([message], [unknownTurn]).some(entry => entry.type === 'contribution'), true,
+    'unknown turn can still offer an actual cumulative workspace review');
+  for (const changes of [
+    { ...empty, files: [{ ...snapshot.files[0], additions: 0, deletions: 0, binary: true }] },
+    { ...empty, hidden_files: 1 },
+    { ...empty, patch: 'old mode 100644\nnew mode 100755' },
+    { ...empty, patch_truncated: true },
+  ]) {
+    const review = { ...work, summary: { ...work.summary, contribution: { changes, summary: null } } };
+    assert.equal(buildMessageTimelineEntries([message], [review]).some(entry => entry.type === 'contribution'), true,
+      'zero textual counts and incomplete previews do not prove no change');
+  }
+  const { contribution: _turn, ...legacy } = work.summary;
+  assert.equal(buildMessageTimelineEntries([message], [{ ...work, summary: { ...legacy, version: 2 } }]).some(entry => entry.type === 'contribution'), false);
+});
+
+it('keeps contribution prose formatted and never displays a machine path or a cut sentence', async () => {
+  const { readableContributionText } = await import('../../../../shared/contribution-text.mjs');
+  const value = readableContributionText('Done.\n\nPath: `/Users/emmy/work tree/src/example.ts`\n\n**Changed**\n- Added a file.\n- Preserved existing work.');
+  assert.equal(value, '**Changed**\n- Added a file.\n- Preserved existing work.');
+  assert.match(renderDesktopMarkdown(value!, { block: true }), /<strong>Changed<\/strong>.*<ul><li>Added a file\./);
+  const linked = readableContributionText('Created [example.ts](/Users/emmy/repo/example.ts).');
+  assert.equal(linked, 'Created `example.ts`.');
+  assert.doesNotMatch(linked!, /\/Users|\]\(/);
+  assert.equal(readableContributionText('Updated the task editor. ' + 'unfinished '.repeat(60)), 'Updated the task editor.');
+  assert.equal(readableContributionText('x'.repeat(400)), null);
+  assert.equal(readableContributionText('Updated /tmp/private.ts successfully.'), 'Updated `private.ts` successfully.');
+  assert.equal(readableContributionText('See https://raw.githubusercontent.com/acme/repo/main/app.ts.'), 'See `app.ts`.');
+  assert.equal(readableContributionText('See [app.ts](https://github.com/acme/repo/blob/missing/app.ts).'), 'See `app.ts`.');
+  assert.equal(readableContributionText('Updated the file. Status: `?? ' + 'x'.repeat(400)), 'Updated the file.');
+  const hostile = readableContributionText('<img src=x onerror=alert(1)>\n\n**Text**');
+  assert.doesNotMatch(renderDesktopMarkdown(hostile!, { block: true }), /<img/);
+});

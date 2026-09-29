@@ -17,7 +17,7 @@ test("resolveRequestAuth returns null auth without session or bearer token", asy
   });
 });
 
-test("resolveRequestAuth ignores blank bearer tokens", async () => {
+test("resolveRequestAuth rejects blank bearer tokens", async () => {
   const auth = await resolveRequestAuth({
     headers: {
       authorization: "Bearer   ",

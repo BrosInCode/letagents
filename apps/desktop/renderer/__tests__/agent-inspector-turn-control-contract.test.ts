@@ -42,7 +42,7 @@ test("the Inspector fences stale control completions and makes uncertainty recov
   assert.match(shell, /sourceMessageId: entry\.roomAgentState\?\.turn\.sourceMessageId \?\? null/);
   assert.match(control, /Mark as applied/);
   assert.match(control, /Mark as not applied/);
-  assert.match(control, /Confirming “not applied” unlocks a new request; it never replays the old one\./);
+  assert.match(control, /“Not applied” lets you make a new request; it does not repeat the previous one\./);
   assert.doesNotMatch(control, /aria-live/, "the Inspector host owns one live region for action results");
   const resolveStart = shell.indexOf('if (intent.kind === "resolve_turn_control")');
   const retryStart = shell.indexOf('} else if (intent.kind === "retry_turn_control")', resolveStart);

@@ -7,6 +7,7 @@ import {
   agentInspectorManagedSessionIdentity,
   isCurrentAgentInspectorParticipantSessionUpdate,
   projectAgentInspectorParticipant,
+  projectAgentInspectorStatus,
 } from "../src/domain/agent-inspector-participant";
 import { agentInspectorRequestResetKey } from "../src/domain/agent-inspector-identity";
 
@@ -102,6 +103,31 @@ test("resolving and unavailable supervisor identity never produce a participant 
   assert.equal(projectAgentInspectorParticipant({ ...selection(), kind: "unavailable", unavailableReason: "load_error" }, [session()], "room_a"), null);
 });
 
+test("agent status copy distinguishes a background-service failure from agent availability", () => {
+  assert.deepEqual(projectAgentInspectorStatus({
+    ...selection(),
+    kind: "unavailable",
+    unavailableReason: "load_error",
+  }), {
+    title: "GardenSignal",
+    eyebrow: "Agent",
+    heading: "Couldn’t load agent details",
+    detail: "LetAgents couldn’t reach its background agent service. The agent’s room history is still available, and you can try again.",
+    canRetry: true,
+  });
+  assert.deepEqual(projectAgentInspectorStatus({
+    ...selection(),
+    kind: "unavailable",
+    unavailableReason: "missing",
+  }), {
+    title: "GardenSignal",
+    eyebrow: "Agent",
+    heading: "Agent no longer available",
+    detail: "This agent is no longer managed by this desktop. Its room messages remain available in history.",
+    canRetry: false,
+  });
+});
+
 test("participant session updates are fenced by room, request, selection, and exact session", () => {
   const currentSelection = selection();
   const currentSession = session();
@@ -178,6 +204,13 @@ test("participant actions invalidate on room, request, identity, and unmount bef
   assert.match(surface, /await desktopIpc\.workers\.stopManagedAgent[\s\S]*if \(!fenceIsCurrent\(fence\)\) return false/);
   assert.match(surface, /emitSessionUpdate/);
   assert.doesNotMatch(surface, /managedSessionsContext\.upsert/);
+});
+
+test("worker stop accepts only the same stable session and room before closing the inspector", async () => {
+  const surface = await readFile(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue", import.meta.url), "utf8");
+  assert.match(surface, /function workerStopResultMatchesFence\([\s\S]*session\.id === fence\.sessionId[\s\S]*managedAgentSessionMatchesRoom\(session, fence\.roomIdentifier\)/);
+  assert.match(surface, /if \(stopMode === "worker"\) \{[\s\S]*workerStopResultMatchesFence\(result, fence\)[\s\S]*emit\("close"\);[\s\S]*return true;/);
+  assert.match(surface, /if \(stopMode === "worker"\)[\s\S]*\}[\s\S]*if \(!emitSessionUpdate\(result, fence\)\)/);
 });
 
 test("participant parity keeps exact local changes and published progress without false success", async () => {

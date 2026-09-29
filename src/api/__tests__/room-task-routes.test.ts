@@ -1,11 +1,11 @@
+import { isHumanAppWrite } from "../request/app-session.js";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+process.env.DB_URL ??= process.env.TEST_DB_URL || "postgresql://test:test@127.0.0.1:1/test";
 const {
   getTaskBoardStalePromptState,
-  isDesktopHumanTaskWriteForTest,
   isCurrentStalePromptAction,
   registerRoomTaskRoutes,
 } = await import("../routes/rooms/tasks/index.js");
@@ -227,43 +227,12 @@ test("owner-token task creation requires a registered worker session", async () 
   assert.equal(admissionCalled, false);
 });
 
-test("desktop human task writes are identified by header or body marker without worker credentials", () => {
-  assert.equal(
-    isDesktopHumanTaskWriteForTest(
-      {
-        authKind: "owner_token",
-        headers: { "x-letagents-desktop-client": "1" },
-      } as never,
-      { status: "accepted" }
-    ),
-    true
-  );
-
-  assert.equal(
-    isDesktopHumanTaskWriteForTest(
-      {
-        authKind: "owner_token",
-        headers: {},
-      } as never,
-      { status: "accepted", desktop_human_client: true }
-    ),
-    true
-  );
-
-  assert.equal(
-    isDesktopHumanTaskWriteForTest(
-      {
-        authKind: "owner_token",
-        headers: { "x-letagents-desktop-client": "1" },
-      } as never,
-      {
-        status: "accepted",
-        desktop_human_client: true,
-        agent_session_id: "agent_session_1",
-      }
-    ),
-    false
-  );
+test("human task authority requires an app session, never a client marker", () => {
+  assert.equal(isHumanAppWrite({ authKind: "session", sessionAccount: { account_id: "acct_1" } } as never, {}), true);
+  for (const authKind of ["owner_token", "agent_session", null]) {
+    assert.equal(isHumanAppWrite({ authKind, sessionAccount: { account_id: "acct_1" }, headers: { "x-letagents-desktop-client": "1" } } as never, { desktop_human_client: true }), false);
+  }
+  assert.equal(isHumanAppWrite({ authKind: "session", sessionAccount: { account_id: "acct_1" } } as never, { agent_session_id: "worker" }), false);
 });
 
 test("room task updates deny parent board writes from hard-isolated Focus Rooms before task lookup", async () => {
@@ -445,4 +414,37 @@ test("lease action denies parent board writes from hard-isolated Focus Rooms", a
     error: "blocked by focus settings",
     code: "focus_parent_board_read_only",
   });
+});
+
+test('recent task reads reject incompatible board cursors after access checks', async () => {
+  const { app, handlers } = createRouteApp();
+  let checked = 0;
+  registerRoomTaskRoutes(app as never, { ...createDeps(), resolveCanonicalRoomRequestId: async (id: string) => id, resolveRoomOrReply: async () => ({ id: 'room' }), requireParticipant: async () => { checked++; return true; } } as never);
+  const handler = handlers.get.get('/^\\/rooms\\/(.+)\\/tasks$/')!;
+  for (const query of [{ order: 'recent', after: 'task_1' }, { order: 'recent', open: 'true' }]) {
+    const response = createResponseRecorder();
+    await handler({ params: { 0: 'room' }, query }, response);
+    assert.equal(response.statusCode, 400);
+  }
+  assert.equal(checked, 2);
+});
+
+test('recent completed tasks include new work beyond the first 200 and recently finished old tasks', { skip: !process.env.TEST_DB_URL }, async () => {
+  const { migrate } = await import('drizzle-orm/node-postgres/migrator');
+  const { db, pool } = await import('../db/client.js');
+  const { createProjectWithName, getTasks } = await import('../db.js');
+  await migrate(db, { migrationsFolder: 'drizzle' });
+  const room = await createProjectWithName(`inbox-recency-${Date.now()}`);
+  try {
+    await pool.query(`INSERT INTO tasks (room_id, number, title, status, created_by, created_at, updated_at)
+      SELECT $1, i, 'Completed ' || i, 'done', 'test', NOW() - INTERVAL '1 day',
+        CASE WHEN i = 1 THEN NOW() ELSE NOW() - (206 - i) * INTERVAL '1 minute' END
+      FROM generate_series(1, 205) i`, [room.id]);
+    const recent = await getTasks(room.id, 'done', { limit: 2, order: 'recent' });
+    assert.deepEqual(recent.tasks.map(task => task.id), ['task_1', 'task_205']);
+    assert.equal(recent.has_more, true);
+    assert.ok(recent.tasks.every(task => !task.assignee));
+    const original = await getTasks(room.id, 'done', { limit: 2 });
+    assert.deepEqual(original.tasks.map(task => task.id), ['task_1', 'task_2'], 'existing board order stays stable');
+  } finally { await pool.query('DELETE FROM rooms WHERE id = $1', [room.id]); await pool.end(); }
 });

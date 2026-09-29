@@ -201,3 +201,39 @@
   font-size: 0.74rem;
   line-height: 1.4;
 }
+
+.desktop-add-agent-permissions {
+  display: block;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.desktop-add-agent-permissions summary {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.desktop-add-agent-permissions summary:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 4px;
+  border-radius: 3px;
+}
+
+.desktop-add-agent-access-selection {
+  float: right;
+  margin-left: 12px;
+  color: var(--text);
+}
+
+.desktop-add-agent-access-selection em {
+  margin-left: 6px;
+  color: var(--amber-text);
+  font-size: 0.72rem;
+  font-style: normal;
+}
+
+.desktop-add-agent-permission-options {
+  margin: 14px 0 10px;
+}

@@ -510,7 +510,8 @@ export async function createSupervisedWorkspaceGeneration(
  * normalized turn result. Keeping it until then is what makes a crash between
  * filesystem reconciliation and daemon checkpointing recoverable.
  */
-export async function removeSupervisedWorkspaceGenerationReceipt(manifestPath: string): Promise<void> {
+export async function removeSupervisedWorkspaceGenerationReceipt(manifestPath: string,
+  options: { settlementVerified?: boolean } = {}): Promise<void> {
   let manifest: GenerationManifest;
   try {
     manifest = await loadManifest(manifestPath);
@@ -521,7 +522,10 @@ export async function removeSupervisedWorkspaceGenerationReceipt(manifestPath: s
   if (manifest.phase !== "cleaned" && manifest.phase !== "aborted") {
     throw generationError("A live or unreconciled workspace-generation receipt cannot be removed.", "GENERATION_RECEIPT_STILL_REQUIRED");
   }
-  if (manifest.phase === "cleaned") {
+  // A provider's fsynced exact-turn settlement can outlive partially removed
+  // receipt artifacts. It proves the reconciliation already finished; never
+  // infer that proof merely from missing artifacts or a missing manifest.
+  if (manifest.phase === "cleaned" && !options.settlementVerified) {
     const inspections = new FileInspectionSession(manifest.limits.maxChangedPaths);
     for (const operation of manifest.operationJournal) {
       await validateAppliedOperationArtifacts(manifest, operation, inspections);
@@ -549,6 +553,11 @@ export async function recoverSupervisedWorkspaceGeneration(
     );
   }
   return retireAndReconcile(manifest, options.failpoint);
+}
+
+/** Reopen the validated exact generation for provider continuation recovery. */
+export async function openSupervisedWorkspaceGeneration(manifestPath: string): Promise<SupervisedWorkspaceGenerationHandle> {
+  return makeHandle(await loadManifest(manifestPath));
 }
 
 function makeHandle(

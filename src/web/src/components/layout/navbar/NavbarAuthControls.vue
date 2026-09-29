@@ -6,6 +6,7 @@
     </button>
   </template>
   <template v-else>
+    <RouterLink class="nav-btn nav-btn-ghost nav-btn-sm" to="/messages" @click="emit('close')">Messages</RouterLink>
     <NavbarUserBadge :user="auth.user.value" :mobile="mobile" />
     <button :class="signOutClasses" type="button" @click="signOut">
       Sign Out
@@ -15,6 +16,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import GitHubIcon from '@/components/icons/GitHubIcon.vue'
 import { useAuth } from '@/composables/useAuth'
 import NavbarUserBadge from './NavbarUserBadge.vue'

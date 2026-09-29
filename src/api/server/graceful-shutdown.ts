@@ -5,7 +5,7 @@ export interface GracefulShutdownDeps {
   stopIntake: () => Promise<void>;
   stopWorkers: () => Promise<void>;
   stopBridge: () => Promise<void>;
-  closeBroker: () => void;
+  closeBroker: () => void | Promise<void>;
   drainConnections?: () => Promise<void>;
   closeDatabase: () => Promise<void>;
   exit?: (code: number) => void;
@@ -64,7 +64,7 @@ export function createGracefulShutdownController(
       // Closing broker subscriptions lets long-lived SSE/poll responses finish,
       // which in turn allows Server.close() to resolve without a shutdown
       // deadlock.
-      deps.closeBroker();
+      await deps.closeBroker();
       await intakeStopped;
       await deps.drainConnections?.();
       await deps.closeDatabase();

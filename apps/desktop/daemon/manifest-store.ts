@@ -1,20 +1,86 @@
+import { PreparedReadStatements } from "./prepared-reads.js";
+import { ManagedRuntimeRefreshDeferred } from "./provider-action-port.js";
+import type { ProcessIdentity } from "./process-identity.js";
+import { listHostToolRules, findHostToolRule, readHostToolContext, bindHostToolRule, assertDecisionToolRule, revokeHostToolRule,
+  withdrawHostToolApproval, type WithdrawHostToolApproval, type HostToolRule, type HostToolScope } from "./host-tool-rules.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { chmod, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
-import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
-import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
+import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import {
+  beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
+  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
+  type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
+  type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
+} from "./execution-approval-journal.js";
+import {
+  admitExecutionApprovalPlan,
+  type ExecutionApprovalAdmission,
+  type ExecutionApprovalAdmissionPlan,
+} from "./execution-approval-admission.js";
+import {
+  prepareExecutionApprovalProjection,
+  type ExecutionApprovalProjectionPreparation,
+  type ExecutionApprovalProjectionSource,
+  type PreparedExecutionApprovalProjection,
+} from "./execution-approval-projection.js";
+import {
+  readExecutionApprovalProjection,
+  type ExecutionApprovalProjectionRecord,
+} from "./execution-approval-projection-journal.js";
+import {
+  listExecutionDelegationInstanceIds,
+  listExecutionDelegationsForApprovalPublication,
+  reconcileExecutionDelegation,
+  validateExecutionDelegation,
+  type ExecutionDelegationInventoryScope,
+  type ExecutionDelegationReconciliation,
+  type ExecutionApprovalPublicationDelegationScope,
+  type LocalExecutionDelegation,
+  type ReconcileExecutionDelegation,
+  type ValidateExecutionDelegation,
+} from "./execution-delegation-journal.js";
+import {
+  selectDelegatedApproval,
+  type SelectDelegatedApproval,
+} from "./execution-delegated-approval.js";
+import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
+  type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "./runtime-recovery-journal.js";
+import {
+  assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
+  getPollingActivation, markPollingActivationDispatch, markPollingActivationUncertain, preparePollingActivation, unresolvedPollingActivation,
+  type CompletePollingActivation, type DispatchPollingActivation, type PollingActivationRecord, type PreparePollingActivation,
+  acknowledgePollingOffer, getPollingOfferTail, recordPollingOffer,
+  type AcknowledgePollingOffer, type PollingOfferRecord, type RecordPollingOffer,
+} from "./custodial-polling-activation.js";
+import {
+  assertNoDeliveryDrain, cancelDeliveryDrain, commitDeliveryDrain, deliveryDrainReadiness,
+  markDeliveryDrainDispatch, markDeliveryDrainUncertain, prepareCustodialForward, prepareDeliveryDrain, readDeliveryDrain, unresolvedDeliveryDrain,
+  type DeliveryDrainReadiness, type DeliveryDrainRecord, type DispatchDeliveryDrain, type PrepareCustodialForward, type PrepareDeliveryDrain,
+} from "./delivery-drain.js";
+import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
+import { STATE_WATCH_ACTIVITY_SUMMARY_LIMIT } from "./state-watch-projection.js";
+import {
+  cancelInterruptedSupervisedTurn,
   pruneSupervisedAgentHistory,
-  settlePreparedSupervisedEffectsForTerminalItem,
+  readDurableNativeFailure,
+  settleSupervisedTerminalItem,
 } from "./supervised-agent-history-retention.js";
+import type { SupervisedProviderTurnBinding } from "./supervised-agent-inbox-store.js";
 
 import {
   composeDaemonManifestEntry,
   projectDaemonManifestEntry,
   type DaemonManifestDomainProjection,
 } from "./manifest-entry-projection.js";
+import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
+import {
+  lifecycleAuthorityModeSchema,
+  lifecycleAuthorityProviderSchema,
+  type LifecycleAuthorityMode,
+} from "./lifecycle-authority-mode.js";
 import type {
   DaemonActivityEvent,
   DaemonAgentConfiguration,
@@ -37,8 +103,18 @@ import type {
 
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
-type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number };
+type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"] };
 type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
+export type PendingTypedLifecycleEffect = {
+  factId: string; agentId: string; factSequence: number;
+  observerExecutionGenerationId: string; observerRuntimeGenerationId: string;
+  effectKind: "manifest_working" | "manifest_idle" | "manifest_failed"; observedAtMs: number;
+};
+export type TypedLifecycleEffectInstallation = {
+  agentId: string; executionGenerationId: string; workAttemptId: string;
+  providerContinuationId: string; providerConnection: DaemonProviderConnection;
+  configurationRevision: number; authorityMode: "typed"; disposedAtMs: number;
+};
 
 function roomMoveFromRow(row: Row): DaemonRoomMoveRecord {
   return {
@@ -111,39 +187,10 @@ function run(statement: StatementSync, ...values: unknown[]): void {
   statement.run(...values as never[]);
 }
 
-/**
- * SQLite-backed durable state for the daemon's compatibility manifest.
- *
- * The flat manifest entry remains the control-socket contract only. Each row is
- * decomposed into records with distinct ownership before persistence, and reads
- * recompose the same flat projection for existing callers.
- */
-export class ManifestStore {
-  private database: DatabaseSync | null = null;
-  private initializing: Promise<DatabaseSync> | null = null;
-  private writes: Promise<void> = Promise.resolve();
-  private closed = false;
-
-  constructor(
-    readonly path: string,
-    private readonly legacyJsonPath?: string,
-    private readonly permissionHousekeeping?: (paths: string[]) => Promise<void>,
-    private readonly schemaInitializationHook?: (database: DatabaseSync) => void,
-  ) {}
-
-  /** Initialise/upgrade the shared daemon database without retaining a handle. */
-  static async ensureDatabase(path: string): Promise<void> {
-    const store = new ManifestStore(path);
-    try { await store.load(); } finally { await store.close(); }
-  }
-
-  async load(): Promise<DaemonManifest> {
-    const database = await this.getDatabase();
-    const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
-    const entries = (database.prepare(`
+const MANIFEST_ENTRY_SELECT = `
       SELECT
         i.agent_id, i.created_by, i.created_at,
-        p.display_name, m.room_id,
+        p.display_name, m.room_id, m.local_room_id,
         c.provider, c.model, c.reasoning_effort, c.charter, c.permission_profile_id, c.config_revision, c.runtime_configuration_revision, c.delivery_mode, c.delivery_cutover_json,
         c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
         l.desired_state, l.source_repo_path_present, l.source_repo_path,
@@ -154,7 +201,7 @@ export class ManifestStore {
         d.provider_connection_kind, d.provider_connection_url, d.provider_server_auth_path,
         d.provider_connection_pid,
         d.provider_process_identity_present,
-        d.provider_process_identity, d.provider_execution_generation_id,
+        d.provider_process_identity, d.provider_execution_generation_id, d.custodial_launch_agent_session_id,
         d.workplace_liveness_present, d.workplace_liveness_state,
         d.workplace_liveness_observed_at, d.workplace_liveness_detail,
         d.native_liveness_present, d.native_liveness_state,
@@ -191,8 +238,61 @@ export class ManifestStore {
       LEFT JOIN turn_control_sequence_watermarks w USING (agent_id)
       JOIN retained_worker_bindings b USING (agent_id)
       JOIN reconciliation_records q USING (agent_id)
-      ORDER BY i.sort_order
-    `).all() as Row[]).map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row)));
+`;
+
+const MANIFEST_READS = {
+  generation: "SELECT generation FROM manifest_metadata WHERE singleton = 1",
+  allEntries: `${MANIFEST_ENTRY_SELECT} ORDER BY i.sort_order`,
+  roomEntries: `${MANIFEST_ENTRY_SELECT} WHERE m.room_id = ? ORDER BY i.sort_order`,
+  entry: `${MANIFEST_ENTRY_SELECT} WHERE i.agent_id = ?`,
+  activityState: `SELECT observed_state,
+    (SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1) AS last_sequence
+    FROM runtime_deployments WHERE agent_id = ?`,
+  activity: "SELECT * FROM activity_events WHERE agent_id = ? ORDER BY sort_order",
+  activitySummary: `SELECT observed_at, sequence, provider, kind, method, summary, status,
+    NULL AS payload_json, payload_truncated, payload_redacted, durable_payload_ref
+    FROM activity_events WHERE agent_id = ? ORDER BY sequence DESC, sort_order DESC LIMIT ?`,
+  lastSequence: "SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1",
+  stages: "SELECT stage FROM turn_control_stages WHERE agent_id = ? ORDER BY sort_order",
+  completedActions: `SELECT action_id FROM reconciliation_completed_actions
+    WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?`,
+  exitTimestamps: "SELECT timestamp_ms FROM reconciliation_exit_timestamps WHERE agent_id = ? ORDER BY sort_order",
+  notices: "SELECT * FROM reconciliation_notices WHERE agent_id = ? ORDER BY sort_order",
+} as const;
+
+/**
+ * SQLite-backed durable state for the daemon's compatibility manifest.
+ *
+ * The flat manifest entry remains the control-socket contract only. Each row is
+ * decomposed into records with distinct ownership before persistence, and reads
+ * recompose the same flat projection for existing callers.
+ */
+export class ManifestStore {
+  private readonly reads = new PreparedReadStatements(MANIFEST_READS);
+  private database: DatabaseSync | null = null;
+  private initializing: Promise<DatabaseSync> | null = null;
+  private writes: Promise<void> = Promise.resolve();
+  private closed = false;
+
+  constructor(
+    readonly path: string,
+    private readonly legacyJsonPath?: string,
+    private readonly permissionHousekeeping?: (paths: string[]) => Promise<void>,
+    private readonly schemaInitializationHook?: (database: DatabaseSync) => void,
+    private readonly schemaPrepared = false,
+  ) {}
+
+  /** Initialise/upgrade the shared daemon database without retaining a handle. */
+  static async ensureDatabase(path: string): Promise<void> {
+    const store = new ManifestStore(path);
+    try { await store.load(); } finally { await store.close(); }
+  }
+
+  async load(activityMode: "full" | "summary" = "full"): Promise<DaemonManifest> {
+    const database = await this.getDatabase();
+    const generation = Number((this.reads.get(database, "generation").get() as Row).generation);
+    const entries = (this.reads.get(database, "allEntries").all() as Row[])
+      .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)));
 
     const legacyLaneOwners = (database.prepare(`
       SELECT reservation_id, room_id, provider, owner_pid, owner_process_identity,
@@ -220,11 +320,611 @@ export class ManifestStore {
     return this.readEntryFromDatabase(database, agentId);
   }
 
+  async listRoomEntries(roomId: string): Promise<DaemonManifestEntry[]> {
+    const database = await this.getDatabase();
+    return (this.reads.get(database, "roomEntries").all(roomId) as Row[])
+      .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row)));
+  }
+
+  /**
+   * Read the authority frozen onto one exact native process birth. This never
+   * consults current release policy and never materializes or relabels a row.
+   */
+  async readRuntimeLifecycleAuthority(input: {
+    agentId: string;
+    executionGenerationId: string;
+    providerConnection: DaemonProviderConnection;
+    configurationRevision: number;
+  }): Promise<LifecycleAuthorityMode | null> {
+    const snapshot = structuredClone(input);
+    if (!snapshot.agentId || !snapshot.executionGenerationId
+      || snapshot.providerConnection.pid === null || !snapshot.providerConnection.processIdentity
+      || !Number.isSafeInteger(snapshot.configurationRevision) || snapshot.configurationRevision < 1) return null;
+    const provider = {
+      codex_app_server: "codex",
+      claude_cli: "claude-code",
+      cursor_cli: "cursor",
+      opencode_server: "open-model",
+    } as const;
+    const runtimeGenerationId = executionRuntimeStorageIdentity(snapshot.agentId,
+      snapshot.executionGenerationId, snapshot.providerConnection.kind,
+      snapshot.providerConnection.pid, snapshot.providerConnection.processIdentity);
+    const row = (await this.getDatabase()).prepare(`SELECT authority_mode FROM execution_runtime_generations
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=? AND provider=? AND config_revision=?`)
+      .get(snapshot.agentId, snapshot.executionGenerationId, runtimeGenerationId,
+        provider[snapshot.providerConnection.kind], snapshot.configurationRevision) as Row | undefined;
+    const authority = lifecycleAuthorityModeSchema.safeParse(row?.authority_mode);
+    return authority.success ? authority.data : null;
+  }
+
+  /** Bounded pending tail; the durable state, not this read, owns retries. */
+  async listPendingTypedLifecycleEffects(agentId?: string, limit = 32, afterFactSequence = 0): Promise<PendingTypedLifecycleEffect[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128) throw new Error("Lifecycle effect read limit is invalid.");
+    if (!Number.isSafeInteger(afterFactSequence) || afterFactSequence < 0) throw new Error("Lifecycle effect cursor is invalid.");
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      const rows = database.prepare(`SELECT e.fact_id,e.agent_id,e.fact_sequence,
+          e.observer_execution_generation_id,e.observer_runtime_generation_id,e.effect_kind,f.observed_at_ms
+        FROM execution_lifecycle_effects e JOIN execution_facts f ON f.fact_id=e.fact_id
+        WHERE e.state='pending' AND e.fact_sequence>? AND (? IS NULL OR e.agent_id=?)
+        ORDER BY e.fact_sequence LIMIT ?`).all(afterFactSequence, agentId ?? null, agentId ?? null, limit) as Row[];
+      return rows.map((row) => ({
+        factId: String(row.fact_id), agentId: String(row.agent_id), factSequence: Number(row.fact_sequence),
+        observerExecutionGenerationId: String(row.observer_execution_generation_id),
+        observerRuntimeGenerationId: String(row.observer_runtime_generation_id),
+        effectKind: String(row.effect_kind) as PendingTypedLifecycleEffect["effectKind"],
+        observedAtMs: Number(row.observed_at_ms),
+      }));
+    });
+  }
+
+  /** Applies one exact typed lifecycle projection and acknowledges it in the
+   * same SQLite transaction. A hard runtime terminal authenticates its own
+   * dead birth; live turn effects still require the exact installation. */
+  async applyTypedLifecycleEffect(
+    expectedGeneration: number,
+    effect: PendingTypedLifecycleEffect,
+    installation: TypedLifecycleEffectInstallation | null,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; disposition: "applied" | "superseded" | "settled" | "pending"; entry?: DaemonManifestEntry }> {
+    const pending = structuredClone(effect);
+    const exact = installation ? structuredClone(installation) : null;
+    return this.writeOperationalJournal((database) => {
+      const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
+      const row = database.prepare(`SELECT e.*,f.observed_at_ms,f.domain AS fact_domain,f.state AS fact_state,
+          subject.provider AS subject_provider,subject.runtime_state AS subject_runtime_state,
+          observer.runtime_state AS observer_runtime_state,
+          observer.authority_mode AS durable_observer_authority,
+          observer.config_revision AS durable_observer_configuration_revision
+        FROM execution_lifecycle_effects e
+        JOIN execution_facts f ON f.fact_id=e.fact_id AND f.sequence=e.fact_sequence AND f.agent_id=e.agent_id
+        JOIN execution_runtime_generations subject ON subject.agent_id=f.agent_id
+          AND subject.execution_generation_id=f.execution_generation_id
+          AND subject.runtime_generation_id=f.runtime_generation_id
+        LEFT JOIN execution_runtime_generations observer ON observer.agent_id=e.agent_id
+          AND observer.execution_generation_id=e.observer_execution_generation_id
+          AND observer.runtime_generation_id=e.observer_runtime_generation_id
+        WHERE e.fact_id=? AND e.agent_id=? AND e.fact_sequence=?`).get(
+        pending.factId, pending.agentId, pending.factSequence,
+      ) as Row | undefined;
+      if (!row || row.state !== "pending") return { generation, disposition: "settled" as const };
+      if (pending.effectKind !== row.effect_kind
+        || pending.observerExecutionGenerationId !== row.observer_execution_generation_id
+        || pending.observerRuntimeGenerationId !== row.observer_runtime_generation_id) {
+        throw new Error("Lifecycle effect installation identity is invalid.");
+      }
+      const entry = this.readEntryFromDatabase(database, pending.agentId);
+      const configuration = database.prepare(`SELECT runtime_configuration_revision
+        FROM agent_configurations WHERE agent_id=?`).get(pending.agentId) as Row | undefined;
+      const manifestConnection = entry?.provider_ref?.provider_connection;
+      const manifestRuntimeId = entry?.provider_ref?.execution_generation_id
+        && manifestConnection?.pid !== null && manifestConnection?.pid !== undefined
+        && manifestConnection.processIdentity
+        ? executionRuntimeStorageIdentity(pending.agentId, entry.provider_ref.execution_generation_id,
+          manifestConnection.kind, manifestConnection.pid, manifestConnection.processIdentity)
+        : null;
+      const terminal = database.prepare(`SELECT terminal_json FROM work_attempt_executions
+        WHERE work_attempt_id=? AND execution_generation_id=?`).get(
+        entry?.provider_ref?.work_attempt_id ?? "", pending.observerExecutionGenerationId,
+      ) as Row | undefined;
+      const durableBirth = manifestRuntimeId === pending.observerRuntimeGenerationId
+        && entry?.provider_ref?.execution_generation_id === pending.observerExecutionGenerationId
+        && row.observer_authority_mode === "typed" && row.subject_authority_mode === "typed"
+        && row.durable_observer_authority === "typed";
+      const runtimeFailure = pending.effectKind === "manifest_failed";
+      const cursorTurnEffect = row.subject_provider === "cursor"
+        && row.fact_domain === "turn" && (row.fact_state === "terminal" || row.fact_state === "lost");
+      const runtimeReady = pending.effectKind === "manifest_idle"
+        && row.fact_domain === "runtime" && row.fact_state === "ready";
+      const completedStopTurn = entry?.desired_state === "running"
+        && entry.turn_control?.execution_generation_id === entry.provider_ref?.execution_generation_id
+        && entry.turn_control?.status === "completed"
+        && entry.turn_control?.has_correction === false
+        && entry.turn_control?.interrupted === true
+        && entry.turn_control?.resumed === false
+        && entry.turn_control?.state === "idle";
+      const definitivelyStale = !durableBirth
+        || (!runtimeFailure && !cursorTurnEffect && (row.subject_runtime_state === "exited"
+          || row.observer_runtime_state === "exited" || terminal?.terminal_json !== null))
+        || (runtimeReady && !["starting", "recovering"].includes(entry?.observed_state ?? ""))
+        || (runtimeFailure && completedStopTurn)
+        || entry?.desired_state !== "running" || entry.condition === "quarantined"
+        || (entry.delivery_mode ?? "mcp_polling") !== "daemon_inbox";
+      const disposedAtMs = Math.max(Number(row.created_at_ms), exact?.disposedAtMs ?? pending.observedAtMs);
+      if (definitivelyStale) {
+        database.prepare(`UPDATE execution_lifecycle_effects SET state='superseded',disposed_at_ms=?
+          WHERE fact_id=? AND state='pending'`).run(disposedAtMs, pending.factId);
+        return { generation, disposition: "superseded" as const };
+      }
+      const durableCursorTurn = cursorTurnEffect && durableBirth
+        && row.subject_runtime_state === "exited" && row.observer_runtime_state === "exited";
+      if (!exact && !runtimeFailure && !durableCursorTurn) return { generation, disposition: "pending" as const };
+      if (!entry?.provider_ref) throw new Error("Lifecycle effect lost its durable provider reference.");
+      if (exact && (pending.agentId !== exact.agentId
+        || pending.observerExecutionGenerationId !== exact.executionGenerationId
+        || exact.providerConnection.pid === null || !exact.providerConnection.processIdentity
+        || !Number.isSafeInteger(exact.configurationRevision) || exact.configurationRevision < 1
+        || !Number.isSafeInteger(exact.disposedAtMs) || exact.disposedAtMs < 0)) {
+        throw new Error("Lifecycle effect installation identity is invalid.");
+      }
+      const exactBirth = exact ? executionRuntimeStorageIdentity(exact.agentId, exact.executionGenerationId,
+        exact.providerConnection.kind, exact.providerConnection.pid!, exact.providerConnection.processIdentity!) === pending.observerRuntimeGenerationId
+          && Number(configuration?.runtime_configuration_revision) === exact.configurationRevision
+          && entry.work_attempt_id === exact.workAttemptId
+          && entry.provider_ref?.work_attempt_id === exact.workAttemptId
+          && entry.provider_ref.provider_continuation_id === exact.providerContinuationId
+          && entry.provider_ref.execution_generation_id === exact.executionGenerationId
+          && sameProviderActionConnectionSnapshot(entry.provider_ref.provider_connection, exact.providerConnection)
+        : (runtimeFailure || durableCursorTurn)
+          && Number(configuration?.runtime_configuration_revision) === Number(row.durable_observer_configuration_revision)
+          && row.subject_runtime_state === "exited" && row.observer_runtime_state === "exited";
+      if (!exactBirth) return { generation, disposition: "pending" as const };
+      const generationUpdate = database.prepare(`UPDATE manifest_metadata SET generation=generation+1
+        WHERE singleton=1 AND generation=?`).run(expectedGeneration);
+      if (Number(generationUpdate.changes) !== 1) {
+        throw new ManifestConflictError(`Manifest generation ${generation} does not match expected ${expectedGeneration}.`);
+      }
+      const observedAt = new Date(pending.observedAtMs).toISOString();
+      const observedState = pending.effectKind === "manifest_working" ? "working"
+        : pending.effectKind === "manifest_failed" ? "failed" : "idle";
+      const nativeState = pending.effectKind === "manifest_working" ? "active"
+        : pending.effectKind === "manifest_failed" ? "terminal" : "idle";
+      const updated = database.prepare(`UPDATE runtime_deployments
+        SET observed_state=?,native_liveness_present=1,native_liveness_state=?,
+          native_liveness_observed_at=?,native_liveness_detail=? WHERE agent_id=?`).run(
+        observedState, nativeState, observedAt,
+        pending.effectKind === "manifest_working" ? "Provider turn active"
+          : pending.effectKind === "manifest_failed" ? "Provider runtime unavailable"
+            : runtimeReady ? "Provider runtime ready" : "Provider turn terminal",
+        pending.agentId,
+      );
+      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${pending.agentId}`);
+      if (runtimeReady) {
+        const readiness = database.prepare(`UPDATE agent_readiness
+          SET ready_reached_at_present=1,ready_reached_at=COALESCE(ready_reached_at,?)
+          WHERE agent_id=?`).run(observedAt, pending.agentId);
+        if (Number(readiness.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${pending.agentId}`);
+      }
+      const acknowledged = database.prepare(`UPDATE execution_lifecycle_effects SET state='applied',disposed_at_ms=?
+        WHERE fact_id=? AND state='pending'`).run(disposedAtMs, pending.factId);
+      if (Number(acknowledged.changes) !== 1) throw new Error("Lifecycle effect disposition changed before apply.");
+      const persisted = this.readEntryFromDatabase(database, pending.agentId);
+      if (!persisted) throw new Error(`Daemon manifest entry disappeared during lifecycle effect apply: ${pending.agentId}`);
+      return { generation: expectedGeneration + 1, disposition: "applied" as const, entry: persisted };
+    }, commitFence);
+  }
+
+  /** Filesystem preparation only; exact authority is revalidated at admission. */
+  async prepareExecutionApprovalProjection(
+    input: ExecutionApprovalProjectionPreparation,
+    source: ExecutionApprovalProjectionSource,
+  ): Promise<PreparedExecutionApprovalProjection> {
+    const snapshot = structuredClone({ input, source });
+    return prepareExecutionApprovalProjection(await this.getDatabase(), snapshot.input, snapshot.source);
+  }
+
+  /** Immutable classification and required projection settle in one fenced transaction. */
+  async admitExecutionApprovalPlan(
+    input: ExecutionApprovalAdmissionPlan,
+    nowMs: () => number,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<ExecutionApprovalAdmission> {
+    if (typeof nowMs !== "function") throw new Error("Approval journal requires a transaction clock.");
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => admitExecutionApprovalPlan(
+      db,
+      snapshot,
+      this.readEntryFromDatabase(db, snapshot.request.agentId),
+      nowMs(),
+    ), commitFence);
+  }
+
+  async getExecutionApproval(input: ApprovalReference): Promise<ExecutionApprovalRecord | null> {
+    const snapshot = structuredClone(input);
+    return getExecutionApproval(await this.getDatabase(), snapshot);
+  }
+
+  async readExecutionApprovalProjection(input: ApprovalReference): Promise<ExecutionApprovalProjectionRecord | null> {
+    const snapshot = structuredClone(input);
+    return readExecutionApprovalProjection(await this.getDatabase(), snapshot);
+  }
+
+  async readLatestExecutionApproval(requestId: string): Promise<ExecutionApprovalRecord | null> {
+    return readLatestExecutionApproval(await this.getDatabase(), requestId);
+  }
+
+  async readManagedLaunchContract(input: {
+    agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
+  }): Promise<string | null> {
+    const connection = input.providerConnection;
+    if (connection.pid === null || !connection.processIdentity) return null;
+    const runtimeId = executionRuntimeStorageIdentity(input.agentId, input.executionGenerationId,
+      connection.kind, connection.pid, connection.processIdentity);
+    const row = (await this.getDatabase()).prepare(`SELECT contract_sha256 FROM managed_launch_contracts
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?`)
+      .get(input.agentId, input.executionGenerationId, runtimeId);
+    return typeof row?.contract_sha256 === "string" ? row.contract_sha256 : null;
+  }
+
+  /** Operational existence check; deliberately independent of the capped UI list. */
+  async hasUnclosedRuntimeApprovals(input: {
+    agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
+  }): Promise<boolean> {
+    return this.runtimeHasUnclosedApprovals(await this.getDatabase(), structuredClone(input));
+  }
+
+  private runtimeHasUnclosedApprovals(database: DatabaseSync, input: {
+    agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
+  }): boolean {
+    const connection = input.providerConnection;
+    if (!input.agentId || !input.executionGenerationId
+      || connection.pid === null || !connection.processIdentity) return true;
+    const runtimeId = executionRuntimeStorageIdentity(input.agentId,
+      input.executionGenerationId, connection.kind, connection.pid, connection.processIdentity);
+    if (!database.prepare(`SELECT 1 FROM execution_runtime_generations
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?`)
+      .get(input.agentId, input.executionGenerationId, runtimeId)) return true;
+    return Boolean(database.prepare(`SELECT 1 FROM execution_approval_requests r
+      WHERE r.agent_id=? AND r.execution_generation_id=? AND r.runtime_generation_id=?
+        AND r.state IN ('requested','decision_recorded','dispatching','lost')
+        AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+          WHERE c.request_id=r.request_id AND c.request_version=r.request_version)
+      LIMIT 1`).get(input.agentId, input.executionGenerationId, runtimeId));
+  }
+
+  /** Re-read durable authority synchronously at the native signal boundary. */
+  async validateManagedRuntimeReplacement(input: {
+    agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
+    configurationRevision: number; apiUrl: string; roomId: string;
+    workAttemptId: string; providerContinuationId: string;
+  }): Promise<() => void> {
+    const snapshot = structuredClone(input);
+    const database = await this.getDatabase();
+    const assertCurrent = () => {
+      if (this.closed || this.database !== database) throw new Error("Runtime authority store is unavailable.");
+      const entry = this.readEntryFromDatabase(database, snapshot.agentId);
+      const configuration = database.prepare(`SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?`).get(snapshot.agentId);
+      const binding = database.prepare(`SELECT room_id,work_attempt_id,execution_generation_id,api_url FROM worker_session_bindings WHERE entry_id=?`).get(snapshot.agentId);
+      if (!entry || entry.room_id !== snapshot.roomId || entry.work_attempt_id !== snapshot.workAttemptId
+        || entry.provider !== "codex" || entry.desired_state !== "running"
+        || entry.delivery_mode !== "daemon_inbox" || entry.condition !== "none" || entry.observed_state !== "idle"
+        || (entry.turn_control && entry.turn_control.status !== "completed")
+        || entry.provider_ref?.provider_continuation_id !== snapshot.providerContinuationId
+        || entry.provider_ref?.execution_generation_id !== snapshot.executionGenerationId
+        || !sameProviderActionConnectionSnapshot(entry.provider_ref.provider_connection, snapshot.providerConnection)
+        || configuration?.config_revision !== snapshot.configurationRevision
+        || configuration.runtime_configuration_revision !== snapshot.configurationRevision
+        || binding?.room_id !== entry.room_id || binding.work_attempt_id !== entry.work_attempt_id
+        || binding.execution_generation_id !== snapshot.executionGenerationId || binding.api_url !== snapshot.apiUrl
+        || this.runtimeHasUnclosedApprovals(database, snapshot)) {
+        throw new ManagedRuntimeRefreshDeferred("Managed runtime replacement lost its durable idle authority.");
+      }
+    };
+    assertCurrent();
+    return assertCurrent;
+  }
+
+  async listExecutionApprovals(roomId: string, limit = 64): Promise<ExecutionApprovalRecord[]> {
+    return listExecutionApprovals(await this.getDatabase(), roomId, limit);
+  }
+
+  /** Recheck after native pending inspection, immediately before the exact provider response. */
+  async validateExecutionApprovalAuthority(expected: ApprovalReference, authority: ApprovalAuthority): Promise<() => void> {
+    const snapshot = structuredClone({ expected, authority });
+    const db = await this.getDatabase();
+    const assertCurrent = () => {
+      if (this.closed || this.database !== db) throw new Error("Approval authority store is unavailable.");
+      const entry = this.readEntryFromDatabase(db, snapshot.expected.agentId);
+      validateExecutionApprovalAuthority(db, snapshot.expected, snapshot.authority, entry);
+      const record = getExecutionApproval(db, snapshot.expected);
+      if (record?.decision) assertDecisionToolRule(db, record.decision.decisionId, entry);
+    };
+    assertCurrent();
+    return assertCurrent;
+  }
+
+  async readHostToolContext(workAttemptId: string) {
+    return readHostToolContext(await this.getDatabase(), workAttemptId);
+  }
+
+  async listHostToolRules(ownerId: string, agentId: string): Promise<HostToolRule[]> {
+    return listHostToolRules(await this.getDatabase(), ownerId, agentId);
+  }
+
+  async findHostToolRule(ownerId: string, scope: HostToolScope): Promise<HostToolRule | null> {
+    return findHostToolRule(await this.getDatabase(), ownerId, scope);
+  }
+
+  async withdrawHostToolApproval(input: WithdrawHostToolApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<void> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    await this.writeOperationalJournal(db => {
+      const record = getExecutionApproval(db, snapshot.expected);
+      if (!record) throw new Error("Approval request is unavailable.");
+      withdrawHostToolApproval(db, snapshot, record);
+    }, commitFence);
+  }
+
+  async selectHostToolApproval(input: SelectHostApproval, rule: { scope: HostToolScope; create?: boolean; rule?: { id: string; revision: number } },
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone({ input, rule });
+    return this.writeOperationalJournal(db => {
+      const entry = this.readEntryFromDatabase(db, snapshot.input.expected.agentId);
+      if (snapshot.input.decision !== "allow_once") throw new Error("A tool rule can only select allow once.");
+      const prior = getExecutionApproval(db, snapshot.input.expected);
+      if (prior?.request.closedAtMs != null) throw new Error("This approval request has closed.");
+      if (prior?.decision && !db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(snapshot.input.decisionId)) {
+        throw new Error("The existing decision did not create a saved tool permission.");
+      }
+      const selected = selectHostApproval(db, snapshot.input, entry);
+      bindHostToolRule(db, { ...snapshot.rule, decisionId: snapshot.input.decisionId, ownerId: snapshot.input.actorId,
+        atMs: snapshot.input.atMs }, entry);
+      return selected;
+    }, commitFence);
+  }
+
+  async revokeHostToolRule(ownerId: string, agentId: string, ruleId: string, revision: number, atMs: number,
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<void> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    await this.writeOperationalJournal(db => revokeHostToolRule(db, ownerId, agentId, ruleId, revision, atMs), commitFence);
+  }
+
+  async selectHostApproval(input: SelectHostApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => selectHostApproval(db, snapshot, this.readEntryFromDatabase(db, snapshot.expected.agentId)), commitFence);
+  }
+
+  async beginExecutionApprovalDispatch(input: DispatchExecutionApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ dispatch: boolean; approval: ExecutionApprovalRecord }> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => beginExecutionApprovalDispatch(db, snapshot, this.readEntryFromDatabase(db, snapshot.expected.agentId)), commitFence);
+  }
+
+  async recordExecutionApprovalOutcome(input: RecordExecutionApprovalOutcome, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => recordExecutionApprovalOutcome(db, snapshot), commitFence);
+  }
+
+  async closeExecutionApprovalRequest(expected: ApprovalReference, nowMs: () => number,
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function" || typeof nowMs !== "function") throw new Error("Approval closure requires a clock and daemon ownership fence.");
+    const snapshot = structuredClone(expected);
+    // Receipt time belongs to this transaction, after any racing selection/dispatch.
+    return this.writeOperationalJournal(db => closeExecutionApprovalRequest(db, { expected: snapshot, atMs: nowMs() }), commitFence);
+  }
+
+  async settleWitnessedRuntimeApprovalClosures(agentId: string, nowMs: () => number,
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<number> {
+    if (typeof commitFence !== "function" || typeof nowMs !== "function") throw new Error("Approval closure requires a clock and daemon ownership fence.");
+    // Most convergence passes have nothing to settle. Avoid taking a write lock
+    // in that case; re-read all evidence under the fence when there is work.
+    const pending = await this.serialize(async () => witnessedRuntimeApprovalClosures(await this.getDatabase(), agentId).length > 0);
+    if (!pending) return 0;
+    return this.writeOperationalJournal(db => settleWitnessedRuntimeApprovalClosures(db, agentId, nowMs), commitFence);
+  }
+
+  async loseExecutionApproval(input: LoseExecutionApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => loseExecutionApproval(db, snapshot), commitFence);
+  }
+
+  /** Persist one server revision only while exact process-held host authority remains current. */
+  async reconcileExecutionDelegation(
+    input: ReconcileExecutionDelegation,
+    assertCurrent: () => void,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<ExecutionDelegationReconciliation> {
+    if (typeof assertCurrent !== "function" || typeof commitFence !== "function") {
+      throw new Error("Execution delegation journal requires current host authority and a daemon ownership commit fence.");
+    }
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(
+      (db) => {
+        assertCurrent();
+        return reconcileExecutionDelegation(db, snapshot, this.readEntryFromDatabase(db, snapshot.authority.agentId));
+      },
+      commitFence,
+    );
+  }
+
+  /** Discovery only; exact server reads remain mandatory before use. */
+  async listExecutionDelegationInstanceIds(
+    input: ExecutionDelegationInventoryScope,
+  ): Promise<string[]> {
+    return listExecutionDelegationInstanceIds(await this.getDatabase(), structuredClone(input));
+  }
+
+  /** Current local delegation discovery only; publishers still exact-revalidate before upload. */
+  async listExecutionDelegationsForApprovalPublication(
+    input: ExecutionApprovalPublicationDelegationScope,
+  ): Promise<LocalExecutionDelegation[]> {
+    return listExecutionDelegationsForApprovalPublication(await this.getDatabase(), structuredClone(input));
+  }
+
+  /** Durable rows never suffice: callers must supply their current host-authority snapshot. */
+  async validateExecutionDelegation(input: ValidateExecutionDelegation): Promise<LocalExecutionDelegation> {
+    const snapshot = structuredClone(input);
+    const db = await this.getDatabase();
+    return validateExecutionDelegation(db, snapshot, this.readEntryFromDatabase(db, snapshot.agentId));
+  }
+
+  /** Record only; provider dispatch remains a separate, later authority edge. */
+  async selectDelegatedApproval(
+    input: Omit<SelectDelegatedApproval, "atMs">,
+    nowMs: () => number,
+    assertCurrent: () => void,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<ExecutionApprovalRecord> {
+    if (typeof nowMs !== "function" || typeof assertCurrent !== "function" || typeof commitFence !== "function") {
+      throw new Error("Delegated approval selection requires current host/native authority and a daemon ownership commit fence.");
+    }
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal((db) => {
+      assertCurrent();
+      return selectDelegatedApproval(db, { ...snapshot, atMs: nowMs() }, this.readEntryFromDatabase(db, snapshot.expected.agentId));
+    }, commitFence);
+  }
+
+  /** Internal drain admission only. This does not switch modes or interrupt a provider. */
+  async prepareDeliveryDrain(input: PrepareDeliveryDrain, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; cutover: DeliveryDrainRecord }> {
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal((database) => prepareDeliveryDrain(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  /** Explicit pre-activation undo only; never infer general idle polling safety. */
+  async prepareCustodialForward(input: PrepareCustodialForward, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; cutover: DeliveryDrainRecord }> {
+    if (typeof commitFence !== "function") throw new Error("Custodial forward requires a native ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(database => prepareCustodialForward(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async getDeliveryDrain(operationId: string): Promise<DeliveryDrainRecord | null> {
+    return readDeliveryDrain(await this.getDatabase(), operationId);
+  }
+
+  async unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null> {
+    return unresolvedDeliveryDrain(await this.getDatabase(), agentId);
+  }
+
+  async cancelDeliveryDrain(input: { operationId: string; agentId: string }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
+    const snapshot = { ...input };
+    return this.writeOperationalJournal((database) => cancelDeliveryDrain(database, snapshot), commitFence);
+  }
+
+  async deliveryDrainReadiness(operationId: string): Promise<DeliveryDrainReadiness> {
+    return this.writeOperationalJournal((database) => deliveryDrainReadiness(database, operationId));
+  }
+
+  async markDeliveryDrainDispatch(input: DispatchDeliveryDrain, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal((database) => markDeliveryDrainDispatch(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async markDeliveryDrainUncertain(input: { operationId: string; agentId: string }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
+    const snapshot = { ...input };
+    return this.writeOperationalJournal((database) => markDeliveryDrainUncertain(database, snapshot), commitFence);
+  }
+
+  /** The internal caller must prove the saved native birth is gone in this fence.
+   * It must invoke commit synchronously after that proof, while holding daemon ownership. */
+  async commitDeliveryDrain(expectedGeneration: number, input: { operationId: string; agentId: string },
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; cutover: DeliveryDrainRecord }> {
+    if (typeof commitFence !== "function") throw new Error("Delivery drain requires a native-death commit fence.");
+    const snapshot = { ...input };
+    const prior = await this.getDeliveryDrain(snapshot.operationId);
+    if (prior?.phase === "complete" && prior.agent_id === snapshot.agentId && prior.authority_version === 1
+      && prior.strategy === "drain"
+      && ((prior.from_mode === "daemon_inbox" && prior.to_mode === "mcp_polling" && prior.predecessor_operation_id === null)
+        || (prior.from_mode === "mcp_polling" && prior.to_mode === "daemon_inbox" && prior.predecessor_operation_id !== null
+          && prior.native_target_turn_id === null && prior.admitted_inbox_item_id === null))) {
+      // A lost response may be retried after a successor is running. Return the
+      // immutable receipt without another cursor transfer, stop, or revision.
+      return { generation: (await this.load()).generation, cutover: prior };
+    }
+    const result = await this.writeTargeted(expectedGeneration, (database) => commitDeliveryDrain(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+    return { generation: result.generation, cutover: result.value };
+  }
+
   async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
     const database = await this.getDatabase();
-    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
+    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
     if (!row) return undefined;
-    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision) };
+    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"] };
+  }
+
+  /** Explicit operator request only; startup and credential recovery never create this journal. */
+  async preparePollingActivation(input: PreparePollingActivation, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; activation: PollingActivationRecord }> {
+    this.requirePollingActivationFence(commitFence); const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(database => preparePollingActivation(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async getPollingActivation(operationId: string): Promise<PollingActivationRecord | null> {
+    return getPollingActivation(await this.getDatabase(), operationId);
+  }
+
+  async unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null> {
+    return unresolvedPollingActivation(await this.getDatabase(), agentId);
+  }
+
+  async markPollingActivationDispatch(input: DispatchPollingActivation, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(database => markPollingActivationDispatch(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  /** First IDs require the same live RPC invocation; known-ID reconciliation must remain exact. */
+  async checkpointPollingActivationTurn(input: { operationId: string; agentId: string; providerTurnId: string },
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => checkpointPollingActivationTurn(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async markPollingActivationUncertain(input: { operationId: string; agentId: string }, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => markPollingActivationUncertain(database, snapshot), commitFence);
+  }
+
+  async cancelPollingActivation(input: { operationId: string; agentId: string }, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => cancelPollingActivation(database, snapshot), commitFence);
+  }
+
+  /** Fence authenticates the exact native terminal, or hard loss of the saved native birth. */
+  async completePollingActivation(input: CompletePollingActivation, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => completePollingActivation(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  private requirePollingActivationFence(fence: unknown): void {
+    if (typeof fence !== "function") throw new Error("Polling activation requires a native ownership commit fence.");
+  }
+
+  async getPollingOfferTail(activationId: string): Promise<PollingOfferRecord | null> {
+    return getPollingOfferTail(await this.getDatabase(), activationId);
+  }
+
+  async recordPollingOffer(input: RecordPollingOffer, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingOfferRecord | null> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => recordPollingOffer(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async acknowledgePollingOffer(input: AcknowledgePollingOffer, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ReturnType<typeof acknowledgePollingOffer>> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => acknowledgePollingOffer(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
   }
 
   async prepareRoomMove(
@@ -247,6 +947,8 @@ export class ManifestStore {
             if (move.operation_id !== input.operation_id || move.agent_id !== input.agent_id || move.source_room_id !== input.source_room_id || move.destination_room_id !== input.destination_room_id || move.execution_generation_id !== input.execution_generation_id) throw new Error("Room-move request id is already bound to different coordinates.");
             result = { created: false, move };
           } else {
+            assertNoDeliveryDrain(database, input.agent_id);
+            assertNoPollingActivation(database, input.agent_id);
             const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
               WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id) as Row | undefined;
             if (unresolvedControl) {
@@ -659,7 +1361,7 @@ export class ManifestStore {
     if (bool(state.turn_control_present) && ![null, "completed"].includes(state.turn_status as string | null)) throw new Error("Purge cannot remove an agent with nonterminal turn control.");
     const blockers = [
       database.prepare("SELECT 1 FROM worker_session_bindings WHERE entry_id=? LIMIT 1").get(agentId),
-      database.prepare("SELECT 1 FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') LIMIT 1").get(agentId),
+      database.prepare("SELECT 1 FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM supervised_agent_effects WHERE agent_id=? AND state IN ('prepared','executing') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM supervised_agent_ingress_health WHERE agent_id=? AND state NOT IN ('stopped','blocked') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(agentId),
@@ -682,6 +1384,8 @@ export class ManifestStore {
       let transactionOpen = false;
       const commit = async () => {
         database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
+        assertNoDeliveryDrain(database, input.agentId);
+        assertNoPollingActivation(database, input.agentId);
         const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
         if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during configuration update.");
         const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.agentId, input.expectedRevision);
@@ -700,58 +1404,7 @@ export class ManifestStore {
   }
 
   private readEntryFromDatabase(database: DatabaseSync, agentId: string): DaemonManifestEntry | undefined {
-    const row = database.prepare(`
-      SELECT
-        i.agent_id, i.created_by, i.created_at,
-        p.display_name, m.room_id,
-        c.provider, c.model, c.reasoning_effort, c.charter, c.permission_profile_id, c.config_revision, c.runtime_configuration_revision, c.delivery_mode, c.delivery_cutover_json,
-        c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
-        l.desired_state, l.source_repo_path_present, l.source_repo_path,
-        d.deployment_id, d.run_id, d.observed_state,
-        d.workspace_path_present, d.workspace_path,
-        d.work_attempt_id_present, d.work_attempt_id,
-        d.provider_ref_present, d.provider_work_attempt_id, d.provider_continuation_id,
-        d.provider_connection_kind, d.provider_connection_url, d.provider_server_auth_path,
-        d.provider_connection_pid,
-        d.provider_process_identity_present, d.provider_process_identity, d.provider_execution_generation_id,
-        d.workplace_liveness_present, d.workplace_liveness_state,
-        d.workplace_liveness_observed_at, d.workplace_liveness_detail,
-        d.native_liveness_present, d.native_liveness_state,
-        d.native_liveness_observed_at, d.native_liveness_detail,
-        d.activity_present,
-        s.condition, s.last_error_present, s.last_error,
-        r.ready_reached_at_present, r.ready_reached_at,
-        COALESCE(w.last_sequence,0) AS last_turn_control_sequence,
-        t.turn_control_present, t.action_id, t.action_sequence, t.turn_work_attempt_id,
-        t.turn_execution_generation_id, t.target_room_id, t.target_source_message_id,
-        t.target_provider_continuation_id, t.has_correction, t.status AS turn_status,
-        t.inbox_item_id, t.provider_turn_id, t.correction_text, t.correction_strategy, t.operator_resolution,
-        t.capability, t.interrupted, t.resumed, t.turn_state, t.error AS turn_error,
-        t.recorded_at, t.updated_at,
-        b.last_worker_binding_present, b.binding_agent_session_id,
-        b.binding_work_attempt_id, b.binding_execution_generation_id, b.binding_updated_at,
-        q.reconciliation_present, q.consecutive_action_failures,
-        q.last_observed_state, q.next_restart_at_ms, q.last_action_sequence,
-        q.pending_action_id, q.pending_action_sequence, q.pending_action_kind,
-        q.pending_action_recorded_at_ms, q.last_terminal_present,
-        q.terminal_ended_at, q.terminal_exit_code, q.terminal_signal,
-        q.terminal_stdio_archive_ref, q.terminal_stdio_tail, q.terminal_cause,
-        q.terminal_actor, q.terminal_generation, q.terminal_provider_continuation_id,
-        q.reconciliation_notices_present
-      FROM agent_identities i
-      JOIN agent_profiles p USING (agent_id)
-      JOIN agent_room_memberships m USING (agent_id)
-      JOIN agent_configurations c USING (agent_id)
-      JOIN agent_launch_intents l USING (agent_id)
-      JOIN runtime_deployments d USING (agent_id)
-      JOIN agent_lifecycle_states s USING (agent_id)
-      JOIN agent_readiness r USING (agent_id)
-      JOIN turn_control_journals t USING (agent_id)
-      LEFT JOIN turn_control_sequence_watermarks w USING (agent_id)
-      JOIN retained_worker_bindings b USING (agent_id)
-      JOIN reconciliation_records q USING (agent_id)
-      WHERE i.agent_id = ?
-    `).get(agentId) as Row | undefined;
+    const row = this.reads.get(database, "entry").get(agentId) as Row | undefined;
     return row ? composeDaemonManifestEntry(this.projectionFromRow(database, row)) : undefined;
   }
 
@@ -760,11 +1413,27 @@ export class ManifestStore {
     entry: DaemonManifestEntry,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
     roomMoveCancellation?: PreMembershipRoomMoveCancellation,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+    interruptedDelivery?: { turn: SupervisedProviderTurnBinding; detail: string; observedAt: string; cursorLaneRetirement?: import("./runtime-recovery-journal.js").CursorLaneRetirement },
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; recoveredRuntimeId?: string }> {
     const normalized = canonicalManifestEntry(entry);
+    let recoveredRuntimeId: string | undefined;
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?").get(normalized.id) as Row | undefined;
       if (!row) throw new Error(`Unknown daemon manifest entry: ${normalized.id}`);
+      if (interruptedDelivery) {
+        const { turn, detail, observedAt } = interruptedDelivery;
+        const receipt = database.prepare("SELECT state,outcome,provider_turn_id FROM supervised_agent_inbox WHERE inbox_item_id=?").get(turn.inbox_item_id) as Row | undefined;
+        const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(turn.inbox_item_id) as Row | undefined;
+        if (turn.agent_id !== normalized.id || turn.room_id !== normalized.room_id
+          || !receipt || receipt.state !== "blocked" || receipt.outcome !== null
+          || receipt.provider_turn_id !== turn.provider_turn_id
+          || !binding || Object.entries(turn).some(([key, value]) => binding[key] !== value)) {
+          throw new ManifestConflictError("Runtime recovery lost the exact blocked provider turn before settlement.");
+        }
+        recoveredRuntimeId = recordInterruptedCursorRecovery(database, turn, observedAt, interruptedDelivery.cursorLaneRetirement) ?? undefined;
+        cancelInterruptedSupervisedTurn(database, turn.inbox_item_id, detail, observedAt,
+          { agent_id: normalized.id, room_id: normalized.room_id });
+      }
       if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
       // Configuration revisions are Inspector-owned state, intentionally not
       // part of the legacy flat manifest projection. Preserve them through
@@ -778,7 +1447,104 @@ export class ManifestStore {
       if (!persisted) throw new Error(`Daemon manifest entry disappeared during replacement: ${normalized.id}`);
       return persisted;
     }, commitFence);
-    return { generation: result.generation, entry: result.value };
+    return { generation: result.generation, entry: result.value, recoveredRuntimeId };
+  }
+
+  /**
+   * Persist the provider reference, applied configuration, and exact native
+   * process birth in one transaction. Cursor's idle lane has no process birth;
+   * each paused child is materialized by checkpointCursorPreparedTurn instead.
+   */
+  async checkpointProviderBirth(
+    expectedGeneration: number,
+    input: {
+      entry: DaemonManifestEntry;
+      executionGenerationId: string;
+      providerConnection: DaemonProviderConnection;
+      appliedRevision: number;
+      managedLaunchContract?: string;
+      requestedAuthorityMode: LifecycleAuthorityMode;
+      observedAtMs: number;
+    },
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode | null }> {
+    const snapshot = structuredClone(input);
+    const normalized = canonicalManifestEntry(snapshot.entry);
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id=?")
+        .get(normalized.id) as Row | undefined;
+      const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?")
+        .get(normalized.id) as Row | undefined;
+      const ref = normalized.provider_ref;
+      if (!row || !configuration || !ref
+        || normalized.work_attempt_id !== ref.work_attempt_id
+        || ref.execution_generation_id !== snapshot.executionGenerationId
+        || !sameProviderActionConnectionSnapshot(ref.provider_connection, snapshot.providerConnection)
+        || !Number.isSafeInteger(snapshot.appliedRevision)
+        || snapshot.appliedRevision < 1
+        || snapshot.appliedRevision > Number(configuration.config_revision)
+        || Number(configuration.runtime_configuration_revision) > snapshot.appliedRevision
+        || !Number.isSafeInteger(snapshot.observedAtMs)
+        || snapshot.observedAtMs < 0) {
+        throw new ManifestConflictError("Provider birth lost its exact manifest or configuration authority.");
+      }
+      if (!database.prepare(`SELECT 1 FROM work_attempt_executions
+        WHERE work_attempt_id=? AND execution_generation_id=?`)
+        .get(ref.work_attempt_id, snapshot.executionGenerationId)) {
+        throw new ManifestConflictError("Provider birth has no exact durable execution generation.");
+      }
+      const provider = lifecycleAuthorityProviderSchema.safeParse(normalized.provider);
+      const expectedProvider = {
+        codex_app_server: "codex",
+        claude_cli: "claude-code",
+        cursor_cli: "cursor",
+        opencode_server: "open-model",
+      } as const;
+      if (!provider.success || provider.data !== expectedProvider[snapshot.providerConnection.kind]) {
+        throw new ManifestConflictError("Provider birth connection does not match its provider.");
+      }
+      const projection = projectDaemonManifestEntry(normalized);
+      this.preserveInspectorConfiguration(projection, configuration);
+      run(database.prepare("DELETE FROM agent_identities WHERE agent_id=?"), normalized.id);
+      this.insertProjection(database, projection, Number(row.sort_order));
+      run(database.prepare("UPDATE agent_configurations SET runtime_configuration_revision=? WHERE agent_id=?"),
+        snapshot.appliedRevision, normalized.id);
+
+      const connection = snapshot.providerConnection;
+      let authorityMode: LifecycleAuthorityMode | null = null;
+      if (connection.pid === null || !connection.processIdentity) {
+        if (connection.kind !== "cursor_cli" || connection.pid !== null || connection.processIdentity != null) {
+          throw new ManifestConflictError("Provider birth requires an exact native process identity.");
+        }
+      } else {
+        const runtimeGenerationId = executionRuntimeStorageIdentity(normalized.id,
+          snapshot.executionGenerationId, connection.kind, connection.pid, connection.processIdentity);
+        authorityMode = materializeRuntimeIdentity(database, {
+          agentId: normalized.id,
+          executionGenerationId: snapshot.executionGenerationId,
+          runtimeGenerationId,
+          provider: provider.data,
+          authorityMode: snapshot.requestedAuthorityMode,
+          configRevision: snapshot.appliedRevision,
+          createdAtMs: snapshot.observedAtMs,
+        });
+        if (authorityMode !== snapshot.requestedAuthorityMode) {
+          throw new Error("Provider birth retained an incompatible frozen lifecycle authority.");
+        }
+        if (snapshot.managedLaunchContract !== undefined) {
+          if (!/^[a-f0-9]{64}$/.test(snapshot.managedLaunchContract)) throw new Error("Invalid managed launch contract.");
+          const prior = database.prepare("SELECT contract_sha256 FROM managed_launch_contracts WHERE runtime_generation_id=?").get(runtimeGenerationId);
+          if (prior && prior.contract_sha256 !== snapshot.managedLaunchContract) throw new Error("Native birth cannot change its managed launch contract.");
+          database.prepare(`INSERT OR IGNORE INTO managed_launch_contracts
+            (runtime_generation_id,agent_id,execution_generation_id,contract_sha256) VALUES(?,?,?,?)`)
+            .run(runtimeGenerationId, normalized.id, snapshot.executionGenerationId, snapshot.managedLaunchContract);
+        }
+      }
+      const persisted = this.readEntryFromDatabase(database, normalized.id);
+      if (!persisted) throw new Error("Provider birth disappeared during its atomic checkpoint.");
+      return { entry: persisted, authorityMode };
+    }, commitFence);
+    return { generation: result.generation, ...result.value };
   }
 
   /**
@@ -787,6 +1553,64 @@ export class ManifestStore {
    * links that already-admitted row; if this transaction wins first, a pending
    * row remains unlinked and the journal barrier prevents it from starting.
    */
+  async getRuntimeRecovery(operationId: string): Promise<RuntimeRecoveryRecord | null> {
+    return readRuntimeRecovery(await this.getDatabase(), operationId);
+  }
+
+  async pendingRuntimeRecovery(agentId: string): Promise<RuntimeRecoveryRecord | null> {
+    return pendingRuntimeRecovery(await this.getDatabase(), agentId);
+  }
+
+  async prepareRuntimeRecovery(expectedGeneration: number, input: RuntimeRestartRequest,
+    commitFence: (commit: () => Promise<void>) => Promise<void>) {
+    const result = await this.writeTargeted(expectedGeneration, database => {
+      assertNoDeliveryDrain(database, input.entryId);
+      assertNoPollingActivation(database, input.entryId);
+      if (database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(input.entryId)) {
+        throw new Error("Finish the room move before restarting this agent.");
+      }
+      const current = this.readEntryFromDatabase(database, input.entryId);
+      if (current?.turn_control && current.turn_control.status !== "completed") {
+        throw new Error("Resolve the pending turn control before restarting this agent.");
+      }
+      return prepareRuntimeRecovery(database, input, current);
+    }, commitFence);
+    return { generation: result.generation, record: result.value };
+  }
+
+  async prepareRetiredRuntimePlan(request: RuntimeRestartRequest, supplied: RetiredRuntimeEvidence[] = [], identity?: ProcessIdentity) {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      return prepareRetiredRuntimePlan(database, request, this.readEntryFromDatabase(database, request.entryId), supplied, identity);
+    });
+  }
+
+  async checkpointRuntimeStopped(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>, retired?: RetiredRuntimePlan, identity?: ProcessIdentity) {
+    return this.writeOperationalJournal(database => {
+      const record = readRuntimeRecovery(database, operationId);
+      const entry = record ? this.readEntryFromDatabase(database, record.agent_id) : undefined;
+      if (record?.phase === "prepared" && entry && retired) archiveRetiredRuntimes(database, {
+        operationId, entryId: record.agent_id, roomId: record.room_id, executionGenerationId: record.execution_generation_id,
+        runtimeGenerationId: record.runtime_generation_id, mode: record.mode,
+      }, entry, retired, identity);
+      return checkpointRuntimeStopped(database, operationId, entry);
+    }, commitFence);
+  }
+
+  async completeRuntimeRecovery(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {
+    return this.writeOperationalJournal(database => {
+      const record = readRuntimeRecovery(database, operationId);
+      if (!record || record.phase === "prepared") throw new Error("The old runtime has not been proven stopped.");
+      const entry = this.readEntryFromDatabase(database, record.agent_id);
+      if (!entry || entry.room_id !== record.room_id || entry.desired_state !== "running"
+        || (record.mode === "fresh" ? entry.provider_ref != null : entry.provider_ref?.execution_generation_id !== record.execution_generation_id)) {
+        throw new Error("The replacement runtime intent changed before recovery completed.");
+      }
+      database.prepare("UPDATE agent_runtime_recoveries SET phase='complete',updated_at=? WHERE operation_id=?")
+        .run(new Date().toISOString(), operationId);
+    }, commitFence);
+  }
+
   async prepareTurnControlState(
     expectedGeneration: number,
     input: {
@@ -815,6 +1639,8 @@ export class ManifestStore {
     }
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
+      assertNoDeliveryDrain(database, input.agentId);
+      assertNoPollingActivation(database, input.agentId);
       if (!current
         || current.room_id !== input.roomId
         || current.desired_state !== "running"
@@ -898,10 +1724,11 @@ export class ManifestStore {
         WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND state='prepared' AND tool_name<>'join_room'`),
       input.recordedAt, input.agentId, String(turnBinding.origin_execution_generation_id), input.expectedProviderTurnId);
       const retryingExactAction = existing?.action_id === input.actionId;
-      const terminalOrPublishing = ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linkedState ?? "");
+      const terminalOrPublishing = Boolean(readDurableNativeFailure(database, input.expectedInboxItemId))
+        || ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linkedState ?? "");
       if (!retryingExactAction || !terminalOrPublishing) {
         const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
-          WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+          WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
           ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
         if (!head || String(head.inbox_item_id) !== input.expectedInboxItemId
           || !["dispatching", "awaiting_result"].includes(linkedState ?? "")) {
@@ -1003,7 +1830,7 @@ export class ManifestStore {
         if (!linked
           || String(linked.agent_id) !== input.agentId
           || String(linked.room_id) !== input.roomId
-          || ["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linked.state))
+          || ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linked.state))
           || (nullableString(linked.provider_turn_id) && nullableString(linked.provider_turn_id) !== input.providerTurnId)) {
           throw new ManifestConflictError("Turn-control target checkpoint lost its exact linked FIFO invocation.");
         }
@@ -1062,10 +1889,10 @@ export class ManifestStore {
     },
     buildEntry: (
       current: DaemonManifestEntry,
-      outcome: { original: "cancelled" | "publication_won" | "resumed" | "none"; inboxItemId: string | null; correctionInboxItemId: string | null; providerTurnId: string | null },
+      outcome: { original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none"; inboxItemId: string | null; correctionInboxItemId: string | null; providerTurnId: string | null },
     ) => DaemonManifestEntry,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; original: "cancelled" | "publication_won" | "resumed" | "none"; correctionInboxItemId: string | null; providerTurnId: string | null }> {
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none"; correctionInboxItemId: string | null; providerTurnId: string | null }> {
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
       const control = current?.turn_control;
@@ -1112,6 +1939,9 @@ export class ManifestStore {
       }
       const linkedState = linkedRow ? String(linkedRow.state) : null;
       const linkedProviderTurnId = linkedRow ? nullableString(linkedRow.provider_turn_id) : null;
+      const linkedNativeFailure = linkedRow
+        ? readDurableNativeFailure(database, String(linkedRow.inbox_item_id))
+        : null;
       let durableOutcomeKind: "reply" | "no_reply" | null = null;
       if (linkedRow?.outcome) {
         try {
@@ -1122,7 +1952,7 @@ export class ManifestStore {
       }
       const linkedHasPublicationOnlyOutcome = durableOutcomeKind !== null;
       const linkedIsTerminal = linkedState !== null
-        && (linkedHasPublicationOnlyOutcome
+        && (linkedHasPublicationOnlyOutcome || linkedNativeFailure !== null
           || ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(linkedState));
       const linkedWasV16MigrationCancelled = Boolean(linkedRow
         && linkedState === "cancelled_by_user"
@@ -1151,9 +1981,9 @@ export class ManifestStore {
       // A may have settled before B acquired the head. Historical resolution
       // can retire the control barrier, but it may mutate a FIFO row only when
       // the journal carries that row's exact durable identity.
-      if (linkedRow && !["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
+      if (linkedRow && !["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
         const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
-          WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+          WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
           ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
         if (!head || String(head.inbox_item_id) !== String(linkedRow.inbox_item_id)) {
           throw new ManifestConflictError("Turn-control commit target is no longer the exact FIFO head.");
@@ -1170,7 +2000,7 @@ export class ManifestStore {
         throw new ManifestConflictError("Turn-control correction semantics were not durably prepared.");
       }
 
-      let original: "cancelled" | "publication_won" | "resumed" | "none" = "none";
+      let original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none" = "none";
       if (linkedRow && String(linkedRow.state) === "cancelled_by_room_move") {
         throw new ManifestConflictError("Turn-control target was cancelled by a committed room move.");
       } else if (linkedRow && String(linkedRow.state) === "cancelled_by_user") {
@@ -1201,6 +2031,21 @@ export class ManifestStore {
             WHERE inbox_item_id=?`), input.observedAt, input.observedAt, String(linkedRow.inbox_item_id));
         }
         original = "publication_won";
+      } else if (linkedRow && linkedNativeFailure !== null) {
+        // Exact native failure is terminal authority, not proof that Stop
+        // cancelled anything or that a reply was published. Never resurrect
+        // the original prompt when resolving an uncertain native control.
+        if (String(linkedRow.state) !== "acknowledged_failed") {
+          const detail = linkedNativeFailure === "interrupted"
+            ? "The provider turn was interrupted before completing this room request."
+            : "The provider turn failed before completing this room request.";
+          run(database.prepare(`UPDATE supervised_agent_inbox
+            SET state='acknowledged_failed',last_error=?,failure_code=NULL,
+                blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=?
+            WHERE inbox_item_id=?`), detail, input.observedAt, input.observedAt, String(linkedRow.inbox_item_id));
+          linkedRow = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(String(linkedRow.inbox_item_id)) as Row;
+        }
+        original = "terminal_won";
       } else if (input.mode === "operator_not_applied" && linkedRow) {
         const state = String(linkedRow.state);
         if (["publishing", "acknowledged", "acknowledged_no_reply"].includes(state)) {
@@ -1281,15 +2126,15 @@ export class ManifestStore {
           // current head is old A or an already-admitted successor B. Never
           // reorder or cancel it; place the accepted correction behind it.
           correctionPredecessor = database.prepare(`SELECT * FROM supervised_agent_inbox
-            WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+            WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
           if (correctionPredecessor && String(correctionPredecessor.room_id) !== input.roomId) {
             throw new ManifestConflictError("Historical turn-control correction found a current FIFO head in a different room.");
           }
         }
-        if (linkedRow && ["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
+        if (linkedRow && ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
           const successor = database.prepare(`SELECT * FROM supervised_agent_inbox
-            WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+            WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
           const pristinePendingSuccessor = successor
             && String(successor.state) === "pending"
@@ -1312,7 +2157,7 @@ export class ManifestStore {
         const sourceMessage = { text: correction, sender: { kind: "supervisor_correction" } };
         const activation = { decision: "activate", reason: "human_correction", addressed: true };
         const sequenceBounds = database.prepare(`SELECT
-            MIN(CASE WHEN state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') THEN fifo_sequence END) AS first_active,
+            MIN(CASE WHEN state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') THEN fifo_sequence END) AS first_active,
             COALESCE(MAX(fifo_sequence),0) AS maximum
           FROM supervised_agent_inbox WHERE agent_id=?`).get(input.agentId) as Row;
         const insertionSequence = correctionPredecessor
@@ -1332,7 +2177,7 @@ export class ManifestStore {
           }
           const existingSequence = Number(existing.fifo_sequence);
           if (existingSequence !== insertionSequence
-            && !["acknowledged", "acknowledged_no_reply"].includes(existingState)) {
+            && !["acknowledged", "acknowledged_no_reply", "acknowledged_failed"].includes(existingState)) {
             const pristinePending = existingState === "pending"
               && Number(existing.attempt_count) === 0
               && existing.provider_turn_id === null
@@ -1430,8 +2275,8 @@ export class ManifestStore {
       if (control.inbox_item_id) {
         const terminal = database.prepare(`SELECT inbox_item_id,agent_id,provider_turn_id,state
           FROM supervised_agent_inbox WHERE inbox_item_id=?`).get(control.inbox_item_id) as Row | undefined;
-        if (terminal && ["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(String(terminal.state))) {
-          settlePreparedSupervisedEffectsForTerminalItem(database, {
+        if (terminal && ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(terminal.state))) {
+          settleSupervisedTerminalItem(database, {
             inboxItemId: String(terminal.inbox_item_id),
             agentId: String(terminal.agent_id),
             providerTurnId: nullableString(terminal.provider_turn_id),
@@ -1468,16 +2313,23 @@ export class ManifestStore {
       expectedProviderContinuationId: string;
       expectedProviderConnection: DaemonProviderConnection | null;
       providerConnection: Extract<DaemonProviderConnection, { kind: "cursor_cli" }>;
+      configurationRevision: number;
+      requestedAuthorityMode: LifecycleAuthorityMode;
       observedAt: string;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode }> {
     if (!input.providerTurnId.trim() || !input.inboxItemId.trim() || !input.providerContinuationId.trim()) {
       throw new Error("Cursor prepared-turn checkpoint requires exact inbox and provider turn ids.");
     }
     if (input.providerConnection.pid === null || !input.providerConnection.processIdentity?.trim()) {
       throw new Error("Cursor prepared-turn checkpoint requires a verified wrapper process birth.");
     }
+    if (!Number.isSafeInteger(input.configurationRevision) || input.configurationRevision < 1) {
+      throw new Error("Cursor prepared-turn checkpoint requires an exact applied configuration revision.");
+    }
+    const processPid = input.providerConnection.pid;
+    const processIdentity = input.providerConnection.processIdentity;
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const entry = this.readEntryFromDatabase(database, input.agentId);
       if (!entry
@@ -1501,6 +2353,13 @@ export class ManifestStore {
         || String(binding.api_url) !== input.apiUrl) {
         throw new ManifestConflictError("Cursor prepared turn lost its exact worker binding.");
       }
+      const configuration = database.prepare(`SELECT config_revision,runtime_configuration_revision
+        FROM agent_configurations WHERE agent_id=?`).get(input.agentId) as Row | undefined;
+      if (!configuration
+        || Number(configuration.runtime_configuration_revision) !== input.configurationRevision
+        || input.configurationRevision > Number(configuration.config_revision)) {
+        throw new ManifestConflictError("Cursor prepared turn lost its exact applied configuration.");
+      }
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inboxItemId) as Row | undefined;
       if (!row
         || String(row.agent_id) !== input.agentId
@@ -1509,7 +2368,7 @@ export class ManifestStore {
         throw new ManifestConflictError("Cursor prepared turn no longer owns the exact dispatching FIFO item.");
       }
       const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
-        WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+        WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
       if (!head || String(head.inbox_item_id) !== input.inboxItemId) {
         throw new ManifestConflictError("Cursor prepared turn is no longer the exact FIFO head.");
@@ -1550,6 +2409,18 @@ export class ManifestStore {
         input.providerConnection.pid, input.providerConnection.processIdentity,
         input.agentId, input.executionGenerationId);
       }
+      const runtimeGenerationId = executionRuntimeStorageIdentity(input.agentId,
+        input.executionGenerationId, input.providerConnection.kind,
+        processPid, processIdentity);
+      const authorityMode = materializeRuntimeIdentity(database, {
+        agentId: input.agentId,
+        executionGenerationId: input.executionGenerationId,
+        runtimeGenerationId,
+        provider: "cursor",
+        authorityMode: input.requestedAuthorityMode,
+        configRevision: input.configurationRevision,
+        createdAtMs: Date.parse(input.observedAt),
+      });
       if (!persistedTurnId) {
         const nextAttemptCount = Number(row.attempt_count) + 1;
         run(database.prepare(`UPDATE supervised_agent_inbox
@@ -1568,9 +2439,9 @@ export class ManifestStore {
       }
       const persisted = this.readEntryFromDatabase(database, input.agentId);
       if (!persisted) throw new Error("Cursor prepared-turn entry disappeared during checkpoint.");
-      return persisted;
+      return { entry: persisted, authorityMode };
     }, commitFence);
-    return { generation: result.generation, entry: result.value };
+    return { generation: result.generation, ...result.value };
   }
 
   /** CAS a later Cursor runtime edge against the exact durable inbox turn. */
@@ -1751,6 +2622,15 @@ export class ManifestStore {
     return { generation: result.generation, configuration };
   }
 
+  async getActivityState(agentId: string): Promise<{
+    observed_state: DaemonManifestEntry["observed_state"]; last_sequence: number;
+  } | undefined> {
+    const database = await this.getDatabase();
+    const row = this.reads.get(database, "activityState").get(agentId, agentId) as Row | undefined;
+    return row ? { observed_state: String(row.observed_state) as DaemonManifestEntry["observed_state"],
+      last_sequence: row.last_sequence == null ? -1 : Number(row.last_sequence) } : undefined;
+  }
+
   async appendActivity(
     expectedGeneration: number,
     agentId: string,
@@ -1760,39 +2640,95 @@ export class ManifestStore {
     limit = 200,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
-    const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
-      const latest = database.prepare("SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1").get(agentId) as Row | undefined;
-      const lastSequence = latest ? Number(latest.sequence) : -1;
-      if (normalizedEvent.sequence <= lastSequence) throw new Error(`Native activity sequence ${normalizedEvent.sequence} is not newer than ${lastSequence}.`);
-      const updated = database.prepare(`
-        UPDATE runtime_deployments
-        SET observed_state = ?, native_liveness_present = 1, native_liveness_state = ?,
-            native_liveness_observed_at = ?, native_liveness_detail = ?, activity_present = 1
-        WHERE agent_id = ?
-      `).run(observedState, nativeLiveness.state, nativeLiveness.observed_at ?? null, nativeLiveness.detail ?? null, agentId);
-      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
-      const order = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM activity_events WHERE agent_id = ?").get(agentId) as Row).next_order);
-      run(database.prepare(`
-        INSERT INTO activity_events(
-          agent_id, sort_order, observed_at, sequence, provider, kind, method, summary,
-          status, payload_json, payload_truncated, payload_redacted, durable_payload_ref
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `), agentId, order, normalizedEvent.observed_at, normalizedEvent.sequence, normalizedEvent.provider,
-      normalizedEvent.kind, normalizedEvent.method, normalizedEvent.summary, normalizedEvent.status,
-      json(normalizedEvent.payload), Number(normalizedEvent.payload_truncated), Number(normalizedEvent.payload_redacted),
-      normalizedEvent.durable_payload_ref);
-      run(database.prepare(`
-        DELETE FROM activity_events
-        WHERE agent_id = ? AND sort_order NOT IN (
-          SELECT sort_order FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?
-        )
-      `), agentId, agentId, limit);
-      const persisted = this.readEntryFromDatabase(database, agentId);
-      if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity append: ${agentId}`);
-      return persisted;
-    }, commitFence);
+    const result = await this.writeActivity(expectedGeneration, agentId, event, { observedState, nativeLiveness }, limit,
+      database => this.activityEntry(database, agentId), commitFence);
     return { generation: result.generation, entry: result.value };
+  }
+
+  /** Persist presentation detail without acquiring any runtime lifecycle field. */
+  async appendActivityOnly(
+    expectedGeneration: number,
+    agentId: string,
+    event: DaemonActivityEvent,
+    limit = 200,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+    const result = await this.writeActivity(expectedGeneration, agentId, event, null, limit,
+      database => this.activityEntry(database, agentId), commitFence);
+    return { generation: result.generation, entry: result.value };
+  }
+
+  /** Native stream consumers do not need a fresh full-history return value. */
+  async recordActivity(
+    expectedGeneration: number,
+    agentId: string,
+    event: DaemonActivityEvent,
+    runtimeUpdate: { observedState: DaemonManifestEntry["observed_state"];
+      nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]> } | null,
+    limit = 200,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number }> {
+    const result = await this.writeActivity(expectedGeneration, agentId, event, runtimeUpdate, limit,
+      () => undefined, commitFence);
+    return { generation: result.generation };
+  }
+
+  private activityEntry(database: DatabaseSync, agentId: string): DaemonManifestEntry {
+    const persisted = this.readEntryFromDatabase(database, agentId);
+    if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity append: ${agentId}`);
+    return persisted;
+  }
+
+  private writeActivity<T>(
+    expectedGeneration: number,
+    agentId: string,
+    event: DaemonActivityEvent,
+    runtimeUpdate: { observedState: DaemonManifestEntry["observed_state"];
+      nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]> } | null,
+    limit: number,
+    project: (database: DatabaseSync) => T,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; value: T }> {
+    const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
+    return this.writeTargeted(expectedGeneration, database => {
+      const updated = runtimeUpdate
+        ? database.prepare(`UPDATE runtime_deployments
+            SET observed_state = ?, native_liveness_present = 1, native_liveness_state = ?,
+                native_liveness_observed_at = ?, native_liveness_detail = ?, activity_present = 1
+            WHERE agent_id = ?`).run(runtimeUpdate.observedState, runtimeUpdate.nativeLiveness.state,
+          runtimeUpdate.nativeLiveness.observed_at ?? null, runtimeUpdate.nativeLiveness.detail ?? null, agentId)
+        : database.prepare("UPDATE runtime_deployments SET activity_present = 1 WHERE agent_id = ?").run(agentId);
+      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
+      this.appendActivityEvent(database, agentId, normalizedEvent, limit);
+      return project(database);
+    }, commitFence);
+  }
+
+  private appendActivityEvent(
+    database: DatabaseSync,
+    agentId: string,
+    event: DaemonActivityEvent,
+    limit: number,
+  ): void {
+    const latest = this.reads.get(database, "lastSequence").get(agentId) as Row | undefined;
+    const lastSequence = latest ? Number(latest.sequence) : -1;
+    if (event.sequence <= lastSequence) throw new Error(`Native activity sequence ${event.sequence} is not newer than ${lastSequence}.`);
+    const order = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM activity_events WHERE agent_id = ?").get(agentId) as Row).next_order);
+    run(database.prepare(`
+      INSERT INTO activity_events(
+        agent_id, sort_order, observed_at, sequence, provider, kind, method, summary,
+        status, payload_json, payload_truncated, payload_redacted, durable_payload_ref
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), agentId, order, event.observed_at, event.sequence, event.provider,
+    event.kind, event.method, event.summary, event.status,
+    json(event.payload), Number(event.payload_truncated), Number(event.payload_redacted),
+    event.durable_payload_ref);
+    run(database.prepare(`
+      DELETE FROM activity_events
+      WHERE agent_id = ? AND sort_order NOT IN (
+        SELECT sort_order FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?
+      )
+    `), agentId, agentId, limit);
   }
 
   async updateWorkplaceLiveness(
@@ -1820,6 +2756,7 @@ export class ManifestStore {
     this.closed = true;
     await this.writes;
     await this.initializing?.catch(() => undefined);
+    this.reads.clear();
     this.database?.close();
     this.database = null;
     this.initializing = null;
@@ -1848,7 +2785,7 @@ export class ManifestStore {
             WHERE singleton = 1 AND generation = ?
           `).run(expectedGeneration);
           if (Number(result.changes) !== 1) {
-            const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
+            const current = Number((this.reads.get(database, "generation").get() as Row).generation);
             throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
           }
           if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
@@ -1899,10 +2836,12 @@ export class ManifestStore {
   private async initialize(): Promise<DatabaseSync> {
     let database: DatabaseSync | null = null;
     try {
-      database = await openDaemonStateDatabase(this.path, async (opened) => {
-        await this.secureDatabaseFiles();
-        this.createSchema(opened);
-      });
+      database = this.schemaPrepared
+        ? await openPreparedDaemonStateDatabase(this.path)
+        : await openDaemonStateDatabase(this.path, async (opened) => {
+          await this.secureDatabaseFiles();
+          this.createSchema(opened);
+        });
       await this.importLegacyManifest(database);
       this.database = database;
       return database;
@@ -1948,10 +2887,13 @@ export class ManifestStore {
 
     database.exec("BEGIN IMMEDIATE");
     try {
-      const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
+      const current = Number((this.reads.get(database, "generation").get() as Row).generation);
       const count = Number((database.prepare("SELECT COUNT(*) AS count FROM agent_identities").get() as Row).count);
       if (current !== 0 || count !== 0) throw new Error("Refusing to import a legacy manifest into non-empty daemon state.");
-      this.replaceEntries(database, stored.manifest.entries, false);
+      this.replaceEntries(database, stored.manifest.entries.map((entry) =>
+        entry.provider === "codex" && entry.provider_ref
+          ? { ...entry, desired_state: "stopped" as const }
+          : entry), false);
       this.replaceLegacyLaneOwners(database, stored.manifest.legacy_lane_owners ?? []);
       run(database.prepare("UPDATE manifest_metadata SET generation = ? WHERE singleton = 1"), stored.manifest.generation);
       run(database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)"), migrationKey, stored.checksum, new Date().toISOString());
@@ -2020,6 +2962,9 @@ export class ManifestStore {
   }
 
   private preserveInspectorConfiguration(projection: DaemonManifestDomainProjection, row: Row): void {
+    // Custody, like Inspector revisions, is database-owned and cannot be
+    // replaced by the compatibility manifest's stale or caller-supplied fields.
+    projection.configuration.polling_contract = nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"];
     projection.configuration.provider = String(row.provider);
     projection.configuration.model = nullableString(row.model);
     projection.configuration.reasoning_effort = nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"];
@@ -2036,17 +2981,23 @@ export class ManifestStore {
 
   private insertProjection(database: DatabaseSync, projection: DaemonManifestDomainProjection, sortOrder: number): void {
     const { identity, profile, membership, configuration, launch_intent: launch, runtime_deployment: runtime, lifecycle, readiness, turn_control_journal: turnJournal, retained_worker_binding: bindingRecord, reconciliation: reconciliationRecord } = projection;
+    // Legacy cutover preparation commits through all projection replacement
+    // paths; a preflight check alone would race native drain acceptance.
+    if (configuration.delivery_cutover) {
+      assertNoDeliveryDrain(database, identity.agent_id);
+      assertNoPollingActivation(database, identity.agent_id);
+    }
     run(database.prepare("INSERT INTO agent_identities VALUES (?, ?, ?, ?)"), identity.agent_id, identity.created_by, identity.created_at, sortOrder);
     run(database.prepare("INSERT INTO agent_profiles VALUES (?, ?)"), identity.agent_id, profile.display_name);
-    run(database.prepare("INSERT INTO agent_room_memberships VALUES (?, ?)"), identity.agent_id, membership.room_id);
+    run(database.prepare("INSERT INTO agent_room_memberships(agent_id, room_id, local_room_id) VALUES (?, ?, ?)"), identity.agent_id, membership.room_id, membership.local_room_id ?? null);
     const policyPresent = Object.hasOwn(configuration, "provider_launch_policy");
     const policyUndefined = policyPresent && configuration.provider_launch_policy === undefined;
     run(database.prepare(`
       INSERT INTO agent_configurations(
         agent_id, provider, model, reasoning_effort, charter, permission_profile_id, config_revision, runtime_configuration_revision, delivery_mode, delivery_cutover_json,
-        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
+        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json, polling_contract
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, configuration.polling_contract ?? null);
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 
@@ -2066,11 +3017,11 @@ export class ManifestStore {
         provider_ref_present, provider_work_attempt_id, provider_continuation_id,
         provider_connection_kind, provider_connection_url, provider_server_auth_path,
         provider_connection_pid,
-        provider_process_identity_present, provider_process_identity, provider_execution_generation_id,
+        provider_process_identity_present, provider_process_identity, provider_execution_generation_id, custodial_launch_agent_session_id,
         workplace_liveness_present, workplace_liveness_state, workplace_liveness_observed_at, workplace_liveness_detail,
         native_liveness_present, native_liveness_state, native_liveness_observed_at, native_liveness_detail,
         activity_present
-      ) VALUES (${Array.from({ length: 27 }, () => "?").join(", ")})
+      ) VALUES (${Array.from({ length: 28 }, () => "?").join(", ")})
     `),
       identity.agent_id, runtime.deployment_id, runtime.run_id, runtime.observed_state,
       Number(workspacePresent), workspacePresent ? runtime.workspace_path ?? null : null,
@@ -2083,6 +3034,7 @@ export class ManifestStore {
       connection?.kind === "opencode_server" ? connection.serverAuthPath : null,
       connection?.pid ?? null, Number(processIdentityPresent), connection?.processIdentity ?? null,
       providerRef?.execution_generation_id ?? null,
+      providerRef?.custodial_launch_agent_session_id ?? null,
       Number(workplacePresent), runtime.workplace_liveness?.state ?? null,
       runtime.workplace_liveness?.observed_at ?? null, runtime.workplace_liveness?.detail ?? null,
       Number(nativePresent), runtime.native_liveness?.state ?? null,
@@ -2181,7 +3133,7 @@ export class ManifestStore {
     });
   }
 
-  private projectionFromRow(database: DatabaseSync, row: Row): DaemonManifestDomainProjection {
+  private projectionFromRow(database: DatabaseSync, row: Row, activityMode: "full" | "summary" = "full"): DaemonManifestDomainProjection {
     const agentId = String(row.agent_id);
     let providerRef: DaemonProviderRuntimeReference | null | undefined;
     if (bool(row.provider_ref_present)) {
@@ -2205,22 +3157,29 @@ export class ManifestStore {
           provider_continuation_id: String(row.provider_continuation_id),
           provider_connection: providerConnection,
           execution_generation_id: String(row.provider_execution_generation_id),
+          ...(row.custodial_launch_agent_session_id != null
+            ? { custodial_launch_agent_session_id: String(row.custodial_launch_agent_session_id) } : {}),
         };
       }
     }
-    const activity = (database.prepare("SELECT * FROM activity_events WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[]).map((event): DaemonActivityEvent => ({
+    // Bound the database read itself: state watchers never need raw payloads.
+    // sort_order breaks sequence ties exactly as the stable wire projection does.
+    const activityRows = activityMode === "summary"
+      ? (this.reads.get(database, "activitySummary")
+        .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
+      : this.reads.get(database, "activity").all(agentId) as Row[];
+    const activity = activityRows.map((event): DaemonActivityEvent => ({
       observed_at: String(event.observed_at), sequence: Number(event.sequence), provider: String(event.provider),
       kind: String(event.kind), method: String(event.method), summary: String(event.summary),
       status: String(event.status) as DaemonActivityEvent["status"], payload: parseJson(event.payload_json),
       payload_truncated: bool(event.payload_truncated), payload_redacted: bool(event.payload_redacted),
       durable_payload_ref: nullableString(event.durable_payload_ref),
     }));
-    const stages = (database.prepare("SELECT stage FROM turn_control_stages WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[]).map((stage) => String(stage.stage)) as DaemonTurnControlEffect["stages"];
-    const completedActions = (database.prepare(`SELECT action_id FROM reconciliation_completed_actions
-      WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?`).all(agentId, MAX_PROJECTED_COMPLETED_ACTION_IDS) as Row[])
+    const stages = (this.reads.get(database, "stages").all(agentId) as Row[]).map((stage) => String(stage.stage)) as DaemonTurnControlEffect["stages"];
+    const completedActions = (this.reads.get(database, "completedActions").all(agentId, MAX_PROJECTED_COMPLETED_ACTION_IDS) as Row[])
       .map((action) => String(action.action_id)).reverse();
-    const exitTimestamps = (database.prepare("SELECT timestamp_ms FROM reconciliation_exit_timestamps WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[]).map((item) => Number(item.timestamp_ms));
-    const notices = (database.prepare("SELECT * FROM reconciliation_notices WHERE agent_id = ? ORDER BY sort_order").all(agentId) as Row[]).map((notice): ReconciliationNotice => ({
+    const exitTimestamps = (this.reads.get(database, "exitTimestamps").all(agentId) as Row[]).map((item) => Number(item.timestamp_ms));
+    const notices = (this.reads.get(database, "notices").all(agentId) as Row[]).map((notice): ReconciliationNotice => ({
       at: String(notice.at), kind: String(notice.kind) as ReconciliationNotice["kind"], cause: String(notice.cause),
       ...(bool(notice.terminal_present) ? { terminal: this.terminalFromRow(notice, "terminal_") } : {}),
     }));
@@ -2267,7 +3226,7 @@ export class ManifestStore {
     return {
       identity: { agent_id: agentId, created_by: String(row.created_by), created_at: String(row.created_at) },
       profile: { agent_id: agentId, display_name: String(row.display_name) },
-      membership: { agent_id: agentId, room_id: String(row.room_id) },
+      membership: { agent_id: agentId, room_id: String(row.room_id), ...(row.local_room_id == null ? {} : { local_room_id: String(row.local_room_id) }) },
       configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(row.delivery_cutover_json === null ? {} : { delivery_cutover: parseJson(row.delivery_cutover_json) }), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
       launch_intent: { agent_id: agentId, desired_state: String(row.desired_state) as DaemonManifestEntry["desired_state"], ...(bool(row.source_repo_path_present) ? { source_repo_path: nullableString(row.source_repo_path) } : {}) },
       runtime_deployment: runtime,
@@ -2424,6 +3383,35 @@ export class ManifestStore {
     owners.forEach((owner, index) => run(insert, owner.reservation_id, owner.room_id, owner.provider, owner.owner_pid, owner.owner_process_identity, owner.state, owner.session_id, owner.created_at, owner.updated_at, index));
   }
 
+  /** Journal-first transaction helper. A manifest projection must perform its
+   * generation CAS inside the mutation so the projection and journal settle together. */
+  private writeOperationalJournal<T>(mutation: (database: DatabaseSync) => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      let open = false;
+      let committed = false;
+      let value!: T;
+      try {
+        const commit = async () => {
+          if (committed) throw new Error("Operational journal transaction was already committed.");
+          database.exec("BEGIN IMMEDIATE");
+          open = true;
+          value = mutation(database);
+          database.exec("COMMIT");
+          open = false;
+          committed = true;
+        };
+        if (commitFence) await commitFence(commit);
+        else await commit();
+        if (!committed) throw new Error("Operational journal fence returned without committing the transaction.");
+        return value;
+      } catch (error) {
+        if (open) { try { database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ } }
+        throw error;
+      }
+    });
+  }
+
   private writeTargeted<T>(
     expectedGeneration: number,
     mutation: (database: DatabaseSync) => T,
@@ -2444,7 +3432,7 @@ export class ManifestStore {
             WHERE singleton = 1 AND generation = ?
           `).run(expectedGeneration);
           if (Number(result.changes) !== 1) {
-            const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
+            const current = Number((this.reads.get(database, "generation").get() as Row).generation);
             throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
           }
           value = mutation(database);

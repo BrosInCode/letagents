@@ -64,7 +64,7 @@ function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): Desktop
       blockedByMessageId: null,
       error: null,
       updatedAt: "2026-07-17T00:00:00.500Z",
-      timeline: [{ phase: "turn_started", observedAt: "2026-07-17T00:00:00.500Z", detail: null }],
+      timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-17T00:00:00.500Z", detail: null }],
     }],
     activity: [{
       observedAt: "2026-07-17T00:00:01.000Z",
@@ -90,6 +90,70 @@ function indicator(
 ): ManagedAgentWorkIndicator {
   return { id, displayName: id, summary, startedAt };
 }
+
+test("an Open Model provider retry is shown in the adapter's own words only", () => {
+  const notice = {
+    kind: "provider_event",
+    method: "letagents/providerRetry",
+    summary: "The model provider returned an error. Retrying (attempt 2).",
+  };
+  assert.equal(isHumanVisibleSupervisorActivity(notice), true);
+  assert.equal(
+    humanFacingSupervisorActivitySummary(notice),
+    "The model provider returned an error. Retrying (attempt 2).",
+  );
+  // Every other provider event stays in diagnostics.
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "provider_event", method: "letagents/turnAttention" }), false);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "provider_event", method: "system/api_retry" }), false);
+  // Provider text under this method is never shown.
+  for (const summary of [
+    "This request requires more credits. You can only afford 1500 tokens.",
+    "The model provider returned an error. Retrying (attempt 2). Visit https://provider.example",
+    "open-model · letagents/providerRetry",
+    "",
+  ]) {
+    assert.equal(
+      humanFacingSupervisorActivitySummary({ ...notice, summary }),
+      "Waiting for the model provider",
+    );
+  }
+});
+
+test("the work indicator shows a provider retry, then gives way to the answer", () => {
+  const retry = {
+    ...entry().activity[0]!,
+    provider: "open-model",
+    kind: "provider_event",
+    method: "letagents/providerRetry",
+    summary: "The model provider returned an error. Retrying (attempt 2).",
+    observedAt: "2026-07-17T00:00:02.000Z",
+    sequence: 6,
+  };
+  const retrying = supervisedAgentWorkIndicators([entry({ activity: [...entry().activity, retry] })], [], "room_1");
+  assert.equal(retrying.length, 1);
+  assert.equal(retrying[0]!.summary, "The model provider returned an error. Retrying (attempt 2).");
+
+  const answering = supervisedAgentWorkIndicators([entry({ activity: [...entry().activity, retry, {
+    ...retry,
+    kind: "text_delta",
+    method: "item/agentMessage/delta",
+    summary: "",
+    observedAt: "2026-07-17T00:00:09.000Z",
+    sequence: 7,
+  }] })], [], "room_1");
+  assert.equal(answering[0]!.summary, "Writing a response");
+
+  // The notice refines an indicator; it never raises one for a finished turn.
+  const finished = entry({
+    activity: [retry],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+    },
+  });
+  assert.deepEqual(supervisedAgentWorkIndicators([finished], [], "room_1"), []);
+});
 
 test("echo trims, collapses whitespace, and keeps short summaries verbatim", () => {
   assert.equal(liveActivityEchoText("  running focused tests  "), "running focused tests");

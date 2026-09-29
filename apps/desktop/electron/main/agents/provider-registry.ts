@@ -7,6 +7,12 @@ import {
   listManagedAgentPermissionProfiles,
 } from "./managed-agent-permission-profiles.js";
 
+export function cursorRuntimeInstallCommand(
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  return platform === "win32" ? null : "curl https://cursor.com/install -fsS | bash";
+}
+
 const agentProviders: DesktopAgentProvider[] = [
   {
     id: "claude-code",
@@ -21,6 +27,8 @@ const agentProviders: DesktopAgentProvider[] = [
     ],
     supervisedDeliveryMode: "daemon_inbox",
     runtimeCommand: "claude",
+    runtimeInstallCommand: "npm install -g @anthropic-ai/claude-code",
+    runtimeInstallUrl: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
     mcpTargetId: "claude-code",
     permissionProfiles: listManagedAgentPermissionProfiles("claude-code"),
     defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("claude-code"),
@@ -50,6 +58,8 @@ const agentProviders: DesktopAgentProvider[] = [
     ],
     supervisedDeliveryMode: "daemon_inbox",
     runtimeCommand: "cursor-agent",
+    runtimeInstallCommand: cursorRuntimeInstallCommand(),
+    runtimeInstallUrl: "https://docs.cursor.com/en/cli/installation",
     mcpTargetId: "cursor",
     permissionProfiles: listManagedAgentPermissionProfiles("cursor"),
     defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("cursor"),
@@ -62,7 +72,6 @@ const agentProviders: DesktopAgentProvider[] = [
       "external_mcp",
       "desktop_managed_runtime",
       "supervised_runtime",
-      "installable_runtime",
       "auth_preflight",
       "turn_control",
       "reasoning_stream",
@@ -70,6 +79,10 @@ const agentProviders: DesktopAgentProvider[] = [
     ],
     supervisedDeliveryMode: "daemon_inbox",
     runtimeCommand: "codex",
+    runtimeInstallCommand: process.platform === "win32"
+      ? "irm https://chatgpt.com/codex/install.ps1 | iex"
+      : "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+    runtimeInstallUrl: "https://learn.chatgpt.com/docs/codex/cli",
     mcpTargetId: "codex",
     permissionProfiles: listManagedAgentPermissionProfiles("codex"),
     defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("codex"),

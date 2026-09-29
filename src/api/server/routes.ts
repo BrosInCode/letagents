@@ -1,3 +1,5 @@
+import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
+import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
@@ -40,6 +42,7 @@ import {
 } from "../rooms/access.js";
 import {
   resolveCanonicalRoomRequestId,
+  resolveExistingRoomRequest,
   resolveRoomOrReply,
 } from "../rooms/resolution.js";
 import { normalizeOptionalString } from "../tasks/coordination-inputs.js";
@@ -56,6 +59,8 @@ import {
 import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js";
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
+import { registerAppLoginRoutes } from "../routes/auth/app-login.js";
+import { registerConversationRoutes } from "../routes/conversations.js";
 import {
   registerAuthRoutes,
   registerGitHubAppCallbackRoute,
@@ -141,6 +146,11 @@ import {
   type RoomTaskRouteDeps,
 } from "../routes/rooms/tasks/index.js";
 import { registerSupervisorHostGrantRoutes } from "../routes/supervisor-host-grants.js";
+import { registerExecutionDelegationRoutes } from "../routes/execution-delegations.js";
+import { registerExecutionDelegationDecisionRoutes } from "../routes/execution-delegation-decisions.js";
+import { registerExecutionApprovalPublicationRoutes } from "../routes/execution-approval-publications.js";
+import { registerCommandReviewRoutes } from "../routes/command-reviews.js";
+import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import {
   createListing,
@@ -166,6 +176,9 @@ import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
   artifactEvents,
+  agentApprovalEvents,
+  agentWorkEvents,
+  executionDelegationEvents,
   githubRoomEvents,
   messageEvents,
   reasoningEvents,
@@ -206,6 +219,9 @@ function getRoomEventBroker(): RoomEventBroker {
     githubRoomEvents,
     reasoningEvents,
     artifactEvents,
+    agentApprovalEvents,
+    agentWorkEvents,
+    executionDelegationEvents,
     rentalActivityEvents,
     messageInfoEvents,
     bridgeLossEvents: roomEventBridgeLossEvents,
@@ -228,6 +244,7 @@ export function registerApiRoutes(app: Express): void {
   const roomMessageOverlayBatcher = sharedRoomMessageOverlayBatcher;
   const roomEntryRouteDeps = {
     getProjectById,
+    resolveExistingRoomRequest,
     getGitRoomBindingForRoom,
     isRepoBackedRoomId,
     resolveGitHubRoomEntryDecision,
@@ -411,6 +428,8 @@ export function registerApiRoutes(app: Express): void {
   } satisfies RoomPullRequestDiffRouteDeps;
 
   const roomBoardRouteDeps = {
+    taskEvents,
+    ensureTaskGitRoomForActiveWorkLease,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
@@ -467,6 +486,8 @@ export function registerApiRoutes(app: Express): void {
   registerGitHubWebhookRoutes(app, githubWebhookRouteDeps);
 
   registerAuthRoutes(app);
+  registerAppLoginRoutes(app);
+  registerConversationRoutes(app);
   registerAccountRoomRoutes(app);
   registerDesktopPushRoutes(app);
 
@@ -480,8 +501,17 @@ export function registerApiRoutes(app: Express): void {
 
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
+  registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
   registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
+  registerExecutionDelegationRoutes(app, roomPresenceRouteDeps);
+  registerExecutionDelegationDecisionRoutes(app, roomPresenceRouteDeps);
+  registerExecutionApprovalPublicationRoutes(app, {
+    ...roomPresenceRouteDeps,
+    getProjectById,
+  });
+  registerCommandReviewRoutes(app, roomPresenceRouteDeps);
+  registerRoomAgentWorkRoutes(app, roomMessageRouteDeps, roomPresenceRouteDeps);
   registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
   registerRoomFocusRoutes(app, roomFocusRouteDeps);
   registerRoomTaskRoutes(app, roomTaskRouteDeps);
@@ -489,6 +519,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomEventRoutes(app, roomEventRouteDeps);
   registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
   registerRoomPullRequestDiffRoutes(app, roomPullRequestDiffRouteDeps);
+  registerConversationRoutingRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
   registerRentalProviderRoutes(app, {
     createListing,

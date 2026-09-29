@@ -1,6 +1,14 @@
+export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
+import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
+import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
+import type { DesktopNeedsYou } from "./knowledge.js";
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
 import type { DesktopNotificationStatus, DesktopNotificationTarget } from "./notifications.js";
-import type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "./supervisor-grant.js";
+import type {
+  DesktopProvisionSupervisorGrantInput,
+  DesktopSecureStorageStatus,
+  DesktopSupervisorGrantMetadata,
+} from "./supervisor-grant.js";
 import type {
   DesktopAppInfo,
   DesktopGitHubPullRequestStats,
@@ -35,6 +43,8 @@ import type {
   DesktopManagedAgentStopInput,
   DesktopSupervisorAttemptDetail,
   DesktopSupervisorAgentConfiguration,
+  DesktopSupervisorAgentConfigurationApplyInput,
+  DesktopSupervisorAgentConfigurationApplyResult,
   DesktopSupervisorAgentConfigurationUpdateInput,
   DesktopSupervisorAgentConfigurationUpdateResult,
   DesktopSupervisorRoomMove,
@@ -70,6 +80,11 @@ import type {
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
   DesktopInviteRoomCreation,
+  DesktopLegacyProjectBindingCandidate,
+  DesktopProjectBinding,
+  DesktopProjectBindingContext,
+  DesktopProjectBindingMigrationResult,
+  DesktopProjectConnectionResult,
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
@@ -81,6 +96,7 @@ import type {
   DesktopRoomThreadPage,
   DesktopRoomThreadReadResult,
   DesktopRoomLiveMetadata,
+  DesktopRoomAgentWorkPollResult,
   DesktopRoomDeliveryRepair,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
@@ -111,6 +127,7 @@ import type {
 } from "./board-governance.js";
 
 export interface DesktopApi {
+  conversations: ConversationApi;
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
     onOpenUpdates?: (callback: () => void) => () => void;
@@ -123,10 +140,20 @@ export interface DesktopApi {
     onStatusChanged: (callback: (status: DesktopNotificationStatus) => void) => () => void;
   };
   app: {
+    readWorkspaceReviewPage?: (input: import("../main/workspace-review.js").WorkspaceReviewPageRequest) => Promise<import("../../../../shared/workspace-diff.mjs").WorkspaceDiffPage>;
+    closeWorkspaceReview?: (input: { requestId: string }) => Promise<void>;
+    readWorkspaceReview?: (input: import("../main/workspace-review.js").WorkspaceReviewRequest) => Promise<import("../main/workspace-review.js").WorkspaceReviewResult>;
+    resolveWorkspaceFiles?: (input: { roomId: string; agentKey: string; sourceMessageId: string; paths: string[] }) => Promise<Array<{ path: string; kind: "local" | "github"; url?: string }>>;
+    openWorkspaceFile?: (input: { roomId: string; agentKey: string; sourceMessageId: string; paths: string[] }) => Promise<void>;
     getInfo: () => Promise<DesktopAppInfo>;
     openGitHubUrl: (url: string) => Promise<void>;
     openExternalUrl: (url: string) => Promise<void>;
+    openCredentialStorage: () => Promise<void>;
     getGitHubPullRequestStats: (url: string) => Promise<DesktopGitHubPullRequestStats | null>;
+  };
+  maintenance?: {
+    getStatus(): Promise<{ held: boolean; ready: boolean }>;
+    restart(resume: boolean): Promise<void>;
   };
   updates?: {
     getStatus: () => Promise<DesktopUpdateStatus>;
@@ -145,6 +172,11 @@ export interface DesktopApi {
     saveSettings: (input: DesktopOpenModelSaveSettingsInput) => Promise<DesktopOpenModelSettingsStatus>;
   };
   room: {
+    getNeedsYou?: (includeUpdates?: boolean) => Promise<DesktopNeedsYou>;
+    getKnowledge?: (room: string, type: KnowledgeType) => Promise<KnowledgePage>;
+    createKnowledge?: (room: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }) => Promise<KnowledgeRecord>;
+    reviseKnowledge?: (room: string, type: KnowledgeType, id: string, input: KnowledgeRevisionInput) => Promise<KnowledgeRecord>;
+    getMemoryHistory?: (room: string, id: string) => Promise<KnowledgePage>;
     listAccountRooms: (options?: DesktopAccountRoomListOptions) => Promise<DesktopAccountRoomEntry[]>;
     updateAccountRoom: (
       roomIdentifier: string,
@@ -158,6 +190,11 @@ export interface DesktopApi {
      * preload was reloaded). Callers must skip gracefully when missing.
      */
     getLiveMetadata?: (roomIdentifier: string) => Promise<DesktopRoomLiveMetadata>;
+    /** Optional until the preload carrying retained room-work history reloads. */
+    pollAgentWork?: (
+      roomIdentifier: string,
+      afterCursor?: string | null,
+    ) => Promise<DesktopRoomAgentWorkPollResult>;
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
     getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;
@@ -184,13 +221,15 @@ export interface DesktopApi {
       text: string,
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>,
-      threadRootId?: string | null
+      threadRootId?: string | null,
+      clientMessageId?: string | null,
+      messageNamespace?: string | null
     ) => Promise<DesktopSendRoomMessageResult>;
     addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (
       roomIdentifier: string,
       taskId: string,
-      updates: { status?: string; assignee?: string | null; pr_url?: string | null }
+      updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null }
     ) => Promise<DesktopTaskMutationResult>;
     updateTaskLease: (
       roomIdentifier: string,
@@ -238,6 +277,8 @@ export interface DesktopApi {
       roomIdentifier: string,
       title: string
     ) => Promise<DesktopFocusRoomMutationResult>;
+    getConversationRouting: (roomIdentifier: string) => Promise<DesktopConversationRoutingSettings>;
+    setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
     updateFocusRoomSettings: (
       roomIdentifier: string,
       focusKey: string,
@@ -282,11 +323,13 @@ export interface DesktopApi {
     getStatus: () => Promise<DesktopAuthStatus>;
     startDeviceFlow: (roomIdentifier?: string | null) => Promise<DesktopAuthStartResult>;
     pollDeviceFlow: (requestId?: string | null) => Promise<DesktopAuthPollResult>;
+    cancelDeviceFlow: () => Promise<DesktopAuthStatus>;
     openVerification: (url: string) => Promise<void>;
     signOut: () => Promise<DesktopAuthStatus>;
   };
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;
+    getStorageStatus: () => Promise<DesktopSecureStorageStatus>;
     provision: (input: DesktopProvisionSupervisorGrantInput) => Promise<DesktopSupervisorGrantMetadata>;
     revoke: () => Promise<void>;
   };
@@ -303,6 +346,13 @@ export interface DesktopApi {
     onStatusChanged: (callback: (status: RepoStatus) => void) => () => void;
     openRoom: (rootPath: string) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
+    listProjectBindings: () => Promise<DesktopProjectBinding[]>;
+    migrateProjectBindings: (
+      candidates: DesktopLegacyProjectBindingCandidate[],
+    ) => Promise<DesktopProjectBindingMigrationResult>;
+    connectProject: (
+      context: DesktopProjectBindingContext,
+    ) => Promise<DesktopProjectConnectionResult>;
     createWorktree: (repoRoot: string, branch: string) => Promise<DesktopRepoWorktreeResult>;
   };
   workers: {
@@ -338,6 +388,10 @@ export interface DesktopApi {
     ) => Promise<DesktopAgentProviderSetupResult>;
   };
   supervisor: {
+    listHostToolRules?: (agentId: string) => Promise<import("../../shared/host-tool-rules.js").HostToolRule[]>;
+    revokeHostToolRule?: (input: { agentId: string; ruleId: string; revision: number }) => Promise<void>;
+    listHostApprovals?: (roomIdentifier: string) => Promise<import("../../shared/host-approvals.js").DesktopHostApprovalSnapshot>;
+    decideHostApproval?: (input: { id: string; decision: import("../../shared/host-approvals.js").HostApprovalSelection }) => Promise<import("../../shared/host-approvals.js").HostApprovalStatus>;
     getStatus: () => Promise<DesktopSupervisorDaemonStatus>;
     listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
@@ -354,14 +408,18 @@ export interface DesktopApi {
     getAgentInspectorDetail: (input: import("./agents.js").DesktopSupervisorAgentInspectorDetailInput) => Promise<import("./agents.js").DesktopSupervisorAgentInspectorDetail>;
     getAgentConfiguration: (input: { entryId: string; daemonGeneration: number }) => Promise<DesktopSupervisorAgentConfiguration>;
     updateAgentConfiguration: (input: DesktopSupervisorAgentConfigurationUpdateInput) => Promise<DesktopSupervisorAgentConfigurationUpdateResult>;
+    applyAgentConfiguration: (input: DesktopSupervisorAgentConfigurationApplyInput) => Promise<DesktopSupervisorAgentConfigurationApplyResult>;
     prepareRoomMove: (input: DesktopSupervisorRoomMovePrepareInput) => Promise<DesktopSupervisorRoomMove>;
     commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
     getRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
     getCurrentRoomMove: (input: DesktopSupervisorCurrentRoomMoveInput) => Promise<DesktopSupervisorRoomMove | null>;
-    retireAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<void>;
+    retireAgent: (input: import("./agents.js").DesktopSupervisorRetirementInput) => Promise<import("./agents.js").DesktopSupervisorRetirementReceipt>;
+    getRetirementStatus?: (input: { entryId: string; daemonGeneration: number }) => Promise<import("./agents.js").DesktopSupervisorRetirementStatus>;
     purgeAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<{ outcome: "purged" | "invalid"; error?: string }>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
-    onState: (callback: (snapshot: import("./agents.js").DesktopSupervisorStateSnapshot) => void) => () => void;
+    /** Optional exact-room projection is applied before crossing contextBridge. */
+    onState: (callback: (snapshot: import("./agents.js").DesktopSupervisorStateSnapshot) => void, roomIdentifier?: string) => () => void;
+    onRetirement?: (callback: (event: import("./agents.js").DesktopSupervisorRetirementEvent) => void) => () => void;
     /** Subscribe to ordered launch facts (task_84). Fold idempotently by `sequence`. */
     onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;
     /** Replay a launch's facts after `afterSequence` (for modal reopen/restore). */

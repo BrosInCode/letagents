@@ -1,7 +1,7 @@
 <template>
   <header class="reasoning-header">
     <div>
-      <p class="reasoning-eyebrow">Agent reasoning stream</p>
+      <p class="reasoning-eyebrow">Agent work stream</p>
       <h2 :id="titleId">{{ heading }}</h2>
       <p class="reasoning-subtitle">{{ subtitle }}</p>
     </div>

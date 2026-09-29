@@ -71,7 +71,7 @@ test("managed-session selector preserves rendered permission, Cursor policy, and
     permissionProfile: undefined as unknown as DesktopManagedAgentSession["permissionProfile"],
     cursorMcpPolicy: "normal",
     effort: "max",
-    lastError: "Provider connection lost",
+    lastError: "Agent app connection lost",
   });
   const first = select([cursor], "room-1", "cursor");
 

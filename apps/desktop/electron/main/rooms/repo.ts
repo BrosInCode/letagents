@@ -6,13 +6,19 @@ import type {
   DesktopRepoRoomSelection,
   DesktopRepoWorktreeResult,
   DesktopRoomInfo,
+  DesktopProjectBindingContext,
+  DesktopProjectConnectionResult,
 } from "../../ipc-types.js";
 import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../../repo-status.js";
+import { projectContextsCompatibleForConnection } from "../../project-bindings.js";
 import { ensureRepoWorktree } from "./worktrees.js";
 import { apiFetch } from "../auth.js";
 import { openAllowedExternalUrl } from "../external-url.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { focusMainWindow } from "../window.js";
+import {
+  bindProjectRoot,
+} from "../project-bindings-store.js";
 import { fetchRoomSnapshot } from "./snapshot.js";
 import {
   cloudRoomIdentifierForStorage,
@@ -49,6 +55,7 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
       snapshot: null,
       error: null,
       warning: null,
+      projectBinding: null,
     };
   }
 
@@ -69,6 +76,7 @@ export async function openRepoRoomFromPath(
       snapshot: null,
       error: "Choose a project folder.",
       warning: null,
+      projectBinding: null,
     };
   }
 
@@ -94,16 +102,93 @@ export async function openRepoRoomFromPath(
     }
   }
 
+  const snapshot = await fetchRoomSnapshot(resolved.roomIdentifier);
+  // The existing repository watcher fills in branch statistics independently
+  // of opening the room. Only identity and folder selection are needed here.
+  const selectedRepoStatus = await buildRepoStatus(repoPath, { includeBranchDeltas: false });
+  const projectBinding = await bindProjectRoot({
+    context: {
+      roomIdentifier: snapshot.roomIdentifier || resolved.roomIdentifier,
+      gitRoom: snapshot.room?.gitRoom || resolved.gitRoom,
+    },
+    rootPath: selectedRepoStatus.isGitRepo
+      ? selectedRepoStatus.mainRootPath || selectedRepoStatus.rootPath
+      : repoPath,
+    source: resolved.source || "local_folder",
+  });
+
   return {
     canceled: false,
-    repoPath,
-    repoStatus: await buildRepoStatus(repoPath),
+    repoPath: projectBinding.rootPath,
+    repoStatus: selectedRepoStatus,
     roomIdentifier: resolved.roomIdentifier,
     source: resolved.source,
-    snapshot: await fetchRoomSnapshot(resolved.roomIdentifier),
+    snapshot,
     error: null,
     warning: resolved.warning,
+    projectBinding,
   };
+}
+
+/** Connect the current room to a folder without turning folder choice into navigation. */
+export async function connectProjectToRoom(
+  context: DesktopProjectBindingContext,
+): Promise<DesktopProjectConnectionResult> {
+  focusMainWindow();
+  const result = await dialog.showOpenDialog({
+    title: "Connect this room to a project",
+    buttonLabel: "Connect project",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || !result.filePaths[0]) {
+    return { canceled: true, binding: null, repoStatus: null, error: null };
+  }
+  try {
+    const resolved = await resolveRoomIdentifierFromPath(result.filePaths[0], {
+      ignoreConfiguredRoom: true,
+    });
+    const resolvedContext: DesktopProjectBindingContext = {
+      roomIdentifier: resolved.roomIdentifier,
+      gitRoom: resolved.gitRoom,
+    };
+    if (!projectContextsCompatibleForConnection(
+      context,
+      resolvedContext,
+      resolved.source || "local_folder",
+    )) {
+      return {
+        canceled: false,
+        binding: null,
+        repoStatus: null,
+        error: "That folder belongs to a different project room.",
+      };
+    }
+    const selectedRepoStatus = await buildRepoStatus(resolved.repoRoot || result.filePaths[0]);
+    const rootPath = selectedRepoStatus.isGitRepo
+      ? selectedRepoStatus.mainRootPath || selectedRepoStatus.rootPath
+      : result.filePaths[0];
+    const binding = await bindProjectRoot({
+      context: {
+        roomIdentifier: context.roomIdentifier || resolved.roomIdentifier,
+        gitRoom: context.gitRoom || resolved.gitRoom,
+      },
+      rootPath,
+      source: resolved.source || "local_folder",
+    });
+    return {
+      canceled: false,
+      binding,
+      repoStatus: selectedRepoStatus,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      canceled: false,
+      binding: null,
+      repoStatus: null,
+      error: error instanceof Error ? error.message : "LetAgents could not connect that project.",
+    };
+  }
 }
 
 export async function createRepoRoomWorktree(
@@ -224,6 +309,7 @@ export async function getDesktopGitHubIntegrationStatus(
     connected?: boolean;
     install_url_available?: boolean;
     repository?: { full_name?: string } | null;
+    review_submission?: { permission?: string; recorded_at?: string | null } | null;
   }>(`/rooms/${encodeURIComponent(cloudRoomIdentifier)}/integrations/github`);
 
   return {
@@ -236,6 +322,11 @@ export async function getDesktopGitHubIntegrationStatus(
     repository: status.repository?.full_name
       ? { fullName: status.repository.full_name }
       : null,
+    reviewSubmission: {
+      permission: status.review_submission?.permission === "write" ? "write"
+        : status.review_submission?.permission === "missing" ? "missing" : "unknown",
+      recordedAt: status.review_submission?.recorded_at ?? null,
+    },
   };
 }
 

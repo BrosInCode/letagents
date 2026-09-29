@@ -21,7 +21,12 @@ export function isRoomEventVisibleToSubscriber(input: {
   messageOnly?: boolean;
 }): boolean {
   const { event } = input;
-  if (input.messageOnly && event.kind !== "message_created") return false;
+  if (input.messageOnly && event.kind !== "message_created" && event.kind !== "message_routed") return false;
+  if (event.kind === "message_routed") {
+    // Completion also releases workers waiting behind this message, even if
+    // Jev chose nobody. Authority is hydrated separately for each subscriber.
+    return !isPromptOnlyAgentMessage(event.message.text, event.message.agent_prompt_kind);
+  }
   if (event.kind === "message_created") {
     if (!isPromptOnlyAgentMessage(event.message.text, event.message.agent_prompt_kind)) return true;
     const durableTarget = input.recipientAgentIdentity

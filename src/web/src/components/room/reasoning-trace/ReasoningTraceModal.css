@@ -304,6 +304,19 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-live-badge[data-state='live'],
+  .reasoning-live-dot {
+    animation: none;
+  }
+
+  .reasoning-summary,
+  .reasoning-entry {
+    transition-property: background-color, border-color;
+    transition-duration: 0.01ms;
+  }
+}
+
 @media (max-width: 720px) {
   .reasoning-backdrop {
     padding: 10px;

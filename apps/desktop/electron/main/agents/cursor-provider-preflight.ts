@@ -36,6 +36,8 @@ import {
 import { managedAgentPermissionProfileForProvider } from "./managed-agent-permission-profiles.js";
 import { assertSupervisedWorkspaceGenerationSupported } from "./supervised-workspace-generation.js";
 import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "../paths.js";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
+import { missingExternalRuntimePreflight } from "./external-runtime-preflight.js";
 
 type ExecResult = {
   ok: boolean;
@@ -64,6 +66,8 @@ export type DesktopCursorPreflightOptions = {
   personalIdentityAttestor?: typeof assertCursorPersonalIdentity;
   /** Lightweight Git/topology check; it must never inventory project files. */
   workspaceGenerationSupportChecker?: typeof assertSupervisedWorkspaceGenerationSupported;
+  /** Exact environment snapshot used by every executable probe; injectable for tests. */
+  runtimeEnvironment?: NodeJS.ProcessEnv;
 };
 
 export async function runDesktopCursorProviderPreflight(
@@ -73,21 +77,13 @@ export async function runDesktopCursorProviderPreflight(
   options: DesktopCursorPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
   const timeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
-  const command = process.env.LETAGENTS_CURSOR_AGENT_BIN ||
+  const runtimeEnv = options.runtimeEnvironment ?? desktopRuntimeEnvironment();
+  const command = runtimeEnv.LETAGENTS_CURSOR_AGENT_BIN ||
     provider.runtimeCommand ||
     "cursor-agent";
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv });
   if (commandMissing(versionResult)) {
-    return {
-      providerId: provider.id,
-      status: "missing_runtime",
-      canStart: false,
-      message: "Cursor Agent is not installed.",
-      detail: "Install Cursor Agent before starting a local Cursor room agent.",
-      nextAction: null,
-      version: null,
-      mcpStatus,
-    };
+    return missingExternalRuntimePreflight(provider, mcpStatus);
   }
   if (!versionResult.ok) {
     return {
@@ -139,6 +135,7 @@ export async function runDesktopCursorProviderPreflight(
   if (supervised || launchOptions.force || launchOptions.sandbox) {
     const flagResult = await execFileWithTimeout(command, ["--help"], {
       cwd: workspaceRoot ?? undefined,
+      env: runtimeEnv,
       timeoutMs,
     });
     if (!flagResult.ok || !cursorHelpSupportsLaunchOptions(flagResult, launchOptions, supervised)) {
@@ -148,7 +145,7 @@ export async function runDesktopCursorProviderPreflight(
         canStart: false,
         message: "Cursor Agent does not support the selected permission profile.",
         detail: supervised
-          ? "Update Cursor Agent so supervised Cursor can use --trust and the selected permission flags."
+          ? "Update Cursor Agent to use this access level."
           : "Update Cursor Agent so managed Cursor can use the required --force and --sandbox flags.",
         nextAction: null,
         version,
@@ -156,28 +153,53 @@ export async function runDesktopCursorProviderPreflight(
       };
     }
   }
+  const roomOnlyReadOnly = supervised
+    && input.roomOnly === true
+    && !workspaceRoot
+    && permissionProfile.id === "read_only";
+  if (!workspaceRoot && !roomOnlyReadOnly) {
+    return {
+      providerId: provider.id,
+      status: "repo_required",
+      canStart: false,
+      message: "Choose a local repository before starting Cursor.",
+      detail: "A desktop-managed Cursor agent needs a local repo or worktree.",
+      nextAction: "choose_repo",
+      version,
+      mcpStatus,
+    };
+  }
+
+  let preflightWorkspaceRoot = workspaceRoot;
   let managedProfile: CursorManagedProfile;
   let supervisedMcpRuntime: LetAgentsMcpRuntime | undefined;
-  const preflightProfileRoot = supervised && workspaceRoot
-    ? mkdtempSync(join(tmpdir(), "letagents-cursor-preflight-"))
-    : null;
-  const cleanupPreflightProfile = () => {
+  let preflightProfileRoot: string | null = null;
+  const cleanupPreflightDirectories = () => {
     if (preflightProfileRoot) rmSync(preflightProfileRoot, { recursive: true, force: true });
+    if (roomOnlyReadOnly && preflightWorkspaceRoot) {
+      rmSync(preflightWorkspaceRoot, { recursive: true, force: true });
+    }
   };
   try {
+    if (roomOnlyReadOnly) {
+      preflightWorkspaceRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-workspace-preflight-"));
+    }
+    if (supervised && preflightWorkspaceRoot) {
+      preflightProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-preflight-"));
+    }
     try {
-      supervisedMcpRuntime = supervised && workspaceRoot
+      supervisedMcpRuntime = supervised && preflightWorkspaceRoot
         ? options.mcpRuntime ?? resolveLetAgentsMcpRuntime({
           devEntryPath: process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()
             ? join(sourceWorkspaceRoot, "dist", "mcp", "server.js")
             : undefined,
         })
         : undefined;
-      managedProfile = supervised && workspaceRoot
+      managedProfile = supervised && preflightWorkspaceRoot
         ? prepareCursorSupervisedProfile({
-          workAttemptId: `preflight:${workspaceRoot}`,
+          workAttemptId: `preflight:${preflightWorkspaceRoot}`,
           apiBaseUrl: desktopApiUrl,
-          workspaceRoot,
+          workspaceRoot: preflightWorkspaceRoot,
           profileRoot: preflightProfileRoot!,
           mcpRuntime: supervisedMcpRuntime,
           identityAttestationOnly: true,
@@ -193,7 +215,7 @@ export async function runDesktopCursorProviderPreflight(
         providerId: provider.id,
         status: "error",
         canStart: false,
-        message: "Cursor managed profile could not be prepared.",
+        message: "Could not set up Cursor for this agent.",
         detail: error instanceof Error ? error.message : String(error),
         nextAction: null,
         version,
@@ -233,7 +255,7 @@ export async function runDesktopCursorProviderPreflight(
           providerId: provider.id,
           status: "error",
           canStart: false,
-          message: "Cursor live account identity could not be supervised.",
+          message: "Could not verify the Cursor account in use.",
           detail: error instanceof Error ? error.message : String(error),
           nextAction: null,
           version,
@@ -259,21 +281,7 @@ export async function runDesktopCursorProviderPreflight(
         };
       }
     }
-
-    if (!workspaceRoot) {
-      return {
-        providerId: provider.id,
-        status: "repo_required",
-        canStart: false,
-        message: "Choose a local repository before starting Cursor.",
-        detail: "A desktop-managed Cursor agent needs a local repo or worktree.",
-        nextAction: "choose_repo",
-        version,
-        mcpStatus,
-      };
-    }
-
-    if (supervised && (permissionProfile.id === "sandboxed_write" || permissionProfile.id === "full_access")) {
+    if (supervised && workspaceRoot && (permissionProfile.id === "sandboxed_write" || permissionProfile.id === "full_access")) {
       try {
         await (options.workspaceGenerationSupportChecker ?? assertSupervisedWorkspaceGenerationSupported)(workspaceRoot);
       } catch (error) {
@@ -281,7 +289,7 @@ export async function runDesktopCursorProviderPreflight(
           providerId: provider.id,
           status: "error",
           canStart: false,
-          message: "Cursor writable workspace cannot be supervised exactly.",
+          message: "LetAgents cannot safely track Cursor’s changes in this folder.",
           detail: error instanceof Error ? error.message : String(error),
           nextAction: null,
           version,
@@ -294,9 +302,9 @@ export async function runDesktopCursorProviderPreflight(
       if (!supervised || !preflightProfileRoot || !supervisedMcpRuntime) return null;
       try {
         managedProfile = prepareCursorSupervisedProfile({
-          workAttemptId: `preflight:${workspaceRoot}`,
+          workAttemptId: `preflight:${preflightWorkspaceRoot}`,
           apiBaseUrl: desktopApiUrl,
-          workspaceRoot,
+          workspaceRoot: preflightWorkspaceRoot!,
           permissionProfileId: permissionProfile.id,
           profileRoot: preflightProfileRoot,
           mcpRuntime: supervisedMcpRuntime,
@@ -312,7 +320,7 @@ export async function runDesktopCursorProviderPreflight(
           providerId: provider.id,
           status: "error",
           canStart: false,
-          message: "Cursor authenticated profile cannot be supervised exactly.",
+          message: "LetAgents could not verify this Cursor sign-in.",
           detail: error instanceof Error ? error.message : String(error),
           nextAction: null,
           version,
@@ -332,9 +340,9 @@ export async function runDesktopCursorProviderPreflight(
       const authorityProfileRoot = join(preflightProfileRoot, "authority");
       try {
         const authorityProfile = prepareCursorSupervisedProfile({
-          workAttemptId: `preflight-authority:${workspaceRoot}`,
+          workAttemptId: `preflight-authority:${preflightWorkspaceRoot}`,
           apiBaseUrl: desktopApiUrl,
-          workspaceRoot,
+          workspaceRoot: preflightWorkspaceRoot!,
           profileRoot: authorityProfileRoot,
           includeAuth: false,
           mcpRuntime: supervisedMcpRuntime,
@@ -358,7 +366,7 @@ export async function runDesktopCursorProviderPreflight(
           providerId: provider.id,
           status: "error",
           canStart: false,
-          message: "Cursor supervised MCP authority is not exact.",
+          message: "LetAgents could not verify Cursor’s connected tools.",
           detail,
           nextAction: null,
           version,
@@ -373,7 +381,7 @@ export async function runDesktopCursorProviderPreflight(
       // each turn. An authenticated `mcp list` is unsafe here: Cursor loads
       // account-managed plugin and team MCP definitions while merely listing.
       const mcpResult = await execFileWithTimeout(command, ["mcp", "list"], {
-        cwd: workspaceRoot,
+        cwd: workspaceRoot!,
         env: managedEnv,
         timeoutMs,
       });
@@ -432,7 +440,7 @@ export async function runDesktopCursorProviderPreflight(
       mcpStatus,
     };
   } finally {
-    cleanupPreflightProfile();
+    cleanupPreflightDirectories();
   }
 }
 
@@ -516,15 +524,15 @@ function cursorPreflightReadyDetail(
 ): string {
   const permissionDetail = cursorPermissionProfileReadyDetail(permissionProfileId, supervised);
   if (supervised) {
-    return `${permissionDetail} A per-agent Cursor profile exposes only the daemon-mediated LetAgents bridge and survives desktop restarts.`;
+    return `${permissionDetail} This agent connects only to LetAgents room tools and keeps running when the desktop app restarts.`;
   }
   if (policy === "normal") {
-    return `${permissionDetail} The normal Cursor MCP settings are enabled; Cursor may directly use any MCP tools configured in Cursor, including LetAgents if present.`;
+    return `${permissionDetail} Cursor can use your configured tools, including LetAgents if connected.`;
   }
   if (policy === "none") {
-    return `${permissionDetail} MCP tools are disabled in the managed profile.`;
+    return `${permissionDetail} Connected tools are disabled for this agent.`;
   }
   return mcpStatus === "installed"
-    ? `${permissionDetail} Managed MCP settings keep user MCPs except LetAgents.`
-    : `${permissionDetail} Managed MCP settings filter LetAgents; install the LetAgents connection only for manual Cursor joins.`;
+    ? `${permissionDetail} Your connected tools remain available, except LetAgents.`
+    : `${permissionDetail} LetAgents room tools are disabled for this agent.`;
 }

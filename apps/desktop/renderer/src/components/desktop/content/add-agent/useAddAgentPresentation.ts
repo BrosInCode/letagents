@@ -7,6 +7,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import {
+  autoReviewNotice,
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
   branchScopedGitRoomExpectedBranch,
@@ -21,7 +22,7 @@ import {
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
-  supervisedCursorPermissionProfilePresentation,
+  supervisedPermissionProfilePresentation,
 } from "../../../../domain/managed-agents";
 import type { DesktopSelectOption } from "../../controls/DesktopSelectField.vue";
 import type { useAddAgentConfiguration } from "./useAddAgentConfiguration";
@@ -29,6 +30,7 @@ import type { useAddAgentSetup } from "./useAddAgentSetup";
 
 interface AddAgentPresentationProps {
   roomIdentifier: string;
+  roomStorageMode?: "local" | "cloud";
   roomGitRoom: DesktopGitRoomInfo | null;
   gitRoomMatchesActiveRepo: boolean;
   roomDisplayName: string | null;
@@ -45,6 +47,7 @@ export function useAddAgentPresentation(
     providers,
     selectedProviderId,
     preflight,
+    secureStorageStatus,
     loadingProviders,
     loadingPreflight,
     creatingWorktree,
@@ -70,8 +73,8 @@ export function useAddAgentPresentation(
   );
   const selectedPermissionProfiles = computed(() => {
     const profiles = selectedProvider.value?.permissionProfiles ?? [];
-    return selectedProviderId.value === "cursor" && launchMode.value === "supervised"
-      ? profiles.map(supervisedCursorPermissionProfilePresentation)
+    return launchMode.value === "supervised"
+      ? profiles.map((profile) => supervisedPermissionProfilePresentation(selectedProviderId.value, profile, { hasProject: Boolean(props.repoRootPath?.trim()) }))
       : profiles;
   });
   const selectedPermissionProfile = computed(() =>
@@ -84,6 +87,7 @@ export function useAddAgentPresentation(
   const canStartManagedAgent = computed(() =>
     Boolean(
       preflight.value?.canStart &&
+      (props.roomStorageMode === "local" || launchMode.value !== "supervised" || secureStorageStatus.value?.available === true) &&
       (!loadingPreflight.value || Boolean(preflight.value)) &&
       (selectedModelMode.value !== "option" || !loadingProviderModels.value) &&
       (
@@ -94,6 +98,12 @@ export function useAddAgentPresentation(
     )
   );
   const authCommand = computed(() => agentAuthCommand(selectedProvider.value));
+  const installCommand = computed(() =>
+    selectedProvider.value?.runtimeInstallCommand?.trim() || null
+  );
+  const installUrl = computed(() =>
+    selectedProvider.value?.runtimeInstallUrl?.trim() || null
+  );
   const authCommandForProvider = (providerId: string | null): string | null =>
     agentAuthCommand(providers.value.find((provider) => provider.id === providerId));
   const roomLabel = computed(() => props.roomDisplayName?.trim() || props.roomIdentifier);
@@ -112,18 +122,24 @@ export function useAddAgentPresentation(
   });
   const statusTitle = computed(() => {
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking setup";
-    if (loadError.value) return "Provider check failed";
-    if (!preflight.value) return "Choose a provider";
+    if (loadError.value) return "Could not check the agent app";
+    if (!preflight.value) return "Choose an agent app";
+    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
+      return "Unlock secure credential storage";
+    }
     if (preflight.value.status === "ready") return "Choose how it works here";
-    return safeUserVisibleErrorDetail(preflight.value.message, "Provider setup needs attention");
+    return safeUserVisibleErrorDetail(preflight.value.message, "Agent setup needs attention");
   });
   const statusDescription = computed(() => {
-    if (loadError.value) return "We couldn't verify this provider's setup. Use Check again to retry.";
-    if (!preflight.value) return "Checking provider readiness...";
+    if (loadError.value) return "We couldn't check this agent app. Choose Check again to retry.";
+    if (!preflight.value) return "Checking the agent app…";
+    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
+      return secureStorageStatus.value.detail;
+    }
     if (preflight.value.status !== "ready") {
       return safeUserVisibleErrorDetail(
         preflight.value.detail || preflight.value.message,
-        "Provider setup needs attention. Check the provider app, then try again.",
+        "Agent setup needs attention. Check the agent app, then try again.",
       );
     }
     if (
@@ -133,12 +149,13 @@ export function useAddAgentPresentation(
       return "Use the handoff below to bring it into this room.";
     }
     return hasSupervisedRuntime(selectedProvider.value)
-      ? "Set its model, lifecycle, and access before launch."
+      ? "Choose a model, set its access, and give it something to work on."
       : "Set its model and access before launch.";
   });
   const preflightStatusLabel = computed(() => {
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking";
     if (loadError.value || preflight.value?.status === "error") return "Needs attention";
+    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) return "Needs attention";
     if (preflight.value?.status === "ready") return "Ready";
     if (!preflight.value) return "Not checked";
     return "Setup needed";
@@ -154,7 +171,7 @@ export function useAddAgentPresentation(
   });
   const bridgeLabel = computed(() => {
     if (
-      selectedProviderId.value === "claude-code" &&
+      (selectedProviderId.value === "claude-code" || selectedProviderId.value === "codex") &&
       launchMode.value === "supervised"
     ) return "Managed at launch";
     if (preflight.value?.mcpStatus === "installed") return "Installed";
@@ -170,8 +187,25 @@ export function useAddAgentPresentation(
         ? `${mismatch.currentBranch} - expected ${mismatch.expectedBranch}`
         : `Expected ${mismatch.expectedBranch}`;
     }
-    return props.repoRootPath || "Required before local agents can start";
+    if (props.repoRootPath) return props.repoRootPath;
+    // A repo-less room (no git binding, no resolved repo path) launches the
+    // agent in a private, empty scratch folder the daemon provisions — it does
+    // NOT need a repo. Only a repo-backed room still prompts for one.
+    if (props.roomGitRoom == null) return "Private scratch workspace";
+    return "Required before local agents can start";
   });
+  const showSecureStorage = computed(() => props.roomStorageMode !== "local" && launchMode.value === "supervised");
+  const secureStorageLabel = computed(() => {
+    if (!showSecureStorage.value) return null;
+    if (!secureStorageStatus.value) return "Checking";
+    return secureStorageStatus.value.available ? "Available" : "Unlock required";
+  });
+  const secureStorageNeedsAttention = computed(() =>
+    showSecureStorage.value && secureStorageStatus.value?.available === false
+  );
+  const canOpenSecureStorage = computed(() =>
+    secureStorageNeedsAttention.value && secureStorageStatus.value?.canOpenCredentialStorage === true
+  );
   const expectedWorktreeBranch = computed(() =>
     preflight.value?.branchMismatch?.expectedBranch ||
     branchScopedGitRoomExpectedBranch(props.roomGitRoom, props.repoStatus)
@@ -204,15 +238,9 @@ export function useAddAgentPresentation(
       ? "This desktop app sends room updates to the local agent."
       : "The agent app joins the room through its LetAgents connection."
   );
-  const lifecycleDescription = computed(() => {
-    if (launchMode.value === "legacy") {
-      return "The current app-owned path stays unchanged and stops with its normal lifecycle.";
-    }
-    if (/^local[_-]/i.test(props.roomIdentifier) || /^git-room:local:/i.test(props.roomIdentifier)) {
-      return "Supervision needs a cloud room for durable workplace reachability. Local-only rooms keep the existing path.";
-    }
-    return "A detached daemon owns desired state and recovery. Closing this app does not stop the supervised agent.";
-  });
+  const lifecycleDescription = computed(() => props.roomStorageMode === "local"
+    ? "Runs on this Mac and keeps working after you quit LetAgents. Room history is stored on this Mac."
+    : "Runs on this Mac and keeps working after you quit LetAgents. Room messages are shared in the cloud.");
   const showCursorMcpPolicySelector = computed(() =>
     launchMode.value === "legacy" && shouldShowCursorMcpPolicySelector(selectedProvider.value)
   );
@@ -307,14 +335,15 @@ export function useAddAgentPresentation(
     const providerName = selectedProvider.value?.name?.trim() || "this agent";
     if (launchMode.value === "supervised" && selectedProviderId.value === "cursor") {
       if (profile.id === "full_access") {
-        return "Full access disables Cursor's native sandbox inside a private turn workspace. LetAgents carries back only conflict-checked, nonignored file edits; Git history and ignored output are not persisted. Only daemon-mediated room tools are exposed.";
+        return "Cursor edits a separate copy of your project with its own command restrictions off. LetAgents checks for conflicts before copying changes back; files ignored by Git and changes to Git history are not copied back. Only LetAgents room tools are available.";
       }
       if (profile.id === "sandboxed_write") {
-        return "LetAgents runs Cursor in a private turn workspace and carries back conflict-checked, nonignored file edits. Ignored dependencies stay read-only and Git history is not changed. Daemon-mediated LetAgents room tools remain available.";
+        return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, Git history is kept, and LetAgents room tools remain available.";
       }
     }
+    if (launchMode.value === "supervised" && profile.id === "auto_review") return autoReviewNotice(providerName, selectedProviderId.value);
     if (profile.risk === "high") {
-      return `${profile.label} gives ${providerName} broad write and shell access. Use only with trusted repos and MCPs.`;
+      return `${providerName} can change files and run commands without asking, including outside your project. Use only with projects and connected tools you trust.`;
     }
     if (
       selectedProviderId.value === "cursor" &&
@@ -322,7 +351,7 @@ export function useAddAgentPresentation(
       profile.id === "sandboxed_write" &&
       selectedCursorMcpPolicy.value !== "none"
     ) {
-      return "Sandboxed writes still allow the selected Cursor MCP tools.";
+      return "Connected tools remain available and may make changes outside Cursor’s own restrictions.";
     }
     return null;
   });
@@ -334,6 +363,8 @@ export function useAddAgentPresentation(
     canStartManagedAgent,
     authCommand,
     authCommandForProvider,
+    installCommand,
+    installUrl,
     roomLabel,
     externalJoinPrompt,
     activeSetupConfirmation,
@@ -343,6 +374,10 @@ export function useAddAgentPresentation(
     runtimeLabel,
     bridgeLabel,
     repoLabel,
+    showSecureStorage,
+    secureStorageLabel,
+    secureStorageNeedsAttention,
+    canOpenSecureStorage,
     expectedWorktreeBranch,
     matchingWorktrees,
     showWorktreePicker,

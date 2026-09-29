@@ -42,6 +42,11 @@ export interface RememberAgentRoomParticipantInput {
 export interface RememberRoomParticipantFromMessageInput {
   projectId: string;
   sender: string;
+  /**
+   * The authenticated sender's agent key. Without it the participant row
+   * loses its owner, and the agent's own name is later held against it.
+   */
+  agentKey?: string | null | undefined;
   source: string | undefined;
   sessionAccount?: SessionAccount | OwnerTokenAccount | null | undefined;
   timestamp: string;
@@ -141,6 +146,7 @@ export function buildRoomParticipantUpsertFromMessage(
     return buildAgentRoomParticipantUpsert({
       projectId: input.projectId,
       actorLabel: normalizedSender,
+      agentKey: input.agentKey,
       lastSeenAt: input.timestamp,
     });
   }

@@ -4,11 +4,16 @@ import type { DaemonManifestEntry } from "./types.js";
 export type SupervisedWaitEvidence = { roomCursor: string; agentSessionId: string };
 type PollActivityLike = Pick<ProviderActionStreamEvent, "method" | "payload">;
 
-export function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
+export function providerStreamLifecycle(event: ProviderActionStreamEvent, daemonInbox = false): "failed" | "terminal" | "idle" | "working" {
   const method = event.method.trim();
   const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
     ? event.payload as Record<string, unknown>
     : {};
+  // Only adapter-attested exact native results end a bounded turn. Unbound
+  // errors and legacy polling retain their existing runtime-failure behavior.
+  if (daemonInbox && (event.provider === "claude-code" || event.provider === "cursor")
+    && event.nativeLifecyclePhase === "turn_terminal" && /^nlc1:/.test(event.nativeEventId ?? "")
+    && /^result(?:\/|$)/.test(method)) return "terminal";
   const nestedStatus = (value: unknown): unknown[] => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return [value];
     const record = value as Record<string, unknown>;
@@ -36,9 +41,41 @@ export function providerStreamLifecycle(event: ProviderActionStreamEvent): "fail
       && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages"));
     return failedRoomWait ? "idle" : "working";
   }
-  // A tool lifecycle status belongs to one tool call, not the provider turn.
-  const failedStatus = event.kind !== "tool_lifecycle"
-    && statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
+  // Item/command failures are execution evidence, not runtime-death evidence.
+  // Scope ALL generic failure checks, including method suffixes and nested
+  // item.error. Keep existing successful-completion presence signals intact.
+  // Do not exempt arbitrary process/terminal errors.
+  const executionScoped = /^(?:item\/|command\/exec(?:\/|$))/i.test(method) || event.kind === "tool_lifecycle";
+  // The Claude adapter labels only recognized turn-limit errors as lifecycle
+  // events. Keep their failure payload intact, but never fence the session
+  // ("terminal" would still fence legacy mcp_polling continuations).
+  if (event.provider === "claude-code" && event.kind === "turn_lifecycle" && /^result\/error_/.test(method)) return "idle";
+  // Codex turn failure is an exact terminal turn outcome, not app-server
+  // failure. The coordinator preserves the observed terminal edge for legacy
+  // cutover, then maps it to runtime-idle without fencing the reusable server.
+  // Transcript snapshots may carry the same turn-scoped result without a live
+  // turn notification, but hard thread failure evidence always wins.
+  const codexTranscript = event.provider === "codex"
+    && event.kind === "transcript_snapshot"
+    && /^thread\/read$/i.test(method);
+  const codexTranscriptRuntimeFailure = codexTranscript
+    && [payload.threadStatus, (payload.thread as Record<string, unknown> | undefined)?.status]
+      .flatMap(nestedStatus)
+      .some((value) => typeof value === "string"
+        && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
+  if (codexTranscriptRuntimeFailure) return "failed";
+  const codexTurnFailure = event.provider === "codex" && (
+    event.kind === "turn_lifecycle" && (
+      /^turn\/failed$/i.test(method)
+      || /^turn\/completed$/i.test(method)
+        && statuses.some((value) => typeof value === "string" && /^failed$/i.test(value))
+    )
+    || codexTranscript
+      && nestedStatus((payload.latestTurn as Record<string, unknown> | undefined)?.status)
+        .some((value) => typeof value === "string" && /^failed$/i.test(value))
+  );
+  if (codexTurnFailure) return "terminal";
+  const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
   const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
   const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);
   const failedItem = /^item\/completed$/i.test(method)
@@ -47,7 +84,7 @@ export function providerStreamLifecycle(event: ProviderActionStreamEvent): "fail
     || failedResult
     || failedItem
     || failedStatus && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)
-    || event.kind === "error" && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)) return "failed";
+    || event.kind === "error" && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)) return executionScoped ? "working" : "failed";
   if (/^(?:result(?:\/success)?|turn\/completed|thread\/completed)$/i.test(method)) return "terminal";
   if (/(?:completed|finished|idle|stopped|interrupted)$/i.test(method)) return "idle";
   return "working";
@@ -59,7 +96,7 @@ export function isHumanRoomActivityEvent(event: ProviderActionStreamEvent): bool
     && method !== "account/ratelimits/updated";
 }
 
-export function isAgentInspectorLiveDisplayEvent(event: ProviderActionStreamEvent): boolean {
+export function isAgentInspectorLiveDisplayEvent(event: Pick<ProviderActionStreamEvent, "method">): boolean {
   return event.method === "reasoning/summaryTextDelta"
     || event.method === "item/reasoning/summaryTextDelta"
     || event.method === "item/agentMessage/delta"

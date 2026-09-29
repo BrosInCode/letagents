@@ -1,6 +1,10 @@
 .composer {
+  position: relative;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  max-height: calc(var(--room-viewport-height, 100dvh) * 0.6);
   padding: 16px 24px 20px;
 }
 .composer-card {
@@ -11,7 +15,14 @@
   border: 1px solid var(--line, #27272a);
   border-radius: 16px;
   transition: border-color 200ms ease, box-shadow 200ms ease;
-  overflow: hidden;
+  min-height: 0;
+}
+.composer-scroll-content {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
 }
 .composer-card[data-drag-active="true"] {
   border-color: color-mix(in srgb, var(--line-strong, #3f3f46) 45%, #7dd3fc 55%);
@@ -32,6 +43,7 @@
   font-weight: 650;
   letter-spacing: 0;
   pointer-events: none;
+  border-radius: inherit;
 }
 .composer-card:focus-within {
   border-color: var(--line-strong, #3f3f46);
@@ -92,6 +104,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 0 4px 6px;
+  flex-shrink: 0;
 }
 .composer-toolbar-pills {
   display: flex;
@@ -105,6 +118,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 0 6px 6px;
+  flex-shrink: 0;
 }
 .composer-toolbar-left {
   display: flex;
@@ -208,7 +222,9 @@
   cursor: pointer;
   transition: background 150ms ease;
   white-space: nowrap;
+  max-width: 120px;
 }
+.prompt-trigger span { overflow: hidden; text-overflow: ellipsis; }
 .prompt-trigger:hover { background: rgba(255, 255, 255, 0.14); }
 .prompt-trigger svg {
   width: 10px; height: 10px;
@@ -226,6 +242,10 @@
   left: 0;
   bottom: calc(100% + 6px);
   width: 260px;
+  max-width: calc(100vw - 32px);
+  max-height: max(100px, calc(var(--room-viewport-height, 100dvh) * 0.4 - 64px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 6px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -304,11 +324,44 @@
 }
 
 @media (max-width: 768px) {
-  .composer { padding: 8px 12px 12px; }
+  .composer { padding: 4px 12px 8px; max-height: min(calc(var(--room-viewport-height, 100dvh) * 0.65), calc(var(--room-viewport-height, 100dvh) - 152px)); }
   .composer-card { border-radius: 12px; }
-  .message-textarea { padding: 12px 14px 6px; font-size: 0.88rem; min-height: 44px; max-height: 120px; }
-  .composer-pills-row { padding: 0 2px 4px; }
+  .message-textarea { padding: 12px 14px 6px; font-size: 16px; min-height: 44px; max-height: min(120px, calc(var(--room-viewport-height, 100dvh) * 0.24)); }
+  .composer-pills-row { padding: 0 2px 2px; }
   .composer-toolbar { padding: 0 4px 4px; }
-  .prompt-panel { width: 220px; }
-  .send-btn { width: 34px; height: 34px; }
+  .composer-shortcut-hint { display: none; }
+  .prompt-panel {
+    position: fixed;
+    inset: 64px 12px auto;
+    width: auto;
+    max-width: none;
+    max-height: calc(var(--room-viewport-height, 100dvh) - 80px);
+  }
+  .send-btn { width: 44px; height: 44px; }
+  .attachment-btn, .prompt-trigger, .composer-signin-btn { min-height: 44px; }
+  .prompt-trigger { border-radius: 10px; font-size: 0.72rem; }
+}
+
+@media (pointer: coarse) {
+  .message-textarea { font-size: 16px; }
+  .send-btn { width: 44px; height: 44px; }
+  .attachment-btn, .prompt-trigger, .composer-signin-btn { min-height: 44px; }
+}
+
+.room-shell[data-compact-viewport="true"] .composer {
+  padding: 4px 12px;
+  max-height: max(100px, calc(var(--room-viewport-height, 100dvh) - 120px - env(safe-area-inset-bottom, 0px)));
+}
+.room-shell[data-compact-viewport="true"] .composer-pills-row { display: none; }
+.room-shell[data-compact-viewport="true"] .composer-scroll-content { min-height: 44px; }
+.room-shell[data-compact-viewport="true"] .composer-toolbar { padding: 0 4px; }
+.room-shell[data-compact-viewport="true"] .message-textarea { min-height: 44px; max-height: 80px; padding: 12px 14px 6px; font-size: 16px; }
+.room-shell[data-compact-viewport="true"] .send-btn { width: 44px; height: 44px; }
+.room-shell[data-compact-viewport="true"] .attachment-btn,
+.room-shell[data-compact-viewport="true"] .prompt-trigger { min-height: 44px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt-panel { animation: none; }
+  .send-btn { transition: none; }
+  .send-btn:hover:not(:disabled), .send-btn:active:not(:disabled) { transform: none; }
 }

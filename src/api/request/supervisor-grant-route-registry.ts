@@ -7,8 +7,18 @@ const SUPERVISOR_GRANT_ROUTE_PATTERNS: ReadonlyArray<{ method: string; pattern: 
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/rotate$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/end$/ },
+  { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/agent-work$/ },
+  { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/execution-approval-publications$/ },
+  { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/execution-approval-publications\/[^/]+\/close$/ },
+  { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/command-reviews$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/leases\/[^/]+\/attestation$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/leases\/[^/]+\/rebind$/ },
+  // Reconciliation reads are explicit grant capabilities, not generic
+  // account-less fallthrough routes.
+  { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegations$/ },
+  { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegations\/[^/]+$/ },
+  { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegation-decisions$/ },
+  { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegation-decisions\/[^/]+$/ },
 ];
 
 export function isSupervisorGrantRouteAllowed(method: string, path: string): boolean {

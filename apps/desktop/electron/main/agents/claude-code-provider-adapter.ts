@@ -1,12 +1,20 @@
+import { ClaudeCompaction, type ClaudeStartupDeadline } from "./claude-compaction.js";
+import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { claudeToolOperation } from "../../../../../shared/claude-tool-operation.mjs";
+import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../../shared/provider-acquisition-evidence.mjs";
+import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import {
   synthesizeTerminalPayload,
+  sameProviderConnectionIdentity,
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
@@ -27,7 +35,17 @@ import {
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
+  type NativeExecutionObservation,
+  type NativeExecutionSubscription,
+  type ControlProbeResult,
 } from "./provider-adapter.js";
+import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
+import {
+  nativeExecutionId,
+  nativeLifecycleCheckpoint,
+  ProviderExecutionObserver,
+  type NativeLifecycleCheckpoint,
+} from "./provider-execution-observer.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   isRentalCredentialIsolationRequested,
@@ -35,6 +53,7 @@ import {
   rentalIsolatedChildEnvironment,
 } from "./rental-child-environment.js";
 import {
+  ProviderProcessCustody,
   DEFAULT_STOP_GRACE_MS,
   defaultGetProcessIdentity,
   defaultObserveProcessExit,
@@ -55,9 +74,9 @@ import {
   type ClaudeExactTurnFailure,
   type ClaudeExactTurnResult,
 } from "./claude-room-turn-evidence.js";
-import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
+import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
-import { requireSupportedClaudeCodeVersion } from "./claude-code-version.js";
+import { claudeApprovalProfileLabel, requireSupportedClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 
 // Claude Code through its native headless CLI. The daemon owns room ingress,
 // exact-turn dispatch, retry, credentials, and publication; this adapter owns
@@ -74,6 +93,10 @@ type ClaudeStreamMessage = Record<string, unknown> & { type?: unknown; subtype?:
 export interface ClaudeCliChild {
   pid: number | null;
   exited: Promise<ProviderProcessExit>;
+  /** Output volume only; native stderr contents never leave the child owner. */
+  stderrBytesRead?(): number;
+  /** Positive native spawn failure before any child process was acquired. */
+  didNotSpawn?(): boolean;
   /** Ordered stdout stream-json lines (raw, one JSON document per line). */
   onLine(listener: (line: string) => void): () => void;
   /** Control-channel loss (stdout closed while the child was not stopped by us). */
@@ -89,7 +112,7 @@ export interface ClaudeCliChild {
 export interface ClaudeCodeProviderAdapterDependencies {
   readVersion(claudeBin: string): Promise<string>;
   launchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild;
-  createLetAgentsMcpConfig(): Promise<{ path: string; dispose(): Promise<void> }>;
+  createLetAgentsMcpConfig(req: ProviderSpawnRequest): Promise<{ path: string; dispose(): Promise<void> }>;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
@@ -103,13 +126,19 @@ export interface ClaudeCodeProviderAdapterOptions {
   dependencies?: Partial<ClaudeCodeProviderAdapterDependencies>;
   activitySink?: (event: ProviderActivityEvent) => void;
   streamSink?: (event: ProviderStreamEvent) => void;
-  /** Startup-only bound on waiting for the stream-json init message. */
+  /** Cumulative startup time outside positively observed compaction. */
   initTimeoutMs?: number;
+  /** Cumulative time spent compacting during one startup; defaults to five minutes. */
+  compactionTimeoutMs?: number;
   /** SIGTERM → SIGKILL escalation window for stop() and the attach-path fence. */
   stopGraceMs?: number;
 }
 
 const BASE_CLAUDE_CAPABILITIES: ProviderAdapterCapabilities = {
+  execution: {
+    controlProbe: "unsupported",
+    approvals: { kinds: ["command"], recovery: "native_instance_only", denyScope: "request" },
+  },
   deliveryModes: ["daemon_inbox"],
   // Empirically proven by the task_36 acceptance spike (msg_1382): `--resume
   // <session_id>` continues the SAME session id. The adapter asserts that
@@ -126,7 +155,7 @@ const BASE_CLAUDE_CAPABILITIES: ProviderAdapterCapabilities = {
   // The live stream-json stdout IS the transcript stream; every message is
   // published as bounded/redacted stream evidence.
   transcriptAccess: true,
-  permissionPromptBridging: false,
+  permissionPromptBridging: true,
   // stdio dies with the supervising process: a daemon restart can fence the
   // orphan and resume the continuation, but in-context state since the last
   // message is not a survivable live session. Bounded recovery, not survival.
@@ -160,6 +189,8 @@ const RESERVED_POLICY_KEYS = new Set([
   "mcp-config",
   "strictMcpConfig",
   "strict-mcp-config",
+  "permissionPromptTool",
+  "permission-prompt-tool",
 ]);
 
 function camelToKebab(key: string): string {
@@ -202,7 +233,8 @@ function claudeStreamKind(message: ClaudeStreamMessage): ProviderStreamEventKind
   if (type === "assistant") return "text_delta";
   if (type === "user") return "tool_lifecycle";
   if (type === "tool_use_summary") return "tool_lifecycle";
-  if (type === "result") return isClaudeFailedResult(message) ? "error" : "turn_lifecycle";
+  if (type === "result") return isClaudeFailedResult(message) && !isClaudeTurnLimitResult(message)
+    ? "error" : "turn_lifecycle";
   if (type === "system") return "provider_event";
   if (/error/i.test(type)) return "error";
   return "provider_event";
@@ -212,6 +244,13 @@ function isClaudeFailedResult(message: ClaudeStreamMessage): boolean {
   if (message.type !== "result") return false;
   if ((message as { is_error?: unknown }).is_error === true) return true;
   return typeof message.subtype === "string" && /(?:error|failed)/i.test(message.subtype);
+}
+
+function isClaudeTurnLimitResult(message: ClaudeStreamMessage): boolean {
+  // These documented limits end one command, not the CLI session. Unknown
+  // failures retain the legacy recovery path until typed lifecycle rollout.
+  return message.type === "result" && typeof message.subtype === "string"
+    && /^(?:error_max_turns|error_max_budget_usd|error_max_structured_output_retries)$/.test(message.subtype);
 }
 
 function streamMethod(message: ClaudeStreamMessage): string {
@@ -225,14 +264,21 @@ function sessionIdOf(message: ClaudeStreamMessage): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function initMcpServerNames(message: ClaudeStreamMessage): string[] {
-  const servers = (message as { mcp_servers?: unknown }).mcp_servers;
-  if (!Array.isArray(servers)) return [];
-  return servers.flatMap((row) => {
-    if (!row || typeof row !== "object") return [];
-    const name = (row as { name?: unknown }).name;
-    return typeof name === "string" ? [name] : [];
-  });
+function claudeTerminalDiscriminator(message: ClaudeStreamMessage): string {
+  const subtype = typeof message.subtype === "string" && message.subtype.trim()
+    ? message.subtype.trim().toLowerCase()
+    : "unknown";
+  const errorState = message.is_error === true ? "error"
+    : message.is_error === false ? "ok" : "unknown";
+  return `${subtype}:${errorState}`;
+}
+
+function hasReadyRoomWorkplace(message: ClaudeStreamMessage): boolean {
+  if (!Array.isArray(message.mcp_servers) || !Array.isArray(message.tools)) return false;
+  const connected = message.mcp_servers.some(row => row && typeof row === "object"
+    && row.name === "letagents" && row.status === "connected");
+  return connected && ["get_board", "read_messages", "send_message"].every(name =>
+    (message.tools as unknown[]).includes(`mcp__letagents__${name}`));
 }
 
 function assistantTextOf(message: ClaudeStreamMessage): string | null {
@@ -261,9 +307,7 @@ function userStreamJsonLine(text: string, uuid?: string): string {
 
 export function boundedClaudeRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
-    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
-    `Your durable charter: ${request.charter?.trim() || "Help thoughtfully within the room."}`,
-    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     `If no response should be published, return exactly ${CLAUDE_NO_ROOM_REPLY_SENTINEL} with no other text.`,
@@ -282,6 +326,195 @@ const CLAUDE_DAEMON_BOOTSTRAP_PROMPT = [
 
 type ClaudeRoomTurnTerminal = ClaudeExactTurnResult | ClaudeExactTurnFailure;
 
+const CLAUDE_API_ERROR_CATEGORIES = new Set([
+  "authentication_failed", "oauth_org_not_allowed", "billing_error", "rate_limit",
+  "overloaded", "invalid_request", "model_not_found", "server_error", "unknown", "max_output_tokens",
+]);
+const CLAUDE_RESULT_CATEGORIES = new Set([
+  "success", "error_during_execution", "error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries",
+]);
+const CLAUDE_STARTUP_SYSTEM_TYPES = new Set([
+  "init", "api_retry", "compact_boundary", "control_request_progress", "hook_started", "hook_progress",
+  "commands_changed", "background_tasks_changed", "files_persisted", "elicitation_complete", "informational",
+  "local_command_output", "memory_recall", "mirror_error", "model_refusal_fallback", "model_refusal_no_fallback",
+  "notification", "permission_denied", "plugin_install", "task_notification", "task_progress", "task_started",
+  "task_updated", "thinking_tokens", "worker_shutting_down",
+]);
+const CLAUDE_STARTUP_LINE_TYPES = new Set([
+  "assistant", "result", "user", "auth_status", "stream_event", "tool_progress", "tool_use_summary",
+  "control_request", "control_cancel_request",
+]);
+
+function claudeStartupLineType(message: ClaudeStreamMessage): string {
+  // Values outside these finite enums never enter the diagnostic, including
+  // unknown keys/subtypes, hook output, tool names, IDs and native error text.
+  if (message.type === "command_lifecycle") {
+    return `command_lifecycle.${message.state === "started" ? "started" : "unlisted"}`;
+  }
+  if (message.type !== "system") {
+    return typeof message.type === "string" && CLAUDE_STARTUP_LINE_TYPES.has(message.type) ? message.type : "unlisted";
+  }
+  if (message.subtype === "status") {
+    const status = message.status === null ? "cleared"
+      : message.status === "compacting" || message.status === "requesting" ? message.status : "unlisted";
+    const compact = message.compact_result === undefined ? ""
+      : message.compact_result === "success" || message.compact_result === "failed"
+        ? `.compact_${message.compact_result}` : ".compact_unlisted";
+    return `system.status.${status}${compact}`;
+  }
+  if (message.subtype === "hook_response") {
+    const outcome = message.outcome === "success" || message.outcome === "error" || message.outcome === "cancelled"
+      ? message.outcome : "unlisted";
+    return `system.hook_response.${outcome}`;
+  }
+  if (message.subtype === "session_state_changed") {
+    const state = message.state === "idle" || message.state === "running" || message.state === "requires_action"
+      ? message.state : "unlisted";
+    return `system.session_state_changed.${state}`;
+  }
+  return typeof message.subtype === "string" && CLAUDE_STARTUP_SYSTEM_TYPES.has(message.subtype)
+    ? `system.${message.subtype}` : "system.unlisted";
+}
+
+/** Bounded observations from this child's startup, never an inferred root cause. */
+class ClaudeBootstrapDiagnostics {
+  private readonly startedAt = performance.now();
+  private initializedAt: number | null = null;
+  private stdoutLines = 0;
+  private matchedSessionLines = 0;
+  private apiRetries = 0;
+  private assistantMessages = 0;
+  private resultMessages = 0;
+  private authMessages = 0;
+  private authenticating: boolean | null = null;
+  private lastApiRetry: string | null = null;
+  private assistantError: string | null = null;
+  private result: string | null = null;
+  private uncorrelatedResult: string | null = null;
+  private readonly lineTypes = new Map<string, number>();
+  private lastLineType: string | null = null;
+  private lastLineMs = 0;
+
+  constructor(private readonly sessionId: string, private readonly turnId: string, private readonly budgetMs: number) {}
+
+  initialized(): void { this.initializedAt = performance.now(); }
+
+  /** The allowlisted API error category Claude reported for the bootstrap turn. */
+  get apiError(): string | null { return this.assistantError; }
+
+  observe(line: string): void {
+    this.stdoutLines = Math.min(Number.MAX_SAFE_INTEGER, this.stdoutLines + 1);
+    const message = parseStreamLine(line);
+    if (!message || message.session_id !== this.sessionId) return;
+    this.matchedSessionLines = Math.min(Number.MAX_SAFE_INTEGER, this.matchedSessionLines + 1);
+    const lineType = claudeStartupLineType(message);
+    this.lineTypes.set(lineType, Math.min(Number.MAX_SAFE_INTEGER, (this.lineTypes.get(lineType) ?? 0) + 1));
+    this.lastLineType = lineType;
+    // Subscription/diagnostics start is the origin, including pre-init lines.
+    this.lastLineMs = Math.max(0, Math.round(performance.now() - this.startedAt));
+    // Never include arbitrary error strings, keys, subtypes, IDs or message text.
+    const category = typeof message.error === "string" && CLAUDE_API_ERROR_CATEGORIES.has(message.error)
+      ? message.error : "unlisted";
+    if (message.type === "system" && message.subtype === "api_retry") {
+      this.apiRetries = Math.min(Number.MAX_SAFE_INTEGER, this.apiRetries + 1);
+      const status = message.error_status === null ? "none"
+        : typeof message.error_status === "number" && Number.isInteger(message.error_status)
+          && message.error_status >= 100 && message.error_status <= 599 ? message.error_status : "unlisted";
+      this.lastApiRetry = `${category} (HTTP ${status})`;
+    } else if (message.type === "assistant") {
+      this.assistantMessages = Math.min(Number.MAX_SAFE_INTEGER, this.assistantMessages + 1);
+      if (message.error !== undefined) this.assistantError = category;
+    } else if (message.type === "result") {
+      this.resultMessages = Math.min(Number.MAX_SAFE_INTEGER, this.resultMessages + 1);
+      const subtype = typeof message.subtype === "string" && CLAUDE_RESULT_CATEGORIES.has(message.subtype)
+        ? message.subtype : "unlisted";
+      if (message.user_message_uuid === this.turnId) {
+        this.result = subtype;
+      } else this.uncorrelatedResult = subtype;
+    } else if (message.type === "auth_status") {
+      this.authMessages = Math.min(Number.MAX_SAFE_INTEGER, this.authMessages + 1);
+      this.authenticating = typeof message.isAuthenticating === "boolean" ? message.isAuthenticating : null;
+    }
+  }
+
+  summary(child: ClaudeCliChild, compactionFields: string[] = []): string {
+    const failedAt = performance.now();
+    const elapsed = (start: number, end: number) => Math.max(0, Math.round(end - start));
+    let stderrBytes: number | null = null;
+    try {
+      const count = child.stderrBytesRead?.();
+      if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) stderrBytes = count;
+    } catch { /* An unavailable diagnostic must not replace the launch failure. */ }
+    const lineTypes: string[] = [];
+    for (const [type, count] of this.lineTypes) {
+      const item = `${type}:${count}`;
+      if (lineTypes.length === 8 || [...lineTypes, item].join(",").length > 180) break;
+      lineTypes.push(item);
+    }
+    // Keep the histogram and its omission count in one field so the outer
+    // 512-character cap cannot retain a partial histogram without its marker.
+    const omittedTypes = this.lineTypes.size - lineTypes.length;
+    if (omittedTypes) lineTypes.push(`omitted_types:${omittedTypes}`);
+    const fields = [
+      ...compactionFields,
+      ...(this.lastApiRetry === null ? [] : [`last_api_retry=${this.lastApiRetry}`]),
+      ...(this.assistantError === null ? [] : [`assistant_error=${this.assistantError}`]),
+      ...(this.result === null ? [] : [`result=${this.result}`]),
+      ...(this.uncorrelatedResult === null ? [] : [`uncorrelated_result=${this.uncorrelatedResult}`]),
+      ...(this.authMessages === 0 ? [] : [`auth_status_count=${this.authMessages}`, `authenticating=${this.authenticating ?? "unlisted"}`]),
+      ...(this.lastLineType === null ? [] : [`last_line_type=${this.lastLineType}`, `last_line_ms=${this.lastLineMs}`]),
+      `init_ms=${elapsed(this.startedAt, this.initializedAt ?? failedAt)}`,
+      `bootstrap_ms=${this.initializedAt === null ? "not_started" : elapsed(this.initializedAt, failedAt)}`,
+      `budget_ms=${this.budgetMs}`, `stdout_lines=${this.stdoutLines}`, `matched_session_lines=${this.matchedSessionLines}`,
+      `stderr_bytes=${stderrBytes ?? "unavailable"}`,
+      `api_retry_count=${this.apiRetries}`, `assistant_count=${this.assistantMessages}`, `result_count=${this.resultMessages}`,
+      ...(lineTypes.length ? [`line_types=${lineTypes.join(",")}`] : []),
+    ];
+    let omitted = 0;
+    for (;;) {
+      const summary = `Startup observations: ${fields.join("; ")}${omitted ? `; omitted_fields=${omitted}` : ""}.`;
+      if (summary.length <= 512) return summary;
+      fields.pop();
+      omitted += 1;
+    }
+  }
+}
+
+class ClaudeBootstrapError extends Error {
+  readonly name = "ClaudeBootstrapError";
+  readonly reason: ClaudeStartupDeadline | "native_exit" | "transport_error" | "failed_response";
+  readonly exitCode?: number | null;
+  readonly signal?: string | null;
+  /** The account's usage limit rejected the turn; retrying only helps after it resets. */
+  readonly providerQuotaExhausted?: true;
+  /** Claude reported a service-side failure that a fresh attempt may clear. */
+  readonly transientProviderStart?: true;
+
+  constructor(
+    readonly phase: "init" | "bootstrap_turn",
+    failure: ProviderProcessExit | { type: ClaudeStartupDeadline | "failed_response" },
+    observations: string,
+    apiError: string | null = null,
+  ) {
+    const reason = failure.type === "exit" ? "native_exit"
+      : failure.type === "error" ? "transport_error" : failure.type;
+    const prefix = phase === "init" ? "Claude CLI did not report its stream-json init message"
+      : "Claude CLI did not complete its daemon-safe bootstrap turn";
+    // Preserve the observed boundary without copying native error/result text
+    // into supervisor diagnostics. Transport loss is not a physical death proof.
+    super(`${prefix} (${reason}${failure.type === "exit" ? `; exit code ${failure.code ?? "unknown"}; signal ${failure.signal ?? "none"}` : ""}). ${observations}`);
+    this.reason = reason;
+    if (failure.type === "exit") {
+      this.exitCode = failure.code;
+      this.signal = failure.signal;
+    }
+    // Only an explicit API rejection of the bootstrap turn is classified. A
+    // deadline stays unretried: a stalled resume can spend tokens each time.
+    if (reason === "failed_response" && apiError === "rate_limit") this.providerQuotaExhausted = true;
+    if (reason === "failed_response" && (apiError === "overloaded" || apiError === "server_error")) this.transientProviderStart = true;
+  }
+}
+
 class ClaudeRoomTurnRecoveryError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
 }
@@ -297,7 +530,7 @@ class ClaudeRoomTurnObservationDetachedError extends Error {}
  * authority, so ambient owner and fixed worker credentials are also removed
  * before Claude or provider-started shell commands can inherit them.
  */
-export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+export function claudeCliEnv(base: NodeJS.ProcessEnv = desktopRuntimeEnvironment(), overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const combined = { ...base, ...overrides };
   if (isRentalCredentialIsolationRequested(combined)) return rentalIsolatedChildEnvironment(combined);
   const {
@@ -314,7 +547,7 @@ function defaultReadVersion(claudeBin: string): Promise<string> {
     const child = execFile(
       claudeBin,
       ["--version"],
-      { timeout: VERSION_TIMEOUT_MS, env: claudeCliEnv(process.env) },
+      { timeout: VERSION_TIMEOUT_MS, env: claudeCliEnv() },
       (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`Claude Code could not be checked: ${errorMessage(error)}`));
@@ -337,7 +570,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     detached: process.platform !== "win32",
     // The strict launch config supplies the API endpoint; these coordinates
     // make every LetAgents MCP effect borrow the exact daemon generation.
-    env: claudeCliEnv(process.env, input.env),
+    env: claudeCliEnv(desktopRuntimeEnvironment(), input.env),
   });
 
   const lineListeners = new Set<(line: string) => void>();
@@ -345,7 +578,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
   let intentionalClose = false;
   let exitedSettled = false;
   let disconnectNotified = false;
-  const stderrTail: string[] = [];
+  let stderrBytes = 0;
 
   const notifyDisconnect = () => {
     if (intentionalClose || exitedSettled || disconnectNotified) return;
@@ -354,8 +587,14 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     disconnectListeners.clear();
   };
 
+  let spawned = false;
+  let sawPid = child.pid !== undefined;
+  let failedToSpawn = false;
+  child.once("spawn", () => { spawned = true; sawPid ||= child.pid !== undefined; });
   const exited = new Promise<ProviderProcessExit>((resolve) => {
     child.once("error", (error) => {
+      sawPid ||= child.pid !== undefined;
+      failedToSpawn = !spawned && !sawPid;
       exitedSettled = true;
       resolve({ type: "error", error });
     });
@@ -377,13 +616,14 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     });
   }
   child.stderr?.on("data", (chunk: Buffer) => {
-    stderrTail.push(chunk.toString("utf8"));
-    if (stderrTail.length > 20) stderrTail.shift();
+    stderrBytes = Math.min(Number.MAX_SAFE_INTEGER, stderrBytes + chunk.byteLength);
   });
 
   return {
     pid: child.pid ?? null,
     exited,
+    stderrBytesRead: () => stderrBytes,
+    didNotSpawn: () => failedToSpawn && child.pid === undefined,
     onLine(listener) {
       lineListeners.add(listener);
       return () => lineListeners.delete(listener);
@@ -417,6 +657,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
 
 export async function createEphemeralClaudeMcpConfig(
   mcpEnv: Record<string, string>,
+  runtime: LetAgentsMcpRuntime,
   temporaryRoot = tmpdir(),
 ): Promise<{ path: string; dispose(): Promise<void> }> {
   const directory = await mkdtemp(join(temporaryRoot, "letagents-claude-mcp-"));
@@ -424,9 +665,9 @@ export async function createEphemeralClaudeMcpConfig(
   await writeFile(configPath, JSON.stringify({
     mcpServers: {
       letagents: {
-        command: "npx",
-        args: [...LETAGENTS_NPX_ARGS],
-        env: mcpEnv,
+        command: process.execPath,
+        args: [runtime.entryPath],
+        env: { ...mcpEnv, ELECTRON_RUN_AS_NODE: "1" },
       },
     },
   }), { encoding: "utf8", mode: 0o600 });
@@ -444,6 +685,9 @@ export async function createEphemeralClaudeMcpConfig(
 export function createManagedClaudeMcpConfig(
   apiBaseUrl = desktopApiUrl,
   temporaryRoot = tmpdir(),
+  devEntryPath?: string,
+  resolveRuntime: (devEntryPath?: string) => LetAgentsMcpRuntime = entry =>
+    resolveLetAgentsMcpRuntime({ devEntryPath: entry, env: desktopRuntimeEnvironment() }),
 ): Promise<{ path: string; dispose(): Promise<void> }> {
   const normalizedApiUrl = apiBaseUrl.trim();
   if (!normalizedApiUrl) {
@@ -451,6 +695,7 @@ export function createManagedClaudeMcpConfig(
   }
   return createEphemeralClaudeMcpConfig(
     { LETAGENTS_API_URL: normalizedApiUrl },
+    resolveRuntime(devEntryPath),
     temporaryRoot,
   );
 }
@@ -493,7 +738,9 @@ async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidence
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   readVersion: defaultReadVersion,
   launchChild: defaultLaunchChild,
-  createLetAgentsMcpConfig: createManagedClaudeMcpConfig,
+  createLetAgentsMcpConfig: req => createManagedClaudeMcpConfig(
+    req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl, tmpdir(), req.devMcpServerEntryPath,
+  ),
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
@@ -518,15 +765,57 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly roomTurnResults = new Map<string, ClaudeRoomTurnTerminal>();
   activeRoomTurnId: string | null = null;
   roomTurnOperationId: string | null = null;
+  pendingInterruptTurnId: string | null = null;
+  contextualInterruptTerminalTurnId: string | null = null;
+  readonly contextualInterruptResults = new WeakSet<ClaudeStreamMessage>();
+  readonly execution: ProviderExecutionObserver;
+  executionTurnId: string | null = null;
+  executionTurnStarted = false;
+  executionTerminalCheckpoint: {
+    providerTurnId: string; terminalDiscriminator: string; nativeLifecycle: NativeLifecycleCheckpoint;
+  } | null = null;
+  readonly executionTools = new Map<string, { operation: Extract<NativeExecutionFact, { domain: "execution" }>["operation"]; completed: boolean; name: string; input: unknown }>();
+  executionExitObserved = false;
+  permissionControlAvailable = true;
+  readonly seenPermissionRequestIds = new Set<string>();
+  readonly permissionRequests = new Map<string, { native: ClaudeNativePermissionRequest; turnId: string; dispatching: boolean }>();
+  readonly permissionListeners = new Set<() => void>();
+  // Sent prompts still need a request-closure receipt when their tool completes.
+  readonly permissionClosures = new Map<string, { native: ClaudeNativePermissionRequest; turnId: string }>();
+  readonly permissionClosureListeners = new Set<(event: Extract<ClaudePermissionObservation, { type: "request_closed" }>) => void>();
+
+  permissionsChanged(): void {
+    for (const listener of this.permissionListeners) { try { listener(); } catch { /* Observers cannot control the CLI. */ } }
+  }
+
+  clearPermissions(): void {
+    this.permissionRequests.clear();
+    this.permissionClosures.clear();
+    this.permissionsChanged();
+  }
 
   constructor(
     readonly workAttemptId: string,
     readonly pid: number | null,
     readonly providerContinuationId: string,
+    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
     readonly providerConnection: ProviderConnectionRef,
     readonly child: ClaudeCliChild,
     readonly exitEvidence: Promise<ProviderProcessExit>,
-  ) {}
+    now: () => string,
+  ) {
+    this.execution = new ProviderExecutionObserver(now);
+    child.onDisconnect(() => {
+      this.permissionControlAvailable = false;
+      this.clearPermissions();
+      if (this.executionExitObserved) return;
+      this.execution.emit(
+        { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+        providerConnection.kind === "claude_cli" ? providerConnection.processIdentity ?? undefined : undefined,
+        providerConnection.kind === "claude_cli" ? providerConnection.pid ?? undefined : undefined,
+      );
+    });
+  }
 
   observedState(): ProviderObservedState {
     return this.state;
@@ -540,18 +829,36 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly initTimeoutMs: number;
+  private readonly compactionTimeoutMs: number;
+  private readonly compactions = new Map<string, ClaudeCompaction>();
+  private readonly handleCompactions = new WeakMap<ClaudeProviderHandle, ClaudeCompaction>();
   private readonly stopGraceMs: number;
   private readonly handles = new Map<string, ClaudeProviderHandle>();
-  private readonly pendingAttaches = new Map<string, Promise<ProviderHandle | ProviderAttachTerminal | null>>();
+  private readonly processCustody: ProviderProcessCustody;
+  private readonly pendingAttaches = new Map<string, {
+    ref: ProviderContinuationRef;
+    promise: Promise<ProviderHandle | ProviderAttachTerminal | null>;
+  }>();
   private readonly exitPromises = new WeakMap<ClaudeProviderHandle, Promise<ProviderTerminalPayload>>();
 
   constructor(options: ClaudeCodeProviderAdapterOptions = {}) {
-    this.claudeBin = options.claudeBin || process.env.LETAGENTS_CLAUDE_BIN || "claude";
+    this.claudeBin = options.claudeBin || resolveClaudeCodeExecutable(desktopRuntimeEnvironment());
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+    this.processCustody = new ProviderProcessCustody(this.deps);
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
     this.initTimeoutMs = options.initTimeoutMs ?? INIT_TIMEOUT_MS;
+    this.compactionTimeoutMs = options.compactionTimeoutMs ?? 300_000;
     this.stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  }
+
+  runtimeCustody(workAttemptId: string, providerHandle?: ProviderHandle): "absent" | "owned" | "unknown" {
+    const handle = this.handles.get(workAttemptId);
+    return this.processCustody.state(workAttemptId, handle === providerHandle ? handle?.child : undefined);
+  }
+
+  compactionProgress(workAttemptId: string): { state: "compacting"; startedAt: string } | null {
+    return this.compactions.get(workAttemptId)?.progress() ?? null;
   }
 
   capabilities(): ProviderAdapterCapabilities {
@@ -584,7 +891,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
    */
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
     const handle = this.handles.get(ref.workAttemptId);
-    if (handle && !handle.terminal && handle.providerContinuationId === ref.providerContinuationId) {
+    const authorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
+    if (handle && !handle.terminal
+      && handle.providerContinuationId === ref.providerContinuationId
+      && handle.lifecycleAuthorityMode === authorityMode
+      && sameProviderConnectionIdentity(handle.providerConnection, ref.providerConnection)) {
       return handle;
     }
     if (handle) return null;
@@ -592,13 +903,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!connection || connection.kind !== "claude_cli") return null;
 
     const pending = this.pendingAttaches.get(ref.workAttemptId);
-    if (pending) return pending;
+    if (pending) {
+      if (pending.ref.providerContinuationId !== ref.providerContinuationId
+        || (pending.ref.lifecycleAuthorityMode ?? "typed_shadow") !== authorityMode
+        || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)) return null;
+      return pending.promise;
+    }
     const attaching = this.fenceRecordedChild(connection, ref.providerContinuationId).finally(() => {
-      if (this.pendingAttaches.get(ref.workAttemptId) === attaching) {
+      if (this.pendingAttaches.get(ref.workAttemptId)?.promise === attaching) {
         this.pendingAttaches.delete(ref.workAttemptId);
       }
     });
-    this.pendingAttaches.set(ref.workAttemptId, attaching);
+    this.pendingAttaches.set(ref.workAttemptId, { ref, promise: attaching });
     return attaching;
   }
 
@@ -646,11 +962,17 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           "not_applied",
         );
       }
-      handle.child.writeLine(JSON.stringify({
-        type: "control_request",
-        request_id: randomUUID(),
-        request: { subtype: "interrupt" },
-      }));
+      handle.pendingInterruptTurnId = activeTurnId!;
+      try {
+        handle.child.writeLine(JSON.stringify({
+          type: "control_request",
+          request_id: randomUUID(),
+          request: { subtype: "interrupt" },
+        }));
+      } catch (error) {
+        if (handle.pendingInterruptTurnId === activeTurnId) handle.pendingInterruptTurnId = null;
+        throw error;
+      }
       // A control_response acknowledgement is intentionally insufficient. The
       // subsequent result event is the only proof that the queued/live turn
       // actually reached an interrupted boundary.
@@ -659,15 +981,19 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       const resultTurnId = typeof result.user_message_uuid === "string"
         ? result.user_message_uuid.trim()
         : "";
+      const contextualInterrupt = handle.contextualInterruptResults.has(result);
       if (
-        subtype !== "interrupted"
-        || sessionIdOf(result) !== handle.providerContinuationId
-        || resultTurnId !== activeTurnId
+        !contextualInterrupt
+        && (subtype !== "interrupted"
+          || sessionIdOf(result) !== handle.providerContinuationId
+          || resultTurnId !== activeTurnId)
       ) {
-        const exactSessionTerminal = sessionIdOf(result) === handle.providerContinuationId;
+        const exactTargetTerminal = sessionIdOf(result) === handle.providerContinuationId
+          && resultTurnId === activeTurnId
+          && Boolean(exactClaudeStreamTerminal(result, activeTurnId!, handle.providerContinuationId));
         throw new ProviderTurnControlError(
           `Claude returned ${streamMethod(result)} instead of an exact-session interrupted boundary.`,
-          exactSessionTerminal ? "not_applied" : "uncertain",
+          exactTargetTerminal ? "not_applied" : "uncertain",
         );
       }
       handle.state = "idle";
@@ -697,6 +1023,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
 
     const turnId = randomUUID();
     handle.roomTurnOperationId = turnId;
+    handle.contextualInterruptTerminalTurnId = null;
     let terminalPromise: Promise<ClaudeRoomTurnTerminal> | null = null;
     try {
       await options.beforeNativeDispatch?.();
@@ -705,7 +1032,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       await options.checkpointTurnStarted?.(turnId);
       terminalPromise = this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
       handle.activeRoomTurnId = turnId;
-      handle.state = "working";
+      if (handle.lifecycleAuthorityMode !== "typed") handle.state = "working";
+      handle.executionTurnId = turnId;
+      handle.executionTurnStarted = false;
+      handle.executionTerminalCheckpoint = null;
+      handle.executionTools.clear();
       try {
         handle.child.writeLine(userStreamJsonLine(boundedClaudeRoomTurnPrompt(request), turnId));
       } catch (error) {
@@ -715,12 +1046,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         handle.activeRoomTurnId = null;
         handle.state = "failed";
         handle.protocolError = true;
+        handle.executionTurnId = null;
+        handle.executionTurnStarted = false;
         throw error;
       }
       const terminal = await terminalPromise;
-      const result = this.providerRoomTurnResult(terminal);
+      const result = this.providerRoomTurnResult(handle, terminal);
       await options.checkpointTerminalResult?.(result);
-      handle.roomTurnResults.delete(turnId);
+      if (!("error" in terminal) || options.checkpointTerminalResult) handle.roomTurnResults.delete(turnId);
       return result;
     } catch (error) {
       if (terminalPromise && handle.activeRoomTurnId !== turnId) {
@@ -761,10 +1094,40 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       );
     }
 
-    const result = this.providerRoomTurnResult(terminal);
+    const result = this.providerRoomTurnResult(handle, terminal);
     await options.checkpointTerminalResult?.(result);
-    handle.roomTurnResults.delete(turnId);
+    if (!("error" in terminal) || options.checkpointTerminalResult) handle.roomTurnResults.delete(turnId);
     return result;
+  }
+
+  async stopRef(ref: ProviderContinuationRef, options: ProviderStopOptions = {}): Promise<ProviderTerminalPayload> {
+    ref = { ...ref, providerConnection: ref.providerConnection && { ...ref.providerConnection } };
+    const connection = ref.providerConnection;
+    const graceMs = options.graceMs ?? this.stopGraceMs;
+    const birthEvidence = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
+    if (!ref.workAttemptId?.trim() || !ref.providerContinuationId?.trim()
+      || connection?.kind !== "claude_cli" || !Number.isSafeInteger(connection.pid) || connection.pid! <= 0
+      || typeof connection.processIdentity !== "string" || !birthEvidence.test(connection.processIdentity.trim())
+      || !Number.isFinite(graceMs) || graceMs < 0) {
+      throw new Error("Claude exact-reference stop requires an exact continuation and process birth.");
+    }
+    const known = [...this.handles.values()].find(handle => handle.pid === connection.pid
+      && handle.providerConnection.processIdentity
+      && sameProcessBirthIdentity(handle.providerConnection.processIdentity, connection.processIdentity!));
+    if (known && (known.workAttemptId !== ref.workAttemptId || known.providerContinuationId !== ref.providerContinuationId
+      || !sameProviderConnectionIdentity(known.providerConnection, connection))) {
+      throw new Error("Claude exact-reference stop conflicts with the known native process owner.");
+    }
+    if (known) {
+      known.stopRequested = true;
+      known.clearPermissions();
+      known.state = "stopping";
+      known.child.markIntentionalClose();
+    }
+    // A cached protocol terminal is not evidence that the process stopped.
+    const result = await this.fenceRecordedChild(connection, ref.providerContinuationId,
+      { force: options.force === true, graceMs, birthEvidence });
+    return result.terminal;
   }
 
   async stop(
@@ -778,6 +1141,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
 
     handle.stopRequested = true;
+    handle.clearPermissions();
     handle.state = "stopping";
     handle.child.markIntentionalClose();
     const exitPromise = this.requireExitPromise(handle);
@@ -829,10 +1193,166 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
+  onExecution(providerHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription {
+    return this.requireHandle(providerHandle).execution.subscribe(listener);
+  }
+
+  async observePermissions(
+    providerHandle: ProviderHandle,
+    listener: (event: ClaudePermissionObservation) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const handle = this.requireHandle(providerHandle);
+    if (signal.aborted) return;
+    const notify = () => {
+      if (signal.aborted) return;
+      try {
+        if (this.handles.get(handle.workAttemptId) !== handle || handle.terminal || handle.stopRequested) listener({ type: "unavailable" });
+        else if (!handle.permissionControlAvailable) listener({ type: "degraded" });
+        else listener({ type: "snapshot", requests: [...handle.permissionRequests.values()].map(value => structuredClone(value.native)) });
+      } catch { /* Observer failures do not alter permission decisions. */ }
+    };
+    const closed = (event: Extract<ClaudePermissionObservation, { type: "request_closed" }>) => {
+      if (!signal.aborted) listener(event);
+    };
+    handle.permissionClosureListeners.add(closed);
+    handle.permissionListeners.add(notify);
+    notify();
+    await new Promise<void>(resolve => {
+      const stop = () => { handle.permissionListeners.delete(notify); handle.permissionClosureListeners.delete(closed); resolve(); };
+      signal.addEventListener("abort", stop, { once: true });
+      if (signal.aborted) stop();
+    });
+  }
+
+  async correlatePermissionTurn(providerHandle: ProviderHandle, request: ClaudeNativePermissionRequest): Promise<
+    { outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }
+  > {
+    const handle = this.requireHandle(providerHandle);
+    const pending = this.currentPermission(handle, request);
+    return pending ? { outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: pending.turnId }
+      : { outcome: "correlation_unproven" };
+  }
+
+  async replyPermission(providerHandle: ProviderHandle, expected: ClaudeNativePermissionRequest,
+    reply: "once" | "reject", options?: ProviderPermissionDispatchOptions,
+  ): Promise<{ outcome: "sent"; scope: "request" }> {
+    const handle = this.requireHandle(providerHandle);
+    const refuse = () => Object.assign(new Error("Claude permission request is no longer pending on the exact turn."), { outcome: "not_dispatched" });
+    if (!["once", "reject"].includes(reply) || !options?.beforeNativeDispatch) throw refuse();
+    const pending = this.currentPermission(handle, expected);
+    if (!pending || pending.dispatching) throw refuse();
+    pending.dispatching = true;
+    let dispatched = false;
+    try {
+      await options.beforeNativeDispatch();
+      if (this.currentPermission(handle, expected) !== pending) throw refuse();
+      options.assertNativeDispatch?.();
+      // The assertion may synchronously revoke or replace the runtime.
+      if (this.currentPermission(handle, expected) !== pending) throw refuse();
+      dispatched = true;
+      handle.child.writeLine(JSON.stringify({ type: "control_response", response: {
+        subtype: "success", request_id: pending.native.id,
+        response: reply === "once" ? { behavior: "allow", updatedInput: pending.native.request.input }
+          : { behavior: "deny", message: "The host rejected this action." },
+      } }));
+      return { outcome: "sent", scope: "request" };
+    } catch (error) {
+      if (dispatched) throw Object.assign(new Error("Claude approval dispatch cannot be confirmed."), { outcome: "uncertain" });
+      pending.dispatching = false;
+      throw error;
+    } finally {
+      if (dispatched) { handle.permissionRequests.delete(expected.id); handle.permissionsChanged(); }
+    }
+  }
+
+  private currentPermission(handle: ClaudeProviderHandle, expected: ClaudeNativePermissionRequest) {
+    const pending = handle.permissionRequests.get(expected.id);
+    if (!pending || !isDeepStrictEqual(pending.native, expected)
+      || this.handles.get(handle.workAttemptId) !== handle || handle.terminal || handle.stopRequested
+      || !handle.permissionControlAvailable || handle.providerConnection.kind !== "claude_cli"
+      || !handle.providerConnection.processIdentity
+      || this.deps.getProcessIdentity(handle.pid!) !== handle.providerConnection.processIdentity
+      || handle.executionTurnId !== pending.turnId || handle.activeRoomTurnId !== pending.turnId
+      || !handle.executionTurnStarted || handle.pendingInterruptTurnId) return null;
+    const tool = handle.executionTools.get(expected.request.tool_use_id);
+    return tool && !tool.completed && tool.name === expected.request.tool_name
+      && isDeepStrictEqual(tool.input, expected.request.input) ? pending : null;
+  }
+
+  private closePermission(handle: ClaudeProviderHandle, id: string): void {
+    const pending = handle.permissionRequests.get(id) ?? handle.permissionClosures.get(id);
+    if (!pending || this.handles.get(handle.workAttemptId) !== handle || !handle.permissionControlAvailable
+      || handle.providerConnection.kind !== "claude_cli" || !handle.providerConnection.processIdentity
+      || this.deps.getProcessIdentity(handle.pid!) !== handle.providerConnection.processIdentity) return;
+    handle.permissionClosures.delete(id);
+    handle.permissionRequests.delete(id);
+    const event = { type: "request_closed" as const, request: structuredClone(pending.native),
+      providerContinuationId: handle.providerContinuationId, providerTurnId: pending.turnId };
+    for (const listener of handle.permissionClosureListeners) {
+      try { listener(event); } catch { /* Closure is observation, never a decision. */ }
+    }
+    handle.permissionsChanged();
+  }
+
+  private consumePermission(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+    if (typeof message.request_id !== "string" || !message.request_id.trim() || message.request_id.length > 512) return;
+    if (message.type === "control_cancel_request") {
+      handle.seenPermissionRequestIds.add(message.request_id);
+      this.closePermission(handle, message.request_id);
+      return;
+    }
+    const request = message.request as ClaudeNativePermissionRequest["request"] | undefined;
+    const turnId = handle.activeRoomTurnId;
+    if (!request || request.agent_id != null || request.subtype !== "can_use_tool" || !turnId || handle.executionTurnId !== turnId
+      || !handle.executionTurnStarted || typeof request.tool_name !== "string" || !request.tool_name.trim()
+      || typeof request.tool_use_id !== "string" || !request.tool_use_id.trim()
+      || !request.input || typeof request.input !== "object" || Array.isArray(request.input)) return;
+    const native = { id: message.request_id, request: structuredClone(request) };
+    const prior = handle.permissionRequests.get(native.id);
+    if (prior) {
+      // Reused IDs with different payloads are ambiguous and cannot inherit approval.
+      if (!isDeepStrictEqual(prior.native, native)) { handle.permissionControlAvailable = false; handle.clearPermissions(); }
+      return;
+    }
+    if (handle.seenPermissionRequestIds.has(native.id)) return;
+    handle.seenPermissionRequestIds.add(native.id);
+    handle.permissionRequests.set(native.id, { native, turnId, dispatching: false });
+    handle.permissionClosures.set(native.id, { native, turnId });
+    while (handle.permissionClosures.size > 64) handle.permissionClosures.delete(handle.permissionClosures.keys().next().value!);
+    handle.permissionsChanged();
+  }
+
+  async probeControl(providerHandle: ProviderHandle): Promise<ControlProbeResult> {
+    const handle = this.requireHandle(providerHandle);
+    // A live PID or quiet stdout cannot prove the native control loop responds.
+    const result: ControlProbeResult = handle.executionExitObserved
+      ? { state: "lost", controlEvidence: "process_exit" }
+      : { state: "unprobeable" };
+    handle.execution.emit(
+      { domain: "control", kind: "state_changed", sideEffects: "none", ...result },
+      handle.providerConnection.kind === "claude_cli"
+        ? handle.providerConnection.processIdentity ?? undefined
+        : undefined,
+      handle.providerConnection.kind === "claude_cli"
+        ? handle.providerConnection.pid ?? undefined
+        : undefined,
+    );
+    return result;
+  }
+
   private async start(
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<ClaudeProviderHandle> {
+    return this.processCustody.acquire(req.workAttemptId, () => this.startAcquired(req, resumeRef));
+  }
+
+  private async startAcquired(
+    req: ProviderSpawnRequest,
+    resumeRef: ProviderContinuationRef | null,
+  ): Promise<ClaudeProviderHandle> {
+    const acquisition = providerAcquisitionIdentity("claude-code", req, resumeRef?.providerContinuationId ?? null);
     const current = this.handles.get(req.workAttemptId);
     if (current && !current.terminal) {
       throw new Error(`Claude work attempt '${req.workAttemptId}' already has a live process.`);
@@ -843,11 +1363,13 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (req.deliveryMode !== "daemon_inbox") {
       throw new Error("Claude room agents require daemon_inbox delivery.");
     }
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
     const versionOutput = await this.deps.readVersion(this.claudeBin);
-    requireSupportedClaudeCodeVersion(versionOutput);
+    const approvalProfileLabel = claudeApprovalProfileLabel(req.permissionProfileId);
+    requireSupportedClaudeCodeVersion(versionOutput, approvalProfileLabel);
 
     const policyArgs = claudeLaunchPolicyArgs(attestProviderSpawnPolicy("claude-code", req));
-    const managedMcpConfig = await this.deps.createLetAgentsMcpConfig();
+    const managedMcpConfig = await this.deps.createLetAgentsMcpConfig(req);
     // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
     // the managed room workplace. The short-lived 0600 config lives outside
     // the worktree, its path (never its credential) enters argv, and it is
@@ -862,6 +1384,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       "--verbose",
       "--input-format", "stream-json",
       "--output-format", "stream-json",
+      // Auto keeps the bridge: anything Claude declines to decide reaches the host.
+      ...(approvalProfileLabel ? ["--permission-prompt-tool", "stdio"] : []),
       "--strict-mcp-config",
       "--mcp-config", managedMcpConfig.path,
       ...policyArgs,
@@ -895,6 +1419,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       throw error;
     }
 
+    const captureBirth = this.processCustody.record(req.workAttemptId, child);
+    const processIdentity = captureBirth();
     if (child.pid === null) {
       // Node exposes no safe signalling target in this state. Fail closed until
       // the launch itself proves terminal instead of retrying beside an orphan.
@@ -904,7 +1430,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         "Claude CLI launch did not expose a process id; refusing to start an unfenceable writer.",
       );
     }
-    const processIdentity = this.deps.getProcessIdentity(child.pid);
+
     if (typeof processIdentity !== "string" || !processIdentity) {
       child.markIntentionalClose();
       await terminateFreshLaunch(child, this.deps, this.stopGraceMs);
@@ -915,11 +1441,23 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
 
     let handle: ClaudeProviderHandle | null = null;
+    const diagnostics = new ClaudeBootstrapDiagnostics(expectedSessionId, bootstrapTurnId, this.initTimeoutMs);
+    const compaction = new ClaudeCompaction(expectedSessionId, this.initTimeoutMs,
+      this.compactionTimeoutMs, this.deps.now, req.onProgress);
+    this.compactions.set(req.workAttemptId, compaction);
+    const closeCompaction = () => {
+      compaction.close();
+      if (this.compactions.get(req.workAttemptId) === compaction) this.compactions.delete(req.workAttemptId);
+    };
+    void child.exited.then(closeCompaction);
+    const unsubscribeCompactionDisconnect = child.onDisconnect(() => compaction.clear());
+    let capturingBootstrap = true;
     const pendingLines: string[] = [];
     let init: ClaudeStreamMessage | null = null;
     let resolveInit: ((message: ClaudeStreamMessage) => void) | null = null;
     const initPromise = new Promise<ClaudeStreamMessage>((resolve) => { resolveInit = resolve; });
     const unsubscribeLines = child.onLine((line) => {
+      if (capturingBootstrap) diagnostics.observe(line);
       if (!init) {
         const parsed = parseStreamLine(line);
         if (parsed && parsed.type === "system" && parsed.subtype === "init") {
@@ -937,33 +1475,37 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.consumeLine(handle, line);
     });
 
-    // The init wait is a REF'D timer (unlike the evidence module's unref'd
-    // delay): startup must stay observable even when nothing else keeps the
-    // supervising process's event loop alive. Cleared as soon as the race ends.
-    let initTimer: ReturnType<typeof setTimeout> | null = null;
-    const initTimeout = new Promise<null>((resolve) => {
-      initTimer = setTimeout(() => resolve(null), this.initTimeoutMs);
-    });
+    const bootstrapFailure = Symbol("bootstrap-failure");
+    const initTimeout = compaction.deadline.then(type => ({ [bootstrapFailure]: { type } }));
     try {
       // Claude does not emit init until it receives one stdin user frame. This
       // bootstrap establishes the continuation but deliberately does no room
       // work; every real message is claimed and dispatched by the daemon.
       child.writeLine(userStreamJsonLine(CLAUDE_DAEMON_BOOTSTRAP_PROMPT, bootstrapTurnId));
 
+      // Keep the raw observation promises and map only process exit, retaining
+      // the established precedence for exact results consumed in the same batch.
       const observedInit = await Promise.race([
         initPromise,
-        child.exited.then(() => null),
+        child.exited.then(exit => ({ [bootstrapFailure]: exit })),
         initTimeout,
       ]);
-      if (!observedInit) {
-        throw new Error("Claude CLI did not report its stream-json init message; refusing an unobservable worker.");
+      if (bootstrapFailure in observedInit) {
+        throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields()));
       }
-      // The workplace is inherited from the user's own CLI configuration —
-      // nothing is injected — but a worker without the room channel is useless
-      // and must not be launched (parity with the Codex adapter's check).
-      if (!initMcpServerNames(observedInit).some((name) => name.toLowerCase() === "letagents")) {
+      if (approvalProfileLabel
+        && (!Array.isArray(observedInit.capabilities) || !observedInit.capabilities.includes("msg_lifecycle_v1"))) {
+        throw new Error("Claude tool approvals require exact native turn lifecycle support. Update Claude Code, then try again.");
+      }
+      // An account without automatic review starts in another mode. Running
+      // there would either prompt for everything or decide nothing.
+      if (req.permissionProfileId === "auto_review" && observedInit.permissionMode !== "auto") {
+        throw new Error("Claude Code did not start in Auto mode. This account or Claude Code version may not support it. Choose another access level, then try again.");
+      }
+      // A named but failed server is not a usable room connection.
+      if (!hasReadyRoomWorkplace(observedInit)) {
         throw new Error(
-          "LetAgents MCP server is not configured for the Claude CLI; refusing to launch without the room workplace.",
+          "LetAgents room tools did not connect to Claude; refusing to launch without the room workplace.",
         );
       }
       const sessionId = sessionIdOf(observedInit);
@@ -986,14 +1528,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         req.workAttemptId,
         child.pid,
         sessionId,
+        lifecycleAuthorityMode,
         { kind: "claude_cli", pid: child.pid, processIdentity },
         child,
         observeFencedExit(child, child.pid, processIdentity, child.exited, this.deps),
+        this.deps.now,
       );
       this.handles.set(req.workAttemptId, handle);
+      this.handleCompactions.set(handle, compaction);
       const exitPromise = handle.exitEvidence.then((exit) => this.observeExit(handle!, exit));
       this.exitPromises.set(handle, exitPromise);
 
+      diagnostics.initialized();
       this.publishStream(handle, streamMethod(observedInit), observedInit, "provider_event");
       const bootstrapResult = this.waitForExactRoomTurn(handle, bootstrapTurnId);
       for (const line of pendingLines.splice(0)) {
@@ -1001,16 +1547,32 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       const bootstrapTerminal = await Promise.race([
         bootstrapResult,
-        child.exited.then(() => null),
+        child.exited.then(exit => ({ [bootstrapFailure]: exit })),
         initTimeout,
       ]);
-      if (!bootstrapTerminal || "error" in bootstrapTerminal) {
-        throw new Error("Claude CLI did not complete its daemon-safe bootstrap turn.");
+      if (bootstrapFailure in bootstrapTerminal) {
+        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields()));
+      }
+      compaction.checkDeadline();
+      if (compaction.failure) {
+        throw new ClaudeBootstrapError("bootstrap_turn", { type: compaction.failure }, diagnostics.summary(child, compaction.diagnosticFields()));
+      }
+      if ("error" in bootstrapTerminal) {
+        throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" },
+          diagnostics.summary(child, compaction.diagnosticFields()), diagnostics.apiError);
       }
       handle.roomTurnResults.delete(bootstrapTurnId);
       handle.state = "idle";
+      handle.execution.emit(
+        { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
+        processIdentity,
+        child.pid ?? undefined,
+      );
       return handle;
     } catch (error) {
+      capturingBootstrap = false;
+      closeCompaction();
+      unsubscribeCompactionDisconnect();
       if (handle) {
         handle.protocolError = true;
       } else {
@@ -1018,9 +1580,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       child.markIntentionalClose();
       await terminateFreshLaunch(child, this.deps, this.stopGraceMs);
+      // Cleanup returning is not death. Retain only the existing exact exit
+      // observation from this rejected child, without admitting its handle.
+      if (handle?.terminal?.nativeRuntimeDeath && handle.providerConnection.kind === "claude_cli") {
+        retainProviderAcquisitionEvidence(error, acquisition, handle.providerConnection, handle.terminal);
+      }
       throw error;
     } finally {
-      if (initTimer) clearTimeout(initTimer);
+      capturingBootstrap = false;
+      compaction.finishBootstrap();
       await managedMcpConfig.dispose();
     }
   }
@@ -1029,13 +1597,21 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private async fenceRecordedChild(
     connection: Extract<ProviderConnectionRef, { kind: "claude_cli" }>,
     providerContinuationId: string,
+    stop?: { force: boolean; graceMs: number; birthEvidence: RegExp },
   ): Promise<ProviderAttachTerminal> {
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
         "Claude CLI attach is ambiguous; the durable endpoint has no verified process identity.",
       );
     }
-    const identity = this.deps.getProcessIdentity(connection.pid);
+    const readIdentity = () => {
+      const identity = this.deps.getProcessIdentity(connection.pid!);
+      if (stop && typeof identity === "string" && !stop.birthEvidence.test(identity.trim())) {
+        throw new Error("Claude exact-reference stop is ambiguous because process birth cannot be verified.");
+      }
+      return identity;
+    };
+    const identity = readIdentity();
     if (identity === undefined) {
       throw new Error(
         "Claude CLI attach is ambiguous; the recorded process identity cannot be verified.",
@@ -1044,48 +1620,59 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (identity === null || !sameProcessBirthIdentity(identity, connection.processIdentity)) {
       // The recorded child is verifiably gone (a recycled pid is NOT it and is
       // never signalled). Proven absent — bounded recovery may proceed.
-      return this.attachTerminal(providerContinuationId, null, "crashed");
+      return this.attachTerminal(connection, providerContinuationId, null, "crashed");
     }
     // A previous daemon's stdin disappearing normally gives Claude EOF. Let
     // that exact orphan finish and flush its JSONL terminal boundary before
     // fencing it; recovery can then prove the already-started turn without a
     // duplicate dispatch.
-    const exitedNaturally = await Promise.race([
+    const exitedNaturally = !stop && await Promise.race([
       this.deps.observeProcessExit(connection.pid, connection.processIdentity).then(() => true),
       delay(this.stopGraceMs).then(() => false),
     ]);
     if (exitedNaturally) {
-      return this.attachTerminal(providerContinuationId, null, "crashed");
+      return this.attachTerminal(connection, providerContinuationId, null, "crashed");
     }
-    const identityBeforeTerm = this.deps.getProcessIdentity(connection.pid);
+    const identityBeforeTerm = readIdentity();
     if (identityBeforeTerm === undefined) {
       throw new Error(
         "Claude CLI attach is ambiguous; the orphaned child's identity cannot be verified.",
       );
     }
     if (identityBeforeTerm === null || !sameProcessBirthIdentity(identityBeforeTerm, connection.processIdentity)) {
-      return this.attachTerminal(providerContinuationId, null, "crashed");
+      return this.attachTerminal(connection, providerContinuationId, null, "crashed");
     }
     // The exact recorded child is still alive but unreachable (its stdio died
     // with the previous supervisor). It may still be writing the workspace, so
     // it must be terminal before any replacement generation exists.
-    this.deps.signalProcess(connection.pid, "SIGTERM");
-    await delay(this.stopGraceMs);
-    const identityBeforeKill = this.deps.getProcessIdentity(connection.pid);
+    const signal = stop?.force ? "SIGKILL" : "SIGTERM";
+    this.deps.signalProcess(connection.pid, signal);
+    await delay(stop?.graceMs ?? this.stopGraceMs);
+    const identityBeforeKill = readIdentity();
     if (identityBeforeKill === undefined) {
       throw new Error(
         "Claude CLI attach is ambiguous; the orphaned child's termination could not be verified.",
       );
     }
     if (identityBeforeKill !== null && sameProcessBirthIdentity(identityBeforeKill, connection.processIdentity)) {
+      if (stop?.force) throw new Error("Claude exact-reference stop has not yet proved the recorded process birth is gone.");
       this.deps.signalProcess(connection.pid, "SIGKILL");
-      await this.deps.observeProcessExit(connection.pid, connection.processIdentity);
-      return this.attachTerminal(providerContinuationId, "SIGKILL", "killed");
+      if (stop) {
+        await delay(stop.graceMs);
+        const finalIdentity = readIdentity();
+        if (finalIdentity === undefined || (finalIdentity !== null && sameProcessBirthIdentity(finalIdentity, connection.processIdentity))) {
+          throw new Error("Claude exact-reference stop has not yet proved the recorded process birth is gone.");
+        }
+      } else {
+        await this.deps.observeProcessExit(connection.pid, connection.processIdentity);
+      }
+      return this.attachTerminal(connection, providerContinuationId, "SIGKILL", "killed");
     }
-    return this.attachTerminal(providerContinuationId, "SIGTERM", "stopped");
+    return this.attachTerminal(connection, providerContinuationId, signal, signal === "SIGKILL" ? "killed" : "stopped");
   }
 
   private attachTerminal(
+    connection: Extract<ProviderConnectionRef, { kind: "claude_cli" }>,
     providerContinuationId: string,
     signal: string | null,
     terminalCause: ProviderTerminalPayload["terminalCause"],
@@ -1098,6 +1685,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         signal,
         terminalCause,
         providerContinuationId,
+        nativeRuntimeDeath: { kind: "claude_cli", pid: connection.pid!, processIdentity: connection.processIdentity! },
       },
     };
   }
@@ -1108,36 +1696,63 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.publishStream(handle, "stdout/raw", { line }, "provider_event");
       return;
     }
-    this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message));
+    this.handleCompactions.get(handle)?.observe(message);
+    // Native approval payloads stay host-ephemeral; do not publish them to room activity.
+    if (message.type === "control_request" || message.type === "control_cancel_request") {
+      this.consumePermission(handle, message);
+      return;
+    }
+    const contextualInterruptTurnId = this.contextualInterruptTurnId(handle, message);
+    const contextualInterruptReplayTurnId = contextualInterruptTurnId
+      ? null
+      : this.contextualInterruptReplayTurnId(handle, message);
+    if (contextualInterruptTurnId) handle.contextualInterruptResults.add(message);
+    const nativeLifecycle = this.observeNativeExecution(
+      handle,
+      message,
+      contextualInterruptTurnId,
+      contextualInterruptReplayTurnId,
+    );
+    this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message),
+      nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
+    if (nativeLifecycle?.phase === "turn_terminal") this.handleCompactions.get(handle)?.clear();
+    const typedAuthority = handle.lifecycleAuthorityMode === "typed";
+    if (typedAuthority && nativeLifecycle?.phase === "turn_active") handle.state = "working";
+    if (typedAuthority && nativeLifecycle?.phase === "turn_terminal") handle.state = "idle";
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     if (type === "result") {
       const exactTurnId = typeof message.user_message_uuid === "string"
         ? message.user_message_uuid.trim()
-        : "";
+        : contextualInterruptTurnId ?? "";
+      let exactTurnFailed = false;
       if (exactTurnId) {
-        const terminal = exactClaudeStreamTerminal(
-          message,
-          exactTurnId,
-          handle.providerContinuationId,
-        );
+        const terminal = contextualInterruptTurnId
+          ? { turnId: contextualInterruptTurnId, nativeOutcome: "interrupted" as const, error: "Claude command ended interrupted." }
+          : exactClaudeStreamTerminal(message, exactTurnId, handle.providerContinuationId);
         if (terminal) {
+          exactTurnFailed = "error" in terminal && handle.activeRoomTurnId === exactTurnId;
           handle.roomTurnResults.set(exactTurnId, terminal);
           if (handle.activeRoomTurnId === exactTurnId) handle.activeRoomTurnId = null;
+          if (handle.pendingInterruptTurnId === exactTurnId) handle.pendingInterruptTurnId = null;
+          if (contextualInterruptTurnId === exactTurnId) {
+            handle.contextualInterruptTerminalTurnId = exactTurnId;
+          }
           const exactWaiters = [...(handle.roomTurnWaiters.get(exactTurnId) ?? [])];
           for (const waiter of exactWaiters) waiter.resolve(terminal);
         }
       }
-      const exactInterrupted = typeof message.subtype === "string"
-        && message.subtype.toLowerCase() === "interrupted"
-        && sessionIdOf(message) === handle.providerContinuationId;
+      const exactInterrupted = Boolean(contextualInterruptTurnId || contextualInterruptReplayTurnId)
+        || (typeof message.subtype === "string"
+          && message.subtype.toLowerCase() === "interrupted"
+          && sessionIdOf(message) === handle.providerContinuationId);
       if (handle.turnResultWaiters.size) {
         const waiters = [...handle.turnResultWaiters];
         handle.turnResultWaiters.clear();
         for (const resolve of waiters) resolve(message);
       }
       if (exactInterrupted) {
-        handle.state = "idle";
+        if (!typedAuthority) handle.state = "idle";
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
@@ -1148,19 +1763,20 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         });
         return;
       }
-      if (isClaudeFailedResult(message)) {
-        handle.state = "failed";
+      if (isClaudeFailedResult(message) || (typedAuthority && exactTurnFailed)) {
+        const turnLimited = isClaudeTurnLimitResult(message);
+        if (!typedAuthority) handle.state = turnLimited || exactTurnFailed ? "idle" : "failed";
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
           summary: "Turn failed",
           status: "blocked",
           checking: "Claude Code reported a terminal turn failure.",
-          next_action: "Awaiting supervised recovery.",
+          next_action: turnLimited ? "Awaiting next room work." : "Awaiting supervised recovery.",
         });
         return;
       }
-      handle.state = "idle";
+      if (!typedAuthority) handle.state = "idle";
       this.publishActivity(handle, {
         source: "native_harness",
         method: streamMethod(message),
@@ -1172,7 +1788,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       return;
     }
     if (type === "assistant" || type === "user" || type === "tool_use_summary") {
-      handle.state = "working";
+      if (!typedAuthority) handle.state = "working";
       const text = type === "assistant" ? assistantTextOf(message) : null;
       this.publishActivity(handle, {
         source: "native_harness",
@@ -1183,6 +1799,152 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         next_action: "",
       });
     }
+  }
+
+  private contextualInterruptTurnId(
+    handle: ClaudeProviderHandle,
+    message: ClaudeStreamMessage,
+  ): string | null {
+    const turnId = handle.pendingInterruptTurnId;
+    // Delivery may detach/recover its waiter while this native turn stays live.
+    // Its transient roomTurnOperationId is not native interruption authority.
+    if (!turnId
+      || handle.activeRoomTurnId !== turnId
+      || handle.executionTurnId !== turnId
+      || message.type !== "result"
+      || sessionIdOf(message) !== handle.providerContinuationId
+      || message.subtype !== "error_during_execution"
+      || message.is_error !== true
+      || !(message.terminal_reason === "aborted_streaming" && message.user_message_uuid == null
+        || ["aborted_streaming", "aborted_tools"].includes(String(message.terminal_reason)) && message.user_message_uuid === turnId)) return null;
+    return turnId;
+  }
+
+  private contextualInterruptReplayTurnId(
+    handle: ClaudeProviderHandle,
+    message: ClaudeStreamMessage,
+  ): string | null {
+    const turnId = handle.contextualInterruptTerminalTurnId;
+    if (!turnId
+      || handle.activeRoomTurnId !== null
+      || handle.executionTurnId !== null
+      || message.type !== "result"
+      || sessionIdOf(message) !== handle.providerContinuationId
+      || message.subtype !== "error_during_execution"
+      || message.is_error !== true
+      || !(message.terminal_reason === "aborted_streaming" && message.user_message_uuid == null
+        || ["aborted_streaming", "aborted_tools"].includes(String(message.terminal_reason)) && message.user_message_uuid === turnId)) return null;
+    return turnId;
+  }
+
+  private observeNativeExecution(
+    handle: ClaudeProviderHandle,
+    message: ClaudeStreamMessage,
+    contextualInterruptTurnId: string | null = null,
+    contextualInterruptReplayTurnId: string | null = null,
+  ): NativeLifecycleCheckpoint | null {
+    const replay = handle.executionTerminalCheckpoint;
+    if (message.type === "result" && replay
+      && message.session_id === handle.providerContinuationId
+      && (message.user_message_uuid === replay.providerTurnId
+        || contextualInterruptReplayTurnId === replay.providerTurnId)
+      && claudeTerminalDiscriminator(message) === replay.terminalDiscriminator) {
+      return replay.nativeLifecycle;
+    }
+    const turnId = handle.executionTurnId;
+    if (!turnId || message.session_id !== handle.providerContinuationId
+      || !nativeExecutionId(handle.providerContinuationId)) return null;
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
+      handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined,
+      handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.pid ?? undefined : undefined);
+    const turn = { providerTurnId: turnId, providerContinuationId: handle.providerContinuationId };
+    // command_uuid names the user turn, never a shell command. Only an exact
+    // native started event proves receipt; writing stdin alone is insufficient.
+    if (message.type === "command_lifecycle" && message.command_uuid === turnId && message.state === "started") {
+      const nativeLifecycle = nativeLifecycleCheckpoint({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_active",
+        providerContinuationId: handle.providerContinuationId,
+        providerTurnId: turnId,
+        nativeProcessPid: handle.providerConnection.kind === "claude_cli"
+          ? handle.providerConnection.pid ?? undefined : undefined,
+        nativeProcessIdentity: handle.providerConnection.kind === "claude_cli"
+          ? handle.providerConnection.processIdentity ?? undefined : undefined,
+      });
+      if (!handle.executionTurnStarted) {
+        handle.executionTurnStarted = true;
+        emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+          nativeEventId: nativeLifecycle.nativeEventId, ...turn });
+      }
+      return nativeLifecycle;
+    } else if (message.type === "result"
+      && (message.user_message_uuid === turnId || contextualInterruptTurnId === turnId)) {
+      const hasLegacyTerminalShape = typeof message.subtype === "string" && Boolean(message.subtype)
+        && (message.subtype === "success" ? message.is_error === false : message.is_error === true);
+      if (handle.lifecycleAuthorityMode !== "typed" && !hasLegacyTerminalShape) return null;
+      const terminalDiscriminator = claudeTerminalDiscriminator(message);
+      const subtype = typeof message.subtype === "string" ? message.subtype.toLowerCase() : "";
+      const turnOutcome = contextualInterruptTurnId === turnId || subtype === "interrupted" ? "interrupted"
+        : subtype === "success" && message.is_error === false ? "completed" : "failed";
+      const nativeLifecycle = nativeLifecycleCheckpoint({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_terminal",
+        providerContinuationId: handle.providerContinuationId,
+        providerTurnId: turnId,
+        nativeProcessPid: handle.providerConnection.kind === "claude_cli"
+          ? handle.providerConnection.pid ?? undefined : undefined,
+        nativeProcessIdentity: handle.providerConnection.kind === "claude_cli"
+          ? handle.providerConnection.processIdentity ?? undefined : undefined,
+        terminalDiscriminator,
+      });
+      emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...turn,
+        nativeEventId: nativeLifecycle.nativeEventId,
+        turnOutcome });
+      handle.executionTerminalCheckpoint = {
+        providerTurnId: turnId,
+        terminalDiscriminator,
+        nativeLifecycle,
+      };
+      for (const [id, pending] of new Map([...handle.permissionClosures, ...handle.permissionRequests])) {
+        if (pending.turnId === turnId) this.closePermission(handle, id);
+      }
+      handle.executionTurnId = null;
+      handle.executionTurnStarted = false;
+      handle.executionTools.clear();
+      handle.clearPermissions();
+      return nativeLifecycle;
+    } else if (handle.executionTurnStarted && (message.type === "assistant" || message.type === "user")
+      && message.parent_tool_use_id == null
+      && (message.user_message_uuid == null || message.user_message_uuid === turnId)) {
+      // Tool messages carry session/tool identity, not the caller's turn UUID.
+      // Do not attribute a bootstrap or previous-turn tail before exact receipt.
+      const body = message.message as { content?: unknown } | undefined;
+      if (!Array.isArray(body?.content)) return null;
+      for (const value of body.content) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const block = value as Record<string, unknown>;
+        if (message.type === "assistant" && block.type === "tool_use" && nativeExecutionId(block.id)
+          && typeof block.name === "string" && !handle.executionTools.has(block.id)) {
+          // Tool requests precede permission. Record correlation only, never
+          // claim execution.started (nor expose agent-authored input/text).
+          const operation = claudeToolOperation(block.name);
+          handle.executionTools.set(block.id, { operation, completed: false, name: block.name, input: structuredClone(block.input) });
+        } else if (message.type === "user" && block.type === "tool_result" && nativeExecutionId(block.tool_use_id)) {
+          const tool = handle.executionTools.get(block.tool_use_id);
+          if (!tool || tool.completed || (block.is_error !== undefined && typeof block.is_error !== "boolean")
+            || (typeof block.content !== "string" && !Array.isArray(block.content))) continue;
+          tool.completed = true;
+          for (const [id, pending] of new Map([...handle.permissionClosures, ...handle.permissionRequests])) {
+            if (pending.turnId === turnId && pending.native.request.tool_use_id === block.tool_use_id) this.closePermission(handle, id);
+          }
+          emit({ domain: "execution", kind: "completed", executionId: block.tool_use_id, operation: tool.operation,
+            outcome: block.is_error === true ? "failed" : "succeeded", sideEffects: tool.operation === "file_read" ? "none" : "possible", ...turn });
+        }
+      }
+    }
+    return null;
   }
 
   private waitForNextTurnResult(handle: ClaudeProviderHandle): Promise<ClaudeStreamMessage> {
@@ -1252,9 +2014,12 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private providerRoomTurnResult(terminal: ClaudeRoomTurnTerminal): ProviderRoomTurnResult {
+  private providerRoomTurnResult(handle: ClaudeProviderHandle, terminal: ClaudeRoomTurnTerminal): ProviderRoomTurnResult {
     if ("error" in terminal) {
-      throw new Error(`Claude bounded room turn ${terminal.turnId} failed: ${terminal.error}`);
+      if (!terminal.nativeOutcome) throw new Error(`Claude bounded room turn ${terminal.turnId} failed: ${terminal.error}`);
+      return { turnId: terminal.turnId, providerContinuationId: handle.providerContinuationId,
+        outcome: terminal.nativeOutcome, text: null, evidence: "stream",
+        error: String(safeStreamPayload(terminal.error).payload).slice(0, 2000) };
     }
     if (terminal.outcome === "reply") {
       return {
@@ -1280,6 +2045,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     method: string,
     providerPayload: unknown,
     kind: ProviderStreamEventKind,
+    nativeEventId: string | null = null,
+    nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
   ): void {
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
@@ -1290,6 +2057,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       provider: this.id,
       kind,
       method,
+      ...(nativeEventId ? { nativeEventId } : {}),
+      ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
       ...safe,
       durablePayloadRef: null,
     };
@@ -1327,6 +2096,24 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     handle: ClaudeProviderHandle,
     exit: ProviderProcessExit,
   ): ProviderTerminalPayload {
+    handle.pendingInterruptTurnId = null;
+    handle.contextualInterruptTerminalTurnId = null;
+    handle.permissionControlAvailable = false;
+    handle.clearPermissions();
+    if (exit.type === "exit") {
+      handle.executionExitObserved = true;
+      const identity = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined;
+      const pid = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.pid ?? undefined : undefined;
+      if (handle.executionTurnId && nativeExecutionId(handle.providerContinuationId)) {
+        handle.execution.emit({ domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none",
+          providerContinuationId: handle.providerContinuationId, providerTurnId: handle.executionTurnId }, identity, pid);
+        handle.executionTurnId = null;
+        handle.executionTurnStarted = false;
+        handle.executionTools.clear();
+      }
+      handle.execution.emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" }, identity, pid);
+      handle.execution.emit({ domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: "process_exit" }, identity, pid);
+    }
     const terminal = exit.type === "error"
       ? {
         ...synthesizeTerminalPayload({
@@ -1345,6 +2132,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         providerContinuationId: handle.providerContinuationId,
         stopRequested: handle.stopRequested,
       });
+    if (exit.type === "exit" && handle.providerConnection.kind === "claude_cli"
+      && handle.providerConnection.pid && handle.providerConnection.processIdentity) {
+      (terminal as ProviderTerminalPayload).nativeRuntimeDeath = { kind: "claude_cli",
+        pid: handle.providerConnection.pid, processIdentity: handle.providerConnection.processIdentity };
+    }
     if (handle.protocolError) terminal.terminalCause = "protocol_error";
     handle.terminal = terminal;
     handle.state = terminal.terminalCause === "exited" || terminal.terminalCause === "stopped"

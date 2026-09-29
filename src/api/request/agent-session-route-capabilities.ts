@@ -7,6 +7,8 @@ import type { AgentSessionBearerCapability } from "../../shared/agent-session-be
 // must be authorized for exactly the requests those routes accept. With the
 // old single-segment `[^/]+` every worker call in a Git room failed 403.
 const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSessionBearerCapability }> = [
+  { method: "GET", path: /^\/rooms\/.+\/(?:memory|attention|memory\/[^/]+\/history)$/, capability: "coordination.read" },
+  { method: "POST", path: /^\/rooms\/.+\/(?:memory|attention)$/, capability: "coordination.propose" },
   { method: "GET", path: /^\/rooms\/.+\/messages$/, capability: "messages.read" },
   { method: "GET", path: /^\/rooms\/.+\/messages\/(?:poll|stream|threads|msg_\d+|msg_\d+\/thread|msg_\d+\/info)$/, capability: "messages.read" },
   { method: "PUT", path: /^\/rooms\/.+\/messages\/read$/, capability: "messages.read" },
@@ -16,7 +18,8 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "POST", path: /^\/rooms\/.+\/(?:presence|reasoning-sessions|reasoning-sessions\/[^/]+\/updates|agent-sessions\/[^/]+\/(?:disconnect|failures|desktop-heartbeat|native-activity|desktop-pause)|tasks\/[^/]+\/(?:lease-action|review-lease-action|review-verdict))$/, capability: "coordination.self_write" },
   { method: "PUT", path: /^\/rooms\/.+\/(?:agents\/self\/observation|messages\/msg_\d+\/agent-receipts\/self)$/, capability: "coordination.self_write" },
   { method: "PATCH", path: /^\/rooms\/.+\/(?:reasoning-sessions\/[^/]+|tasks\/[^/]+)$/, capability: "coordination.self_write" },
-  { method: "POST", path: /^\/rooms\/.+\/tasks$/, capability: "coordination.propose" },
+  { method: "POST", path: /^\/rooms\/.+\/(?:tasks|board-intents)$/, capability: "coordination.propose" },
+  { method: "POST", path: /^\/rooms\/.+\/board-intents\/[^/]+\/(?:approve|deny)$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/artifacts$/, capability: "artifacts.self_write" },
 ];
 

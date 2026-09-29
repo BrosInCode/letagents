@@ -1,8 +1,36 @@
 <template>
   <div class="desktop-add-agent-actions">
     <div v-if="!activeSupervisedLaunch" class="desktop-add-agent-action-buttons">
+      <template v-if="preflight?.nextAction === 'install_external_runtime'">
+        <button
+          v-if="installCommand"
+          type="button"
+          class="desktop-add-agent-primary"
+          :disabled="copyingAuthCommand"
+          @click="emit('copy-install-command')"
+        >
+          {{ copyingAuthCommand ? "Copying..." : "Copy install command" }}
+        </button>
+        <button
+          v-if="installUrl"
+          type="button"
+          class="desktop-add-agent-recover"
+          @click="emit('open-install-guide')"
+        >
+          Open installation guide
+        </button>
+        <button
+          v-if="!installCommand && !installUrl"
+          type="button"
+          class="desktop-add-agent-primary"
+          :disabled="setupBusy"
+          @click="emit('refresh')"
+        >
+          Check provider setup
+        </button>
+      </template>
       <button
-        v-if="preflight?.nextAction === 'install_runtime'"
+        v-else-if="preflight?.nextAction === 'install_runtime'"
         type="button"
         class="desktop-add-agent-primary"
         :disabled="setupBusy"
@@ -32,9 +60,9 @@
       v-else-if="preflight?.nextAction === 'choose_repo'"
       type="button"
       class="desktop-add-agent-primary"
-      @click="emit('choose-repo')"
+      disabled
     >
-      Choose project folder
+      Connect project from the room
     </button>
     <button
       v-else-if="preflight?.nextAction === 'choose_worktree' && canCreateWorktree && matchingWorktreeCount === 0"
@@ -82,7 +110,7 @@
         : activeSupervisedLaunch.failed
           ? "This launch needs attention."
           : activeSupervisedLaunch.stopped
-            ? "This supervised launch has stopped."
+            ? "This agent has stopped."
             : activeSupervisedLaunch.status === "stopping"
               ? `${activeSupervisedLaunch.providerLabel} is stopping.`
               : `${activeSupervisedLaunch.providerLabel} setup is in progress.` }}
@@ -94,12 +122,12 @@
       {{ externalInstruction }}
     </span>
     <span v-else-if="launchMode === 'supervised' && charterMissing" class="desktop-add-agent-confirmation">
-      Add a charter before starting the supervised agent.
+      Add a first task to start the agent.
     </span>
     <span v-else-if="launchMode === 'supervised' && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
       {{ recoveryScanStatus === "error"
-        ? "Previous launches could not be checked. Starting now creates a new supervised agent."
-        : "Checking for a previous supervised agent before enabling Start..." }}
+        ? "Previous launches could not be checked. Starting now creates a new agent."
+        : "Checking for a previous agent before enabling Start..." }}
     </span>
     <span v-else-if="permissionWarning" class="desktop-add-agent-confirmation">
       {{ permissionWarning }}
@@ -141,6 +169,8 @@ const props = defineProps<{
   setupBusy: boolean;
   setupActionLabel: string;
   copyingAuthCommand: boolean;
+  installCommand?: string | null;
+  installUrl?: string | null;
   canCreateWorktree: boolean;
   matchingWorktreeCount: number;
   creatingWorktree: boolean;
@@ -157,7 +187,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   "setup-action": [action: DesktopAgentProviderSetupAction];
   "copy-auth-command": [];
-  "choose-repo": [];
+  "copy-install-command": [];
+  "open-install-guide": [];
+  refresh: [];
   "create-worktree": [];
   start: [];
   "recover-launch": [];
@@ -187,8 +219,8 @@ const startButtonLabel = computed(() => {
   if (props.startingAgent) return "Starting...";
   if (props.launchMode === "supervised") {
     return recoveryScanStatus.value === "error"
-      ? "Start new supervised agent"
-      : "Start supervised agent";
+      ? "Start new agent"
+      : "Start agent";
   }
   if (!hasDesktopManagedRuntime(props.provider)) return "Start agent";
   const providerName = props.provider?.name?.trim() || "agent";

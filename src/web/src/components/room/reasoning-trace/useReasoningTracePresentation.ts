@@ -32,7 +32,7 @@ export function useReasoningTracePresentation(
   const heading = computed(() =>
     activeSession.value?.title
     || activeSession.value?.summary
-    || `${actorDisplayName.value} reasoning`
+    || `${actorDisplayName.value} work log`
   )
 
   const subtitle = computed(() => {
@@ -86,10 +86,10 @@ export function useReasoningTracePresentation(
   )
 
   const streamLabel = computed(() => {
-    if (isCodexReasoningSummary.value) return 'Live thinking'
+    if (isCodexReasoningSummary.value) return 'Live update'
     if (isCodexSnapshot.value) return 'Snapshot'
     const status = String(currentSnapshot.value?.status || activeSession.value?.status || '').trim()
-    return status ? entryLabel({ id: 'status', text: status, timestamp: '', label: status }) : 'Reasoning'
+    return status ? entryLabel({ id: 'status', text: status, timestamp: '', label: status }) : 'Work log'
   })
 
   return {

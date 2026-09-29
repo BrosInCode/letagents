@@ -92,17 +92,14 @@
                 <dd :title="projectSelection.folderLabel">{{ projectSelection.folderLabel }}</dd>
               </div>
               <div>
-                <dt>Room source</dt>
+                <dt>Found using</dt>
                 <dd>{{ projectSelection.sourceLabel }}</dd>
               </div>
               <div>
                 <dt>Room</dt>
                 <dd :title="projectSelection.roomName">{{ projectSelection.roomName }}</dd>
               </div>
-              <div>
-                <dt>Identifier</dt>
-                <dd :title="projectSelection.roomIdentifier">{{ projectSelection.roomIdentifier }}</dd>
-              </div>
+
               <div v-if="projectSelection.repoStatus?.branch">
                 <dt>Branch</dt>
                 <dd>{{ projectSelection.repoStatus.branch }}</dd>
@@ -149,14 +146,14 @@
             <label class="desktop-new-room-storage-option" data-testid="new-room-storage-cloud">
               <input v-model="storage" type="radio" value="cloud" />
               <span>
-                <strong>Cloud / shared</strong>
+                <strong>Shared online</strong>
                 <small>Creates an invite code teammates can use.</small>
               </span>
             </label>
             <label class="desktop-new-room-storage-option" data-testid="new-room-storage-local">
               <input v-model="storage" type="radio" value="local" />
               <span>
-                <strong>Local / private</strong>
+                <strong>Only on this Mac</strong>
                 <small>Stays on this device until you publish it.</small>
               </span>
             </label>
@@ -196,7 +193,7 @@
               data-testid="new-room-join-input"
             />
             <small id="new-room-join-hint" class="desktop-new-room-hint">
-              Paste a code or LetAgents room link. Spaces and case are normalized.
+              Paste an invite code or a LetAgents room link.
             </small>
             <small
               v-if="joinError"
@@ -403,7 +400,7 @@ const intents: Intent[] = [
   {
     id: "project",
     title: "Work on a project",
-    description: "Open a folder so LetAgents can route you to the matching repository room.",
+    description: "Choose a project folder to open its room.",
     event: "chooseProject",
     icon: FolderOpen,
     primary: true,
@@ -412,7 +409,7 @@ const intents: Intent[] = [
   {
     id: "standalone",
     title: "Start a standalone room",
-    description: "Create a named room and choose Cloud/shared or Local/private storage.",
+    description: "Create a room to share online or keep on this Mac.",
     event: "chooseStandalone",
     icon: Hash,
     testId: "new-room-intent-standalone",
@@ -463,7 +460,7 @@ const description = computed(() => {
     case "error":
       return "Your inputs are still here. Retry or go back.";
     default:
-      return "Pick one path. Project is recommended for repository work.";
+      return "Open a project room, start a conversation, or join your team.";
   }
 });
 

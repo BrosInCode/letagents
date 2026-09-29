@@ -61,6 +61,7 @@
             <Copy v-else :size="14" aria-hidden="true" />
           </button>
           <button
+            v-if="!message.outgoing"
             class="room-message-reply-action room-message-quote-action"
             type="button"
             title="Quote reply"
@@ -70,6 +71,7 @@
             <CornerUpLeft :size="14" aria-hidden="true" />
           </button>
           <button
+            v-if="!message.outgoing"
             class="room-message-reply-action room-message-thread-action"
             type="button"
             :title="tertiaryActionLabel"
@@ -86,6 +88,11 @@
         </div>
       </div>
 
+      <div v-if="message.outgoing" class="room-message-outgoing" role="status" aria-live="polite">
+        <span v-if="message.outgoing.attachmentCount">{{ message.outgoing.attachmentCount }} attachment{{ message.outgoing.attachmentCount === 1 ? "" : "s" }} · </span>
+        <span>{{ message.outgoing.status === "pending" ? "Sending…" : "Delivery not confirmed" }}</span>
+        <button v-if="message.outgoing.status === 'uncertain'" type="button" :title="message.outgoing.error || undefined" @click="retryDesktopOutgoingMessage(message.clientMessageId || '')">Retry safely</button>
+      </div>
       <div class="room-message-bubble">
         <button
           v-if="message.replyTo"
@@ -108,7 +115,7 @@
 
         <DesktopLongMessageContent
           v-else
-          :text="message.text || 'No message body.'"
+          :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
           @message-reference-click="$emit('scroll-to-message', $event)"
@@ -139,7 +146,7 @@
             <span v-if="receiptIsAnimated(receipt.state)" class="room-message-delivery-dots">
               <i></i><i></i><i></i>
             </span>
-            <CircleAlert v-else-if="receiptNeedsAttention(receipt.state)" :size="14" />
+            <CircleAlert v-else-if="receiptNeedsAttention(receipt.state) || receipt.state === 'acknowledged_failed'" :size="14" />
             <Check v-else :size="14" />
           </span>
           <strong>{{ receipt.agentName }}</strong>
@@ -274,11 +281,13 @@
 </template>
 
 <script setup lang="ts">
+import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
@@ -296,6 +305,8 @@ import {
 } from "./desktop-chat-message/context-menu-focus";
 import {
   formatTimestamp,
+  highlightRenderedMessage,
+  linkRenderedMessageReferences,
   renderMessageText,
   isAmbientSystemMessage,
   stripStatusPrefix,
@@ -318,7 +329,7 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
-  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }>;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }>;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
@@ -367,6 +378,7 @@ const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((re
   "result_recovery",
   "blocked",
   "acknowledged_no_reply",
+  "acknowledged_failed",
   "cancelled_by_room_move",
   "cancelled_by_user",
   "restoring_conversation",
@@ -381,31 +393,39 @@ function receiptNeedsAttention(state: string): boolean {
   return state === "blocked" || state === "queued_behind_blocked";
 }
 
-function receiptStateLabel(receipt: { state: string; terminalReason: string | null }): string {
+function receiptErrorLabel(error: string | null): string | null {
+  const normalized = safeUserVisibleErrorDetail(error, "");
+  if (!normalized) return null;
+  return normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized;
+}
+
+function receiptStateLabel(receipt: { state: string; terminalReason: string | null; error: string | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return "Retired during safety upgrade";
   const state = receipt.state;
   if (state === "retryable") return "Retrying";
   if (state === "result_recovery") return "Recovering reply";
   if (state === "restoring_conversation") return "Restoring conversation";
-  if (state === "blocked") return "Needs attention";
+  if (state === "blocked") return receiptErrorLabel(receipt.error) || "Needs attention";
   if (state === "queued_behind_blocked") return "Queued behind an issue";
   if (state === "acknowledged_no_reply") return "Read · no reply";
+  if (state === "acknowledged_failed") return receiptErrorLabel(receipt.error) || "Work did not finish";
   if (state === "cancelled_by_room_move") return "Moved rooms";
   if (state === "cancelled_by_user") return "Skipped";
   return "";
 }
 
-function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null }): string {
+function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return `A safety upgrade retired this legacy turn for ${receipt.agentName}; its exact authority could not be reconstructed`;
   if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
   if (receipt.state === "publishing") return `${receipt.agentName} is sending a reply`;
   if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;
   if (receipt.state === "acknowledged") return `${receipt.agentName} replied`;
   if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
+  if (receipt.state === "acknowledged_failed") return `${receipt.agentName}: ${receiptErrorLabel(receipt.error) || "Work did not finish"}`;
   if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
   if (receipt.state === "result_recovery") return `${receipt.agentName} answered, but LetAgents is re-reading the completed result`;
   if (receipt.state === "restoring_conversation") return `${receipt.agentName} is restoring its private conversation`;
-  if (receipt.state === "blocked") return `${receipt.agentName} needs attention`;
+  if (receipt.state === "blocked") return `${receipt.agentName}: ${receiptErrorLabel(receipt.error) || "Needs attention"}`;
   if (receipt.state === "cancelled_by_room_move") return `${receipt.agentName} moved to another room before handling this`;
   if (receipt.state === "cancelled_by_user") return `You skipped this message for ${receipt.agentName}`;
   if (receipt.state === "queued_behind_blocked") return `Waiting — ${receipt.agentName} needs attention on ${receipt.blockedByMessageId || "an earlier message"}`;
@@ -452,17 +472,19 @@ const provenanceLabel = computed(() =>
 const replyDisplayName = computed(() =>
   props.message.replyTo ? parseSenderIdentity(props.message.replyTo).displayName : "unknown"
 );
-const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
+const replyPreviewText = computed(() => truncate((props.message.replyTo?.displayText || props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
+const visibleText = computed(() => props.message.displayText || props.message.text);
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedText = computed(() => {
-  const text = props.message.text || "No message body.";
-  return renderMessageText(
-    isAmbientSystem.value ? stripStatusPrefix(text) : text,
-    props.highlightQuery,
-    props.messageReferenceIds,
-    props.taskReferenceIds,
-  );
+const renderedMarkdown = computed(() => {
+  const text = visibleText.value || "No message body.";
+  return renderMessageText(isAmbientSystem.value ? stripStatusPrefix(text) : text, "");
 });
+const linkedText = computed(() => linkRenderedMessageReferences(
+  renderedMarkdown.value,
+  props.messageReferenceIds,
+  props.taskReferenceIds,
+));
+const renderedText = computed(() => highlightRenderedMessage(linkedText.value, props.highlightQuery));
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
 const tertiaryActionLabel = computed(() => props.context === "timeline" ? "Reply in thread" : "Jump to root");
 const selectionActionLabel = computed(() => props.context === "timeline" ? "Add to chat" : "Add to thread");
@@ -510,6 +532,7 @@ function participantInitials(value: string): string {
 }
 
 function openContextMenu(event: MouseEvent): void {
+  if (props.message.outgoing) return;
   const target = event.target instanceof HTMLElement ? event.target : null;
   const linkHref = resolveExternalWebHref(
     target?.closest("a[href]")?.getAttribute("href"),
@@ -629,7 +652,7 @@ async function copyMessage(): Promise<void> {
 }
 
 function messageCopyText(): string {
-  const text = props.message.text.trim();
+  const text = visibleText.value.trim();
   if (text) return text;
   if (props.message.attachments.length === 1) {
     return props.message.attachments[0]?.fileName || props.message.attachments[0]?.name || "1 attachment";
@@ -643,6 +666,7 @@ function messageCopyText(): string {
 }
 
 function handleSelectionPointerUp(event: PointerEvent): void {
+  if (props.message.outgoing) return;
   if (event.button !== 0) return;
   const article = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
   window.setTimeout(() => {

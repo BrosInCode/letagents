@@ -65,6 +65,9 @@ export function registerWebRoutes(app: Express): void {
   app.get("/docs", (_req, res) => {
     sendVueApp(res);
   });
+  app.get("/messages", (_req, res) => {
+    sendVueApp(res);
+  });
 
   app.get("/app", (_req, res) => {
     res.redirect(301, "/");

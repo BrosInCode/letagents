@@ -51,6 +51,13 @@ describe("desktop sidebar overflow contract", () => {
     );
   });
 
+  it("removes press displacement from selection controls under reduced motion", () => {
+    assert.match(
+      sidebarStyles,
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.sidebar-topbar-action:not\(:disabled\):active,[\s\S]*?\.sidebar-selection-scope:not\(:disabled\):active,[\s\S]*?\.sidebar-selection-toolbar button:not\(:disabled\):active\s*\{\s*transform: none;/,
+    );
+  });
+
   it("associates each overflow disclosure with the controlled room list", () => {
     const overflowToggles = sidebarSource.match(
       /class="project-room-overflow-toggle"[\s\S]*?:aria-controls="projectChildListId\(project\.id\)"/g,

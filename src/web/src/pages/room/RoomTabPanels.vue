@@ -45,6 +45,7 @@
         :roomIdentifier="room?.identifier || null"
         @addTask="emit('addTask', $event)"
         @updateTask="emit('updateTask', $event)"
+        @closeTask="emit('closeTask')"
         @leaseAction="emit('leaseAction', $event)"
         @reviewLeaseAction="emit('reviewLeaseAction', $event)"
         @focusTask="emit('focusTask', $event)"
@@ -91,6 +92,8 @@
         :focusSettings="focusSettings"
         :conclusionSummary="room?.conclusionSummary || null"
         :conclusionDetails="room?.conclusionDetails || null"
+        :creation-error="creationError"
+        :created-room="createdRoom"
         :isCreatingFocusRoom="creatingFocusRoomTaskId !== null"
         :isCreatingAdHocFocusRoom="creatingAdHocFocusRoom"
         :isSharingFocusResult="sharingFocusResult"
@@ -100,6 +103,7 @@
         @createAdHocFocusRoom="emit('createAdHocFocusRoom', $event)"
         @openFocusRoom="emit('openFocusRoom', $event)"
         @openParentRoom="emit('openParentRoom')"
+        @retryCreatedRoom="emit('retryCreatedRoom')"
         @shareResults="emitShareResults"
         @updateFocusSettings="emitUpdateFocusSettings"
       />
@@ -136,7 +140,7 @@ import type {
   RoomTab,
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
-  TaskStatusUpdatePayload,
+  TaskUpdatePayload,
 } from './types'
 
 const props = defineProps<{
@@ -172,6 +176,8 @@ const props = defineProps<{
   roomTitle: string
   focusParentAddress: string
   focusSettings: FocusRoomSettings
+  creationError: string | null
+  createdRoom: { id: string; title: string } | null
   creatingFocusRoomTaskId: string | null
   creatingAdHocFocusRoom: boolean
   sharingFocusResult: boolean
@@ -193,7 +199,8 @@ const emit = defineEmits<{
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   addTask: [title: string]
-  updateTask: [payload: TaskStatusUpdatePayload]
+  updateTask: [payload: TaskUpdatePayload]
+  closeTask: []
   leaseAction: [payload: TaskLeaseActionPayload]
   reviewLeaseAction: [payload: TaskReviewLeaseActionPayload]
   focusTask: [taskId: string]
@@ -201,6 +208,7 @@ const emit = defineEmits<{
   createAdHocFocusRoom: [title: string]
   openFocusRoom: [focusKey: string]
   openParentRoom: []
+  retryCreatedRoom: []
   shareResults: [summary: string, details: FocusRoomConclusionDetails | null]
   updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
   openTask: [taskId: string]
@@ -227,12 +235,14 @@ defineExpose({ matchCount })
 .room-view-viewport {
   position: relative;
   height: 100%;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
 
 .room-tab-panel {
   height: 100%;
+  min-width: 0;
   min-height: 0;
 }
 

@@ -2042,16 +2042,14 @@ test("only providers with isolated supervised runtimes offer Add another", () =>
   }), false);
 });
 
-test("a deferred name lookup persists the complete Start-click snapshot", async () => {
-  const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
+test("creation persists the complete Start-click snapshot and leaves naming to the background service", async () => {
   let createdInput: Record<string, unknown> | null = null;
   const client = {
-    listAgents: () => nameLookup.promise,
     createAgent: async (input: Record<string, unknown>) => {
-      createdInput = input;
+      createdInput = { ...input };
       return entry({
         id: "supervised_snapshot",
-        displayName: String(input.displayName),
+        displayName: "CedarPeak",
         provider: String(input.providerId),
       });
     },
@@ -2071,7 +2069,7 @@ test("a deferred name lookup persists the complete Start-click snapshot", async 
     ...form,
   }, () => true);
 
-  // These represent editable controls changing while listAgents is pending.
+  // These represent editable controls changing after the click.
   form.providerId = "claude-code";
   form.providerName = "Claude Code";
   form.roomIdentifier = "room-after";
@@ -2080,64 +2078,31 @@ test("a deferred name lookup persists the complete Start-click snapshot", async 
   form.permissionProfileId = "full-access";
   form.launchPolicy = { profile: "full-access" };
   form.model = "other-model";
-  nameLookup.resolve([]);
-  await request;
+  const created = await request;
 
   assert.equal(createdInput?.creationRequestId, "request-snapshot");
   assert.equal(createdInput?.providerId, "codex");
   assert.equal(createdInput?.roomIdentifier, "room-before");
-  assert.equal(createdInput?.displayName, "CloudSignal");
+  assert.equal(createdInput?.displayName, "", "the renderer never chooses the name");
   assert.equal(createdInput?.repoRootPath, "/repo-before");
   assert.equal(createdInput?.charter, "Investigate the failure.");
   assert.equal(createdInput?.permissionProfileId, "read-only");
   assert.deepEqual(createdInput?.launchPolicy, { profile: "read-only" });
   assert.equal(createdInput?.model, "gpt-5.6");
+  assert.equal(created?.displayName, "CedarPeak", "the saved entry carries the assigned name");
 });
 
-test("a stalled optional name lookup cannot prevent durable agent creation", async () => {
-  const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
-  let createCalls = 0;
-  const created = await createSupervisedAgentFromSnapshot({
-    listAgents: () => nameLookup.promise,
-    createAgent: async (input: Record<string, unknown>) => {
-      createCalls += 1;
-      return entry({
-        id: "supervised_after-timeout",
-        displayName: String(input.displayName),
-      });
-    },
-  } as never, {
-    creationRequestId: "request-after-timeout",
-    providerId: "open-model",
-    providerName: "Open Model",
-    roomIdentifier: "room-1",
-    repoRootPath: "/repo",
-    charter: "Investigate the task.",
-    permissionProfileId: "full_access",
-    launchPolicy: null,
-    model: "moonshotai/kimi-k3",
-  }, () => true, 1);
-
-  assert.equal(createCalls, 1);
-  assert.equal(created?.id, "supervised_after-timeout");
-  assert.match(created?.displayName ?? "", /^[A-Z][A-Za-z]+$/);
-});
-
-test("Claude and Open Model creation use the same friendly codename contract as Codex", async () => {
+test("every provider leaves naming to the background service", async () => {
   for (const provider of [
+    { id: "codex", name: "Codex", model: "gpt-5.6", permissionProfileId: "read_only" },
     { id: "claude-code", name: "Claude Code", model: "claude-sonnet", permissionProfileId: "read_only" },
     { id: "open-model", name: "Open Model", model: "qwen/agent-model", permissionProfileId: "full_access" },
   ] as const) {
     let createdInput: Record<string, unknown> | null = null;
     await createSupervisedAgentFromSnapshot({
-      listAgents: async () => [entry({ displayName: "GardenSignal" })],
       createAgent: async (input: Record<string, unknown>) => {
         createdInput = input;
-        return entry({
-          id: `supervised_${provider.id}`,
-          displayName: String(input.displayName),
-          provider: String(input.providerId),
-        });
+        return entry({ id: `supervised_${provider.id}`, provider: String(input.providerId) });
       },
     } as never, {
       creationRequestId: `${provider.id}-request`,
@@ -2152,24 +2117,19 @@ test("Claude and Open Model creation use the same friendly codename contract as 
     }, () => true);
 
     assert.equal(createdInput?.providerId, provider.id);
-    assert.match(String(createdInput?.displayName), /^[A-Z][A-Za-z]+$/);
-    assert.doesNotMatch(String(createdInput?.displayName), /claude|open model|supervised agent/i);
-    assert.notEqual(createdInput?.displayName, "GardenSignal");
+    assert.equal(createdInput?.displayName, "");
   }
 });
 
-test("modal close or provider invalidation during name lookup fences durable creation", async () => {
+test("modal close or provider invalidation before creation fences durable creation", async () => {
   for (const invalidation of ["modal close", "provider switch"]) {
-    const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
-    let current = true;
     let createCalls = 0;
-    const request = createSupervisedAgentFromSnapshot({
-      listAgents: () => nameLookup.promise,
+    const created = await createSupervisedAgentFromSnapshot({
       createAgent: async () => {
         createCalls += 1;
         return entry();
       },
-    }, {
+    } as never, {
       creationRequestId: `request-${invalidation}`,
       providerId: "codex",
       providerName: "Codex",
@@ -2179,11 +2139,9 @@ test("modal close or provider invalidation during name lookup fences durable cre
       permissionProfileId: null,
       launchPolicy: null,
       model: null,
-    }, () => current);
+    }, () => false);
 
-    current = false;
-    nameLookup.resolve([]);
-    assert.equal(await request, null);
+    assert.equal(created, null);
     assert.equal(createCalls, 0, `${invalidation} must prevent createAgent`);
   }
 });
@@ -2236,4 +2194,41 @@ test("switching away from Codex revokes the shared Add-another eligibility and h
   launch.dismissReadyLaunchForAnother();
   assert.equal(launch.view.value?.ready, true, "revoked handler must preserve the Codex card");
   launch.cleanup();
+});
+
+
+test("launch compaction clears on a failed refresh and returns only with fresh native progress", async () => {
+  const timers: Array<() => void> = [];
+  let reads = 0;
+  const compacting = entry({ provider: "claude-code", workspacePath: "/tmp/worktree",
+    providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+  Object.assign(globalThis, { window: {
+    crypto: { randomUUID: () => "launch-1" }, sessionStorage: memorySessionStorage(),
+    setTimeout: (callback: () => void) => { timers.push(callback); return timers.length; },
+    clearTimeout: () => undefined,
+    letagentsDesktop: { supervisor: {
+      listAgents: async () => { if (++reads === 2) throw new Error("daemon unavailable"); return [compacting]; },
+      onLaunchEvent: () => () => undefined, getLaunchEvents: async () => [],
+    } },
+  } });
+  const launch = useSupervisedAgentLaunch({
+    open: () => true, roomIdentifier: () => "room-1", roomLabel: () => "Room one",
+    providerId: () => "claude-code", authCommand: () => null, authCommandForProvider: () => null,
+    currentVersion: () => 0, isCurrentRequest: () => true, onChooseRepo: () => undefined,
+    onCopyAuthCommand: () => undefined, onRetry: () => { throw new Error("must not retry"); }, onMessage: () => undefined,
+  });
+  const pump = async () => { for (let n = 0; n < 10; n++) await Promise.resolve(); await nextTick(); };
+  try {
+    launch.begin(); launch.complete(compacting); await pump();
+    assert.equal(launch.view.value?.headline, "Compacting conversation");
+    timers.shift()!(); await pump();
+    assert.notEqual(launch.view.value?.headline, "Compacting conversation");
+    assert.equal(launch.conflict.value?.id, compacting.id);
+    assert.equal(launch.view.value?.ready, false);
+    assert.equal(launch.conflictLookupTone.value, "warning");
+    timers.shift()!(); await pump();
+    assert.equal(launch.view.value?.headline, "Compacting conversation");
+    assert.equal(launch.conflictLookupError.value, null);
+    assert.equal(launch.view.value?.ready, false);
+  } finally { launch.cleanup(); }
 });

@@ -6,6 +6,17 @@ import { fileURLToPath } from "node:url";
 const mainSource = read("../main.ts");
 const routerSource = read("../control-request-router.ts");
 const cloudSource = read("../cloud-http.ts");
+const daemonReadModelSource = read("../daemon-read-model.ts");
+const deliveryCutoverExecutionSource = read("../delivery-cutover-execution-coordinator.ts");
+const desiredStateSource = read("../desired-state-coordinator.ts");
+const manifestTransitionSource = read("../manifest-transition-coordinator.ts");
+const nativeActivityPublicationSource = read("../native-activity-publication-coordinator.ts");
+const providerCheckpointSource = read("../provider-checkpoint-coordinator.ts");
+const providerSchedulerFailureSource = read("../provider-scheduler-failure-coordinator.ts");
+const providerTerminalSource = read("../provider-terminal-coordinator.ts");
+const roomAgentProjectionSource = read("../room-agent-state-projection.ts");
+const runtimeRecoverySource = read("../runtime-recovery-coordinator.ts");
+const supervisedDeliveryLifecycleSource = read("../supervised-delivery-lifecycle-coordinator.ts");
 
 const expectedControlMethods = [
   "attempt.read",
@@ -15,6 +26,8 @@ const expectedControlMethods = [
   "lane.activate_legacy",
   "lane.release_legacy",
   "lane.reserve_legacy",
+  "local_board.mutate",
+  "local_board.watch",
   "manifest.append_activity",
   "manifest.compare_and_set_desired_state",
   "manifest.control_turn",
@@ -26,20 +39,32 @@ const expectedControlMethods = [
   "manifest.update_workplace_liveness",
   "manifest.watch_state",
   "supervisor.acknowledge_room_move_source_revocation",
+  "supervisor.activate_custodial_polling",
+  "supervisor.apply_agent_configuration",
+  "supervisor.authorize_custodial_polling",
   "supervisor.bind_worker_session",
   "supervisor.bootstrap_room_ingress",
   "supervisor.borrow_worker_credential",
+  "supervisor.cancel_delivery_drain",
+  "supervisor.cancel_polling_activation",
   "supervisor.checkpoint_worker_cursor",
   "supervisor.commit_room_move",
   "supervisor.complete_bounded_effect",
+  "supervisor.execute_bounded_tool",
   "supervisor.get_agent_configuration",
   "supervisor.get_agent_inspector_detail",
   "supervisor.get_current_room_move",
+  "supervisor.get_delivery_drain",
+  "supervisor.get_polling_activation",
   "supervisor.get_room_move",
+  "supervisor.host_approval_challenge",
+  "supervisor.host_approval_request",
   "supervisor.install_host_grant",
   "supervisor.install_open_model_credential",
   "supervisor.install_worker_credential",
   "supervisor.prepare_bounded_effect",
+  "supervisor.prepare_custodial_forward",
+  "supervisor.prepare_delivery_drain",
   "supervisor.prepare_room_move",
   "supervisor.purge_agent",
   "supervisor.recover_agent_runtime",
@@ -48,6 +73,7 @@ const expectedControlMethods = [
   "supervisor.retry_room_delivery",
   "supervisor.rollback_room_move",
   "supervisor.skip_room_delivery",
+  "supervisor.sync_execution_delegations",
   "supervisor.update_agent_configuration",
   "supervisor.verify_worker_session",
   "supervisor.watch_agent_stream",
@@ -66,22 +92,104 @@ test("the daemon entrypoint delegates control-protocol parsing to one router", (
 
 test("cloud requests are isolated from the daemon authority owner", () => {
   assert.equal(matches(mainSource, /\bfetch\s*\(/g).length, 0);
-  assert.ok(matches(cloudSource, /\bfetch\s*\(/g).length >= 8);
+  assert.ok(matches(cloudSource, /\broomRequest\s*\(/g).length >= 8);
 });
 
 test("daemon policy and projection domains remain extracted", () => {
   for (const moduleName of [
+    "agent-stream-registry",
+    "bounded-effect-coordinator",
     "cloud-http",
+    "continuation-repair-coordinator",
+    "continuation-repair-policy",
     "control-request-router",
-    "manifest-view-projection",
+    "daemon-authority",
+    "daemon-error-policy",
+    "daemon-read-model",
+    "daemon-state-watch",
+    "delivery-cutover-coordinator",
+    "delivery-cutover-execution-coordinator",
+    "desired-state-coordinator",
+    "entry-concurrency-gate",
+    "execution-delegation-coordinator",
+    "legacy-lane-coordinator",
+    "lifecycle-administration-coordinator",
+    "manifest-administration-coordinator",
+    "manifest-transition-coordinator",
+    "native-activity-publication-coordinator",
     "process-identity",
-    "provider-state-policy",
+    "provider-checkpoint-coordinator",
+    "provider-execution-coordinator",
+    "provider-reconciliation-coordinator",
+    "provider-scheduler-failure-coordinator",
+    "provider-stream-coordinator",
     "provider-stream-policy",
+    "provider-terminal-coordinator",
+    "room-delivery-control",
+    "room-move-coordinator",
+    "runtime-configuration-apply-coordinator",
+    "runtime-recovery-coordinator",
+    "supervised-delivery-lifecycle-coordinator",
+    "turn-control-coordinator",
+    "worker-authority-coordinator",
+    "worker-runtime-custody",
   ]) {
     assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
   }
+  assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
+  assert.match(daemonReadModelSource, /from "\.\/room-agent-state-projection\.js"/);
+  assert.match(deliveryCutoverExecutionSource, /controlExactTurn/);
+  assert.match(mainSource, /startDelivery: \(entryId\) => this\.startSupervisedDelivery\(entryId, "wake"\)/,
+    "cutover cancellation wakes an existing A without refreshing or aborting its loop");
+  assert.equal(matches(mainSource, /\.controlExactTurn\s*\(/g).length, 0);
+  assert.match(desiredStateSource, /compareAndSet/);
+  assert.equal(matches(mainSource, /private async setDesiredState\s*\(/g).length, 0);
+  assert.match(providerCheckpointSource, /checkpointCursorPreparedTurn/);
+  assert.match(providerCheckpointSource, /from "\.\/provider-state-policy\.js"/);
+  assert.equal(matches(mainSource, /\.checkpointCursorPreparedTurn\s*\(/g).length, 0);
+  assert.match(runtimeRecoverySource, /commitTurnControlState/);
+  assert.equal(matches(mainSource, /\.commitTurnControlState\s*\(/g).length, 0);
+  assert.match(supervisedDeliveryLifecycleSource, /exactActiveBoundedContext/);
+  assert.equal(matches(mainSource, /preparedRoomMove\s*\(/g).length, 0);
+  assert.match(providerSchedulerFailureSource, /transientProviderStartFailure/);
+  assert.equal(matches(mainSource, /transientProviderStartFailure/g).length, 0);
+  assert.match(nativeActivityPublicationSource, /publishWorkerNativeActivity/);
+  assert.equal(matches(mainSource, /publishWorkerNativeActivity/g).length, 0);
+  assert.match(manifestTransitionSource, /function sanitizeTerminal/);
+  assert.equal(matches(mainSource, /function sanitizeTerminal/g).length, 0);
+  assert.match(providerTerminalSource, /advanceReconciliationState/);
+  assert.equal(matches(mainSource, /advanceReconciliationState/g).length, 0);
+  assert.match(daemonReadModelSource, /projectRoomAgentManifestEntry/);
+  assert.equal(matches(mainSource, /projectRoomAgentManifestEntry/g).length, 0);
   assert.equal(matches(mainSource, /^export function providerStreamLifecycle/mg).length, 0);
   assert.equal(matches(mainSource, /^function projectDeliveryReceipts/mg).length, 0);
+  // 1500 -> 1510 at #1043: RoomWorkPublisher composition seam; 1510 -> 1531 for the
+  // typed lifecycle effect consumer and its atomic activation seam. Policy stays extracted.
+  // Raises must be reviewed, never blank-line-gamed.
+  // 1531 -> 1550 for the isolated runtime-configuration apply coordinator.
+  // 1550 -> 1575 for delegation lifecycle composition and shutdown wiring; paging,
+  // coalescing, exact reconciliation, and policy remain in the extracted coordinator.
+  // 1575 -> 1585 for independently reviewed workspace snapshot composition;
+  // Git capture, persistence, and publication policy remain in their own modules.
+  // 1585 -> 1587: independently reviewed local authority restoration at startup;
+  // credential and storage policy remain in local-room-runtime.ts.
+  // 1587 -> 1592: runtime recovery composes existing stream, terminal, capture,
+  // and delivery coordinators; recovery policy and its journal remain extracted.
+  // 1592 -> 1611: service-owned local board RPCs and singleton lifecycle wiring;
+  // storage, commit notifications, subscriptions, and worker fencing stay extracted.
+  // 1611 -> 1620: runtime-death approval settlement ports; storage and fault-only
+  // retry policy stay in execution-approval-journal.ts.
+  // 1620 -> 1630: managed-launch reconciliation and approval-idle composition;
+  // fingerprint, reservation, replacement, and deferral policy stay extracted.
+  // 1630 -> 1633: compaction progress getter and state-watch notification ports;
+  // timing and signal interpretation stay in the provider-owned tracker.
+  // 1633 -> 1635: scoped manifest reads and post-commit capture notification ports;
+  // SQL hydration and capture scheduling stay in their owning stores/coordinator.
+  // 1635 -> 1657: exact terminal commit ports and planned/emergency retirement
+  // composition; retries, storage ownership and handoff policy remain extracted.
+  // 1657 -> 1660: automatic permission review composition; the rules, the
+  // edit and command decisions, and the server call stay in their own modules.
+  assert.ok(mainSource.split("\n").length < 1_660, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

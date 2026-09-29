@@ -272,7 +272,7 @@ async function stageLocalDesktopAttachmentBuffer(
   };
 }
 
-export function consumeLocalStagedAttachments(
+export function readLocalStagedAttachments(
   roomIdentifier: string,
   attachments: Array<{ upload_id: string }>,
 ): RoomMessageAttachmentPayload[] {
@@ -284,7 +284,6 @@ export function consumeLocalStagedAttachments(
     if (!staged || staged.roomIdentifier !== roomIdentifier) {
       throw new Error("One or more local attachments are no longer available.");
     }
-    localStagedAttachments.delete(uploadId);
     const fileUrl = pathToFileURL(staged.filePath).toString();
     consumed.push({
       id: staged.uploadId,
@@ -297,6 +296,12 @@ export function consumeLocalStagedAttachments(
     });
   }
   return consumed;
+}
+
+export function releaseLocalStagedAttachments(roomIdentifier: string, attachments: Array<{ upload_id: string }>): void {
+  for (const { upload_id } of attachments) {
+    if (localStagedAttachments.get(upload_id)?.roomIdentifier === roomIdentifier) localStagedAttachments.delete(upload_id);
+  }
 }
 
 export async function publishLocalAttachmentPayload(

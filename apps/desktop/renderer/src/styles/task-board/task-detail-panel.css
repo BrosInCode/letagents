@@ -1,6 +1,6 @@
 .desktop-task-detail-panel {
   display: grid;
-  gap: 16px;
+  gap: 24px;
   min-width: 0;
   padding: 18px;
   border: 1px solid var(--border);
@@ -20,7 +20,7 @@
   color: var(--text);
   font-size: 1.2rem;
   font-weight: 700;
-  letter-spacing: -0.015em;
+  letter-spacing: 0;
   line-height: 1.28;
   overflow-wrap: anywhere;
 }
@@ -52,10 +52,8 @@
   display: grid;
   gap: 5px;
   min-width: 0;
-  padding: 10px 11px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--accent-dim);
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
 }
 
 .desktop-task-detail-grid small,
@@ -63,9 +61,8 @@
   color: var(--text-tertiary);
   font-size: 0.64rem;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
   line-height: 1.1;
-  text-transform: uppercase;
 }
 
 .desktop-task-detail-grid strong,
@@ -90,8 +87,7 @@
   color: var(--text);
   font-size: 0.72rem;
   font-weight: 650;
-  letter-spacing: 0.035em;
-  text-transform: uppercase;
+  letter-spacing: 0;
 }
 
 .desktop-task-detail-list {
@@ -142,7 +138,6 @@
   color: var(--text-tertiary);
   font-size: 0.64rem;
   font-weight: 600;
-  text-transform: uppercase;
 }
 
 .desktop-task-authority-panel strong {
@@ -186,11 +181,11 @@
   width: min(680px, calc(100vw - 48px));
   max-height: min(850px, calc(100vh - 48px));
   overflow: auto;
-  padding: 20px;
+  padding: 28px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-xl);
   outline: none;
-  background: var(--bg-elevated);
+  background: var(--bg);
   color: var(--text);
   box-shadow: var(--shadow-xl);
 }
@@ -205,7 +200,7 @@
   width: min(620px, 100vw);
   height: 100%;
   max-height: none;
-  padding: 20px;
+  padding: 28px;
   border-width: 0 0 0 1px;
   border-radius: 0;
   box-shadow: var(--shadow-xl);
@@ -286,7 +281,7 @@
   color: var(--text);
   font-size: 1.2rem;
   font-weight: 700;
-  letter-spacing: -0.015em;
+  letter-spacing: 0;
   line-height: 1.25;
 }
 

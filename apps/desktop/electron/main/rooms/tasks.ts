@@ -12,7 +12,7 @@ import {
   getCurrentLocalWorkerSession,
   readLetAgentsLocalState,
 } from "../../board-task-actions.js";
-import { apiFetch } from "../auth.js";
+import { agentApiFetch, apiFetch } from "../auth.js";
 import { getLetAgentsLocalStatePath } from "../paths.js";
 import {
   addLocalTask,
@@ -22,6 +22,8 @@ import {
   releaseLocalTaskReviewLease,
   resolveLocalAwareRoomStorageMode,
   updateLocalTask,
+  changeLocalTaskWorkLease,
+  getLocalTask,
 } from "./local-store.js";
 import {
   mapDesktopTaskSummaryPayload,
@@ -51,15 +53,6 @@ function mapDesktopTaskMutationResult(data: {
     task: mapDesktopTaskSummaryPayload(
       rawTask as DesktopTaskSummaryPayload,
     ),
-  };
-}
-
-function withDesktopHumanTaskBody<T extends object>(
-  body: T,
-): T & { desktop_human_client: true } {
-  return {
-    ...body,
-    desktop_human_client: true,
   };
 }
 
@@ -97,14 +90,14 @@ export async function addDesktopRoomTask(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify(
-        withDesktopHumanTaskBody({
+        {
           title: trimmedTitle,
           description: trimmedDescription,
           created_by: "human",
-        }),
+        },
       ),
     },
   );
@@ -115,6 +108,9 @@ export async function updateDesktopRoomTask(
   roomIdentifier: string,
   taskId: string,
   updates: {
+    title?: string;
+    description?: string;
+    expected_content?: { title?: string; description?: string };
     status?: string;
     assignee?: string | null;
     pr_url?: string | null;
@@ -132,6 +128,9 @@ export async function updateDesktopRoomTask(
     );
     return {
       task: await updateLocalTask(localRoomIdentifier, taskId.trim(), {
+        title: updates.title,
+        description: updates.description,
+        expectedContent: updates.expected_content,
         status: updates.status,
         assignee: updates.assignee,
         prUrl: updates.pr_url,
@@ -148,9 +147,9 @@ export async function updateDesktopRoomTask(
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
-      body: JSON.stringify(withDesktopHumanTaskBody(updates)),
+      body: JSON.stringify(updates),
     },
   );
   return mapDesktopTaskMutationResult(data);
@@ -175,9 +174,16 @@ export async function updateDesktopRoomTaskLease(
       input.action === "release"
         ? "accepted"
         : undefined;
+    const current = await getLocalTask(localRoomIdentifier, taskId.trim());
+    if (current?.activeLeases.some(lease => lease.kind === "work")) {
+      return changeLocalTaskWorkLease(localRoomIdentifier, taskId.trim(), input);
+    }
+    if (input.lease_id) throw new Error("The task lease changed. Refresh the task before trying again.");
     return {
       task: await updateLocalTask(localRoomIdentifier, taskId.trim(), {
         status: nextStatus,
+        expectedNoWorkLease: true,
+        ...(input.action === "release" ? { assignee: null, assigneeAgentKey: null } : {}),
         validateStatus: nextStatus ? false : undefined,
       }),
     };
@@ -192,9 +198,9 @@ export async function updateDesktopRoomTaskLease(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
-      body: JSON.stringify(withDesktopHumanTaskBody(input)),
+      body: JSON.stringify(input),
     },
   );
   return mapDesktopTaskMutationResult(data);
@@ -247,9 +253,9 @@ export async function updateDesktopRoomTaskReviewLease(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
-      body: JSON.stringify(withDesktopHumanTaskBody(input)),
+      body: JSON.stringify(input),
     },
   );
   return mapDesktopTaskMutationResult(data);
@@ -290,7 +296,8 @@ export async function runDesktopRoomTaskWorkerAction(
         status: nextStatus,
         assignee: input.action === "claim" ? actor : undefined,
         assigneeAgentKey: input.action === "claim" ? session?.agent_key || null : undefined,
-      }),
+      }, session?.agent_key && session.session_id ? { agent_key: session.agent_key, session_id: session.session_id,
+        actor_label: actor, agent_instance_id: session.agent_instance_id } : undefined),
     };
   }
 
@@ -308,7 +315,7 @@ export async function runDesktopRoomTaskWorkerAction(
     );
   }
 
-  const data = await apiFetch<{ task?: unknown; id?: unknown }>(
+  const data = await agentApiFetch<{ task?: unknown; id?: unknown }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
     {
       method: "PATCH",
@@ -374,7 +381,7 @@ export async function runDesktopRoomTaskReviewWorkerAction(
     );
   }
 
-  const data = await apiFetch<{ task?: unknown; id?: unknown }>(
+  const data = await agentApiFetch<{ task?: unknown; id?: unknown }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
     {
       method: "POST",

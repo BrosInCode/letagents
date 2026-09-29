@@ -64,6 +64,10 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 if (args[0] === "--help") {
+  if (process.env.LETAGENTS_TEST_CURSOR_PROBE_ENV !== "present") {
+    console.error("missing exact probe environment");
+    process.exit(9);
+  }
   const fixture = path.join(process.cwd(), ".fake-cursor-help");
   console.log(fs.existsSync(fixture) ? fs.readFileSync(fixture, "utf-8") : "Usage: cursor-agent --force --sandbox <mode> --trust");
   process.exit(0);
@@ -169,6 +173,10 @@ function runPreflight(
       return { userId: 12345, email: "personal@example.test" };
     },
     workspaceGenerationSupportChecker,
+    runtimeEnvironment: {
+      ...process.env,
+      LETAGENTS_TEST_CURSOR_PROBE_ENV: "present",
+    },
   });
 }
 
@@ -185,7 +193,7 @@ test("Cursor preflight defaults to filter_letagents MCP policy", async () => {
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
   assert.equal(result.message, "Cursor Agent is ready to start with Read-only.");
-  assert.match(result.detail ?? "", /keep user MCPs except LetAgents/);
+  assert.match(result.detail ?? "", /connected tools remain available, except LetAgents/);
   assert.deepEqual(
     JSON.parse(readFileSync(join(cursorManagedHome, ".cursor", "mcp.json"), "utf-8")),
     {
@@ -208,7 +216,7 @@ test("Cursor preflight validates write-capable permission profile flags", async 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
   assert.equal(result.message, "Cursor Agent is ready to start with Full access.");
-  assert.match(result.detail ?? "", /--force and Cursor sandbox disabled/);
+  assert.match(result.detail ?? "", /without its own restrictions or approval prompts/);
 });
 
 test("Cursor supervised preflight requires and accepts its isolated LetAgents bridge", async () => {
@@ -224,8 +232,8 @@ test("Cursor supervised preflight requires and accepts its isolated LetAgents br
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
   assert.equal(result.message, "Cursor Agent is ready to start supervised with Workspace writes.");
-  assert.match(result.detail ?? "", /private per-turn Git workspace/i);
-  assert.match(result.detail ?? "", /per-agent Cursor profile exposes only the daemon-mediated LetAgents bridge/i);
+  assert.match(result.detail ?? "", /separate copy of your project/i);
+  assert.match(result.detail ?? "", /agent connects only to LetAgents room tools/i);
   setFakeCursorMcpMode(null);
 });
 
@@ -264,7 +272,7 @@ test("Cursor supervised preflight gates writable generations without gating read
     }, unsupported);
     assert.equal(writable.status, "error");
     assert.equal(writable.canStart, false);
-    assert.equal(writable.message, "Cursor writable workspace cannot be supervised exactly.");
+    assert.equal(writable.message, "LetAgents cannot safely track Cursor’s changes in this folder.");
     assert.match(writable.detail ?? "", /canonical Git worktree/i);
 
     const readOnly = await runPreflight({
@@ -275,6 +283,47 @@ test("Cursor supervised preflight gates writable generations without gating read
     assert.equal(readOnly.status, "ready");
     assert.equal(readOnly.canStart, true);
     assert.equal(checks, 1, "read-only never needs a writable generation");
+  } finally {
+    setFakeCursorMcpMode(null);
+  }
+});
+
+test("Cursor supervised preflight admits repo-less read-only without relaxing the legacy repo gate", async () => {
+  let checks = 0;
+  const checker: NonNullable<DesktopCursorPreflightOptions["workspaceGenerationSupportChecker"]> = async () => {
+    checks += 1;
+    throw new Error("A repo-less read-only launch must not request a writable generation.");
+  };
+  setFakeCursorMcpMode("ready");
+  try {
+    const readOnly = await runPreflight({
+      repoRootPath: null,
+      roomOnly: true,
+      launchMode: "supervised",
+      permissionProfileId: "read_only",
+    }, checker);
+    assert.equal(readOnly.status, "ready");
+    assert.equal(readOnly.canStart, true);
+    assert.equal(readOnly.message, "Cursor Agent is ready to start supervised with Read-only.");
+    assert.equal(checks, 0);
+
+    for (const permissionProfileId of ["sandboxed_write", "full_access"] as const) {
+      let identityChecks = 0;
+      const writable = await runDesktopCursorProviderPreflight(cursorProvider, {
+        repoRootPath: null, roomOnly: true, launchMode: "supervised", permissionProfileId,
+      }, "installed", { commandTimeoutMs: 0,
+        personalIdentityAttestor: async () => { identityChecks += 1; throw new Error("account check must not run without a profile directory"); },
+        runtimeEnvironment: { ...process.env, LETAGENTS_TEST_CURSOR_PROBE_ENV: "present" },
+      });
+      assert.equal(writable.status, "repo_required");
+      assert.equal(writable.canStart, false);
+      assert.equal(writable.nextAction, "choose_repo");
+      assert.equal(identityChecks, 0);
+    }
+
+    const legacy = await runPreflight({ repoRootPath: null, roomOnly: true });
+    assert.equal(legacy.status, "repo_required");
+    assert.equal(legacy.canStart, false);
   } finally {
     setFakeCursorMcpMode(null);
   }
@@ -320,7 +369,7 @@ test("Cursor supervised preflight fails closed when the bridge is not visible", 
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
-  assert.equal(result.message, "Cursor supervised MCP authority is not exact.");
+  assert.equal(result.message, "LetAgents could not verify Cursor’s connected tools.");
   setFakeCursorMcpMode(null);
 });
 
@@ -337,7 +386,7 @@ test("Cursor supervised preflight rejects extra and false-substring MCP entries"
 
     assert.equal(result.status, "error");
     assert.equal(result.canStart, false);
-    assert.equal(result.message, "Cursor supervised MCP authority is not exact.");
+    assert.equal(result.message, "LetAgents could not verify Cursor’s connected tools.");
     assert.match(result.detail ?? "", /exactly one effective MCP entry/);
   }
   setFakeCursorMcpMode(null);
@@ -355,7 +404,7 @@ test("Cursor supervised preflight rejects a CLI without headless workspace trust
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
   assert.equal(result.message, "Cursor Agent does not support the selected permission profile.");
-  assert.match(result.detail ?? "", /--trust/);
+  assert.match(result.detail ?? "", /Update Cursor Agent/);
   setFakeCursorMcpMode(null);
 });
 
@@ -367,7 +416,7 @@ test("Cursor supervised preflight rejects a CLI without native project-config is
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
-  assert.equal(result.message, "Cursor supervised MCP authority is not exact.");
+  assert.equal(result.message, "LetAgents could not verify Cursor’s connected tools.");
   setFakeCursorMcpMode(null);
 });
 
@@ -465,7 +514,7 @@ test("Cursor preflight allows normal MCP policy even when LetAgents is configure
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
-  assert.match(result.detail ?? "", /normal Cursor MCP settings/);
+  assert.match(result.detail ?? "", /Cursor can use your configured tools/);
 });
 
 function workspaceFixture(name: string): string {

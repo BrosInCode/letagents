@@ -1,19 +1,51 @@
 import { createHash, randomUUID } from "node:crypto";
+import { PreparedReadStatements } from "./prepared-reads.js";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { ExecutionShadowStore } from "./execution-shadow-store.js";
+import { pendingRuntimeRecovery } from "./runtime-recovery-journal.js";
+import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
+import type { PreparedRoomContext, MessageIntervention } from "../shared/message-outcome.js";
+import { prepareRoomContext } from "./prepared-room-context.js";
 
-import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
+import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
+import { assertNoPollingActivation } from "./custodial-polling-activation.js";
+import { parseTaskContinuation, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
 import {
+  cancelInterruptedSupervisedTurn,
   pruneSupervisedAgentHistory,
+  readDurableNativeFailure,
   RETAINED_UNCERTAIN_EFFECTS_PER_AGENT,
   RETAINED_TERMINAL_RECEIPTS_PER_AGENT,
-  settlePreparedSupervisedEffectsForTerminalItem,
+  settleSupervisedTerminalItem,
 } from "./supervised-agent-history-retention.js";
 
-export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "cancelled_by_room_move" | "cancelled_by_user";
+export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "cancelled_by_room_move" | "cancelled_by_user";
 export type SupervisedInboxReceiptState = SupervisedInboxState | "queued_behind_blocked";
+export type SupervisedRetryDomain = "pre_dispatch" | "result_recovery" | "publication";
 export type InboxActivation = Record<string, unknown>;
 export type IngressMessage = { source_message_id: string; source_message: unknown; activation: InboxActivation };
 export type ObservedIngressMessage = IngressMessage & { activation_decision: string };
+type PollIngestionInput = {
+  agent_id: string;
+  room_id: string;
+  last_observed_message_id: string | null;
+  expected_cursor?: string | null;
+  messages: readonly IngressMessage[];
+  observed_messages?: readonly ObservedIngressMessage[];
+};
+type SuccessfulPollIngestionInput = PollIngestionInput & {
+  execution_generation_id: string;
+  /** Optional observation after COMMIT, never part of ingress authority. */
+  onInserted?: (sourceMessageIds: readonly string[]) => void;
+};
+type IngressHealthUpdate = {
+  agent_id: string;
+  room_id: string;
+  execution_generation_id: string;
+  state: "starting" | "observing" | "backoff" | "blocked" | "stopped";
+  detail?: string | null;
+};
 export type SupervisedInboxItem = {
   inbox_item_id: string; agent_id: string; room_id: string; source_message_id: string;
   source_message: unknown; activation: InboxActivation; fifo_sequence: number; state: SupervisedInboxState;
@@ -22,6 +54,12 @@ export type SupervisedInboxItem = {
   next_attempt_at_ms: number | null; terminal_reason: "upgrade_authority_unavailable" | null;
   created_at: string; updated_at: string; acknowledged_at: string | null;
 };
+type InboxHeadSnapshot = Pick<SupervisedInboxItem, "inbox_item_id" | "state" | "provider_turn_id" | "outcome">;
+export function sameInboxHead(left: InboxHeadSnapshot | null, right: InboxHeadSnapshot | null): boolean {
+  return left === null || right === null ? left === right
+    : left.inbox_item_id === right.inbox_item_id && left.state === right.state
+      && left.provider_turn_id === right.provider_turn_id && left.outcome === right.outcome;
+}
 export type SupervisedProviderTurnBinding = {
   inbox_item_id: string;
   agent_id: string;
@@ -33,6 +71,7 @@ export type SupervisedProviderTurnBinding = {
 };
 export type SupervisedInboxReceipt = SupervisedInboxItem & { receipt_state: SupervisedInboxReceiptState };
 export type SupervisedInboxEvent = {
+  event_sequence: number;
   phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled";
   observed_at: string;
   detail: string | null;
@@ -41,6 +80,9 @@ export type SupervisedInboxReceiptWithTimeline = SupervisedInboxReceipt & {
   timeline: SupervisedInboxEvent[];
   canonical_message_id: string | null;
 };
+export type SupervisedInboxReceiptProjection = Omit<SupervisedInboxReceiptWithTimeline, "source_message" | "activation">;
+type SupervisedInboxItemMetadata = Omit<SupervisedInboxItem, "source_message" | "activation">;
+
 export type SupervisedEffectRecord = {
   effect_id: string; agent_id: string; room_id: string; execution_generation_id: string; provider_turn_id: string;
   mcp_request_id: string; tool_name: string; request: unknown; mutation: boolean;
@@ -79,6 +121,17 @@ function structuredRoomTurnCompletionResult(completion: StructuredRoomTurnComple
   };
 }
 export type AgentInspectorDetail = {
+  prepared_context?: PreparedRoomContext | null;
+  latest_intervention?: MessageIntervention | null;
+  recorded_execution?: RetainedExecutionDetail;
+  runtime_control: {
+    runtime_generation_id?: string;
+    control_state: "connecting" | "responsive" | "degraded" | "lost" | "unprobeable";
+    runtime_state: "starting" | "ready" | "stopping" | "exited";
+    observed_at: string | null;
+    execution_generation_id: string;
+    daemon_generation_id: string;
+  } | null;
   availability: "available" | "pruned" | "not_loaded";
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: InboxActivation | null } | null;
@@ -104,6 +157,7 @@ const MAX_EFFECT_ERROR_BYTES = 16 * 1024;
 const READ_ONLY_EFFECT_TOOLS = new Set([
   "get_current_room", "check_repo", "check_repo_visibility",
   "read_messages", "wait_for_messages", "get_board", "get_board_settings",
+  "get_room_memory", "get_human_requests",
   "get_room_artifacts", "get_room_events", "list_board_intents",
   "get_onboarding_status", "status_local_codex_session", "rental_list_requests",
 ]);
@@ -125,14 +179,57 @@ export type ProviderContinuationRepair = {
   created_at: string;
   updated_at: string;
 };
-const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"]);
+const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"]);
 const RETAINED_TIMELINE_EVENTS_PER_RECEIPT = 64;
 const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInboxState[]>> = {
-  pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "retryable", "blocked"],
-  awaiting_result: ["result_recovery", "publishing", "acknowledged_no_reply", "retryable", "blocked"],
-  result_recovery: ["publishing", "acknowledged_no_reply", "blocked"], publishing: ["acknowledged", "retryable", "blocked"],
-  retryable: ["pending", "blocked"], blocked: ["pending", "cancelled_by_user"], acknowledged: [], acknowledged_no_reply: [], cancelled_by_room_move: [], cancelled_by_user: [],
+  pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "acknowledged_failed", "retryable", "blocked"],
+  awaiting_result: ["result_recovery", "publishing", "acknowledged_no_reply", "acknowledged_failed", "retryable", "blocked"],
+  result_recovery: ["publishing", "acknowledged_no_reply", "acknowledged_failed", "blocked"], publishing: ["acknowledged", "retryable", "blocked"],
+  retryable: ["pending", "blocked"], blocked: ["pending", "cancelled_by_user"], acknowledged: [], acknowledged_no_reply: [], acknowledged_failed: [], cancelled_by_room_move: [], cancelled_by_user: [],
 };
+
+const RECEIPT_METADATA_COLUMNS = "i.inbox_item_id,i.agent_id,i.room_id,i.source_message_id,i.fifo_sequence,i.state,i.attempt_count,i.action_id,i.reply_client_message_id,i.provider_turn_id,i.outcome,i.last_error,i.failure_code,i.blocked_by_inbox_item_id,i.next_attempt_at_ms,i.terminal_reason,i.created_at,i.updated_at,i.acknowledged_at";
+const RECEIPT_SELECTION_SQL = `FROM supervised_agent_inbox i
+        LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
+        WHERE i.agent_id=? AND (
+          i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+          OR i.inbox_item_id IN (
+            SELECT inbox_item_id FROM supervised_agent_inbox
+            WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+            ORDER BY fifo_sequence DESC LIMIT ?
+          )
+        ) ORDER BY i.fifo_sequence`;
+const INBOX_READS = {
+  receipts: `SELECT i.*,p.canonical_message_id ${RECEIPT_SELECTION_SQL}`,
+  receiptProjection: `SELECT ${RECEIPT_METADATA_COLUMNS},p.canonical_message_id ${RECEIPT_SELECTION_SQL}`,
+  receiptTimelines: `WITH selected_inbox AS (
+          SELECT inbox_item_id,fifo_sequence
+          FROM supervised_agent_inbox
+          WHERE agent_id=? AND (
+            state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+            OR inbox_item_id IN (
+              SELECT inbox_item_id FROM supervised_agent_inbox
+              WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+              ORDER BY fifo_sequence DESC LIMIT ?
+            )
+          )
+        )
+        SELECT e.inbox_item_id,e.event_sequence,e.phase,e.observed_at,e.detail
+        FROM selected_inbox s
+        JOIN supervised_agent_inbox_events e
+          ON e.inbox_item_id=s.inbox_item_id
+          AND e.event_sequence > COALESCE((
+            SELECT cutoff.event_sequence
+            FROM supervised_agent_inbox_events cutoff
+            WHERE cutoff.inbox_item_id=s.inbox_item_id
+            ORDER BY cutoff.event_sequence DESC
+            LIMIT 1 OFFSET ?
+          ),0)
+        ORDER BY s.fifo_sequence,e.event_sequence`,
+  ingressHealth: "SELECT room_id,state,detail,execution_generation_id FROM supervised_agent_ingress_health WHERE agent_id=?",
+  ingressCursor: "SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?",
+  latestRepair: "SELECT * FROM provider_continuation_repairs WHERE agent_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+} as const;
 
 /** Durable, provider-neutral room delivery queue. It owns neither polling nor turns. */
 export class SupervisedAgentInboxStore {
@@ -140,17 +237,20 @@ export class SupervisedAgentInboxStore {
   private initializing: Promise<DatabaseSync> | null = null;
   private writes: Promise<void> = Promise.resolve();
   private closed = false;
+  private readonly reads = new PreparedReadStatements(INBOX_READS);
 
   constructor(
     private readonly databasePath: string,
     private readonly now: () => string = () => new Date().toISOString(),
-    private readonly onMutation: () => void = () => undefined,
+    private readonly onMutation: (affectedAgentId?: string) => void = () => undefined,
+    private readonly schemaPrepared = false,
   ) {}
 
   async close(): Promise<void> {
     this.closed = true;
     await this.writes.catch(() => undefined);
     await this.initializing?.catch(() => undefined);
+    this.reads.clear();
     this.database?.close(); this.database = null; this.initializing = null;
   }
 
@@ -163,7 +263,8 @@ export class SupervisedAgentInboxStore {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
     if (input.last_observed_message_id !== null) this.requireNumericCursor(input.last_observed_message_id);
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const existing = database.prepare("SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
+      assertDeliveryDrainIngressAllowed(database, input.agent_id);
+      const existing = this.reads.get(database, "ingressCursor").get(input.agent_id) as Row | undefined;
       if (existing) {
         if (String(existing.room_id) !== input.room_id) throw new Error("Supervised inbox ingress room changed for the exact agent identity.");
         return {
@@ -175,7 +276,7 @@ export class SupervisedAgentInboxStore {
       }
       run(database.prepare("INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)"), input.agent_id, input.room_id, input.last_observed_message_id, this.now());
       return { agent_id: input.agent_id, room_id: input.room_id, last_observed_message_id: input.last_observed_message_id, created: true };
-    }));
+    }), input.agent_id);
   }
 
   /** Atomically retire source ingress and install the response-first destination tail boundary. */
@@ -191,27 +292,62 @@ export class SupervisedAgentInboxStore {
       if (existing && (existing.last_observed_message_id === null ? null : String(existing.last_observed_message_id)) !== input.last_observed_message_id) throw new Error("Destination ingress cursor already has a different room-move boundary.");
       run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?"), input.agent_id, input.source_room_id);
       if (!existing) run(database.prepare("INSERT OR REPLACE INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)"), input.agent_id, input.destination_room_id, input.last_observed_message_id, this.now());
-    }, commitFence));
+    }, commitFence), input.agent_id);
   }
 
-  /** One transaction: idempotently insert activated messages and persist the poll cursor. */
-  async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; expected_cursor?: string | null; messages: readonly IngressMessage[]; observed_messages?: readonly ObservedIngressMessage[] }): Promise<SupervisedInboxItem[]> {
+  /** Insert poll data without changing transport health. Used for durable recovery and test setup. */
+  async ingestPoll(input: PollIngestionInput): Promise<SupervisedInboxItem[]> {
+    return this.commitPollIngestion(input);
+  }
+
+  /**
+   * Commit every fact proven by one successful network poll together. The
+   * renderer must never observe newly received work while the same poll still
+   * carries an older backoff error.
+   */
+  async ingestSuccessfulPoll(input: SuccessfulPollIngestionInput): Promise<SupervisedInboxItem[]> {
+    this.require(input.execution_generation_id, "execution_generation_id");
+    return this.commitPollIngestion(input, input.execution_generation_id, input.onInserted);
+  }
+
+  /** One transaction: idempotently insert activated messages, persist the cursor, and optionally restore observing health. */
+  private async commitPollIngestion(input: PollIngestionInput, observingExecutionGenerationId?: string,
+    onInserted?: (sourceMessageIds: readonly string[]) => void): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
-    return this.exclusive(async (database) => this.transaction(database, () => {
-      const cursor = database.prepare("SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
+    const inserted: string[] = [];
+    let changed = true;
+    const result = await this.exclusive(async (database) => this.transaction(database, () => {
+      assertDeliveryDrainIngressAllowed(database, input.agent_id);
+      const cursor = this.reads.get(database, "ingressCursor").get(input.agent_id) as Row | undefined;
       if (cursor && String(cursor.room_id) !== input.room_id) throw new Error("Supervised inbox ingress room changed for the exact agent identity.");
       const currentCursor = cursor?.last_observed_message_id === null || cursor?.last_observed_message_id === undefined ? null : String(cursor.last_observed_message_id);
       if (input.expected_cursor !== undefined && input.expected_cursor !== currentCursor) {
         throw new Error("Supervised inbox ingress cursor changed before this poll could commit.");
       }
       if (input.last_observed_message_id !== null) this.requireNumericCursor(input.last_observed_message_id);
+      const nextCursor = input.last_observed_message_id === null || !isNewerCursor(input.last_observed_message_id, currentCursor)
+        ? currentCursor : input.last_observed_message_id;
+      if (observingExecutionGenerationId && cursor && nextCursor === currentCursor
+        && input.messages.length === 0 && (input.observed_messages?.length ?? 0) === 0) {
+        const health = this.reads.get(database, "ingressHealth").get(input.agent_id) as Row | undefined;
+        if (health?.room_id === input.room_id && health.execution_generation_id === observingExecutionGenerationId
+          && health.state === "observing" && health.detail === null) {
+          // The room/cursor/drain checks above remain inside the transaction.
+          // These timestamps are change records; binding publications own liveness.
+          // Retention is driven by growth and terminal transitions, not elapsed time.
+          changed = false;
+          return [];
+        }
+      }
+      let historyGrew = false;
       const observedAt = this.now();
       for (const message of input.observed_messages ?? input.messages.map((candidate) => ({ ...candidate, activation_decision: "activate" }))) {
         this.require(message.source_message_id, "source_message_id");
-        run(database.prepare(`INSERT INTO supervised_agent_observed_messages
+        const observed = database.prepare(`INSERT INTO supervised_agent_observed_messages
           (agent_id,room_id,source_message_id,source_message_json,activation_json,activation_decision,observed_at)
-          VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id,room_id,source_message_id) DO NOTHING`),
+          VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id,room_id,source_message_id) DO NOTHING`).run(
           input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), message.activation_decision, observedAt);
+        historyGrew ||= Number(observed.changes) > 0;
       }
       let sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value);
       const created: SupervisedInboxItem[] = [];
@@ -219,6 +355,7 @@ export class SupervisedAgentInboxStore {
         this.require(message.source_message_id, "source_message_id");
         const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, message.source_message_id) as Row | undefined;
         if (existing) { created.push(rowToItem(existing)); continue; }
+        historyGrew = true;
         sequence += 1;
         const timestamp = this.now(); const inboxItemId = randomUUID();
         const actionId = `supervised-room:${input.agent_id}:${input.room_id}:${message.source_message_id}:action:v1`;
@@ -229,16 +366,40 @@ export class SupervisedAgentInboxStore {
           inboxItemId, input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), sequence, actionId, replyId, timestamp, timestamp);
         this.recordEvent(database, inboxItemId, "received:0", "received", timestamp, null);
         this.recordEvent(database, inboxItemId, "queued:0", "queued", timestamp, null);
+        // An inbox row can be re-created after receipt pruning. Only sources
+        // beyond the committed poll cursor get a new attribution opportunity;
+        // this observation fence does not alter operational ingestion.
+        try { if (isNewerCursor(message.source_message_id, currentCursor)) inserted.push(message.source_message_id); }
+        catch { /* A nonnumeric source cannot establish new room provenance. */ }
         created.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row));
       }
       const timestamp = this.now();
-      const nextCursor = input.last_observed_message_id === null || !isNewerCursor(input.last_observed_message_id, currentCursor)
-        ? currentCursor : input.last_observed_message_id;
       run(database.prepare(`INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)
         ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,last_observed_message_id=excluded.last_observed_message_id,updated_at=excluded.updated_at`), input.agent_id, input.room_id, nextCursor, timestamp);
-      this.pruneAgentHistory(database, input.agent_id);
+      if (observingExecutionGenerationId) {
+        this.writeIngressHealth(database, {
+          agent_id: input.agent_id,
+          room_id: input.room_id,
+          execution_generation_id: observingExecutionGenerationId,
+          state: "observing",
+        }, timestamp);
+      }
+      if (historyGrew) this.pruneAgentHistory(database, input.agent_id);
       return created;
-    }));
+    }), input.agent_id, () => changed);
+    // Replays deliberately do not receive a fresh attribution opportunity.
+    // Missing observation stays local; it must never roll back received work.
+    try { if (inserted.length) onInserted?.(inserted); } catch { /* optional observation */ }
+    return result;
+  }
+
+  /**
+   * Enqueue the desktop-authored message that starts a newly created agent.
+   * Its caller supplies a deterministic source id, so retries and daemon
+   * recovery can re-admit the same launch without running the message twice.
+   */
+  async enqueueInitialMessage(input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): Promise<SupervisedInboxItem> {
+    return this.enqueueSyntheticMessage(input);
   }
 
   /**
@@ -251,21 +412,166 @@ export class SupervisedAgentInboxStore {
    * retried control action re-enqueues idempotently rather than duplicating.
    */
   async enqueueCorrection(input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): Promise<SupervisedInboxItem> {
+    return this.enqueueSyntheticMessage(input);
+  }
+
+  private async enqueueSyntheticMessage(input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): Promise<SupervisedInboxItem> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id"); this.require(input.source_message_id, "source_message_id");
+    return this.exclusive(async (database) => this.transaction(database, () => this.insertSyntheticMessage(database, input)), input.agent_id);
+  }
+
+  private insertSyntheticMessage(database: DatabaseSync, input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): SupervisedInboxItem {
+    assertDeliveryDrainIngressAllowed(database, input.agent_id);
+    const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, input.source_message_id) as Row | undefined;
+    if (existing) return rowToItem(existing);
+    const sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value) + 1;
+    const timestamp = this.now(); const inboxItemId = randomUUID();
+    const actionId = `supervised-room:${input.agent_id}:${input.room_id}:${input.source_message_id}:action:v1`;
+    const replyId = `supervised-room:${input.agent_id}:${input.room_id}:${input.source_message_id}:reply:v1`;
+    run(database.prepare(`INSERT INTO supervised_agent_inbox
+      (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+      VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
+      inboxItemId, input.agent_id, input.room_id, input.source_message_id, JSON.stringify(input.source_message), JSON.stringify(input.activation), sequence, actionId, replyId, timestamp, timestamp);
+    this.recordEvent(database, inboxItemId, "received:0", "received", timestamp, null);
+    this.recordEvent(database, inboxItemId, "queued:0", "queued", timestamp, null);
+    return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+  }
+
+  /** Only the unhandled tail can create work: a later message supersedes automatic continuation. */
+  async taskContinuityCandidate(agentId: string): Promise<SupervisedInboxItem | null> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(agentId) as Row | undefined;
+      if (!row) return null;
+      const item = rowToItem(row);
+      if (item.state !== "acknowledged_failed" || item.activation.task_continuity_considered
+        || typeof item.activation.task_continuity_owner_session_id !== "string"
+        || typeof item.activation.task_continuity_failed_at !== "string"
+        || readDurableNativeFailure(database, item.inbox_item_id) !== "failed") return null;
+      const control = database.prepare("SELECT 1 FROM turn_control_journals WHERE agent_id=? AND turn_control_present=1 AND inbox_item_id=?").get(agentId, item.inbox_item_id);
+      return control ? null : item;
+    });
+  }
+
+  /** The considered marker and child commit together; a restart can fill the gap after terminal settlement. */
+  async enqueueTaskContinuation(input: { parentId: string; agentId: string; roomId: string; workAttemptId: string;
+    providerContinuationId: string; agentSessionId: string; tasks: ContinuityTask[] | null;
+    blockReason: string | null; detail: string; delayMs: number }): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, input.source_message_id) as Row | undefined;
-      if (existing) return rowToItem(existing);
-      const sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value) + 1;
-      const timestamp = this.now(); const inboxItemId = randomUUID();
-      const actionId = `supervised-room:${input.agent_id}:${input.room_id}:${input.source_message_id}:action:v1`;
-      const replyId = `supervised-room:${input.agent_id}:${input.room_id}:${input.source_message_id}:reply:v1`;
-      run(database.prepare(`INSERT INTO supervised_agent_inbox
-        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
-        VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
-        inboxItemId, input.agent_id, input.room_id, input.source_message_id, JSON.stringify(input.source_message), JSON.stringify(input.activation), sequence, actionId, replyId, timestamp, timestamp);
-      this.recordEvent(database, inboxItemId, "received:0", "received", timestamp, null);
-      this.recordEvent(database, inboxItemId, "queued:0", "queued", timestamp, null);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(input.agentId) as Row | undefined;
+      if (!row || row.inbox_item_id !== input.parentId) return null;
+      const parent = rowToItem(row);
+      if (parent.state !== "acknowledged_failed" || parent.activation.task_continuity_considered
+        || parent.room_id !== input.roomId || parent.activation.task_continuity_owner_session_id !== input.agentSessionId
+        || readDurableNativeFailure(database, parent.inbox_item_id) !== "failed") return null;
+      const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(input.parentId) as Row | undefined;
+      if (binding?.work_attempt_id !== input.workAttemptId || binding.provider_continuation_id !== input.providerContinuationId) return null;
+      if (database.prepare("SELECT 1 FROM turn_control_journals WHERE agent_id=? AND turn_control_present=1 AND inbox_item_id=?").get(input.agentId, input.parentId)) return null;
+      const prior = this.readTaskContinuation(database, parent);
+      const continuation: TaskContinuation = { parentId: parent.inbox_item_id,
+        attempt: (prior?.attempt ?? 0) + 1, workAttemptId: input.workAttemptId,
+        providerContinuationId: input.providerContinuationId, agentSessionId: input.agentSessionId,
+        heldBefore: prior?.heldBefore ?? String(parent.activation.task_continuity_failed_at), tasks: input.tasks };
+      if (!parseTaskContinuation(continuation)) throw new Error("Invalid task continuation snapshot.");
+      const childSource = `task-continuation:${parent.inbox_item_id}`;
+      run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
+        JSON.stringify({ ...parent.activation, task_continuity_considered: childSource }), parent.inbox_item_id);
+      if (this.hasUncertainTaskEffects(database, parent)) {
+        run(database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?"),
+          "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.", parent.inbox_item_id);
+        return null;
+      }
+      if (input.tasks?.length === 0) return null;
+      // No model turn is replayed. The same native conversation retains its files and tool history.
+      const source = parent.source_message && typeof parent.source_message === "object" ? parent.source_message as Record<string, unknown> : {};
+      const child = this.insertSyntheticMessage(database, { agent_id: input.agentId, room_id: input.roomId,
+        source_message_id: childSource, activation: { task_continuity: continuation },
+        source_message: { ...source, sender: "letagents", source: "system", text: [
+          "Continue the unfinished task after a provider failure. This is a new continuation of existing authorized work, not a replay of the original request.",
+          `Tasks and exact work leases: ${JSON.stringify(input.tasks)}`,
+          "Preserve existing work. Inspect the current files, Git status, task board, and your prior tool results before proceeding. Do not repeat completed actions, claims, commits, PRs, or merges. Verify any uncertain external action before attempting it again; report a blocker if its result cannot be established.",
+          "Continue only these tasks while you still hold their work leases. Keep the existing scope and approval requirements. If they are already finished or no longer yours, take no action.",
+        ].join("\n") } });
+      const reason = input.blockReason;
+      const timestamp = this.now();
+      run(database.prepare("UPDATE supervised_agent_inbox SET state=?,last_error=?,next_attempt_at_ms=? WHERE inbox_item_id=?"),
+        reason ? "blocked" : "pending", reason ?? input.detail, reason ? null : Date.parse(timestamp) + input.delayMs, child.inbox_item_id);
+      this.recordEvent(database, child.inbox_item_id, "task-continuation:0", reason ? "blocked" : "retry_scheduled", timestamp, reason ?? input.detail);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(child.inbox_item_id) as Row);
+    }));
+  }
+
+  private readTaskContinuation(database: DatabaseSync, item: SupervisedInboxItem): TaskContinuation | null {
+    if (!item.source_message_id.startsWith("task-continuation:")) return null;
+    const metadata = parseTaskContinuation(item.activation.task_continuity);
+    if (!metadata || item.source_message_id !== `task-continuation:${metadata.parentId}`) throw new Error("Task continuation metadata is invalid.");
+    const parent = database.prepare(`SELECT i.*,b.work_attempt_id,b.provider_continuation_id FROM supervised_agent_inbox i
+      JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id WHERE i.inbox_item_id=?`).get(metadata.parentId) as Row | undefined;
+    const activation = parent ? rowToItem(parent).activation : null;
+    if (!parent || parent.agent_id !== item.agent_id || parent.room_id !== item.room_id
+      || parent.work_attempt_id !== metadata.workAttemptId || parent.provider_continuation_id !== metadata.providerContinuationId
+      || activation?.task_continuity_considered !== item.source_message_id
+      || activation.task_continuity_owner_session_id !== metadata.agentSessionId
+      || readDurableNativeFailure(database, metadata.parentId) !== "failed") throw new Error("Task continuation lost its original owner or failure evidence.");
+    return metadata;
+  }
+
+  async taskContinuation(inboxItemId: string): Promise<TaskContinuation | null> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      return row ? this.readTaskContinuation(database, rowToItem(row)) : null;
+    });
+  }
+
+  private hasUncertainTaskEffects(database: DatabaseSync, parent: SupervisedInboxItem): boolean {
+    const binding = database.prepare("SELECT origin_execution_generation_id FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(parent.inbox_item_id) as Row | undefined;
+    return ["supervised_agent_effects", "supervised_agent_effect_tombstones"].some((table) => Boolean(database.prepare(`SELECT 1 FROM ${table}
+      WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=? AND mutation=1 AND state IN ('executing','uncertain') LIMIT 1`)
+      .get(parent.agent_id, parent.room_id, binding?.origin_execution_generation_id as string, parent.provider_turn_id)));
+  }
+
+  async taskContinuationHasUncertainEffects(inboxItemId: string): Promise<boolean> {
+    return this.read(async (database) => {
+      const item = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const continuation = this.readTaskContinuation(database, item);
+      if (!continuation) return false;
+      return this.hasUncertainTaskEffects(database, rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(continuation.parentId) as Row));
+    });
+  }
+
+  async taskContinuationDelay(inboxItemId: string): Promise<number> {
+    const item = await this.get(inboxItemId);
+    return Math.max(0, (item?.next_attempt_at_ms ?? 0) - Date.parse(this.now()));
+  }
+
+  /** Resolve a previously unavailable snapshot, or remove tasks that have since finished. Never add to a known scope. */
+  async refreshTaskContinuationSnapshot(inboxItemId: string, tasks: ContinuityTask[]): Promise<TaskContinuation> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const item = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const previous = this.readTaskContinuation(database, item);
+      if (!previous || item.state !== "pending" || item.provider_turn_id || item.outcome || !tasks.length
+        || (previous.tasks && tasks.some((task) => !previous.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)))) throw new Error("Task continuation scope cannot expand.");
+      this.assertCurrentHead(database, item);
+      const metadata = { ...previous, tasks };
+      if (!parseTaskContinuation(metadata)) throw new Error("Invalid task continuation snapshot.");
+      const source = item.source_message as Record<string, unknown>;
+      const text = String(source.text).replace(/^Tasks and exact work leases:.*$/m, `Tasks and exact work leases: ${JSON.stringify(tasks)}`);
+      run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=?,source_message_json=? WHERE inbox_item_id=?"),
+        JSON.stringify({ ...item.activation, task_continuity: metadata }), JSON.stringify({ ...source, text }), inboxItemId);
+      return metadata;
+    }));
+  }
+
+  /** A never-dispatched synthetic continuation can become unnecessary; it has no native outcome to overwrite. */
+  async finishUnusedTaskContinuation(inboxItemId: string, detail: string): Promise<void> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const item = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      if (!this.readTaskContinuation(database, item) || item.state !== "pending" || item.provider_turn_id || item.outcome) throw new Error("Only an undispatched task continuation can be skipped.");
+      this.assertCurrentHead(database, item);
+      const timestamp = this.now();
+      run(database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',last_error=?,acknowledged_at=?,updated_at=? WHERE inbox_item_id=?"), detail, timestamp, timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, "task-continuation:unused", "no_reply", timestamp, detail);
+      this.settleTerminalItem(database, item, timestamp);
+      this.pruneAgentHistory(database, item.agent_id);
     }));
   }
 
@@ -278,7 +584,7 @@ export class SupervisedAgentInboxStore {
 
   async head(agentId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       return row ? rowToItem(row) : null;
     });
   }
@@ -289,6 +595,22 @@ export class SupervisedAgentInboxStore {
         .get(inboxItemId) as Row | undefined;
       return row ? rowToProviderTurnBinding(row) : null;
     });
+  }
+  /** Completed routing controls carry no text and grant no publication authority.
+   * Retain legacy intercepted requests for already-running provider versions;
+   * Stop may fail those effects before a native reply wins publication. */
+  async hasInterceptedThreadReply(inboxItemId: string): Promise<boolean> {
+    return this.read(async (database) => Boolean(database.prepare(`SELECT 1
+      FROM supervised_agent_inbox i
+      JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+        AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
+      JOIN supervised_agent_effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
+        AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
+      WHERE i.inbox_item_id=? AND (
+        (e.state='completed' AND e.tool_name='set_reply_thread') OR
+        (e.state IN ('prepared','failed') AND e.tool_name IN ('send_message','send_thread_message')
+          AND json_extract(e.request_json,'$.thread_parent_id')=i.source_message_id))
+      LIMIT 1`).get(inboxItemId)));
   }
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
@@ -319,15 +641,62 @@ export class SupervisedAgentInboxStore {
           VALUES (?,?,?,?,?,?) ON CONFLICT(inbox_item_id) DO NOTHING`), item.inbox_item_id, item.agent_id, item.room_id, item.reply_client_message_id, input.canonical_message_id, timestamp);
         run(database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged',updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"), timestamp, timestamp, item.inbox_item_id);
         this.recordEvent(database, item.inbox_item_id, `published:${item.attempt_count}`, "published", timestamp, input.canonical_message_id);
-        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.settleTerminalItem(database, item, timestamp);
       }
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
     }));
   }
   /** Exact-entry, exact-room, bounded renderer-safe projection. */
-  async detail(agentId: string, roomId: string, sourceMessageId?: string | null): Promise<AgentInspectorDetail> {
+  async detail(
+    agentId: string,
+    roomId: string,
+    sourceMessageId?: string | null,
+    runtimeFence?: { executionGenerationId: string; runtimeGenerationId: string; daemonGenerationId: string } | null,
+  ): Promise<AgentInspectorDetail> {
     return this.read(async (database) => {
+      let runtimeControl: AgentInspectorDetail["runtime_control"] = null;
+      try { if (runtimeFence !== null) {
+        const runtime = database.prepare(`SELECT r.control_state,r.runtime_state,
+          o.observer_execution_generation_id,o.observer_runtime_generation_id,o.daemon_generation_id,
+          (SELECT MAX(f.observed_at_ms) FROM execution_facts f
+            WHERE f.agent_id=o.agent_id
+              AND f.execution_generation_id=o.observer_execution_generation_id
+              AND f.runtime_generation_id=o.observer_runtime_generation_id
+              AND f.observer_epoch=o.observer_epoch
+              AND f.domain='control') AS observed_at_ms
+          FROM execution_observers o
+          JOIN execution_runtime_generations r ON r.agent_id=o.agent_id
+            AND r.execution_generation_id=o.observer_execution_generation_id
+            AND r.runtime_generation_id=o.observer_runtime_generation_id
+          WHERE o.agent_id=?
+            AND o.max_observed_sequence=o.last_source_sequence
+            AND (? IS NULL OR (o.observer_execution_generation_id=?
+              AND o.observer_runtime_generation_id=? AND o.daemon_generation_id=?))`).get(
+          agentId,
+          runtimeFence?.executionGenerationId ?? null,
+          runtimeFence?.executionGenerationId ?? "",
+          runtimeFence?.runtimeGenerationId ?? "",
+          runtimeFence?.daemonGenerationId ?? "",
+        ) as Row | undefined;
+        if (runtime) {
+          const observedAtMs = runtime.observed_at_ms === null ? null : Number(runtime.observed_at_ms);
+          const observedAt = observedAtMs !== null && Number.isSafeInteger(observedAtMs)
+            ? new Date(observedAtMs).toISOString()
+            : null;
+          runtimeControl = {
+            control_state: String(runtime.control_state) as NonNullable<AgentInspectorDetail["runtime_control"]>["control_state"],
+            runtime_state: String(runtime.runtime_state) as NonNullable<AgentInspectorDetail["runtime_control"]>["runtime_state"],
+            observed_at: observedAt,
+            execution_generation_id: String(runtime.observer_execution_generation_id),
+            daemon_generation_id: String(runtime.daemon_generation_id),
+            runtime_generation_id: String(runtime.observer_runtime_generation_id),
+          };
+        }
+      } } catch {
+        // Control health is optional evidence. A missing/corrupt execution
+        // journal must not hide durable delivery history from the Inspector.
+      }
       const boundary = database.prepare("SELECT * FROM supervised_agent_history_boundaries WHERE agent_id=? AND room_id=?").get(agentId, roomId) as Row | undefined;
       // Work rows are newest-first so a reopened Inspector starts at current work.
       const items = (database.prepare(`SELECT i.inbox_item_id,i.source_message_id,i.source_message_json,i.state,i.attempt_count,i.updated_at,i.outcome,i.provider_turn_id,i.last_error,i.failure_code,i.terminal_reason,p.canonical_message_id
@@ -349,14 +718,39 @@ export class SupervisedAgentInboxStore {
         const pruned = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_pruned_sources WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const observed = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const availability: AgentInspectorDetail["availability"] = pruned ? "pruned" : observed ? "not_loaded" : "not_loaded";
-        return { availability, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, continuation_repair: null, timeline: [], items, uncertain_effects: uncertainEffects, history_boundary: history };
+        return { availability, runtime_control: runtimeControl, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, continuation_repair: null, timeline: [], items, uncertain_effects: uncertainEffects, history_boundary: history };
       }
       const item = rowToItem(row);
-      const events = (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
+      const events = (database.prepare("SELECT event_sequence,phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
+      const contextEvent = database.prepare("SELECT snapshot_json FROM supervised_agent_prepared_context WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
+      let preparedContext: PreparedRoomContext | null = null;
+      try { if (contextEvent) preparedContext = JSON.parse(String(contextEvent.snapshot_json)); } catch { /* Optional evidence must not hide delivery receipts. */ }
+      const control = database.prepare(`SELECT j.* FROM turn_control_journals j
+        JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=j.inbox_item_id
+        WHERE j.turn_control_present=1 AND j.agent_id=? AND j.target_room_id=?
+          AND j.target_source_message_id=? AND j.inbox_item_id=?
+          AND b.agent_id=j.agent_id AND b.room_id=j.target_room_id
+          AND b.provider_turn_id=j.provider_turn_id AND b.work_attempt_id=j.turn_work_attempt_id
+          AND b.origin_execution_generation_id=j.turn_execution_generation_id
+          AND b.provider_continuation_id=j.target_provider_continuation_id`)
+        .get(agentId, roomId, item.source_message_id, item.inbox_item_id) as Row | undefined;
+      const intervention: MessageIntervention | null = control ? {
+        actionId: String(control.action_id), recordedAt: String(control.recorded_at),
+        hasCorrection: control.has_correction === 1,
+        correctionText: typeof control.correction_text === "string" ? control.correction_text : null,
+        strategy: control.correction_strategy as MessageIntervention["strategy"],
+        operatorResolution: control.operator_resolution as MessageIntervention["operatorResolution"],
+        status: control.status as MessageIntervention["status"],
+        interrupted: control.interrupted === null ? null : control.interrupted === 1,
+        resumed: control.resumed === null ? null : control.resumed === 1,
+      } : null;
       const terminal = database.prepare("SELECT outcome,normalized_text,evidence_source,observed_at FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const publication = database.prepare("SELECT room_id,client_message_id,canonical_message_id FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
-      const repair = database.prepare("SELECT * FROM provider_continuation_repairs WHERE inbox_item_id=? ORDER BY created_at DESC LIMIT 1").get(item.inbox_item_id) as Row | undefined;
-      return { availability: "available", entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: item.inbox_item_id,
+      const repair = database.prepare("SELECT * FROM provider_continuation_repairs WHERE inbox_item_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(item.inbox_item_id) as Row | undefined;
+      return { availability: "available", runtime_control: runtimeControl, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: item.inbox_item_id,
+        prepared_context: preparedContext,
+        latest_intervention: intervention,
+        recorded_execution: new ExecutionShadowStore(database).retainedMessageExecution(agentId, roomId, item.source_message_id),
         source_message: safeSource(item.source_message, item.source_message_id, roomId, item.activation),
         receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, failure_code: item.failure_code, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms, terminal_reason: item.terminal_reason },
         terminal: terminal ? { outcome: String(terminal.outcome), normalized_text: terminal.normalized_text === null ? null : String(terminal.normalized_text), evidence_source: String(terminal.evidence_source), observed_at: String(terminal.observed_at) } : null,
@@ -371,10 +765,32 @@ export class SupervisedAgentInboxStore {
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (!transitions[item.state].includes(next)) throw new Error(`Invalid supervised inbox transition: ${item.state} -> ${next}.`);
+      const nativeFailure = readDurableNativeFailure(database, inboxItemId);
+      if (nativeFailure && ((Object.hasOwn(patch, "outcome") && patch.outcome !== item.outcome)
+        || ["pending", "publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(next))) {
+        throw new Error("Exact native terminal failure cannot be overwritten or replayed.");
+      }
+      if (Object.hasOwn(patch, "outcome") && patch.outcome !== item.outcome) {
+        let kind: unknown;
+        try { kind = patch.outcome ? JSON.parse(patch.outcome).kind : null; } catch { /* Existing opaque outcomes remain supported. */ }
+        if (kind === "failed" || kind === "interrupted") throw new Error("Native failure outcomes require the exact terminal checkpoint.");
+      }
+      if (next === "acknowledged_failed") {
+        this.assertCurrentHead(database, item);
+        const patchKeys = Object.keys(patch);
+        const hasOnlyFailureDetail = patchKeys.length === 1
+          && patchKeys[0] === "last_error"
+          && typeof patch.last_error === "string"
+          && patch.last_error.trim().length > 0;
+        if ((patchKeys.length > 0 && !hasOnlyFailureDetail) || !nativeFailure) {
+          throw new Error("Failed settlement requires unchanged exact native terminal evidence.");
+        }
+      }
       // Every in-flight state is causally owned by the true FIFO head. This
       // prevents a later item becoming blocked and hiding the real stall.
       if (!finalStates.has(next)) this.assertCurrentHead(database, item);
       if (next === "dispatching" && item.state !== "pending") throw new Error("Only the current pending FIFO head may be dispatched.");
+      if (next === "dispatching" && !deliveryDrainAllowsAdmission(database, item)) throw new Error("Delivery drain blocks new turn admission.");
       if (Object.hasOwn(patch, "provider_turn_id")
         && patch.provider_turn_id !== item.provider_turn_id) {
         throw new Error("Provider turn identity may change only through the atomic turn-start checkpoint.");
@@ -393,17 +809,19 @@ export class SupervisedAgentInboxStore {
         this.recordEvent(database, inboxItemId, `${event}:${ordinal}`, event, timestamp, updated.last_error);
       }
       if (finalStates.has(next)) {
-        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.settleTerminalItem(database, item, timestamp);
         this.pruneAgentHistory(database, item.agent_id);
       }
       return updated;
     }));
   }
-  async claimHead(agentId: string): Promise<SupervisedInboxItem | null> {
+  async claimHead(agentId: string, expected?: InboxHeadSnapshot | null): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      if (pendingRuntimeRecovery(database, agentId)) return null;
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
+      if (expected !== undefined && !sameInboxHead(expected, item)) return null;
       const turnControlBarrier = database.prepare(`SELECT inbox_item_id,status FROM turn_control_journals
         WHERE agent_id=? AND turn_control_present=1
           AND status IN ('prepared','dispatching','uncertain','retryable')`).get(agentId) as Row | undefined;
@@ -422,8 +840,11 @@ export class SupervisedAgentInboxStore {
         // blocked after A finishes until the accepted action completes.
         if (status !== "retryable" || linkedInboxItemId === null || item.inbox_item_id !== linkedInboxItemId) return null;
       }
+      if (!deliveryDrainAllowsAdmission(database, item)) return null;
       if (item.state === "result_recovery") return item;
       if (item.state !== "pending") return null;
+      if (this.readTaskContinuation(database, item) && item.next_attempt_at_ms !== null
+        && item.next_attempt_at_ms > Date.parse(this.now())) return null;
       this.assertCurrentHead(database, item);
       const timestamp = this.now();
       run(database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
@@ -436,13 +857,21 @@ export class SupervisedAgentInboxStore {
    * fact itself is the FIFO claim's committed `dispatching` state; this is
    * intentionally not a second synthetic transition.
    */
-  async checkpointDispatchIntent(inboxItemId: string): Promise<SupervisedInboxItem> {
+  async checkpointDispatchIntent(inboxItemId: string, taskOwnerSessionId?: string, context?: readonly unknown[]): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (item.state !== "dispatching" || item.provider_turn_id) throw new Error("Provider dispatch intent requires an unstarted dispatching inbox item.");
       this.assertCurrentHead(database, item);
+      if (!deliveryDrainAllowsAdmission(database, item)) throw new Error("Delivery drain blocks new turn dispatch.");
+      if (context) {
+        const snapshot = prepareRoomContext(context, this.now());
+        run(database.prepare(`INSERT INTO supervised_agent_prepared_context(inbox_item_id,snapshot_json) VALUES (?,?)
+          ON CONFLICT(inbox_item_id) DO UPDATE SET snapshot_json=excluded.snapshot_json`), inboxItemId, JSON.stringify(snapshot));
+      }
+      run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
+        JSON.stringify({ ...item.activation, task_continuity_dispatch_session_id: taskOwnerSessionId ?? null }), inboxItemId);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
@@ -491,52 +920,101 @@ export class SupervisedAgentInboxStore {
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
-  /**
-   * Roll back only a provider turn whose durable wrapper proves native dispatch
-   * never happened. This is intentionally narrower than the ordinary retry
-   * transition: exact turn identity, FIFO ownership, and absence of terminal
-   * or tool-effect evidence are all checked in the same transaction.
-   */
-  async resetUndispatchedTurn(inboxItemId: string, providerTurnId: string): Promise<SupervisedInboxItem> {
-    if (!providerTurnId.trim()) throw new Error("Undispatched reset requires an exact provider turn id.");
+  /** Record failure debt and its retry/block disposition in one transaction. */
+  async recordRetryFailure(inboxItemId: string, input: {
+    domain: SupervisedRetryDomain;
+    error: string;
+    resetUndispatchedTurnId?: string;
+  }): Promise<{ item: SupervisedInboxItem; attempt: number }> {
+    if (!["pre_dispatch", "result_recovery", "publication"].includes(input.domain)) {
+      throw new Error("Unknown supervised retry domain.");
+    }
+    const resetTurnId = input.resetUndispatchedTurnId;
+    if (resetTurnId !== undefined && (input.domain !== "pre_dispatch" || !resetTurnId.trim())) {
+      throw new Error("Undispatched reset requires an exact provider turn id and pre-dispatch retry domain.");
+    }
     return this.exclusive(async (database) => this.transaction(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(row);
-      if (!["dispatching", "awaiting_result", "result_recovery"].includes(item.state)
-        || item.provider_turn_id !== providerTurnId) {
-        throw new Error("Undispatched reset does not match the exact in-flight provider turn.");
-      }
       this.assertCurrentHead(database, item);
+      if (readDurableNativeFailure(database, inboxItemId)) {
+        throw new Error("Exact native terminal failure cannot be retried.");
+      }
       const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
         .get(inboxItemId) as Row | undefined;
-      if (!binding || String(binding.agent_id) !== item.agent_id || String(binding.room_id) !== item.room_id
-        || String(binding.provider_turn_id) !== providerTurnId) {
-        throw new Error("Undispatched reset is missing its exact provider-turn authority binding.");
+      const terminal = database.prepare("SELECT outcome FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      const outcome = safeOutcome(item.outcome) as { kind?: unknown; text?: unknown } | null;
+      if (input.domain === "publication") {
+        if (item.state !== "publishing" || outcome?.kind !== "reply"
+          || typeof outcome.text !== "string" || !outcome.text.trim()) {
+          throw new Error("Publication retry requires a publishing inbox item with its saved reply.");
+        }
+      } else {
+        if (!["dispatching", "awaiting_result", "result_recovery"].includes(item.state)
+          || (resetTurnId !== undefined && item.provider_turn_id !== resetTurnId)) {
+          throw new Error("Retry does not match the exact in-flight provider turn.");
+        }
+        if (input.domain === "result_recovery" || resetTurnId !== undefined) {
+          if (!item.provider_turn_id || !binding || String(binding.agent_id) !== item.agent_id
+            || String(binding.room_id) !== item.room_id || String(binding.provider_turn_id) !== item.provider_turn_id) {
+            throw new Error("Retry is missing its exact provider-turn authority binding.");
+          }
+        }
+        if (input.domain === "result_recovery") {
+          if ((terminal && terminal.outcome !== "unreadable")
+            || (item.outcome !== null && outcome?.kind !== "unreadable")) {
+            throw new Error("Accepted terminal completion cannot consume a result-recovery retry.");
+          }
+        } else if (resetTurnId !== undefined) {
+          const executionGenerationId = String(binding!.origin_execution_generation_id);
+          const effect = database.prepare(`SELECT 1 FROM supervised_agent_effects
+            WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
+            UNION ALL
+            SELECT 1 FROM supervised_agent_effect_tombstones
+            WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
+            LIMIT 1`).get(
+            item.agent_id, item.room_id, executionGenerationId, resetTurnId,
+            item.agent_id, item.room_id, executionGenerationId, resetTurnId,
+          );
+          if (terminal || effect || item.outcome) {
+            throw new Error("Undispatched reset found terminal or effect evidence and was refused.");
+          }
+        } else if (item.provider_turn_id || binding || item.outcome || terminal || item.state === "result_recovery") {
+          throw new Error("Pre-dispatch retry requires an unstarted dispatch without turn or terminal evidence.");
+        }
       }
-      const executionGenerationId = String(binding.origin_execution_generation_id);
-      const terminal = database.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(inboxItemId);
-      const effect = database.prepare(`SELECT 1 FROM supervised_agent_effects
-        WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
-        UNION ALL
-        SELECT 1 FROM supervised_agent_effect_tombstones
-        WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
-        LIMIT 1`).get(
-        item.agent_id, item.room_id, executionGenerationId, providerTurnId,
-        item.agent_id, item.room_id, executionGenerationId, providerTurnId,
-      );
-      if (terminal || effect || item.outcome) {
-        throw new Error("Undispatched reset found terminal or effect evidence and was refused.");
-      }
+
+      // Count the physical journal, never the receipt's bounded display tail.
+      // Old generic retry keys have unknown provenance: retain that debt for
+      // each domain, without guessing from error text. Known bookkeeping keys
+      // (including room-move rollback and handoff) do not consume a budget.
+      const prefix = `retry_failure:${input.domain}:`;
+      const legacyPrefix = input.domain === "pre_dispatch" ? "undispatched_retry:*"
+        : input.domain === "result_recovery" ? "result_recovery_retry:*" : null;
+      const prior = Number((database.prepare(`SELECT COUNT(*) AS value FROM supervised_agent_inbox_events
+        WHERE inbox_item_id=? AND phase='retry_scheduled'
+          AND (idempotency_key GLOB ? OR idempotency_key GLOB ? OR idempotency_key GLOB 'retry_scheduled:*')`)
+        .get(inboxItemId, `${prefix}*`, legacyPrefix) as Row).value);
+      const attempt = prior + 1;
+      const exhausted = attempt >= 3;
+      const reset = resetTurnId !== undefined && !exhausted;
+      const next = exhausted ? "blocked" : reset ? "pending"
+        : item.state === "result_recovery" ? "result_recovery" : "retryable";
       const timestamp = this.now();
-      run(database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?"), inboxItemId);
+      const label = input.domain === "result_recovery" ? "Result recovery"
+        : input.domain === "publication" ? "Reply publication" : "Pre-dispatch preparation";
+      const error = exhausted ? `${label} failed ${attempt} times: ${input.error}` : input.error;
+      if (reset) run(database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?"), inboxItemId);
       run(database.prepare(`UPDATE supervised_agent_inbox
-        SET state='pending',attempt_count=?,provider_turn_id=NULL,outcome=NULL,last_error=NULL,
-            failure_code=NULL,next_attempt_at_ms=NULL,updated_at=?
-        WHERE inbox_item_id=?`), Math.max(0, item.attempt_count - 1), timestamp, inboxItemId);
-      const retryOrdinal = Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='retry_scheduled'").get(inboxItemId) as Row).value) + 1;
-      this.recordEvent(database, inboxItemId, `undispatched_retry:${retryOrdinal}:${providerTurnId}`, "retry_scheduled", timestamp, "Prepared provider wrapper exited before native dispatch; retrying the same FIFO item.");
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+        SET state=?,attempt_count=?,provider_turn_id=?,last_error=?,failure_code=NULL,
+            blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?
+        WHERE inbox_item_id=?`), next, reset ? Math.max(0, item.attempt_count - 1) : item.attempt_count,
+      reset ? null : item.provider_turn_id, error, timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, `${prefix}${attempt}`, "retry_scheduled", timestamp, error);
+      if (exhausted) this.recordEvent(database, inboxItemId, `${prefix}${attempt}:blocked`, "blocked", timestamp, error);
+      return { item: rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row), attempt };
     }));
   }
   /**
@@ -570,9 +1048,11 @@ export class SupervisedAgentInboxStore {
     agent_id: string;
     execution_generation_id: string;
     provider_turn_id: string;
-    outcome: "reply" | "no_reply" | "unreadable";
+    outcome: "reply" | "no_reply" | "unreadable" | "failed" | "interrupted";
     text: string | null;
     evidence: "transcript" | "stream" | "none";
+    failure_detail?: string | null;
+    task_owner_session_id?: string;
     terminal_evidence: unknown;
   }): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
@@ -591,12 +1071,36 @@ export class SupervisedAgentInboxStore {
         || String(binding.provider_turn_id) !== input.provider_turn_id) {
         throw new Error("Normalized terminal evidence does not match the durable provider-turn authority binding.");
       }
-      const priorTerminal = database.prepare(`SELECT agent_id,execution_generation_id,provider_turn_id
+      const nativeFailure = input.outcome === "failed" || input.outcome === "interrupted";
+      if (!nativeFailure && input.failure_detail) {
+        throw new Error("Only an exact native terminal failure may retain a failure detail.");
+      }
+      if (nativeFailure) {
+        const evidence = input.terminal_evidence as Record<string, unknown> | null;
+        const failureDetail = input.failure_detail?.trim() || undefined;
+        if (input.text !== null || input.evidence === "none" || !evidence
+          || evidence.outcome !== input.outcome || evidence.turnId !== input.provider_turn_id
+          || evidence.text !== null || evidence.evidence !== input.evidence
+          || evidence.providerContinuationId !== binding.provider_continuation_id
+          || evidence.error !== failureDetail) {
+          throw new Error("Native terminal failure requires exact continuation, turn, and terminal evidence.");
+        }
+      }
+      const priorTerminal = database.prepare(`SELECT agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text
         FROM supervised_agent_terminal_results WHERE inbox_item_id=?`).get(input.inbox_item_id) as Row | undefined;
       if (priorTerminal && (String(priorTerminal.agent_id) !== input.agent_id
         || String(priorTerminal.execution_generation_id) !== input.execution_generation_id
         || String(priorTerminal.provider_turn_id) !== input.provider_turn_id)) {
         throw new Error("Normalized terminal evidence conflicts with an earlier provider-turn authority identity.");
+      }
+      // A definitive completion is monotonic. Re-reading can resolve an
+      // unreadable result, but cleanup or a late observation cannot demote an
+      // already accepted room reply/no-reply or change an exact native failure.
+      if (priorTerminal && priorTerminal.outcome !== "unreadable") {
+        if (input.outcome === "unreadable"
+          || (nativeFailure && ["reply", "no_reply"].includes(String(priorTerminal.outcome)))
+          || (priorTerminal.outcome === input.outcome && priorTerminal.normalized_text === input.text)) return item;
+        throw new Error("Normalized terminal evidence conflicts with an already accepted completion.");
       }
       const timestamp = this.now();
       run(database.prepare(`INSERT INTO supervised_agent_terminal_results
@@ -605,7 +1109,19 @@ export class SupervisedAgentInboxStore {
         ON CONFLICT(inbox_item_id) DO UPDATE SET outcome=excluded.outcome,normalized_text=excluded.normalized_text,evidence_source=excluded.evidence_source,terminal_evidence_json=excluded.terminal_evidence_json,updated_at=excluded.updated_at`),
         input.inbox_item_id, input.agent_id, input.execution_generation_id, input.provider_turn_id, input.outcome, input.text, input.evidence, JSON.stringify(input.terminal_evidence), timestamp, timestamp);
       const outcome = JSON.stringify({ kind: input.outcome, text: input.text, evidence: input.evidence });
-      run(database.prepare("UPDATE supervised_agent_inbox SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, timestamp, input.inbox_item_id);
+      const failureDetail = nativeFailure ? input.failure_detail?.trim() || null : item.last_error;
+      run(database.prepare(`UPDATE supervised_agent_inbox
+        SET outcome=?,last_error=?,updated_at=? WHERE inbox_item_id=?`),
+        outcome, failureDetail, timestamp, input.inbox_item_id);
+      // Recovery may observe an old turn after a worker-session replacement.
+      // Only the worker stamped before native dispatch can inherit its work.
+      if (input.outcome === "failed") {
+        const sameOwner = input.task_owner_session_id
+          && item.activation.task_continuity_dispatch_session_id === input.task_owner_session_id;
+        run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
+          JSON.stringify({ ...item.activation, task_continuity_owner_session_id: sameOwner ? input.task_owner_session_id : null,
+            task_continuity_failed_at: sameOwner ? timestamp : null, task_continuity_considered: null }), input.inbox_item_id);
+      }
       this.recordEvent(database, input.inbox_item_id, `turn_finished:${item.attempt_count}:${input.provider_turn_id}`, "turn_finished", timestamp, input.evidence);
       if (input.outcome === "unreadable") {
         this.recordEvent(database, input.inbox_item_id, `result_unreadable:${input.provider_turn_id}`, "result_unreadable", timestamp, "Re-reading the same completed provider turn.");
@@ -614,20 +1130,8 @@ export class SupervisedAgentInboxStore {
     }));
   }
 
-  async recordResultRecoveryRetry(inboxItemId: string, error: string): Promise<number> {
-    return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
-      if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
-      const item = rowToItem(row);
-      if (item.state !== "result_recovery") throw new Error("Only an unreadable terminal result may record a result-recovery retry.");
-      this.assertCurrentHead(database, item);
-      const prior = Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='retry_scheduled'").get(inboxItemId) as Row).value);
-      const attempt = prior + 1;
-      const timestamp = this.now();
-      run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?"), error, timestamp, inboxItemId);
-      this.recordEvent(database, inboxItemId, `result_recovery_retry:${attempt}`, "retry_scheduled", timestamp, `Re-reading the same completed turn (${attempt}/3): ${error}`);
-      return attempt;
-    }));
+  async nativeFailure(inboxItemId: string): Promise<"failed" | "interrupted" | null> {
+    return this.read(async (database) => readDurableNativeFailure(database, inboxItemId));
   }
 
   async observedContext(agentId: string, roomId: string, limit = 50): Promise<ObservedIngressMessage[]> {
@@ -636,18 +1140,21 @@ export class SupervisedAgentInboxStore {
       .reverse().map((row) => ({ source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), activation_decision: String(row.activation_decision) })));
   }
 
-  async setIngressHealth(input: { agent_id: string; room_id: string; execution_generation_id: string; state: "starting" | "observing" | "backoff" | "blocked" | "stopped"; detail?: string | null }): Promise<void> {
+  async setIngressHealth(input: IngressHealthUpdate): Promise<void> {
     await this.exclusive(async (database) => this.transaction(database, () => {
-      const timestamp = this.now();
-      run(database.prepare(`INSERT INTO supervised_agent_ingress_health(agent_id,room_id,execution_generation_id,state,detail,observed_at,updated_at)
-        VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,execution_generation_id=excluded.execution_generation_id,state=excluded.state,detail=excluded.detail,observed_at=excluded.observed_at,updated_at=excluded.updated_at`),
-        input.agent_id, input.room_id, input.execution_generation_id, input.state, input.detail ?? null, timestamp, timestamp);
-    }));
+      this.writeIngressHealth(database, input, this.now());
+    }), input.agent_id);
+  }
+
+  private writeIngressHealth(database: DatabaseSync, input: IngressHealthUpdate, timestamp: string): void {
+    run(database.prepare(`INSERT INTO supervised_agent_ingress_health(agent_id,room_id,execution_generation_id,state,detail,observed_at,updated_at)
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,execution_generation_id=excluded.execution_generation_id,state=excluded.state,detail=excluded.detail,observed_at=excluded.observed_at,updated_at=excluded.updated_at`),
+      input.agent_id, input.room_id, input.execution_generation_id, input.state, input.detail ?? null, timestamp, timestamp);
   }
 
   async ingressHealth(agentId: string): Promise<{ room_id: string; state: "starting" | "observing" | "backoff" | "blocked" | "stopped"; detail: string | null; execution_generation_id: string } | null> {
     return this.read(async (database) => {
-      const row = database.prepare("SELECT room_id,state,detail,execution_generation_id FROM supervised_agent_ingress_health WHERE agent_id=?").get(agentId) as Row | undefined;
+      const row = this.reads.get(database, "ingressHealth").get(agentId) as Row | undefined;
       return row ? { room_id: String(row.room_id), state: String(row.state) as "starting" | "observing" | "backoff" | "blocked" | "stopped", detail: row.detail === null ? null : String(row.detail), execution_generation_id: String(row.execution_generation_id) } : null;
     });
   }
@@ -658,6 +1165,9 @@ export class SupervisedAgentInboxStore {
     mcp_request_id: string; tool_name: string; request: unknown; mutation?: boolean;
   }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; effect: SupervisedEffectRecord }> {
     const requestJson = serializeEffectJson(input.request, "request");
+    if (input.tool_name === "set_reply_thread" && requestJson !== "{}") {
+      throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
+    }
     const expectedMutation = !READ_ONLY_EFFECT_TOOLS.has(input.tool_name);
     if (input.mutation !== undefined && input.mutation !== expectedMutation) {
       throw new Error("The supervised effect classification does not match the registered tool policy.");
@@ -680,7 +1190,7 @@ export class SupervisedAgentInboxStore {
           if (!completion) throw new Error("The supervised room-turn completion proposal is malformed.");
           const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
             WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-              AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+              AND tool_name<>'complete_room_turn' AND state='executing' AND mutation=1 LIMIT 1`).get(
             input.agent_id, input.execution_generation_id, input.provider_turn_id,
           );
           if (executing) {
@@ -748,7 +1258,7 @@ export class SupervisedAgentInboxStore {
           if (effect.state !== "completed") {
             const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
               WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-                AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+                AND tool_name<>'complete_room_turn' AND state='executing' AND mutation=1 LIMIT 1`).get(
               input.agent_id, input.execution_generation_id, input.provider_turn_id,
             );
             if (executing) {
@@ -765,16 +1275,38 @@ export class SupervisedAgentInboxStore {
         }
         const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
           WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-            AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+            AND tool_name<>'complete_room_turn' AND state='executing' AND mutation=1 LIMIT 1`).get(
           input.agent_id, input.execution_generation_id, input.provider_turn_id,
         );
         if (executing) {
           throw new Error("The supervised room turn cannot complete while an earlier effect is still executing.");
         }
       }
-      this.assertActiveEffectAuthority(database, input);
+      const binding = this.assertActiveEffectAuthority(database, input);
       const timestamp = this.now();
       const effectId = randomUUID();
+      if (input.tool_name === "set_reply_thread") {
+        // Only an observed room message can select a thread. Synthetic initial
+        // assignments, corrections and task continuations are not room messages.
+        const source = database.prepare(`SELECT i.source_message_id FROM supervised_agent_inbox i
+          JOIN supervised_agent_observed_messages o ON o.agent_id=i.agent_id AND o.room_id=i.room_id
+            AND o.source_message_id=i.source_message_id
+          WHERE i.inbox_item_id=? AND json_extract(i.source_message_json,'$.id')=i.source_message_id`)
+          .get(binding.inbox_item_id) as Row | undefined;
+        if (!source) throw new Error("set_reply_thread requires an observed activating room message, not a synthetic turn.");
+        const payload = { code: "REPLY_THREAD_RECORDED", source_message_id: String(source.source_message_id),
+          instruction: "Thread choice recorded. Continue working and finish through your normal final completion; no message has been sent." };
+        const result = serializeEffectJson({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload }, "result");
+        // Keep a receipt per request id so reusing any id for a different tool
+        // still fails. Existing admission limits bound repeated distinct calls.
+        this.assertEffectAdmissionCapacity(database, input, requestJson);
+        run(database.prepare(`INSERT INTO supervised_agent_effects
+          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,1,'completed',?,NULL,?,?)`),
+        effectId, input.agent_id, input.room_id, input.execution_generation_id, input.provider_turn_id,
+        input.mcp_request_id, input.tool_name, requestJson, result, timestamp, timestamp);
+        return { created: true, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row) };
+      }
       if (input.tool_name === "complete_room_turn") {
         const completion = structuredRoomTurnCompletion(input.request)!;
         const completedResultJson = serializeEffectJson(structuredRoomTurnCompletionResult(completion), "result");
@@ -962,6 +1494,8 @@ export class SupervisedAgentInboxStore {
         const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
           WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id);
         if (unresolvedControl) throw new Error("Room move is blocked by unresolved turn control.");
+        assertNoDeliveryDrain(database, input.agent_id);
+        assertNoPollingActivation(database, input.agent_id);
         const timestamp = this.now();
         const sourceCursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?")
           .get(input.agent_id, input.room_id) as Row | undefined;
@@ -1035,14 +1569,14 @@ export class SupervisedAgentInboxStore {
   ): Promise<number> {
     return this.exclusive(async (database) => this.transactionFenced(database, () => {
       const rows = database.prepare(`SELECT * FROM supervised_agent_inbox
-        WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+        WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence`).all(input.agent_id, input.old_room_id, input.after_fifo_sequence) as Row[];
       const timestamp = this.now();
       for (const row of rows) {
         const item = rowToItem(row);
         run(database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_room_move',last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
           "Cancelled because the agent moved to another room.", timestamp, timestamp, item.inbox_item_id);
-        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.settleTerminalItem(database, item, timestamp);
         this.recordEvent(database, item.inbox_item_id, `room_move_cancelled:${input.operation_id}:${item.fifo_sequence}`, "room_move_cancelled", timestamp, "Agent moved rooms after completing an earlier message.");
       }
       run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?"), input.agent_id, input.old_room_id);
@@ -1145,6 +1679,13 @@ export class SupervisedAgentInboxStore {
       const item = rowToItem(current);
       if (item.state !== "dispatching" && item.state !== "awaiting_result") throw new Error("Provider terminal evidence may only be checkpointed while delivery is in-flight.");
       this.assertCurrentHead(database, item);
+      if (readDurableNativeFailure(database, inboxItemId)) {
+        if (outcome !== item.outcome) throw new Error("Exact native terminal failure cannot be overwritten.");
+        return item;
+      }
+      let kind: unknown;
+      try { kind = JSON.parse(outcome).kind; } catch { /* Legacy opaque outcomes remain supported. */ }
+      if (kind === "failed" || kind === "interrupted") throw new Error("Native failure outcomes require the exact terminal checkpoint.");
       const timestamp = this.now();
       run(database.prepare("UPDATE supervised_agent_inbox SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, timestamp, inboxItemId);
       this.recordEvent(database, inboxItemId, `turn_finished:${item.attempt_count}`, "turn_finished", timestamp, null);
@@ -1171,6 +1712,8 @@ export class SupervisedAgentInboxStore {
     missing_continuation: string;
   }): Promise<ProviderContinuationRepair> {
     return this.exclusive(async (database) => this.transaction(database, () => {
+      assertNoDeliveryDrain(database, input.agent_id);
+      assertNoPollingActivation(database, input.agent_id);
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
       if (!row) throw new Error("The blocked room message no longer exists.");
       const item = rowToItem(row);
@@ -1360,9 +1903,7 @@ export class SupervisedAgentInboxStore {
 
   async latestContinuationRepair(agentId: string): Promise<ProviderContinuationRepair | null> {
     return this.read(async (database) => {
-      const row = database.prepare(
-        "SELECT * FROM provider_continuation_repairs WHERE agent_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
-      ).get(agentId) as Row | undefined;
+      const row = this.reads.get(database, "latestRepair").get(agentId) as Row | undefined;
       return row ? rowToContinuationRepair(row) : null;
     });
   }
@@ -1380,7 +1921,7 @@ export class SupervisedAgentInboxStore {
       run(database.prepare(`UPDATE supervised_agent_inbox
         SET state='cancelled_by_user',last_error=NULL,failure_code=NULL,updated_at=?,acknowledged_at=?
         WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
-      this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+      this.settleTerminalItem(database, item, timestamp);
       this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, "Skipped by the user before any provider turn started.");
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
@@ -1413,26 +1954,9 @@ export class SupervisedAgentInboxStore {
     detail = "Stopped by the user.",
     expected?: { agent_id: string; room_id: string },
   ): Promise<SupervisedInboxItem | null> {
-    // Every pre-publish state is safe to settle on a user Stop. `publishing`
-    // and the terminal states are not: their outcome is already committed.
-    const cancellable = new Set<SupervisedInboxState>(["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"]);
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
-      if (!row) return null;
-      const item = rowToItem(row);
-      if (expected && (item.agent_id !== expected.agent_id || item.room_id !== expected.room_id)) {
-        throw new Error("Interrupted-turn settlement does not match the exact active delivery identity.");
-      }
-      if (!cancellable.has(item.state)) return item;
-      this.assertCurrentHead(database, item);
-      const timestamp = this.now();
-      run(database.prepare(`UPDATE supervised_agent_inbox
-        SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
-        WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
-      this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
-      this.recordEvent(database, inboxItemId, `user_cancelled:${item.fifo_sequence}`, "user_cancelled", timestamp, detail);
-      this.pruneAgentHistory(database, item.agent_id);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const row = cancelInterruptedSupervisedTurn(database, inboxItemId, detail, this.now(), expected);
+      return row ? rowToItem(row) : null;
     }));
   }
 
@@ -1467,14 +1991,17 @@ export class SupervisedAgentInboxStore {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const interruptedAt = this.now();
       this.normalizeInterruptedEffectsInTransaction(database, agentId, interruptedAt);
-      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence").all(agentId) as Row[];
+      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence").all(agentId) as Row[];
       const recovered: SupervisedInboxItem[] = [];
       for (const row of rows) {
         const item = rowToItem(row);
         const terminal = persistedTerminalOutcome(item.outcome);
         let next: SupervisedInboxState | null = null;
         let error: string | null = item.last_error;
-        if (item.state === "result_recovery") {
+        if (readDurableNativeFailure(database, item.inbox_item_id)) {
+          next = "acknowledged_failed";
+          error = item.last_error;
+        } else if (item.state === "result_recovery") {
           next = "result_recovery";
           error = "Re-reading the same completed provider turn; no new model turn will start.";
         } else if (item.state === "dispatching" || item.state === "awaiting_result" || item.state === "publishing" || item.state === "retryable") {
@@ -1524,7 +2051,7 @@ export class SupervisedAgentInboxStore {
         const phase = phaseForTransition(next);
         if (phase) this.recordEvent(database, updated.inbox_item_id, `recovery:${phase}:${updated.attempt_count}`, phase, timestamp, error);
         if (finalStates.has(next)) {
-          this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+          this.settleTerminalItem(database, item, timestamp);
           this.pruneAgentHistory(database, item.agent_id);
         }
         recovered.push(updated);
@@ -1539,44 +2066,23 @@ export class SupervisedAgentInboxStore {
    * noisy historical incident cannot make every manifest projection unbounded.
    */
   async receipts(agentId: string, terminalLimit = RETAINED_TERMINAL_RECEIPTS_PER_AGENT): Promise<SupervisedInboxReceiptWithTimeline[]> {
+    return this.readReceipts(agentId, terminalLimit, "receipts", rowToItem);
+  }
+
+  /** State projections never need activating message bodies or activation payloads. */
+  async receiptProjection(agentId: string, terminalLimit = RETAINED_TERMINAL_RECEIPTS_PER_AGENT): Promise<SupervisedInboxReceiptProjection[]> {
+    return this.readReceipts(agentId, terminalLimit, "receiptProjection", rowToItemMetadata);
+  }
+
+  private async readReceipts<Item extends SupervisedInboxItemMetadata>(agentId: string, terminalLimit: number,
+    statement: "receipts" | "receiptProjection", decode: (row: Row) => Item): Promise<Array<Item & {
+      timeline: SupervisedInboxEvent[]; canonical_message_id: string | null; receipt_state: SupervisedInboxReceiptState;
+    }>> {
     return this.read(async (database) => {
       const limit = Math.max(0, Math.min(Math.trunc(terminalLimit), RETAINED_TERMINAL_RECEIPTS_PER_AGENT));
-      const rows = database.prepare(`SELECT i.*,p.canonical_message_id
-        FROM supervised_agent_inbox i
-        LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
-        WHERE i.agent_id=? AND (
-          i.state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
-          OR i.inbox_item_id IN (
-            SELECT inbox_item_id FROM supervised_agent_inbox
-            WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
-            ORDER BY fifo_sequence DESC LIMIT ?
-          )
-        ) ORDER BY i.fifo_sequence`).all(agentId, agentId, limit) as Row[];
+      const rows = this.reads.get(database, statement).all(agentId, agentId, limit) as Row[];
       const timelines = new Map<string, SupervisedInboxEvent[]>();
-      for (const event of database.prepare(`WITH selected_inbox AS (
-          SELECT inbox_item_id,fifo_sequence
-          FROM supervised_agent_inbox
-          WHERE agent_id=? AND (
-            state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
-            OR inbox_item_id IN (
-              SELECT inbox_item_id FROM supervised_agent_inbox
-              WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
-              ORDER BY fifo_sequence DESC LIMIT ?
-            )
-          )
-        )
-        SELECT e.inbox_item_id,e.phase,e.observed_at,e.detail
-        FROM selected_inbox s
-        JOIN supervised_agent_inbox_events e
-          ON e.inbox_item_id=s.inbox_item_id
-          AND e.event_sequence > COALESCE((
-            SELECT cutoff.event_sequence
-            FROM supervised_agent_inbox_events cutoff
-            WHERE cutoff.inbox_item_id=s.inbox_item_id
-            ORDER BY cutoff.event_sequence DESC
-            LIMIT 1 OFFSET ?
-          ),0)
-        ORDER BY s.fifo_sequence,e.event_sequence`).all(
+      for (const event of this.reads.get(database, "receiptTimelines").all(
           agentId,
           agentId,
           limit,
@@ -1585,6 +2091,7 @@ export class SupervisedAgentInboxStore {
         const inboxItemId = String(event.inbox_item_id);
         const timeline = timelines.get(inboxItemId) ?? [];
         timeline.push({
+          event_sequence: Number(event.event_sequence),
           phase: String(event.phase) as SupervisedInboxEvent["phase"],
           observed_at: String(event.observed_at),
           detail: event.detail === null ? null : String(event.detail),
@@ -1594,7 +2101,7 @@ export class SupervisedAgentInboxStore {
       const head = rows.find((row) => !finalStates.has(String(row.state) as SupervisedInboxState));
       const firstBlocked = head && String(head.state) === "blocked" ? head : undefined;
       return rows.map((row) => {
-        const item = rowToItem(row);
+        const item = decode(row);
         const timeline = timelines.get(item.inbox_item_id) ?? [];
         const canonicalMessageId = row.canonical_message_id === null
           ? null
@@ -1631,15 +2138,16 @@ export class SupervisedAgentInboxStore {
       run(database.prepare("DELETE FROM supervised_agent_history_boundaries WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_pruned_sources WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_inbox WHERE agent_id=?"), agentId);
-    }));
+    }), agentId);
   }
 
   async pruneHistory(agentId: string): Promise<void> {
-    await this.exclusive(async (database) => this.transaction(database, () => this.pruneAgentHistory(database, agentId)));
+    await this.exclusive(async (database) => this.transaction(database, () => this.pruneAgentHistory(database, agentId)), agentId);
   }
 
   private async read<T>(operation: (database: DatabaseSync) => Promise<T> | T): Promise<T> { return operation(await this.getDatabase()); }
-  private async exclusive<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> {
+  private async exclusive<T>(operation: (database: DatabaseSync) => Promise<T>, affectedAgentId?: string,
+    shouldNotify: () => boolean = () => true): Promise<T> {
     let release!: () => void; const prior = this.writes; this.writes = new Promise<void>((resolve) => { release = resolve; });
     await prior;
     let committed = false;
@@ -1649,7 +2157,7 @@ export class SupervisedAgentInboxStore {
       return result;
     } finally {
       release();
-      if (committed) this.onMutation();
+      if (committed && shouldNotify()) this.onMutation(affectedAgentId);
     }
   }
   private transaction<T>(database: DatabaseSync, operation: () => T): T { database.exec("BEGIN IMMEDIATE"); try { const result = operation(); database.exec("COMMIT"); return result; } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; } }
@@ -1678,7 +2186,10 @@ export class SupervisedAgentInboxStore {
   private async getDatabase(): Promise<DatabaseSync> {
     if (this.closed) throw new Error("Supervised inbox store is closed.");
     if (this.database) return this.database;
-    if (!this.initializing) this.initializing = openDaemonStateDatabase(this.databasePath, (database) => new DaemonStateSchema().createSchema(database)).then((database) => { this.database = database; return database; });
+    if (!this.initializing) this.initializing = (this.schemaPrepared
+      ? openPreparedDaemonStateDatabase(this.databasePath)
+      : openDaemonStateDatabase(this.databasePath, (database) => new DaemonStateSchema().createSchema(database)))
+      .then((database) => { this.database = database; return database; });
     return this.initializing;
   }
   private require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }
@@ -1686,9 +2197,10 @@ export class SupervisedAgentInboxStore {
   /** Terminal ownership proves a prepared ordinary effect never crossed its
    * execution CAS. Settle it in the same transaction as every terminal path
    * so handoff/Stop races cannot leave immortal purge blockers. Room moves are
-   * intentionally prepared until the acknowledged reply is reconciled. */
-  private settlePreparedEffectsForTerminalItem(database: DatabaseSync, item: SupervisedInboxItem, timestamp: string): void {
-    settlePreparedSupervisedEffectsForTerminalItem(database, {
+   * intentionally prepared until the acknowledged reply is reconciled. Already
+   * captured attempts may copy this receipt through an isolated savepoint. */
+  private settleTerminalItem(database: DatabaseSync, item: SupervisedInboxItem, timestamp: string): void {
+    settleSupervisedTerminalItem(database, {
       inboxItemId: item.inbox_item_id,
       agentId: item.agent_id,
       providerTurnId: item.provider_turn_id,
@@ -1800,7 +2312,7 @@ export class SupervisedAgentInboxStore {
       throw new EffectAuthorityError("A supervised effect requires one exact active durable provider-turn authority binding.");
     }
     const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
-      WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+      WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       ORDER BY fifo_sequence LIMIT 1`).get(input.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== String(rows[0]?.inbox_item_id)) {
       throw new EffectAuthorityError("The supervised effect provider turn is no longer the exact FIFO head.");
@@ -1810,7 +2322,7 @@ export class SupervisedAgentInboxStore {
       FROM agent_room_memberships m JOIN agent_launch_intents l USING(agent_id)
       JOIN runtime_deployments d USING(agent_id) JOIN agent_lifecycle_states s USING(agent_id)
       WHERE m.agent_id=?`).get(input.agent_id) as Row | undefined;
-    if (!runtime || String(runtime.room_id) !== input.room_id || String(runtime.desired_state) !== "running"
+    if (pendingRuntimeRecovery(database, input.agent_id) || !runtime || String(runtime.room_id) !== input.room_id || String(runtime.desired_state) !== "running"
       || String(runtime.condition) !== "none" || Number(runtime.work_attempt_id_present) !== 1
       || String(runtime.work_attempt_id) !== input.work_attempt_id || Number(runtime.provider_ref_present) !== 1
       || String(runtime.provider_work_attempt_id) !== input.work_attempt_id
@@ -1826,7 +2338,7 @@ export class SupervisedAgentInboxStore {
     return { inbox_item_id: String(rows[0]!.inbox_item_id) };
   }
   private assertCurrentHead(database: DatabaseSync, item: SupervisedInboxItem): void {
-    const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
+    const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== item.inbox_item_id) throw new Error("Only the current FIFO head may change delivery state.");
   }
   private normalizeInterruptedEffectsInTransaction(database: DatabaseSync, agentId: string | undefined, interruptedAt: string): void {
@@ -1892,7 +2404,10 @@ function isNewerCursor(candidate: string, current: string | null): boolean {
 }
 
 function rowToItem(row: Row): SupervisedInboxItem {
-  return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), terminal_reason: row.terminal_reason === null || row.terminal_reason === undefined ? null : String(row.terminal_reason) as "upgrade_authority_unavailable", created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };
+  return { ...rowToItemMetadata(row), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)) };
+}
+function rowToItemMetadata(row: Row): SupervisedInboxItemMetadata {
+  return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), terminal_reason: row.terminal_reason === null || row.terminal_reason === undefined ? null : String(row.terminal_reason) as "upgrade_authority_unavailable", created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };
 }
 function rowToProviderTurnBinding(row: Row): SupervisedProviderTurnBinding {
   return {
@@ -1914,7 +2429,7 @@ function sameProviderTurnBinding(left: SupervisedProviderTurnBinding, right: Sup
     && left.provider_continuation_id === right.provider_continuation_id
     && left.provider_turn_id === right.provider_turn_id;
 }
-function rowToEvent(row: Row): SupervisedInboxEvent { return { phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail) }; }
+function rowToEvent(row: Row): SupervisedInboxEvent { return { event_sequence: Number(row.event_sequence), phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail) }; }
 function rowToInspectorItem(row: Row): AgentInspectorDetail["items"][number] { const source = safeSource(JSON.parse(String(row.source_message_json)), String(row.source_message_id), "", {}); return { source_message_id: String(row.source_message_id), inbox_item_id: String(row.inbox_item_id), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), updated_at: String(row.updated_at), sender: source?.sender ?? null, text_preview: source?.text ? source.text.slice(0, 240) : null, created_at: source?.created_at ?? null, outcome: safeOutcome(row.outcome === null ? null : String(row.outcome)), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", terminal_reason: row.terminal_reason === null || row.terminal_reason === undefined ? null : String(row.terminal_reason) as "upgrade_authority_unavailable", canonical_message_id: row.canonical_message_id === null ? null : String(row.canonical_message_id) }; }
 function rowToContinuationRepair(row: Row): ProviderContinuationRepair {
   return {

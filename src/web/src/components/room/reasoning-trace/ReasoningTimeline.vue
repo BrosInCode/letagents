@@ -6,11 +6,11 @@
     </div>
 
     <p v-if="loading" class="reasoning-empty">
-      Loading the latest reasoning details...
+      Loading the latest work details...
     </p>
 
     <p v-else-if="entries.length === 0" class="reasoning-empty">
-      No detailed reasoning updates have been exposed for this session yet.
+      No detailed work updates are available for this session yet.
     </p>
 
     <ol v-else class="reasoning-timeline">

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { canNotifyConversation } from "../conversations/store.js";
 
 import { getProjectById } from "../db.js";
 import { pool } from "../db/client.js";
@@ -31,7 +32,8 @@ export interface ClaimedNotification {
   account_id: string;
   device_token: string;
   environment: ApnsEnvironment;
-  room_id: string;
+  room_id: string | null;
+  conversation_id?: string | null;
   room_display_name: string;
   message_number: number;
   thread_root_number: number | null;
@@ -82,6 +84,7 @@ export async function claimNotifications(workerId: string): Promise<ClaimedNotif
              device.device_token,
              device.environment,
              claimed.room_id,
+             claimed.conversation_id,
              claimed.room_display_name,
              claimed.message_number,
              claimed.thread_root_number,
@@ -140,6 +143,16 @@ export async function recordAuthorizationDenied(
   notification: ClaimedNotification,
   workerId: string,
 ): Promise<void> {
+  if (notification.conversation_id) {
+    // DM eligibility includes this device's session and this message's read
+    // cursor. One denied delivery says nothing about another device/message.
+    await pool.query(`UPDATE desktop_push_notifications
+      SET state='dead', room_display_name='', sender='', body='',
+          last_status=NULL, last_error='Private message notification is no longer eligible',
+          claimed_at=NULL, claimed_by=NULL, updated_at=now()
+      WHERE id=$1 AND claimed_by=$2`, [notification.id, workerId]);
+    return;
+  }
   await pool.query(`
     UPDATE desktop_push_notifications AS notification
     SET state = 'dead', room_display_name = '', sender = '', body = '',
@@ -306,6 +319,7 @@ async function deliverNotification(
       deviceToken: notification.device_token,
       environment: notification.environment,
       roomId: notification.room_id,
+      conversationId: notification.conversation_id,
       roomDisplayName: notification.room_display_name,
       messageId: `msg_${notification.message_number}`,
       threadRootId: notification.thread_root_number ? `msg_${notification.thread_root_number}` : null,
@@ -325,11 +339,15 @@ async function processBatch(client: ApnsClient, workerId: string): Promise<void>
     await Promise.all(
       notifications.slice(index, index + DELIVERY_CONCURRENCY)
         .map((notification) => {
+          if (notification.conversation_id) {
+            return deliverNotification(client, workerId, notification, async () =>
+              await canNotifyConversation(notification.account_id, notification.conversation_id!, notification.message_number, notification.device_id) ? "allow" : "deny");
+          }
           const authorizationKey = `${notification.account_id}\u0000${notification.room_id}`;
           let authorization = authorizationChecks.get(authorizationKey);
           if (!authorization) {
             authorization = authorizeDesktopPushNotification(
-              { accountId: notification.account_id, roomId: notification.room_id },
+              { accountId: notification.account_id, roomId: notification.room_id! },
               {
                 getProject: getProjectById,
                 getAccount: getPushDeliveryAccount,

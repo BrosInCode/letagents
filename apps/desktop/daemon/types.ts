@@ -1,5 +1,5 @@
-export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.100";
+export const DAEMON_PROTOCOL_VERSION = 3;
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.201";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -91,6 +91,8 @@ export type DaemonAgentProfile = {
 export type DaemonAgentRoomMembership = {
   agent_id: string;
   room_id: string;
+  /** Pinned local storage identity; absent means the existing cloud transport. */
+  local_room_id?: string;
 };
 
 export type DaemonRoomMovePhase = "prepared" | "waiting_for_current_turn" | "joining_destination" | "membership_committed" | "rotating_credentials" | "bootstrapping_destination_tail" | "active" | "failed" | "rollback_required";
@@ -157,6 +159,8 @@ export type DaemonAgentConfiguration = {
   runtime_configuration_revision?: number;
   /** Explicit inbox owner; never infer daemon delivery from native policy. */
   delivery_mode?: DaemonAgentDeliveryMode;
+  /** Daemon-owned polling custody, never accepted from the flat manifest. */
+  polling_contract?: "custodial_polling_v1" | null;
   /** Present only while a legacy Codex polling turn is being fenced. */
   delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
@@ -195,6 +199,8 @@ export type DaemonProviderConnection =
   | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string };
 
 export type DaemonProviderRuntimeReference = {
+  /** Non-secret worker identity actually installed in this native runtime's MCP environment. */
+  custodial_launch_agent_session_id?: string | null;
   work_attempt_id: string;
   provider_continuation_id: string;
   provider_connection: DaemonProviderConnection | null;
@@ -297,6 +303,7 @@ export type DaemonReconciliationRecord = {
 export type DaemonManifestEntry = {
   id: string;
   room_id: string;
+  local_room_id?: string;
   display_name: string;
   provider: string;
   model: string | null;
@@ -334,6 +341,16 @@ export type DaemonManifestEntry = {
 };
 
 export type DaemonManifestEntryView = DaemonManifestEntry & {
+  /** Current child-owned progress only; never durable lifecycle or readiness. */
+  provider_progress?: { state: "compacting"; startedAt: string } | null;
+  runtime_recovery?: {
+    operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
+    mode: "resume" | "fresh"; phase: "prepared" | "stopped";
+  } | null;
+  /** Opaque exact native process birth; absent on older supervisors. */
+  runtime_generation_id?: string | null;
+  /** Read-only credential contract from configuration, never caller-owned manifest input. */
+  polling_contract?: "custodial_polling_v1" | null;
   worker_binding?: DaemonWorkerBindingProjection | null;
   /** Ephemeral causal delivery projection; never persisted in the manifest. */
   room_agent_state?: {
@@ -344,14 +361,14 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
     task: { state: "none" | "assigned" | "working" | "blocked"; task_id: string | null; title: string | null };
   } | null;
   delivery_receipts?: Array<{
-    inbox_item_id: string; source_message_id: string;
+    inbox_item_id: string; source_message_id: string; fifo_sequence: number;
     /** Deterministic publication identity used even before a canonical id was checkpointed. */
     reply_client_message_id: string;
     /** Exact room message created by this inbox item's final-answer publication. */
     canonical_message_id: string | null;
-    state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "retryable" | "blocked" | "restoring_conversation" | "cancelled_by_room_move" | "cancelled_by_user" | "queued_behind_blocked";
+    state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "retryable" | "blocked" | "restoring_conversation" | "cancelled_by_room_move" | "cancelled_by_user" | "queued_behind_blocked";
     attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; updated_at: string;
-    timeline: Array<{ phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;
+    timeline: Array<{ event_sequence: number; phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;
   }>;
 };
 
@@ -400,6 +417,7 @@ export type WorkAttemptCheckpoint = {
 };
 
 export type ExecutionTerminalPayload = {
+  native_runtime_death?: import("../shared/execution-protocol.js").NativeRuntimeDeath;
   ended_at: string;
   exit_code: number | null;
   signal: string | null;

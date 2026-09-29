@@ -10,13 +10,13 @@ import {
   getCanonicalRoomWebPath,
   type JoinedVia,
 } from "../../room-id.js";
-import { API_URL, getLetagentsToken } from "./api.js";
+import { getApiUrl, getLetagentsToken } from "./api.js";
 import {
   AGENT_INSTANCE_UUID,
   currentAgentIdentity,
   currentAgentIdentityKey,
 } from "./identity.js";
-import { isSupervisedBoundedTurn } from "./worker-bearer.js";
+import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
 import {
   getCurrentSupervisedRoomAuthority,
   runWithSupervisedRoomAuthority,
@@ -27,6 +27,7 @@ let sseClient: SseClient | null = null;
 
 export interface RoomState {
   room_id: string;
+  navigation_locator?: string | null;
   project_id?: string | null;
   code?: string | null;
   display_name?: string | null;
@@ -46,7 +47,7 @@ export function shutdownRuntime(): void {
 }
 
 function getSseClient(): SseClient {
-  sseClient ??= new SseClient(API_URL, () => getLetagentsToken());
+  sseClient ??= new SseClient(getApiUrl(), () => getLetagentsToken());
   return sseClient;
 }
 
@@ -71,6 +72,7 @@ function getCurrentStreamAgentIdentity():
 
 export function toRoomState(input: {
   room_id: string;
+  navigation_locator?: string | null;
   project_id?: string | null;
   code?: string | null;
   display_name?: string | null;
@@ -80,6 +82,7 @@ export function toRoomState(input: {
 }): RoomState {
   return {
     room_id: input.room_id,
+    navigation_locator: input.navigation_locator ?? null,
     project_id: input.project_id ?? null,
     code: input.code ?? null,
     display_name: input.display_name ?? null,
@@ -89,8 +92,15 @@ export function toRoomState(input: {
   };
 }
 
+export function currentRoomMatchesLocator(locator: string | null): boolean {
+  const value = locator?.trim();
+  return Boolean(value && currentRoom && (
+    currentRoom.room_id === value || currentRoom.navigation_locator === value
+  ));
+}
+
 function getCanonicalRoomWebUrl(roomId: string): string {
-  return new URL(getCanonicalRoomWebPath(roomId), `${API_URL}/`).toString();
+  return new URL(getCanonicalRoomWebPath(roomId), `${getApiUrl()}/`).toString();
 }
 
 export function withCanonicalRoomLink<T extends Record<string, unknown>>(
@@ -157,7 +167,7 @@ export function toPublicRoomResponse(
 
 export function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
   currentRoom = state;
-  if (isSupervisedBoundedTurn()) return state;
+  if (hasSupervisedWorkerAuthority()) return state;
   saveRoomSession({
     room_id: state.room_id,
     project_id: state.project_id ?? null,
@@ -192,7 +202,7 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
 }
 
 export function touchCurrentRoom(lastMessageId?: string): void {
-  if (isSupervisedBoundedTurn()) return;
+  if (hasSupervisedWorkerAuthority()) return;
   if (!currentRoom) {
     return;
   }
@@ -201,7 +211,7 @@ export function touchCurrentRoom(lastMessageId?: string): void {
 }
 
 export function getTargetRoomId(roomId?: string): string | null {
-  if (isSupervisedBoundedTurn()) {
+  if (hasSupervisedWorkerAuthority()) {
     const exactRoomAuthority = getCurrentSupervisedRoomAuthority();
     if (!exactRoomAuthority) {
       throw new Error("The daemon-supervised tool has not received its exact room authority.");
@@ -234,7 +244,7 @@ export function toPublicCurrentRoomState(): Record<string, unknown> | null {
  * repository inspection and can safely rebind after a durable room move.
  */
 export function runWithCurrentSupervisedRoom<T>(roomId: string, callback: () => T): T {
-  if (!isSupervisedBoundedTurn()) {
+  if (!hasSupervisedWorkerAuthority()) {
     throw new Error("Only a daemon-supervised bounded turn can bind supervisor room authority.");
   }
   const normalized = roomId.trim();
@@ -245,6 +255,6 @@ export function runWithCurrentSupervisedRoom<T>(roomId: string, callback: () => 
 }
 
 export function getFallbackProjectId(): string | null {
-  if (isSupervisedBoundedTurn()) return null;
+  if (hasSupervisedWorkerAuthority()) return null;
   return currentRoom?.project_id ?? null;
 }

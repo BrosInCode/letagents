@@ -1,3 +1,4 @@
+import { ClaudeCompaction } from "../main/agents/claude-compaction.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -5,6 +6,7 @@ import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
 
 import {
   ClaudeCodeProviderAdapter,
@@ -18,10 +20,20 @@ import {
 } from "../main/agents/claude-code-provider-adapter.js";
 import type {
   ProviderSpawnRequest,
+  ProviderActivityEvent,
   ProviderStreamEvent,
   ProviderTerminalPayload,
+  NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
+
+// Cross-layer assertions load the daemon at test runtime without pulling its
+// separately compiled source tree into Electron's production rootDir.
+const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
+const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
+const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+const { ProviderSchedulerFailureCoordinator } = await import(new URL("../../daemon/provider-scheduler-failure-coordinator.ts", import.meta.url).href);
+const { redactCredentialText } = await import(new URL("../../daemon/credential-redaction.ts", import.meta.url).href);
 
 // Fake-child harness proving the P2a adapter honors every #765 liveness
 // invariant with no live `claude` binary: birth-identity fencing, control-loss
@@ -95,6 +107,15 @@ interface HarnessOptions {
   initSessionId?: string;
   noInit?: boolean;
   noLetagents?: boolean;
+  mcpStatus?: string;
+  mcpTools?: string[];
+  noApprovalLifecycle?: boolean;
+  /** The mode the CLI reports it started in; an account without Auto reports another. */
+  initPermissionMode?: string;
+  bootstrapResultSubtype?: string;
+  bootstrapMessages?: (sessionId: string, turnId: string) => Record<string, unknown>[];
+  omitBootstrapResult?: boolean;
+  exitAfterBootstrapResult?: ProviderProcessExit;
   /** Overrides per pid; undefined entries mean "cannot verify". */
   identities?: Map<number, string | null | undefined>;
   /** Defaults to true (a well-behaved CLI); fence tests opt out to exercise escalation. */
@@ -115,6 +136,7 @@ function birthIdentity(pid: number): string {
 function createHarness(options: HarnessOptions = {}) {
   const children: FakeClaudeChild[] = [];
   const launches: Array<{ claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
+  const versionBins: string[] = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 4100;
@@ -122,8 +144,9 @@ function createHarness(options: HarnessOptions = {}) {
   let versionReads = 0;
 
   const dependencies: ClaudeCodeProviderAdapterDependencies = {
-    async readVersion() {
+    async readVersion(claudeBin) {
       versionReads += 1;
+      versionBins.push(claudeBin);
       return options.versionOutput ?? "2.1.220 (Claude Code)";
     },
     async createLetAgentsMcpConfig() {
@@ -149,28 +172,36 @@ function createHarness(options: HarnessOptions = {}) {
       let sawFirstWrite = false;
       child.writeLine = (json: string) => {
         originalWriteLine(json);
-        if (sawFirstWrite || options.noInit) return;
+        if (sawFirstWrite) return;
         sawFirstWrite = true;
         queueMicrotask(() => {
           if (!child.alive) return;
-          child.emit({
+          if (!options.noInit) child.emit({
             type: "system",
             subtype: "init",
             session_id: initSessionId,
             model: "claude-fable-5",
-            permissionMode: "default",
+            capabilities: options.noApprovalLifecycle ? [] : ["msg_lifecycle_v1"],
+            permissionMode: options.initPermissionMode ?? "default",
             cwd: input.cwd,
-            mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: "connected" }],
+            mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }],
+            tools: options.mcpTools ?? ["mcp__letagents__get_board", "mcp__letagents__read_messages", "mcp__letagents__send_message"],
           });
           const frame = JSON.parse(json) as { uuid?: string };
+          for (const message of options.bootstrapMessages?.(initSessionId, frame.uuid!) ?? []) child.emit(message);
+          if (options.noInit || options.omitBootstrapResult) return;
           child.emit({
             type: "result",
-            subtype: "success",
-            is_error: false,
+            subtype: options.bootstrapResultSubtype ?? "success",
+            is_error: options.bootstrapResultSubtype !== undefined,
             session_id: initSessionId,
             user_message_uuid: frame.uuid,
             result: "LETAGENTS_CLAUDE_DAEMON_READY",
           });
+          if (options.exitAfterBootstrapResult) {
+            if (options.exitAfterBootstrapResult.type === "exit" && pid !== null) identities.set(pid, null);
+            child.resolveExit(options.exitAfterBootstrapResult);
+          }
         });
       };
       return child;
@@ -211,6 +242,7 @@ function createHarness(options: HarnessOptions = {}) {
   return {
     children,
     launches,
+    versionBins,
     signals,
     identities,
     dependencies,
@@ -276,6 +308,8 @@ test("spawn launches the headless CLI with verbatim policy flags and establishes
     streamSink: (event) => streamEvents.push(event),
   });
   const handle = await adapter.spawn(spawnRequest({ launchPolicy: { permissionMode: "acceptEdits", model: "opus", dangerouslySkipPermissions: false } }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
 
   assert.equal(harness.launches.length, 1);
   const args = harness.launches[0]!.args;
@@ -299,6 +333,12 @@ test("spawn launches the headless CLI with verbatim policy flags and establishes
     processIdentity: birthIdentity(4100),
   });
   assert.equal(handle.observedState(), "idle");
+  assert.deepEqual(observations.map(({ fact }) => fact), [{
+    domain: "runtime",
+    kind: "state_changed",
+    state: "ready",
+    sideEffects: "none",
+  }], "verified bootstrap readiness is retained before the first room turn");
   assert.equal(harness.versionReads, 1, "the installed CLI is checked immediately before launch");
 
   const child = harness.children[0]!;
@@ -311,6 +351,163 @@ test("spawn launches the headless CLI with verbatim policy flags and establishes
   assert.doesNotMatch(prompt, /register_agent_session|wait_for_messages|join_room/);
 
   assert.ok(streamEvents.some((event) => event.method === "system/init"), "init published as stream evidence");
+});
+
+test("read-only spawn removes shell tools and ambient settings from the native CLI", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    configurationRevision: 1,
+    permissionProfileId: "read_only",
+    launchPolicy: {
+      permissionMode: "dontAsk",
+      dangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep"],
+      allowedTools: ["mcp__letagents__*"],
+      settingSources: "",
+    },
+  }));
+
+  const args = harness.launches[0]!.args;
+  assert.equal(argValue(args, "--permission-mode"), "dontAsk");
+  assert.equal(argValue(args, "--tools"), "Read,Glob,Grep");
+  assert.equal(argValue(args, "--allowed-tools"), "mcp__letagents__*");
+  assert.equal(argValue(args, "--setting-sources"), "");
+  assert.equal(args.includes("--dangerously-skip-permissions"), false);
+});
+
+test("Claude freezes lifecycle authority to the exact CLI process birth", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const typedHandle = handle as typeof handle & { lifecycleAuthorityMode: string };
+  const ref = {
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed" as const,
+  };
+
+  assert.equal(typedHandle.lifecycleAuthorityMode, "typed");
+  assert.equal(await adapter.attach(ref), handle);
+  assert.equal(await adapter.attach({
+    ...ref,
+    providerConnection: { kind: "claude_cli", pid: handle.pid, processIdentity: birthIdentity(9999) },
+  }), null);
+  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
+  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: undefined }), null);
+  await assert.rejects(adapter.spawn(spawnRequest({
+    workAttemptId: "wa-claude-wrong-delivery",
+    deliveryMode: "mcp_polling",
+    lifecycleAuthorityMode: "typed",
+  })), /require daemon_inbox delivery/);
+
+  const resumed = await adapter.resume(
+    { ...ref, workAttemptId: "wa-claude-resumed", lifecycleAuthorityMode: "typed_shadow" },
+    spawnRequest({ workAttemptId: "wa-claude-resumed", lifecycleAuthorityMode: "typed" }),
+  ) as typeof handle & { lifecycleAuthorityMode: string };
+  assert.equal(resumed.lifecycleAuthorityMode, "typed",
+    "a resumed continuation starts a new process birth under the requested authority");
+});
+
+test("typed Claude lifecycle ignores foreign failures and settles every exact result", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const child = harness.children[0]!;
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  const request = { inboxItemId: "typed-malformed", actionId: "typed-malformed", sourceMessage: {}, activation: {} };
+  const running = adapter.runRoomTurn(handle, request);
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  const session_id = handle.providerContinuationId;
+
+  child.emit({
+    type: "result", subtype: "error_during_execution", is_error: true,
+    session_id, user_message_uuid: "foreign-turn",
+  });
+  assert.equal(handle.observedState(), "idle", "foreign raw failure cannot poison typed lifecycle");
+
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
+  assert.equal(handle.observedState(), "working");
+  child.emit({ type: "result", session_id, user_message_uuid: turnId });
+  await assert.rejects(running, /without success/);
+  assert.equal(handle.observedState(), "idle", "an exact failed turn leaves the typed runtime reusable");
+  assert.equal(events.filter((event) => event.fact.domain === "turn"
+    && event.fact.state === "terminal"
+    && event.fact.providerTurnId === turnId
+    && event.fact.turnOutcome === "failed").length, 1,
+  "the same exact result that settles delivery emits one typed terminal");
+
+  const next = adapter.runRoomTurn(handle, { ...request, inboxItemId: "typed-after-malformed" });
+  await flush();
+  const nextId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: nextId, result: "ready" });
+  assert.equal((await next).text, "ready");
+});
+
+test("typed-shadow Claude keeps malformed exact-result observation unchanged", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed_shadow" }));
+  const child = harness.children[0]!;
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  const running = adapter.runRoomTurn(handle, {
+    inboxItemId: "shadow-malformed", actionId: "shadow-malformed", sourceMessage: {}, activation: {},
+  });
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", session_id: handle.providerContinuationId, user_message_uuid: turnId });
+
+  await assert.rejects(running, /without success/);
+  assert.equal(handle.observedState(), "idle");
+  assert.equal(events.some((event) => event.fact.domain === "turn" && event.fact.state === "terminal"), false,
+    "the permissive exact-result terminal belongs only to typed authority");
+});
+
+test("Claude checkpoints an exact provider failure while retaining its reusable session", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const checkpoints: unknown[] = [];
+  const pending = adapter.runRoomTurn(handle, { inboxItemId: "failure", actionId: "failure", sourceMessage: {}, activation: {} }, {
+    checkpointTerminalResult: async result => { checkpoints.push(result); },
+  });
+  await flush();
+  const child = harness.children[0]!;
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "error_during_execution", is_error: true,
+    session_id: handle.providerContinuationId, user_message_uuid: turnId, errors: ["HTTP 503 service unavailable"] });
+  const failure = await pending;
+  assert.deepEqual(failure, { turnId, providerContinuationId: handle.providerContinuationId,
+    outcome: "failed", text: null, evidence: "stream", error: "HTTP 503 service unavailable" });
+  assert.deepEqual(checkpoints, [failure]);
+  assert.equal(handle.observedState(), "idle");
+  assert.equal(child.alive, true);
+  assert.deepEqual(harness.signals, []);
+});
+
+test("preflight and launch use the exact configured Claude Code executable", async () => {
+  const previousExact = process.env.LETAGENTS_CLAUDE_CODE_BIN;
+  const previousLegacy = process.env.LETAGENTS_CLAUDE_BIN;
+  process.env.LETAGENTS_CLAUDE_CODE_BIN = "/custom/claude-code";
+  process.env.LETAGENTS_CLAUDE_BIN = "/different/claude";
+  try {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+
+    await adapter.spawn(spawnRequest());
+
+    assert.deepEqual(harness.versionBins, ["/custom/claude-code"]);
+    assert.equal(harness.launches[0]?.claudeBin, "/custom/claude-code");
+  } finally {
+    if (previousExact === undefined) delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
+    else process.env.LETAGENTS_CLAUDE_CODE_BIN = previousExact;
+    if (previousLegacy === undefined) delete process.env.LETAGENTS_CLAUDE_BIN;
+    else process.env.LETAGENTS_CLAUDE_BIN = previousLegacy;
+  }
 });
 
 test("spawn blocks an outdated Claude CLI before creating credentials or a provider process", async () => {
@@ -363,16 +560,17 @@ test("managed Claude MCP config is private, official-runtime-only, and ephemeral
     const config = await createEphemeralClaudeMcpConfig({
       LETAGENTS_API_URL: "https://letagents.example",
       LETAGENTS_TOKEN: "test-worker-token",
-    }, root);
+    }, { entryPath: "/verified/runtime/dist/mcp/server.js", readRoots: ["/verified/runtime"] }, root);
     const parsed = JSON.parse(await readFile(config.path, "utf8"));
     assert.deepEqual(parsed, {
       mcpServers: {
         letagents: {
-          command: "npx",
-          args: ["-y", "--package=letagents-runtime@npm:letagents", "letagents"],
+          command: process.execPath,
+          args: ["/verified/runtime/dist/mcp/server.js"],
           env: {
             LETAGENTS_API_URL: "https://letagents.example",
             LETAGENTS_TOKEN: "test-worker-token",
+            ELECTRON_RUN_AS_NODE: "1",
           },
         },
       },
@@ -388,10 +586,14 @@ test("managed Claude MCP config is private, official-runtime-only, and ephemeral
 test("supervised Claude builds its MCP workplace from the desktop endpoint without a user Claude config", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-managed-endpoint-"));
   try {
-    const config = await createManagedClaudeMcpConfig("https://desktop.letagents.example", root);
+    const config = await createManagedClaudeMcpConfig("https://desktop.letagents.example", root, "/explicit/dev/entry.js", entry => {
+      assert.equal(entry, "/explicit/dev/entry.js");
+      return { entryPath: entry!, readRoots: ["/explicit/dev"] };
+    });
     const parsed = JSON.parse(await readFile(config.path, "utf8"));
     assert.deepEqual(parsed.mcpServers.letagents.env, {
       LETAGENTS_API_URL: "https://desktop.letagents.example",
+      ELECTRON_RUN_AS_NODE: "1",
     });
     assert.equal(JSON.stringify(parsed).includes("LETAGENTS_TOKEN"), false);
     await config.dispose();
@@ -481,6 +683,17 @@ test("a CLI without the LetAgents workplace is terminated with no orphan", async
   assert.equal(harness.mcpConfigDisposals, 1, "startup refusal removes the private MCP config");
 });
 
+for (const options of [{ mcpStatus: "failed" }, { mcpStatus: "pending" }, { mcpTools: ["Bash", "Read"] },
+  { mcpTools: ["mcp__letagents__get_board", "mcp__letagents__read_messages"] }]) {
+  test(`Claude refuses an unusable room connection: ${JSON.stringify(options)}`, async () => {
+    const harness = createHarness(options);
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    await assert.rejects(adapter.spawn(spawnRequest()), /room tools did not connect/);
+    assert.equal(harness.children[0]!.alive, false);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  });
+}
+
 test("startup identity failure terminates and awaits the known fresh child", async () => {
   const identities = new Map<number, string | null | undefined>([[4100, undefined]]);
   const harness = createHarness({ identities });
@@ -499,6 +712,653 @@ test("a silent CLI that never reports init is refused as unobservable, with no o
   assert.equal(harness.children[0]!.alive, false);
 });
 
+test("a turn-limit failure during Claude bootstrap still rejects startup and reaps the child", async () => {
+  const harness = createHarness({ bootstrapResultSubtype: "error_max_turns" });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest()), {
+    name: "ClaudeBootstrapError", phase: "bootstrap_turn", reason: "failed_response",
+  });
+  assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+  assert.equal(harness.children[0]!.alive, false);
+  assert.equal(harness.mcpConfigDisposals, 1);
+});
+
+for (const mode of ["deadline", "failed_response", "native_exit", "transport_error", "cleanup_error", "init_deadline"] as const) {
+  test(`failed acquisition retains only exact death evidence: ${mode}`, async () => {
+    const harness = createHarness({ noInit: mode === "init_deadline", omitBootstrapResult: mode !== "failed_response",
+      ...(mode === "failed_response" ? { bootstrapResultSubtype: "error_max_turns" } : {}) });
+    const request = spawnRequest({ supervisorEntryId: "entry-1", supervisorExecutionGenerationId: "generation-1" });
+    if (mode === "native_exit" || mode === "transport_error") {
+      const launch = harness.dependencies.launchChild;
+      harness.dependencies.launchChild = input => {
+        const child = launch(input) as FakeClaudeChild;
+        const write = child.writeLine.bind(child);
+        child.writeLine = line => {
+          write(line);
+          setImmediate(() => {
+            if (mode === "native_exit") {
+              harness.identities.set(child.pid!, null);
+              child.resolveExit({ type: "exit", code: 7, signal: null });
+            } else child.resolveExit({ type: "error", error: new Error("private transport payload") });
+          });
+        };
+        return child;
+      };
+    }
+    if (mode === "cleanup_error") harness.dependencies.signalProcess = () => { throw new Error("cleanup signal rejected"); };
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    try {
+      await assert.rejects(withLoopAlive(adapter.spawn(request)), error => {
+        const evidence = providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request));
+        if (["deadline", "failed_response", "native_exit"].includes(mode)) {
+          assert.ok(evidence, "adapter-confirmed death must survive the rejected acquisition");
+          assert.deepEqual(evidence.terminal.nativeRuntimeDeath, {
+            kind: "claude_cli", pid: 4100, processIdentity: "fake-claude-4100-birth-1",
+          });
+          assert.equal(evidence.terminal.providerContinuationId, argValue(harness.launches[0]!.args, "--session-id"));
+          assert.equal(evidence.terminal.exitCode, mode === "native_exit" ? 7 : null);
+          assert.equal(evidence.terminal.signal, mode === "native_exit" ? null : "SIGTERM");
+          assert.equal(adapter.runtimeCustody(request.workAttemptId), "absent");
+        } else {
+          assert.equal(evidence, undefined, "unknown custody or unverified init must not invent a receipt");
+          if (mode !== "init_deadline") assert.equal(adapter.runtimeCustody(request.workAttemptId), "unknown");
+        }
+        return true;
+      });
+      assert.equal(harness.launches.length, 1);
+      assert.equal(harness.children[0]!.written.length, 1);
+    } finally {
+      harness.identities.set(4100, null);
+      harness.children[0]!.resolveExit({ type: "exit", code: null, signal: "SIGTERM" });
+      await flush();
+    }
+  });
+}
+
+test("failed resumed acquisition binds death to the saved continuation and immutable request", async () => {
+  const harness = createHarness({ omitBootstrapResult: true });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+  const request = spawnRequest({ supervisorEntryId: "entry-1", supervisorExecutionGenerationId: "generation-1" });
+  const saved = "saved-claude-continuation";
+  const expected = providerAcquisitionIdentity("claude-code", request, saved);
+  await assert.rejects(withLoopAlive(adapter.resume({ workAttemptId: request.workAttemptId, providerContinuationId: saved }, request)), error => {
+    const evidence = providerAcquisitionEvidence(error, expected);
+    assert.ok(evidence?.terminal.nativeRuntimeDeath);
+    assert.equal(evidence.terminal.providerContinuationId, saved);
+    request.supervisorExecutionGenerationId = "later-generation";
+    assert.throws(() => providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request, saved)), /does not match/);
+    assert.throws(() => providerAcquisitionEvidence(error, { ...expected!, continuationId: "another-continuation" }), /does not match/);
+    assert.equal(providerAcquisitionEvidence({ ...error as Error }, expected), undefined, "structural error copies are not operational evidence");
+    assert.equal(providerAcquisitionEvidence(error, expected), evidence);
+    return true;
+  });
+});
+
+// api_retry has the published SDKAPIRetryMessage shape. This reproduces the
+// capture boundary, not the native cause of any historical live failure.
+for (const withOptionalSink of [false, true]) {
+  test(`bootstrap retry diagnostic survives rejected acquisition (optional sink: ${withOptionalSink})`, async () => {
+    const harness = createHarness({ omitBootstrapResult: true });
+    const saved = "saved-bootstrap-diagnostic-session";
+    const retry = {
+      type: "system", subtype: "api_retry", session_id: saved,
+      uuid: "00000000-0000-4000-8000-000000000001",
+      attempt: 1, max_retries: 10, retry_delay_ms: 1000,
+      error_status: 529, error: "overloaded",
+    };
+    let emitted = 0;
+    const launch = harness.dependencies.launchChild;
+    harness.dependencies.launchChild = input => {
+      const child = launch(input) as FakeClaudeChild;
+      const write = child.writeLine.bind(child);
+      child.writeLine = line => {
+        write(line);
+        queueMicrotask(() => { emitted += 1; child.emit(retry); });
+      };
+      return child;
+    };
+    const streams: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({
+      dependencies: harness.dependencies, initTimeoutMs: 40,
+      ...(withOptionalSink ? { streamSink: (event: ProviderStreamEvent) => streams.push(event) } : {}),
+    });
+    const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+    const request = { ...spawnRequest({ supervisorEntryId: "entry-diagnostic",
+      supervisorExecutionGenerationId: "execution-diagnostic" }), provider: "claude-code" };
+    let admitted = false;
+    let rejected: Error | null = null;
+    await assert.rejects(withLoopAlive(router.resume({ workAttemptId: request.workAttemptId,
+      provider: "claude-code", providerContinuationId: saved }, request).then(() => {
+      admitted = true;
+    })), error => {
+      assert.ok(error instanceof Error);
+      rejected = error;
+      assert.equal(error.name, "ClaudeBootstrapError");
+      assert.equal((error as Error & { phase: string }).phase, "bootstrap_turn");
+      assert.equal((error as Error & { reason: string }).reason, "deadline");
+      const evidence = providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request, saved));
+      assert.ok(evidence?.terminal.nativeRuntimeDeath, "existing exact death evidence still survives");
+      assert.equal(evidence.terminal.providerContinuationId, saved);
+      assert.match(error.message, /last_api_retry=overloaded \(HTTP 529\)/);
+      assert.doesNotMatch(error.message, /retry_delay_ms|uuid|saved-bootstrap-diagnostic-session/);
+      assert.match(error.message, /stdout_lines=2; matched_session_lines=2; stderr_bytes=unavailable/);
+      assert.doesNotMatch(JSON.stringify(evidence), /api_retry|overloaded|529/,
+        "diagnostics never change the operational death receipt");
+      return true;
+    });
+    assert.equal(emitted, 1);
+    assert.equal(admitted, false, "failed startup must not admit a handle");
+    assert.deepEqual(router.runtimeCustody(request.workAttemptId, "claude-code"), { state: "absent" });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+    assert.equal(harness.mcpConfigDisposals, 1);
+    const retryEvents = streams.filter(event => event.method === "system/api_retry");
+    assert.equal(retryEvents.length, withOptionalSink ? 1 : 0,
+      "positive control proves the adapter consumes the event before failure");
+    if (withOptionalSink) assert.deepEqual(retryEvents[0]!.payload, retry);
+
+    const projected: string[] = [];
+    const entry = { id: "entry-diagnostic", desired_state: "running", observed_state: "recovering",
+      condition: "none", work_attempt_id: request.workAttemptId };
+    const scheduler = new ProviderSchedulerFailureCoordinator({
+      nativeHeartbeatIntervalMs: 1000, currentDaemonGeneration: () => 1, nowMs: () => 0,
+      serializeEntry: async (_id: string, operation: () => Promise<unknown>) => operation(),
+      serializeManifest: async (operation: () => Promise<unknown>) => operation(),
+      manifest: { load: async () => ({ entries: [entry] }), updateEntry: async () => { throw new Error("must not reset continuation"); } },
+      transitionOnce: async (_id: string, _state: string, condition: string, message: string) => {
+        assert.equal(condition, "coordination_blocked"); projected.push(message);
+      },
+      audit: { append: async () => {} },
+      scheduleRecovery: () => { throw new Error("diagnostics must not authorize a retry"); },
+    });
+    await scheduler.record(entry.id, rejected, "test");
+    assert.equal(projected.length, 1);
+    assert.match(projected[0]!, /last_api_retry=overloaded \(HTTP 529\)/,
+      "the existing saved-failure transition receives the useful diagnostic");
+  });
+}
+
+// SDKStatusMessage and SDKHookResponseMessage carry these fixed enums.
+// Retain the observed distinction, not the cause of a historical native stall.
+test("bootstrap diagnostics distinguish observed progress at the appropriate bounded deadline", async () => {
+  const diagnostics: string[] = [];
+  for (const category of ["compacting", "requesting", "hook_error"] as const) {
+    const privateText = "private-hook-output-token";
+    const harness = createHarness({ omitBootstrapResult: true, bootstrapMessages: sessionId =>
+      Array.from({ length: 3 }, () => category === "hook_error"
+        ? { type: "system", subtype: "hook_response", outcome: "error", session_id: sessionId,
+          hook_id: privateText, hook_name: privateText, hook_event: privateText,
+          output: privateText, stdout: privateText, stderr: privateText, exit_code: 1 }
+        : { type: "system", subtype: "status", status: category, session_id: sessionId }),
+    });
+    const streams: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40, compactionTimeoutMs: 40,
+      streamSink: event => streams.push(event),
+    });
+    const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+    const request = { ...spawnRequest({ supervisorEntryId: "entry-progress",
+      supervisorExecutionGenerationId: "execution-progress" }), provider: "claude-code" };
+    const saved = "saved-progress-session";
+    await assert.rejects(withLoopAlive(router.resume({ workAttemptId: request.workAttemptId,
+      provider: "claude-code", providerContinuationId: saved }, request)), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ClaudeBootstrapError");
+      assert.match(error.message, category === "compacting" ? /bootstrap turn \(compaction_deadline\)/ : /bootstrap turn \(deadline\)/);
+      assert.match(error.message, /stdout_lines=4; matched_session_lines=4/);
+      assert.match(error.message, /api_retry_count=0; assistant_count=0; result_count=0/);
+      const expected = category === "hook_error" ? "system.hook_response.error" : `system.status.${category}`;
+      assert.ok(error.message.includes(`last_line_type=${expected}`));
+      assert.ok(error.message.includes(`line_types=system.init:1,${expected}:3`));
+      assert.match(error.message, /last_line_ms=\d+/);
+      assert.doesNotMatch(error.message, /private-hook-output-token|saved-progress-session/);
+      diagnostics.push(error.message.replace(/(?:init_ms|bootstrap_ms|last_line_ms)=\d+/g, "elapsed_ms=<measured>"));
+      const safe = redactCredentialText(error.message);
+      assert.equal(safe.value, error.message);
+      assert.equal(safe.redacted, false);
+      assert.equal(safe.truncated, false);
+      const evidence = providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request, saved));
+      assert.ok(evidence?.terminal.nativeRuntimeDeath);
+      return true;
+    });
+    const observed = streams.filter(event => event.method !== "system/init");
+    assert.equal(observed.length, 3, "positive control: the adapter consumed all three progress events");
+    for (const event of observed) {
+      const payload = event.payload as Record<string, unknown>;
+      assert.equal(event.method, category === "hook_error" ? "system/hook_response" : "system/status");
+      assert.equal(category === "hook_error" ? payload.outcome : payload.status,
+        category === "hook_error" ? "error" : category);
+    }
+    assert.deepEqual(router.runtimeCustody(request.workAttemptId, "claude-code"), { state: "absent" });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  }
+  assert.equal(new Set(diagnostics).size, 3, "progress categories survive without relying on elapsed-time differences");
+});
+
+for (const [apiError, expected] of [
+  ["rate_limit", { providerQuotaExhausted: true, transientProviderStart: undefined }],
+  ["overloaded", { providerQuotaExhausted: undefined, transientProviderStart: true }],
+  ["server_error", { providerQuotaExhausted: undefined, transientProviderStart: true }],
+  ["authentication_failed", { providerQuotaExhausted: undefined, transientProviderStart: undefined }],
+] as const) {
+  test(`a bootstrap turn Claude rejects with ${apiError} is classified for the scheduler`, async () => {
+    const harness = createHarness({
+      bootstrapResultSubtype: "success",
+      bootstrapMessages: sessionId => [{ type: "assistant", session_id: sessionId, error: apiError,
+        message: { content: [{ type: "text", text: "limit" }] } }],
+    });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, new RegExp(`\\(failed_response\\).*assistant_error=${apiError}`));
+      const flags = error as { providerQuotaExhausted?: true; transientProviderStart?: true };
+      assert.equal(flags.providerQuotaExhausted, expected.providerQuotaExhausted);
+      assert.equal(flags.transientProviderStart, expected.transientProviderStart);
+      return true;
+    });
+  });
+}
+
+test("a bootstrap deadline stays unretried even after Claude reported a rate-limit retry", async () => {
+  const harness = createHarness({
+    omitBootstrapResult: true,
+    bootstrapMessages: sessionId => [{ type: "system", subtype: "api_retry", session_id: sessionId,
+      error: "rate_limit", error_status: 429, attempt: 1, retry_delay_ms: 1000 }],
+  });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+  await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /\(deadline\)/);
+    const flags = error as { providerQuotaExhausted?: true; transientProviderStart?: true };
+    assert.equal(flags.providerQuotaExhausted, undefined, "a stalled resume can cost tokens; only an explicit rejection retries");
+    assert.equal(flags.transientProviderStart, undefined);
+    return true;
+  });
+});
+
+test("post-init bootstrap diagnostics count a retry storm without changing the deadline", async () => {
+  const harness = createHarness({ omitBootstrapResult: true });
+  let emittedAfterInit = false;
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40,
+    streamSink: event => {
+      if (event.method !== "system/init") return;
+      emittedAfterInit = true;
+      for (const [index, category] of ["billing_error", "rate_limit", "overloaded"].entries()) {
+        harness.children[0]!.emit({ type: "system", subtype: "api_retry", session_id: event.providerContinuationId,
+          error: category, error_status: [402, 429, 529][index], attempt: index + 1, retry_delay_ms: 1000 });
+      }
+    },
+  });
+  await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), error => {
+    assert.ok(error instanceof Error);
+    assert.equal(emittedAfterInit, true);
+    assert.match(error.message, /\(deadline\).*last_api_retry=overloaded \(HTTP 529\)/);
+    assert.match(error.message, /api_retry_count=3; assistant_count=0; result_count=0/);
+    assert.doesNotMatch(error.message, /billing_error|rate_limit|retry_delay_ms/);
+    const safe = redactCredentialText(error.message);
+    assert.equal(safe.value, error.message);
+    assert.equal(safe.redacted, false);
+    assert.equal(safe.truncated, false);
+    return true;
+  });
+  assert.equal(harness.children[0]!.written.length, 1);
+  assert.equal(harness.mcpConfigDisposals, 1);
+});
+
+for (const scenario of ["preinit", "foreign", "private_fields", "compact_result", "histogram_cap", "total_cap", "cleanup"] as const) {
+  test(`bootstrap progress observations remain bounded and passive: ${scenario}`, async () => {
+    const privateText = "private-progress-token";
+    const harness = createHarness({ noInit: scenario === "preinit", omitBootstrapResult: true,
+      bootstrapMessages: (sessionId, turnId) => {
+        const base = { session_id: sessionId, uuid: privateText };
+        if (scenario === "preinit") return [{ ...base, type: "system", subtype: "status", status: "requesting" }];
+        if (scenario === "foreign") return [
+          { ...base, type: "command_lifecycle", command_uuid: turnId, state: "started" },
+          { type: "system", subtype: "status", status: "compacting", session_id: "other-session" },
+          { type: "control_request", request: { subtype: "can_use_tool", input: privateText } },
+        ];
+        if (scenario === "private_fields") return [
+          { ...base, type: privateText, subtype: privateText },
+          { ...base, type: "system", subtype: privateText },
+          { ...base, type: "system", subtype: "status", status: privateText, compact_result: privateText, compact_error: privateText },
+          { ...base, type: "system", subtype: "hook_response", outcome: privateText, output: privateText, stderr: privateText },
+          { ...base, type: "system", subtype: "session_state_changed", state: privateText },
+          { ...base, type: "command_lifecycle", state: privateText, command_uuid: privateText },
+        ];
+        if (scenario === "compact_result") return [
+          { ...base, type: "system", subtype: "status", status: "compacting" },
+          { ...base, type: "system", subtype: "status", status: null, compact_result: "failed", compact_error: privateText },
+        ];
+        if (scenario === "histogram_cap") return ["hook_started", "hook_progress", "compact_boundary", "commands_changed",
+          "background_tasks_changed", "files_persisted", "notification", "informational", "thinking_tokens", "worker_shutting_down"]
+          .map(subtype => ({ ...base, type: "system", subtype, output: privateText, reason: privateText }));
+        if (scenario === "total_cap") return [
+          { ...base, type: "system", subtype: "api_retry", error: "authentication_failed", error_status: 401 },
+          { ...base, type: "assistant", error: "oauth_org_not_allowed" },
+          { ...base, type: "result", subtype: "error_max_structured_output_retries", user_message_uuid: "other-turn", is_error: true },
+          { ...base, type: "auth_status", isAuthenticating: true },
+          { ...base, type: "system", subtype: "status", status: "requesting", compact_result: "failed" },
+        ];
+        return [];
+      },
+    });
+    if (scenario === "cleanup") {
+      const signal = harness.dependencies.signalProcess;
+      harness.dependencies.signalProcess = (pid, kind) => {
+        const session = argValue(harness.launches[0]!.args, "--session-id")!;
+        harness.children[0]!.emit({ type: "system", subtype: "hook_response", outcome: "error", session_id: session });
+        return signal(pid, kind);
+      };
+    }
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), error => {
+      assert.ok(error instanceof Error);
+      const suffix = `Startup observations: ${error.message.split("Startup observations: ")[1]}`;
+      assert.ok(suffix.length <= 512, suffix);
+      assert.doesNotMatch(error.message, new RegExp(privateText));
+      const safe = redactCredentialText(error.message);
+      assert.equal(safe.value, error.message);
+      assert.equal(safe.redacted, false);
+      assert.equal(safe.truncated, false);
+      if (scenario === "preinit") {
+        assert.match(error.message, /bootstrap_ms=not_started/);
+        assert.match(error.message, /last_line_type=system.status.requesting; last_line_ms=\d+/);
+        assert.match(error.message, /line_types=system.status.requesting:1/);
+      }
+      if (scenario === "foreign") {
+        assert.match(error.message, /stdout_lines=4; matched_session_lines=2/);
+        assert.match(error.message, /last_line_type=command_lifecycle.started/);
+        assert.match(error.message, /line_types=system.init:1,command_lifecycle.started:1/);
+        assert.doesNotMatch(error.message, /compacting|control_request/);
+      }
+      if (scenario === "private_fields") {
+        assert.match(error.message, /last_line_type=command_lifecycle.unlisted/);
+        assert.match(error.message, /line_types=system.init:1,unlisted:1,system.unlisted:1/);
+        assert.match(error.message, /system.status.unlisted.compact_unlisted:1/);
+      }
+      if (scenario === "compact_result") {
+        assert.match(error.message, /last_line_type=system.status.cleared.compact_failed/);
+        assert.match(error.message, /line_types=system.init:1,system.status.compacting:1,system.status.cleared.compact_failed:1/);
+      }
+      if (scenario === "histogram_cap") {
+        assert.match(error.message, /last_line_type=system.worker_shutting_down/);
+        const histogram = suffix.match(/line_types=([^;]+)\./)![1]!;
+        const parts = histogram.split(",");
+        const omitted = Number(parts.pop()!.split(":")[1]);
+        assert.ok(omitted > 0);
+        assert.ok(parts.length <= 8);
+        assert.equal(parts.length + omitted, 11, "all omitted distinct types are disclosed");
+        assert.ok(histogram.length <= 210);
+      }
+      if (scenario === "total_cap") {
+        assert.match(error.message, /last_api_retry=authentication_failed \(HTTP 401\)/);
+        assert.match(error.message, /assistant_error=oauth_org_not_allowed/);
+        assert.match(error.message, /uncorrelated_result=error_max_structured_output_retries/);
+        assert.match(error.message, /last_line_type=system.status.requesting.compact_failed; last_line_ms=\d+/);
+        assert.match(error.message, /omitted_fields=\d+/);
+        assert.doesNotMatch(error.message, /line_types=/, "the histogram yields to existing error categories and last observed progress");
+      }
+      if (scenario === "cleanup") {
+        assert.match(error.message, /last_line_type=system.init/);
+        assert.doesNotMatch(error.message, /hook_response/);
+      }
+      return true;
+    });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.equal(harness.mcpConfigDisposals, 1);
+    assert.equal(adapter.runtimeCustody("wa-claude-1"), "absent");
+  });
+}
+
+for (const scenario of ["foreign_session", "private_error", "foreign_turn", "assistant_error", "failed_result", "unlisted_result", "no_http_response", "auth_status", "result_without_turn_id"] as const) {
+  test(`bootstrap diagnostics retain only bounded correlated categories: ${scenario}`, async () => {
+    const secret = "private-token-and-native-message";
+    const harness = createHarness({ omitBootstrapResult: true, bootstrapMessages: (sessionId, turnId) => {
+      const base = { session_id: sessionId, private_field: secret };
+      switch (scenario) {
+        case "foreign_session": return [{ ...base, type: "system", subtype: "api_retry", session_id: "other-session", error: "billing_error", error_status: 402 }];
+        case "private_error": return [{ ...base, type: "system", subtype: "api_retry", error: secret, error_status: secret }];
+        case "foreign_turn": return [{ ...base, type: "result", subtype: "error_max_turns", user_message_uuid: "other-turn", is_error: true, errors: [secret] }];
+        case "assistant_error": return [{ ...base, type: "assistant", error: "authentication_failed", message: { content: [{ type: "text", text: secret }] } }];
+        case "failed_result": return [{ ...base, type: "result", subtype: "error_max_turns", user_message_uuid: turnId, is_error: true, errors: [secret] }];
+        case "unlisted_result": return [{ ...base, type: "result", subtype: secret, user_message_uuid: turnId, is_error: true, errors: [secret] }];
+        case "no_http_response": return [{ ...base, type: "system", subtype: "api_retry", error: "unknown", error_status: null }];
+        case "auth_status": return [{ ...base, type: "auth_status", isAuthenticating: true, error: secret, output: [secret] }];
+        case "result_without_turn_id": return [{ ...base, type: "result", subtype: "error_max_turns", is_error: true, errors: [secret] }];
+      }
+    } });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), error => {
+      assert.ok(error instanceof Error);
+      assert.doesNotMatch(`${error.message} ${JSON.stringify(error)}`, new RegExp(secret));
+      assert.ok(error.message.split("Startup observations: ")[1]!.length <= 512);
+      assert.match(error.message, /init_ms=\d+; bootstrap_ms=\d+; budget_ms=40/);
+      if (scenario === "foreign_session") assert.doesNotMatch(error.message, /billing_error|HTTP 402|last_api_retry=/);
+      if (scenario === "private_error") assert.match(error.message, /last_api_retry=unlisted \(HTTP unlisted\)/);
+      if (scenario === "foreign_turn" || scenario === "result_without_turn_id") {
+        assert.match(error.message, /\(deadline\).*uncorrelated_result=error_max_turns/);
+        assert.match(error.message, /result_count=1/);
+        assert.doesNotMatch(error.message, /(?:^|; )result=/);
+      }
+      if (scenario === "assistant_error") assert.match(error.message, /assistant_error=authentication_failed/);
+      if (scenario === "failed_result") assert.match(error.message, /\(failed_response\).*result=error_max_turns/);
+      if (scenario === "unlisted_result") assert.match(error.message, /result=unlisted/);
+      if (scenario === "no_http_response") assert.match(error.message, /last_api_retry=unknown \(HTTP none\)/);
+      if (scenario === "auth_status") assert.match(error.message, /auth_status_count=1; authenticating=true/);
+      const safe = redactCredentialText(error.message);
+      assert.equal(safe.value, error.message);
+      assert.equal(safe.redacted, false);
+      assert.equal(safe.truncated, false);
+      return true;
+    });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.children[0]!.written.length, 1);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  });
+}
+
+for (const stderr of [0, 123, "unavailable"] as const) {
+  test(`init deadline keeps stderr volume ${stderr} separate from native content and custody`, async () => {
+    const harness = createHarness({ noInit: true });
+    const launch = harness.dependencies.launchChild;
+    harness.dependencies.launchChild = input => {
+      const child = launch(input);
+      child.stderrBytesRead = () => {
+        if (stderr === "unavailable") throw new Error("private stderr read failure");
+        return stderr;
+      };
+      return child;
+    };
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    const request = spawnRequest({ supervisorEntryId: "entry-init", supervisorExecutionGenerationId: "execution-init" });
+    await assert.rejects(withLoopAlive(adapter.spawn(request)), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /\(deadline\).*bootstrap_ms=not_started.*stdout_lines=0; matched_session_lines=0/);
+      assert.ok(error.message.includes(`stderr_bytes=${stderr}`));
+      assert.doesNotMatch(error.message, /private stderr/);
+      assert.equal(providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request)), undefined,
+        "diagnostics on an uninitialized child must not invent operational evidence");
+      return true;
+    });
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.mcpConfigDisposals, 1);
+  });
+}
+
+test("pre-init matching-session diagnostics survive without admitting native custody", async () => {
+  const harness = createHarness({ noInit: true, bootstrapMessages: sessionId => [
+    { type: "system", subtype: "api_retry", session_id: sessionId, error: "rate_limit", error_status: 429 },
+    { type: "auth_status", session_id: sessionId, isAuthenticating: false, error: "private native text" },
+  ] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+  const request = spawnRequest({ supervisorEntryId: "entry-preinit", supervisorExecutionGenerationId: "execution-preinit" });
+  await assert.rejects(withLoopAlive(adapter.spawn(request)), error => {
+    assert.ok(error instanceof Error);
+    assert.equal((error as Error & { phase: string }).phase, "init");
+    assert.match(error.message, /last_api_retry=rate_limit \(HTTP 429\)/);
+    assert.match(error.message, /auth_status_count=1; authenticating=false/);
+    assert.match(error.message, /bootstrap_ms=not_started/);
+    assert.match(error.message, /stdout_lines=2; matched_session_lines=2/);
+    assert.doesNotMatch(error.message, /private native text/);
+    assert.equal(providerAcquisitionEvidence(error, providerAcquisitionIdentity("claude-code", request)), undefined);
+    return true;
+  });
+  assert.equal(harness.launches.length, 1);
+  assert.equal(harness.children[0]!.written.length, 1);
+});
+
+test("default child retains stderr byte count without its text", { skip: process.platform === "win32" }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "claude-startup-diagnostic-test-"));
+  const executable = join(directory, "inert-cli.cjs");
+  const privateText = "private-stderr-token-12345\n";
+  await writeFile(executable, `#!${process.execPath}\n`
+    + `process.stderr.write(${JSON.stringify(privateText)});\n`
+    + "process.stdin.resume(); setInterval(() => {}, 1000);\n", { mode: 0o700 });
+  const adapter = new ClaudeCodeProviderAdapter({ claudeBin: executable, initTimeoutMs: 5000,
+    dependencies: { readVersion: async () => "2.1.220 (Claude Code)",
+      createLetAgentsMcpConfig: async () => ({ path: join(directory, "unused.json"), dispose: async () => {} }) },
+  });
+  try {
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest({ cwd: directory }))), error => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(`stderr_bytes=${Buffer.byteLength(privateText)}`));
+      assert.match(error.message, /bootstrap_ms=not_started/);
+      assert.doesNotMatch(error.message, /private-stderr-token/);
+      return true;
+    });
+    assert.equal(adapter.runtimeCustody("wa-claude-1"), "absent");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const phase of ["init", "bootstrap_turn"] as const) {
+  for (const reason of ["deadline", "native_exit", "transport_error"] as const) {
+    test(`Claude ${phase} preserves ${reason} without changing native custody`, async () => {
+      const harness = createHarness({ noInit: phase === "init", omitBootstrapResult: true });
+      const launch = harness.dependencies.launchChild;
+      if (reason !== "deadline") {
+        harness.dependencies.launchChild = input => {
+          const child = launch(input) as FakeClaudeChild;
+          const write = child.writeLine.bind(child);
+          child.writeLine = json => {
+            write(json);
+            setImmediate(() => {
+              if (reason === "native_exit") {
+                harness.identities.set(child.pid!, null);
+                child.resolveExit({ type: "exit", code: 7, signal: null });
+              } else {
+                child.resolveExit({ type: "error", error: new Error("private transport payload") });
+              }
+            });
+          };
+          return child;
+        };
+      }
+      const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+      try {
+        await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal(error.name, "ClaudeBootstrapError");
+          assert.equal((error as Error & { phase: string }).phase, phase);
+          assert.equal((error as Error & { reason: string }).reason, reason);
+          assert.match(error.message, new RegExp(reason));
+          assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`, /private transport payload/);
+          if (reason === "native_exit") {
+            assert.equal((error as Error & { exitCode: number }).exitCode, 7);
+            assert.equal((error as Error & { signal: unknown }).signal, null);
+          }
+          return true;
+        });
+        assert.equal(harness.launches.length, 1);
+        assert.equal(harness.children[0]!.written.length, 1);
+        assert.equal(harness.mcpConfigDisposals, 1);
+        assert.equal(adapter.runtimeCustody("wa-claude-1"), reason === "transport_error" ? "unknown" : "absent");
+        assert.deepEqual(harness.signals, reason === "deadline" ? [{ pid: 4100, signal: "SIGTERM" }] : []);
+      } finally {
+        harness.identities.set(4100, null);
+        await flush();
+      }
+    });
+  }
+}
+
+for (const failed of [false, true]) {
+  for (const exit of [{ type: "exit", code: 7, signal: null },
+    { type: "error", error: new Error("private transport payload") }] as const) {
+    test(`exact bootstrap ${failed ? "failure" : "success"} keeps precedence over same-batch ${exit.type}`, async () => {
+      const harness = createHarness({
+        ...(failed ? { bootstrapResultSubtype: "error_max_turns" } : {}),
+        exitAfterBootstrapResult: exit,
+      });
+      const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+      try {
+        if (failed) {
+          await assert.rejects(adapter.spawn(spawnRequest()), {
+            name: "ClaudeBootstrapError", phase: "bootstrap_turn", reason: "failed_response",
+          });
+        } else {
+          const handle = await adapter.spawn(spawnRequest());
+          assert.equal(handle.providerContinuationId, argValue(harness.launches[0]!.args, "--session-id"));
+        }
+      } finally {
+        harness.identities.set(4100, null);
+        await flush();
+      }
+    });
+  }
+}
+
+test("failed Claude bootstrap retains rejected native custody until exact physical retirement", async () => {
+  const options: HarnessOptions = { noInit: true };
+  const harness = createHarness(options);
+  harness.dependencies.signalProcess = () => { throw new Error("cleanup signal failed"); };
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 20 });
+  await assert.rejects(adapter.spawn(spawnRequest()), /cleanup signal failed/);
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "unknown");
+  options.noInit = false;
+  const successor = await adapter.spawn(spawnRequest());
+  assert.equal(adapter.runtimeCustody("wa-claude-1", successor), "unknown", "the successful retry does not overwrite the old child");
+  harness.identities.set(4100, undefined);
+  assert.equal(adapter.runtimeCustody("wa-claude-1", successor), "unknown");
+  harness.identities.set(4100, null);
+  assert.equal(adapter.runtimeCustody("wa-claude-1", successor), "owned");
+  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal(adapter.runtimeCustody("wa-claude-1", successor), "absent");
+});
+
+test("Claude missing executable proves no native child was acquired", async () => {
+  const harness = createHarness();
+  const { launchChild: _launchChild, ...dependencies } = harness.dependencies;
+  const adapter = new ClaudeCodeProviderAdapter({ claudeBin: "/nonexistent-letagents-test/claude", dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest({ cwd: tmpdir() })), /did not expose a process id/);
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "absent");
+  assert.deepEqual(harness.signals, []);
+});
+
+test("Claude bootstrap transport error is not a native-death receipt", async () => {
+  const harness = createHarness({ noInit: true });
+  const launch = harness.dependencies.launchChild;
+  harness.dependencies.launchChild = input => {
+    const child = launch(input) as FakeClaudeChild;
+    queueMicrotask(() => child.resolveExit({ type: "error", error: new Error("transport failed") }));
+    return child;
+  };
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 20 });
+  await assert.rejects(adapter.spawn(spawnRequest()), /did not report its stream-json init/);
+  assert.equal(harness.signals.length, 0, "existing cleanup resolves early on this transport error");
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "unknown", "birth remains live despite rejected acquisition and resolved error");
+  harness.identities.set(4100, undefined);
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "unknown");
+  harness.identities.set(4100, "reused-pid-birth");
+  assert.equal(adapter.runtimeCustody("wa-claude-1"), "absent", "later physical retirement unblocks handoff without history edits");
+});
+
 test("observed crash emits one synthesized terminal payload and makes attach terminal evidence", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
@@ -512,6 +1372,7 @@ test("observed crash emits one synthesized terminal payload and makes attach ter
 
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]!.terminalCause, "crashed");
+  assert.deepEqual(terminals[0]!.nativeRuntimeDeath, { kind: "claude_cli", pid: 4100, processIdentity: handle.providerConnection!.processIdentity });
   assert.equal(handle.observedState(), "failed");
   const attachment = await adapter.attach({
     workAttemptId: "wa-claude-1",
@@ -564,12 +1425,84 @@ test("stop orders SIGTERM before the observed terminal and escalates to SIGKILL 
   assert.equal(killed.terminalCause, "killed");
 });
 
+test("exact-reference Claude stop fences both attached and unreachable processes and emits birth evidence", async () => {
+  for (const cached of [false, true]) for (const force of [false, true]) {
+    const birth = "Mon Sep 21 17:55:18 2026";
+    const h = createHarness({ identities: new Map([[4100, birth]]), dieOnSigterm: false });
+    const owner = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+    const handle = await owner.spawn(spawnRequest());
+    const adapter = cached ? owner : new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+    const terminal = await withLoopAlive(adapter.stopRef({ workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection }, { force, graceMs: 1 }));
+    assert.deepEqual(h.signals.map(value => value.signal), force ? ["SIGKILL"] : ["SIGTERM", "SIGKILL"]);
+    assert.equal(h.identities.get(4100), null);
+    assert.deepEqual(terminal.nativeRuntimeDeath, { kind: "claude_cli", pid: 4100, processIdentity: birth });
+    assert.equal(terminal.providerContinuationId, handle.providerContinuationId);
+    assert.equal(h.launches.length, 1);
+  }
+});
+
+test("exact-reference Claude stop ignores a cached protocol terminal while its process remains alive", async () => {
+  const birth = "Mon Sep 21 17:55:18 2026";
+  const h = createHarness({ identities: new Map([[4100, birth]]) });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  Object.assign(handle, { terminal: { endedAt: h.dependencies.now(), exitCode: null, signal: null,
+    terminalCause: "protocol_error", providerContinuationId: handle.providerContinuationId } });
+  const terminal = await withLoopAlive(adapter.stopRef({ workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection }, { graceMs: 1 }));
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGTERM"]);
+  assert.equal(h.identities.get(4100), null);
+  assert.equal(terminal.nativeRuntimeDeath?.pid, 4100);
+});
+
+test("exact-reference Claude stop refuses invalid births and known foreign ownership", async () => {
+  const birth = "Mon Sep 21 17:55:18 2026";
+  const h = createHarness({ identities: new Map([[4100, birth]]) });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const ref = { workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection };
+  await assert.rejects(adapter.stopRef({ ...ref, workAttemptId: "foreign" }), /known native process owner/);
+  await assert.rejects(adapter.stopRef({ ...ref, providerContinuationId: "foreign" }), /known native process owner/);
+  for (const pid of [-1, 0, 1.1, null]) await assert.rejects(adapter.stopRef({ ...ref,
+    providerConnection: { kind: "claude_cli", pid, processIdentity: birth } }), /exact continuation and process birth/);
+  await assert.rejects(adapter.stopRef({ ...ref, providerConnection: { kind: "claude_cli", pid: 4100, processIdentity: "bad" } }), /exact continuation and process birth/);
+  for (const unknown of [undefined, "bad ps output"]) {
+    h.identities.set(4100, unknown);
+    await assert.rejects(adapter.stopRef(ref), /ambiguous/);
+  }
+  assert.equal(h.signals.length, 0);
+});
+
+test("exact-reference Claude stop never signals a reused PID or accepts an unconfirmed kill", async () => {
+  const birth = "Mon Sep 21 17:55:18 2026";
+  const h = createHarness({ identities: new Map([[4100, "Mon Sep 21 18:55:18 2026"]]) });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  const ref = { workAttemptId: "wa-old", providerContinuationId: "session-old",
+    providerConnection: { kind: "claude_cli" as const, pid: 4100, processIdentity: birth } };
+  assert.equal((await adapter.stopRef(ref)).nativeRuntimeDeath?.processIdentity, birth);
+  assert.equal(h.signals.length, 0);
+  h.identities.set(4100, birth);
+  h.dependencies.signalProcess = (pid, signal) => { h.signals.push({ pid, signal }); };
+  const stubborn = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  await assert.rejects(withLoopAlive(stubborn.stopRef(ref, { force: true, graceMs: 1 })), /not yet proved/);
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGKILL"]);
+  h.signals.length = 0;
+  h.dependencies.signalProcess = (pid, signal) => { h.signals.push({ pid, signal }); h.identities.set(pid, "Mon Sep 21 18:55:18 2026"); };
+  const replaced = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
+  await withLoopAlive(replaced.stopRef(ref, { graceMs: 1 }));
+  assert.deepEqual(h.signals.map(value => value.signal), ["SIGTERM"], "no escalation into reused PID");
+});
+
 test("stdio loss on a verified-live child fences the exact child instead of synthesizing death", async () => {
   const harness = createHarness({ dieOnSigterm: false });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
   const terminals: ProviderTerminalPayload[] = [];
+  const observations: NativeExecutionObservation[] = [];
   adapter.onExit(handle, (terminal) => terminals.push(terminal));
+  adapter.onExecution(handle, (event) => observations.push(event));
 
   harness.children[0]!.disconnect();
   await flush();
@@ -577,6 +1510,14 @@ test("stdio loss on a verified-live child fences the exact child instead of synt
   assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }], "the exact live child is fenced");
   assert.equal(terminals.length, 0, "stdio loss alone cannot make a live writer restartable");
   assert.equal(harness.children[0]!.alive, true);
+  assert.deepEqual(observations.at(-1), {
+    sourceId: observations.at(-1)?.sourceId,
+    sequence: 2,
+    observedAtMs: 1_700_000_000_000,
+    fact: { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+    nativeProcessIdentity: birthIdentity(4100),
+    nativeProcessPid: 4100,
+  }, "stdio loss degrades typed control without inventing runtime death");
 
   // Only real identity disappearance becomes terminal.
   harness.identities.set(4100, null);
@@ -584,6 +1525,10 @@ test("stdio loss on a verified-live child fences the exact child instead of synt
   await flush();
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]!.terminalCause, "crashed");
+  assert.deepEqual(observations.slice(-2).map(({ fact }) => fact), [
+    { domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" },
+    { domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: "process_exit" },
+  ], "verified process exit remains the only hard-loss boundary");
 });
 
 test("a quiet daemon-owned Claude continuation stays idle between turns", async () => {
@@ -621,6 +1566,8 @@ test("a recycled pid can neither authenticate an attach nor be signalled", async
   });
   assert.equal(attached && "state" in attached ? attached.state : null, "terminal", "the recorded child is proven absent");
   assert.equal(attached && "state" in attached ? attached.terminal.terminalCause : null, "crashed");
+  assert.deepEqual(attached && "state" in attached ? attached.terminal.nativeRuntimeDeath : null,
+    { kind: "claude_cli", pid: 4100, processIdentity: `${originalBirth} /opt/homebrew/bin/claude --print --verbose` });
   assert.deepEqual(harness.signals, [], "the recycled pid was never signalled");
 });
 
@@ -665,6 +1612,31 @@ test("attach to a live unreachable orphan fences it (TERM, identity recheck, KIL
   assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM", "SIGKILL"], "exact-child fence ordering");
   assert.equal(harness.identities.get(4100), null, "the orphan is verifiably gone before recovery may proceed");
   assert.equal(harness.launches.length, 1, "fencing never launches a second writer");
+});
+
+test("concurrent Claude attach authenticates one exact continuation, authority mode, and process birth", async () => {
+  const stableBirth = "Wed Jul 15 23:42:10 2026";
+  const harness = createHarness({ dieOnSigterm: false, identities: new Map([[4100, stableBirth]]) });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
+  const handle = await adapter.spawn(spawnRequest());
+  const fresh = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
+  const ref = {
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    lifecycleAuthorityMode: "typed_shadow" as const,
+    providerConnection: handle.providerConnection,
+  };
+
+  const exact = fresh.attach(ref);
+  assert.equal(await fresh.attach({ ...ref, providerContinuationId: "foreign-session" }), null);
+  assert.equal(await fresh.attach({ ...ref, lifecycleAuthorityMode: "typed" }), null);
+  assert.equal(await fresh.attach({
+    ...ref,
+    providerConnection: { kind: "claude_cli", pid: handle.pid, processIdentity: birthIdentity(9999) },
+  }), null);
+  assert.equal(await fresh.attach({ ...ref }), await withLoopAlive(exact),
+    "an identical concurrent attach shares only the exact in-flight fence");
+  assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM", "SIGKILL"]);
 });
 
 test("resume presents the recorded continuation and asserts the spike-proven same-session identity", async () => {
@@ -769,7 +1741,6 @@ test("daemon-owned Claude runs one exact bounded room turn and checkpoints befor
   const pending = adapter.runRoomTurn!(handle, {
     inboxItemId: "inbox-claude-1",
     actionId: "action-claude-1",
-    charter: "Fix the requested code and report clearly.",
     observedContext: [{ id: "msg-before", text: "Earlier context" }],
     sourceMessage: { id: "msg-source", text: "Please fix it" },
     activation: { kind: "mention" },
@@ -787,8 +1758,11 @@ test("daemon-owned Claude runs one exact bounded room turn and checkpoints befor
   assert.ok(frame.uuid);
   assert.deepEqual(calls, ["intent", `turn:${frame.uuid}`], "durable intent and exact id precede native completion");
   const prompt = frame.message.content[0]!.text;
-  assert.match(prompt, /daemon owns observation, credentials, retries, and publication/i);
-  assert.match(prompt, /Do not register a session, authenticate, poll/);
+  assert.match(prompt, /publication of your final chat reply/i);
+  assert.match(prompt, /chat reply publication does not publish code or create PRs/);
+  assert.match(prompt, /standing merge approval/);
+  assert.match(prompt, /Do not register a session, authenticate LetAgents, poll/);
+  assert.doesNotMatch(prompt, /durable charter/i);
   assert.match(prompt, /Inbox item: inbox-claude-1/);
   assert.match(prompt, /Source message: .*Please fix it/);
 
@@ -1051,7 +2025,7 @@ test("Claude turn control interrupts only the active bounded turn and refuses co
     resumed: false,
     state: "idle",
   });
-  await assert.rejects(running, /failed.*interrupted/i);
+  assert.equal((await running).outcome, "interrupted");
   const writesAfterInterrupt = child.written.length;
   await assert.rejects(
     adapter.controlTurn!(handle, "Start another untracked turn."),
@@ -1060,23 +2034,846 @@ test("Claude turn control interrupts only the active bounded turn and refuses co
   assert.equal(child.written.length, writesAfterInterrupt);
 });
 
-test("error result messages settle the observed state to failed", async () => {
+test("Claude 2.1.238 UUID-less interrupt boundary settles only the daemon-fenced exact turn", async () => {
   const harness = createHarness();
   const stream: ProviderStreamEvent[] = [];
   const adapter = new ClaudeCodeProviderAdapter({
     dependencies: harness.dependencies,
     streamSink: (event) => stream.push(event),
   });
-  const handle = await adapter.spawn(spawnRequest());
-  harness.children[0]!.emit({
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const child = harness.children[0]!;
+  const events: NativeExecutionObservation[] = [];
+  const activities: ProviderActivityEvent[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  adapter.onActivity(handle, (event) => activities.push(event));
+  const request = { inboxItemId: "inbox-uuidless-interrupt", actionId: "action-uuidless-interrupt", sourceMessage: {}, activation: {} };
+  const running = adapter.runRoomTurn!(handle, request);
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: handle.providerContinuationId });
+
+  const controlled = adapter.controlTurn!(handle, null, {
+    targetTurnId: turnId,
+    checkpointTurnStarted: async () => {},
+    markDispatched: async () => {},
+  });
+  await flush();
+  const boundary = {
     type: "result",
     subtype: "error_during_execution",
     is_error: true,
-    result: "native provider failure",
+    terminal_reason: "aborted_streaming",
+    session_id: handle.providerContinuationId,
+  };
+  child.emit(boundary);
+
+  assert.deepEqual(await controlled, {
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: false,
+    state: "idle",
+  });
+  assert.equal((await running).outcome, "interrupted");
+  assert.equal(handle.observedState(), "idle");
+  const terminalFacts = events.filter(({ fact }) => fact.domain === "turn"
+    && fact.state === "terminal"
+    && fact.providerTurnId === turnId);
+  assert.equal(terminalFacts.length, 1);
+  const terminalFact = terminalFacts[0]!.fact;
+  assert.equal(terminalFact.domain, "turn");
+  if (terminalFact.domain !== "turn") throw new Error("expected an exact turn terminal");
+  assert.equal(terminalFact.turnOutcome, "interrupted");
+  const rawBoundary = stream.find((event) => event.method === "result/error_during_execution");
+  assert.equal(rawBoundary?.nativeLifecyclePhase, "turn_terminal");
+  assert.equal((rawBoundary?.payload as Record<string, unknown>).user_message_uuid, undefined,
+    "the published provider payload remains raw; exact correlation is local context");
+
+  child.emit(boundary);
+  await flush();
+  assert.equal(events.filter(({ fact }) => fact.domain === "turn"
+    && fact.state === "terminal"
+    && fact.providerTurnId === turnId).length, 1,
+  "a duplicate UUID-less boundary reuses the original typed terminal");
+  const replayedBoundaries = stream.filter((event) => event.method === "result/error_during_execution");
+  assert.equal(replayedBoundaries.length, 2);
+  assert.equal(replayedBoundaries[1]!.nativeEventId, replayedBoundaries[0]!.nativeEventId);
+  assert.equal(activities.at(-1)?.summary, "Turn interrupted");
+
+  const next = adapter.runRoomTurn!(handle, { ...request, inboxItemId: "inbox-after-interrupt", actionId: "action-after-interrupt" });
+  await flush();
+  const nextId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({
+    type: "result", subtype: "success", is_error: false,
+    session_id: handle.providerContinuationId, user_message_uuid: nextId, result: "reused",
+  });
+  assert.equal((await next).text, "reused");
+});
+
+test("Claude UUID-less interrupt compatibility stays fenced across malformed and late boundaries", async () => {
+  const withoutStop = createHarness();
+  const standaloneAdapter = new ClaudeCodeProviderAdapter({ dependencies: withoutStop.dependencies });
+  const standaloneHandle = await standaloneAdapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const standaloneChild = withoutStop.children[0]!;
+  const standaloneEvents: NativeExecutionObservation[] = [];
+  standaloneAdapter.onExecution(standaloneHandle, (event) => standaloneEvents.push(event));
+  const standalone = standaloneAdapter.runRoomTurn!(standaloneHandle, {
+    inboxItemId: "inbox-unprompted-abort", actionId: "action-unprompted-abort", sourceMessage: {}, activation: {},
+  });
+  let standaloneSettled = false;
+  void standalone.then(() => { standaloneSettled = true; }, () => { standaloneSettled = true; });
+  await flush();
+  const standaloneTurnId = (JSON.parse(standaloneChild.written.at(-1)!) as { uuid: string }).uuid;
+  standaloneChild.emit({
+    type: "result", subtype: "error_during_execution", is_error: true,
+    terminal_reason: "aborted_streaming", session_id: standaloneHandle.providerContinuationId,
   });
   await flush();
+  assert.equal(standaloneSettled, false, "an identical frame without a daemon interrupt is not exact evidence");
+  assert.equal(standaloneEvents.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false);
+  standaloneChild.emit({
+    type: "result", subtype: "success", is_error: false,
+    session_id: standaloneHandle.providerContinuationId, user_message_uuid: standaloneTurnId, result: "natural",
+  });
+  assert.equal((await standalone).text, "natural");
 
+  for (const { name, patch } of [
+    { name: "wrong terminal reason", patch: { terminal_reason: "different_reason" } },
+    { name: "missing terminal reason", patch: { terminal_reason: undefined } },
+    { name: "wrong session", patch: { session_id: "different-session" } },
+    { name: "foreign turn UUID", patch: { user_message_uuid: "foreign-turn" } },
+    { name: "empty turn UUID", patch: { user_message_uuid: "" } },
+    { name: "wrong subtype", patch: { subtype: "different_subtype" } },
+    { name: "non-error result", patch: { is_error: false } },
+  ]) {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+    const child = harness.children[0]!;
+    const running = adapter.runRoomTurn!(handle, {
+      inboxItemId: "inbox-late-interrupt", actionId: "action-late-interrupt", sourceMessage: {}, activation: {},
+    });
+    await flush();
+    const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+    const controlled = adapter.controlTurn!(handle, null, {
+      targetTurnId: turnId,
+      checkpointTurnStarted: async () => {},
+      markDispatched: async () => {},
+    });
+    await flush();
+    const malformedFrame: Record<string, unknown> = {
+      type: "result", subtype: "error_during_execution", is_error: true,
+      terminal_reason: "aborted_streaming", session_id: handle.providerContinuationId,
+    };
+    Object.assign(malformedFrame, patch);
+    child.emit(malformedFrame);
+    await assert.rejects(controlled, (error: unknown) => {
+      assert.equal((error as { turnControlOutcome?: unknown }).turnControlOutcome, "uncertain");
+      return true;
+    }, name);
+
+    child.emit({
+      type: "result", subtype: "error_during_execution", is_error: true,
+      terminal_reason: "aborted_streaming", session_id: handle.providerContinuationId,
+    });
+    assert.equal((await running).outcome, "interrupted",
+      "the retained exact-turn context recognizes the late provider boundary");
+    assert.equal(handle.observedState(), "idle");
+  }
+});
+
+for (const natural of [
+  { name: "success", frame: { subtype: "success", is_error: false, result: "natural result" } },
+  { name: "failure", frame: { subtype: "error_during_execution", is_error: true } },
+]) {
+  test(`Claude exact ${natural.name} racing an interrupt remains the natural terminal`, async () => {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+    const child = harness.children[0]!;
+    const running = adapter.runRoomTurn!(handle, {
+      inboxItemId: `inbox-natural-${natural.name}`,
+      actionId: `action-natural-${natural.name}`,
+      sourceMessage: {},
+      activation: {},
+    });
+    await flush();
+    const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+    const controlled = adapter.controlTurn!(handle, null, {
+      targetTurnId: turnId,
+      checkpointTurnStarted: async () => {},
+      markDispatched: async () => {},
+    });
+    await flush();
+    child.emit({
+      type: "result",
+      session_id: handle.providerContinuationId,
+      user_message_uuid: turnId,
+      ...natural.frame,
+    });
+
+    await assert.rejects(controlled, (error: unknown) => {
+      assert.equal((error as { turnControlOutcome?: unknown }).turnControlOutcome, "not_applied");
+      return true;
+    });
+    if (natural.name === "success") {
+      assert.equal((await running).text, "natural result");
+    } else {
+      assert.equal((await running).outcome, "failed");
+    }
+    assert.equal(handle.observedState(), "idle");
+  });
+}
+
+for (const subtype of ["error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries"]) {
+  test(`Claude ${subtype} fails only the exact turn and leaves the continuation reusable`, async () => {
+    const harness = createHarness();
+    const stream: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({
+      dependencies: harness.dependencies,
+      streamSink: (event) => stream.push(event),
+    });
+    const handle = await adapter.spawn(spawnRequest());
+    const child = harness.children[0]!;
+    const request = { inboxItemId: "inbox-limited", actionId: "action-limited", sourceMessage: {}, activation: {} };
+    const options = { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} };
+    const running = adapter.runRoomTurn!(handle, request, options);
+    let settled = false;
+    void running.then(() => { settled = true; }, () => { settled = true; });
+    await flush();
+    const frame = JSON.parse(child.written.at(-1)!) as { uuid: string };
+    for (const identity of [
+      { session_id: "different-session", user_message_uuid: frame.uuid },
+      { session_id: handle.providerContinuationId, user_message_uuid: "different-turn" },
+    ]) {
+      child.emit({ type: "result", subtype, is_error: true, ...identity });
+      await flush();
+      assert.equal(settled, false, "uncorrelated results cannot settle the active room turn");
+    }
+    child.emit({
+      type: "result", subtype, is_error: true,
+      session_id: handle.providerContinuationId, user_message_uuid: frame.uuid,
+      errors: ["Configured turn limit reached."],
+    });
+    assert.equal((await running).outcome, "failed");
+    assert.equal(handle.observedState(), "idle");
+    assert.equal(stream.at(-1)?.kind, "turn_lifecycle");
+    assert.equal(stream.at(-1)?.method, `result/${subtype}`);
+    assert.equal(providerStreamLifecycle(stream.at(-1)!), "idle");
+    assert.equal((stream.at(-1)?.payload as { is_error: boolean }).is_error, true);
+
+    const writesBeforeRecovery = child.written.length;
+    assert.equal((await adapter.recoverRoomTurn!(handle, {
+      inboxItemId: request.inboxItemId, providerTurnId: frame.uuid,
+    })).outcome, "failed");
+    assert.equal(child.written.length, writesBeforeRecovery, "exact failed-turn evidence is retained without replay");
+
+    const next = adapter.runRoomTurn!(handle, { ...request, inboxItemId: "inbox-next", actionId: "action-next" }, options);
+    await flush();
+    const nextFrame = JSON.parse(child.written.at(-1)!) as { uuid: string };
+    assert.notEqual(nextFrame.uuid, frame.uuid);
+    child.emit({
+      type: "result", subtype: "success", is_error: false,
+      session_id: handle.providerContinuationId, user_message_uuid: nextFrame.uuid,
+      result: "The next turn completed.",
+    });
+    assert.deepEqual(await next, { turnId: nextFrame.uuid, outcome: "reply", text: "The next turn completed.", evidence: "stream" });
+    assert.equal(harness.children.length, 1);
+    assert.equal(child.alive, true);
+    assert.deepEqual(harness.signals, []);
+  });
+}
+
+for (const subtype of ["error_during_execution", "error_max_unknown_limit", "error_max_turns_extra"]) {
+  test(`Claude ${subtype} retains legacy runtime failure handling`, async () => {
+    const harness = createHarness();
+    const stream: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({
+      dependencies: harness.dependencies,
+      streamSink: (event) => stream.push(event),
+    });
+    const handle = await adapter.spawn(spawnRequest());
+    harness.children[0]!.emit({
+      type: "result",
+      subtype,
+      is_error: true,
+      result: "native provider failure",
+    });
+    await flush();
+
+    assert.equal(handle.observedState(), "failed");
+    assert.equal(stream.at(-1)?.kind, "error");
+    assert.equal(stream.at(-1)?.method, `result/${subtype}`);
+    assert.equal(providerStreamLifecycle(stream.at(-1)!), "failed");
+  });
+}
+
+test("Claude typed observations correlate native turns and completed tools without inventing execution starts", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  const stream: ProviderStreamEvent[] = [];
+  const stopStream = adapter.onStream(handle, (event) => stream.push(event));
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, () => { throw new Error("shadow persistence unavailable"); });
+  adapter.onExecution(handle, (event) => events.push(event));
+  assert.deepEqual(events.map(({ fact }) => fact), [{
+    domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none",
+  }], "subscription replays verified runtime readiness, never bootstrap room work");
+  assert.deepEqual(adapter.capabilities().execution, {
+    controlProbe: "unsupported", approvals: { kinds: ["command"], recovery: "native_instance_only", denyScope: "request" },
+  });
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+  assert.deepEqual(events.map(({ fact }) => fact), [
+    { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
+    { domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" },
+  ], "the unsupported probe state is still published to typed-shadow history");
+  const request = { inboxItemId: "typed-inbox", actionId: "typed-action", sourceMessage: {}, activation: {} };
+  const running = adapter.runRoomTurn(handle, request);
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  const session_id = handle.providerContinuationId;
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: "wrong", session_id });
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: "wrong" });
+  child.emit({ type: "assistant", session_id, message: { content: [
+    { type: "tool_use", id: "bootstrap-tail", name: "Bash", input: { command: "late-bootstrap" } },
+  ] } });
+  child.emit({ type: "user", session_id, message: { content: [
+    { type: "tool_result", tool_use_id: "bootstrap-tail", is_error: false, content: "finished" },
+  ] } });
+  assert.equal(events.length, 2);
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
+  child.emit({ type: "user", session_id, message: { content: [
+    { type: "tool_result", tool_use_id: "bootstrap-tail", is_error: false, content: "finished" },
+  ] } });
+  child.emit({ type: "assistant", session_id, message: { content: [
+    { type: "tool_use", id: "shell-1", name: "Bash", input: { command: "secret-command" } },
+  ] } });
+  assert.equal(events.length, 3, "the control state, runtime readiness, and native turn start are proved");
+  child.emit({ type: "user", session_id, message: { content: [
+    { type: "tool_result", tool_use_id: "unmatched", is_error: true, content: "secret-output" },
+    { type: "tool_result", tool_use_id: "shell-1", is_error: true, content: "secret-output" },
+  ] } });
+  child.emit({ type: "user", session_id, message: { content: [
+    { type: "tool_result", tool_use_id: "shell-1", is_error: true },
+  ] } });
+  const failedResult = { type: "result", subtype: "error_max_turns", is_error: true, session_id, user_message_uuid: turnId };
+  child.emit(failedResult);
+  assert.equal((await running).outcome, "failed");
+  child.emit(failedResult);
+  assert.equal(handle.observedState(), "idle", "typed collection preserves legacy containment");
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" }, "turn failure is not runtime death");
+
+  const next = adapter.runRoomTurn(handle, { ...request, inboxItemId: "typed-next" });
+  await flush();
+  const nextId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: nextId, result: "ready" });
+  assert.equal((await next).text, "ready");
+  let projection = emptyExecutionProjection();
+  let runtimeReadyObserved = false;
+  for (const event of events) {
+    projection = reduceExecutionFact(projection, {
+      ...event.fact, ...("providerTurnId" in event.fact ? { turnId: event.fact.providerTurnId } : {}),
+      factId: `fact-${event.sequence}`, agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime",
+      observerEpoch: 1, sourceSequence: event.sequence, observedAtMs: event.observedAtMs,
+    });
+    assert.equal(event.nativeProcessIdentity, birthIdentity(child.pid!));
+    if (event.fact.domain === "runtime" && event.fact.state === "ready") runtimeReadyObserved = true;
+    if (runtimeReadyObserved) {
+      assert.equal(projection.runtime, "ready", "the exact native start proves readiness, which survives turn failure");
+    }
+  }
+  assert.equal(projection.turns.get(turnId)?.outcome, "failed");
+  assert.equal(projection.turns.get(nextId)?.outcome, "completed");
+  assert.equal(projection.turns.get(turnId)?.operations.get("shell-1")?.startObserved, false);
+  assert.equal(projection.turns.get(turnId)?.operations.get("shell-1")?.outcome, "failed");
+  assert.equal(events.filter((event) => event.fact.domain === "execution").length, 1);
+  assert.doesNotMatch(JSON.stringify(events), /secret-command|secret-output/);
+  const streamCheckpointIds = [...new Set(stream.flatMap((event) => event.nativeEventId ? [event.nativeEventId] : []))];
+  const typedCheckpointIds = [...new Set(events.flatMap((event) => event.fact.nativeEventId ? [event.fact.nativeEventId] : []))];
+  assert.deepEqual(typedCheckpointIds, streamCheckpointIds,
+    "exact native command lifecycle and result records correlate both projections");
+  assert.equal(stream.every((event) => !event.nativeEventId || event.nativeLifecyclePhase ===
+    (event.method === "command_lifecycle" ? "turn_active" : "turn_terminal")), true,
+  "correlated Claude events expose only the closed structural lifecycle phase");
+  assert.equal(streamCheckpointIds.length, 3, "one start and two terminal records have distinct identities");
+  const terminalIds = stream.filter((event) => event.method.startsWith("result") && event.nativeEventId)
+    .map((event) => event.nativeEventId);
+  assert.equal(terminalIds.length, 3);
+  assert.equal(terminalIds[0], terminalIds[1], "an identical terminal replay keeps the first checkpoint identity");
+  assert.equal(events.filter((event) => event.fact.domain === "turn" && event.fact.state === "terminal"
+    && event.fact.nativeEventId === terminalIds[0]).length, 1, "a replay does not emit another typed terminal");
+  const repeatedStartIds = stream.filter((event) => event.method === "command_lifecycle" && event.nativeEventId)
+    .map((event) => event.nativeEventId);
+  assert.equal(repeatedStartIds.length, 2, "only the two exact repeated native starts are eligible");
+  assert.equal(new Set(repeatedStartIds).size, 1, "a replayed native start keeps the same checkpoint identity");
+  assert.equal(stream.some((event) => ["assistant", "user"].includes(event.method) && event.nativeEventId !== undefined), false);
+  assert.equal(events.some((event) => event.fact.domain === "execution" && event.fact.nativeEventId !== undefined), false);
+  assert.deepEqual(harness.signals, []);
+  stopStream();
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.deepEqual(await adapter.probeControl(handle), { state: "lost", controlEvidence: "process_exit" });
+  assert.equal(events.at(-1)?.fact.domain, "runtime");
+});
+
+test("Claude shadow native terminal remains observable behind a legacy failed-state latch", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  const running = adapter.runRoomTurn(handle, { inboxItemId: "latch", actionId: "latch", sourceMessage: {}, activation: {} });
+  const rejected = assert.rejects(running, /exited/);
+  await flush();
+  const child = harness.children[0]!;
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: handle.providerContinuationId, user_message_uuid: "foreign" });
   assert.equal(handle.observedState(), "failed");
-  assert.equal(stream.at(-1)?.kind, "error");
-  assert.equal(stream.at(-1)?.method, "result/error_during_execution");
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId });
+  assert.equal(events.length, 2);
+  assert.deepEqual(events[0]!.fact, {
+    domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none",
+  });
+  const { nativeEventId, ...terminalFact } = events[1]!.fact;
+  assert.match(nativeEventId ?? "", /^nlc1:[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(terminalFact, { domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
+    providerContinuationId: handle.providerContinuationId, providerTurnId: turnId, turnOutcome: "completed" });
+  assert.equal(handle.observedState(), "failed", "shadow must not repair or rewrite legacy behavior");
+  assert.deepEqual(harness.signals, []);
+  child.resolveExit({ type: "exit", code: 1, signal: null });
+  await rejected;
+});
+
+const claudeAskPolicy = {
+  permissionMode: "default", dangerouslySkipPermissions: false, allowDangerouslySkipPermissions: false,
+  tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
+  allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+};
+
+async function approvalHarness(detachSignal?: AbortSignal) {
+  const harness = createHarness({ versionOutput: "2.1.272 (Claude Code)" });
+  const streams: ProviderStreamEvent[] = [];
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, streamSink: event => streams.push(event) });
+  const handle = await adapter.spawn(spawnRequest({ permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: claudeAskPolicy }));
+  const child = harness.children[0]!;
+  const controller = new AbortController();
+  let requests: import("../../shared/provider-permissions.js").ClaudeNativePermissionRequest[] = [];
+  const closures: import("../../shared/provider-permissions.js").ClaudePermissionObservation[] = [];
+  const observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") requests = [...event.requests]; else if (event.type === "request_closed") closures.push(event); }, controller.signal);
+  const running = adapter.runRoomTurn(handle, { inboxItemId: "approval-inbox", actionId: "approval-action", sourceMessage: { text: "Write a file" }, activation: {} }, { detachSignal });
+  void running.catch(() => {});
+  await flush();
+  const turnId = JSON.parse(child.written.at(-1)!).uuid as string;
+  const started = () => child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: handle.providerContinuationId });
+  const tool = (over: Record<string, unknown> = {}) => child.emit({ type: "assistant", session_id: handle.providerContinuationId, parent_tool_use_id: null,
+    message: { content: [{ type: "tool_use", id: "tool-write", name: "Write", input: { file_path: "/tmp/output", content: "private approval content" } }] }, ...over });
+  const permission = (over: Record<string, unknown> = {}) => child.emit({ type: "control_request", request_id: "native-request",
+    request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: "tool-write", input: { file_path: "/tmp/output", content: "private approval content" },
+      permission_suggestions: [{ type: "setMode", mode: "bypassPermissions", destination: "session" }] }, ...over });
+  return { harness, adapter, handle, child, streams, turnId, started, tool, permission,
+    get requests() { return requests; }, closures,
+    async close() {
+      child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId, result: "Done" });
+      await running.catch(() => {}); controller.abort(); await observing; await adapter.stop(handle);
+    } };
+}
+
+test("Claude Ask before writes owns prompting policy and requires native exact-turn capability", async () => {
+  const h = await approvalHarness();
+  try {
+    assert.equal(argValue(h.harness.launches[0]!.args, "--permission-prompt-tool"), "stdio");
+    assert.equal(argValue(h.harness.launches[0]!.args, "--permission-mode"), "default");
+    assert.equal(argValue(h.harness.launches[0]!.args, "--setting-sources"), "");
+    assert.equal(h.adapter.capabilities().execution?.approvals.denyScope, "request");
+  } finally { await h.close(); }
+  const old = createHarness({ noApprovalLifecycle: true, versionOutput: "2.1.272 (Claude Code)" });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: old.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest({ permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: claudeAskPolicy })), /exact native turn lifecycle/);
+  assert.equal(old.children[0]!.alive, false);
+  for (const override of [{ permissionMode: "acceptEdits" }, { allowedTools: ["*"] }, { settings: '{"permissions":{"allow":["Bash"]}}' }, { "permission-mode": "bypassPermissions" }]) {
+    await assert.rejects(adapter.spawn(spawnRequest({ permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: { ...claudeAskPolicy, ...override } })), /authority|cannot override/);
+  }
+});
+
+test("Claude Auto starts in the native mode, keeps the prompt bridge, and refuses a runtime that did not apply it", async () => {
+  const claudeAutoPolicy = { ...claudeAskPolicy, permissionMode: "auto" };
+  const request = () => spawnRequest({ permissionProfileId: "auto_review", configurationRevision: 1, launchPolicy: claudeAutoPolicy });
+  const harness = createHarness({ versionOutput: "2.1.272 (Claude Code)", initPermissionMode: "auto" });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(request());
+  try {
+    const args = harness.launches[0]!.args;
+    assert.equal(argValue(args, "--permission-mode"), "auto");
+    assert.equal(argValue(args, "--permission-prompt-tool"), "stdio", "anything Claude leaves undecided still reaches the host");
+    assert.equal(argValue(args, "--setting-sources"), "");
+    assert.equal(argValue(args, "--settings"), "{}");
+    assert.equal(args.includes("--dangerously-skip-permissions"), false);
+    assert.equal(args.includes("--allow-dangerously-skip-permissions"), false);
+  } finally { await adapter.stop(handle); }
+
+  const unsupported = createHarness({ versionOutput: "2.1.272 (Claude Code)" });
+  await assert.rejects(new ClaudeCodeProviderAdapter({ dependencies: unsupported.dependencies }).spawn(request()), /did not start in Auto mode/);
+  assert.equal(unsupported.children[0]!.alive, false);
+
+  const old = createHarness({ versionOutput: "2.1.220 (Claude Code)", initPermissionMode: "auto" });
+  await assert.rejects(new ClaudeCodeProviderAdapter({ dependencies: old.dependencies }).spawn(request()), /too old for Auto/);
+  assert.equal(old.children.length, 0);
+
+  const noLifecycle = createHarness({ noApprovalLifecycle: true, versionOutput: "2.1.272 (Claude Code)", initPermissionMode: "auto" });
+  await assert.rejects(new ClaudeCodeProviderAdapter({ dependencies: noLifecycle.dependencies }).spawn(request()), /exact native turn lifecycle/);
+
+  for (const override of [{ permissionMode: "bypassPermissions" }, { permissionMode: "default" }, { allowedTools: ["*"] }, { "permission-mode": "bypassPermissions" }, { dangerouslySkipPermissions: true }]) {
+    await assert.rejects(adapter.spawn(spawnRequest({ permissionProfileId: "auto_review", configurationRevision: 1, launchPolicy: { ...claudeAutoPolicy, ...override } })), /authority|cannot override/);
+  }
+});
+
+for (const reply of ["once", "reject"] as const) test(`Claude native ${reply} applies once to the exact tool and never persists permission suggestions`, async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); const expected = h.requests[0]!;
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, expected), { outcome: "correlated", providerContinuationId: h.handle.providerContinuationId, providerTurnId: h.turnId });
+    h.permission(); assert.equal(h.requests.length, 1);
+    const order: string[] = [];
+    assert.deepEqual(await h.adapter.replyPermission(h.handle, expected, reply, { beforeNativeDispatch: async () => { order.push("journal"); }, assertNativeDispatch: () => { order.push("fence"); } }), { outcome: "sent", scope: "request" });
+    assert.deepEqual(order, ["journal", "fence"]);
+    const response = JSON.parse(h.child.written.at(-1)!).response;
+    assert.equal(response.request_id, expected.id);
+    assert.deepEqual(response.response, reply === "once" ? { behavior: "allow", updatedInput: expected.request.input } : { behavior: "deny", message: "The host rejected this action." });
+    assert.equal(h.requests.length, 0);
+    assert.equal(h.streams.some(event => event.method === "control_request"), false);
+    h.permission(); assert.equal(h.requests.length, 0, "resolved IDs cannot be reused");
+    await assert.rejects(h.adapter.replyPermission(h.handle, expected, reply, { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+test("Claude approval correlation excludes pre-start, foreign, subagent, changed and completed tools", async () => {
+  const h = await approvalHarness();
+  try {
+    h.tool(); h.permission(); assert.equal(h.requests.length, 0);
+    h.started(); h.tool({ session_id: "foreign" }); h.permission();
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, h.requests[0]!), { outcome: "correlation_unproven" });
+    h.child.emit({ type: "control_cancel_request", request_id: "native-request" });
+    h.tool({ parent_tool_use_id: "subagent" }); h.permission({ request_id: "subagent-request" });
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, h.requests[0]!), { outcome: "correlation_unproven" });
+    h.tool(); h.permission({ request_id: "valid-request" });
+    const expected = h.requests.find(request => request.id === "valid-request")!;
+    const changed = structuredClone(expected); changed.request.input.content = "changed";
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, changed), { outcome: "correlation_unproven" });
+    await assert.rejects(h.adapter.replyPermission(h.handle, changed, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+    h.child.emit({ type: "user", session_id: h.handle.providerContinuationId, parent_tool_use_id: null,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", content: "Denied", is_error: true }] } });
+    await assert.rejects(h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+for (const invalidation of ["cancel", "disconnect", "process-replaced", "terminal"] as const) {
+  test(`Claude approval is fenced when ${invalidation} arrives during durable admission`, async () => {
+    const h = await approvalHarness();
+    try {
+      h.started(); h.tool(); h.permission(); const expected = h.requests[0]!;
+      const before = h.child.written.length;
+      await assert.rejects(h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: async () => {
+        if (invalidation === "cancel") h.child.emit({ type: "control_cancel_request", request_id: expected.id });
+        if (invalidation === "disconnect") h.child.disconnect();
+        if (invalidation === "process-replaced") h.harness.identities.set(h.handle.pid!, "other-birth");
+        if (invalidation === "terminal") h.child.emit({ type: "result", subtype: "success", is_error: false, session_id: h.handle.providerContinuationId, user_message_uuid: h.turnId, result: "Done" });
+      } }), { outcome: "not_dispatched" });
+      assert.equal(h.child.written.length, before);
+    } finally { await h.close(); }
+  });
+}
+
+test("Claude approval serializes replies and refuses retry after an uncertain stdin write", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); const expected = h.requests[0]!;
+    let release!: () => void; const admitted = new Promise<void>(resolve => { release = resolve; });
+    const first = h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: () => admitted });
+    await assert.rejects(h.adapter.replyPermission(h.handle, expected, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+    const original = h.child.writeLine.bind(h.child);
+    h.child.writeLine = () => { throw new Error("pipe lost after write attempt"); };
+    release(); await assert.rejects(first, { outcome: "uncertain" });
+    h.child.writeLine = original;
+    await assert.rejects(h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+for (const observer of ["attached", "detached before interrupt", "detached during interrupt"]) test(`Claude cancellation at a native approval uses its exact aborted-tools boundary (${observer})`, async () => {
+  const delivery = new AbortController();
+  const h = await approvalHarness(delivery.signal);
+  try {
+    h.started(); h.tool(); h.permission(); const pending = h.requests[0]!;
+    if (observer === "detached before interrupt") {
+      delivery.abort();
+      await flush();
+      assert.equal(h.handle.observedState(), "working", "detaching delivery does not stop native work");
+    }
+    const interrupted = h.adapter.controlTurn(h.handle, null, { targetTurnId: h.turnId });
+    if (observer === "detached during interrupt") delivery.abort();
+    await flush();
+    h.child.emit({ type: "control_cancel_request", request_id: pending.id });
+    h.child.emit({ type: "result", subtype: "error_during_execution", terminal_reason: "aborted_tools", is_error: true,
+      session_id: h.handle.providerContinuationId, user_message_uuid: h.turnId });
+    assert.equal((await interrupted).interrupted, true);
+    assert.equal(h.handle.observedState(), "idle");
+    const writes = h.child.written.length;
+    const recovered = await h.adapter.recoverRoomTurn(h.handle, { inboxItemId: "approval-inbox", providerTurnId: h.turnId });
+    assert.equal(recovered.outcome, "interrupted");
+    assert.equal(h.child.written.length, writes, "recovery consumes the interrupted result without another native request");
+    await assert.rejects(h.adapter.replyPermission(h.handle, pending, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+for (const invalid of ["foreign session", "foreign turn", "missing tool turn", "natural failure"]) {
+  test(`detached Claude interruption still rejects ${invalid} evidence`, async () => {
+    const delivery = new AbortController();
+    const h = await approvalHarness(delivery.signal);
+    try {
+      h.started(); h.tool(); h.permission();
+      delivery.abort();
+      await flush();
+      const interrupted = h.adapter.controlTurn(h.handle, null, { targetTurnId: h.turnId });
+      const rejected = assert.rejects(interrupted, /instead of an exact-session interrupted boundary/);
+      await flush();
+      h.child.emit({ type: "result", subtype: "error_during_execution", is_error: true,
+        terminal_reason: invalid === "natural failure" ? "tool_error" : "aborted_tools",
+        session_id: invalid === "foreign session" ? "other-session" : h.handle.providerContinuationId,
+        user_message_uuid: invalid === "foreign turn" ? "other-turn" : invalid === "missing tool turn" ? undefined : h.turnId });
+      await rejected;
+    } finally { await h.close(); }
+  });
+}
+
+test("Claude explicit foreign tool-turn UUID cannot create or resolve approval authority", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool({ user_message_uuid: "previous-turn" }); h.permission();
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, h.requests[0]!), { outcome: "correlation_unproven" });
+    await assert.rejects(h.adapter.replyPermission(h.handle, h.requests[0]!, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+    h.child.emit({ type: "control_cancel_request", request_id: "native-request" });
+    h.tool({ user_message_uuid: h.turnId }); h.permission({ request_id: "current-request" });
+    const expected = h.requests[0]!;
+    const result = { type: "user", session_id: h.handle.providerContinuationId, parent_tool_use_id: null,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", content: "Done" }] } };
+    h.child.emit({ ...result, user_message_uuid: "previous-turn" });
+    assert.equal((await h.adapter.correlatePermissionTurn(h.handle, expected)).outcome, "correlated");
+    h.child.emit({ ...result, user_message_uuid: h.turnId });
+    assert.equal((await h.adapter.correlatePermissionTurn(h.handle, expected)).outcome, "correlation_unproven");
+  } finally { await h.close(); }
+});
+
+test("Claude refuses to fall back to npx when the sealed MCP runtime cannot be verified", async () => {
+  assert.throws(() => createManagedClaudeMcpConfig("https://letagents.example", tmpdir(), undefined, () => {
+    throw new Error("runtime integrity failure");
+  }), /runtime integrity failure/);
+});
+
+for (const cause of ["cancel", "failed", "succeeded", "terminal"] as const) {
+  test(`Claude publishes exact request closure for ${cause}, including a sent prompt`, async () => {
+    const h = await approvalHarness();
+    try {
+      h.started(); h.tool(); h.permission();
+      const expected = h.requests[0]!;
+      if (cause === "failed" || cause === "succeeded") {
+        await h.adapter.replyPermission(h.handle, expected, "once", { beforeNativeDispatch: async () => {} });
+        assert.equal(h.requests.length, 0);
+        h.child.emit({ type: "user", session_id: h.handle.providerContinuationId,
+          message: { content: [{ type: "tool_result", tool_use_id: "tool-write", is_error: cause === "failed", content: "result" }] } });
+      } else if (cause === "cancel") h.child.emit({ type: "control_cancel_request", request_id: expected.id });
+      else h.child.emit({ type: "result", subtype: "interrupted", is_error: true,
+        session_id: h.handle.providerContinuationId, user_message_uuid: h.turnId });
+      assert.deepEqual(h.closures, [{ type: "request_closed", request: expected,
+        providerContinuationId: h.handle.providerContinuationId, providerTurnId: h.turnId }]);
+      h.child.emit({ type: "control_cancel_request", request_id: expected.id });
+      assert.equal(h.closures.length, 1);
+    } finally { await h.close(); }
+  });
+}
+
+test("Claude cannot close a prompt from foreign tool, turn, session or process evidence", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission();
+    const result = { type: "user", session_id: h.handle.providerContinuationId,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", content: "done" }] } };
+    h.child.emit({ ...result, session_id: "foreign" });
+    h.child.emit({ ...result, user_message_uuid: "foreign" });
+    h.child.emit({ ...result, message: { content: [{ type: "tool_result", tool_use_id: "other", content: "done" }] } });
+    assert.equal(h.closures.length, 0);
+    h.harness.identities.set(h.handle.pid!, "different-birth");
+    h.child.emit({ type: "control_cancel_request", request_id: "native-request" });
+    assert.equal(h.closures.length, 0);
+  } finally { await h.close(); }
+});
+
+test("Claude disconnect clears native pendingness without inventing request closure", async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); h.child.disconnect();
+    assert.equal(h.closures.length, 0);
+  } finally { await h.close(); }
+});
+
+for (const cause of ["cancel", "result"] as const) test(`Claude retires an evicted pending permission on exact ${cause}`, async () => {
+  const h = await approvalHarness();
+  try {
+    h.started(); h.tool(); h.permission(); const original = h.requests[0]!;
+    for (let index = 0; index < 65; index++) {
+      const toolId = `later-tool-${index}`;
+      h.child.emit({ type: "assistant", session_id: h.handle.providerContinuationId,
+        message: { content: [{ type: "tool_use", id: toolId, name: "Write", input: {} }] } });
+      h.child.emit({ type: "control_request", request_id: `later-request-${index}`,
+        request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: toolId, input: {} } });
+    }
+    if (cause === "cancel") h.child.emit({ type: "control_cancel_request", request_id: original.id });
+    else h.child.emit({ type: "user", session_id: h.handle.providerContinuationId,
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-write", is_error: true, content: "failed" }] } });
+    assert.ok(h.requests.every(request => request.id !== original.id));
+    assert.equal(h.closures.length, 1);
+    await assert.rejects(h.adapter.replyPermission(h.handle, original, "once", { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
+  } finally { await h.close(); }
+});
+
+
+test("compaction uses cumulative separate budgets; repeated starts and cleared statuses never refill them", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  let wakes = 0;
+  const tracker = new ClaudeCompaction("session", 30_000, 300_000,
+    () => new Date(clock).toISOString(), () => { wakes++; }, () => clock);
+  const tick = (ms: number) => { clock += ms; t.mock.timers.tick(ms); };
+  const status = (value: unknown, extra = {}) => tracker.observe({ type: "system", subtype: "status", session_id: "session", status: value, ...extra });
+  tick(10_000);
+  status("compacting");
+  const first = tracker.progress();
+  tick(100_000);
+  status("compacting");
+  assert.deepEqual(tracker.progress(), first);
+  assert.equal(wakes, 1);
+  status(null); // Ends busy status, but is never a bootstrap result.
+  tick(10_000);
+  status("compacting");
+  tick(199_999);
+  assert.equal(tracker.failure, null);
+  tick(1);
+  assert.equal(await tracker.deadline, "compaction_deadline");
+  assert.equal(tracker.progress(), null);
+  tracker.close();
+});
+
+for (const completion of ["boundary", "success", "cleared", "requesting"] as const) {
+  test(`compaction ${completion} resumes only the unused normal startup budget`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let clock = 0;
+    const tracker = new ClaudeCompaction("session", 30_000, 300_000, () => "2026-09-24T00:00:00Z", undefined, () => clock);
+    const tick = (ms: number) => { clock += ms; t.mock.timers.tick(ms); };
+    tick(20_000);
+    tracker.observe({ type: "system", subtype: "status", session_id: "session", status: "compacting" });
+    tick(60_000);
+    tracker.observe({ type: "system", session_id: "session", subtype: completion === "boundary" ? "compact_boundary" : "status",
+      status: completion === "requesting" ? "requesting" : null, ...(completion === "success" ? { compact_result: "success" } : {}) });
+    assert.equal(tracker.progress(), null);
+    tick(9_999);
+    assert.equal(tracker.failure, null);
+    tick(1);
+    assert.equal(await tracker.deadline, "deadline");
+    tracker.close();
+  });
+}
+
+test("foreign, missing-session and subagent compaction cannot extend startup; explicit failure wins", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  const tracker = new ClaudeCompaction("session", 30_000, 300_000, () => "now", undefined, () => clock);
+  for (const extra of [{ session_id: "other" }, {}, { session_id: "session", parent_tool_use_id: "subagent" }]) {
+    tracker.observe({ type: "system", subtype: "status", status: "compacting", ...extra });
+    assert.equal(tracker.progress(), null);
+  }
+  tracker.observe({ type: "system", subtype: "status", session_id: "session", status: "compacting", compact_result: "failed", compact_error: "PRIVATE" });
+  assert.equal(await tracker.deadline, "compaction_failed");
+  assert.equal(tracker.progress(), null);
+  tracker.close();
+  tracker.observe({ type: "system", subtype: "status", session_id: "session", status: "compacting" });
+  assert.equal(tracker.progress(), null);
+});
+
+test("router exposes exact child compaction before admission, then ordinary bootstrap proof is still required", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  t.mock.method(performance, "now", () => clock);
+  const pump = async () => { for (let n = 0; n < 40; n++) await Promise.resolve(); };
+  const harness = createHarness({ omitBootstrapResult: true,
+    bootstrapMessages: session_id => [{ type: "system", subtype: "status", status: "compacting", session_id }] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  let wakes = 0;
+  const req = { ...spawnRequest({ onProgress: () => wakes++ }), provider: "claude-code" };
+  let admitted = false;
+  const launched = router.spawn(req).then((handle: { observedState: string }) => { admitted = true; return handle; });
+  await pump();
+  assert.equal(router.compactionProgress(req.workAttemptId, "claude-code")?.state, "compacting");
+  assert.equal(router.compactionProgress(req.workAttemptId, "codex"), null);
+  assert.equal(router.compactionProgress("another-attempt", "claude-code"), null);
+  clock = 60_000; t.mock.timers.tick(60_000); await pump();
+  assert.equal(admitted, false);
+  assert.deepEqual(harness.signals, []);
+  const child = harness.children[0]!;
+  const session = argValue(harness.launches[0]!.args, "--session-id")!;
+  child.emit({ type: "system", subtype: "compact_boundary", session_id: session });
+  await pump();
+  assert.equal(admitted, false, "compaction completion is not readiness");
+  assert.equal(router.compactionProgress(req.workAttemptId, "claude-code"), null);
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id: session,
+    user_message_uuid: JSON.parse(child.written[0]!).uuid, result: "LETAGENTS_CLAUDE_DAEMON_READY" });
+  const handle = await launched;
+  assert.equal(handle.observedState, "idle");
+  child.emit({ type: "system", subtype: "status", session_id: session, status: "compacting" });
+  assert.equal(router.compactionProgress(req.workAttemptId, "claude-code")?.state, "compacting",
+    "the same owner supplies progress for later native turns");
+  child.emit({ type: "system", subtype: "status", session_id: "other", status: null });
+  assert.ok(router.compactionProgress(req.workAttemptId, "claude-code"));
+  harness.identities.set(child.pid!, null);
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await pump();
+  assert.equal(router.compactionProgress(req.workAttemptId, "claude-code"), null);
+  assert.ok(wakes >= 4);
+});
+
+for (const elapsed of [299_999, 300_001]) test(`bootstrap admission accounts ${elapsed}ms compaction even before its timer runs`, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 0;
+  t.mock.method(performance, "now", () => clock);
+  const harness = createHarness({ omitBootstrapResult: true,
+    bootstrapMessages: session_id => [{ type: "system", subtype: "status", status: "compacting", session_id }] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const launched = adapter.spawn(spawnRequest());
+  for (let n = 0; n < 40; n++) await Promise.resolve();
+  const child = harness.children[0]!;
+  clock = elapsed; // Intentionally leave the overdue timer undelivered.
+  child.emit({ type: "result", subtype: "success", is_error: false,
+    session_id: argValue(harness.launches[0]!.args, "--session-id"),
+    user_message_uuid: JSON.parse(child.written[0]!).uuid, result: "LETAGENTS_CLAUDE_DAEMON_READY" });
+  if (elapsed < 300_000) {
+    assert.equal((await launched).observedState(), "idle");
+    harness.identities.set(child.pid!, null);
+    child.resolveExit({ type: "exit", code: 0, signal: null });
+  } else {
+    await assert.rejects(launched, { reason: "compaction_deadline" });
+    assert.deepEqual(harness.signals, [{ pid: child.pid, signal: "SIGTERM" }]);
+  }
+  for (let n = 0; n < 40; n++) await Promise.resolve();
+  assert.equal(adapter.compactionProgress("wa-claude-1"), null);
+});
+
+for (const sameBatchExit of [false, true]) test(`buffered explicit compaction failure blocks a success result (same-batch exit=${sameBatchExit})`, async () => {
+  const harness = createHarness({
+    ...(sameBatchExit ? { exitAfterBootstrapResult: { type: "exit" as const, code: 0, signal: null } } : {}),
+    bootstrapMessages: session_id => [{ type: "system", subtype: "status", status: null, compact_result: "failed", session_id }],
+  });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest()), { reason: "compaction_failed" });
+  assert.equal(adapter.compactionProgress("wa-claude-1"), null);
 });

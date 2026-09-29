@@ -1,7 +1,6 @@
 @import "./room-activity/summary-toolbar.css";
 @import "./room-activity/groups-roster.css";
 @import "./room-activity/detail-panel.css";
-@import "./room-activity/liquid-glass.css";
 
 .room-task-list {
   margin-top: 4px;

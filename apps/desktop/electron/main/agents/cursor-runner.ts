@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 export type CursorReadOnlyMode = "ask" | "plan";
 export type CursorSandboxMode = "enabled" | "disabled";
@@ -83,7 +84,8 @@ export function buildCursorAgentArgs(input: CursorTurnInput): string[] {
 }
 
 export async function runCursorTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
-  const executable = input.cursorBin?.trim() || process.env.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const executable = input.cursorBin?.trim() || runtimeEnv.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
   const abortController = input.abortController ?? new AbortController();
   const state: CursorStreamState = {
     sessionId: input.cursorSessionId?.trim() || null,
@@ -189,7 +191,7 @@ export function buildCursorChildEnv(
   overrides: Record<string, string | undefined> = {},
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  copyAllowedCursorEnv(env, process.env);
+  copyAllowedCursorEnv(env, desktopRuntimeEnvironment());
   copyAllowedCursorEnv(env, overrides);
   return env;
 }

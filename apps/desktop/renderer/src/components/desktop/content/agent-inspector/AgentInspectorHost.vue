@@ -12,10 +12,11 @@
         @close="emit('close')"
         @action="forwardAction($event, 'wide')"
         @status="participantAnnouncement = $event"
+        @retry="retryStatus"
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
-        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
+        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </div>
@@ -39,10 +40,11 @@
         @close="emit('close')"
         @action="forwardAction($event, 'compact')"
         @status="participantAnnouncement = $event"
+        @retry="retryStatus"
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
-        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
+        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </Teleport>
@@ -53,16 +55,18 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
-import type {
-  AgentInspectorActionIntent,
-  AgentInspectorActionState,
-  AgentInspectorProjection,
+import {
+  agentInspectorLiveAnnouncement,
+  type AgentInspectorActionIntent,
+  type AgentInspectorActionState,
+  type AgentInspectorProjection,
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorConfigurationDraft, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type {
   DesktopAgentProvider,
+  DesktopRoomAgentWork,
   DesktopAgentStreamEvent,
   DesktopFocusRoomInfo,
   DesktopManagedAgentSession,
@@ -70,6 +74,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import {
   projectAgentInspectorParticipant,
+  projectAgentInspectorStatus,
   type AgentInspectorParticipantSessionUpdate,
 } from "../../../../domain/agent-inspector-participant";
 import { agentInspectorRequestResetKey } from "../../../../domain/agent-inspector-identity";
@@ -84,6 +89,8 @@ const compactBreakpoint = 920;
 const props = defineProps<{
   open: boolean;
   projection: AgentInspectorProjection | null;
+  daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
+  refreshDiagnostics?: () => Promise<boolean>;
   selection: AgentInspectorSelection;
   actionState: AgentInspectorActionState | null;
   workResource: AgentInspectorWorkResource;
@@ -97,7 +104,12 @@ const props = defineProps<{
   settingsConflict: boolean;
   liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
   roomIdentifier: string;
+  roomDisplayName?: string;
   requestVersion: number;
+  initialTab?: "overview" | "work" | "workspace";
+  roomAgentWork?: DesktopRoomAgentWork[];
+  roomAgentWorkStatus?: string;
+  workspaceSourceMessageId?: string | null;
   managedSessions: readonly DesktopManagedAgentSession[];
   reasoningSessions: readonly DesktopReasoningSession[];
 }>();
@@ -114,6 +126,7 @@ const emit = defineEmits<{
   "settings-selected": [];
   "settings-patch": [patch: Partial<AgentInspectorConfigurationDraft>];
   "settings-save": [overwrite: boolean];
+  "settings-apply": [];
   "settings-reload": [];
   "room-move-prepare": [destination: string];
   "room-move-commit": [];
@@ -121,6 +134,7 @@ const emit = defineEmits<{
   purge: [];
   "session-updated": [update: AgentInspectorParticipantSessionUpdate];
   "open-reasoning": [sessionId: string];
+  retry: [];
 }>();
 
 const compact = ref(false);
@@ -154,31 +168,11 @@ const surfaceComponentType = computed<Component>(() => props.projection
     ? AgentInspectorParticipantSurface
     : AgentInspectorStatusSurface);
 watch(compact, (value) => emit("presentation-change", value), { immediate: true });
-const statusPresentation = computed(() => {
-  const title = props.selection.displayName || props.selection.sender || "Agent";
-  if (props.selection.kind === "resolving") {
-    return { title, eyebrow: "Agent", heading: "Loading agent state", detail: "Checking the desktop supervisor for this agent’s durable identity." };
-  }
-  if (props.selection.kind === "unavailable" && props.selection.unavailableReason === "load_error") {
-    return { title, eyebrow: "Agent", heading: "Agent state unavailable", detail: props.selection.unavailableDetail || "The desktop supervisor could not be reached." };
-  }
-  if (props.selection.kind === "unavailable" && props.selection.unavailableReason === "ambiguous") {
-    return {
-      title,
-      eyebrow: "Agent",
-      heading: "Agent identity unavailable",
-      detail: "Conflicting exact supervised identities were found. Controls are withheld until the identity is unambiguous.",
-    };
-  }
-  if (props.selection.kind === "external") {
-    return { title, eyebrow: "Room participant", heading: "Externally managed agent", detail: "This participant is visible in the room, but it is not controlled by this desktop supervisor." };
-  }
-  return { title, eyebrow: "Agent", heading: "Saved agent unavailable", detail: "The durable agent record is no longer available in this room." };
-});
+const statusPresentation = computed(() => projectAgentInspectorStatus(props.selection));
 const liveAnnouncement = computed(() => {
   if (props.actionState?.message) return props.actionState.message;
   if (participantAnnouncement.value) return participantAnnouncement.value;
-  if (props.projection) return `${props.projection.displayName}: ${props.projection.overallLabel}.`;
+  if (props.projection) return agentInspectorLiveAnnouncement(props.projection);
   if (participantProjection.value?.kind === "local_managed") {
     return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
   }
@@ -193,9 +187,16 @@ watch(
   () => { participantAnnouncement.value = null; },
 );
 function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
+  const workspace = { roomAgentWork: props.roomAgentWork ?? [], roomAgentWorkStatus: props.roomAgentWorkStatus ?? 'idle',
+    workspaceSourceMessageId: props.workspaceSourceMessageId, workspaceAgentKey: props.selection.agentKey,
+    initialTab: props.initialTab };
   if (props.projection) {
     return {
+      ...workspace,
       projection: props.projection,
+      daemonStatus: props.daemonStatus,
+      refreshDiagnostics: props.refreshDiagnostics,
+      requestVersion: props.requestVersion,
       actionState: props.actionState,
       compact: compactPresentation,
       workResource: props.workResource,
@@ -206,12 +207,14 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
       roomMoveAvailable: props.roomMoveAvailable,
       providers: props.providers,
       destinations: props.destinations,
+      roomDisplayName: props.roomDisplayName,
       settingsConflict: props.settingsConflict,
       liveFeed: props.liveFeed,
     };
   }
   if (participantProjection.value) {
     return {
+      ...workspace,
       projection: participantProjection.value,
       compact: compactPresentation,
       busy: false,
@@ -235,6 +238,14 @@ function syncCompact(): void {
 
 function forwardAction(intent: AgentInspectorActionIntent, presentation: "wide" | "compact"): void {
   emit("action", { ...intent, presentation });
+}
+
+function retryStatus(): void {
+  const inspectorOwnedFocus = surfaceComponent.value?.containsFocus() ?? false;
+  emit("retry");
+  if (inspectorOwnedFocus) {
+    void nextTick(() => surfaceComponent.value?.focusInitial());
+  }
 }
 
 function setShellContentInert(inert: boolean): void {
@@ -284,7 +295,7 @@ watch(surfaceKind, () => {
 function handleHostKeydown(event: KeyboardEvent): void {
   if (!props.open || !compact.value || event.key !== "Escape") return;
   const target = event.target as (EventTarget & { closest?: (selector: string) => Element | null }) | null;
-  if (target?.closest?.('[role="menu"]')) return;
+  if (target?.closest?.('[role="menu"]') || target?.closest?.('.workspace-reader-backdrop')) return;
   event.preventDefault();
   event.stopPropagation();
   emit("close");
@@ -292,6 +303,10 @@ function handleHostKeydown(event: KeyboardEvent): void {
 
 function handleDocumentPointerDown(event: PointerEvent): void {
   if (!props.open || compact.value || event.button !== 0) return;
+  // The workspace reader belongs to this inspector but is teleported to body.
+  // Its own dialog handles dismissal, including pointer presses on its scrim.
+  const target = event.target as (EventTarget & { closest?: (selector: string) => Element | null }) | null;
+  if (target?.closest?.('.workspace-reader-backdrop')) return;
   const host = wideHostElement.value;
   if (!host || (event.target && host.contains(event.target as Node))) return;
   // The pointer target is the user's new focus destination. Escape and the

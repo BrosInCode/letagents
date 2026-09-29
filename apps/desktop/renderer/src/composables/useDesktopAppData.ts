@@ -1,4 +1,4 @@
-import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -31,6 +31,7 @@ import {
   upsertSnapshotTask,
 } from "../domain/desktop-room-snapshots";
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
+import { preserveRoomRepoStatistics } from "../domain/repo-status";
 import { desktopIpc } from "../ipc/index.js";
 import {
   normalizeRoomIdentifier,
@@ -66,6 +67,7 @@ interface DesktopAppDataOptions {
   resolveSelectedRoomIdentifier: (baseRootSnapshot: DesktopRoomSnapshot | null) => string | null;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   scheduleLiveMetadataRefresh: (delayMs?: number) => void;
+  sessionGeneration: Ref<number>;
   selectedMcpTargetIds: Ref<DesktopMcpInstallTargetId[]>;
   selectedRootRoomIdentifier: Ref<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
@@ -124,6 +126,44 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   const degradedStreamRooms = new Map<string, number>();
   const pendingVerifiedRecoveries = new Map<string, number>();
   const pendingDeliveryRepairs = new Map<string, PendingDeliveryRepairState>();
+  let artifactRefreshContext = 0;
+  let artifactRefreshDisposed = false;
+  let artifactRefresh: {
+    context: number;
+    roomIdentifier: string;
+    streamGeneration: number;
+    streamToken: number;
+    invalidated: boolean;
+  } | null = null;
+
+  function invalidateArtifactRefresh(): void {
+    artifactRefreshContext += 1;
+    artifactRefresh = null;
+  }
+
+  watch([
+    () => options.activeEntry.value.id,
+    () => options.sessionGeneration.value,
+    () => options.authStatus.value?.account?.id,
+    () => options.authStatus.value?.apiUrl,
+    () => normalizeRoomIdentifier(options.selectedSnapshot.value?.roomIdentifier),
+  ], invalidateArtifactRefresh, { flush: "sync" });
+
+  if (getCurrentScope()) onScopeDispose(() => {
+    artifactRefreshDisposed = true;
+    invalidateArtifactRefresh();
+  });
+
+  function sessionIsCurrent(generation: number): boolean {
+    return generation === options.sessionGeneration.value;
+  }
+
+  function invalidateSession(): void {
+    options.sessionGeneration.value += 1;
+    selectedSnapshotRequestId += 1;
+    clearSelectedSnapshotCache();
+    clearPendingDeliveryRepairs();
+  }
 
   function resetBufferedStreamEvents(): void {
     bufferedStreamEvents = [];
@@ -262,6 +302,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       return;
     }
 
+    const sessionGeneration = options.sessionGeneration.value;
     options.loading.value = true;
     let rootBarrierToken: number | null = null;
     try {
@@ -270,10 +311,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       const preloadedRepoStatus = requestedRootRoomIdentifier
         ? null
         : await desktopIpc.repos.getStatus(requestedRootPath);
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const barrierRoomIdentifier = requestedRootRoomIdentifier || preloadedRepoStatus?.roomIdentifier || null;
       if (barrierRoomIdentifier) {
         rootBarrierToken = await beginRoomSnapshotBarrier(barrierRoomIdentifier);
       }
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const [
         nextAppInfo,
         loadedRootRoomContext,
@@ -297,12 +340,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         // feeds the sidebar and the full list feeds Settings.
         desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
       ]), "root room refresh");
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const nextAccountRooms = (nextSettingsAccountRooms || []).filter((room) => !room.archived);
       const nextRootRoomSnapshot = await recoverRootRoomSnapshot(
         requestedRootRoomIdentifier,
         loadedRootRoomContext.snapshot,
         nextAccountRooms || nextSettingsAccountRooms || [],
       );
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const nextRootRoomKey = normalizeRoomIdentifier(nextRootRoomSnapshot.roomIdentifier);
       await repairManagedAgentDeliveryFromSnapshot(
         nextRootRoomSnapshot.roomIdentifier || "",
@@ -310,9 +355,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextRootRoomSnapshot,
         nextRootRoomKey ? pendingDeliveryRepairs.get(nextRootRoomKey)?.token ?? null : null,
       );
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
       options.appInfo.value = nextAppInfo;
-      options.repoStatus.value = loadedRootRoomContext.repoStatus;
+      options.repoStatus.value = loadedRootRoomContext.openedRoom?.repoStatus
+        ? preserveRoomRepoStatistics(options.repoStatus.value, loadedRootRoomContext.repoStatus)
+        : loadedRootRoomContext.repoStatus;
       options.workers.value = nextWorkers;
       options.rootRoomSnapshot.value = nextRootRoomSnapshot;
       options.selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
@@ -405,8 +453,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     // A single `include_archived=true` fetch covers both consumers: the sidebar
     // uses the non-archived subset while Settings needs the full list. This
     // replaces the previous pair of `/account/rooms` requests per refresh tick.
+    const sessionGeneration = options.sessionGeneration.value;
     const allAccountRooms =
       (await desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => [])) || [];
+    if (!sessionIsCurrent(sessionGeneration)) return;
     options.settingsAccountRooms.value = allAccountRooms;
     options.accountRooms.value = allAccountRooms.filter((room) => !room.archived);
   }
@@ -464,7 +514,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         const nextRootSnapshot = openedContext.snapshot;
         const nextRepoStatus = openedContext.repoStatus;
         if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-        options.repoStatus.value = nextRepoStatus;
+        options.repoStatus.value = openedContext.openedRoom?.repoStatus
+          ? preserveRoomRepoStatistics(options.repoStatus.value, nextRepoStatus)
+          : nextRepoStatus;
         options.rootRoomSnapshot.value = nextRootSnapshot;
         setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot), { cache: false });
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
@@ -716,6 +768,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       return;
     }
 
+    if (event.type === "task_remove") {
+      const snapshot = options.selectedSnapshot.value;
+      if (snapshot) setSelectedSnapshot({
+        ...snapshot, tasks: snapshot.tasks.filter(task => task.id !== event.taskId),
+      });
+      return;
+    }
+
     if (event.type === "github_event") {
       setSelectedSnapshot(upsertSnapshotGitHubEvent(options.selectedSnapshot.value, event.event));
       return;
@@ -847,10 +907,37 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   async function refreshSelectedRoomArtifacts(roomIdentifier: string): Promise<void> {
-    const artifacts = await desktopIpc.room.getArtifacts?.(roomIdentifier).catch(() => null);
-    if (!artifacts) return;
-    if (!snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)) return;
-    setSelectedSnapshot(replaceSnapshotRoomArtifacts(options.selectedSnapshot.value, artifacts));
+    const isCurrent = (request: NonNullable<typeof artifactRefresh>): boolean => !artifactRefreshDisposed
+      && artifactRefresh === request
+      && request.context === artifactRefreshContext
+      && request.streamGeneration === streamReconcileGeneration
+      && request.streamToken === activeStreamToken
+      && snapshotMatchesRoom(options.selectedSnapshot.value, request.roomIdentifier);
+    if (artifactRefreshDisposed || !snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)) return;
+    if (artifactRefresh && isCurrent(artifactRefresh)) {
+      artifactRefresh.invalidated = true;
+      return;
+    }
+    const request = {
+      context: artifactRefreshContext, roomIdentifier,
+      streamGeneration: streamReconcileGeneration, streamToken: activeStreamToken,
+      invalidated: false,
+    };
+    artifactRefresh = request;
+    const baseline = options.selectedSnapshot.value?.roomArtifacts;
+    try {
+      const artifacts = await desktopIpc.room.getArtifacts?.(roomIdentifier).catch(() => null);
+      // A later event requires a trailing read. A newer snapshot or explicit
+      // artifact mutation already owns the displayed list and must also win.
+      if (!artifacts || !isCurrent(request) || request.invalidated
+        || options.selectedSnapshot.value?.access.status !== "ready"
+        || options.selectedSnapshot.value?.roomArtifacts !== baseline) return;
+      setSelectedSnapshot(replaceSnapshotRoomArtifacts(options.selectedSnapshot.value, artifacts));
+    } finally {
+      const refreshAgain = isCurrent(request) && request.invalidated;
+      if (artifactRefresh === request) artifactRefresh = null;
+      if (refreshAgain) void refreshSelectedRoomArtifacts(roomIdentifier);
+    }
   }
 
   function handleRoomRenamed(room: DesktopRoomInfo): void {
@@ -952,6 +1039,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     handleRefreshRoom,
     handleRoomRenamed,
     handleRoomStreamEvent,
+    invalidateSession,
     refresh,
     refreshAccountRooms,
     refreshSelectedSnapshot,

@@ -6,7 +6,6 @@ import test from "node:test";
 
 import {
   installedCodexExecutablePath,
-  pinInstalledCodexExecutable,
   resolveCodexExecutable,
 } from "../main/agents/codex-executable.js";
 
@@ -65,45 +64,4 @@ test("Codex standalone path matches the official Windows installer default", () 
     homeDirectory: "C:\\Users\\Ada",
     platform: "win32",
   }), join("C:\\Users\\Ada\\AppData\\Local", "Programs", "OpenAI", "Codex", "bin", "codex.exe"));
-});
-
-test("pinning a completed in-app install makes it available immediately", async () => {
-  const homeDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-pin-"));
-  const installed = join(homeDirectory, ".local", "bin", "codex");
-  await executable(installed);
-  const previous = process.env.LETAGENTS_CODEX_BIN;
-
-  try {
-    delete process.env.LETAGENTS_CODEX_BIN;
-    assert.equal(pinInstalledCodexExecutable({
-      env: { PATH: "/usr/bin:/bin" },
-      homeDirectory,
-      platform: "darwin",
-    }), installed);
-    assert.equal(process.env.LETAGENTS_CODEX_BIN, installed);
-  } finally {
-    if (previous === undefined) delete process.env.LETAGENTS_CODEX_BIN;
-    else process.env.LETAGENTS_CODEX_BIN = previous;
-  }
-});
-
-test("pinning rejects a completed install when the executable is missing", async () => {
-  const homeDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-missing-"));
-  const previous = process.env.LETAGENTS_CODEX_BIN;
-
-  try {
-    delete process.env.LETAGENTS_CODEX_BIN;
-    assert.throws(
-      () => pinInstalledCodexExecutable({
-        env: { PATH: "/usr/bin:/bin" },
-        homeDirectory,
-        platform: "darwin",
-      }),
-      /Codex installer completed but .*\.local\/bin\/codex is not executable\./,
-    );
-    assert.equal(process.env.LETAGENTS_CODEX_BIN, undefined);
-  } finally {
-    if (previous === undefined) delete process.env.LETAGENTS_CODEX_BIN;
-    else process.env.LETAGENTS_CODEX_BIN = previous;
-  }
 });

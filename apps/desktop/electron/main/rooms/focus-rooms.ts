@@ -48,9 +48,9 @@ export async function createDesktopTaskFocusRoom(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
-      body: JSON.stringify({ desktop_human_client: true }),
+      body: JSON.stringify({}),
     },
   );
   return mapDesktopFocusRoomMutationResult(data);
@@ -70,11 +70,11 @@ export async function createDesktopAdHocFocusRoom(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify({
         title: trimmedTitle,
-        desktop_human_client: true,
+
       }),
     },
   );
@@ -96,7 +96,7 @@ export async function updateDesktopFocusRoomSettings(
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify(settings),
     },
@@ -123,13 +123,13 @@ export async function concludeDesktopFocusRoom(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
+
       },
       body: JSON.stringify({
         summary: trimmedSummary,
         conclusion_details: conclusionDetails,
         quick_close: quickClose,
-        desktop_human_client: true,
+
       }),
     },
   );
@@ -149,7 +149,7 @@ export async function archiveDesktopFocusRoom(
     {
       method: "DELETE",
       headers: {
-        "X-LetAgents-Desktop-Client": "1",
+
       },
     },
   );

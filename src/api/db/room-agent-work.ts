@@ -1,0 +1,271 @@
+import { parseWorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
+import { createHash, randomUUID } from "node:crypto";
+import { and, asc, count, desc, eq, inArray, isNull } from "drizzle-orm";
+import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWork, type RoomAgentWorkSnapshot } from "../../../shared/room-agent-work.mjs";
+import { db } from "./client.js";
+import { message_agent_receipts, messages, room_agent_sessions, room_agent_work, room_agent_work_review_pages, supervisor_host_grants } from "./schema.js";
+import { assertSupervisorGrantFenceTx, SupervisorGrantFenceStaleError, type SupervisorGrantFence } from "./auth/supervisor-grants.js";
+import { visibleMessageCondition } from "./messages/visibility.js";
+
+export class RoomAgentWorkError extends Error {
+  constructor(readonly code: "invalid_summary" | "publisher_not_authorized" | "publisher_conflict" | "revision_conflict" | "payload_cleared" | "evidence_not_clearable") {
+    super(`Room work evidence rejected: ${code}.`);
+  }
+}
+
+function publicWork(row: typeof room_agent_work.$inferSelect): RoomAgentWork {
+  const summary = isClearedRoomAgentWorkSummary(row.summary) ? row.summary : parseRoomAgentWorkSummary(row.summary);
+  if (!summary) throw new RoomAgentWorkError("invalid_summary");
+  return {
+    attempt_id: row.attempt_id, room_id: row.room_id, source_message_id: `msg_${row.source_message_number}`,
+    agent_key: row.agent_key, revision: row.publisher_revision, summary, updated_at: row.updated_at,
+  };
+}
+
+
+type WorkTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+async function saveRoomWorkReviewPage(tx: WorkTransaction, work: typeof room_agent_work.$inferSelect, summary: NonNullable<ReturnType<typeof parseRoomAgentWorkSummary>>, reviewPage: ReturnType<typeof parseWorkspaceReviewPage>): Promise<void> {
+  if (!reviewPage || isClearedRoomAgentWorkSummary(work.summary)) return;
+  if (summary.version !== 3) throw new RoomAgentWorkError("invalid_summary");
+  // The work lock serializes all pages and clearing. A retry cannot replace
+  // captured bytes, mix two captures, or resurrect a cleared review.
+  const [prior] = await tx.select().from(room_agent_work_review_pages)
+    .where(eq(room_agent_work_review_pages.attempt_id, work.attempt_id)).limit(1);
+  if (prior && (prior.digest !== reviewPage.digest || prior.page_total !== reviewPage.total)) throw new RoomAgentWorkError("revision_conflict");
+  const pageWhere = and(eq(room_agent_work_review_pages.attempt_id, work.attempt_id), eq(room_agent_work_review_pages.page_index, reviewPage.index));
+  const [page] = await tx.select().from(room_agent_work_review_pages).where(pageWhere);
+  if (page && page.data !== reviewPage.data) throw new RoomAgentWorkError("revision_conflict");
+  if (!page) await tx.insert(room_agent_work_review_pages).values({ attempt_id: work.attempt_id,
+    digest: reviewPage.digest, page_index: reviewPage.index, page_total: reviewPage.total, data: reviewPage.data });
+}
+
+/**
+ * Admission is evidence publication, not permission to execute. Serialize on
+ * the captured receipt, then reverify the exact live publisher in the same
+ * transaction. A later second session does not retroactively revoke a write;
+ * immutable custody prevents it taking over the existing attempt.
+ */
+export async function publishRoomAgentWork(input: {
+  fence: SupervisorGrantFence; room_id: string; session_id: string;
+  source_message_number: number; revision: number; summary: unknown; review_page?: unknown;
+}): Promise<{ status: "created" | "updated" | "replayed"; work: RoomAgentWork }> {
+  const reviewPage = input.review_page === undefined ? null : parseWorkspaceReviewPage(input.review_page);
+  if (input.review_page !== undefined && !reviewPage) throw new RoomAgentWorkError("invalid_summary");
+  const summary = parseRoomAgentWorkSummary(input.summary);
+  if (!summary || !Number.isSafeInteger(input.revision) || input.revision < 1
+    || !Number.isSafeInteger(input.source_message_number) || input.source_message_number < 1) {
+    throw new RoomAgentWorkError("invalid_summary");
+  }
+  const digest = createHash("sha256").update(JSON.stringify(summary)).digest("hex");
+  return db.transaction(async (tx) => {
+    if (!(await assertSupervisorGrantFenceTx(tx, input.fence))) throw new SupervisorGrantFenceStaleError();
+    // Reprovisioning can rotate token_version under the installation advisory
+    // lock instead. This row lock also fences that path through commit.
+    const [grant] = await tx.select().from(supervisor_host_grants)
+      .where(eq(supervisor_host_grants.grant_id, input.fence.grant_id)).for("share");
+    if (!grant || grant.current_generation !== input.fence.generation || grant.token_version !== input.fence.token_version
+      || grant.revoked_at || Date.parse(grant.expires_at) <= Date.now()) throw new SupervisorGrantFenceStaleError();
+    if (grant.scope_key !== "owner" || grant.rental_session_id || !grant.allowed_room_ids.includes(input.room_id)) {
+      throw new RoomAgentWorkError("publisher_not_authorized");
+    }
+    const [candidate] = await tx.select().from(room_agent_sessions)
+      .where(eq(room_agent_sessions.session_id, input.session_id));
+    if (!candidate || !grant.allowed_agent_keys.includes(candidate.agent_key)) throw new RoomAgentWorkError("publisher_not_authorized");
+    const receiptWhere = and(eq(message_agent_receipts.message_room_id, input.room_id),
+      eq(message_agent_receipts.message_number, input.source_message_number), eq(message_agent_receipts.agent_key, candidate.agent_key));
+    const [capturedReceipt] = await tx.select().from(message_agent_receipts).where(receiptWhere);
+    if (!capturedReceipt) throw new RoomAgentWorkError("publisher_not_authorized");
+    // Match lifecycle lock order: sessions (sorted), then receipts. Taking the
+    // receipt first could deadlock with owner-driven retirement's receipt sweep.
+    const sessions = await tx.select().from(room_agent_sessions)
+      .where(inArray(room_agent_sessions.session_id, [input.session_id, capturedReceipt.agent_session_id]))
+      .orderBy(asc(room_agent_sessions.session_id)).for("share");
+    const publisher = sessions.find((session) => session.session_id === input.session_id);
+    const captured = sessions.find((session) => session.session_id === capturedReceipt.agent_session_id);
+    if (!publisher || !captured || publisher.room_id !== input.room_id || captured.room_id !== input.room_id
+      || publisher.agent_key !== candidate.agent_key || captured.agent_key !== candidate.agent_key
+      || publisher.owner_account_id !== grant.owner_account_id || captured.owner_account_id !== grant.owner_account_id
+      || publisher.session_kind !== "worker" || captured.session_kind !== "worker"
+      || publisher.supervisor_grant_id !== grant.grant_id || publisher.ended_at || !publisher.agent_instance_id) {
+      throw new RoomAgentWorkError("publisher_not_authorized");
+    }
+    // Deletion/pruning locks the source before cascading to its receipts.
+    const [source] = await tx.select({ visibility: messages.visibility, rental: messages.rental_session_id }).from(messages)
+      .where(and(eq(messages.room_id, input.room_id), eq(messages.number, input.source_message_number))).for("share");
+    // Rental projection has a separate participant visibility domain. It is
+    // deliberately not admitted by this owner-host foundation.
+    if (!source || source.visibility !== null || source.rental !== null) throw new RoomAgentWorkError("publisher_not_authorized");
+    const [receipt] = await tx.select().from(message_agent_receipts).where(receiptWhere).for("update");
+    if (!receipt || receipt.agent_session_id !== captured.session_id || receipt.room_id !== input.room_id) {
+      throw new RoomAgentWorkError("publisher_not_authorized");
+    }
+    if (captured.ended_at) {
+      // Re-read after acquiring the receipt's write lock, not from an earlier
+      // routing snapshot. All same-key workers count, including foreign owners.
+      const active = await tx.select({ id: room_agent_sessions.session_id }).from(room_agent_sessions)
+        .where(and(eq(room_agent_sessions.room_id, input.room_id), eq(room_agent_sessions.agent_key, publisher.agent_key),
+          eq(room_agent_sessions.session_kind, "worker"), isNull(room_agent_sessions.ended_at))).limit(2);
+      if (active.length !== 1 || active[0].id !== publisher.session_id) throw new RoomAgentWorkError("publisher_not_authorized");
+    } else if (captured.session_id !== publisher.session_id) throw new RoomAgentWorkError("publisher_not_authorized");
+    const identity = and(eq(room_agent_work.room_id, input.room_id),
+      eq(room_agent_work.source_message_number, input.source_message_number), eq(room_agent_work.agent_key, publisher.agent_key));
+    // Clear history also takes this lock. A publication cannot restore cleared
+    // evidence or let a stale clear erase a newly published revision.
+    const [existing] = await tx.select().from(room_agent_work).where(identity).for("update");
+    if (Date.parse(grant.expires_at) <= Date.now()) throw new SupervisorGrantFenceStaleError();
+
+    if (existing) {
+      if (existing.publisher_kind !== "supervisor" || existing.owner_account_id !== grant.owner_account_id || existing.host_id !== grant.host_id
+        || existing.installation_id !== grant.installation_id || existing.agent_instance_id !== publisher.agent_instance_id) {
+        throw new RoomAgentWorkError("publisher_conflict");
+      }
+      if (input.revision < existing.publisher_revision || (input.revision === existing.publisher_revision && digest !== existing.summary_digest)) {
+        throw new RoomAgentWorkError("revision_conflict");
+      }
+      if (input.revision === existing.publisher_revision) { await saveRoomWorkReviewPage(tx, existing, summary, reviewPage); return { status: "replayed", work: publicWork(existing) }; }
+      if (isClearedRoomAgentWorkSummary(existing.summary)) throw new RoomAgentWorkError("payload_cleared");
+      const [updated] = await tx.update(room_agent_work).set({ publisher_revision: input.revision, summary_digest: digest, summary,
+        updated_at: new Date().toISOString() }).where(identity).returning();
+      await saveRoomWorkReviewPage(tx, updated, summary, reviewPage);
+      return { status: "updated", work: publicWork(updated) };
+    }
+    const [created] = await tx.insert(room_agent_work).values({
+      attempt_id: randomUUID(), room_id: input.room_id, source_message_number: input.source_message_number,
+      agent_key: publisher.agent_key, owner_account_id: grant.owner_account_id, host_id: grant.host_id,
+      installation_id: grant.installation_id, agent_instance_id: publisher.agent_instance_id,
+      publisher_revision: input.revision, summary_digest: digest, summary, updated_at: new Date().toISOString(),
+    }).returning();
+    await saveRoomWorkReviewPage(tx, created, summary, reviewPage);
+    return { status: "created", work: publicWork(created) };
+  });
+}
+
+/** Independent MCP captures attach only to the worker's own authenticated message.
+ * Session locks fence replacement/disconnect; no supervisor custody is inferred. */
+export async function publishIndependentWorkspace(input: {
+  room_id: string; source_message_number: number; session_id: string;
+  owner_account_id: string; token_hash: string; summary: unknown; review_page?: unknown;
+}): Promise<{ status: "created" | "replayed"; work: RoomAgentWork }> {
+  const summary = parseRoomAgentWorkSummary(input.summary);
+  const reviewPage = input.review_page === undefined ? null : parseWorkspaceReviewPage(input.review_page);
+  if (!summary || summary.version !== 3 || summary.recorded_state !== "completed"
+    || summary.evidence_incomplete !== true || summary.elapsed_ms !== null
+    || Object.values(summary.operation_counts).some(value => value !== 0)
+    || (input.review_page !== undefined && !reviewPage)
+    || !Number.isSafeInteger(input.source_message_number) || input.source_message_number < 1) {
+    throw new RoomAgentWorkError("invalid_summary");
+  }
+  const digest = createHash("sha256").update(JSON.stringify(summary)).digest("hex");
+  return db.transaction(async tx => {
+    const sourceWhere = and(eq(messages.room_id, input.room_id), eq(messages.number, input.source_message_number));
+    const [candidate] = await tx.select().from(messages).where(sourceWhere);
+    if (!candidate?.publisher_agent_session_id) throw new RoomAgentWorkError("publisher_not_authorized");
+    const sessions = await tx.select().from(room_agent_sessions)
+      .where(inArray(room_agent_sessions.session_id, [input.session_id, candidate.publisher_agent_session_id]))
+      .orderBy(asc(room_agent_sessions.session_id)).for("share");
+    const current = sessions.find(session => session.session_id === input.session_id);
+    const original = sessions.find(session => session.session_id === candidate.publisher_agent_session_id);
+    if (!current || !original || current.ended_at || current.token_hash !== input.token_hash
+      || current.supervisor_grant_id || original.supervisor_grant_id
+      || current.session_kind !== "worker" || original.session_kind !== "worker"
+      || current.room_id !== input.room_id || original.room_id !== input.room_id
+      || current.owner_account_id !== input.owner_account_id || original.owner_account_id !== input.owner_account_id
+      || !current.agent_instance_id || current.agent_instance_id !== original.agent_instance_id
+      || current.agent_key !== original.agent_key) throw new RoomAgentWorkError("publisher_not_authorized");
+    // Serialize first publication as well as its retries; deletion/visibility must
+    // remain stable until both summary and archive page have been admitted.
+    const [source] = await tx.select().from(messages).where(and(sourceWhere, visibleMessageCondition(false),
+      isNull(messages.visibility), isNull(messages.rental_session_id))).for("update");
+    if (!source || source.source !== "agent" || source.publisher_account_id !== input.owner_account_id
+      || source.publisher_agent_key !== current.agent_key || source.publisher_agent_session_id !== original.session_id) {
+      throw new RoomAgentWorkError("publisher_not_authorized");
+    }
+    const where = and(eq(room_agent_work.room_id, input.room_id), eq(room_agent_work.source_message_number, input.source_message_number),
+      eq(room_agent_work.agent_key, current.agent_key));
+    const [existing] = await tx.select().from(room_agent_work).where(where).for("update");
+    if (existing) {
+      if (existing.publisher_kind !== "independent_worker" || existing.owner_account_id !== input.owner_account_id
+        || existing.agent_instance_id !== current.agent_instance_id) throw new RoomAgentWorkError("publisher_conflict");
+      if (isClearedRoomAgentWorkSummary(existing.summary)) throw new RoomAgentWorkError("payload_cleared");
+      if (existing.publisher_revision !== 1 || existing.summary_digest !== digest) throw new RoomAgentWorkError("revision_conflict");
+      await saveRoomWorkReviewPage(tx, existing, summary, reviewPage);
+      return { status: "replayed", work: publicWork(existing) };
+    }
+    const [created] = await tx.insert(room_agent_work).values({ attempt_id: randomUUID(), room_id: input.room_id,
+      source_message_number: input.source_message_number, agent_key: current.agent_key,
+      publisher_kind: "independent_worker", host_id: null, installation_id: null,
+      owner_account_id: input.owner_account_id, agent_instance_id: current.agent_instance_id,
+      publisher_revision: 1, summary_digest: digest, summary, updated_at: new Date().toISOString() }).returning();
+    await saveRoomWorkReviewPage(tx, created, summary, reviewPage);
+    return { status: "created", work: publicWork(created) };
+  });
+}
+
+/** Clear display evidence, never the custody/replay receipt or the source.
+ * The route requires current human membership; only the report owner may clear.
+ * Retaining the receipt until source deletion prevents UUID/custody resurrection.
+ */
+export async function clearRoomAgentWork(input: {
+  room_id: string; attempt_id: string; owner_account_id: string; revision: number;
+}): Promise<{ status: "cleared" | "already_cleared"; work: RoomAgentWork } | null> {
+  if (!Number.isSafeInteger(input.revision) || input.revision < 1) throw new RoomAgentWorkError("invalid_summary");
+  return db.transaction(async (tx) => {
+    const identity = and(eq(room_agent_work.room_id, input.room_id), eq(room_agent_work.attempt_id, input.attempt_id),
+      eq(room_agent_work.owner_account_id, input.owner_account_id));
+    const [candidate] = await tx.select({ source: room_agent_work.source_message_number }).from(room_agent_work).where(identity);
+    if (!candidate) return null;
+    // Match publication and cascade order: source first, then work. Hold source
+    // visibility stable through the clear; hidden/missing/foreign all return null.
+    const [source] = await tx.select({ number: messages.number }).from(messages)
+      .where(and(eq(messages.room_id, input.room_id), eq(messages.number, candidate.source),
+        visibleMessageCondition(false), isNull(messages.visibility), isNull(messages.rental_session_id))).for("share");
+    if (!source) return null;
+    const [existing] = await tx.select().from(room_agent_work).where(identity).for("update");
+    if (!existing) return null;
+    if (existing.publisher_revision !== input.revision) throw new RoomAgentWorkError("revision_conflict");
+    if (isClearedRoomAgentWorkSummary(existing.summary)) return { status: "already_cleared", work: publicWork(existing) };
+    const summary = parseRoomAgentWorkSummary(existing.summary);
+    if (!summary || !["completed", "completed_no_reply", "failed", "interrupted"].includes(summary.recorded_state)
+      || (existing.publisher_kind === "supervisor" && summary.evidence_incomplete) || summary.operation_counts.unresolved || summary.operation_counts.lost_after_start) {
+      throw new RoomAgentWorkError("evidence_not_clearable");
+    }
+    // Preserve publication revision, digest, timestamp and custody verbatim.
+    // Equal-revision retries acknowledge the receipt without restoring payload;
+    // future revisions are terminally rejected, not an invitation to rerun work.
+    const [cleared] = await tx.update(room_agent_work).set({ summary: { version: 1, availability: "cleared" } }).where(identity).returning();
+    await tx.delete(room_agent_work_review_pages).where(eq(room_agent_work_review_pages.attempt_id, existing.attempt_id));
+    return { status: "cleared", work: publicWork(cleared) };
+  });
+}
+
+/** Authorized human room readers only; the route performs current membership checks. */
+export async function readRoomAgentWork(input: { room_id: string; attempt_id?: string; include_workspace?: boolean; include_contribution?: boolean }): Promise<RoomAgentWorkSnapshot> {
+  const rows = await db.select({ work: room_agent_work }).from(room_agent_work)
+    .innerJoin(messages, and(eq(messages.room_id, room_agent_work.room_id), eq(messages.number, room_agent_work.source_message_number)))
+    .where(and(eq(room_agent_work.room_id, input.room_id),
+      ...(input.attempt_id ? [eq(room_agent_work.attempt_id, input.attempt_id)] : []),
+      visibleMessageCondition(false), isNull(messages.visibility), isNull(messages.rental_session_id)))
+    .orderBy(desc(room_agent_work.updated_at), asc(room_agent_work.attempt_id)).limit(input.attempt_id ? 1 : 51);
+  return { work: rows.slice(0, 50).map((row) => {
+    const work = publicWork(row.work);
+    if (!input.include_contribution && work.summary.version === 3 && "contribution" in work.summary) {
+      const { contribution: _contribution, ...workspace } = work.summary;
+      work.summary = { ...workspace, version: 2 };
+    }
+    if (!input.include_workspace && work.summary.version >= 2 && "workspace" in work.summary) {
+      const { workspace: _workspace, contribution: _contribution, ...execution } = work.summary;
+      work.summary = { ...execution, version: 1 };
+    }
+    return work;
+  }), truncated: rows.length > 50 };
+}
+
+/** Only called after the detail route has verified current room membership and source visibility. */
+export async function readRoomAgentWorkReviewPage(attemptId: string, index: number) {
+  const table = room_agent_work_review_pages;
+  const [page] = await db.select().from(table).where(and(eq(table.attempt_id, attemptId), eq(table.page_index, index)));
+  if (!page) return { status: 'unavailable' as const, page: null };
+  const [size] = await db.select({ count: count() }).from(table).where(eq(table.attempt_id, attemptId));
+  if (size.count !== page.page_total) return { status: 'pending' as const, page: null };
+  return { status: 'ready' as const, page: { digest: page.digest, index: page.page_index, total: page.page_total, data: page.data } };
+}

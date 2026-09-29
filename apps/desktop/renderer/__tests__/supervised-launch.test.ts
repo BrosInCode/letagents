@@ -167,6 +167,59 @@ test("a pre-provider provisioning failure is retryable and never described as re
   assert.match(progress.failureDetail ?? "", /prepare the private project area/i);
 });
 
+test("an unusable source repository surfaces the daemon's actionable message, not the generic fallback", () => {
+  // When the source folder is not a Git repository (e.g. a stale binding that
+  // points at a plain directory), the daemon reports an actionable message
+  // verbatim (no "convergence scheduler failure:" wrapper) so the user knows to
+  // pick a valid repository. That message must reach the launch card instead of
+  // being flattened to the generic "prepare the private project area" copy.
+  const progress = supervisedLaunchProgress(entry({
+    observedState: "failed",
+    condition: "coordination_blocked",
+    lastError: "not a git repository: /Users/emmy/Documents — choose a folder with a git remote, or start the agent in a room with no repo.",
+    workspacePath: null,
+    workAttemptId: null,
+    providerPid: null,
+    providerContinuationId: null,
+    executionGenerationId: null,
+  }));
+
+  assert.equal(progress.failed, true);
+  assert.equal(progress.recoverableBlocked, false);
+  assert.match(progress.failureDetail ?? "", /not a git repository: \/Users\/emmy\/Documents/i);
+  assert.doesNotMatch(progress.failureDetail ?? "", /prepare the private project area/i);
+});
+
+test("a missing provider executable explains the setup-to-supervisor mismatch", () => {
+  const progress = supervisedLaunchProgress(entry({
+    provider: "codex",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: Codex app-server exited before it became ready: spawn codex ENOENT",
+    workspacePath: "/tmp/wt",
+    providerPid: null,
+    providerContinuationId: null,
+    executionGenerationId: null,
+  }));
+
+  assert.equal(progress.failed, true);
+  assert.match(progress.failureDetail ?? "", /background service could not find a command needed to start Codex/i);
+  assert.doesNotMatch(progress.failureDetail ?? "", /private project area/i);
+});
+
+test("a missing helper command is not mislabeled as the provider executable", () => {
+  const progress = supervisedLaunchProgress(entry({
+    provider: "claude-code",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: spawn /Applications/Git Helper/bin/git ENOENT",
+    workspacePath: "/tmp/wt",
+  }));
+
+  assert.match(progress.failureDetail ?? "", /command needed to start Claude Code/i);
+  assert.doesNotMatch(progress.failureDetail ?? "", /Claude Code command that setup checked/i);
+});
+
 test("expected exact-bind coordination remains an in-progress registration", () => {
   const progress = supervisedLaunchProgress(entry({
     workspacePath: "/tmp/wt",
@@ -287,7 +340,7 @@ test("a blocking condition without lastError falls back to a condition message",
     lastError: null,
   }));
   assert.equal(progress.failed, true);
-  assert.match(progress.failureDetail ?? "", /budget|rate cap/i);
+  assert.match(progress.failureDetail ?? "", /budget|automatic approval limit/i);
 });
 
 test("observedState failed is a failure even with condition none", () => {
@@ -395,4 +448,20 @@ test("the agent name is withheld until the launch is actually ready", () => {
     condition: "coordination_blocked",
   }));
   assert.equal(progress.agentName, null);
+});
+
+
+test("native compaction is visible during startup without completing any readiness gate", () => {
+  const starting = entry({ provider: "claude-code", workspacePath: "/tmp/wt",
+    providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+  const progress = supervisedLaunchProgress(starting);
+  assert.equal(progress.headline, "Compacting conversation");
+  assert.equal(progress.phases.find(phase => phase.state === "active")?.label, "Compacting conversation");
+  assert.equal(progress.ready, false);
+  assert.equal(progress.failed, false);
+  assert.match(progress.joinHint!, /summarizing/);
+  assert.equal(supervisedLaunchProgress({ ...starting, providerProgress: null }).headline, "Starting Claude Code agent");
+  for (const override of [{ desiredState: "paused" }, { desiredState: "stopped" }, { condition: "coordination_blocked", lastError: "Failed" }, { observedState: "failed" }, { provider: "codex" }] as Partial<DesktopSupervisorManifestEntry>[]) {
+    assert.notEqual(supervisedLaunchProgress({ ...starting, ...override }).headline, "Compacting conversation");
+  }
 });

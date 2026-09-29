@@ -131,7 +131,7 @@ export function useTaskMergeReadiness(
     return {
       label: 'Merge eligible',
       summary: boardReviewRequired.value
-        ? 'Checks are green, GitHub approval is present, and board review authority is assigned.'
+        ? 'Checks passed, the pull request is approved, and a task reviewer is assigned.'
         : 'Checks are green and a non-author approval is present.',
       tone: 'ready',
       blockers: [],

@@ -15,3 +15,9 @@ export interface DesktopProvisionSupervisorGrantInput {
   allowedAgentKeys: string[];
   ttlMs?: number;
 }
+
+export interface DesktopSecureStorageStatus {
+  available: boolean;
+  detail: string;
+  canOpenCredentialStorage: boolean;
+}

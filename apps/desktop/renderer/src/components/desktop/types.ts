@@ -48,7 +48,9 @@ export type MarketplaceEntry = {
   sectionLabel: "LetAgents";
 };
 
-export type SidebarEntry = RoomEntry | SystemEntry | MarketplaceEntry;
+export type NeedsYouEntry = { id: "inbox:needs-you"; type: "inbox"; title: "Inbox"; description: string; sectionLabel: "LetAgents" };
+export type MessagesEntry = { id: "messages"; type: "messages"; title: "Messages"; description: string; sectionLabel: "LetAgents" };
+export type SidebarEntry = RoomEntry | SystemEntry | MarketplaceEntry | NeedsYouEntry | MessagesEntry;
 
 export type ProjectGroup = {
   id: string;

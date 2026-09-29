@@ -230,10 +230,19 @@ export async function listDesktopAccountRooms(
   // fetch-twice-and-splice-archived dance only existed to reconcile the local
   // overlay; with the server authoritative for cloud rooms there is nothing to
   // reconcile.
-  const cloudRooms = await fetchDesktopAccountRooms({
-    includeArchived: options.includeArchived === true,
-    limit,
-  });
+  let cloudRooms: DesktopAccountRoomEntry[];
+  try {
+    cloudRooms = await fetchDesktopAccountRooms({
+      includeArchived: options.includeArchived === true,
+      limit,
+    });
+  } catch (error) {
+    // A server outage must not hide rooms owned by this device. Cloud-linked
+    // mirrors retain server authority and are not an offline account list.
+    const localOnly = await listLocalRoomEntries({ includeArchived: options.includeArchived, unpublishedOnly: true });
+    if (!localOnly.length) throw error;
+    return mergeDesktopAccountRoomEntries([], localOnly, options);
+  }
   const localRooms = await listLocalRoomEntries({
     includeArchived: options.includeArchived,
     linkedIdentity: "cloud",

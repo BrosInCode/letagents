@@ -93,7 +93,7 @@ test("nudge text names live workers and falls back gracefully", () => {
   assert.ok(named.includes("empty for 45m"));
   assert.ok(named.includes("RiverGrove and RiverRidge"));
   assert.ok(!named.includes("Third"));
-  assert.ok(named.includes("auto-approve when no manager responds"));
+  assert.ok(named.includes("approved automatically if no manager responds"));
 
   const anonymous = buildRoomStallNudgeText({
     stalled_for_ms: 31 * 60_000,
@@ -109,7 +109,7 @@ test("nudge text names live workers and falls back gracefully", () => {
     manager_mode: "intent_required",
   });
   assert.ok(!humanGated.includes("auto-approve"));
-  assert.ok(humanGated.includes("room admin will need to decide"));
+  assert.ok(humanGated.includes("room admin to approve"));
 });
 
 test("room-stall labels include only reachable workers from the prefiltered roster", () => {

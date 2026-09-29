@@ -177,14 +177,19 @@ export function buildSidebarProjectGroups(input: {
     }
   }
 
+  const currentFocusEntries = input.focusRooms
+    .filter(isOpenFocusRoom)
+    .map((focusRoom) => desktopFocusRoomToEntry(focusRoom, input.currentParentRoom.roomIdentifier));
+  const currentFocusLanes = partitionGitFocusEntries(currentFocusEntries);
   upsertGroup({
     id: projectGroupIdForEntry(input.currentParentRoom),
     roomName: input.currentParentRoom.title,
     parent: input.currentParentRoom,
-    branchRooms: gitRoomBranchChildFromCurrentEntry(input.currentParentRoom),
-    focusRooms: input.focusRooms
-      .filter(isOpenFocusRoom)
-      .map((focusRoom) => desktopFocusRoomToEntry(focusRoom, input.currentParentRoom.roomIdentifier)),
+    branchRooms: mergeRoomEntries(
+      gitRoomBranchChildFromCurrentEntry(input.currentParentRoom),
+      currentFocusLanes.branchRooms,
+    ),
+    focusRooms: currentFocusLanes.focusRooms,
   });
 
   const groupedGitRooms = groupAccountGitRoomsByRepository(input.accountRooms);
@@ -257,6 +262,7 @@ function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
   }
   return {
     ...current,
+    kind: current.kind === "focus" || incoming.kind === "focus" ? "focus" : current.kind,
     title: preferIncomingDisplay ? incoming.title : current.title,
     meta: preferIncomingDisplay ? incoming.meta : current.meta,
     sectionLabel: preferIncomingDisplay ? incoming.sectionLabel : current.sectionLabel,
@@ -350,6 +356,13 @@ function gitRoomBranchChildFromCurrentEntry(entry: RoomEntry): RoomEntry[] {
   }];
 }
 
+function partitionGitFocusEntries(entries: RoomEntry[]): Pick<ProjectGroup, "branchRooms" | "focusRooms"> {
+  return {
+    branchRooms: entries.filter((entry) => Boolean(entry.gitRoom)),
+    focusRooms: entries.filter((entry) => !entry.gitRoom),
+  };
+}
+
 function desktopFocusRoomToEntry(
   focusRoom: DesktopRoomSnapshot["focusRooms"][number],
   parentRoomIdentifier: string | null,
@@ -379,14 +392,17 @@ function desktopFocusRoomToEntry(
 
 function accountRoomToGroup(room: DesktopAccountRoomEntry): ProjectGroup {
   const parent = accountRoomToEntry(room);
+  const focusLanes = partitionGitFocusEntries(
+    room.focusRooms
+      .filter(isOpenFocusRoom)
+      .map((focusRoom) => accountFocusRoomToEntry(focusRoom, null, room.roomIdentifier)),
+  );
   return {
     id: projectGroupIdForEntry(parent),
     roomName: parent.title,
     parent,
-    branchRooms: [],
-    focusRooms: room.focusRooms
-      .filter(isOpenFocusRoom)
-      .map((focusRoom) => accountFocusRoomToEntry(focusRoom, null, room.roomIdentifier)),
+    branchRooms: focusLanes.branchRooms,
+    focusRooms: focusLanes.focusRooms,
   };
 }
 
@@ -412,23 +428,24 @@ function accountGitRoomToGroup(input: {
     parent.description = `${sortedRooms.length} ${sortedRooms.length === 1 ? "branch room" : "branch rooms"}`;
     parent.currentWorkspace = false;
   }
-  const branchRooms = sortedRooms
+  const accountBranchRooms = sortedRooms
     .filter((room) => !defaultRoom || room.roomIdentifier !== defaultRoom.roomIdentifier)
     .map((room) => accountGitRoomToBranchEntry(room, input.currentRoomIdentifier));
-  const focusRooms = sortedRooms.flatMap((room) =>
+  const nestedFocusRooms = sortedRooms.flatMap((room) =>
     room.focusRooms
       .filter(isOpenFocusRoom)
       .map((focusRoom) =>
         accountFocusRoomToEntry(focusRoom, input.currentRoomIdentifier, room.roomIdentifier)
       )
   );
+  const focusLanes = partitionGitFocusEntries(nestedFocusRooms);
 
   return {
     id: `project:git:${input.repositoryKey}`,
     roomName: parent.title,
     parent,
-    branchRooms,
-    focusRooms,
+    branchRooms: mergeRoomEntries(accountBranchRooms, focusLanes.branchRooms),
+    focusRooms: focusLanes.focusRooms,
   };
 }
 

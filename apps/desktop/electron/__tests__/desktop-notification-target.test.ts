@@ -49,3 +49,11 @@ test("parses legacy macOS launch userInfo and rejects incomplete payloads", () =
   }), expectedTarget);
   assert.equal(parseDesktopNotificationLaunchInfo({ userInfo: { letagents: { message_id: "msg_3" } } }), null);
 });
+
+test("private-message notifications open a conversation and reject ambiguous room targets", () => {
+  const input = { notification_id: "dm-1", conversation_id: "chat_123", message_id: "msg_9" };
+  assert.deepEqual(parseDesktopNotificationTarget(input), {
+    notificationId: "dm-1", conversationId: "chat_123", messageId: "msg_9", threadRootId: null,
+  });
+  assert.equal(parseDesktopNotificationTarget({ ...input, room_id: "room_1" }), null);
+});

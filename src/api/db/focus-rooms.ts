@@ -6,16 +6,12 @@ import type { FocusRoomConclusionDetails } from "../focus-rooms/conclusion.js";
 import { normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { db } from "./client.js";
 import { id_sequences, rooms } from "./schema.js";
-import { getRoomScopedSequenceNames, isUniqueConstraintError, nextPrefixedId } from "./utils.js";
+import { getRoomScopedSequenceNames, isUniqueConstraintError } from "./utils.js";
 import { toProject } from "./mappers.js";
-import { getProjectById } from "./rooms.js";
+import { buildFocusRoomId, getProjectById } from "./rooms.js";
 import { getTaskById } from "./tasks.js";
 import { acquireLeaseFenceTx, LeaseFenceStaleError, type LeaseFence } from "./coordination/lease-rebind.js";
 import type { Project, Task } from "./types.js";
-
-export async function buildFocusRoomId(): Promise<string> {
-  return nextPrefixedId("focus_rooms", "focus");
-}
 
 export function truncateDisplayName(value: string): string {
   const normalized = value.trim().replace(/\s+/g, " ");

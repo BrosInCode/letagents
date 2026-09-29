@@ -14,6 +14,7 @@
       variant="secondary"
       size="sm"
       type="button"
+      :disabled="!newTaskTitle.trim()"
       @click="handleAdd"
     >
       Add task
@@ -82,8 +83,6 @@ function handleAdd() {
   --btn-secondary-hover-bg: color-mix(in srgb, var(--text) 88%, var(--bg));
   --btn-secondary-border: var(--text);
   --btn-secondary-color: var(--bg);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
 }
 
 .add-task-button:focus-visible {

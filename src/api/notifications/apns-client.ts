@@ -8,7 +8,8 @@ export interface ApnsNotificationInput {
   notificationId: string;
   deviceToken: string;
   environment: ApnsEnvironment;
-  roomId: string;
+  roomId: string | null;
+  conversationId?: string | null;
   roomDisplayName: string;
   messageId: string;
   threadRootId: string | null;
@@ -76,15 +77,15 @@ export function buildApnsPayload(input: ApnsNotificationInput): Record<string, u
   return {
     aps: {
       alert: {
-        title: `${sender} in ${truncateUtf8(input.roomDisplayName, 120)}`,
+        title: input.conversationId ? sender : `${sender} in ${truncateUtf8(input.roomDisplayName, 120)}`,
         body: truncateUtf8(input.body, 1_800) || "Sent an attachment",
       },
       sound: "default",
-      "thread-id": input.roomId,
+      "thread-id": input.conversationId ?? input.roomId,
     },
     letagents: {
       notification_id: input.notificationId,
-      room_id: input.roomId,
+      ...(input.conversationId ? { conversation_id: input.conversationId } : { room_id: input.roomId }),
       message_id: input.messageId,
       thread_root_id: input.threadRootId,
     },

@@ -1,5 +1,6 @@
 import crypto, { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { isMcpWorkerId, isMcpConnectionToken } from "../../../shared/mcp-worker.js";
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import {
@@ -10,6 +11,7 @@ import {
   room_agent_presence,
   room_agent_session_bearers,
   room_agent_sessions,
+  supervisor_host_grants,
 } from "../schema.js";
 import { hashToken, nextPrefixedId } from "../utils.js";
 import { toRoomAgentSession } from "../mappers.js";
@@ -24,6 +26,7 @@ import {
   ACTIVE_AGENT_DELIVERY_WINDOW_MS,
   ROOM_AGENT_RECONNECT_GRACE_MS,
   type RoomAgentSessionKind,
+  type RoomAgentDeliveryCredentialFence,
 } from "../../../shared/agent-presence.js";
 import {
   DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES,
@@ -162,6 +165,9 @@ export interface CreateRoomAgentSessionInput {
   runtime: string;
   registration_liveness?: RoomAgentRegistrationLiveness | null;
   repo_branch?: string | null;
+  /** Launcher-declared provider model and charter; optional, routing context only. */
+  model?: string | null;
+  charter?: string | null;
   actor_label: string;
   agent_key: string;
   agent_instance_id?: string | null;
@@ -173,6 +179,8 @@ export interface CreateRoomAgentSessionInput {
   supervisor_grant_id?: string | null;
   worker_bearer_expires_at?: string | null;
   supervisor_grant_fence?: SupervisorGrantFence;
+  /** Prepared and persisted by the MCP client before registration; never public. */
+  connection_token?: string;
 }
 
 export const SAME_INSTANCE_RECLAIM_STALE_AFTER_MS =
@@ -224,7 +232,7 @@ async function insertRoomAgentSessionTx(
 ): Promise<CreatedRoomAgentSession> {
   const nowDate = new Date();
   const now = nowDate.toISOString();
-  const sessionToken = makeAgentSessionToken();
+  const sessionToken = input.connection_token ?? makeAgentSessionToken();
   const workerBearer = input.session_kind === "worker" && isAgentSessionBearerFeatureEnabled()
     ? makeAgentSessionBearerToken()
     : null;
@@ -240,6 +248,8 @@ async function insertRoomAgentSessionTx(
     liveness_capability: input.registration_liveness?.liveness_capability ?? null,
     tool_bridge_id: input.registration_liveness?.tool_bridge_id ?? null,
     repo_branch: input.repo_branch ?? null,
+    model: input.model ?? null,
+    charter: input.charter ?? null,
     actor_label: input.actor_label,
     agent_key: input.agent_key,
     agent_instance_id: input.agent_instance_id ?? null,
@@ -280,7 +290,7 @@ async function rotateRoomAgentSessionTx(
 ): Promise<CreatedRoomAgentSession> {
   const nowDate = new Date();
   const now = nowDate.toISOString();
-  const sessionToken = makeAgentSessionToken();
+  const sessionToken = input.connection_token ?? makeAgentSessionToken();
   const workerBearer = isAgentSessionBearerFeatureEnabled()
     ? makeAgentSessionBearerToken()
     : null;
@@ -300,6 +310,8 @@ async function rotateRoomAgentSessionTx(
     liveness_capability: input.registration_liveness?.liveness_capability ?? null,
     tool_bridge_id: input.registration_liveness?.tool_bridge_id ?? null,
     repo_branch: input.repo_branch ?? null,
+    model: input.model ?? null,
+    charter: input.charter ?? null,
     actor_label: input.actor_label,
     agent_key: input.agent_key,
     agent_instance_id: input.agent_instance_id ?? null,
@@ -314,7 +326,7 @@ async function rotateRoomAgentSessionTx(
     ended_at: null,
   }).where(and(
     eq(room_agent_sessions.session_id, current.session_id),
-    isNull(room_agent_sessions.ended_at),
+    ...(isMcpWorkerId(input.agent_instance_id) ? [] : [isNull(room_agent_sessions.ended_at)]),
   )).returning();
   if (!updated) throw new Error("Agent session replacement target disappeared.");
 
@@ -378,6 +390,11 @@ export async function createFencedRoomAgentSession(
   session: CreatedRoomAgentSession;
   replaced_session_ids: string[];
 }> {
+  const durable = isMcpWorkerId(input.agent_instance_id);
+  if ((durable && input.session_kind !== "worker") || durable !== Boolean(input.connection_token)
+    || (input.connection_token && !isMcpConnectionToken(input.connection_token))) {
+    throw new Error("Durable MCP registration requires a prepared connection credential.");
+  }
   if (input.session_kind !== "worker" || !input.agent_instance_id?.trim()) {
     return {
       session: await createRoomAgentSession(input),
@@ -391,6 +408,10 @@ export async function createFencedRoomAgentSession(
     }
 
     const instanceId = input.agent_instance_id!.trim();
+    if (durable) {
+      // Names belong to durable workers, including while they are offline.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mcp_worker_names:${input.room_id}`}, 0))`);
+    }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_instance:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
     const predecessors = await tx
       .select()
@@ -400,7 +421,7 @@ export async function createFencedRoomAgentSession(
         eq(room_agent_sessions.agent_key, input.agent_key),
         eq(room_agent_sessions.agent_instance_id, instanceId),
         eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
-        isNull(room_agent_sessions.ended_at),
+        ...(durable ? [] : [isNull(room_agent_sessions.ended_at)]),
       ))
       // Board Manager failover share-locks both manager session rows before
       // entering the delivery-key lock domain. Every multi-session auth
@@ -417,13 +438,29 @@ export async function createFencedRoomAgentSession(
     }
 
     const nowMs = Date.now();
+    if (durable && predecessors.length === 1) {
+      const prior = predecessors[0] as RoomAgentSessionRow;
+      if (prior.owner_account_id !== input.owner_account_id) {
+        throw new ActiveAgentInstanceConflictError(prior.session_id);
+      }
+      // A lost response retries the prepared credential, not another rotation.
+      if (replacementProofMatches(prior, {
+        session_id: prior.session_id, session_token: input.connection_token!,
+      })) {
+        if (prior.ended_at) throw new ActiveAgentInstanceConflictError(prior.session_id);
+        return { result: {
+          session: { ...toRoomAgentSession(prior), session_token: input.connection_token!, worker_bearer: null },
+          replaced_session_ids: [],
+        }, invalidations: [] };
+      }
+    }
     for (const row of predecessors) {
       const activeSession = toRoomAgentSession(row as RoomAgentSessionRow);
       if (!replacementProofMatches(row as RoomAgentSessionRow, replacementProof)
-        && !isActiveRoomAgentSessionStaleForRegistration({
+        && (durable || !isActiveRoomAgentSessionStaleForRegistration({
         active_session: activeSession,
         now_ms: nowMs,
-      })) {
+      }))) {
         throw new ActiveAgentInstanceConflictError(activeSession.session_id);
       }
     }
@@ -439,6 +476,27 @@ export async function createFencedRoomAgentSession(
       }
       return row.session_id > latest.session_id ? row as RoomAgentSessionRow : latest;
     }, null);
+    if (durable && replacementProof && !replacementTarget) {
+      throw new ActiveAgentInstanceConflictError(replacementProof.session_id);
+    }
+    if (durable && replacementTarget) {
+      // Reconnecting is never a rename; preserve the name originally assigned.
+      input = { ...input, display_name: replacementTarget.display_name,
+        actor_label: replacementTarget.actor_label,
+        assigned_base_display_name: replacementTarget.assigned_base_display_name };
+    }
+    if (durable) {
+      const [reserved] = await tx.select({ session_id: room_agent_sessions.session_id })
+        .from(room_agent_sessions).where(and(
+          eq(room_agent_sessions.room_id, input.room_id),
+          eq(room_agent_sessions.actor_label, input.actor_label),
+          sql`${room_agent_sessions.agent_instance_id} LIKE 'worker\\_%'`,
+          sql`${room_agent_sessions.agent_instance_id} <> ${instanceId}`,
+        )).limit(1);
+      if (reserved) throw Object.assign(new Error("Worker name is reserved."), {
+        code: "23505", constraint: "room_agent_sessions_active_worker_actor_label_idx",
+      });
+    }
     const replacedSessionIds = predecessors.map((row: RoomAgentSessionRow) => row.session_id);
     const retiredCredentials = await collectSessionCredentialFingerprintsTx(
       tx,
@@ -504,17 +562,52 @@ export async function createFencedRoomAgentSession(
  * prove replacement.  The current grant fence plus this tuple lock are the
  * authority to rotate the worker bearer in place.
  */
+export interface RoomWorkerNameHolderRow {
+  session_id: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  display_name: string;
+  assigned_base_display_name: string | null;
+  created_at: string;
+  ended_at: string | null;
+}
+
+/** The room could not offer this worker any name that is still free. */
+export class WorkerDisplayNameExhaustedError extends Error {
+  readonly code = "agent_session_display_name_exhausted";
+  constructor() {
+    super("Could not allocate a unique active worker display name for this room.");
+  }
+}
+
+export function isWorkerDisplayNameExhaustedError(error: unknown): error is WorkerDisplayNameExhaustedError {
+  return error instanceof WorkerDisplayNameExhaustedError;
+}
+
 export async function createOrRotateSupervisorWorkerSession(
   input: CreateRoomAgentSessionInput & {
     supervisor_grant_id: string;
     supervisor_grant_fence: SupervisorGrantFence;
     agent_instance_id: string;
+    /**
+     * Decides the worker's name from the names taken in the room. It runs on
+     * this transaction's connection, after the lock timeout is set, so naming
+     * never waits on a second connection outside the mint's deadline.
+     */
+    resolve_display_name?: (holders: readonly RoomWorkerNameHolderRow[]) =>
+      { display_name: string; actor_label: string } | null;
   },
 ): Promise<{ session: CreatedRoomAgentSession; bearer: RoomAgentSessionBearer }> {
   const instanceId = input.agent_instance_id.trim();
   if (!instanceId) throw new Error("Supervisor worker agent_instance_id is required.");
 
   const committed = await db.transaction(async (tx) => {
+    // The daemon gives up on a mint after 10s and retries, but its abort does
+    // not end this transaction. Fail lock waits first so a slow mint answers
+    // with a retryable error instead of outliving the client and queueing the
+    // retry behind it. The limit applies to each wait, and the grant and
+    // worker locks can both be contended, so two waits must fit inside 10s.
+    await tx.execute(sql`SET LOCAL lock_timeout = '3s'`);
     if (!(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
       throw new SupervisorGrantFenceStaleError();
     }
@@ -578,9 +671,16 @@ export async function createOrRotateSupervisorWorkerSession(
       const now = new Date().toISOString();
       await retireRoomAgentDeliveryTx(tx, [retained.session_id], now);
     }
+    const { resolve_display_name: resolveDisplayName, ...sessionInput } = input;
+    let named: CreateRoomAgentSessionInput = sessionInput;
+    if (resolveDisplayName) {
+      const resolved = resolveDisplayName(await getRoomWorkerNameHolders(input.room_id, tx));
+      if (!resolved) throw new WorkerDisplayNameExhaustedError();
+      named = { ...sessionInput, display_name: resolved.display_name, actor_label: resolved.actor_label };
+    }
     const session = retained
-      ? await rotateRoomAgentSessionTx(tx, retained as RoomAgentSessionRow, { ...input, agent_instance_id: instanceId })
-      : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId });
+      ? await rotateRoomAgentSessionTx(tx, retained as RoomAgentSessionRow, { ...named, agent_instance_id: instanceId })
+      : await insertRoomAgentSessionTx(tx, { ...named, agent_instance_id: instanceId });
     if (!session.worker_bearer) throw new Error("Worker bearer mode is not enabled.");
     const [bearer] = await tx.select().from(room_agent_session_bearers).where(and(
       eq(room_agent_session_bearers.session_id, session.session_id),
@@ -620,6 +720,40 @@ export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
     ))
     .orderBy(desc(room_agent_sessions.last_seen_at))
 
+  return rows.map((row) => toRoomAgentSession(row as RoomAgentSessionRow));
+}
+
+/**
+ * Worker sessions whose names are taken in a room: every live worker, and
+ * every durable worker even while offline, because a durable worker keeps its
+ * name across reconnects. Kept narrow because the supervisor mint reads it
+ * inside its transaction.
+ */
+export async function getRoomWorkerNameHolders(
+  roomId: string,
+  executor: Pick<typeof db, "select"> = db,
+): Promise<RoomWorkerNameHolderRow[]> {
+  return await executor.select({
+    session_id: room_agent_sessions.session_id,
+    agent_key: room_agent_sessions.agent_key,
+    agent_instance_id: room_agent_sessions.agent_instance_id,
+    display_name: room_agent_sessions.display_name,
+    assigned_base_display_name: room_agent_sessions.assigned_base_display_name,
+    created_at: room_agent_sessions.created_at,
+    ended_at: room_agent_sessions.ended_at,
+  }).from(room_agent_sessions).where(and(
+    eq(room_agent_sessions.room_id, roomId),
+    eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+    sql`(${room_agent_sessions.ended_at} IS NULL OR ${room_agent_sessions.agent_instance_id} LIKE 'worker\\_%')`,
+  ));
+}
+
+export async function getDurableRoomWorkerSessions(roomId: string): Promise<RoomAgentSession[]> {
+  const rows = await db.select().from(room_agent_sessions).where(and(
+    eq(room_agent_sessions.room_id, roomId),
+    eq(room_agent_sessions.session_kind, "worker"),
+    sql`${room_agent_sessions.agent_instance_id} LIKE 'worker\\_%'`,
+  ));
   return rows.map((row) => toRoomAgentSession(row as RoomAgentSessionRow));
 }
 
@@ -709,6 +843,10 @@ export async function getRoomAgentSessionBearerByToken(
       room_agent_sessions,
       eq(room_agent_session_bearers.session_id, room_agent_sessions.session_id)
     )
+    .leftJoin(
+      supervisor_host_grants,
+      eq(room_agent_session_bearers.supervisor_grant_id, supervisor_host_grants.grant_id),
+    )
     .where(and(
       eq(room_agent_session_bearers.token_hash, hashToken(token)),
       isNull(room_agent_session_bearers.revoked_at),
@@ -716,6 +854,18 @@ export async function getRoomAgentSessionBearerByToken(
       isNull(room_agent_sessions.ended_at),
       eq(room_agent_session_bearers.room_id, room_agent_sessions.room_id),
       eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      or(
+        and(
+          isNull(room_agent_session_bearers.supervisor_grant_id),
+          isNull(room_agent_sessions.supervisor_grant_id),
+        ),
+        and(
+          eq(room_agent_session_bearers.supervisor_grant_id, supervisor_host_grants.grant_id),
+          eq(room_agent_sessions.supervisor_grant_id, supervisor_host_grants.grant_id),
+          isNull(supervisor_host_grants.revoked_at),
+          gt(supervisor_host_grants.expires_at, now),
+        ),
+      ),
     ))
     .limit(1);
 
@@ -841,6 +991,7 @@ export async function endRoomAgentSession(input: {
   owner_account_id?: string | null;
   supervisor_grant_id?: string | null;
   supervisor_grant_fence?: SupervisorGrantFence;
+  credential_fence?: RoomAgentDeliveryCredentialFence | null;
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
   let unavailableReceiptRoom: string | null = null;
@@ -856,8 +1007,13 @@ export async function endRoomAgentSession(input: {
       eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id),
       eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
     )).limit(1);
-    if (!session?.agent_instance_id) throw new SupervisorGrantFenceStaleError();
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${session.owner_account_id}:${session.room_id}:${session.agent_key}:${session.agent_instance_id}`}, 0))`);
+    if (!session) throw new SupervisorGrantFenceStaleError();
+    if (!session.agent_instance_id && input.supervisor_grant_fence) {
+      throw new SupervisorGrantFenceStaleError();
+    }
+    if (session.agent_instance_id) {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${session.owner_account_id}:${session.room_id}:${session.agent_key}:${session.agent_instance_id}`}, 0))`);
+    }
     // A lost response after the first commit must be safely replayable under
     // the same exact current grant fence and session coordinates.
     if (session.ended_at) return toRoomAgentSession(session as RoomAgentSessionRow);
@@ -874,6 +1030,23 @@ export async function endRoomAgentSession(input: {
     conditions.push(eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id));
     conditions.push(eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind));
     conditions.push(isNull(room_agent_sessions.ended_at));
+  }
+  const fence = input.credential_fence;
+  if (fence?.kind === "session_token") {
+    conditions.push(eq(room_agent_sessions.token_hash, fence.token_hash));
+  } else if (fence?.kind === "bearer") {
+    // Lock the session before checking its bearer, in the same order as rotation.
+    const [current] = await tx.select().from(room_agent_sessions)
+      .where(and(...conditions)).for("update").limit(1);
+    if (!current) return null;
+    const [bearer] = await tx.select().from(room_agent_session_bearers).where(and(
+      eq(room_agent_session_bearers.session_id, current.session_id),
+      eq(room_agent_session_bearers.bearer_id, fence.bearer_id),
+      eq(room_agent_session_bearers.generation, fence.generation),
+      isNull(room_agent_session_bearers.revoked_at),
+      gt(room_agent_session_bearers.expires_at, new Date().toISOString()),
+    )).for("share").limit(1);
+    if (!bearer) return null;
   }
 
   const [row] = await tx

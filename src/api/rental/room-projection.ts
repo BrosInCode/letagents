@@ -34,14 +34,9 @@ import {
   rental_activity_events,
 } from "../db/schema.js";
 import { isRentalParticipantProvisionableStatus } from "./room-provisioning-policy.js";
+import { buildFocusRoomId } from "../db/rooms.js";
 
 // ===== ID helpers =====
-
-function generateRoomId(): string {
-  const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).slice(2, 8);
-  return `rroom_${timestamp}_${random}`;
-}
 
 function generateParticipantId(): string {
   const timestamp = Date.now().toString(36);
@@ -187,7 +182,7 @@ export async function provisionRentalRoom(
       )
       .limit(1);
 
-    const roomId = existingRoom?.id ?? generateRoomId();
+    const roomId = existingRoom?.id ?? await buildFocusRoomId(tx);
     const now = new Date().toISOString();
 
     if (!existingRoom) {

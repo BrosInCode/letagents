@@ -15,9 +15,7 @@ export function providerSetupConfirmationResult(
       action,
       success: false,
       message: `${name} install requires confirmation.`,
-      detail: provider.id === "codex"
-        ? "LetAgents will install the official Codex CLI runtime only after the user confirms this action."
-        : `LetAgents will install the official ${name} runtime only after the user confirms this action.`,
+      detail: `LetAgents will install its managed ${name} execution engine only after the user confirms this action. External provider CLIs remain user-managed.`,
     };
   }
 

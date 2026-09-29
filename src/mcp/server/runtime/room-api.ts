@@ -10,7 +10,8 @@ import {
 import { maybeHandleRepoRoomAuthRequired } from "./device-auth.js";
 import { getLastMessageId } from "./messages.js";
 import { currentRoom, getCurrentSupervisedRoomAuthority } from "./room-state.js";
-import { isSupervisedBoundedTurn } from "./worker-bearer.js";
+import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
+import { currentWorkerCall } from "../../worker-call-context.js";
 
 export async function roomScopedApiCall<T>(input: {
   room_id?: string | null;
@@ -23,7 +24,9 @@ export async function roomScopedApiCall<T>(input: {
   // last_message_id alone so the cursor never moves backwards.
   preserve_session_cursor?: boolean;
 }): Promise<T> {
-  const supervised = isSupervisedBoundedTurn();
+  // A successful send does not prove that preceding messages were read.
+  const preserveCursor = input.preserve_session_cursor || (input.options?.method ?? "GET").toUpperCase() !== "GET";
+  const supervised = hasSupervisedWorkerAuthority();
   const exactRoomAuthority = supervised ? getCurrentSupervisedRoomAuthority() : null;
   if (supervised && (!exactRoomAuthority || input.room_id !== exactRoomAuthority)) {
     throw new Error("The daemon-supervised API request is missing its exact per-call room authority.");
@@ -37,8 +40,8 @@ export async function roomScopedApiCall<T>(input: {
   if (exactRoomAuthority) {
     if (originHeaderKey) delete headers[originHeaderKey];
     headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = exactRoomAuthority;
-  } else if (currentRoom?.room_id && !originHeaderKey) {
-    headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = currentRoom.room_id;
+  } else if ((currentWorkerCall()?.room_id || currentRoom?.room_id) && !originHeaderKey) {
+    headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = currentWorkerCall()?.room_id ?? currentRoom!.room_id;
   }
   const options = {
     ...input.options,
@@ -53,7 +56,7 @@ export async function roomScopedApiCall<T>(input: {
     try {
       const result = await apiCall<T>(input.room_path(apiRoomId), options);
       if (!supervised) {
-        touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
+        touchRoomSession(input.room_id, preserveCursor ? undefined : getLastMessageId(result));
       }
       return result;
     } catch (error) {
@@ -71,7 +74,7 @@ export async function roomScopedApiCall<T>(input: {
   const result = await apiCall<T>(input.project_path(input.project_id), options);
   if (input.room_id) {
     if (!supervised) {
-      touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
+      touchRoomSession(input.room_id, preserveCursor ? undefined : getLastMessageId(result));
     }
   }
   return result;

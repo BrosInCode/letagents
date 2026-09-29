@@ -421,3 +421,12 @@ test("ordered notification queues cap aggregate work across publisher origins", 
   await new Promise<void>((resolve) => setImmediate(resolve));
   receiver.close();
 });
+
+
+test("oversized deferred routing events retain an authoritative reference", () => {
+  const event = buildBridgeEnvelope("messages", "message:routed", {
+    projectId: "room_jev", message: { id: "msg_9", text: "x".repeat(12000) }, recipientAgentTargets: [],
+  });
+  assert.ok(event?.mode === "ref");
+  assert.deepEqual(event.ref, { room_id: "room_jev", number: 9 });
+});

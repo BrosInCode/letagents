@@ -17,19 +17,18 @@
           class="desktop-task-column-header"
           type="button"
           :aria-expanded="!collapsedGroups.has(group.status)"
+          :aria-controls="`desktop-task-group-${group.status}`"
           @click="emit('toggle-group', group.status)"
         >
           <span class="desktop-task-column-title">
-            <svg class="desktop-task-column-chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="m5.5 6.5 2.5 2.5 2.5-2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
             <span class="desktop-task-column-dot" aria-hidden="true"></span>
             <span>{{ group.label }}</span>
+            <strong>{{ group.tasks.length }}</strong>
           </span>
-          <strong>{{ group.tasks.length }}</strong>
+          <ChevronDown class="desktop-task-column-chevron" :size="14" aria-hidden="true" />
         </button>
 
-        <div v-if="!collapsedGroups.has(group.status)" class="desktop-task-column-list">
+        <div v-show="!collapsedGroups.has(group.status)" :id="`desktop-task-group-${group.status}`" class="desktop-task-column-list">
           <RoomBoardTaskCard
             v-for="task in group.tasks"
             :key="task.id"
@@ -57,6 +56,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { ChevronDown } from "@lucide/vue";
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import RoomBoardTaskCard from "./RoomBoardTaskCard.vue";
 import type { TaskAction, TaskGroup } from "./types";

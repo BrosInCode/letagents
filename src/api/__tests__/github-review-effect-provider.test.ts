@@ -21,7 +21,7 @@ const request: GitHubReviewEffectRequest = {
 test("GitHub review creates are fenced to the expected head and embed the stable correlation marker", async () => {
   let sentBody: Record<string, unknown> | null = null;
   const provider = createGitHubReviewProvider({
-    mintToken: async () => "installation-token",
+    mintCredential: async () => ({ token: "installation-token", permissions: { pull_requests: "write" } }),
     fetchImpl: async (url, init) => {
       if (!String(url).endsWith("/reviews")) {
         return new Response(JSON.stringify({ head: { sha: expectedHeadSha } }), {
@@ -51,7 +51,7 @@ test("GitHub review create fails closed when the pull request head drifted", asy
   let postCalls = 0;
   const currentHeadSha = "b".repeat(40);
   const provider = createGitHubReviewProvider({
-    mintToken: async () => "installation-token",
+    mintCredential: async () => ({ token: "installation-token", permissions: { pull_requests: "write" } }),
     fetchImpl: async (_url, init) => {
       if (init?.method === "POST") postCalls += 1;
       return new Response(JSON.stringify({ head: { sha: currentHeadSha } }), {
@@ -69,9 +69,9 @@ test("GitHub review create fails closed when the pull request head drifted", asy
 });
 
 test("GitHub review create distinguishes definite and ambiguous failures", async () => {
-  for (const [status, expected] of [[422, "definite_failure"], [503, "ambiguous"]] as const) {
+  for (const [status, expected] of [[403, "definite_failure"], [422, "definite_failure"], [503, "ambiguous"]] as const) {
     const provider = createGitHubReviewProvider({
-      mintToken: async () => "installation-token",
+      mintCredential: async () => ({ token: "installation-token", permissions: { pull_requests: "write" } }),
       fetchImpl: async (url) => String(url).endsWith("/reviews")
         ? new Response("provider error", { status })
         : new Response(JSON.stringify({ head: { sha: expectedHeadSha } }), {
@@ -83,10 +83,34 @@ test("GitHub review create distinguishes definite and ambiguous failures", async
   }
 });
 
+test("new review attempts require write permission on the actual installation token", async () => {
+  for (const permissions of [{ pull_requests: "read" }, {}, null, { pull_requests: "unexpected" }]) {
+    const provider = createGitHubReviewProvider({
+      mintCredential: async () => ({ token: "installation-token", permissions }),
+      fetchImpl: async () => assert.fail("missing or unknown token write permission must fail before provider requests"),
+    });
+    const result = await provider.create(request, "lae_permission");
+    assert.equal(result.kind, "definite_failure");
+    if (result.kind === "definite_failure") assert.match(result.error, /review was not created/);
+  }
+});
+
+test("read-only reconciliation still finds prior reviews after write permission is removed", async () => {
+  const provider = createGitHubReviewProvider({
+    mintCredential: async () => ({ token: "now-read-only", permissions: { pull_requests: "read" } }),
+    fetchImpl: async (_url, init) => {
+      assert.equal(init?.method, "GET");
+      return new Response(JSON.stringify([{ id: 42, commit_id: expectedHeadSha,
+        body: "<!-- letagents-effect:lae_prior -->" }]), { status: 200 });
+    },
+  });
+  assert.equal((await provider.lookup(request, "lae_prior")).kind, "found");
+});
+
 test("GitHub review reconciliation finds the exact marker and otherwise reports not-found", async () => {
   const requestedPages: number[] = [];
   const provider = createGitHubReviewProvider({
-    mintToken: async () => "installation-token",
+    mintCredential: async () => ({ token: "installation-token", permissions: { pull_requests: "write" } }),
     fetchImpl: async (url) => {
       const page = Number(new URL(String(url)).searchParams.get("page"));
       requestedPages.push(page);
@@ -115,7 +139,7 @@ test("GitHub review reconciliation finds the exact marker and otherwise reports 
   assert.deepEqual(requestedPages, [1, 5], "lookup jumps from the oldest page to the provider's last page");
 
   const wrongHeadProvider = createGitHubReviewProvider({
-    mintToken: async () => "installation-token",
+    mintCredential: async () => ({ token: "installation-token", permissions: { pull_requests: "write" } }),
     fetchImpl: async () => new Response(JSON.stringify([{
       id: 78,
       body: "done\n<!-- letagents-effect:lae_exact -->",

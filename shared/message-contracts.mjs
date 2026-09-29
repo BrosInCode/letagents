@@ -107,3 +107,14 @@ export function parseAccountAgentRoutingEnvelope(routing) {
     controlAuthorized: routing.control_authorized === true,
   };
 }
+
+/** Only daemon publication identities can link an answer to its source receipt. */
+export function parseSupervisedReplySourceNumber(clientMessageId) {
+  if (!clientMessageId) return null;
+  const parts = clientMessageId.split(":");
+  if (parts[0] !== "supervised-room" || parts.at(-2) !== "reply" || parts.at(-1) !== "v1") return null;
+  const body = parts.slice(1, -2);
+  if (body.length !== 2 && body.length !== 3) return null;
+  const source = body.at(-1);
+  return source ? parsePositivePgIntegerScopedId(source, "msg") : null;
+}

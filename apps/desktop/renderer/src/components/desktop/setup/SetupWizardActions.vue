@@ -56,6 +56,7 @@ const props = defineProps<{
   selectedTargets: DesktopMcpInstallTarget[];
   busy: boolean;
   canInstall: boolean;
+  retry?: boolean;
 }>();
 
 defineEmits<{
@@ -65,15 +66,9 @@ defineEmits<{
   finish: [];
 }>();
 
-const selectedIncludesCodex = computed(() => {
-  return props.selectedTargets.some((target) => target.id === "codex");
-});
-
 const installButtonLabel = computed(() => {
   if (props.busy) return "Installing...";
-  if (selectedIncludesCodex.value && props.selectedTargets.length === 1) return "Install CLI and bridge";
-  if (selectedIncludesCodex.value) return `Install CLI and ${props.selectedTargets.length} bridges`;
-  if (props.selectedTargets.length <= 1) return "Install LetAgents";
-  return `Install in ${props.selectedTargets.length} apps`;
+  if (props.retry) return "Retry";
+  return "Install MCP";
 });
 </script>

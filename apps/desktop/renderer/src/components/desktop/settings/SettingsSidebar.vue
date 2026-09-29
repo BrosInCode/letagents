@@ -6,21 +6,26 @@
     </button>
 
     <div class="settings-brand">
-      <span class="settings-brand-mark" aria-hidden="true">LA</span>
       <div>
         <h2>Settings</h2>
-        <p>Account, storage, setup</p>
+        <p>Make LetAgents yours</p>
       </div>
     </div>
 
+    <label class="settings-sidebar-search">
+      <Search aria-hidden="true" />
+      <input v-model="query" type="search" aria-label="Find a setting" placeholder="Find a setting…" />
+    </label>
+
     <nav class="settings-nav" aria-label="Settings sections">
-      <section v-for="group in groups" :key="group.label" class="settings-nav-group">
+      <section v-for="group in visibleGroups" :key="group.label" class="settings-nav-group">
         <p class="settings-nav-heading">{{ group.label }}</p>
         <button
           v-for="item in group.items"
           :key="item.id"
           class="settings-nav-row"
-          :data-active="activePane === item.id"
+          :data-active="(query.trim() ? activePane : settingsSectionFor(activePane)) === item.id"
+          :aria-current="(query.trim() ? activePane : settingsSectionFor(activePane)) === item.id ? 'page' : undefined"
           type="button"
           :data-testid="`settings-nav-${item.id}`"
           @click="$emit('select', item.id)"
@@ -30,22 +35,26 @@
           </span>
           <span class="settings-nav-copy">
             <span>{{ item.title }}</span>
-            <small>{{ item.description }}</small>
           </span>
         </button>
       </section>
+      <p v-if="!visibleGroups.length" class="settings-search-empty" role="status">No settings match “{{ query }}”. Try a different word.</p>
     </nav>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { ArrowLeft } from "@lucide/vue";
-import type { SettingsNavGroup, SettingsPaneId } from "./types";
+import { ArrowLeft, Search } from "@lucide/vue";
+import { computed, ref } from "vue";
+import { filterSettingsNavigation, settingsSectionFor } from "./navigation";
+import type { SettingsPaneId } from "./types";
 
 defineProps<{
-  groups: SettingsNavGroup[];
   activePane: SettingsPaneId;
 }>();
+
+const query = ref("");
+const visibleGroups = computed(() => filterSettingsNavigation(query.value));
 
 defineEmits<{
   back: [];

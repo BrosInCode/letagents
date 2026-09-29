@@ -1,3 +1,4 @@
+import { isLocalRoomApi, roomApiOrigin } from "../../../../shared/room-api-origin.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { createConnection } from "node:net";
@@ -10,12 +11,17 @@ import type { StoredAgentSessionState } from "../../local-state.js";
 import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
 
 const NEGOTIATION_PROTOCOL_VERSION = 1;
-const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2]);
+const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2, 3]);
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+// A signed desktop update can leave the socket absent for roughly 20 seconds.
+// Only unsent operations receive this startup grace; it never permits replay.
+const SUPERVISED_STARTUP_TIMEOUT_MS = 30_000;
 const CONFIRMED_BINDING_VERIFY_TIMEOUT_MS = 250;
 const SUPERVISOR_CONTEXT_FILE = ".letagents-supervisor-context.json";
 const WORK_ATTEMPT_MARKER_FILE = ".letagents-work-attempt.json";
 const MAX_SUPERVISOR_CONTEXT_BYTES = 4 * 1024;
+// An SDK request id is unique only within this MCP process lifetime.
+const CUSTODIAL_POLLING_PROCESS_INCARNATION_ID = randomUUID();
 
 type SupervisorResponse = { version?: number; id?: string; ok?: boolean; error?: string; result?: unknown };
 type SupervisorBridgeOptions = {
@@ -44,10 +50,102 @@ type ResolvedSupervisorCoordinates = SupervisorCoordinates & {
   supervisorContextCwd: string | null;
 };
 type NegotiatedSupervisor = {
+  custodialPollingV1: boolean;
+  custodialPollingOffersV1: boolean;
   protocolVersion: number;
   daemonIdentity: string | null;
   generation: number | null;
 };
+
+export type CustodialPollingAuthorization = {
+  roomId: string;
+  agentSessionId: string;
+  roomCursor: string | null;
+  configurationRevision: number;
+  coordinates: ResolvedSupervisorCoordinates;
+  negotiated: NegotiatedSupervisor;
+  apiUrl: string;
+  wait?: { processIncarnationId: string; mcpRequestId: string | number; activationId: string; bindingEpoch: number };
+};
+export type CustodialPollingWaitRequest = {
+  mcpRequestId: string | number;
+  roomCursor: string | null;
+  offeredFrontier?: string;
+  requestedRoomId?: string;
+  requestedAgentSessionId?: string;
+};
+
+/** Release reuses BEFORE's exact generation; it never authorizes against a successor. */
+export async function authorizeCustodialPolling(
+  toolName: string,
+  prior?: CustodialPollingAuthorization,
+  env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
+  waitRequest?: CustodialPollingWaitRequest,
+): Promise<CustodialPollingAuthorization> {
+  const wait = waitRequest ? { ...waitRequest } : undefined;
+  if (toolName === "wait_for_messages") {
+    if (!wait || !(typeof wait.mcpRequestId === "string" || Number.isSafeInteger(wait.mcpRequestId))) {
+      throw new Error("Custodial wait is missing its exact MCP request id.");
+    }
+    if (!(wait.roomCursor === null || (typeof wait.roomCursor === "string" && parseRoomMessageNumber(wait.roomCursor) !== null))
+      || (prior && (!prior.wait || prior.wait.processIncarnationId !== CUSTODIAL_POLLING_PROCESS_INCARNATION_ID
+        || prior.wait.mcpRequestId !== wait.mcpRequestId || typeof wait.offeredFrontier !== "string"
+        || parseRoomMessageNumber(wait.offeredFrontier) === null || prior.roomCursor === null
+        || parseRoomMessageNumber(wait.offeredFrontier)! < parseRoomMessageNumber(prior.roomCursor)!))) {
+      throw new Error("Custodial wait receipt does not match its original invocation and cursor.");
+    }
+  } else if (wait || prior?.wait) throw new Error("Only custodial wait may acknowledge or offer a cursor.");
+  if (env.LETAGENTS_EXECUTION_PROFILE?.trim() !== "supervised_mcp_polling") throw new Error("Custodial polling profile required.");
+  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() === "1"
+    || env.LETAGENTS_TOKEN?.trim() || env.LETAGENTS_AGENT_SESSION_BEARER?.trim()) {
+    throw new Error("Custodial polling refuses bounded flags and environment credentials.");
+  }
+  const coordinates = prior?.coordinates ?? await resolveSupervisorCoordinates(supervisedContextSession(env), env, options);
+  if (!coordinates?.roomId || !coordinates.agentSessionId) throw new Error("Custodial polling lacks exact worker coordinates.");
+  if ((wait?.requestedRoomId && wait.requestedRoomId !== coordinates.roomId)
+    || (wait?.requestedAgentSessionId && wait.requestedAgentSessionId !== coordinates.agentSessionId)) {
+    throw new Error("Custodial wait room or worker identity does not match its exact authority.");
+  }
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const negotiated = prior?.negotiated ?? await negotiateSupervisor(coordinates.socketPath, timeoutMs);
+  if (!negotiated.custodialPollingV1 || negotiated.generation === null) throw new Error("Daemon does not support custodial_polling_v1.");
+  if (wait && !negotiated.custodialPollingOffersV1) throw new Error("Daemon does not support custodialPollingOffersV1; refusing an unjournaled wait.");
+  const apiUrl = prior?.apiUrl ?? env.LETAGENTS_API_URL?.trim();
+  if (!apiUrl) throw new Error("Custodial polling requires an explicit API URL.");
+  const response = await supervisorRequest(coordinates.socketPath, {
+    version: negotiated.protocolVersion, id: randomUUID(), method: "supervisor.authorize_custodial_polling",
+    params: {
+      entry_id: coordinates.entryId, room_id: coordinates.roomId, work_attempt_id: coordinates.workAttemptId,
+      execution_generation_id: coordinates.executionGenerationId, agent_session_id: coordinates.agentSessionId,
+      daemon_generation: negotiated.generation, api_url: apiUrl, contract: "custodial_polling_v1",
+      phase: prior ? "release" : "before", tool_name: toolName,
+      ...(prior ? { expected_configuration_revision: prior.configurationRevision } : {}),
+      ...(wait ? {
+        process_incarnation_id: CUSTODIAL_POLLING_PROCESS_INCARNATION_ID, mcp_request_id: wait.mcpRequestId,
+        ...(prior ? { expected_activation_id: prior.wait!.activationId, expected_binding_epoch: prior.wait!.bindingEpoch,
+          input_cursor: prior.roomCursor, offered_frontier: wait.offeredFrontier } : { room_cursor: wait.roomCursor }),
+      } : {}),
+    },
+  }, timeoutMs);
+  const result = response.result as Record<string, unknown> | undefined;
+  if (!response.ok || response.version !== negotiated.protocolVersion || !result || result.status !== "authorized" || result.contract !== "custodial_polling_v1"
+    || result.room_id !== coordinates.roomId || result.agent_session_id !== coordinates.agentSessionId
+    || !Number.isSafeInteger(result.configuration_revision) || Number(result.configuration_revision) < 1
+    || (prior && result.configuration_revision !== prior.configurationRevision)
+    || (wait && (typeof result.activation_id !== "string" || !result.activation_id.trim()
+      || !Number.isSafeInteger(result.binding_epoch) || Number(result.binding_epoch) < 1
+      || typeof result.room_cursor !== "string"
+      || (prior && (result.activation_id !== prior.wait!.activationId || result.binding_epoch !== prior.wait!.bindingEpoch
+        || result.room_cursor !== prior.roomCursor))))
+    || !(result.room_cursor === null || (typeof result.room_cursor === "string" && parseRoomMessageNumber(result.room_cursor) !== null))) {
+    throw new Error("Custodial polling authority was rejected or became stale.");
+  }
+  return { coordinates, negotiated, apiUrl, roomId: coordinates.roomId, agentSessionId: coordinates.agentSessionId,
+    roomCursor: result.room_cursor as string | null, configurationRevision: Number(result.configuration_revision),
+    ...(wait ? { wait: { processIncarnationId: CUSTODIAL_POLLING_PROCESS_INCARNATION_ID, mcpRequestId: wait.mcpRequestId,
+      activationId: String(result.activation_id), bindingEpoch: Number(result.binding_epoch) } } : {}) };
+}
 
 const confirmedBindingsBySession = new Map<string, string>();
 const confirmedRequestsBySession = new Map<string, string>();
@@ -83,32 +181,43 @@ export type PreparedSupervisedEffect =
   | { state: "prepared"; roomId: string; effectId: string; action: "use_final_answer"; sourceMessageId: string }
   | { state: "prepared"; roomId: string; effectId: string; action: "room_move_prepared"; destinationRoom: string };
 
+export type ExecutedSupervisedTool =
+  | { state: "unsupported" }
+  | { state: "completed"; roomId: string; result: unknown };
+
+export async function executeCurrentSupervisedTool(input: {
+  toolName: string;
+  input: unknown;
+  mcpRequestId: string;
+}, env: NodeJS.ProcessEnv = process.env, options: SupervisorBridgeOptions = {}): Promise<ExecutedSupervisedTool> {
+  const response = await requestCurrentSupervisedOperation("supervisor.execute_bounded_tool", {
+    mcp_request_id: input.mcpRequestId, tool_name: input.toolName, input: input.input,
+  }, env, options);
+  if (!response.ok) {
+    if (/Unsupported daemon method:\s*supervisor\.execute_bounded_tool/i.test(response.error ?? "")) {
+      return { state: "unsupported" };
+    }
+    throw new Error(response.error || "The daemon-owned supervised tool was rejected.");
+  }
+  const result = response.result && typeof response.result === "object"
+    ? response.result as Record<string, unknown>
+    : {};
+  const roomId = typeof result.room_id === "string" ? result.room_id.trim() : "";
+  if (!roomId || roomId.length > 1_024 || /[\u0000-\u001f\u007f]/.test(roomId)) {
+    throw new Error("The supervised daemon did not return valid exact room authority.");
+  }
+  return { state: "completed", roomId, result: result.result };
+}
+
 export async function prepareCurrentSupervisedEffect(input: {
   toolName: string;
   input: unknown;
   mcpRequestId: string;
   mutation: boolean;
 }, env: NodeJS.ProcessEnv = process.env, options: SupervisorBridgeOptions = {}): Promise<PreparedSupervisedEffect> {
-  const coordinates = await requireCurrentSupervisedCoordinates(env, options);
-  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
-  if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
-  const response = await supervisorRequest(coordinates.socketPath, {
-    version: negotiated.protocolVersion,
-    id: randomUUID(),
-    method: "supervisor.prepare_bounded_effect",
-    params: {
-      entry_id: coordinates.entryId,
-      work_attempt_id: coordinates.workAttemptId,
-      execution_generation_id: coordinates.executionGenerationId,
-      ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
-      daemon_generation: negotiated.generation,
-      mcp_request_id: input.mcpRequestId,
-      tool_name: input.toolName,
-      input: input.input,
-      mutation: input.mutation,
-    },
-  }, timeoutMs);
+  const response = await requestCurrentSupervisedOperation("supervisor.prepare_bounded_effect", {
+    mcp_request_id: input.mcpRequestId, tool_name: input.toolName, input: input.input, mutation: input.mutation,
+  }, env, options);
   if (!response.ok) throw new Error(response.error || "The supervised effect was rejected.");
   const result = response.result && typeof response.result === "object" ? response.result as Record<string, unknown> : {};
   const roomId = typeof result.room_id === "string" ? result.room_id.trim() : "";
@@ -137,6 +246,52 @@ export async function prepareCurrentSupervisedEffect(input: {
     return { state: "prepared", roomId, effectId, action: "room_move_prepared", destinationRoom: result.destination_room };
   }
   throw new Error("The supervised effect journal returned an unsupported action.");
+}
+
+async function requestCurrentSupervisedOperation(
+  method: "supervisor.execute_bounded_tool" | "supervisor.prepare_bounded_effect",
+  params: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+  options: SupervisorBridgeOptions,
+): Promise<SupervisorResponse> {
+  // Keep the original invocation and authority across an unlink-to-listen gap.
+  const invocation = JSON.parse(JSON.stringify(params)) as Record<string, unknown>;
+  const coordinates = await requireCurrentSupervisedCoordinates(env, options);
+  const requestId = randomUUID();
+  const deadline = Date.now() + (options.requestTimeoutMs ?? SUPERVISED_STARTUP_TIMEOUT_MS);
+  let retryAttempt = 0;
+  while (true) {
+    let negotiated: NegotiatedSupervisor;
+    try {
+      negotiated = await negotiateSupervisor(coordinates.socketPath, remainingRequestTimeout(deadline));
+    } catch (error) {
+      // Negotiation is read-only; no operation has been sent at this point.
+      if (!(error instanceof SupervisorTransportError) || !isRetryableSupervisorBridgeError(error)
+        || !await waitForCompletionHandoffRetry(deadline, retryAttempt++)) throw error;
+      continue;
+    }
+    if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
+    try {
+      return await supervisorRequest(coordinates.socketPath, {
+        version: negotiated.protocolVersion, id: requestId, method,
+        params: {
+          ...invocation,
+          entry_id: coordinates.entryId,
+          work_attempt_id: coordinates.workAttemptId,
+          execution_generation_id: coordinates.executionGenerationId,
+          ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
+          daemon_generation: negotiated.generation,
+        },
+      }, method === "supervisor.execute_bounded_tool" ? null : remainingRequestTimeout(deadline),
+      remainingRequestTimeout(deadline));
+    } catch (error) {
+      // Once a write begins, failure is ambiguous. Never replay an operation,
+      // even when its error looks like a transient daemon restart.
+      if (!(error instanceof SupervisorTransportError) || error.writeAttempted
+        || !isRetryableSupervisorBridgeError(error)
+        || !await waitForCompletionHandoffRetry(deadline, retryAttempt++)) throw error;
+    }
+  }
 }
 
 export async function completeCurrentSupervisedEffect(input: {
@@ -221,7 +376,8 @@ export async function borrowCurrentSupervisedWorkerCredential(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<SupervisedCredentialBorrowResult> {
-  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
+  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1"
+    && env.LETAGENTS_EXECUTION_PROFILE?.trim() !== "supervised_mcp_polling") {
     return { state: "not_supervised" };
   }
   const seed = supervisedContextSession(env);
@@ -325,6 +481,8 @@ export async function borrowSupervisedWorkerCredential(
 
 function normalizedWorkerApiOrigin(env: NodeJS.ProcessEnv): string {
   const apiUrl = env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
+  if (isLocalRoomApi(apiUrl) && env.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1"
+    && env.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn") return apiUrl;
   let parsed: URL;
   try {
     parsed = new URL(apiUrl);
@@ -435,7 +593,7 @@ function bindingRequestKey(
     session.session_id,
     session.room_id,
     tokenDigest,
-    new URL(env.LETAGENTS_API_URL?.trim() || "https://letagents.chat").origin,
+    roomApiOrigin(env.LETAGENTS_API_URL?.trim() || "https://letagents.chat"),
   ].join("\u0000");
 }
 
@@ -817,28 +975,48 @@ async function negotiateSupervisor(socketPath: string, timeoutMs: number): Promi
   const daemonIdentity = hasCompleteIdentity
     ? [result.generation, result.pid, result.started_at].join(":")
     : null;
-  return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null };
+  return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null,
+    custodialPollingV1: (result.capabilities as Record<string, unknown> | undefined)?.custodialPollingV1 === true,
+    custodialPollingOffersV1: (result.capabilities as Record<string, unknown> | undefined)?.custodialPollingOffersV1 === true };
 }
 
-function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number): Promise<SupervisorResponse> {
+class SupervisorTransportError extends Error {
+  readonly code: string | undefined;
+  constructor(error: Error, readonly writeAttempted: boolean) {
+    super(error.message, { cause: error });
+    this.code = (error as NodeJS.ErrnoException).code;
+  }
+}
+
+function supervisorRequest(
+  socketPath: string, request: Record<string, unknown>, timeoutMs: number | null,
+  connectTimeoutMs: number | null = null,
+): Promise<SupervisorResponse> {
   return new Promise((resolve, reject) => {
+    const encoded = `${JSON.stringify(request)}\n`;
     const socket = createConnection(socketPath);
     let buffer = "";
     let finished = false;
-    const timer = setTimeout(() => {
-      socket.destroy();
-      finish(() => reject(new Error("Timed out communicating with the supervisor daemon.")));
-    }, timeoutMs);
-    timer.unref();
+    let writeAttempted = false;
     const finish = (operation: () => void) => {
       if (finished) return;
       finished = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
+      if (connectTimer) clearTimeout(connectTimer);
       operation();
     };
+    const failTransport = (error: Error) => finish(() => reject(new SupervisorTransportError(error, writeAttempted)));
+    const timeout = () => {
+      failTransport(new Error("Timed out communicating with the supervisor daemon."));
+      socket.destroy();
+    };
+    const timer = timeoutMs === null ? null : setTimeout(timeout, timeoutMs);
+    const connectTimer = connectTimeoutMs === null ? null : setTimeout(timeout, connectTimeoutMs);
+    timer?.unref();
+    connectTimer?.unref();
     socket.setEncoding("utf8");
-    socket.once("error", (error) => finish(() => reject(error)));
-    socket.once("close", () => finish(() => reject(new Error("Supervisor connection closed before a response."))));
+    socket.once("error", failTransport);
+    socket.once("close", () => failTransport(new Error("Supervisor connection closed before a response.")));
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       const newline = buffer.indexOf("\n");
@@ -852,6 +1030,15 @@ function supervisorRequest(socketPath: string, request: Record<string, unknown>,
       }
       catch (error) { finish(() => reject(error)); }
     });
-    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.once("connect", () => {
+      if (finished) return;
+      if (connectTimer) clearTimeout(connectTimer);
+      writeAttempted = true;
+      try { socket.write(encoded); }
+      catch (error) {
+        failTransport(error instanceof Error ? error : new Error(String(error)));
+        socket.destroy();
+      }
+    });
   });
 }

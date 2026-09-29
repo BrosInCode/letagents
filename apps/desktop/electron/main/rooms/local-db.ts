@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { observeLocalTaskCommits } from "../../../../../shared/local-task-revisions.mjs";
 
 import { localChatDatabasePath } from "../chat-storage/settings.js";
 
@@ -27,7 +28,7 @@ async function initializeLocalChatDatabase(): Promise<SqliteDatabase> {
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => SqliteDatabase;
   };
-  const database = new DatabaseSync(localChatDatabasePath);
+  const database = observeLocalTaskCommits(new DatabaseSync(localChatDatabasePath));
   try {
     database.exec("PRAGMA journal_mode = WAL");
     database.exec("PRAGMA foreign_keys = ON");

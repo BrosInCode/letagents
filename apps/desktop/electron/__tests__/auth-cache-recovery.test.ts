@@ -3,11 +3,12 @@ import { mkdirSync, rmdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createElectronTestEnv } from "./harness.js";
+import { createElectronTestEnv, installTestSecretStorage, testEncryptedToken } from "./harness.js";
 
 // Runs in its own process (node --test spawns one per file), so auth.js's
 // module-level cache starts cold here — required to exercise the very first
 // readStoredAuth failing.
+installTestSecretStorage();
 const env = createElectronTestEnv({
   prefix: "letagents-auth-cache-recovery-",
   paths: [],
@@ -17,7 +18,7 @@ process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = env.tempDir;
 
 const authStorePath = join(env.tempDir, "letagents-desktop-auth.json");
 
-const { apiFetch } = await import("../main/auth.js");
+const { apiFetch, clearStoredAuth, readStoredAuth } = await import("../main/auth.js");
 
 test("auth cache: a transient non-ENOENT read failure is not cached", async () => {
   const previous = globalThis.fetch;
@@ -49,12 +50,13 @@ test("auth cache: a transient non-ENOENT read failure is not cached", async () =
       authStorePath,
       `${JSON.stringify(
         {
-          ownerTokenId: null,
+    version: 2,
+  ownerTokenId: null,
           oauthTokenExpiresAt: null,
           account: null,
           pendingDeviceAuth: null,
           savedAt: new Date().toISOString(),
-          encryptedToken: "plain:token-recovered",
+          encryptedToken: testEncryptedToken("token-recovered"),
         },
         null,
         2,
@@ -71,4 +73,14 @@ test("auth cache: a transient non-ENOENT read failure is not cached", async () =
   } finally {
     if (globalThis.fetch === stub) globalThis.fetch = previous;
   }
+});
+
+
+test("legacy owner credentials are never promoted into an app session", async () => {
+  await clearStoredAuth();
+  writeFileSync(authStorePath, JSON.stringify({ encryptedToken: testEncryptedToken("old-owner"), account: { id: "old-account" } }));
+  const auth = await readStoredAuth();
+  assert.equal(auth.token, null);
+  assert.equal(auth.agentToken, null);
+  assert.equal(auth.account, null);
 });
