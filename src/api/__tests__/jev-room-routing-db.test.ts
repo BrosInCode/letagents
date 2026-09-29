@@ -198,6 +198,30 @@ test("an expired never-claimed job restores ordered delivery without calling Jev
 });
 
 
+test("a deferred receipt goes to the session that is there, as an immediate one would", skip, async () => {
+  // Three agents, so an untagged message is left for deferred routing.
+  const r = await seed("restart-room", 3);
+  const [left] = r.sessions;
+  await client!.pool.query(
+    "UPDATE room_agent_sessions SET last_seen_at = NOW() - INTERVAL '1 hour', created_at = NOW() - INTERVAL '2 hours' WHERE session_id = $1",
+    [left!.session_id],
+  );
+  // The agent's process restarted and nothing ended the session it left.
+  const restarted = await api!.createRoomAgentSession({
+    room_id: r.room.id, session_kind: "worker", runtime: "codex", actor_label: "Agent0Again",
+    agent_key: left!.agent_key, display_name: "Agent0Again", owner_account_id: r.ownerId,
+    owner_label: r.ownerId, ide_label: "Agent",
+  });
+  const sent = await r.send("what do we think about the rollout?");
+  const number = Number(sent.message.id.replace("msg_", ""));
+  const targets = await client!.db.transaction((tx) => routing!.applyDeferredJevReceipts(
+    tx,
+    { mode: "active", roomId: r.room.id, message: { number, publisher_agent_key: null }, heuristic: null },
+    { reason: "jev_elected", agentKeys: [left!.agent_key] },
+  ));
+  assert.deepEqual(targets.map((target) => target.agent_session_id), [restarted.session_id]);
+});
+
 test("shadow evaluations never hold the worker frontier", skip, async () => {
   const a = await seed();
   await a.enable(true);
