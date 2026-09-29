@@ -53,6 +53,15 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
+// A launch that is expected to get as far as its first session has a budget
+// no runner will exhaust. The harness answers at once, so the size costs
+// nothing. With 100ms, a slow file write before the health check used up the
+// budget and the launch timed out. Cleanup then waited for the harness's
+// process to exit, which it never does, and Node ended the file: that test
+// and every test after it were cancelled. Where a test asserted the phase, it
+// saw "health" where it expected "session".
+const LAUNCH_BUDGET_MS = 10_000;
+
 function createHarness() {
   const launches: LaunchRecord[] = [];
   const promptBodies: Array<Record<string, unknown>> = [];
@@ -322,7 +331,7 @@ async function spawnAdapter(overrides: Partial<ProviderSpawnRequest> = {}) {
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
   const handle = await adapter.spawn(spawnRequest(overrides));
@@ -508,7 +517,7 @@ test("Open Model freezes lifecycle authority across spawn, attach, and resume", 
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
   assert.equal(await replacement.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
@@ -543,7 +552,7 @@ test("a dead Open Model runtime reports terminal evidence even under a mismatche
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: { ...harness.dependencies, getProcessIdentity: () => null },
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -565,7 +574,7 @@ test("attach finishes a cached handle whose process died before its exit observe
     runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-adapter-")),
     dependencies: { ...harness.dependencies,
       getProcessIdentity: (pid) => alive ? harness.dependencies.getProcessIdentity(pid) : null },
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
   const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
@@ -598,7 +607,7 @@ test("resuming a dead runtime under a changed lifecycle authority starts fresh i
   const dependencies = { ...harness.dependencies,
     getProcessIdentity: (pid: number) => alive ? harness.dependencies.getProcessIdentity(pid) : null };
   const born = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot, dependencies,
-    startTimeoutMs: 100, turnTimeoutMs: 100 });
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100 });
   const handle = await born.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
   const ref = {
     workAttemptId: handle.workAttemptId,
@@ -607,14 +616,14 @@ test("resuming a dead runtime under a changed lifecycle authority starts fresh i
     lifecycleAuthorityMode: "typed" as const,
   };
   const afterRestart = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot, dependencies,
-    startTimeoutMs: 100, turnTimeoutMs: 100 });
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100 });
 
   // Alive: a changed authority is still refused rather than attached.
   await assert.rejects(afterRestart.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed_shadow" })),
     /does not match the frozen provider birth/);
   alive = false;
   const afterDeath = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot, dependencies,
-    startTimeoutMs: 100, turnTimeoutMs: 100 });
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100 });
   await assert.rejects(afterDeath.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed_shadow" })),
     (error: unknown) => error instanceof OpenCodeRuntimeGoneError);
   assert.equal(harness.launches.length, 1, "resume itself never launches; the daemon replaces the runtime");
@@ -627,7 +636,7 @@ test("Open Model reattaches from its exact runtime sidecar when a legacy daemon 
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -696,7 +705,7 @@ test("Open Model discovers and checkpoints a pre-sidecar-metadata runtime exactl
         return { pid: 6101, url: "http://127.0.0.1:43821" };
       },
     },
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -826,7 +835,7 @@ test("Open Model refuses to dispatch into a session poisoned by legacy turn ids"
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
   const attached = await fresh.attach({
@@ -1181,7 +1190,7 @@ test("a fresh adapter reattaches to the exact OpenCode PID and session", async (
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -1390,7 +1399,7 @@ test("Open Model aborts and fences a bounded turn that exceeds its assistant-ste
     binary: "/opt/letagents/opencode",
     runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-runaway-")),
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
     maxAssistantSteps: 2,
   });
@@ -1429,7 +1438,7 @@ test("typed Open Model reports a step guardrail without aborting the native turn
     binary: "/opt/letagents/opencode",
     runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-soft-steps-")),
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
     maxAssistantSteps: 2,
   });
@@ -1615,7 +1624,7 @@ test("Open Model terminates and retries a fresh server when session creation tim
         return baseFetch(input, init);
       },
     },
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
     stopGraceMs: 5,
   });
@@ -1636,12 +1645,18 @@ test("Open Model terminates and retries a fresh server when session creation tim
   assert.equal(identityChecks, 2, "cleanup re-verifies the captured process birth before signaling");
 });
 
-test("Open Model bounds first-session bootstrap by the launch budget and names the phase", async () => {
+test("Open Model bounds first-session bootstrap by the launch budget and names the phase", async (t) => {
+  // The adapter reads the clock to see what is left of the budget. Holding
+  // the clock still leaves the whole budget to the first session however
+  // long the file writes before it take, so the phase does not depend on the
+  // speed of the machine. The request's own deadline is a real timer.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const harness = createHarness();
   const baseFetch = harness.dependencies.fetch;
   let exitLaunch!: (exit: ProviderProcessExit) => void;
   const launchExited = new Promise<ProviderProcessExit>((resolve) => { exitLaunch = resolve; });
   let sessionSignal: AbortSignal | null = null;
+  let sessionRequestedAt = 0;
   const adapter = new OpenModelProviderAdapter({
     binary: "/opt/letagents/opencode",
     runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-session-budget-")),
@@ -1662,17 +1677,17 @@ test("Open Model bounds first-session bootstrap by the launch budget and names t
         // A healthy server whose instance bootstrap never finishes: only the
         // request's own deadline can end this wait.
         sessionSignal = init.signal ?? null;
+        sessionRequestedAt = performance.now();
         return new Promise<Response>((_resolve, reject) => {
           init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
         });
       },
     },
-    startTimeoutMs: 100,
+    startTimeoutMs: 200,
     turnTimeoutMs: 100,
     stopGraceMs: 5,
   });
 
-  const startedAt = Date.now();
   // AbortSignal.timeout does not hold the event loop open by itself.
   const keepAlive = setInterval(() => undefined, 25);
   await assert.rejects(
@@ -1691,8 +1706,12 @@ test("Open Model bounds first-session bootstrap by the launch budget and names t
   ).finally(() => clearInterval(keepAlive));
   assert.ok(sessionSignal, "first-session bootstrap carries an explicit deadline");
   assert.ok(
-    Date.now() - startedAt < 5_000,
-    "the 100ms launch budget, not the 15s steady-state control deadline, ends the wait",
+    performance.now() - sessionRequestedAt < 5_000,
+    "the launch budget, not the 15s steady-state control deadline, ends the wait",
+  );
+  assert.ok(
+    performance.now() - sessionRequestedAt >= 150,
+    "the 200ms launch budget, not the 100ms turn budget, sets the deadline",
   );
 });
 
@@ -1777,7 +1796,7 @@ test("Open Model still launches when the runtime config directory cannot be seed
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -1827,7 +1846,7 @@ test("Open Model does not launch a runtime whose instruction shield cannot be wr
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -1854,7 +1873,7 @@ test("Open Model does not launch a runtime whose instruction shield is refused b
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -1873,7 +1892,7 @@ test("Open Model gives an already running runtime the instruction shield when it
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -1905,7 +1924,7 @@ test("Open Model reattaching through a sidecar outside its runtime directory wri
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -1930,7 +1949,7 @@ test("Open Model still reattaches to a running runtime that cannot take the inst
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -2160,7 +2179,7 @@ test("Open Model durably fences the crash window between detached launch and PID
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -2189,7 +2208,7 @@ test("Open Model clears its exact intent after a real no-pid launch failure", as
     binary: join(runtimeRoot, "missing-opencode"),
     runtimeRoot,
     dependencies: { allocatePort: async () => 43821 },
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -2212,7 +2231,7 @@ test("Open Model clears its exact intent after a real no-pid launch failure", as
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
   const handle = await recoveredAdapter.spawn(request);
@@ -2245,7 +2264,7 @@ test("Open Model serializes A/B startup ownership for the same runtime path", as
         return harness.dependencies.launch(input);
       },
     },
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
 
@@ -2317,7 +2336,7 @@ test("Open Model persists an ambiguous startup birth and fences replacement unti
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
     stopGraceMs: 5,
   });
@@ -2398,7 +2417,7 @@ test("Open Model persists and fences a fresh pid whose birth is initially unveri
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
     stopGraceMs: 5,
   });
@@ -2489,7 +2508,7 @@ test("Open Model bounded turns time out without polling transcript history", asy
     binary: "/opt/letagents/opencode",
     runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-timeout-")),
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 10,
   });
   const handle = await adapter.spawn(spawnRequest());
@@ -2515,7 +2534,7 @@ test("typed Open Model reports a duration guardrail and keeps observing the exac
     binary: "/opt/letagents/opencode",
     runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-soft-timeout-")),
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 10,
   });
   const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
@@ -2563,7 +2582,7 @@ test("Open Model bounds a hung status probe to the turn-control budget instead o
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: harness.dependencies,
-    startTimeoutMs: 100,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
     turnControlTimeoutMs: 120,
   });
