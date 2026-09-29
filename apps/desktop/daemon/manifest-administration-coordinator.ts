@@ -9,6 +9,11 @@ import type {
   DaemonPurgeRecord,
   LegacyLaneOwner,
 } from "./types.js";
+import {
+  agentDisplayNameKey,
+  isPlaceholderAgentDisplayName,
+  suggestFreeAgentCodename,
+} from "../../../shared/agent-codenames.mjs";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
@@ -202,6 +207,23 @@ export class ManifestAdministrationCoordinator {
     });
   }
 
+  /**
+   * The requested name is a suggestion. This is the one place that reads the
+   * names saved for a room and saves another in the same step, so it is where
+   * a name is decided: a placeholder, or a name another agent in the room
+   * already answers to, is replaced from the shared pool.
+   */
+  assignDisplayName(entries: readonly DaemonManifestEntry[], entry: DaemonManifestEntry): string {
+    const held = entries
+      .filter((candidate) => candidate.id !== entry.id && candidate.room_id === entry.room_id)
+      .map((candidate) => candidate.display_name);
+    const requested = entry.display_name.trim();
+    const requestedKey = agentDisplayNameKey(requested);
+    const taken = held.some((name) => agentDisplayNameKey(name) === requestedKey);
+    if (!taken && !isPlaceholderAgentDisplayName(requested, entry.provider)) return requested;
+    return suggestFreeAgentCodename(held, entry.id) ?? requested;
+  }
+
   async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
     if (Object.hasOwn(entry, "polling_contract")) {
       throw new Error("Polling custody is daemon-owned and cannot be supplied to manifest.put.");
@@ -217,9 +239,11 @@ export class ManifestAdministrationCoordinator {
       const legacyOwners = this.options.lanes.liveOwners(manifest.legacy_lane_owners ?? []);
       const existing = manifest.entries.find((candidate) => candidate.id === entry.id);
       if (existing) {
+        // The name is assigned here, and the room may since have assigned
+        // another, so a replay is the same request whatever name it carries.
         if (!isDeepStrictEqual(
           this.options.policies.projectCreateReplayParameters(existing),
-          this.options.policies.projectCreateReplayParameters(entry),
+          this.options.policies.projectCreateReplayParameters({ ...entry, display_name: existing.display_name }),
         )) {
           throw new Error(`Supervised creation request '${entry.id}' is already bound to different agent parameters.`);
         }
@@ -238,6 +262,7 @@ export class ManifestAdministrationCoordinator {
       }
       const nextEntry: DaemonManifestEntry = {
         ...entry,
+        display_name: this.assignDisplayName(manifest.entries, entry),
         workplace_liveness: entry.workplace_liveness ?? { state: "unknown", observed_at: null, detail: null },
         native_liveness: entry.native_liveness ?? { state: "unknown", observed_at: null, detail: null },
         activity: (entry.activity ?? []).slice(-200),

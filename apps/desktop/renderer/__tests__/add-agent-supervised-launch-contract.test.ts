@@ -229,8 +229,10 @@ test("a ready supervised launch can start another without stopping the completed
   );
   assert.match(releaseBody, /dismiss\(\);/);
   assert.doesNotMatch(releaseBody, /stop\(/);
-  assert.match(controllerSource, /suggestSupervisedAgentCodename\([\s\S]*?existingDisplayNames,[\s\S]*?snapshot\.creationRequestId/);
-  assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName,/);
+  // The renderer sends no name: the background service assigns one from the
+  // names already taken in the room.
+  assert.doesNotMatch(controllerSource, /suggestSupervisedAgentCodename|lookupExistingDisplayNames/);
+  assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName: "",/);
 });
 
 test("bounded supervised defaults never tell providers to own polling and Claude exposes no ignored effort control", () => {

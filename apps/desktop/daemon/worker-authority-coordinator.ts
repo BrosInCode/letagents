@@ -1074,6 +1074,7 @@ export class WorkerAuthorityCoordinator {
       mintedAtMs: this.options.nowMs(),
       agentSession: minted.agentSession,
     });
+    this.adoptAssignedDisplayName(entry, minted.agentSession?.display_name);
     return {
       agentSessionId: minted.sessionId,
       bearer: minted.bearer,
@@ -1083,6 +1084,23 @@ export class WorkerAuthorityCoordinator {
       agentSession: minted.agentSession,
       authority,
     };
+  }
+
+  /**
+   * This machine knows only its own agents. The room knows every agent in it
+   * and may assign a different name than the one requested, so the name the
+   * room returned is the one people will type. Adoption never delays or fails
+   * the mint: if it is lost, the next mint offers the same name again.
+   */
+  private adoptAssignedDisplayName(entry: DaemonManifestEntry, assigned: string | undefined): void {
+    const displayName = assigned?.trim() ?? "";
+    // The room stores at most 64 characters. A longer name coming back cut
+    // short is the requested name, not a different one.
+    if (!displayName || displayName.length > 120 || displayName === entry.display_name
+      || displayName === entry.display_name.trim().slice(0, 64)) return;
+    void this.options.manifest.updateEntry(entry.id, (current) =>
+      current.display_name === displayName ? current : { ...current, display_name: displayName })
+      .catch(() => undefined);
   }
 
   private hasMintAuthority(entry: DaemonManifestEntry, minted: MintedWorkerAuthorization): boolean {

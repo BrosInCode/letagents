@@ -23,6 +23,7 @@ import {
   supervisedDeliveryModeForProvider,
 } from "./agents/provider-registry.js";
 import { suggestLetAgentsCodename } from "./agents/codenames.js";
+import { agentDisplayNameKey, isPlaceholderAgentDisplayName } from "../../../../shared/agent-codenames.mjs";
 import { readOpenModelSettings, type StoredOpenModelSettings } from "./agents/open-model-settings.js";
 import { assertRentalSafePermissionProfile } from "./agents/rental-permission-profiles.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
@@ -94,12 +95,18 @@ const defaultOperations: SupervisorGrantCoordinatorOperations = {
   revokeEntryWithoutWorkerSession: revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
 };
 
+/**
+ * Reading the room's saved agents is a rich projection that can be slow on a
+ * cold daemon. Naming waits this long for it and no longer.
+ */
+const NAME_LOOKUP_TIMEOUT_MS = 2_000;
+
 function hasGenericSupervisedDisplayName(
   displayName: string,
   providerId: DesktopSupervisorCreateInput["providerId"],
 ): boolean {
+  if (isPlaceholderAgentDisplayName(displayName, providerId)) return true;
   const normalized = displayName.trim().toLocaleLowerCase();
-  if (!normalized) return true;
   const provider = getDesktopAgentProvider(providerId);
   return new Set([
     `${providerId} supervised agent`,
@@ -143,6 +150,7 @@ export class SupervisorGrantCoordinator {
       return roomId;
     },
     private readonly resolveOpenModelSettings: () => Promise<StoredOpenModelSettings> = readOpenModelSettings,
+    private readonly nameLookupTimeoutMs: number = NAME_LOOKUP_TIMEOUT_MS,
   ) {}
 
   private async assertSupervisionAvailable(): Promise<void> {
@@ -188,6 +196,50 @@ export class SupervisorGrantCoordinator {
   }
 
   /**
+   * The name a new agent is created under. A requested name is kept only when
+   * no agent in the room already answers to it; a missing, generic or taken
+   * name is replaced from the shared pool. Replaying a creation request
+   * returns the name already saved for it, so a retry never renames.
+   */
+  private async resolveCreateDisplayName(
+    roomId: string,
+    entryId: string,
+    input: Pick<DesktopSupervisorCreateInput, "displayName" | "providerId" | "creationRequestId">,
+  ): Promise<string> {
+    const requested = input.displayName.trim();
+    const generic = hasGenericSupervisedDisplayName(requested, input.providerId);
+    const seed = input.creationRequestId ?? entryId;
+    const entries = await this.savedRoomEntries(roomId);
+    // The daemon decides the name when it saves the agent and ignores the
+    // name on a replay, so a lookup that stalls or fails costs a better
+    // first guess and nothing else. It must never hold up the creation.
+    if (!entries) return generic ? suggestLetAgentsCodename([], seed) : requested;
+    const saved = entries.find((entry) => entry.id === entryId);
+    if (saved) return saved.displayName;
+    const held = entries.map((entry) => entry.displayName);
+    const requestedKey = agentDisplayNameKey(requested);
+    if (!generic && !held.some((name) => agentDisplayNameKey(name) === requestedKey)) return requested;
+    return suggestLetAgentsCodename(held, seed);
+  }
+
+  /** The room's saved agents, or null when they cannot be read promptly. */
+  private async savedRoomEntries(roomId: string): Promise<DesktopSupervisorManifestEntry[] | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.daemon.list(roomId),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(resolve, this.nameLookupTimeoutMs, null);
+        }),
+      ]);
+    } catch {
+      return null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
    * Fresh launch ordering is deliberate: resolve identity, provision and
    * encrypt a per-entry grant, persist a paused manifest, install to the exact
    * daemon generation, and only then allow the caller to activate ownership.
@@ -205,11 +257,7 @@ export class SupervisorGrantCoordinator {
       return this.serialize(entryId, async () => {
         if (input.localRoomId !== input.roomIdentifier) throw new Error("Local launch storage identity changed.");
         const status = await this.daemon.ensureRunning();
-        const existingEntries = await this.daemon.list(input.roomIdentifier);
-        const displayName = hasGenericSupervisedDisplayName(input.displayName, input.providerId)
-          ? existingEntries.find((entry) => entry.id === entryId)?.displayName
-            ?? suggestLetAgentsCodename(existingEntries.map((entry) => entry.displayName), entryId)
-          : input.displayName.trim();
+        const displayName = await this.resolveCreateDisplayName(input.roomIdentifier, entryId, input);
         const entry = await this.daemon.create({ ...input, displayName });
         const agentKey = await this.installLocal(entry, status.generation, false, false, input.charter);
         return { entry, agentKey };
@@ -222,12 +270,7 @@ export class SupervisorGrantCoordinator {
       // in the daemon manifest too so restart reuse compares like for like.
       const roomId = await this.resolveRoomId(input.roomIdentifier);
       const prepared = await this.serializeDisplayNameMutation(roomId, async () => {
-        const displayName = hasGenericSupervisedDisplayName(input.displayName, input.providerId)
-          ? suggestLetAgentsCodename(
-              (await this.daemon.list(roomId)).map((entry) => entry.displayName),
-              input.creationRequestId ?? entryId,
-            )
-          : input.displayName.trim();
+        const displayName = await this.resolveCreateDisplayName(roomId, entryId, input);
         const normalizedInput = { ...input, displayName };
         await this.assertSupervisionAvailable();
         const agentKey = await this.operations.resolveIdentity({
@@ -243,6 +286,17 @@ export class SupervisorGrantCoordinator {
           roomScopes: [{ requestedRoomId: input.roomIdentifier, canonicalRoomId: roomId }],
         }, { apiFetch: this.request });
         const entry = await this.daemon.create({ ...normalizedInput, roomIdentifier: roomId });
+        if (entry.displayName !== displayName) {
+          // The daemon saved a different name than the one the identity was
+          // registered under. Registration is idempotent, so repeat it with
+          // the saved name. The agent works either way; only its label on
+          // the account is at stake, so a failure here is not the launch's.
+          await this.operations.resolveIdentity({
+            entryId,
+            displayName: entry.displayName,
+            providerId: input.providerId,
+          }, { apiFetch: this.request }).catch(() => undefined);
+        }
         return { entry, agentKey, grant };
       });
       // Re-read after the durable manifest write: a daemon successor may have
@@ -292,12 +346,7 @@ export class SupervisorGrantCoordinator {
         throw new Error("Rental launch authority does not match the selected room and agent.");
       }
       const entry = await this.serializeDisplayNameMutation(roomId, async () => {
-        const displayName = hasGenericSupervisedDisplayName(input.displayName, input.providerId)
-          ? suggestLetAgentsCodename(
-              (await this.daemon.list(roomId)).map((candidate) => candidate.displayName),
-              input.creationRequestId ?? entryId,
-            )
-          : input.displayName.trim();
+        const displayName = await this.resolveCreateDisplayName(roomId, entryId, input);
         return this.daemon.create({ ...input, displayName, roomIdentifier: roomId });
       });
       await this.operations.replaceGrant({
