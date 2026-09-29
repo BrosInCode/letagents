@@ -6,8 +6,9 @@ import type { StoredMcpWorker, StoredAgentSessionState } from "../../local-state
 import { isLocalRoomStorageEnabled, resolveLocalRoomStorageIdentifiers } from "../../local-state.js";
 import { assertWorkerConnection, pinWorkerConnection, pinnedWorkerConnection, withWorkerCall } from "../../worker-call-context.js";
 import { isMcpWorkerId } from "../../../shared/mcp-worker.js";
-import { pickLocalCodename } from "../../../shared/codenames.js";
+import { AGENT_CODENAME_SPACE, pickLocalCodename } from "../../../shared/codenames.js";
 import { buildAgentActorLabel } from "../../../shared/agent-identity.js";
+import { normalizeRoutingHandle, normalizeRoutingSender } from "../../../../shared/routing-aliases.mjs";
 import { encodeRoomIdPath } from "../../room-id.js";
 import { getGitCurrentBranch } from "../../git-remote.js";
 import { apiCall, getApiUrl, getLetagentsToken } from "./api.js";
@@ -152,11 +153,16 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
       if (target?.pending?.operation_id !== operation.operation_id) throw new Error("Worker registration was superseded; retry explicitly.");
       state.agent_sessions ??= {};
       if (local && !target.session_id) {
+        // Mirror the hosted allocator: names are compared the way mentions
+        // are, and a held name receives its own codename, never a numbered
+        // variant that cannot be mentioned as typed.
+        const nameKey = (name: string) => normalizeRoutingHandle(name) || normalizeRoutingSender(name);
         const used = new Set(Object.values(state.agent_sessions)
           .filter((other) => other.room_id === roomId && other.session_id !== session.session_id)
-          .map((other) => other.display_name));
-        let suffix = 1;
-        while (used.has(session.display_name)) session.display_name = `${worker.display_name} ${suffix++}`;
+          .map((other) => nameKey(other.display_name)));
+        for (let offset = 1; used.has(nameKey(session.display_name)) && offset <= AGENT_CODENAME_SPACE; offset += 1) {
+          session.display_name = pickLocalCodename(`${agent.canonical_key}:${offset}`).display_name;
+        }
         session.actor_label = buildAgentActorLabel({ display_name: session.display_name, owner_label: owner.label, ide_label: ide });
       }
       state.agent_sessions[session.session_id] = session;

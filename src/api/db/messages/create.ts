@@ -35,6 +35,7 @@ import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
   MessageAttachmentRow,
+  MessageMentionNotice,
   MessageRecipientAgentTarget,
   MessageRow,
 } from "../types.js";
@@ -161,6 +162,7 @@ interface AddMessageTransactionResult {
   created: boolean;
   recipientAgentKeys: readonly string[];
   recipientAgentTargets: readonly MessageRecipientAgentTarget[];
+  mentionNotices?: readonly MessageMentionNotice[];
 }
 
 async function assertDesktopReplayMatches(
@@ -622,6 +624,7 @@ export async function addMessageWithCreateStatus(
     let receiptCount = 0;
     let recipientAgentKeys: readonly string[] = [];
     let recipientAgentTargets: readonly MessageRecipientAgentTarget[] = [];
+    let mentionNotices: readonly MessageMentionNotice[] = [];
 
     if (activeSessions.length > 0) {
       // Resolve routing against every overlapping session identity first.
@@ -675,6 +678,23 @@ export async function addMessageWithCreateStatus(
         preferredExplicitMentionAgentKeys: reachableAgentKeys,
         explicitMentionOwnerScopeByAgentKey: ownerScopeByAgentKey,
       })(messageForRouting);
+      // An ambiguous mention wakes nobody. Say so on the sender's own
+      // acknowledgement, with a mention that reaches each candidate alone.
+      mentionNotices = globalAddresses.ambiguousMentions.map(({ handle, agentKeys }) => ({
+        reason: "ambiguous" as const,
+        handle,
+        detail: `@${handle} matches ${agentKeys.length} agents in this room, so the mention reached none of them. `
+          + "Resend with the exact mention of the agent you mean.",
+        candidates: agentKeys.flatMap((agentKey) => {
+          const session = sessionsByAgentKey.get(agentKey)?.sessions[0];
+          return session ? [{
+            agent_key: agentKey,
+            display_name: session.display_name,
+            actor_label: session.actor_label,
+            mention: `@agent:${agentKey}`,
+          }] : [];
+        }),
+      }));
       let exactReplySession: (typeof activeSessions)[number] | undefined;
       if (replyToMessage?.publisher_agent_key && replyToMessage.publisher_account_id) {
         globalAddresses.replyTargetKeys.clear();
@@ -942,6 +962,7 @@ export async function addMessageWithCreateStatus(
       created: true,
       recipientAgentKeys,
       recipientAgentTargets,
+      mentionNotices,
     }, options, tx);
   });
   if (repliedReceiptTargets.size > 0) {
@@ -996,6 +1017,10 @@ async function hydrateCreatedMessage(
         ? { account_agent_routing: accountRouting.get(result.messageRow.number) ?? null }
         : {}),
     };
+  }
+  if (result.mentionNotices?.length) {
+    // Copy rather than annotate: the canonical message is the shared event.
+    message = { ...message, mention_notices: [...result.mentionNotices] };
   }
   return {
     message,

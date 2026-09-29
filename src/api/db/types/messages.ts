@@ -19,6 +19,26 @@ export interface Message {
   attachments: MessageAttachment[];
   /** Account-scoped desktop dispatch metadata; omitted from shared events. */
   account_agent_routing?: MessageAccountAgentRouting | null;
+  /**
+   * Present only on the sender's own acknowledgement, never on shared
+   * events: mentions in this message that woke nobody, and how to fix them.
+   */
+  mention_notices?: MessageMentionNotice[];
+}
+
+export interface MessageMentionNotice {
+  reason: "ambiguous";
+  /** The mention exactly as the sender typed it, without the "@". */
+  handle: string;
+  detail: string;
+  /** Each agent the mention could have meant, with a mention that reaches only it. */
+  candidates: Array<{
+    agent_key: string;
+    display_name: string;
+    /** "Name | Owner's agent | Provider", to tell same-named agents apart. */
+    actor_label: string;
+    mention: string;
+  }>;
 }
 
 /** Exact prompt-only receipt audience, scoped by account and generation. */

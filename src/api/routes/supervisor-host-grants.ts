@@ -8,6 +8,7 @@ import {
   getAgentIdentityByCanonicalKey,
   getGitHubAppInstallationById,
   getGitHubAppRepositoryByRoomId,
+  isWorkerDisplayNameExhaustedError,
   getProjectById,
   getSupervisorGrantOwnerAccount,
   getSupervisorHostGrantById,
@@ -29,6 +30,8 @@ import {
 } from "../db.js";
 import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
 import { buildAgentActorLabel } from "../../shared/agent-identity.js";
+import { resolveSupervisedWorkerDisplayName } from "../rooms/agent-display-name-allocation.js";
+import { isActiveWorkerActorLabelConflict } from "./rooms/presence/helpers.js";
 import { getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { isRentalSupervisorGrantActive } from "../rental/session-launch.js";
 import {
@@ -39,6 +42,7 @@ import {
 import type { SupervisorGrantOwnerAccount } from "../db/supervisor-grant-revocation.js";
 
 const MAX_GRANT_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_DISPLAY_NAME_CONFLICT_RETRIES = 1;
 const SUPERVISOR_ACCESS_REVALIDATION_TTL_MS = 60_000;
 const supervisorAccessRevalidationCache = new Map<string, number>();
 
@@ -444,30 +448,75 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       res.status(403).json({ error: "Grant agent identity is no longer valid." });
       return;
     }
-    const displayName = typeof body.display_name === "string" && body.display_name.trim() ? body.display_name.trim().slice(0, 64) : agent.display_name;
+    const requestedDisplayName = typeof body.display_name === "string" && body.display_name.trim() ? body.display_name.trim().slice(0, 64) : agent.display_name;
     const ideLabel = typeof body.ide_label === "string" && body.ide_label.trim() ? body.ide_label.trim().slice(0, 64) : "Supervisor worker";
     try {
-      const created = await createOrRotateSupervisorWorkerSession({
-        room_id: roomId, session_kind: "worker", runtime: typeof body.runtime === "string" ? body.runtime.slice(0, 64) : "supervisor",
-        registration_liveness: { host_id: grant.host_id, host_kind: "supervisor", host_label: grant.installation_id },
-        repo_branch: typeof body.repo_branch === "string" ? body.repo_branch.slice(0, 255) : null,
-        model: typeof body.model === "string" && body.model.trim() ? body.model.trim().slice(0, 64) : null,
-        charter: typeof body.charter === "string" && body.charter.trim() ? body.charter.trim().slice(0, 2_000) : null,
-        actor_label: buildAgentActorLabel({ display_name: displayName, owner_label: agent.owner_label, ide_label: ideLabel }),
-        agent_key: agent.canonical_key, agent_instance_id: agentInstanceId,
-        display_name: displayName, owner_account_id: grant.owner_account_id, owner_label: agent.owner_label, ide_label: ideLabel,
-        supervisor_grant_id: grant.grant_id, worker_bearer_expires_at: cappedExpiry(grant.expires_at),
-        supervisor_grant_fence: fence(grant),
-      });
-      // Never hand the supervisor an owner-capable session token.
-      res.status(201).json({
-        ...created.session,
-        session_token: undefined,
-        worker_bearer_id: created.bearer.bearer_id,
-        worker_bearer_expires_at: created.bearer.expires_at,
-        worker_bearer_generation: created.bearer.generation,
-        worker_bearer_capabilities: created.bearer.capabilities,
-      });
+      // The supervisor only knows the agents on its own machine. The room
+      // decides whether the requested name is free among every agent in it,
+      // and returns the name it assigned for the supervisor to adopt. A taken
+      // name is reassigned rather than refused: a worker must never fail to
+      // start because of what it is called.
+      const lostNames: string[] = [];
+      for (let attempt = 0; ; attempt += 1) {
+        let resolved: { display_name: string; reassigned: boolean } | null = null;
+        try {
+          const created = await createOrRotateSupervisorWorkerSession({
+            room_id: roomId, session_kind: "worker", runtime: typeof body.runtime === "string" ? body.runtime.slice(0, 64) : "supervisor",
+            registration_liveness: { host_id: grant.host_id, host_kind: "supervisor", host_label: grant.installation_id },
+            repo_branch: typeof body.repo_branch === "string" ? body.repo_branch.slice(0, 255) : null,
+            model: typeof body.model === "string" && body.model.trim() ? body.model.trim().slice(0, 64) : null,
+            charter: typeof body.charter === "string" && body.charter.trim() ? body.charter.trim().slice(0, 2_000) : null,
+            actor_label: buildAgentActorLabel({ display_name: requestedDisplayName, owner_label: agent.owner_label, ide_label: ideLabel }),
+            agent_key: agent.canonical_key, agent_instance_id: agentInstanceId,
+            display_name: requestedDisplayName,
+            // Remember what was asked for, so a supervisor repeating this
+            // request later keeps the name it was given for it.
+            assigned_base_display_name: requestedDisplayName,
+            owner_account_id: grant.owner_account_id, owner_label: agent.owner_label, ide_label: ideLabel,
+            supervisor_grant_id: grant.grant_id, worker_bearer_expires_at: cappedExpiry(grant.expires_at),
+            supervisor_grant_fence: fence(grant),
+            resolve_display_name: (holders) => {
+              resolved = resolveSupervisedWorkerDisplayName({
+                requested_display_name: requestedDisplayName,
+                agent_key: agent.canonical_key,
+                agent_instance_id: agentInstanceId,
+                holders,
+                additionally_held: lostNames,
+              });
+              return resolved && {
+                display_name: resolved.display_name,
+                actor_label: buildAgentActorLabel({ display_name: resolved.display_name, owner_label: agent.owner_label, ide_label: ideLabel }),
+              };
+            },
+          });
+          // Never hand the supervisor an owner-capable session token.
+          res.status(201).json({
+            ...created.session,
+            session_token: undefined,
+            requested_display_name: requestedDisplayName,
+            display_name_reassigned: created.session.display_name !== requestedDisplayName,
+            worker_bearer_id: created.bearer.bearer_id,
+            worker_bearer_expires_at: created.bearer.expires_at,
+            worker_bearer_generation: created.bearer.generation,
+            worker_bearer_capabilities: created.bearer.capabilities,
+          });
+          return;
+        } catch (error) {
+          if (isWorkerDisplayNameExhaustedError(error)) {
+            res.status(409).json({ error: error.message, code: error.code });
+            return;
+          }
+          // Another worker claimed this exact label between the read and the
+          // write. One more attempt avoids it; the daemon's own retry covers
+          // anything rarer, so this never grows into a long server-side loop.
+          const lost = (resolved as { display_name: string } | null)?.display_name;
+          if (attempt < MAX_DISPLAY_NAME_CONFLICT_RETRIES && lost && isActiveWorkerActorLabelConflict(error)) {
+            lostNames.push(lost);
+            continue;
+          }
+          throw error;
+        }
+      }
     } catch (error) {
       if (respondToStaleSupervisorGrantFence(res, error)) return;
       if (isLockTimeout(error)) {
