@@ -129,6 +129,68 @@ jobs:
       - name: Build desktop
         run: npm --prefix apps/desktop run build
 
+      # The pinned OpenCode runtime is exercised against loopback fixtures only
+      # when its pin, the adapter's OpenCode boundary, the smoke, or this
+      # workflow changes, so an unrelated change never waits on it. A change
+      # set that cannot be determined runs the smoke.
+      - name: Detect OpenCode runtime contract changes
+        id: opencode_contract
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=""
+          if [ -n "${BASE_REF}" ]; then
+            if git fetch --no-tags --depth=1 origin "${BASE_REF}"; then
+              base=$(git rev-parse FETCH_HEAD)
+            fi
+          elif [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            if git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"; then
+              base="${BEFORE_SHA}"
+            fi
+          fi
+          run=true
+          if [ -n "${base}" ]; then
+            # Renames are listed as a removal and an addition so a matching
+            # file cannot leave the set unnoticed, and paths are not quoted.
+            changed=$(git -c core.quotePath=false diff --no-renames --name-only "${base}" HEAD)
+            matched=0
+            grep -E -q '^(apps/desktop/package\.json|apps/desktop/tsconfig\.electron\.json|apps/desktop/electron/main/agents/(opencode-[^/]+|open-model-provider-adapter|provider-adapter)\.ts|apps/desktop/electron/scripts/opencode-runtime-contract-smoke\.mjs|\.github/workflows/ci\.yml)$' <<< "${changed}" || matched=$?
+            # grep exits 1 for no match; anything else is an error and keeps the smoke.
+            if [ "${matched}" -eq 1 ]; then
+              run=false
+            fi
+          fi
+          echo "run=${run}" >> "${GITHUB_OUTPUT}"
+
+      # Lifecycle scripts stay off, as for every other install in this job.
+      # The package's postinstall only links one platform binary into place.
+      # npm installs the baseline variant beside the regular one, so the
+      # binary is chosen by name rather than searched for.
+      - name: Install the pinned OpenCode runtime
+        if: steps.opencode_contract.outputs.run == 'true'
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          opencode_version=$(node -p "require('./apps/desktop/package.json').letagentsRuntime.openCodeVersion")
+          if ! [[ "${opencode_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "letagentsRuntime.openCodeVersion must be an exact version; received '${opencode_version}'." >&2
+            exit 1
+          fi
+          npm install --global --ignore-scripts --no-audit --prefix "${RUNNER_TEMP}/opencode" "opencode-ai@${opencode_version}"
+          opencode_binary="${RUNNER_TEMP}/opencode/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64/bin/opencode"
+          if ! [ -x "${opencode_binary}" ]; then
+            echo "The OpenCode platform binary is missing or not executable at ${opencode_binary}." >&2
+            exit 1
+          fi
+          echo "LETAGENTS_OPENCODE_BIN=${opencode_binary}" >> "${GITHUB_ENV}"
+
+      - name: Verify the OpenCode runtime contract
+        if: steps.opencode_contract.outputs.run == 'true'
+        timeout-minutes: 5
+        run: cd apps/desktop && node electron/scripts/opencode-runtime-contract-smoke.mjs
+
   # ── DB-backed integration tests ──
   integration-tests:
     runs-on: ubuntu-latest

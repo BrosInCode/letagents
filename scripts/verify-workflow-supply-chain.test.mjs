@@ -424,3 +424,57 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "release installs must disable npm's implicit unbounded audit",
   );
 });
+
+test("the OpenCode runtime contract steps are exactly the reviewed ones", () => {
+  const build = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "build");
+  assert.ok(build, "ci.yml must define the build job");
+  const step = (name) => {
+    const found = build.steps.filter((candidate) => candidate.name === name);
+    assert.equal(found.length, 1, `the build job must define "${name}" once`);
+    return found[0];
+  };
+  const detect = step("Detect OpenCode runtime contract changes");
+  const install = step("Install the pinned OpenCode runtime");
+  const verify = step("Verify the OpenCode runtime contract");
+
+  // Whole scripts are compared, as for the audit client above: a second
+  // install, a bypassed check or a replaced binary cannot hide beside the
+  // reviewed lines.
+  assert.equal(install.run, [
+    "set -euo pipefail",
+    `opencode_version=$(node -p "require('./apps/desktop/package.json').letagentsRuntime.openCodeVersion")`,
+    'if ! [[ "${opencode_version}" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then',
+    `echo "letagentsRuntime.openCodeVersion must be an exact version; received '\${opencode_version}'." >&2`,
+    "exit 1",
+    "fi",
+    'npm install --global --ignore-scripts --no-audit --prefix "${RUNNER_TEMP}/opencode" "opencode-ai@${opencode_version}"',
+    'opencode_binary="${RUNNER_TEMP}/opencode/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64/bin/opencode"',
+    'if ! [ -x "${opencode_binary}" ]; then',
+    'echo "The OpenCode platform binary is missing or not executable at ${opencode_binary}." >&2',
+    "exit 1",
+    "fi",
+    'echo "LETAGENTS_OPENCODE_BIN=${opencode_binary}" >> "${GITHUB_ENV}"',
+  ].join("\n"));
+  assert.equal(verify.run, "cd apps/desktop && node electron/scripts/opencode-runtime-contract-smoke.mjs");
+
+  // The detection may only ever turn the smoke off after a successful
+  // comparison found no matching file.
+  const detection = detect.run.split("\n").filter((line) => !line.startsWith("#"));
+  assert.deepEqual(
+    detection.filter((line) => /\brun=/.test(line)),
+    ["run=true", "run=false", 'echo "run=${run}" >> "${GITHUB_OUTPUT}"'],
+  );
+  assert.equal(detection.at(-1), 'echo "run=${run}" >> "${GITHUB_OUTPUT}"');
+  assert.equal(detection[detection.indexOf("run=false") - 1], 'if [ "${matched}" -eq 1 ]; then');
+
+  const condition = "steps.opencode_contract.outputs.run == 'true'";
+  assert.equal(detect.condition, null, "the detection always runs");
+  assert.equal(install.condition, condition);
+  assert.equal(verify.condition, condition, "the smoke runs exactly when the runtime is installed");
+  for (const candidate of [detect, install, verify]) {
+    assert.equal(candidate.continueOnError, null, `"${candidate.name}" must fail the job when it fails`);
+    assert.equal(candidate.shell, null, `"${candidate.name}" must use the default shell`);
+  }
+  assert.equal(build.condition, null);
+  assert.equal(build.continueOnError, null);
+});

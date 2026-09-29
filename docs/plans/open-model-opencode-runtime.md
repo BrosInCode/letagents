@@ -141,8 +141,12 @@ npm run smoke:opencode-contract
 The smoke launches the pinned OpenCode binary against a loopback
 OpenAI-compatible fixture and imports the same launch-contract and control
 client modules as production. It points npm at a loopback registry that
-records every request. CI does not run it; run it by hand before changing the
-pin. On 2026-09-28 it verified:
+records every request. CI runs it in the `build` job, on Linux, whenever the
+pin, the adapter's OpenCode modules, `provider-adapter.ts`, the electron
+TypeScript configuration, the smoke, or the CI workflow change. A module the
+smoke comes to import from anywhere else must be added to that list in
+`ci.yml`. The desktop release workflow does not run it, so run it by hand on
+macOS before changing the pin. On 2026-09-28 it verified:
 
 - the actual binary reports `1.18.20`;
 - the launch makes no npm registry request before its first session, and
@@ -164,7 +168,9 @@ pin. On 2026-09-28 it verified:
 ## Choosing the pinned version
 
 Change the pin only to a version that passes the contract smoke and is at
-least seven days old, matching the dependency cooldown.
+least seven days old, matching the dependency cooldown. CI enforces the
+smoke; nothing enforces the age of the runtime, which is installed outside
+the lockfiles.
 
 1.18.20 is the newest version that passes. OpenCode 1.18.21 through at least
 1.18.33 re-invoke the model without bound when a provider ends a complete
