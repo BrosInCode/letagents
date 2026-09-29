@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { link, mkdir, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
@@ -139,6 +139,57 @@ export async function seedOpenCodeConfigHome(
     } finally {
       await fileSystem.unlink(staged).catch(() => undefined);
     }
+  }
+}
+
+/**
+ * Keeps the owner's global `~/.claude/CLAUDE.md` out of a supervised agent.
+ *
+ * OpenCode puts one global instruction file into every system prompt: its own
+ * `AGENTS.md` in the config directory when that file exists, otherwise the
+ * owner's `~/.claude/CLAUDE.md`. An empty `AGENTS.md` in the runtime's own
+ * config directory takes that place, and OpenCode adds nothing to the prompt
+ * for an empty file. OpenCode looks again on every turn, so the file also
+ * takes effect on a runtime that is already running.
+ *
+ * Project instruction files are untouched, including a project's `CLAUDE.md`
+ * when it has no `AGENTS.md`. `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` would
+ * drop both.
+ *
+ * Only that one file is covered. OpenCode still reads what the owner keeps
+ * under `~/.opencode`, and in a project that is not a Git repository its
+ * search for project instruction files climbs through every parent
+ * directory, the owner's home among them.
+ *
+ * The file is made empty on every call, whatever was there. Anything else
+ * at that path is replaced, not written through, so a link named `AGENTS.md`
+ * is never followed into a file that belongs to the owner. A file or a link
+ * is replaced by a rename, which leaves no moment without a file for a
+ * running OpenCode to fall through to the owner's. A directory has to be
+ * removed first. The contract smoke proves the effect against the pinned
+ * binary.
+ */
+export async function shieldOwnerInstructions(configHome: string): Promise<void> {
+  const directory = join(configHome, "opencode");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const target = join(directory, "AGENTS.md");
+  const existing = await lstat(target).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  // A second name for the same file would let its other owner fill it.
+  if (existing?.isFile() && existing.size === 0 && existing.nlink === 1) return;
+  const staged = join(directory, `.AGENTS.md.${randomBytes(6).toString("hex")}.shield`);
+  try {
+    await writeFile(staged, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await rename(staged, target).catch(async (error) => {
+      // A rename replaces a file or a link, but not a directory.
+      if (!existing?.isDirectory()) throw error;
+      await rm(target, { recursive: true, force: true });
+      await rename(staged, target);
+    });
+  } finally {
+    await unlink(staged).catch(() => undefined);
   }
 }
 

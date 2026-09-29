@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
-import { link, mkdir, mkdtemp, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -31,7 +31,7 @@ import {
   parseOpenCodePermissionEvent,
   type OpenCodePermissionRequest,
 } from "../main/agents/opencode-server-client.js";
-import { seedOpenCodeConfigHome } from "../main/agents/opencode-launch-contract.js";
+import { seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
 
 type LaunchRecord = {
@@ -1785,6 +1785,8 @@ test("Open Model still launches when the runtime config directory cannot be seed
 
   assert.equal(handle.providerContinuationId, "session-open-model-1");
   assert.equal(harness.launches.length, 1);
+  assert.equal((await lstat(join(directory, "AGENTS.md"))).size, 0,
+    "a failed seed does not skip the instruction shield");
 });
 
 test("Open Model launches without loading the owner's external Claude and agent skills", async (t) => {
@@ -1798,6 +1800,215 @@ test("Open Model launches without loading the owner's external Claude and agent 
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
   assert.equal(harness.launches[0]?.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, "1",
     "the runtime always launches with external skills disabled; the owner's value is not inherited");
+});
+
+test("Open Model launches with an empty global instruction file in place of the owner's", async (t) => {
+  const { harness, runtimeRoot } = await spawnAdapter();
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const configHome = join(runtimeRoot, "work-attempt-open-model-1", "config");
+  assert.equal(harness.launches[0]?.env.XDG_CONFIG_HOME, configHome);
+  // OpenCode reads <config>/opencode/AGENTS.md before ~/.claude/CLAUDE.md and
+  // stops at the first that exists. An empty one adds nothing to the prompt.
+  const shield = await lstat(join(configHome, "opencode", "AGENTS.md"));
+  assert.equal(shield.isFile(), true);
+  assert.equal(shield.size, 0);
+  assert.equal(harness.launches[0]?.env.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT, undefined,
+    "a project's CLAUDE.md stays usable, which this flag would also drop");
+});
+
+test("Open Model does not launch a runtime whose instruction shield cannot be written", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-shield-blocked-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  // A file where the config directory belongs makes every write below it fail.
+  await mkdir(join(runtimeRoot, "work-attempt-open-model-1"), { recursive: true });
+  await writeFile(join(runtimeRoot, "work-attempt-open-model-1", "config"), "not a directory");
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(adapter.spawn(spawnRequest()), /ENOTDIR|EEXIST/);
+  assert.equal(harness.launches.length, 0, "the owner's instructions must not reach a launched runtime");
+});
+
+test("Open Model does not launch a runtime whose instruction shield is refused by the file system", async (t) => {
+  if (process.getuid?.() === 0 || process.platform === "win32") {
+    t.skip("directory permissions do not refuse a write here");
+    return;
+  }
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-shield-readonly-"));
+  const directory = join(runtimeRoot, "work-attempt-open-model-1", "config", "opencode");
+  await mkdir(directory, { recursive: true });
+  // The directory is there and can be read, so only the write itself fails.
+  await chmod(directory, 0o500);
+  t.after(async () => {
+    await chmod(directory, 0o700);
+    await rm(runtimeRoot, { recursive: true, force: true });
+  });
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(adapter.spawn(spawnRequest()), /EACCES.*AGENTS\.md/);
+  assert.equal(harness.launches.length, 0);
+});
+
+test("Open Model gives an already running runtime the instruction shield when it reattaches", async (t) => {
+  const { handle, harness, runtimeRoot } = await spawnAdapter();
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  assert.ok(handle.providerContinuationId);
+  // As left by a desktop version from before the shield existed.
+  const shield = join(runtimeRoot, "work-attempt-open-model-1", "config", "opencode", "AGENTS.md");
+  await rm(shield);
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  const attached = await replacement.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId,
+    providerConnection: handle.providerConnection,
+  });
+
+  assert.ok(attached && !("state" in attached));
+  assert.equal((await lstat(shield)).size, 0);
+  assert.equal(harness.launches.length, 1);
+});
+
+test("Open Model reattaching through a sidecar outside its runtime directory writes nothing there", async (t) => {
+  const { handle, harness, runtimeRoot } = await spawnAdapter();
+  const foreign = await mkdtemp(join(tmpdir(), "letagents-opencode-shield-foreign-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  t.after(() => rm(foreign, { recursive: true, force: true }));
+  const connection = handle.providerConnection;
+  assert.ok(connection?.kind === "opencode_server");
+  assert.ok(handle.providerContinuationId);
+  const foreignAuthPath = join(foreign, "server-auth.json");
+  await writeFile(foreignAuthPath, await readFile(connection.serverAuthPath, "utf8"), { mode: 0o600 });
+  const kept = join(foreign, "config", "opencode", "AGENTS.md", "nested", "keep.txt");
+  await mkdir(join(kept, ".."), { recursive: true });
+  await writeFile(kept, "not ours");
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  const attached = await replacement.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId,
+    providerConnection: { ...connection, serverAuthPath: foreignAuthPath },
+  });
+
+  assert.ok(attached && !("state" in attached));
+  assert.equal(await readFile(kept, "utf8"), "not ours");
+});
+
+test("Open Model still reattaches to a running runtime that cannot take the instruction shield", async (t) => {
+  const { handle, harness, runtimeRoot } = await spawnAdapter();
+  assert.ok(handle.providerContinuationId);
+  const config = join(runtimeRoot, "work-attempt-open-model-1", "config");
+  await rm(config, { recursive: true, force: true });
+  await writeFile(config, "not a directory");
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  const attached = await replacement.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId,
+    providerConnection: handle.providerConnection,
+  });
+
+  assert.ok(attached && !("state" in attached), "a working agent is not taken away");
+});
+
+test("Open Model instruction shield empties whatever was at its path", async (t) => {
+  const configHome = await mkdtemp(join(tmpdir(), "letagents-opencode-shield-"));
+  t.after(() => rm(configHome, { recursive: true, force: true }));
+  const target = join(configHome, "opencode", "AGENTS.md");
+
+  await shieldOwnerInstructions(configHome);
+  await shieldOwnerInstructions(configHome);
+  assert.equal(await readFile(target, "utf8"), "");
+
+  await writeFile(target, "Always answer in French.\n");
+  await shieldOwnerInstructions(configHome);
+  assert.equal(await readFile(target, "utf8"), "");
+
+  await rm(target);
+  await mkdir(join(target, "nested"), { recursive: true });
+  await shieldOwnerInstructions(configHome);
+  assert.equal((await lstat(target)).isFile(), true);
+  assert.equal(await readFile(target, "utf8"), "");
+});
+
+test("Open Model instruction shield replaces a link without writing through it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-opencode-shield-link-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const configHome = join(root, "config");
+  const ownerFile = join(root, "owner-CLAUDE.md");
+  const ownerInstructions = "Always answer in French.\n";
+  await writeFile(ownerFile, ownerInstructions);
+  await mkdir(join(configHome, "opencode"), { recursive: true });
+  const target = join(configHome, "opencode", "AGENTS.md");
+  await symlink(ownerFile, target);
+
+  await shieldOwnerInstructions(configHome);
+
+  const shield = await lstat(target);
+  assert.equal(shield.isSymbolicLink(), false);
+  assert.equal(shield.isFile(), true);
+  assert.equal(shield.size, 0);
+  assert.equal(await readFile(ownerFile, "utf8"), ownerInstructions, "the owner's file is left as it was");
+
+  // An empty file reached through a link is still the owner's file.
+  await rm(target);
+  await writeFile(ownerFile, "");
+  await symlink(ownerFile, target);
+  await shieldOwnerInstructions(configHome);
+  assert.equal((await lstat(target)).isSymbolicLink(), false);
+
+  // So is an empty file that has a second name.
+  await rm(target);
+  await link(ownerFile, target);
+  await shieldOwnerInstructions(configHome);
+  await writeFile(ownerFile, ownerInstructions);
+  assert.equal(await readFile(target, "utf8"), "");
+  assert.deepEqual(await readdir(join(configHome, "opencode")), ["AGENTS.md"]);
+});
+
+test("Open Model instruction shield survives concurrent launches of one runtime", async (t) => {
+  const configHome = await mkdtemp(join(tmpdir(), "letagents-opencode-shield-race-"));
+  t.after(() => rm(configHome, { recursive: true, force: true }));
+  const target = join(configHome, "opencode", "AGENTS.md");
+  await mkdir(join(configHome, "opencode"), { recursive: true });
+  await writeFile(target, "Always answer in French.\n");
+
+  await Promise.all(Array.from({ length: 16 }, () => shieldOwnerInstructions(configHome)));
+
+  assert.equal(await readFile(target, "utf8"), "");
+  assert.deepEqual(await readdir(join(configHome, "opencode")), ["AGENTS.md"]);
 });
 
 test("Open Model seeds a fresh runtime so OpenCode has no plugin SDK to install", async (t) => {
