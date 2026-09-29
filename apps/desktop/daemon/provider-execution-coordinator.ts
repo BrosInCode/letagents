@@ -1817,6 +1817,11 @@ export class ProviderExecutionCoordinator {
       );
       return;
     }
+    // A live handle is the launch succeeding, whatever binding work follows.
+    // Resetting here, not only on the plain path below, keeps grant-bound and
+    // resumed agents from carrying exhausted retry budgets into their next
+    // failure.
+    this.options.host.clearSuccessfulRecovery(entry.id);
     if (requiresGrant) {
       const current = await this.options.store.getEntry(entry.id);
       if (current) await this.convergeAttachedHandle(current, handle);
@@ -1862,7 +1867,6 @@ export class ProviderExecutionCoordinator {
       );
       return;
     }
-    this.options.host.clearSuccessfulRecovery(entry.id);
     await this.options.transition(
       entry.id,
       handle.observedState,
