@@ -20,7 +20,6 @@ import { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import { useAddAgentSetup } from "./useAddAgentSetup";
 import { useAddAgentPresentation } from "./useAddAgentPresentation";
 import { contextualAddAgentError } from "./add-agent-errors";
-import { suggestSupervisedAgentCodename } from "../../../../domain/codenames";
 import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
@@ -66,61 +65,30 @@ export interface SupervisedLaunchCreateSnapshot {
   model: string | null;
 }
 
-type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "listAgents" | "createAgent">;
-const SUPERVISED_NAME_LOOKUP_TIMEOUT_MS = 1_000;
-
-async function lookupExistingDisplayNames(
-  client: SupervisedCreateClient,
-  roomIdentifier: string,
-  timeoutMs: number,
-): Promise<string[]> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const entries = await Promise.race([
-      client.listAgents(roomIdentifier),
-      new Promise<null>((resolve) => {
-        timeout = setTimeout(resolve, Math.max(0, timeoutMs), null);
-      }),
-    ]);
-    return entries?.map((entry) => entry.displayName) ?? [];
-  } catch {
-    return [];
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
-}
+type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "createAgent">;
 
 /**
  * The click-time snapshot is intentionally complete: controls remain editable
- * while the name lookup awaits, but they must not change the authority of the
- * durable agent that click already requested.
+ * after the click, but they must not change the authority of the durable
+ * agent that click already requested.
+ *
+ * The request carries no name. Naming needs the names already taken in the
+ * room, and only the background service that saves the agent can read those
+ * and claim one in the same step. A name chosen here would be a guess.
  */
 export async function createSupervisedAgentFromSnapshot(
   client: SupervisedCreateClient,
   snapshot: SupervisedLaunchCreateSnapshot,
   isCurrent: () => boolean,
-  nameLookupTimeoutMs = SUPERVISED_NAME_LOOKUP_TIMEOUT_MS,
 ): Promise<DesktopSupervisorManifestEntry | null> {
-  // Friendly-name collision avoidance is optional. A slow recovery scan must
-  // never prevent the durable create request from crossing its boundary.
-  const existingDisplayNames = await lookupExistingDisplayNames(
-    client,
-    snapshot.roomIdentifier,
-    nameLookupTimeoutMs,
-  );
-  const displayName = suggestSupervisedAgentCodename(
-    existingDisplayNames,
-    snapshot.creationRequestId,
-  );
-  // listAgents is an async gap before the durable boundary. Modal close,
-  // provider switch, and request invalidation must all fence createAgent here,
-  // not only after a durable agent has already been created.
+  // Modal close, provider switch, and request invalidation must all fence
+  // createAgent before the durable boundary, not only after it.
   if (!isCurrent()) return null;
   const input: DesktopSupervisorCreateInput = {
     creationRequestId: snapshot.creationRequestId,
     providerId: snapshot.providerId,
     roomIdentifier: snapshot.roomIdentifier,
-    displayName,
+    displayName: "",
     repoRootPath: snapshot.repoRootPath,
     charter: snapshot.charter,
     permissionProfileId: snapshot.permissionProfileId,
@@ -502,8 +470,8 @@ async function startManagedAgent(
         launchPolicy: requestLaunchPolicy,
         model: requestModel,
       };
-      // A name is presentation, never identity. The helper reads the room's
-      // labels while retaining every click-time launch input above.
+      // A name is presentation, never identity, and is assigned where the
+      // agent is saved. The helper sends every click-time launch input above.
       const entry = await createSupervisedAgentFromSnapshot(
         desktopIpc.supervisor,
         creationSnapshot,

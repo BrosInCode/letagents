@@ -135,7 +135,8 @@ test("fresh Codex launch provisions before paused claim, installs before activat
   });
   assert.equal(result.entry.desiredState, "paused");
   assert.deepEqual(h.events, [
-    "ensure", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false", "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
+    // Every creation reads the room's saved names before it claims one.
+    "ensure", "list", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false", "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
   ]);
   assert.deepEqual(h.bootstrapMessages, ["help"], "fresh creation queues the saved text as its one-time initial message");
   assert.equal(JSON.stringify(result).includes("secret_provisioned"), false, "no bearer is in the public coordinator result");
@@ -284,6 +285,157 @@ test("the ownership boundary repairs generic Open Model labels before identity p
   assert.doesNotMatch(identityDisplayName, /open model|supervised agent/i);
 });
 
+test("a requested name another agent in the room answers to is replaced, and a replay keeps the saved name", async () => {
+  const h = harness();
+  const entries: DesktopSupervisorManifestEntry[] = [{
+    ...entry("supervised_holder_1234567"),
+    displayName: "FieldMeadow",
+    roomId: "room_1",
+  }];
+  const identityNames: string[] = [];
+  const coordinator = new SupervisorGrantCoordinator(
+    {
+      ...h.daemon,
+      async list() { return [...entries]; },
+      async create(input: { creationRequestId: string; roomIdentifier: string; displayName: string }) {
+        const id = `supervised_${input.creationRequestId}`;
+        const saved = entries.find((candidate) => candidate.id === id);
+        if (saved) return saved;
+        const created = {
+          ...entry(id),
+          displayName: input.displayName,
+          roomId: input.roomIdentifier,
+          desiredState: "paused" as const,
+        };
+        entries.push(created);
+        return created;
+      },
+    } as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    {
+      ...h.operations,
+      async resolveIdentity(input) {
+        identityNames.push(input.displayName ?? "");
+        return `owner/${input.entryId}`;
+      },
+    },
+    async () => "room_1",
+  );
+  const request = {
+    creationRequestId: "newcomer_1234567",
+    roomIdentifier: "room_1",
+    // Another spelling of the held name is still the held name.
+    displayName: "fieldmeadow",
+    providerId: "codex" as const,
+    charter: "help",
+    model: null,
+    permissionProfileId: null,
+    repoRootPath: "/tmp/repo",
+  };
+
+  const created = await coordinator.createPausedAndInstall(request);
+  assert.match(created.entry.displayName, /^[A-Za-z]+$/);
+  assert.notEqual(created.entry.displayName.toLowerCase(), "fieldmeadow");
+  assert.equal(identityNames.at(-1), created.entry.displayName,
+    "the room identity is registered under the name that was saved");
+
+  const replayed = await coordinator.createPausedAndInstall(request);
+  assert.equal(replayed.entry.displayName, created.entry.displayName);
+  assert.equal(entries.length, 2);
+});
+
+test("a room lookup that stalls or fails never holds up or fails the creation", async () => {
+  for (const lookup of ["stalls", "fails"] as const) {
+    const h = harness();
+    let created: { displayName: string } | null = null;
+    const coordinator = new SupervisorGrantCoordinator(
+      {
+        ...h.daemon,
+        list: lookup === "stalls"
+          ? () => new Promise<never>(() => undefined)
+          : async () => { throw new Error("manifest.list timed out"); },
+        async create(input: { creationRequestId: string; roomIdentifier: string; displayName: string }) {
+          created = { displayName: input.displayName };
+          return {
+            ...entry(`supervised_${input.creationRequestId}`),
+            displayName: input.displayName,
+            roomId: input.roomIdentifier,
+            desiredState: "paused" as const,
+          };
+        },
+      } as never,
+      (async () => { throw new Error("unexpected request"); }) as never,
+      () => "host_1",
+      h.operations,
+      async () => "room_1",
+      undefined,
+      20,
+    );
+    const startedAt = Date.now();
+    const result = await coordinator.createPausedAndInstall({
+      creationRequestId: `lookup_${lookup}_1234567`,
+      roomIdentifier: "room_1",
+      displayName: "",
+      providerId: "codex",
+      charter: "help",
+      model: null,
+      permissionProfileId: null,
+      repoRootPath: "/tmp/repo",
+    });
+    assert.ok(Date.now() - startedAt < 1_000, `a lookup that ${lookup} is abandoned promptly`);
+    assert.ok(created, `creation proceeds when the lookup ${lookup}`);
+    assert.match(result.entry.displayName, /^[A-Za-z]+$/);
+    assert.doesNotMatch(result.entry.displayName, /supervised agent/i);
+  }
+});
+
+test("the identity is registered again when the daemon saves a different name", async () => {
+  const h = harness();
+  const identityNames: string[] = [];
+  const coordinator = new SupervisorGrantCoordinator(
+    {
+      ...h.daemon,
+      async list() { return []; },
+      // The daemon is the authority: it found the name taken by an agent
+      // this lookup did not see, and saved another.
+      async create(input: { creationRequestId: string; roomIdentifier: string }) {
+        return {
+          ...entry(`supervised_${input.creationRequestId}`),
+          displayName: "CedarPeak",
+          roomId: input.roomIdentifier,
+          desiredState: "paused" as const,
+        };
+      },
+    } as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    {
+      ...h.operations,
+      async resolveIdentity(input) {
+        identityNames.push(input.displayName ?? "");
+        if (identityNames.length > 1) throw new Error("account service unavailable");
+        return `owner/${input.entryId}`;
+      },
+    },
+    async () => "room_1",
+  );
+
+  const result = await coordinator.createPausedAndInstall({
+    creationRequestId: "renamed_1234567",
+    roomIdentifier: "room_1",
+    displayName: "FieldMeadow",
+    providerId: "codex",
+    charter: "help",
+    model: null,
+    permissionProfileId: null,
+    repoRootPath: "/tmp/repo",
+  });
+
+  assert.deepEqual(identityNames, ["FieldMeadow", "CedarPeak"]);
+  assert.equal(result.entry.displayName, "CedarPeak", "a failed relabel never fails the launch");
+});
+
 test("concurrent generic Open Model launches reserve distinct friendly names within a room", async () => {
   const h = harness();
   const entries: DesktopSupervisorManifestEntry[] = [];
@@ -420,7 +572,7 @@ test("Claude daemon-inbox launch provisions its own exact host grant before acti
   });
   assert.equal(result.agentKey, "owner/supervised_launch_1234567");
   assert.deepEqual(h.events, [
-    "ensure", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false",
+    "ensure", "list", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false",
     "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
   ]);
 });
