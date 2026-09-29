@@ -1,5 +1,6 @@
 import {
   exhaustedTransientWorkerMint,
+  providerQuotaExhaustedFailure,
   providerRuntimeGoneFailure,
   schedulerErrorDetail,
   transientProviderStartFailure,
@@ -16,6 +17,11 @@ import { RepositoryNetworkError, UnusableSourceRepositoryError } from "./workspa
 
 const PROVIDER_START_RETRY_LIMIT = 3;
 const WORKER_MINT_RECOVERY_RETRY_LIMIT = 5;
+// A usage limit resets on the provider's schedule, often hours away. Keep
+// trying for as long as the agent should run, slowly enough that a rejected
+// launch costs almost nothing.
+const PROVIDER_QUOTA_RETRY_BASE_MS = 5 * 60_000;
+const PROVIDER_QUOTA_RETRY_MAX_MS = 60 * 60_000;
 
 export type ProviderSchedulerFailurePorts = {
   nativeHeartbeatIntervalMs: number;
@@ -58,6 +64,7 @@ export type ProviderSchedulerFailurePorts = {
 export class ProviderSchedulerFailureCoordinator {
   private readonly providerStartRetryAttempts = new Map<string, number>();
   private readonly workerMintRecoveryRetryAttempts = new Map<string, number>();
+  private readonly providerQuotaRetryAttempts = new Map<string, number>();
 
   constructor(private readonly ports: ProviderSchedulerFailurePorts) {}
 
@@ -68,6 +75,7 @@ export class ProviderSchedulerFailureCoordinator {
   clearSuccessfulRecovery(entryId: string): void {
     this.providerStartRetryAttempts.delete(entryId);
     this.workerMintRecoveryRetryAttempts.delete(entryId);
+    this.providerQuotaRetryAttempts.delete(entryId);
   }
 
   async record(entryId: string, error: unknown, actor: string): Promise<void> {
@@ -134,6 +142,15 @@ export class ProviderSchedulerFailureCoordinator {
       if (attempts <= WORKER_MINT_RECOVERY_RETRY_LIMIT) {
         this.ports.scheduleRecovery(entryId, this.ports.nativeHeartbeatIntervalMs);
       }
+      return;
+    }
+    if (providerQuotaExhaustedFailure(error)) {
+      const attempts = (this.providerQuotaRetryAttempts.get(entryId) ?? 0) + 1;
+      this.providerQuotaRetryAttempts.set(entryId, attempts);
+      this.ports.scheduleRecovery(entryId, Math.min(
+        PROVIDER_QUOTA_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 10),
+        PROVIDER_QUOTA_RETRY_MAX_MS,
+      ));
       return;
     }
     if (transientProviderStartFailure(error)) {

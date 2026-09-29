@@ -399,6 +399,9 @@ class ClaudeBootstrapDiagnostics {
 
   initialized(): void { this.initializedAt = performance.now(); }
 
+  /** The allowlisted API error category Claude reported for the bootstrap turn. */
+  get apiError(): string | null { return this.assistantError; }
+
   observe(line: string): void {
     this.stdoutLines = Math.min(Number.MAX_SAFE_INTEGER, this.stdoutLines + 1);
     const message = parseStreamLine(line);
@@ -482,11 +485,16 @@ class ClaudeBootstrapError extends Error {
   readonly reason: ClaudeStartupDeadline | "native_exit" | "transport_error" | "failed_response";
   readonly exitCode?: number | null;
   readonly signal?: string | null;
+  /** The account's usage limit rejected the turn; retrying only helps after it resets. */
+  readonly providerQuotaExhausted?: true;
+  /** Claude reported a service-side failure that a fresh attempt may clear. */
+  readonly transientProviderStart?: true;
 
   constructor(
     readonly phase: "init" | "bootstrap_turn",
     failure: ProviderProcessExit | { type: ClaudeStartupDeadline | "failed_response" },
     observations: string,
+    apiError: string | null = null,
   ) {
     const reason = failure.type === "exit" ? "native_exit"
       : failure.type === "error" ? "transport_error" : failure.type;
@@ -500,6 +508,10 @@ class ClaudeBootstrapError extends Error {
       this.exitCode = failure.code;
       this.signal = failure.signal;
     }
+    // Only an explicit API rejection of the bootstrap turn is classified. A
+    // deadline stays unretried: a stalled resume can spend tokens each time.
+    if (reason === "failed_response" && apiError === "rate_limit") this.providerQuotaExhausted = true;
+    if (reason === "failed_response" && (apiError === "overloaded" || apiError === "server_error")) this.transientProviderStart = true;
   }
 }
 
@@ -1539,7 +1551,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         throw new ClaudeBootstrapError("bootstrap_turn", { type: compaction.failure }, diagnostics.summary(child, compaction.diagnosticFields()));
       }
       if ("error" in bootstrapTerminal) {
-        throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" }, diagnostics.summary(child, compaction.diagnosticFields()));
+        throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" },
+          diagnostics.summary(child, compaction.diagnosticFields()), diagnostics.apiError);
       }
       handle.roomTurnResults.delete(bootstrapTurnId);
       handle.state = "idle";

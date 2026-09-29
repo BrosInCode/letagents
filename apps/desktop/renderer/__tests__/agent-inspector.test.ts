@@ -191,6 +191,17 @@ test("truthful online state requires the exact delivery connection and preserves
   })), "reconnecting");
 });
 
+test("a Claude usage-limit bootstrap failure explains the automatic retry instead of a raw diagnostic", () => {
+  const limited = entry({
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
+      + "Startup observations: assistant_error=rate_limit; result=success; init_ms=512; bootstrap_ms=1492; budget_ms=30000.",
+  });
+  const projection = projectAgentInspector(limited, { roomId: "focus_1", deliveryRetryAvailable: false });
+  assert.match(projection?.now?.summary ?? "", /usage limit was reached.*retries automatically/);
+});
+
 test("a stopped provider with retained historical coordinates offers recovery instead of false reconnect or delivery retry", () => {
   const stoppedProvider = entry({
     runtimeGenerationId: "stopped-runtime",
