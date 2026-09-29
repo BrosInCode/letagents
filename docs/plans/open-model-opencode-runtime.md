@@ -65,6 +65,25 @@ wait. Only the turn timeout ends a long wait, and under `typed`
 lifecycle authority there is no turn timeout. Stop is not delayed by the
 backoff.
 
+While a session waits to retry, the adapter says so. For each scheduled
+retry it emits one stream event, `letagents/providerRetry`, whose summary is
+"The model provider returned an error. Retrying (attempt N)." The chat work
+indicator and the inspector show that sentence on the desktop that hosts the
+agent. The provider's own message goes only into the event's payload, for
+the inspector's diagnostics, with known credential formats redacted and
+links removed.
+
+The event is a `provider_event`, which the daemon reads as ordinary working
+activity. It never changes a turn's outcome, a failure classification or a
+schedule. Under typed lifecycle authority, which Open Model runs under, it is
+recorded and nothing else. Under the other authority modes a stream event
+also marks an idle agent as working, as any activity does. The agent
+inspector's Live tab does not show it.
+
+Two limits. A retry scheduled while the adapter is not observing the
+session, such as just before a turn is recovered, is not announced until the
+next one is scheduled. And retries inside a child session are not announced.
+
 A turn stopped during a retry settles differently from one stopped while
 busy. OpenCode reports an aborted busy turn as a failed message, so the turn
 rejects with that failure. It reports an aborted retry with `session.idle`

@@ -448,6 +448,13 @@ function roomTurnFallbackSummary(state: string): string {
   return "Thinking";
 }
 
+/** An agent waiting on its model provider is not working, and looks stuck
+ * unless its owner is told. The adapter sends this as a `provider_event`,
+ * which the daemon treats as ordinary activity; it is the one such event
+ * shown. */
+const PROVIDER_RETRY_METHOD = "letagents/providerretry";
+const PROVIDER_RETRY_SUMMARY = /^The model provider returned an error\. Retrying \(attempt \d{1,3}\)\.$/;
+
 /** Provider transport/account notifications remain in diagnostics, but they
  * are not evidence that an agent is doing work for the room. */
 export function isHumanVisibleSupervisorActivity(
@@ -459,6 +466,7 @@ export function isHumanVisibleSupervisorActivity(
     || method === "account/ratelimitsupdated"
     || method === "thread/read"
   ) return false;
+  if (method === PROVIDER_RETRY_METHOD) return true;
   return event.kind !== "usage" && event.kind !== "provider_event";
 }
 
@@ -470,6 +478,12 @@ export function humanFacingSupervisorActivitySummary(
 ): string {
   const kind = event.kind.trim().toLowerCase();
   const method = event.method.trim().toLowerCase();
+  if (method === PROVIDER_RETRY_METHOD) {
+    // Only the adapter's own sentence is shown. Anything else under this
+    // method gets fixed copy, so provider text cannot be shown here.
+    const summary = event.summary.trim();
+    return PROVIDER_RETRY_SUMMARY.test(summary) ? summary : "Waiting for the model provider";
+  }
   if (method === "item/reasoning/summarytextdelta") {
     // The Codex adapter places only the provider-approved reasoning summary in
     // this field. Older/fallback daemon events contain the protocol label, so

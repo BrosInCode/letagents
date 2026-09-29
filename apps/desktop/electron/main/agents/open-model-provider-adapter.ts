@@ -326,6 +326,36 @@ async function resolveBeforeDeadline<T>(operation: Promise<T>, deadline: number,
   }
 }
 
+/**
+ * Notice that OpenCode is waiting to re-send a failed model request, shown on
+ * the desktop that hosts the agent. The daemon classifies stream events by
+ * kind and method: a `provider_event` with this method is ordinary working
+ * activity. Under typed authority, which Open Model runs under, that is a
+ * record and nothing else. It never changes a turn's outcome or a schedule.
+ * An `error` kind, or a method that reads as a lifecycle boundary, could mark
+ * the turn failed or idle.
+ */
+export const OPEN_MODEL_PROVIDER_RETRY_METHOD = "letagents/providerRetry";
+
+/** Shown in the chat view, so it carries no provider text. */
+export function openModelProviderRetrySummary(attempt: number): string {
+  return `The model provider returned an error. Retrying (attempt ${attempt}).`;
+}
+
+type OpenCodeRetryStatus = { attempt: number; message: string | null; next: number | null };
+
+function openCodeRetryStatus(value: unknown): OpenCodeRetryStatus | null {
+  const status = record(value);
+  if (status?.type !== "retry") return null;
+  const attempt = status.attempt;
+  if (typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 1) return null;
+  return {
+    attempt,
+    message: typeof status.message === "string" ? status.message : null,
+    next: typeof status.next === "number" && Number.isFinite(status.next) ? status.next : null,
+  };
+}
+
 class OpenCodeBoundedTurnError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
 }
@@ -1411,6 +1441,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const toolStatuses = new Map<string, string>();
     const assistantIds = new Set<string>();
     const typedAssistantIds = new Set<string>();
+    // Attempt numbers restart when a later step of the same turn fails, so
+    // the scheduled time is part of what makes a retry distinct.
+    const retriesNotified = new Set<string>();
     const controller = new AbortController();
     const detach = (): void => controller.abort();
     signal?.addEventListener("abort", detach, { once: true });
@@ -1585,6 +1618,15 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           );
         }
         if (!eventReferencesSession(event, handle.providerContinuationId)) continue;
+        if (event.type === "session.status") {
+          const retry = openCodeRetryStatus(properties?.status);
+          const retryKey = retry ? `${retry.attempt}:${retry.next ?? ""}` : null;
+          if (retry && retryKey && !retriesNotified.has(retryKey)) {
+            retriesNotified.add(retryKey);
+            this.emitProviderRetry(handle, turnId, retry);
+          }
+          continue;
+        }
         if (event.type === "session.idle") {
           return resultAtSessionBoundary(await snapshot());
         }
@@ -1746,12 +1788,38 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
   }
 
+  private emitProviderRetry(handle: OpenModelHandle, turnId: string, retry: OpenCodeRetryStatus): void {
+    // The provider's own words stay in the payload, for diagnostics only.
+    // Credentials are redacted before the cut so a key cannot be split by it.
+    const redaction = retry.message === null ? null : redactCredentialText(retry.message);
+    const message = redaction === null ? null : redaction.value
+      .replace(/https?:\/\/\S+/gi, "provider settings")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 320);
+    this.emitStream(handle, {
+      kind: "provider_event",
+      method: OPEN_MODEL_PROVIDER_RETRY_METHOD,
+      summary: openModelProviderRetrySummary(retry.attempt),
+      payloadRedacted: redaction?.redacted === true,
+      payload: {
+        kind: "provider_retry",
+        turnId,
+        attempt: retry.attempt,
+        message,
+        nextRetryAt: retry.next === null ? null : new Date(retry.next).toISOString(),
+      },
+    });
+  }
+
   private emitStream(
     handle: OpenModelHandle,
     input: Pick<ProviderStreamEvent, "kind" | "method"> & Partial<Pick<ProviderStreamEvent,
       "nativeEventId" | "nativeLifecyclePhase" | "lifecycleProjectionOnly">> & {
       summary: string | null;
       payload: unknown;
+      /** The caller already redacted part of the payload. */
+      payloadRedacted?: boolean;
     },
   ): void {
     const safe = safeStreamPayload(input.payload);
@@ -1769,7 +1837,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       summary: input.summary,
       payload: safe.payload,
       payloadTruncated: safe.payloadTruncated,
-      payloadRedacted: safe.payloadRedacted,
+      payloadRedacted: safe.payloadRedacted || input.payloadRedacted === true,
       durablePayloadRef: null,
     };
     for (const listener of handle.streamListeners) listener(event);

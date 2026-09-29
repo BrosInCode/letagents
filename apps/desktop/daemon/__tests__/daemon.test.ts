@@ -1,4 +1,5 @@
 import { DaemonReadModel } from "../daemon-read-model.js";
+import { isHumanRoomActivityEvent } from "../provider-stream-policy.js";
 import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, recordInterruptedCursorRecovery } from "../runtime-recovery-journal.js";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -13281,6 +13282,21 @@ test("quiescence resume failure blocks the live attempt", async () => {
     assert.deepEqual(await store.garbageCollect(0), []);
     assert.equal((await store.getAttempt(live.work_attempt_id)).state, "coordination_blocked");
   } finally { await env.cleanup(); }
+});
+
+test("providerStreamLifecycle reads an Open Model provider retry notice as ordinary work", () => {
+  const notice = {
+    workAttemptId: "attempt", providerContinuationId: "session", observedAt: "2026-09-28T00:00:00.000Z",
+    sequence: 1, provider: "open-model", kind: "provider_event", method: "letagents/providerRetry",
+    summary: "The model provider returned an error. Retrying (attempt 2).",
+    payload: { kind: "provider_retry", turnId: "msg_1", attempt: 2, message: "Rate limit exceeded", nextRetryAt: "2026-09-28T00:00:04.000Z" },
+    payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null,
+  } as const;
+  // The notice describes a provider error, but the turn is still running.
+  // Reading it as failed would fence the runtime; as idle, hide the agent.
+  assert.equal(providerStreamLifecycle(notice), "working");
+  assert.equal(providerStreamLifecycle(notice, true), "working");
+  assert.equal(isHumanRoomActivityEvent(notice), true, "the notice is recorded as activity");
 });
 
 test("providerStreamLifecycle never fails the agent on a tool call's own error status", () => {

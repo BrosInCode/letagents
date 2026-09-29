@@ -1705,6 +1705,52 @@ test("Cursor and OpenModel normalized public display shapes remain unchanged", (
 });
 
 
+test("an Open Model provider retry notice is recorded as activity and never fails, fences or displays in Live", async () => {
+  for (const authorityMode of ["typed", "typed_shadow", "legacy"] as const) {
+    const displayed: DaemonActivityEvent[] = [];
+    const recorded: string[] = [];
+    const recordedActivityOnly: string[] = [];
+    let listener: ((event: ProviderActionStreamEvent) => void) | null = null;
+    const harness = coordinatorHarness({
+      authorityMode,
+      typedLifecycleAdmission: () => "ready",
+      pushStream: event => displayed.push(event),
+      appendActivity: async method => { recorded.push(method); },
+      appendActivityOnly: async method => { recordedActivityOnly.push(method); },
+      onStream: async (_handle, callback) => { listener = callback; return () => {}; },
+    });
+    await harness.coordinator.install("agent-1", handle, "generation-2");
+    // Typed authority subscribes to the stream once the birth is admitted.
+    await harness.coordinator.drainCallbacks();
+    const before = harness.getManifest();
+    assert.ok(listener, `${authorityMode}: the coordinator subscribed to the stream`);
+    (listener as (event: ProviderActionStreamEvent) => void)({
+      ...streamEvent(1, "letagents/providerRetry"),
+      provider: "open-model",
+      kind: "provider_event",
+      summary: "The model provider returned an error. Retrying (attempt 2).",
+      payload: { kind: "provider_retry", turnId: "msg_1", attempt: 2, message: "Rate limit exceeded", nextRetryAt: "2026-09-28T00:00:04.000Z" },
+    });
+    await harness.coordinator.drainCallbacks();
+
+    // Typed authority takes agent state from execution facts, so a stream
+    // event is recorded as activity only. The other modes record it the way
+    // they record any activity, which also refreshes the agent's state.
+    assert.deepEqual(
+      { stateBearing: recorded, activityOnly: recordedActivityOnly },
+      authorityMode === "typed"
+        ? { stateBearing: [], activityOnly: ["letagents/providerRetry"] }
+        : { stateBearing: ["letagents/providerRetry"], activityOnly: [] },
+      `${authorityMode}: recorded once, through the expected path`,
+    );
+    assert.deepEqual(displayed, [], `${authorityMode}: the Live tab shows only message, reasoning and tool events`);
+    assert.equal(harness.getManifest().observed_state, before.observed_state, `${authorityMode}: no failed or idle transition`);
+    assert.equal(harness.getManifest().condition, before.condition, `${authorityMode}: no condition is raised`);
+    assert.equal(harness.stopCalls(), 0, `${authorityMode}: the runtime is never fenced`);
+    await harness.coordinator.disposeAll();
+  }
+});
+
 test("coordinator normalizes only the redacted display copy of a failed native command", async () => {
   const displayed: DaemonActivityEvent[] = [];
   const recorded: string[] = [];
