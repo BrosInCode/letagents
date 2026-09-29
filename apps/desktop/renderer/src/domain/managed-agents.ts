@@ -185,6 +185,7 @@ export function supervisedProviderLaunchPolicy(
       settingSources: "",
     };
     case "ask_before_write": return { permissionMode: "default" };
+    case "auto_review": return { permissionMode: "auto" };
     case "full_access": return { permissionMode: "bypassPermissions" };
     default: throw new Error("Choose an available Claude Code permission profile before supervised launch.");
   }
@@ -498,6 +499,8 @@ export function humanFacingSupervisorActivitySummary(
   if (kind === "text_delta" || method.includes("agentmessage") || method === "assistant") return "Writing a response";
   if (kind === "tool_lifecycle" || /(?:toolcall|tool_use|websearch|filechange)/i.test(method)) return "Using a tool";
   if (kind === "command_output" || /(?:command|process|terminal)/i.test(method)) return "Working in the project";
+  // The provider's own review decides these; nobody is being asked.
+  if (/(?:autoapprovalreview|guardianwarning)/.test(method)) return "Checking an action";
   if (kind === "approval") return "Waiting for approval";
   if (kind === "turn_lifecycle" || kind === "item_lifecycle") return "Thinking";
   return liveActivityEchoText(event.summary);
@@ -1212,6 +1215,16 @@ export function supervisedPermissionProfilePresentation(
     }
     return presented;
   }
+  if (profile.id === "auto_review" && providerId === "claude-code") {
+    return { ...profile, status: "available",
+      description: "Lets Claude check each action before it runs. Actions it judges safe run without asking.",
+      detail: "Claude blocks actions it judges risky. Anything a room message asks for counts as approved, including commands that reach outside your project. Other Claude settings do not apply." };
+  }
+  if (profile.id === "auto_review" && providerId === "codex") {
+    return { ...profile, status: "available",
+      description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
+      detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project." };
+  }
   if (profile.id !== "ask_before_write"
     || (providerId !== "codex" && providerId !== "open-model" && providerId !== "claude-code")) return profile;
   if (providerId === "claude-code") {
@@ -1233,6 +1246,11 @@ export function supervisedPermissionProfilePresentation(
     description: "Requires approval before Codex can run write-capable commands or apply file changes.",
     detail: "Starts with read-only file access and no network access. Requests approval when it needs more access.",
   };
+}
+
+/** Shown before launch. Auto still has a reviewer, so the Full access notice would mislead. */
+export function autoReviewNotice(providerName: string): string {
+  return `${providerName} decides which actions are safe instead of asking you. Anything a room message asks for counts as approved, including commands that reach outside your project. Use only in rooms where you trust everyone who can post.`;
 }
 
 export type ManagedAgentPermissionProfileSelections =

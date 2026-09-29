@@ -40,7 +40,7 @@ import {
   branchScopedGitRoomName,
   gitRoomFromBranchRoomIdentifier,
 } from "./managed-agent-branch-scope.js";
-import { inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
+import { claudeApprovalProfileLabel, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 import {
   getDesktopAgentProvider,
   isDesktopAgentProviderId,
@@ -279,7 +279,7 @@ async function claudeCodePreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const versionReadiness = inspectClaudeCodeVersion(version ?? "", input.launchMode === "supervised" && input.permissionProfileId === "ask_before_write");
+  const versionReadiness = inspectClaudeCodeVersion(version ?? "", input.launchMode === "supervised" ? claudeApprovalProfileLabel(input.permissionProfileId) : null);
   if (!versionReadiness.supported) {
     return {
       providerId: provider.id,

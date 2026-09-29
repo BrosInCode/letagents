@@ -85,8 +85,20 @@ class FakeRpc implements CodexAdapterRpc {
       threadReadFails: boolean;
       threadReadTimesOut: boolean;
       threadReadUnmaterialized: boolean;
+      reviewerFromOwnSettings: string | null;
     },
-  ) {}
+  ) {
+    this.reviewerFromOwnSettings = options.reviewerFromOwnSettings;
+  }
+
+  /** Set when the app-server ignores the requested reviewer and reports this one. */
+  reviewerFromOwnSettings: string | null;
+
+  /** A current app-server applies the reviewer it was asked for; one that ignores the request uses its own. */
+  private appliedReviewer(params: unknown): string {
+    const requested = (params as { approvalsReviewer?: unknown } | undefined)?.approvalsReviewer;
+    return this.reviewerFromOwnSettings ?? (typeof requested === "string" ? requested : "user");
+  }
 
   async connect(): Promise<void> {
     this.connected = true;
@@ -117,6 +129,7 @@ class FakeRpc implements CodexAdapterRpc {
             ? this.threadId
             : `${this.threadId}-replacement-${this.threadStartCount - 1}`,
         },
+        approvalsReviewer: this.appliedReviewer(params),
       } as T;
     }
     if (method === "thread/resume") {
@@ -134,7 +147,7 @@ class FakeRpc implements CodexAdapterRpc {
         if (Number.isFinite(missingResumes)) this.missingThreadResumes.set(threadId, missingResumes - 1);
         throw new Error(`thread not found: ${threadId}`);
       }
-      return { thread: { id: threadId } } as T;
+      return { thread: { id: threadId }, approvalsReviewer: this.appliedReviewer(params) } as T;
     }
     if (method === "turn/start") {
       const threadId = (params as { threadId?: string } | undefined)?.threadId ?? this.threadId;
@@ -258,6 +271,8 @@ function createHarness(options: {
   identityUnavailableAtLaunch?: boolean;
   processIdentity?: string;
   exitOnSignal?: boolean;
+  /** Set when the app-server ignores the requested reviewer and reports this one. */
+  reviewerFromOwnSettings?: string;
 } = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -310,6 +325,7 @@ function createHarness(options: {
         threadReadFails: options.threadReadFails ?? false,
         threadReadTimesOut: options.threadReadTimesOut ?? false,
         threadReadUnmaterialized: options.threadReadUnmaterialized ?? false,
+        reviewerFromOwnSettings: options.reviewerFromOwnSettings ?? null,
       });
       clients.push(client);
       return client;
@@ -1092,6 +1108,140 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
     continuationRepair: "same_process",
   });
   await assert.rejects(adapter.poke(handle, "wake up"), /not enabled/);
+});
+
+test("Codex Auto keeps project-only writes and its own reviewer on every thread and turn", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const launchPolicy = {
+    approvalPolicy: "on-request",
+    sandboxPolicy: { type: "workspaceWrite", networkAccess: false },
+    approvalsReviewer: "auto_review",
+  };
+  const first = await adapter.spawn(spawnRequest({
+    deliveryMode: "daemon_inbox", permissionProfileId: "auto_review", configurationRevision: 1, launchPolicy,
+  }));
+  const thread = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
+  assert.equal(thread.approvalPolicy, "on-request");
+  assert.equal(thread.sandbox, "workspace-write");
+  assert.equal(thread.approvalsReviewer, "auto_review");
+  assert.equal(Object.hasOwn(thread, "sandboxPolicy"), false);
+
+  const attachedAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await attachedAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection, launchPolicy });
+  assertProviderHandle(attached);
+  // A later caller mutation cannot return approvals to nobody or widen the sandbox.
+  launchPolicy.sandboxPolicy.type = "dangerFullAccess";
+  launchPolicy.approvalsReviewer = "user";
+  for (const [runtime, handle, client] of [[adapter, first, harness.clients[0]!], [attachedAdapter, attached, harness.clients[1]!]] as const) {
+    await runtime.runRoomTurn(handle, { inboxItemId: "auto-turn", actionId: "auto-turn", sourceMessage: {}, activation: {} }, {
+      checkpointTurnStarted: async (turnId) => {
+        client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } });
+      },
+    });
+    const turn = requestByMethod(client, "turn/start").params as Record<string, unknown>;
+    assert.equal(turn.approvalPolicy, "on-request");
+    assert.deepEqual(turn.sandboxPolicy, { type: "workspaceWrite", networkAccess: false });
+    assert.equal(turn.approvalsReviewer, "auto_review");
+  }
+});
+
+test("Codex Auto refuses a runtime or policy that would not review automatically", async () => {
+  const autoPolicy = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" };
+  const ignoring = createHarness({ reviewerFromOwnSettings: "user" });
+  await assert.rejects(new CodexProviderAdapter({ dependencies: ignoring.dependencies }).spawn(spawnRequest({
+    deliveryMode: "daemon_inbox", permissionProfileId: "auto_review", configurationRevision: 1, launchPolicy: autoPolicy,
+  })), /did not turn on automatic review/);
+  assert.equal(ignoring.clients[0]!.requests.some(request => request.method === "turn/start"), false);
+
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  for (const [permissionProfileId, launchPolicy, reason] of [
+    // Project-only writes never run with the host as the reviewer of record.
+    ["auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false } }, /approvalsReviewer/],
+    ["auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: true }, approvalsReviewer: "auto_review" }, /sandboxPolicy/],
+    ["auto_review", { approvalPolicy: "never", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" }, /approvalPolicy/],
+    ["ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, approvalsReviewer: "auto_review" }, /approvalsReviewer/],
+    ["full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, approvalsReviewer: "guardian_subagent" }, /approvalsReviewer/],
+    // A launch that names no access level is still held to the same pairing.
+    [null, { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, approvalsReviewer: "auto_review" }, /automatic review outside the Auto access level/],
+    [null, { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, approvalsReviewer: "auto_review" }, /automatic review outside the Auto access level/],
+    [null, { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, approvalsReviewer: "guardian_subagent" }, /unsupported approval reviewer/],
+  ] as const) {
+    await assert.rejects(adapter.spawn(spawnRequest({
+      deliveryMode: "daemon_inbox", permissionProfileId, configurationRevision: 1, launchPolicy,
+    })), reason);
+  }
+  assert.equal(harness.clients.some(client => client.requests.some(request => request.method === "thread/start")), false);
+});
+
+test("Codex asks the host, not its own reviewer, on every access level except Auto", async () => {
+  for (const [permissionProfileId, launchPolicy] of [
+    ["ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }],
+    ["full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+  ] as const) {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", permissionProfileId, configurationRevision: 1, launchPolicy }));
+    // The launch names the host even though the stored policy names nobody.
+    assert.equal((requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>).approvalsReviewer, "user");
+    await adapter.runRoomTurn(handle, { inboxItemId: "pinned", actionId: "pinned", sourceMessage: {}, activation: {} }, {
+      checkpointTurnStarted: async (turnId) => {
+        harness.clients[0]!.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } });
+      },
+    });
+    assert.equal((requestByMethod(harness.clients[0]!, "turn/start").params as Record<string, unknown>).approvalsReviewer, "user");
+
+    // The owner's own Codex settings name a reviewer and the app-server keeps it.
+    const owned = createHarness({ reviewerFromOwnSettings: "auto_review" });
+    await assert.rejects(new CodexProviderAdapter({ dependencies: owned.dependencies }).spawn(spawnRequest({
+      deliveryMode: "daemon_inbox", permissionProfileId, configurationRevision: 1, launchPolicy,
+    })), /would review approvals itself instead of asking you/);
+    assert.equal(owned.clients[0]!.requests.some(request => request.method === "turn/start"), false);
+  }
+});
+
+test("Codex continuation repair keeps the access level the runtime was launched under", async () => {
+  const autoPolicy = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" };
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", permissionProfileId: "auto_review", configurationRevision: 1, launchPolicy: autoPolicy }));
+  const client = harness.clients[0]!;
+  const before = client.requests.length;
+  // An agent created in Add Agent stores an empty policy until its settings are edited.
+  const result = await adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+    forceReplacement: true, cwd: "/repo", launchPolicy: {}, model: null, reasoningEffort: null,
+  }, { checkpointReplacement: async () => {} });
+  assert.equal(result.outcome, "replaced");
+  const replacement = client.requests.slice(before).find(request => request.method === "thread/start")!.params as Record<string, unknown>;
+  assert.equal(replacement.approvalPolicy, "on-request");
+  assert.equal(replacement.sandbox, "workspace-write");
+  assert.equal(replacement.approvalsReviewer, "auto_review");
+});
+
+test("Codex continuation repair refuses a thread that would not review the way the runtime was launched", async () => {
+  for (const [permissionProfileId, launchPolicy, reported, reason] of [
+    ["auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" },
+      "user", /did not turn on automatic review/],
+    ["ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } },
+      "auto_review", /would review approvals itself instead of asking you/],
+  ] as const) {
+    for (const forceReplacement of [true, false]) {
+      const harness = createHarness();
+      const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+      const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", permissionProfileId, configurationRevision: 1, launchPolicy }));
+      // The app-server honoured the launch, then stops honouring the reviewer.
+      harness.clients[0]!.reviewerFromOwnSettings = reported;
+      let checkpointed = false;
+      await assert.rejects(adapter.repairContinuation!(handle, {
+        workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+        forceReplacement, cwd: "/repo", launchPolicy: {}, model: null, reasoningEffort: null,
+      }, { checkpointReplacement: async () => { checkpointed = true; } }), reason);
+      assert.equal(checkpointed, false, "a refused thread never becomes the agent's conversation");
+    }
+  }
 });
 
 test("Codex ask-before-write remains read-only at turn dispatch after reattachment", async () => {

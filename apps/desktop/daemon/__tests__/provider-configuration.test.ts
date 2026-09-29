@@ -329,6 +329,75 @@ test("isolated supervised provider runtimes admit multiple agents in one room", 
   assert.equal(providerSupportsConcurrentSupervisedAgents("cursor"), true);
 });
 
+test("Auto hands approval review to the provider and leaves no trace when switched away", () => {
+  const codex = { provider: "codex", model: null, reasoningEffort: null, configurationRevision: 3 } as const;
+  const codexAuto = deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "auto_review" }, {
+    approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, experimental: true,
+  });
+  assert.deepEqual(codexAuto.launchPolicy, {
+    experimental: true,
+    approvalPolicy: "on-request",
+    sandboxPolicy: { type: "workspaceWrite", networkAccess: false },
+    approvalsReviewer: "auto_review",
+  });
+  // Leaving Auto must return approvals to the host, not keep the reviewer.
+  assert.deepEqual(deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "ask_before_write" }, codexAuto.launchPolicy).launchPolicy, {
+    experimental: true,
+    approvalPolicy: "on-request",
+    sandboxPolicy: { type: "readOnly", networkAccess: false },
+  });
+  assert.deepEqual(deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "full_access" }, codexAuto.launchPolicy).launchPolicy, {
+    experimental: true,
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "dangerFullAccess" },
+  });
+  for (const permissionProfileId of ["ask_before_write", "full_access"]) {
+    assert.throws(() => resolveProviderConfigurationSnapshot({
+      ...codex, permissionProfileId, launchPolicy: { approvalsReviewer: "auto_review" },
+    }), /conflicts with permission-profile authority at 'approvalsReviewer'/);
+  }
+  assert.throws(() => resolveProviderConfigurationSnapshot({
+    ...codex, permissionProfileId: "auto_review", launchPolicy: { approvalsReviewer: "user" },
+  }), /conflicts with permission-profile authority at 'approvalsReviewer'/);
+  assert.throws(() => resolveProviderConfigurationSnapshot({
+    ...codex, permissionProfileId: "auto_review", launchPolicy: { sandboxPolicy: { type: "dangerFullAccess" } },
+  }), /conflicts with permission-profile authority at 'sandboxPolicy'/);
+
+  const claude = { provider: "claude-code", model: null, reasoningEffort: null, configurationRevision: 4 } as const;
+  const claudeAuto = deriveProviderConfigurationSnapshot({ ...claude, permissionProfileId: "auto_review" }, {
+    permissionMode: "bypassPermissions", dangerouslySkipPermissions: true, allowedTools: ["*"],
+    settings: '{"permissions":{"allow":["Bash"]}}', settingSources: "user,project", maxTurns: 9,
+  });
+  assert.deepEqual(claudeAuto.launchPolicy, {
+    maxTurns: 9,
+    permissionMode: "auto", dangerouslySkipPermissions: false, allowDangerouslySkipPermissions: false,
+    tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
+    allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+  });
+  assert.throws(() => resolveProviderConfigurationSnapshot({
+    ...claude, permissionProfileId: "auto_review", launchPolicy: { "permission-mode": "bypassPermissions" },
+  }), /Claude approval profile cannot override 'permission-mode'/);
+  assert.deepEqual(deriveProviderConfigurationSnapshot({ ...claude, permissionProfileId: "full_access" }, claudeAuto.launchPolicy).launchPolicy,
+    { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true, maxTurns: 9 });
+  assert.equal(deriveProviderConfigurationSnapshot({ ...claude, permissionProfileId: "ask_before_write" }, claudeAuto.launchPolicy).launchPolicy.permissionMode, "default");
+  assert.deepEqual(deriveProviderConfigurationSnapshot({ ...claude, permissionProfileId: "read_only" }, claudeAuto.launchPolicy).launchPolicy, {
+    maxTurns: 9, permissionMode: "dontAsk", dangerouslySkipPermissions: false,
+    tools: ["Read", "Glob", "Grep"], allowedTools: ["mcp__letagents__*"], settingSources: "",
+  });
+
+  assert.equal(supervisedPermissionProfilesForProvider("claude-code").find((profile) => profile.id === "auto_review")?.status, "available");
+  assert.equal(supervisedPermissionProfilesForProvider("claude-code").find((profile) => profile.id === "auto_review")?.risk, "high");
+  assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "auto_review")?.status, "available");
+  assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "auto_review")?.risk, "high");
+  for (const provider of ["open-model", "cursor"]) {
+    assert.equal(supervisedPermissionProfilesForProvider(provider).some((profile) => profile.id === "auto_review"), false);
+    assert.throws(() => deriveProviderConfigurationSnapshot({
+      provider, model: null, reasoningEffort: null, permissionProfileId: "auto_review", configurationRevision: 1,
+    }, {}), /unavailable/);
+  }
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "auto_review"), /verified workspace-rooted/);
+});
+
 test("Claude approval profile strips previous broad authority and can return to existing profiles", () => {
   const selection = { provider: "claude-code", model: null, reasoningEffort: null, configurationRevision: 2 } as const;
   const ask = deriveProviderConfigurationSnapshot({ ...selection, permissionProfileId: "ask_before_write" }, {

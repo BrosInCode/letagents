@@ -68,8 +68,15 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
 
   if (provider === "codex") {
     for (const key of reservedCodexPolicy) if (Object.hasOwn(policy, key)) throw new Error(`Codex launch policy cannot override '${key}'.`);
-    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write"]);
-    const authority = profile === "ask_before_write"
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review"]);
+    const authority = profile === "auto_review"
+      ? {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "workspaceWrite", networkAccess: false },
+        // Codex routes its own escalations to its reviewer instead of the host.
+        approvalsReviewer: "auto_review",
+      }
+      : profile === "ask_before_write"
       ? {
         approvalPolicy: "on-request",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
@@ -78,8 +85,13 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
         approvalPolicy: "never",
         sandboxPolicy: { type: "dangerFullAccess" },
       };
-    requirePolicyMatch(policy, "approvalPolicy", authority.approvalPolicy, provider);
-    requirePolicyMatch(policy, "sandboxPolicy", authority.sandboxPolicy, provider);
+    // Only the Auto profile may hand approvals to a reviewer other than the host.
+    if (profile !== "auto_review" && Object.hasOwn(policy, "approvalsReviewer") && policy.approvalsReviewer !== "user") {
+      throw new Error(`Provider '${provider}' launch policy conflicts with permission-profile authority at 'approvalsReviewer'.`);
+    }
+    for (const [key, value] of Object.entries(authority)) {
+      requirePolicyMatch(policy, key, value, provider);
+    }
     return {
       provider, model: normalizedModel, reasoningEffort: input.reasoningEffort, permissionProfileId: profile,
       launchPolicy: { ...policy, ...authority },
@@ -109,7 +121,7 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   if (input.reasoningEffort !== null) throw new Error(`Provider '${provider}' does not support reasoning effort.`);
   if (provider === "claude-code" || provider === "claude") {
     scalarCliPolicy(policy, "Claude");
-    const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "full_access"]);
+    const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "auto_review", "full_access"]);
     const authority = profile === "read_only"
       ? {
         permissionMode: "dontAsk",
@@ -125,12 +137,14 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
         : {
-          permissionMode: "default", dangerouslySkipPermissions: false,
+          // Auto differs from asking only in who decides: Claude's own review
+          // instead of the host. The tool surface and ignored settings match.
+          permissionMode: profile === "auto_review" ? "auto" : "default", dangerouslySkipPermissions: false,
           allowDangerouslySkipPermissions: false,
           tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
           allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
         };
-    if (profile === "ask_before_write") {
+    if (profile === "ask_before_write" || profile === "auto_review") {
       const authorityFlags = new Set(Object.keys(authority).map(key => key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)));
       for (const key of Object.keys(policy)) {
         if (key.includes("-") && authorityFlags.has(key)) throw new Error(`Claude approval profile cannot override '${key}'.`);
@@ -219,19 +233,21 @@ function stripProfileAuthority(
 ): Record<string, unknown> {
   const previousClaudeProfileWasReadOnly = (policy.permissionMode === "plan" || policy.permissionMode === "dontAsk")
     && policy.dangerouslySkipPermissions === false;
-  const previousClaudeProfileAsked = policy.permissionMode === "default" && policy.dangerouslySkipPermissions === false;
+  const previousClaudeProfileAsked = (policy.permissionMode === "default" || policy.permissionMode === "auto")
+    && policy.dangerouslySkipPermissions === false;
+  const nextClaudeProfileAsks = nextPermissionProfileId === "ask_before_write" || nextPermissionProfileId === "auto_review";
   const authorityKeys = provider === "codex"
-    ? ["approvalPolicy", "sandboxPolicy"]
+    ? ["approvalPolicy", "sandboxPolicy", "approvalsReviewer"]
     : provider === "open-model"
       ? ["permission"]
     : provider === "claude-code" || provider === "claude"
       ? [
         "permissionMode",
         "dangerouslySkipPermissions",
-        ...(nextPermissionProfileId === "read_only" || nextPermissionProfileId === "ask_before_write" || previousClaudeProfileWasReadOnly || previousClaudeProfileAsked
+        ...(nextPermissionProfileId === "read_only" || nextClaudeProfileAsks || previousClaudeProfileWasReadOnly || previousClaudeProfileAsked
           ? ["tools", "allowedTools", "settingSources"]
           : []),
-        ...(nextPermissionProfileId === "ask_before_write" || previousClaudeProfileAsked
+        ...(nextClaudeProfileAsks || previousClaudeProfileAsked
           ? ["settings", "allowDangerouslySkipPermissions"] : []),
       ]
       : provider === "cursor"
