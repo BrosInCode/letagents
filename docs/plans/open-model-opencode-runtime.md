@@ -37,9 +37,30 @@ Codex-backed implementation.
   does not list skills from `.claude/skills` or `.agents/skills` under the
   owner's home directory or the project. OpenCode's own `.opencode/skill(s)`
   directories, `skills.paths` from configuration, and its built-in skills still
-  load. The owner's `~/.claude/CLAUDE.md` is still read as instructions;
-  disabling that also changes how a project's `CLAUDE.md` is used, so it is a
-  separate decision.
+  load.
+- Every launch puts an empty `AGENTS.md` in the runtime's own OpenCode config
+  directory. OpenCode adds one global instruction file to each system prompt:
+  that `AGENTS.md` when it exists, otherwise the owner's `~/.claude/CLAUDE.md`.
+  The empty file takes the place and adds nothing, so the owner's global
+  `~/.claude/CLAUDE.md` does not reach the agent. A launch that cannot write
+  the file fails. Reattaching to a running runtime writes it too, without
+  failing, and OpenCode honours it from the next turn. Project instruction
+  files still load, including a project's `CLAUDE.md` when it has no
+  `AGENTS.md`; `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` would drop both and is
+  not set. The contract smoke checks this and the skills setting against the
+  pinned binary, from a planted home directory and Git project.
+- Other files of the owner's still reach the agent. Seen on 1.18.20:
+  - `~/.opencode` is read as an OpenCode config directory. Instruction files
+    named in its `opencode.json` were loaded, a definition there of the
+    primary agent, `build`, replaced that agent's prompt, and a skill there
+    was listed.
+  - In a project that is not a Git repository, OpenCode's search for
+    `AGENTS.md` and `CLAUDE.md` climbs above the project. It found such a
+    file in a home directory two levels up, and a home `AGENTS.md` took the
+    place of the project's `CLAUDE.md`. In the source the search stops only
+    at the file system root. The workspace of a repo-less room is under the
+    owner's home and is not a Git repository; an Open Model agent in one was
+    not tested.
 
 ## Lifecycle evidence
 

@@ -56,6 +56,7 @@ import {
   openCodeConfig,
   parseConfiguredOpenModel,
   seedOpenCodeConfigHome,
+  shieldOwnerInstructions,
   supervisedOpenCodeMcpEnvironment,
 } from "./opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
@@ -623,6 +624,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     // The seed only saves time. A directory it cannot write leaves OpenCode
     // on its own install path, which must not block the launch.
     await seedOpenCodeConfigHome(configHome, OPENCODE_RUNTIME_VERSION).catch(() => undefined);
+    // This one is not best-effort: without it the owner's personal
+    // instructions reach the agent, so a launch that cannot write it fails.
+    await shieldOwnerInstructions(configHome);
     const env = minimalOpenCodeEnvironment(process.env, {
       // Resolve gh's config before isolating OpenCode's XDG directories. Keep
       // the existing credential store location, never copy its credentials.
@@ -788,6 +792,16 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     }
     const configuredModel = parseConfiguredOpenModel(await client.config());
     if (!configuredModel) throw new Error("The attached OpenCode runtime has no configured Open Model.");
+    // OpenCode looks for its instruction files again on every turn, so a
+    // runtime launched before the shield existed gains it here. Unlike a
+    // launch, this is best-effort: the runtime is already running, and
+    // refusing to attach would only take a working agent away. The sidecar
+    // path comes from a persisted reference, so nothing is written unless it
+    // is this adapter's own directory for the work attempt.
+    const ownRuntimeRoot = join(this.runtimeRoot, safeRuntimeId(ref.workAttemptId));
+    if (connection.serverAuthPath === join(ownRuntimeRoot, "server-auth.json")) {
+      await shieldOwnerInstructions(join(ownRuntimeRoot, "config")).catch(() => undefined);
+    }
     const handle = new OpenModelHandle(
       ref.workAttemptId,
       connection.pid,
