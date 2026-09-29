@@ -157,9 +157,8 @@ export async function seedOpenCodeConfigHome(
  * drop both.
  *
  * Only that one file is covered. OpenCode still reads what the owner keeps
- * under `~/.opencode`, and in a project that is not a Git repository its
- * search for project instruction files climbs through every parent
- * directory, the owner's home among them.
+ * under `~/.opencode`. Its climb out of a workspace that is not a Git
+ * repository is narrowed by `workspaceOpenCodeEnvironment`.
  *
  * The file is made empty on every call, whatever was there. Anything else
  * at that path is replaced, not written through, so a link named `AGENTS.md`
@@ -191,6 +190,34 @@ export async function shieldOwnerInstructions(configHome: string): Promise<void>
   } finally {
     await unlink(staged).catch(() => undefined);
   }
+}
+
+/**
+ * Keeps OpenCode inside a room's scratch workspace.
+ *
+ * OpenCode looks for project files from the working directory up to the
+ * root of its Git repository. A scratch workspace has no repository, so the
+ * search climbs to the file system root: it reads `AGENTS.md`, `CLAUDE.md`,
+ * `opencode.json` and `.opencode` directories from every directory above,
+ * and the workspace lies under the owner's home. A scratch workspace has no
+ * project files of its own, so the search is switched off for it.
+ *
+ * The setting does not cover plugins. OpenCode 1.18.20 has a second search
+ * with no switch, and it still imports plugins from a `.opencode` directory
+ * above the workspace and plugins named by an `opencode.json` there, inside
+ * the server process. Only a project root at or above the workspace stops
+ * that search, and for OpenCode a project root is a Git repository.
+ *
+ * A Git worktree is untouched: there the search stops at the repository root.
+ * The kind is never guessed. A launch that does not say which it is would
+ * otherwise be treated as a repository and left open.
+ */
+export function workspaceOpenCodeEnvironment(
+  workspaceKind: ProviderSpawnRequest["workspaceKind"],
+): Record<string, string> {
+  if (workspaceKind === "room_scratch") return { OPENCODE_DISABLE_PROJECT_CONFIG: "1" };
+  if (workspaceKind === "git_worktree") return {};
+  throw new Error("Open Model launch requires an explicit workspace kind.");
 }
 
 export function supervisedOpenCodeMcpEnvironment(

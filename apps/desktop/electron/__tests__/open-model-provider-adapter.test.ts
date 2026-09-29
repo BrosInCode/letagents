@@ -303,6 +303,7 @@ function spawnRequest(overrides: Partial<ProviderSpawnRequest> = {}): ProviderSp
     deliveryMode: "daemon_inbox",
     agentDisplayName: "QuartzCove",
     cwd: "/tmp/open-model-worktree",
+    workspaceKind: "git_worktree",
     launchPolicy: { permission: { "*": "allow" } },
     model: "qwen/qwen3-coder",
     reasoningEffort: null,
@@ -1819,6 +1820,45 @@ test("Open Model launches without loading the owner's external Claude and agent 
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
   assert.equal(harness.launches[0]?.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, "1",
     "the runtime always launches with external skills disabled; the owner's value is not inherited");
+});
+
+test("Open Model keeps OpenCode's project search inside a room's scratch workspace", async (t) => {
+  const previous = process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+  process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+    else process.env.OPENCODE_DISABLE_PROJECT_CONFIG = previous;
+  });
+  const scratch = await spawnAdapter({ workspaceKind: "room_scratch" });
+  t.after(() => rm(scratch.runtimeRoot, { recursive: true, force: true }));
+  assert.equal(scratch.harness.launches[0]?.env.OPENCODE_DISABLE_PROJECT_CONFIG, "1",
+    "a scratch workspace has no repository root to stop the search at");
+
+  // A repository's own AGENTS.md, CLAUDE.md and OpenCode configuration must
+  // keep loading, whatever the owner's environment says.
+  const worktree = await spawnAdapter({ workspaceKind: "git_worktree" });
+  t.after(() => rm(worktree.runtimeRoot, { recursive: true, force: true }));
+  assert.equal(worktree.harness.launches[0]?.env.OPENCODE_DISABLE_PROJECT_CONFIG, undefined);
+});
+
+test("Open Model does not launch into a workspace whose kind it was not told", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-unknown-workspace-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(
+    adapter.spawn(spawnRequest({ workspaceKind: undefined })),
+    /requires an explicit workspace kind/,
+  );
+  assert.equal(harness.launches.length, 0, "an unknown workspace is never treated as a repository");
+  assert.deepEqual(await readdir(runtimeRoot), [], "nothing is written for a launch that is refused");
 });
 
 test("Open Model launches with an empty global instruction file in place of the owner's", async (t) => {

@@ -58,6 +58,7 @@ import {
   seedOpenCodeConfigHome,
   shieldOwnerInstructions,
   supervisedOpenCodeMcpEnvironment,
+  workspaceOpenCodeEnvironment,
 } from "./opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
@@ -576,6 +577,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   ): Promise<ProviderHandle> {
     const appliedConfigurationRevision = attestProviderSpawnPolicy("open-model", req);
     void appliedConfigurationRevision;
+    // Refused before anything is written or launched.
+    const workspaceEnvironment = workspaceOpenCodeEnvironment(req.workspaceKind);
     await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
     await chmod(runtimeRoot, 0o700);
     const authPath = join(runtimeRoot, "server-auth.json");
@@ -644,6 +647,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       XDG_CONFIG_HOME: configHome,
       XDG_STATE_HOME: join(runtimeRoot, "state"),
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
+      ...workspaceEnvironment,
     });
     const intentControl: OpenCodeRuntimeControl = {
       ...initialControl,

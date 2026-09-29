@@ -49,18 +49,36 @@ Codex-backed implementation.
   `AGENTS.md`; `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` would drop both and is
   not set. The contract smoke checks this and the skills setting against the
   pinned binary, from a planted home directory and Git project.
-- Other files of the owner's still reach the agent. Seen on 1.18.20:
-  - `~/.opencode` is read as an OpenCode config directory. Instruction files
-    named in its `opencode.json` were loaded, a definition there of the
-    primary agent, `build`, replaced that agent's prompt, and a skill there
-    was listed.
-  - In a project that is not a Git repository, OpenCode's search for
-    `AGENTS.md` and `CLAUDE.md` climbs above the project. It found such a
-    file in a home directory two levels up, and a home `AGENTS.md` took the
-    place of the project's `CLAUDE.md`. In the source the search stops only
-    at the file system root. The workspace of a repo-less room is under the
-    owner's home and is not a Git repository; an Open Model agent in one was
-    not tested.
+- A room's scratch workspace is launched with
+  `OPENCODE_DISABLE_PROJECT_CONFIG=1`. OpenCode looks for `AGENTS.md`,
+  `CLAUDE.md`, `opencode.json` and `.opencode` directories from the working
+  directory up to the root of its Git repository. A scratch workspace has no
+  repository and lies under the owner's home, so without the setting an
+  `AGENTS.md` in the home directory, or instructions named by an
+  `opencode.json` there, reached the agent, and a `.opencode` directory on
+  the way gave it an agent definition and had packages installed into it. A scratch workspace has no project files
+  of its own to lose. Git worktrees are launched without the setting. A
+  launch that does not say which kind of workspace it has is refused. The
+  contract smoke checks both kinds.
+- The setting does not stop plugins. OpenCode 1.18.20 has a second search
+  with no switch. From a scratch workspace it still imports, inside the
+  server process, which holds the provider key:
+  - plugins in a `.opencode` directory anywhere between the workspace and
+    the file system root;
+  - plugins named by an `opencode.json` in one of those directories, and it
+    fetches packages that file names.
+
+  No launch setting bounds that search; `OPENCODE_PURE` also drops the
+  credential-boundary plugin. A Git repository at the workspace, or at its
+  parent `room-only` directory, does stop it. The workspace is deliberately
+  not a repository, so that is a decision about the workspace, not about
+  this launch. The contract smoke asserts the known state.
+- `~/.opencode` is still read as an OpenCode config directory, for every
+  workspace. Seen on 1.18.20: instruction files named in its `opencode.json`
+  were loaded, a definition there of the primary agent, `build`, replaced
+  that agent's prompt, and a skill there was listed. In the source, OpenCode
+  also reads a system-wide managed configuration directory; that was not
+  tested.
 
 ## Lifecycle evidence
 
