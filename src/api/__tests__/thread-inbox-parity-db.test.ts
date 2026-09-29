@@ -317,6 +317,14 @@ test("PG thread projection migration: hot-table contention is bounded and retrya
     [room.id, Number(root.id.slice(4))],
   );
 
+  // The bound checks that the cutover honours the caller's lock_timeout.
+  // With the 100ms set below it makes three attempts and sleeps 100ms and
+  // 200ms between them: 600ms by design. With its own 1s default it would
+  // take at least 3.3s. At 1.5s a busy CI runner exceeded the bound by 9ms;
+  // 3s still separates the two. A wait with no deadline never returns, so
+  // no bound here can report it.
+  const CUTOVER_WAIT_BOUND_MS = 3_000;
+
   async function attemptCutover(): Promise<{ elapsedMs: number; code: string | undefined }> {
     const migrationClient = await pool!.connect();
     const startedAt = Date.now();
@@ -339,7 +347,7 @@ test("PG thread projection migration: hot-table contention is bounded and retrya
 
   const readBlocked = await attemptCutover();
   assert.equal(readBlocked.code, "55P03");
-  assert.ok(readBlocked.elapsedMs < 1_500, `read lock wait was unbounded: ${readBlocked.elapsedMs}ms`);
+  assert.ok(readBlocked.elapsedMs < CUTOVER_WAIT_BOUND_MS, `read lock wait ignored the caller's deadline: ${readBlocked.elapsedMs}ms`);
   const oldRead = await oldReader.query<{ count: number }>(
     `SELECT COUNT(*)::int AS count FROM message_thread_reads WHERE room_id = $1`,
     [room.id],
@@ -351,7 +359,7 @@ test("PG thread projection migration: hot-table contention is bounded and retrya
 
   const messageBlocked = await attemptCutover();
   assert.equal(messageBlocked.code, "55P03");
-  assert.ok(messageBlocked.elapsedMs < 1_500, `message lock wait was unbounded: ${messageBlocked.elapsedMs}ms`);
+  assert.ok(messageBlocked.elapsedMs < CUTOVER_WAIT_BOUND_MS, `message lock wait ignored the caller's deadline: ${messageBlocked.elapsedMs}ms`);
 
   // A failed cutover rolls back its queued DDL, so legacy writers recover
   // immediately rather than remaining trapped behind a waiting migration.
@@ -379,7 +387,7 @@ test("PG thread projection migration: hot-table contention is bounded and retrya
       await legacyWriter.query(`LOCK TABLE ${table} IN ROW EXCLUSIVE MODE`);
       const blocked = await attemptCutover();
       assert.equal(blocked.code, "55P03", `${table} cutover lock was not deadline-bounded`);
-      assert.ok(blocked.elapsedMs < 1_500, `${table} lock wait was unbounded: ${blocked.elapsedMs}ms`);
+      assert.ok(blocked.elapsedMs < CUTOVER_WAIT_BOUND_MS, `${table} lock wait ignored the caller's deadline: ${blocked.elapsedMs}ms`);
       await legacyWriter.query("ROLLBACK");
     } finally {
       legacyWriter.release();
