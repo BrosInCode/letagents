@@ -33,7 +33,7 @@ import { sameProviderActionConnectionSnapshot, type ProviderActionHandle } from 
 import { isCursorChildConnection } from "./provider-state-policy.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import type { SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
-import type { DaemonAgentConfiguration, DaemonManifestEntry, TaskWorkAttempt } from "./types.js";
+import type { DaemonAgentConfiguration, DaemonManifestEntry, TaskWorkAttempt, Transition } from "./types.js";
 import type { WorkerBindingStore, WorkerSessionBinding } from "./worker-binding-store.js";
 import type { ConvergenceRequestKind } from "./provider-execution-coordinator.js";
 import {
@@ -66,6 +66,15 @@ const WORKER_BIND_RETRY_DELAYS_MS = [1_000, 3_000, 10_000, 30_000, 60_000] as co
 const RETRY_JITTER_RATIO = 0.25;
 
 class InvalidSupervisorGrantRenewalError extends Error {}
+
+/**
+ * The previous owner of a task lease cannot be proven stopped, so the lease
+ * must not move. That is a reason to leave the lease alone, not to deny the
+ * new worker its room. Work leases do not expire, so the unmoved lease stays
+ * with its ended session until someone releases it; the skip is audited with
+ * the lease and task so the owner can.
+ */
+class UnprovenLeasePredecessorError extends Error {}
 
 export type BootstrapOperation = {
   controller: AbortController;
@@ -246,6 +255,7 @@ export type WorkerAuthorityCoordinatorOptions = {
   setTimeout: typeof setTimeout;
   clearTimeout: typeof clearTimeout;
   random?: (() => number) | undefined;
+  audit?: { append(transition: Transition): Promise<void> } | undefined;
   sleep?: ((delayMs: number) => Promise<void>) | undefined;
 };
 
@@ -925,46 +935,20 @@ export class WorkerAuthorityCoordinator {
     const history = await this.options.bindings.executionPredecessors(entry.id, entry.work_attempt_id, entry.room_id);
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id);
     for (const lease of predecessors) {
-      const records = history.filter(record => record.agent_session_id === lease.agent_session_id);
-      if (!records.length) throw new Error("The previous task owner has no exact retained execution identity. No lease was moved.");
-      // A live worker session may rotate onto a replacement host grant without
-      // replacing its native execution. Keep both receipts, and require proof
-      // that this predecessor was actually held under the current grant.
-      if (records.some(record => record.authority) && !records.some(record => record.authority?.grant_id === grant.grantId)) {
-        throw new Error("The previous task owner belongs to a different authority.");
+      let predecessor: (typeof attempt.execution_generations)[number];
+      try {
+        predecessor = this.provenLeasePredecessor(entry, grant, lease, history, attempt);
+      } catch (error) {
+        if (!(error instanceof UnprovenLeasePredecessorError)) throw error;
+        await this.options.audit?.append({
+          at: new Date(this.options.nowMs()).toISOString(), entry_id: entry.id,
+          from: entry.observed_state, to: entry.observed_state, actor: "daemon-convergence",
+          generation: grant.daemonGeneration,
+          cause: `Room access restored without task lease ${lease.id} (task ${lease.task_id}): ${error.message} `
+            + "Release the lease in the room to reassign the task.",
+        }).catch(() => undefined);
+        continue;
       }
-      const executions = records.map(record => {
-        const binding = record.authority;
-        if (!binding && !record.legacy_recovery_complete) throw new Error("The previous worker has no completed exact runtime recovery.");
-        if (binding && (binding.room_id !== entry.room_id || binding.api_url !== grant.apiUrl
-          || binding.agent_key !== grant.agentKey || binding.work_attempt_id !== entry.work_attempt_id)) {
-          throw new Error("The previous task owner belongs to a different authority.");
-        }
-        const execution = attempt.execution_generations.find(value => value.execution_generation_id === record.execution_generation_id);
-        const terminal = execution?.terminal;
-        const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
-        const expectedKind = entry.provider === "claude-code" ? "claude_cli" : entry.provider === "codex" ? "codex_app_server" : null;
-        const parsedLane = cursorLaneRetirementSchema.safeParse(record.cursor_lane_retirement);
-        const lane = parsedLane.success ? parsedLane.data : undefined;
-        const retiredCursorLane = entry.provider === "cursor" && binding && lane
-          && lane.entry_id === entry.id && lane.room_id === entry.room_id && lane.work_attempt_id === entry.work_attempt_id
-          && lane.execution_generation_id === record.execution_generation_id && lane.agent_session_id === lease.agent_session_id
-          && binding.entry_id === entry.id && binding.execution_generation_id === record.execution_generation_id
-          && binding.agent_session_id === lease.agent_session_id
-          && lane.api_url === grant.apiUrl && lane.grant_id === grant.grantId && lane.agent_key === grant.agentKey
-          && terminal?.terminal_cause === "stopped"
-          && lane.provider_continuation_id === terminal?.provider_continuation_id
-          && Number.isFinite(Date.parse(lane.retired_at)) && Date.parse(lane.retired_at) >= Date.parse(terminal?.ended_at ?? "");
-        if (!execution || execution.work_attempt_id !== entry.work_attempt_id || !terminal
-          || !(retiredCursorLane || (death.success && death.data.kind === expectedKind))
-          || terminal.actor !== execution.actor || terminal.generation !== execution.generation
-          || !Number.isFinite(Date.parse(terminal.ended_at)) || Date.parse(terminal.ended_at) < Date.parse(execution.started_at)
-          || !["exited", "killed", "stopped", "crashed", "protocol_error"].includes(terminal.terminal_cause)) {
-          throw new Error("The previous task owner's native runtime has not been proven stopped. No lease was moved.");
-        }
-        return execution;
-      });
-      const predecessor = executions.reduce((latest, value) => value.generation > latest.generation ? value : latest);
       const input = { apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
         grantGeneration: grant.grantGeneration, lease, workAttemptId: entry.work_attempt_id,
         executionGenerationId: predecessor.execution_generation_id,
@@ -988,6 +972,56 @@ export class WorkerAuthorityCoordinator {
       }
       await assertCurrent();
     }
+  }
+
+  /** Exact stopped predecessor for a lease, or UnprovenLeasePredecessorError. */
+  private provenLeasePredecessor(
+    entry: DaemonManifestEntry,
+    grant: InstalledHostGrant,
+    lease: CloudWorkLease,
+    history: Awaited<ReturnType<WorkerAuthorityBindings["executionPredecessors"]>>,
+    attempt: Awaited<ReturnType<WorkerAuthorityDurability["getAttempt"]>>,
+  ): Awaited<ReturnType<WorkerAuthorityDurability["getAttempt"]>>["execution_generations"][number] {
+    const records = history.filter(record => record.agent_session_id === lease.agent_session_id);
+    if (!records.length) throw new UnprovenLeasePredecessorError("The previous task owner has no exact retained execution identity. No lease was moved.");
+    // A live worker session may rotate onto a replacement host grant without
+    // replacing its native execution. Keep both receipts, and require proof
+    // that this predecessor was actually held under the current grant.
+    if (records.some(record => record.authority) && !records.some(record => record.authority?.grant_id === grant.grantId)) {
+      throw new UnprovenLeasePredecessorError("The previous task owner belongs to a different authority.");
+    }
+    const executions = records.map(record => {
+      const binding = record.authority;
+      if (!binding && !record.legacy_recovery_complete) throw new UnprovenLeasePredecessorError("The previous worker has no completed exact runtime recovery.");
+      if (binding && (binding.room_id !== entry.room_id || binding.api_url !== grant.apiUrl
+        || binding.agent_key !== grant.agentKey || binding.work_attempt_id !== entry.work_attempt_id)) {
+        throw new UnprovenLeasePredecessorError("The previous task owner belongs to a different authority.");
+      }
+      const execution = attempt.execution_generations.find(value => value.execution_generation_id === record.execution_generation_id);
+      const terminal = execution?.terminal;
+      const death = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
+      const expectedKind = entry.provider === "claude-code" ? "claude_cli" : entry.provider === "codex" ? "codex_app_server" : null;
+      const parsedLane = cursorLaneRetirementSchema.safeParse(record.cursor_lane_retirement);
+      const lane = parsedLane.success ? parsedLane.data : undefined;
+      const retiredCursorLane = entry.provider === "cursor" && binding && lane
+        && lane.entry_id === entry.id && lane.room_id === entry.room_id && lane.work_attempt_id === entry.work_attempt_id
+        && lane.execution_generation_id === record.execution_generation_id && lane.agent_session_id === lease.agent_session_id
+        && binding.entry_id === entry.id && binding.execution_generation_id === record.execution_generation_id
+        && binding.agent_session_id === lease.agent_session_id
+        && lane.api_url === grant.apiUrl && lane.grant_id === grant.grantId && lane.agent_key === grant.agentKey
+        && terminal?.terminal_cause === "stopped"
+        && lane.provider_continuation_id === terminal?.provider_continuation_id
+        && Number.isFinite(Date.parse(lane.retired_at)) && Date.parse(lane.retired_at) >= Date.parse(terminal?.ended_at ?? "");
+      if (!execution || execution.work_attempt_id !== entry.work_attempt_id || !terminal
+        || !(retiredCursorLane || (death.success && death.data.kind === expectedKind))
+        || terminal.actor !== execution.actor || terminal.generation !== execution.generation
+        || !Number.isFinite(Date.parse(terminal.ended_at)) || Date.parse(terminal.ended_at) < Date.parse(execution.started_at)
+        || !["exited", "killed", "stopped", "crashed", "protocol_error"].includes(terminal.terminal_cause)) {
+        throw new UnprovenLeasePredecessorError("The previous task owner's native runtime has not been proven stopped. No lease was moved.");
+      }
+      return execution;
+    });
+    return executions.reduce((latest, value) => value.generation > latest.generation ? value : latest);
   }
 
   async mintHostWorkerAuthorization(

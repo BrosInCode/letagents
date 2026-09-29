@@ -7326,9 +7326,12 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
         assert.equal(lease.agent_session_id, "successor-worker");
         assert.equal(lease.epoch, 5);
       } else {
-        await assert.rejects(internals.workerAuthority.mintHostWorkerAuthorization(recovered), /not been proven stopped/);
-        assert.deepEqual(leaseEvents, ["retire", "mint"]);
+        // An unproven predecessor keeps its lease, but no longer costs the
+        // successor its room access; the unmoved lease expires on its own.
+        assert.ok(await internals.workerAuthority.mintHostWorkerAuthorization(recovered));
+        assert.deepEqual(leaseEvents, ["retire", "mint"], "no attestation or rebind without proof");
         assert.equal(lease.epoch, 4, "an old terminal/archive alone does not prove lane retirement");
+        assert.equal(lease.agent_session_id, "retired-worker", "the unproven lease stays with its previous owner");
       }
 
       // Drive the next FIFO message through the real native observation path.

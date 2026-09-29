@@ -167,6 +167,7 @@ type HarnessOptions = {
   loseAuthorityAfterFirstAssert?: "handoff";
   fireMintTimeout?: boolean;
   holdRetryTimers?: boolean;
+  audit?: WorkerAuthorityCoordinatorOptions["audit"];
   advanceClockOnTimers?: boolean;
   random?: () => number;
   recordExactMint?: () => Promise<void>;
@@ -489,6 +490,7 @@ function fixture(options: HarnessOptions = {}) {
       clearTimeout(timer);
     }) as typeof clearTimeout,
     random: options.random ?? (() => 0),
+    audit: options.audit,
   });
 
   return {
@@ -1924,6 +1926,35 @@ test("replacement worker restores an exact retired work lease before exposing it
   assert.equal(f.mutations.length, 2, "cached authority does not poll or repeat the transfer");
 });
 
+test("an unproven lease is skipped without stopping a provable lease in the same inventory from moving", async () => {
+  const seed = retiredLeaseFixture();
+  const unproven = { ...seed.lease, id: "lease-unproven", task_id: "task-unproven", agent_session_id: "session-without-history" };
+  const leases = [unproven, seed.lease];
+  const mutations: string[] = [];
+  const audited: Array<{ cause: string }> = [];
+  const f = retiredLeaseFixture({ audit: { append: async transition => { audited.push(transition); } }, leaseHttp: {
+    listWorkLeases: async () => leases,
+    readWorkLease: async input => leases.find(lease => lease.id === input.leaseId) ?? null,
+    attestWorkLease: async input => { mutations.push(`attest:${input.lease.id}`); return "proof"; },
+    rebindWorkLease: async input => {
+      mutations.push(`rebind:${input.lease.id}`);
+      const next = { ...input.lease, epoch: input.lease.epoch + 1, agent_session_id: input.toSessionId };
+      leases[leases.findIndex(item => item.id === next.id)] = next;
+      return next;
+    },
+  } });
+
+  assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+
+  assert.deepEqual(mutations, ["attest:lease-1", "rebind:lease-1"], "only the provable lease is attested and moved");
+  assert.equal(leases[0]!.agent_session_id, "session-without-history", "the unproven lease keeps its previous owner");
+  assert.equal(leases[0]!.epoch, 4);
+  assert.equal(leases[1]!.epoch, 5);
+  assert.ok(f.harness.custody.workerAuthorization("agent-1"));
+  assert.equal(audited.length, 1, "each skipped lease is recorded so its owner can release it");
+  assert.match(audited[0]!.cause, /lease-unproven \(task task-unproven\).*no exact retained execution identity.*Release the lease/);
+});
+
 test("worker lease recovery resumes a partial multi-lease transfer after an ambiguous response", async () => {
   const seed = retiredLeaseFixture();
   const leases = [seed.lease, { ...seed.lease, id: "lease-2", task_id: "task-2" }];
@@ -1952,7 +1983,7 @@ test("worker lease recovery resumes a partial multi-lease transfer after an ambi
 });
 
 for (const invalid of ["missing-history", "unknown-native", "wrong-birth-kind", "wrong-grant", "unrecovered-legacy", "live-earlier-generation", "cursor"] as const) {
-  test(`worker lease recovery rejects ${invalid} before any attestation`, async () => {
+  test(`worker lease recovery leaves an unproven ${invalid} lease unmoved and still restores room access`, async () => {
     const seed = retiredLeaseFixture();
     let calls = 0;
     let records: NonNullable<HarnessOptions["predecessors"]> = [{ execution_generation_id: "execution-1", agent_session_id: "session-old", authority: seed.authority }];
@@ -1970,9 +2001,9 @@ for (const invalid of ["missing-history", "unknown-native", "wrong-birth-kind", 
       ...(invalid === "cursor" ? { entry: manifestEntry({ provider: "cursor" }) } : {}),
       leaseHttp: { listWorkLeases: async () => [seed.lease], readWorkLease: async () => seed.lease,
         attestWorkLease: async () => { calls++; return "bad"; }, rebindWorkLease: async () => seed.lease } });
-    await assert.rejects(f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+    assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
     assert.equal(calls, 0);
-    assert.equal(f.harness.custody.workerAuthorization("agent-1"), undefined);
+    assert.ok(f.harness.custody.workerAuthorization("agent-1"), "room access is restored without the unproven lease");
   });
 }
 
@@ -2011,7 +2042,7 @@ test("an exactly retired Cursor lane restores its lease without inventing native
 for (const mismatch of ["kind", "extra", "entry_id", "room_id", "work_attempt_id", "execution_generation_id",
   "agent_session_id", "api_url", "grant_id", "agent_key", "provider_continuation_id", "retired_at",
   "earlier-unmarked", "legacy", "terminal-cause"] as const) {
-  test(`Cursor lane retirement rejects ${mismatch} without moving the lease`, async () => {
+  test(`Cursor lane retirement with a mismatched ${mismatch} leaves the lease unmoved and still restores room access`, async () => {
     const seed = retiredLeaseFixture();
     const lane = { kind: "cursor_idle_lane_retired_v1", ...seed.authority,
       provider_continuation_id: "continuation-1", retired_at: "2026-08-26T02:00:00.000Z" };
@@ -2029,10 +2060,10 @@ for (const mismatch of ["kind", "extra", "entry_id", "room_id", "work_attempt_id
     }
     if (mismatch === "legacy") { records[0]!.authority = null; records[0]!.legacy_recovery_complete = true; }
     const f = cursorRetiredLeaseFixture({ predecessors: records, executions });
-    await assert.rejects(f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
+    assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
     assert.deepEqual(f.mutations, []);
     assert.equal(f.current.epoch, 4);
-    assert.equal(f.harness.custody.workerAuthorization("agent-1"), undefined);
+    assert.ok(f.harness.custody.workerAuthorization("agent-1"), "room access is restored without the unproven lease");
   });
 }
 
