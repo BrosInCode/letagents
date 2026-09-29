@@ -1,5 +1,2 @@
 export type RoomKind = 'main' | 'focus'
 export type RoomParticipantKind = 'human' | 'agent'
-export type RoomActivityState = 'active' | 'away' | 'offline'
-export type RoomPresenceSourceFlag = 'delivery' | 'presence' | 'messages' | 'tasks'
-export type RoomAgentPresenceStatus = 'idle' | 'working' | 'reviewing' | 'blocked'

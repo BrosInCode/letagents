@@ -72,8 +72,6 @@ const parentVisibilityLabels = new Map(parentVisibilityOptions.map(option => [op
 const activityScopeLabels = new Map(activityScopeOptions.map(option => [option.value, option.label]))
 const githubEventRoutingLabels = new Map(githubEventRoutingOptions.map(option => [option.value, option.label]))
 const reviewStateLabels = new Map(reviewStateOptions.map(option => [option.value, option.label]))
-const blockerStateLabels = new Map(blockerStateOptions.map(option => [option.value, option.label]))
-const parentTaskNextLabels = new Map(parentTaskNextOptions.map(option => [option.value, option.label]))
 
 export function createEmptyCloseoutDetails(): FocusRoomConclusionDetails {
   return {
@@ -103,14 +101,6 @@ export function githubRoutingLabel(value: FocusGitHubEventRouting): string {
 
 export function reviewStateLabel(value: FocusRoomReviewState): string {
   return reviewStateLabels.get(value) ?? value
-}
-
-export function blockerStateLabel(value: FocusRoomBlockerState): string {
-  return blockerStateLabels.get(value) ?? value
-}
-
-export function parentTaskNextLabel(value: FocusRoomParentTaskNextAction): string {
-  return parentTaskNextLabels.get(value) ?? value
 }
 
 export function focusStatusLabel(status: string): string {
