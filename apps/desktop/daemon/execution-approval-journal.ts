@@ -444,10 +444,51 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
   return [...matches.values()];
 }
 
-export function settleWitnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: string, nowMs: () => number): number {
+/**
+ * Expired prompts of a native runtime other than the agent's live one. Expiry
+ * already refuses every selection and dispatch, and only the live runtime has a
+ * lane that can observe its prompts, so these can never become actionable. This
+ * covers terminals without a death witness, such as those recorded before
+ * witnesses existed, without inferring process death or decision application.
+ */
+export function expiredRetiredRuntimeApprovals(db: DatabaseSync, agentId: string, atMs: number,
+  currentEntry: () => DaemonManifestEntry | undefined): ExecutionApprovalRecord[] {
+  parse(executionIdentity, agentId);
+  const now = parse(time, atMs);
+  const rows = db.prepare(`SELECT request_id,request_version,execution_generation_id,runtime_generation_id
+    FROM execution_approval_requests r WHERE agent_id=? AND expires_at_ms<=?
+      AND state IN ('requested','decision_recorded','dispatching','lost')
+      AND NOT EXISTS (SELECT 1 FROM execution_approval_requests newer WHERE newer.request_id=r.request_id AND newer.request_version>r.request_version)
+      AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId, now);
+  if (!rows.length) return [];
+  const current = currentEntry();
+  const ref = current?.id === agentId ? current.provider_ref : null;
+  const live = ref?.provider_connection && !db.prepare(`SELECT 1 FROM work_attempt_executions
+    WHERE execution_generation_id=? AND terminal_json IS NOT NULL`).get(ref.execution_generation_id) ? ref.provider_connection : null;
+  // Without an exact birth the live runtime cannot be told apart from a retired one.
+  if (live && (!Number.isSafeInteger(live.pid) || live.pid! < 1 || !live.processIdentity?.trim())) return [];
+  const records: ExecutionApprovalRecord[] = [];
+  for (const row of rows) {
+    // A live request is bound to the live birth even when a recovered turn keeps
+    // an older origin generation, so compare births in each request's generation.
+    if (live && executionRuntimeStorageIdentity(agentId, String(row.execution_generation_id),
+      live.kind, live.pid!, live.processIdentity!) === row.runtime_generation_id) continue;
+    // Closure is hygiene. An old record whose evidence cannot be read stays as
+    // it was rather than failing convergence for the agent on every pass.
+    try { records.push(read(db, String(row.request_id), Number(row.request_version))!); }
+    catch { continue; }
+  }
+  return records;
+}
+
+export function settleWitnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: string, nowMs: () => number,
+  currentEntry: () => DaemonManifestEntry | undefined): number {
   requireForeignKeys(db);
   if (!db.isTransaction) reject("invalid_transition");
-  const records = witnessedRuntimeApprovalClosures(db, agentId);
+  const records = [...new Map([...witnessedRuntimeApprovalClosures(db, agentId),
+    ...expiredRetiredRuntimeApprovals(db, agentId, nowMs(), currentEntry)]
+    .map(record => [JSON.stringify([record.request.requestId, record.request.requestVersion]), record])).values()];
   const insert = db.prepare(`INSERT INTO execution_approval_request_closures
     (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`);
   for (const { request, decision } of records) {

@@ -9,6 +9,7 @@ import { createServer, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
 import { hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
+import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "../src/components/desktop/content/room-chat/host-approval-dismissals";
 
 interface HostNode {
   kind: "element" | "text" | "comment";
@@ -192,7 +193,7 @@ function composerProps() {
 function hostApproval(): DesktopHostApproval {
   return { id: "presentation-1", presentation: { agentId: "agent-a", displayName: "GardenPoint", provider: "open-model",
     title: "Run a command", details: '<script>notExecutable()</script>\n{"command":"npm test"}', denyScope: "session_pending" },
-    status: "pending", detail: null, retryDecision: null };
+    status: "pending", detail: null, retryDecision: null, dismissKey: null };
 }
 
 async function flushHostApprovals(): Promise<void> {
@@ -339,6 +340,110 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
     assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 2);
     assert.deepEqual(decisions, [], "dismissal is local presentation state and never changes the recorded approval");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer remembers dismissed undecidable records across restarts and brings back live requests", async () => {
+  const stored = new Map<string, string>();
+  Object.assign(window, { localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); } } });
+  // Main mints new presentation IDs on every launch; only the record's dismissKey is stable.
+  const launch = (generation: number, recordStatus: "uncertain" | "unavailable" = "uncertain") => [
+    { ...hostApproval(), id: `pending-${generation}` },
+    { ...hostApproval(), id: `record-${generation}`, status: recordStatus, dismissKey: `record-key-${recordStatus}`,
+      presentation: { ...hostApproval().presentation, displayName: "StaleAgent", title: "Approval unavailable" as const } },
+  ];
+  let approvals = launch(1);
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const cards = (root: HostNode) => descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval");
+  const first = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (buttonByText(first.root, "Show 1 approval needing attention").props.onClick as () => void)();
+    await nextTick();
+    for (const name of ["StaleAgent", "GardenPoint"]) {
+      const dismiss = descendants(first.root).find(node => node.props["aria-label"] === `Dismiss approval from ${name}`)!;
+      (dismiss.props.onClick as () => void)();
+      await nextTick();
+    }
+    assert.equal(cards(first.root).length, 0);
+  } finally { first.app.unmount(); }
+  approvals = launch(2);
+  const relaunched = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(buttons(relaunched.root).some(node => descendants(node).some(child => /needing attention/.test(child.text))), false,
+      "a dismissed record stays dismissed after restart");
+    assert.deepEqual(cards(relaunched.root).map(node => descendants(node).some(child => child.text.includes("GardenPoint"))), [true],
+      "a live request is never hidden across restarts");
+  } finally { relaunched.app.unmount(); }
+  approvals = launch(3, "unavailable");
+  const changed = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.ok(buttonByText(changed.root, "Show 1 approval needing attention"), "a status change resurfaces the record");
+  } finally {
+    changed.app.unmount();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+    delete (window as unknown as Record<string, unknown>).localStorage;
+  }
+});
+
+test("a record dismissed this session returns when its status changes; a live request stays dismissed", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval"] });
+  const stored = new Map<string, string>();
+  Object.assign(window, { localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); } } });
+  const record = (status: "uncertain" | "unavailable") => ({ ...hostApproval(), id: "record", status, dismissKey: `record-key-${status}`,
+    presentation: { ...hostApproval().presentation, displayName: "StaleAgent", title: "Approval unavailable" as const } });
+  let approvals: DesktopHostApproval[] = [hostApproval(), record("uncertain")];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (buttonByText(root, "Show 1 approval needing attention").props.onClick as () => void)();
+    await nextTick();
+    for (const name of ["StaleAgent", "GardenPoint"]) {
+      (descendants(root).find(node => node.props["aria-label"] === `Dismiss approval from ${name}`)!.props.onClick as () => void)();
+      await nextTick();
+    }
+    assert.deepEqual(JSON.parse(stored.get("letagents-desktop:host-approval-dismissals")!), ["record-key-uncertain"],
+      "only the undecidable record is remembered");
+    // The same session presentation changes status: main issues a new key for it.
+    approvals = [hostApproval(), record("unavailable")];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    const shown = descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval");
+    assert.deepEqual(shown.map(node => descendants(node).some(child => child.text.includes("StaleAgent"))), [true],
+      "the changed record returns while the dismissed live request stays hidden for the session");
+  } finally {
+    app.unmount();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+    delete (window as unknown as Record<string, unknown>).localStorage;
+  }
+});
+
+test("remembered approval dismissals keep the newest 500 and work without storage", () => {
+  let dismissals = readHostApprovalDismissals();
+  assert.equal(dismissals.size, 0, "missing storage reads as no dismissals");
+  dismissals = rememberHostApprovalDismissal(dismissals, "key-without-storage");
+  assert.ok(dismissals.has("key-without-storage"), "a dismissal still holds for the session");
+  const stored = new Map<string, string>([["letagents-desktop:host-approval-dismissals", '["kept",7,null]']]);
+  Object.assign(window, { localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); } } });
+  try {
+    dismissals = readHostApprovalDismissals();
+    assert.deepEqual([...dismissals], ["kept"], "non-string entries are ignored");
+    for (let index = 0; index < 500; index += 1) dismissals = rememberHostApprovalDismissal(dismissals, `key-${index}`);
+    const saved = JSON.parse(stored.get("letagents-desktop:host-approval-dismissals")!) as string[];
+    assert.equal(saved.length, 500);
+    assert.equal(saved[0], "key-0", "the oldest key ages out first");
+    assert.equal(saved.at(-1), "key-499");
+    assert.deepEqual([...readHostApprovalDismissals()], saved);
+  } finally { delete (window as unknown as Record<string, unknown>).localStorage; }
 });
 
 test("approval details show tool inputs and exact edits without transport JSON", async () => {
