@@ -1,12 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, opendir, readFile, realpath, rename, rm, unlink } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
+import { ensureScratchWorkspaceRepository } from "../../../shared/scratch-workspace-repository.mjs";
 import { WORKSPACE_MARKER, type WorkspaceMarker } from "./workspace-provisioner.js";
 
 const EPHEMERAL_REMOTE_PREFIX = "letagents-ephemeral:";
 const EMPTY_REVISION = "0".repeat(40);
 const EPHEMERAL_REPO = "room-only";
+const WORK_ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// The daemon's own files in a workspace stay out of an agent's `git add` and `git clean`.
+const REPOSITORY_EXCLUDE = [`/${WORKSPACE_MARKER}`, `/${WORKSPACE_MARKER}.*.tmp`];
 
 function inside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
@@ -20,15 +24,30 @@ export function isEphemeralWorkspaceMarker(
     && marker.resolved_revision === EMPTY_REVISION;
 }
 
-/** Private, intentionally non-Git cwd for a room-only supervised agent. */
+/**
+ * Private cwd for a room-only supervised agent.
+ *
+ * Each workspace is the root of its own empty Git repository, which agent
+ * tools read as the edge of the project: without it OpenCode imports plugins
+ * from any directory above the workspace (see
+ * `ensureScratchWorkspaceRepository`). The repository belongs to the agent.
+ * The daemon never runs Git in it and still treats the workspace as having
+ * no Git identity: `isEphemeralWorkspaceMarker` workspaces are concluded and
+ * collected without Git. The parent `room-only` directory is deliberately not
+ * a repository, so that no workspace is inside another room's project.
+ */
 export class EphemeralWorkspaceProvisioner {
-  constructor(private readonly root: string) {}
+  constructor(
+    private readonly root: string,
+    /** Replaceable so tests can interrupt it. */
+    private readonly writeRepository: typeof ensureScratchWorkspaceRepository = ensureScratchWorkspaceRepository,
+  ) {}
 
   async provision(input: {
     workAttemptId: string;
     taskId: string;
   }): Promise<{ path: string; reused: boolean; identity: WorkspaceMarker }> {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.workAttemptId)) {
+    if (!WORK_ATTEMPT_ID.test(input.workAttemptId)) {
       throw new Error("Work attempt IDs must be supervisor-minted UUIDs.");
     }
     if (!input.taskId.trim()) throw new Error("A task ID is required for an ephemeral workspace.");
@@ -73,7 +92,34 @@ export class EphemeralWorkspaceProvisioner {
     } else {
       await this.writeMarker(markerPath, identity);
     }
+    // After the marker: orphan collection fails closed on a directory with
+    // a `.git` and no marker, so a crash in between must leave the marker.
+    // A reused workspace from an older version gets its repository here.
+    await this.writeRepository(canonicalPath, { exclude: REPOSITORY_EXCLUDE });
     return { path: canonicalPath, reused, identity };
+  }
+
+  /**
+   * Gives an existing room-only workspace its repository before a launch.
+   * Work attempts are provisioned once, so a workspace made by an older
+   * version is otherwise never upgraded. A missing workspace is left missing;
+   * a path that is not exactly one room-only workspace is refused.
+   */
+  async ensureRepository(workspacePath: string): Promise<"created" | "present" | "replaced" | "missing"> {
+    const canonicalRoot = await this.canonicalRoot();
+    const parent = resolve(canonicalRoot, "worktrees", EPHEMERAL_REPO);
+    let info;
+    try { info = await lstat(workspacePath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+      throw error;
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Ephemeral workspace path is unsafe.");
+    const canonicalPath = await realpath(workspacePath);
+    if (dirname(canonicalPath) !== await realpath(parent) || !WORK_ATTEMPT_ID.test(basename(canonicalPath))) {
+      throw new Error("Ephemeral workspace is not a room-only workspace.");
+    }
+    return this.writeRepository(canonicalPath, { exclude: REPOSITORY_EXCLUDE });
   }
 
   /** Remove crash-orphaned room-only directories that have no durable attempt. */
@@ -96,8 +142,7 @@ export class EphemeralWorkspaceProvisioner {
     const entries = await opendir(canonicalParent);
     for await (const entry of entries) {
       const workAttemptId = entry.name;
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workAttemptId)
-        || retainedAttemptIds.has(workAttemptId)) continue;
+      if (!WORK_ATTEMPT_ID.test(workAttemptId) || retainedAttemptIds.has(workAttemptId)) continue;
       const candidate = resolve(canonicalParent, workAttemptId);
       if (!inside(canonicalParent, candidate)) continue;
       const candidateInfo = await lstat(candidate);

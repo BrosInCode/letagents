@@ -26,6 +26,8 @@ const { OPENCODE_RUNTIME_VERSION } = await import(
 const { OpenCodeServerClient, eventReferencesSession, mintNativeUserMessageId, parseOpenCodePermissionEvent } = await import(
   "../../dist-electron/main/agents/opencode-server-client.js"
 );
+// The daemon gives every room's scratch workspace its own repository with this.
+const { ensureScratchWorkspaceRepository } = await import("../../../../shared/scratch-workspace-repository.mjs");
 
 const CONTRACT_SENTINEL = "letagents-opencode-contract-secret";
 const OWNER_INSTRUCTIONS_SENTINEL = "letagents-owner-instructions-sentinel";
@@ -228,14 +230,15 @@ async function startFixtureProvider() {
       } else assistantText(response, "contract-background-request-ok");
       return;
     }
-    const outsideProject = /LETAGENTS_OUTSIDE_PROJECT_FIXTURE:(workdir|path|leave)/.exec(serializedMessages)?.[1];
+    const outsideProject = /LETAGENTS_OUTSIDE_PROJECT_FIXTURE:(workdir|path|leave|sibling)/.exec(serializedMessages)?.[1];
     if (outsideProject || serializedMessages.includes("LETAGENTS_INSIDE_PROJECT_FIXTURE")) {
       if (hasToolResult) assistantText(response, "project-boundary-settled");
       else if (name) assistantToolCall(response, name, [
         outsideProject === "workdir" ? { command: "ls", workdir: tmpdir(), description: "List another directory" }
           : outsideProject === "path" ? "cat /etc/hosts"
             : outsideProject === "leave" ? "cd .. && ls"
-              : "ls",
+              : outsideProject === "sibling" ? "cat ../sibling/notes.txt"
+                : "ls",
       ]);
       else assistantText(response, "contract-background-request-ok");
       return;
@@ -386,6 +389,20 @@ async function watchEvents(client, eventTypes) {
   }
 }
 
+// OpenCode installs its plugin SDK into a project's .opencode directory
+// too. This marks one provisioned, as the seed marks the runtime's own.
+async function markOpenCodeDirectoryProvisioned(directory) {
+  const dependencies = { "@opencode-ai/plugin": OPENCODE_RUNTIME_VERSION };
+  await mkdir(join(directory, "node_modules"), { recursive: true });
+  await writeFile(join(directory, "package.json"), JSON.stringify({ dependencies }));
+  await writeFile(join(directory, "package-lock.json"), JSON.stringify({
+    name: "opencode",
+    lockfileVersion: 3,
+    requires: true,
+    packages: { "": { dependencies } },
+  }));
+}
+
 function skillFile(name) {
   return `---\nname: ${name}\ndescription: Planted by the contract smoke.\n---\n\nNothing to do.\n`;
 }
@@ -398,9 +415,9 @@ async function observeOwnerIsolation({ binary, provider, registry, runtimeRoot, 
   const label = scratch ? "scratch" : "isolation";
   const home = join(runtimeRoot, `${label}-home`);
   // A room's scratch workspace lies under the owner's home directory and is
-  // not a Git repository.
+  // the root of its own repository, as the daemon provisions it.
   const project = scratch
-    ? join(home, ".letagents", "worktrees", "room-only", "contract")
+    ? join(home, ".letagents", "worktrees", "room-only", randomUUID())
     : join(runtimeRoot, "isolation-project");
   const planted = scratch ? [
     [join(home, "AGENTS.md"), `${HOME_DIRECTORY_INSTRUCTIONS_SENTINEL}\n`],
@@ -418,12 +435,29 @@ async function observeOwnerIsolation({ binary, provider, registry, runtimeRoot, 
     [join(project, "notes.txt"), "A scratch workspace starts with no project files.\n"],
     // An OpenCode directory between the workspace and the home directory.
     // OpenCode would replace the agent's prompt with its agent definition
-    // and install packages into it. It imports the plugin whatever the
-    // launch sets.
+    // and install packages into it. Without the workspace's repository it
+    // imports the plugin whatever the launch sets.
     [join(home, ".letagents", ".opencode", "plugin", "planted.js"), [
       'import { writeFileSync } from "node:fs";',
       `writeFileSync(${JSON.stringify(join(runtimeRoot, "scratch-plugin-ran"))}, "ran");`,
       "export const Planted = async () => ({});",
+      "",
+    ].join("\n")],
+    // The directory that holds every room's workspace, in the current format.
+    [join(home, ".letagents", "worktrees", "room-only", ".opencode", "plugin", "planted.js"), [
+      'import { writeFileSync } from "node:fs";',
+      `writeFileSync(${JSON.stringify(join(runtimeRoot, "scratch-room-only-plugin-ran"))}, "ran");`,
+      'export default { id: "letagents-contract-room-only", setup: async () => {} };',
+      "",
+    ].join("\n")],
+    // Positive control: a plugin in the workspace's own .opencode directory
+    // is inside the project and is imported, which shows that plugins were
+    // loaded at all before the ones above are reported absent. It is also a
+    // gap that stays open.
+    [join(project, ".opencode", "plugin", "own.js"), [
+      'import { writeFileSync } from "node:fs";',
+      `writeFileSync(${JSON.stringify(join(runtimeRoot, "scratch-own-plugin-ran"))}, "ran");`,
+      'export default { id: "letagents-contract-own", setup: async () => {} };',
       "",
     ].join("\n")],
     [join(home, ".letagents", ".opencode", "agent", "build.md"),
@@ -440,7 +474,10 @@ async function observeOwnerIsolation({ binary, provider, registry, runtimeRoot, 
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, content, { encoding: "utf8" });
   }
-  if (!scratch) {
+  if (scratch) {
+    assert.equal(await ensureScratchWorkspaceRepository(project), "created");
+    await markOpenCodeDirectoryProvisioned(join(project, ".opencode"));
+  } else {
     // Room agents work in Git worktrees, where OpenCode's search for project
     // instruction files stops at the repository root. Without a repository it
     // climbs to the file system root and picks up whatever lies on the way.
@@ -458,17 +495,7 @@ async function observeOwnerIsolation({ binary, provider, registry, runtimeRoot, 
       [".git"],
       "the planted project must be a Git repository",
     );
-    // OpenCode installs its plugin SDK into a project's .opencode directory
-    // too. This one is marked provisioned, as the seed marks the runtime's own.
-    const dependencies = { "@opencode-ai/plugin": OPENCODE_RUNTIME_VERSION };
-    await mkdir(join(project, ".opencode", "node_modules"), { recursive: true });
-    await writeFile(join(project, ".opencode", "package.json"), JSON.stringify({ dependencies }));
-    await writeFile(join(project, ".opencode", "package-lock.json"), JSON.stringify({
-      name: "opencode",
-      lockfileVersion: 3,
-      requires: true,
-      packages: { "": { dependencies } },
-    }));
+    await markOpenCodeDirectoryProvisioned(join(project, ".opencode"));
   }
   const auth = { username: OPENCODE_SERVER_USERNAME, password: randomBytes(24).toString("base64url") };
   const port = await allocatePort();
@@ -544,17 +571,25 @@ async function observeOwnerIsolation({ binary, provider, registry, runtimeRoot, 
  * nothing a review could trust about a place outside the project. The pinned
  * runtime must therefore refuse such a command itself, before any request
  * for permission exists, and must still ask about a command inside it. A
- * room's scratch workspace is not a Git repository, and OpenCode draws a
- * project's edge differently there, so both kinds are launched.
+ * room's scratch workspace is launched differently from a Git worktree, so
+ * both kinds are launched. Each has a sibling directory, which is outside
+ * its project: a repository above a scratch workspace would bring every
+ * other room's workspace inside it.
  */
 async function verifyAutoStaysInProject(binary, provider, registry, workspaceKind) {
   // OpenCode compares against the real path, as production workspaces are given.
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-opencode-auto-")));
   const pluginPath = join(root, "credential-boundary.mjs");
   const mcpPath = join(root, "noop-mcp.mjs");
-  const worktree = join(root, "worktree");
+  // A scratch workspace sits beside other rooms' workspaces, as in production.
+  const parent = workspaceKind === "room_scratch" ? join(root, "worktrees", "room-only") : root;
+  const worktree = join(parent, workspaceKind === "room_scratch" ? randomUUID() : "worktree");
   await mkdir(worktree, { recursive: true });
-  if (workspaceKind === "git_worktree") {
+  await mkdir(join(parent, "sibling"), { recursive: true });
+  await writeFile(join(parent, "sibling", "notes.txt"), "Another room's workspace.\n");
+  if (workspaceKind === "room_scratch") {
+    assert.equal(await ensureScratchWorkspaceRepository(worktree), "created");
+  } else {
     const initialized = spawnSync("git", ["init", "--quiet", worktree], {
       encoding: "utf8",
       env: Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))),
@@ -617,10 +652,12 @@ async function verifyAutoStaysInProject(binary, provider, registry, workspaceKin
       });
       return { sessionId: session.id, start };
     };
-    for (const kind of ["workdir", "path", "leave"]) {
+    for (const kind of ["workdir", "path", "leave", "sibling"]) {
       const { sessionId, start } = await run(`LETAGENTS_OUTSIDE_PROJECT_FIXTURE:${kind}`);
-      await observation.waitFor((event) => eventReferencesSession(event, sessionId)
-        && (event.type === "session.idle" || event.type === "session.error"), start);
+      // A request would hold the turn open, so it ends the wait too.
+      await observation.waitFor((event) => (event.type === "permission.asked" && event.properties.sessionID === sessionId)
+        || (eventReferencesSession(event, sessionId)
+          && (event.type === "session.idle" || event.type === "session.error")), start);
       assert.deepEqual(observation.seen.slice(start).filter((event) => event.type === "permission.asked"
         && event.properties.sessionID === sessionId), [], `a command outside a ${workspaceKind} project (${kind}) must never become a request`);
       assert.deepEqual(await client.listPendingPermissions(sessionId), []);
@@ -937,16 +974,19 @@ try {
     "instructions named by an opencode.json above a scratch workspace must not reach the model");
   assert.ok(!scratchPrompt.includes(ANCESTOR_AGENT_SENTINEL),
     "an agent definition above a scratch workspace must not replace the agent's prompt");
-  // Known, and not closed by the launch: OpenCode 1.18.20 imports a plugin
-  // from a .opencode directory above a scratch workspace, and one named by
-  // an opencode.json there. No launch setting stops that search. These
-  // assertions hold the known state, so that a pin which changes it cannot
-  // go unnoticed: update the launch contract and its documents with it.
+  // No launch setting stops OpenCode 1.18.20 importing plugins from above a
+  // workspace; the workspace's own repository does, because OpenCode's
+  // search ends at the project root. Each plugin writes its file when it is
+  // imported, so none of these may exist once the turn has ended.
   const scratchLeftovers = await readdir(runtimeRoot);
-  assert.ok(scratchLeftovers.includes("scratch-plugin-ran"),
-    "known gap changed: a plugin above a scratch workspace is no longer imported");
-  assert.ok(scratchLeftovers.includes("scratch-named-plugin-ran"),
-    "known gap changed: a plugin named by an opencode.json above a scratch workspace is no longer imported");
+  assert.ok(scratchLeftovers.includes("scratch-own-plugin-ran"),
+    "positive control: a plugin in the scratch workspace's own .opencode directory is imported");
+  assert.ok(!scratchLeftovers.includes("scratch-plugin-ran"),
+    "a plugin in a .opencode directory above a scratch workspace must not be imported");
+  assert.ok(!scratchLeftovers.includes("scratch-room-only-plugin-ran"),
+    "a plugin in the .opencode directory beside every room's workspace must not be imported");
+  assert.ok(!scratchLeftovers.includes("scratch-named-plugin-ran"),
+    "a plugin named by an opencode.json above a scratch workspace must not be imported");
   assert.deepEqual(
     (await readdir(join(runtimeRoot, "scratch-home", ".letagents", ".opencode"))).sort(),
     ["agent", "plugin"],
@@ -972,7 +1012,8 @@ try {
     retryStatusReadAsActiveAndAborted: true,
     ownerInstructionsAndExternalSkillsWithheld: true,
     scratchWorkspaceInstructionsAndAgentsWithheld: true,
-    scratchWorkspacePluginsStillImported: true,
+    scratchWorkspacePluginsWithheld: true,
+    scratchWorkspaceOwnPluginStillImported: true,
     credentialBoundaryObserved: true,
     reattachedWithoutRelaunch: true,
     nativeAbortAccepted: true,
