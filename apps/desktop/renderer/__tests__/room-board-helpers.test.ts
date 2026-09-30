@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, effectScope, h, nextTick, reactive } from "vue";
+import { createSSRApp, effectScope, h, nextTick, reactive, ref } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 
 import type {
   DesktopAgentPresence,
+  DesktopBoardGovernanceSnapshot,
   DesktopBoardIntentSummary,
   DesktopTaskSummary,
   WorkerSnapshot,
@@ -25,11 +26,18 @@ import { findLocalRoomWorker } from "../src/components/desktop/content/room-boar
 import { useRoomBoardPresentation } from "../src/components/desktop/content/room-board/useRoomBoardPresentation";
 import {
   activeBoardManagerAgents,
+  denyIntentReason,
+  liveManagerCandidates,
   managerCandidateName,
   managerCandidateRuntime,
   readableIntentBody,
 } from "../src/components/desktop/content/room-board/governance-presentation";
 import { reviewAssignmentCandidates } from "../src/components/desktop/content/room-board/review-candidates";
+import { useBoardGovernance } from "../src/components/desktop/content/room-board/useBoardGovernance";
+import {
+  useGovernanceDenyForm,
+  type DenyFormFocusTarget,
+} from "../src/components/desktop/content/room-board/useGovernanceDenyForm";
 import {
   executionAuthorityState,
   reviewPanelState,
@@ -41,6 +49,8 @@ let vite: ViteDevServer;
 let TaskCard: object;
 let Kanban: object;
 let Toolbar: object;
+let GovernanceManagerSection: object;
+let GovernanceIntentSection: object;
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL("../..", import.meta.url)),
@@ -51,6 +61,8 @@ before(async () => {
   TaskCard = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardTaskCard.vue")).default;
   Kanban = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardKanban.vue")).default;
   Toolbar = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardToolbar.vue")).default;
+  GovernanceManagerSection = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardGovernanceManagerSection.vue")).default;
+  GovernanceIntentSection = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardGovernanceIntentSection.vue")).default;
 });
 after(async () => { await vite?.close(); });
 
@@ -123,6 +135,142 @@ describe("board card hierarchy", () => {
     assert.match(html, /aria-controls="desktop-task-group-accepted"/);
     assert.match(html, /id="desktop-task-group-accepted"/);
     assert.match(html, /display:none/);
+  });
+});
+
+describe("board manager panel", () => {
+  const casey = presence({ agentSessionId: "session_casey", actorLabel: "Casey | Cursor", displayName: "Casey" });
+  const blake = presence();
+  const avery = presence({ agentSessionId: "session_avery", actorLabel: "Avery | Claude", displayName: "Avery" });
+
+  it("keeps live candidates in a stable order across presence refreshes", () => {
+    const names = (liveAgents: DesktopAgentPresence[], snapshot = governance()) =>
+      liveManagerCandidates(snapshot, liveAgents).map(managerCandidateName);
+    assert.deepEqual(names([casey, blake, avery]), ["Avery", "Blake", "Casey"]);
+    assert.deepEqual(names([blake, avery, casey]), ["Avery", "Blake", "Casey"]);
+    // Assigning a manager marks the row as Current without moving it.
+    const managed = governance({ activeManager: activeManager("session_casey") });
+    assert.deepEqual(names([avery, casey, blake], managed), ["Avery", "Blake", "Casey"]);
+    assert.deepEqual(
+      liveManagerCandidates(managed, [blake, avery, casey]).map((candidate) => candidate.isActiveManager),
+      [false, false, true],
+    );
+  });
+
+  it("keeps the primary action in place when a manager is assigned", async () => {
+    const render = (snapshot: DesktopBoardGovernanceSnapshot, selectedCandidateId: string | null) => renderToString(createSSRApp({
+      render: () => h(GovernanceManagerSection, {
+        governance: snapshot, busy: false, selectedCandidateId, liveAgents: [blake, casey],
+      }),
+    }));
+    const actions = (html: string) => [...html.matchAll(/data-testid="board-governance-(promote|release)"/g)].map((match) => match[1]);
+    const before = await render(governance(), "session_blake");
+    assert.deepEqual(actions(before), ["promote"]);
+    assert.match(before, />\s*Make manager\s*</);
+    const after = await render(governance({ activeManager: activeManager("session_blake") }), "session_blake");
+    // The primary stays last (rightmost), so a second click lands on the
+    // disabled "Current manager" button instead of the new Release button.
+    assert.deepEqual(actions(after), ["release", "promote"]);
+    assert.match(after, /<button[^>]*disabled[^>]*data-testid="board-governance-promote"[^>]*>\s*Current manager\s*</);
+  });
+
+  it("offers an optional reason when a request is denied", async () => {
+    assert.equal(denyIntentReason("  Duplicate of task_2.  "), "Duplicate of task_2.");
+    assert.equal(denyIntentReason("   "), null);
+    const html = await renderToString(createSSRApp({
+      render: () => h(GovernanceIntentSection, {
+        governance: governance({ pendingIntents: [intent({ id: "intent_close", actionType: "task_close", taskId: "task_2" })] }),
+        busy: false,
+      }),
+    }));
+    assert.match(html, /data-testid="board-governance-deny"[^>]*>\s*Deny\s*</);
+    assert.doesNotMatch(html, /board-governance-deny-reason/, "the reason field opens only when asked");
+  });
+
+  it("runs the deny form: open, keep each reason, submit once, close and move focus when the request leaves", () => {
+    const intents = ref([
+      intent({ id: "intent_a", actionType: "task_close", taskId: "task_1" }),
+      intent({ id: "intent_b", actionType: "task_claim", taskId: "task_2" }),
+      intent({ id: "intent_c", actionType: "task_claim", taskId: "task_3" }),
+    ]);
+    const busy = ref(false);
+    const denied: Array<[string, string | null]> = [];
+    const focused: DenyFormFocusTarget[] = [];
+    const form = useGovernanceDenyForm({
+      intents: () => intents.value,
+      busy: () => busy.value,
+      deny: (intentId, reason) => denied.push([intentId, reason]),
+      focus: (target) => focused.push(target),
+    });
+
+    form.start("intent_a");
+    assert.equal(form.denyingIntentId.value, "intent_a");
+    assert.deepEqual(focused.at(-1), { kind: "reason", intentId: "intent_a" });
+    form.reason.value = "Already merged.";
+    // Opening another request's form keeps the first reason for later.
+    form.start("intent_b");
+    assert.equal(form.reason.value, "");
+    form.start("intent_a");
+    assert.equal(form.reason.value, "Already merged.");
+
+    form.submit();
+    busy.value = true;
+    form.submit();
+    form.cancel();
+    assert.deepEqual(denied, [["intent_a", "Already merged."]], "one request while busy; Cancel waits");
+    assert.equal(form.denyingIntentId.value, "intent_a", "the form stays open while the denial is in flight");
+
+    // A failed denial keeps the typed reason for a retry.
+    busy.value = false;
+    intents.value = [...intents.value];
+    assert.equal(form.reason.value, "Already merged.");
+
+    form.submit();
+    intents.value = intents.value.filter((candidate) => candidate.id !== "intent_a");
+    assert.equal(form.denyingIntentId.value, null);
+    assert.deepEqual(focused.at(-1), { kind: "request", intentId: "intent_b" }, "focus moves to the next request");
+
+    form.start("intent_c");
+    form.submit();
+    intents.value = intents.value.filter((candidate) => candidate.id !== "intent_c");
+    assert.deepEqual(focused.at(-1), { kind: "request", intentId: "intent_b" }, "the last request falls back to the one before it");
+
+    form.start("intent_b");
+    form.reason.value = "Not needed.";
+    form.cancel();
+    assert.deepEqual(focused.at(-1), { kind: "deny", intentId: "intent_b" });
+    form.start("intent_b");
+    assert.equal(form.reason.value, "", "Cancel discards the reason");
+    form.submit();
+    intents.value = [];
+    assert.deepEqual(focused.at(-1), { kind: "list" });
+    assert.deepEqual(denied.at(-1), ["intent_b", null]);
+  });
+
+  it("sends the deny reason to the board", async () => {
+    const decisions: unknown[] = [];
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        letagentsDesktop: {
+          room: {
+            decideBoardIntent: async (_room: string, intentId: string, input: unknown) => {
+              decisions.push({ intentId, input });
+              return { governance: governance() };
+            },
+          },
+        },
+      },
+    });
+    try {
+      const board = useBoardGovernance("room_1");
+      assert.equal(await board.decideIntent("intent_a", "deny", "Already merged."), true);
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "window", previous);
+      else delete (globalThis as { window?: unknown }).window;
+    }
+    assert.deepEqual(decisions, [{ intentId: "intent_a", input: { decision: "deny", reason: "Already merged." } }]);
   });
 });
 
@@ -512,6 +660,41 @@ function worker(overrides: Partial<WorkerSnapshot> = {}): WorkerSnapshot {
     agentSessionId: "session_blake",
     detail: "Blake",
     ...overrides,
+  };
+}
+
+function governance(
+  overrides: Partial<DesktopBoardGovernanceSnapshot> = {}
+): DesktopBoardGovernanceSnapshot {
+  return {
+    roomId: "room_1",
+    managerMode: "manager_optional",
+    activeManager: null,
+    candidates: [],
+    pendingIntents: [],
+    pendingIntentCount: 0,
+    audit: [],
+    warnings: [],
+    capabilities: {
+      canViewGovernance: true,
+      canAssignManager: true,
+      canReleaseManager: true,
+      canSetManagerMode: true,
+      canDecideIntents: true,
+    },
+    ...overrides,
+  };
+}
+
+function activeManager(agentSessionId: string): NonNullable<DesktopBoardGovernanceSnapshot["activeManager"]> {
+  return {
+    assignmentId: `assignment_${agentSessionId}`,
+    agentSessionId,
+    agentKey: `agent/${agentSessionId}`,
+    actorLabel: agentSessionId,
+    runtimeSource: "desktop_managed",
+    assignedBy: "EmmyMay",
+    lastHeartbeatAt: null,
   };
 }
 
