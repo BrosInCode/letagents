@@ -138,13 +138,6 @@ function getTomlStringArrayValue(
   }
 }
 
-export function letAgentsMcpServerMatchesExpected(
-  server: LetAgentsMcpServerConfig,
-  expected: LetAgentsMcpServerConfig,
-): boolean {
-  return !getLetAgentsMcpServerIssue(server, expected);
-}
-
 export function isLocalDevLetAgentsApiUrl(value: string | null | undefined): boolean {
   const raw = value?.trim();
   if (!raw) return false;

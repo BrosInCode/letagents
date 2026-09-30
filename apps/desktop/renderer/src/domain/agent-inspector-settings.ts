@@ -1,5 +1,4 @@
 import type {
-  DesktopAgentProvider,
   DesktopManagedAgentEffort,
   DesktopSupervisorAgentConfiguration,
   DesktopSupervisorRoomMove,
@@ -167,13 +166,6 @@ export function settleConfigurationAlreadyApplied(
       runtimeConfigurationRevision: expectedConfigurationRevision,
     },
   };
-}
-
-export function agentInspectorProvider(
-  providers: readonly DesktopAgentProvider[],
-  configuration: DesktopSupervisorAgentConfiguration | null,
-): DesktopAgentProvider | null {
-  return providers.find((provider) => provider.id === configuration?.provider) ?? null;
 }
 
 export function agentInspectorProviderSupportsEffort(providerId: string | null | undefined): boolean {
