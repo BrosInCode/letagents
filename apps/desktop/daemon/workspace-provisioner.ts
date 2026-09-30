@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -130,6 +131,12 @@ export type WorkspaceMarker = {
 
 const REPOSITORY_MARKER = ".letagents-repository.json";
 export const WORKSPACE_MARKER = ".letagents-work-attempt.json";
+/** The daemon's own files in a workspace stay out of an agent's `git status`, `git add` and `git clean`. */
+export const WORKSPACE_MARKER_EXCLUDE = [`/${WORKSPACE_MARKER}`, `/${WORKSPACE_MARKER}.*.tmp`] as const;
+/** The fetch refspec a normal clone records; `clone --bare` records none. */
+const ORIGIN_FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
+const ORIGIN_FETCH_REFSPEC_VALUE = "^\\+?refs/heads/\\*:refs/remotes/origin/\\*$";
+const ORIGIN_FETCH_REFSPEC_PATTERN = new RegExp(ORIGIN_FETCH_REFSPEC_VALUE);
 
 function safeSegment(value: string, label: string): string {
   if (value === "." || value === ".." || !/^[A-Za-z0-9._-]+$/.test(value)) throw new Error(`Unsafe ${label}.`);
@@ -207,6 +214,7 @@ export class WorkspaceProvisioner {
 
     const repositoryMarker: RepositoryMarker = { version: 1, repo, remote_url: remoteUrl };
     await withWorkspaceFence(bare, async () => {
+      let cloned = false;
       if (await this.exists(bare)) {
         await this.ensureDirectory(bare, await realpath(reposRoot));
         const markerPath = join(bare, REPOSITORY_MARKER);
@@ -224,9 +232,12 @@ export class WorkspaceProvisioner {
         await this.ensureDirectory(bare, await realpath(reposRoot));
         await this.verifyBare(await realpath(bare), remoteUrl);
         await this.writeMarker(join(bare, REPOSITORY_MARKER), repositoryMarker);
+        cloned = true;
       }
       const fencedBare = await realpath(bare);
       await this.verifyBare(fencedBare, remoteUrl);
+      // Also repairs repositories cloned before this existed.
+      await this.prepareForAgents(bare, fencedBare, cloned);
     });
     const canonicalBare = await realpath(bare);
     await this.verifyBare(canonicalBare, remoteUrl);
@@ -333,13 +344,109 @@ export class WorkspaceProvisioner {
     if (normalizeRemote(await this.query(["--git-dir", bare, "remote", "get-url", "origin"])) !== remoteUrl) throw new Error("Bare repository remote identity does not match.");
   }
 
+  /**
+   * Agents' worktrees share the bare repository's config and `info/exclude`.
+   * Give them what a normal clone has: one standard `origin` fetch refspec
+   * (replacing a duplicate an agent added), `origin/<branch>` refs and
+   * `origin/HEAD`, so they can branch from and rebase onto the remote's
+   * branches. Keep the daemon's marker file out of their commits. This runs
+   * under the repository's exclusive fence on every launch, so it never
+   * touches the network, and none of it may fail a launch except refusing to
+   * write through a symlink.
+   */
+  private async prepareForAgents(bare: string, canonicalBare: string, cloned: boolean): Promise<void> {
+    await this.bestEffort("origin fetch refspec", async () => {
+      let refspecs: string[];
+      try {
+        refspecs = String(await this.git(["--git-dir", canonicalBare, "config", "--get-all", "remote.origin.fetch"]) ?? "").split("\n").filter(Boolean);
+      } catch (error) {
+        // `config --get-all` exits 1 when the key is unset.
+        if ((error as { code?: unknown }).code !== 1) throw error;
+        refspecs = [];
+      }
+      const standard = refspecs.filter((value) => ORIGIN_FETCH_REFSPEC_PATTERN.test(value));
+      if (standard.length !== 1 || standard[0] !== ORIGIN_FETCH_REFSPEC) {
+        await this.run(["--git-dir", canonicalBare, "config", "--replace-all", "remote.origin.fetch", ORIGIN_FETCH_REFSPEC, ORIGIN_FETCH_REFSPEC_VALUE]);
+      }
+    });
+    await this.bestEffort("origin refs", () => this.ensureOriginRefs(canonicalBare, cloned));
+    await this.bestEffort("origin/HEAD", () => this.ensureOriginHead(canonicalBare));
+    await this.ensureMarkerExcluded(bare);
+  }
+
+  /**
+   * Copies branches the repository already has; the agent's own
+   * `git fetch origin` brings them up to date. Straight after `clone --bare`
+   * its branches are exactly the remote's. Later they also hold agents' own
+   * branches, so only the daemon's refreshed copy of the remote's branches
+   * is used, when there is one.
+   */
+  private async ensureOriginRefs(bare: string, cloned: boolean): Promise<void> {
+    if (String(await this.git(["--git-dir", bare, "for-each-ref", "--count=1", "--format=%(refname)", "refs/remotes/origin/"]) ?? "").trim()) return;
+    const source = cloned ? "refs/heads" : "refs/letagents/remotes/origin";
+    // A fetch from the repository's own path copies refs locally, in one
+    // command. Atomic, so a crash cannot leave a partial set the guard above
+    // would then never complete.
+    await this.run(["--git-dir", bare, "fetch", "--quiet", "--atomic", "--no-tags", "--no-write-fetch-head", bare, `+${source}/*:refs/remotes/origin/*`]);
+  }
+
+  /**
+   * Points origin/HEAD at the bare repository's HEAD, which `clone --bare`
+   * copies from the remote's default branch. Nothing moves it afterwards:
+   * the daemon doesn't, and an agent's fetch only creates a missing
+   * origin/HEAD under Git's default `followRemoteHEAD=create`. It goes stale
+   * if the remote renames its default branch, unless that setting is
+   * `always`.
+   */
+  private async ensureOriginHead(bare: string): Promise<void> {
+    const succeeds = (args: string[]) => this.run(["--git-dir", bare, ...args]).then(() => true, () => false);
+    if (await succeeds(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])) return;
+    const head = String(await this.git(["--git-dir", bare, "symbolic-ref", "--quiet", "HEAD"]).catch(() => "") ?? "").trim();
+    if (!head.startsWith("refs/heads/")) return;
+    const tracking = `refs/remotes/origin/${head.slice("refs/heads/".length)}`;
+    // Skipped until the default branch has a tracking ref.
+    if (await succeeds(["rev-parse", "--verify", "--quiet", `${tracking}^{commit}`])) {
+      await this.run(["--git-dir", bare, "symbolic-ref", "refs/remotes/origin/HEAD", tracking]);
+    }
+  }
+
+  private async ensureMarkerExcluded(bare: string): Promise<void> {
+    const info = join(bare, "info");
+    const path = join(info, "exclude");
+    for (const candidate of [info, path]) {
+      if ((await lstat(candidate).catch(() => null))?.isSymbolicLink()) throw new Error("Daemon paths may not traverse symlinks.");
+    }
+    await this.bestEffort("marker exclude", async () => {
+      await mkdir(info, { recursive: true, mode: 0o700 });
+      const existing = await readFile(path, { encoding: "utf8", flag: constants.O_RDONLY | constants.O_NOFOLLOW }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      });
+      const lines = new Set(existing.split(/\r?\n/));
+      const missing = WORKSPACE_MARKER_EXCLUDE.filter((line) => !lines.has(line));
+      if (missing.length === 0) return;
+      const handle = await open(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+      try { await handle.writeFile(`${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`, "utf8"); } finally { await handle.close(); }
+    });
+  }
+
+  /** Setup that helps agents but is not workspace identity never fails a launch. */
+  private async bestEffort(step: string, operation: () => Promise<void>): Promise<void> {
+    try {
+      await operation();
+    } catch (error) {
+      console.warn(`[workspace_agent_setup] ${step} skipped:`, error instanceof Error ? error.message : String(error));
+    }
+  }
+
   private async refreshBare(bare: string): Promise<void> {
-    // Bare clones do not retain a remote fetch refspec. Refresh every advertised
-    // branch and tag into daemon-private namespaces so a long-lived repository
-    // can resolve branch-reachable and tag-only source commits created after its
-    // initial clone. The static
+    // Refresh every advertised branch and tag into daemon-private namespaces
+    // so a long-lived repository can resolve branch-reachable and tag-only
+    // source commits created after its initial clone. The static
     // refspec and verified origin prevent callers from selecting another
     // remote or writing arbitrary refs; detached worktrees remain OID-pinned.
+    // Git also updates, but does not prune, agents' `origin/*` refs through
+    // the configured refspec; their own `git fetch --prune` does.
     await this.runRemote([
       "--git-dir", bare,
       "fetch", "--prune", "--no-tags", "origin",
