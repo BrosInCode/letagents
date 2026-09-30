@@ -21,6 +21,7 @@
           :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
           :class="messageClasses(msg)"
           :taskReferenceIds="taskReferenceIds"
+          :arriving="arrivingMessageIds.has(msg.id)"
           @reply="emit('reply', $event)"
           @info="handleOpenMessageInfo($event)"
           @openImageViewer="emit('openImageViewer', $event)"
@@ -80,6 +81,8 @@ const props = defineProps<{
   searchQuery?: string
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   taskReferenceIds?: ReadonlySet<string>
+  /** A message another view asked to show, e.g. the one that woke an agent. */
+  revealMessageId?: string | null
 }>()
 const emit = defineEmits<{
   loadOlder: []
@@ -87,6 +90,7 @@ const emit = defineEmits<{
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   openTask: [taskId: string]
+  revealed: [messageId: string]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)
@@ -164,9 +168,13 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
   isScrolledFarUp.value = false
 }
 
+function findMessageElement(messageId: string): HTMLElement | null {
+  if (!messagesEl.value || !messageId) return null
+  return messagesEl.value.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(messageId)}"]`)
+}
+
 function scrollToMessage(messageId: string) {
-  if (!messagesEl.value || !messageId) return
-  const target = messagesEl.value.querySelector(`[data-msg-id="${messageId}"]`) as HTMLElement | null
+  const target = findMessageElement(messageId)
   if (!target) return
   target.scrollIntoView({ behavior: 'smooth', block: 'center' })
   target.classList.add('jump-target')
@@ -222,6 +230,36 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
     else setupReadObserver()
   })
 })
+
+// A requested message may be older than the loaded page: load a few older
+// pages to find it, then give up quietly rather than paging the whole room.
+const MAX_REVEAL_OLDER_PAGES = 5
+let initialScrollSettled = false
+let revealOlderPagesRequested = 0
+
+function revealRequestedMessage() {
+  const messageId = props.revealMessageId
+  if (!messageId || !initialScrollSettled) return
+  if (findMessageElement(messageId)) {
+    scrollToMessage(messageId)
+  } else if (props.hasOlderMessages && revealOlderPagesRequested < MAX_REVEAL_OLDER_PAGES) {
+    if (!props.isLoadingOlderMessages) {
+      revealOlderPagesRequested += 1
+      emit('loadOlder')
+    }
+    return
+  }
+  revealOlderPagesRequested = 0
+  emit('revealed', messageId)
+}
+
+watch(() => props.revealMessageId, () => { revealOlderPagesRequested = 0 })
+// Registered after the messages watcher so a prepend has restored its scroll
+// position before the reveal scrolls.
+watch(
+  () => [props.revealMessageId, props.messages, props.messages.length, props.isLoadingOlderMessages] as const,
+  () => { void nextTick(revealRequestedMessage) },
+)
 
 // Viewport-based read evidence reporting. Each row must individually stay
 // qualified for 600 ms before it becomes evidence; qualified numbers are
@@ -332,6 +370,8 @@ onMounted(() => {
   nextTick(() => {
     scrollToBottom('instant')
     setupReadObserver()
+    initialScrollSettled = true
+    revealRequestedMessage()
   })
 })
 

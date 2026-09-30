@@ -38,19 +38,26 @@
           class="activity-status-dot"
           :data-status="participant.status"
         />
-        <span>{{ participantNoteText(participant) }}</span>
-        <span
-          v-if="mode === 'live' && participant.workSignal?.detail"
-          class="activity-work-detail"
-        >
-          {{ participant.workSignal.detail }}
-        </span>
-        <span
-          v-if="participant.kind === 'agent' && participant.repoBranch"
-          class="activity-work-detail"
-        >
-          branch {{ participant.repoBranch }}
-        </span>
+        <WakeRuleLine
+          v-if="waitingRules(participant).length"
+          class="activity-roster-waiting"
+          :rules="waitingRules(participant)"
+        />
+        <template v-else>
+          <span>{{ participantNoteText(participant) }}</span>
+          <span
+            v-if="mode === 'live' && participant.workSignal?.detail"
+            class="activity-work-detail"
+          >
+            {{ participant.workSignal.detail }}
+          </span>
+          <span
+            v-if="participant.kind === 'agent' && participant.repoBranch"
+            class="activity-work-detail"
+          >
+            branch {{ participant.repoBranch }}
+          </span>
+        </template>
         <span
           v-if="activeReasoningCount(participant) > 0"
           class="activity-reasoning-pill"
@@ -68,12 +75,15 @@
 </template>
 
 <script setup lang="ts">
+import WakeRuleLine from '../../../../../../shared/ui/WakeRuleLine.vue'
+import type { WakeRule } from '../../../../../../shared/wake-rules.mjs'
 import {
   connectionLabel,
   historyLastSeenLabel,
   historyParticipantNote,
   participantMeta,
   participantNote,
+  rosterWaitingRules,
 } from './displayHelpers'
 import { formatLastSeen } from './time'
 import type {
@@ -89,6 +99,8 @@ const props = defineProps<{
   emptyMessage: string
   showConnectionBadges?: boolean
   showHumanKind?: boolean
+  /** Active wake rules by agent key; live agent rows show what they wait for. */
+  wakeRulesByAgentKey?: ReadonlyMap<string, readonly WakeRule[]> | null
 }>()
 
 const emit = defineEmits<{
@@ -99,6 +111,10 @@ function participantNoteText(participant: ActivityRosterParticipant): string {
   return props.mode === 'history'
     ? historyParticipantNote(participant as HistoryParticipant)
     : participantNote(participant)
+}
+
+function waitingRules(participant: ActivityRosterParticipant): readonly WakeRule[] {
+  return rosterWaitingRules(participant, props.mode, props.wakeRulesByAgentKey)
 }
 
 function seenLabel(participant: ActivityRosterParticipant): string {

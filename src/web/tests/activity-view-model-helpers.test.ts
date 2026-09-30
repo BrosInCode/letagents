@@ -10,10 +10,12 @@ import type {
   RoomTask,
   TaskGitHubArtifactStatus,
 } from '../src/composables/useRoom'
+import type { WakeRule } from '../../../shared/wake-rules.mjs'
 import {
   getActivityTaskLink,
   reasoningCardSummary,
   reasoningStatusLabel,
+  rosterWaitingRules,
 } from '../src/components/room/activity/displayHelpers'
 import { buildAgentThinkingEntry } from '../src/components/room/agentThinking'
 import {
@@ -74,6 +76,44 @@ test('live participant helpers group agent messages and build current agent work
   assert.deepEqual(participant.currentTasks.map((item) => item.id), ['task-1'])
   assert.deepEqual(participant.createdTasks.map((item) => item.id), ['task-2'])
   assert.deepEqual(participant.activeReasoning.map((item) => item.id), ['r1'])
+})
+
+test('agent rows key wake rules by agent and show them unless the agent needs a person', () => {
+  const actorLabel = 'Fable | Claude'
+  const waiting = [{ id: 'wake_1', agent_key: 'EmmyMay/fable' } as WakeRule]
+  const rulesByAgent = new Map([['EmmyMay/fable', waiting]])
+  const build = (input: {
+    presence?: Partial<RoomAgentPresence> | null
+    agentKey?: string | null
+    activityState?: 'active' | 'away' | 'offline'
+  } = {}) => buildAgentParticipant({
+    source: {
+      key: 'agent:fable',
+      actorLabel,
+      participant: roomParticipant({ kind: 'agent', actor_label: actorLabel, agent_key: input.agentKey ?? null }),
+      presence: input.presence === null ? null : presence({ actor_label: actorLabel, agent_key: 'EmmyMay/fable', ...input.presence }),
+      activityState: input.activityState ?? 'away',
+    },
+    messagesByActor: new Map(),
+    reasoningSessions: [],
+    tasks: [],
+  })
+
+  const idle = build()
+  assert.equal(idle.agentKey, 'EmmyMay/fable')
+  assert.equal(build({ presence: null, agentKey: 'EmmyMay/fable' }).agentKey, 'EmmyMay/fable', 'the room record names the agent when presence has gone')
+  assert.equal(rosterWaitingRules(idle, 'live', rulesByAgent), waiting)
+  assert.equal(rosterWaitingRules(build({ presence: { status: 'working', status_text: 'pushing' } }), 'live', rulesByAgent), waiting)
+  assert.deepEqual(rosterWaitingRules(build({ presence: { status: 'blocked', status_text: 'needs a token' } }), 'live', rulesByAgent), [])
+  assert.deepEqual(rosterWaitingRules(build({ activityState: 'offline' }), 'live', rulesByAgent), [])
+  assert.deepEqual(rosterWaitingRules(idle, 'history', rulesByAgent), [])
+  assert.deepEqual(rosterWaitingRules(idle, 'live', new Map()), [])
+  assert.deepEqual(rosterWaitingRules(build({ presence: null }), 'live', rulesByAgent), [])
+  assert.equal(buildHumanParticipant({
+    participant: roomParticipant({ kind: 'human', participant_key: 'human:emmy', display_name: 'Emmy' }),
+    messages: [],
+    tasks: [],
+  }).agentKey, null)
 })
 
 test('live participant helpers build human participants from browser activity', () => {

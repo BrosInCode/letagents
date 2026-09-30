@@ -255,6 +255,9 @@ jobs:
       - name: Test room settings, event filters and agent guidelines
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-settings-routes.test.ts src/api/__tests__/room-settings-delivery.test.ts src/api/__tests__/room-settings-db.test.ts
 
+      - name: Test agent wake rules and room resource invalidation
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/room-event-broker.test.ts
+
       - name: Run message attachment tests
         run: >-
           node

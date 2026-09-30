@@ -113,6 +113,7 @@
       @retryCreatedRoom="retryCreatedRoom"
       @shareResults="handleShareFocusResults"
       @updateFocusSettings="handleUpdateFocusSettings"
+      @openChat="handleActiveTabChange('chat')"
     />
 
     <Composer

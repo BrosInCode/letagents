@@ -1,9 +1,6 @@
 import { waitForMessageRouting } from "./wait-for-routing.js";
 import type { Express } from "express";
 import {
-  ROOM_RESOURCE_AGENT_APPROVAL,
-  ROOM_RESOURCE_AGENT_WORK,
-  ROOM_RESOURCE_EXECUTION_DELEGATION,
   ROOM_RESOURCE_INVALIDATION_CAPABILITY,
 } from "../../../../../shared/room-resource-invalidation.mjs";
 import {
@@ -295,14 +292,8 @@ export function registerMessageStreamRoute(
             message_ids: event.messageIds,
           })}\n\n`);
           return;
-        case "agent_work_invalidated":
-        case "agent_approval_invalidated":
-        case "execution_delegation_invalidated": {
-          const resource = event.kind === "agent_work_invalidated"
-            ? ROOM_RESOURCE_AGENT_WORK
-            : event.kind === "agent_approval_invalidated"
-              ? ROOM_RESOURCE_AGENT_APPROVAL
-              : ROOM_RESOURCE_EXECUTION_DELEGATION;
+        case "resource_invalidated": {
+          const resource = event.resource;
           if (supportsResourceInvalidation) {
             await writeEvent(`${eventId}event: ${ROOM_RESOURCE_INVALIDATION_CAPABILITY}\ndata: ${JSON.stringify({
               room_id: projectId,

@@ -5,12 +5,14 @@ export const ROOM_RESOURCE_AGENT_WORK = "agent_work";
 // authorized exact reads; the pointer never carries approval content.
 export const ROOM_RESOURCE_AGENT_APPROVAL = "agent_approval";
 export const ROOM_RESOURCE_EXECUTION_DELEGATION = "execution_delegation";
+export const ROOM_RESOURCE_WAKE_RULES = "wake_rules";
 // Protocol-known references. Each consumer still decides which surfaces, if
 // any, react to a supported pointer.
 export const ROOM_RESOURCE_INVALIDATION_RESOURCES = [
   ROOM_RESOURCE_AGENT_WORK,
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_EXECUTION_DELEGATION,
+  ROOM_RESOURCE_WAKE_RULES,
 ];
 
 function exactKeys(value, keys) {

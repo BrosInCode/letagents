@@ -50,6 +50,7 @@
                 <strong>{{ agent.displayName }}</strong>
                 <small v-if="agent.resourceFreshness === 'stale'">Reconnecting to this agent…</small>
                 <small v-else-if="agent.overallDetail">{{ agent.overallDetail }}</small>
+                <small v-else-if="waitingRules(agent.agentKey).length"><WakeRuleLine :rules="waitingRules(agent.agentKey)" /></small>
               </span>
               <span class="desktop-activity-row-meta">
                 <span class="state-pill" :data-state="group.key">
@@ -80,7 +81,8 @@
               <span class="desktop-activity-avatar" :data-state="agent.activityState || 'offline'">{{ initials(agent.label) }}</span>
               <span>
                 <strong>{{ agent.label }}</strong>
-                <small>{{ agent.statusText || branchLabel(agent) || agent.workLabel || agent.runtime || "Ready for room messages" }}</small>
+                <small v-if="waitingRules(agent.agentKey).length"><WakeRuleLine :rules="waitingRules(agent.agentKey)" /></small>
+                <small v-else>{{ agent.statusText || branchLabel(agent) || agent.workLabel || agent.runtime || "Ready for room messages" }}</small>
               </span>
               <span class="desktop-activity-row-meta">
                 <span class="state-pill" :data-state="agent.activityState || 'offline'">{{ connectionLabel(agent) }}</span>
@@ -385,6 +387,8 @@ import {
 } from "../../../domain/room-artifacts";
 import ChangeSummaryFilePanel from "./room-activity/ChangeSummaryFilePanel.vue";
 import { useRoomActivityViewModel } from "./room-activity/useRoomActivityViewModel";
+import WakeRuleLine from "../../../../../../../shared/ui/WakeRuleLine.vue";
+import { injectRoomWakeRules } from "../../../composables/useRoomWakeRules";
 import type { AgentInspectorRequest } from "./desktop-chat-message/types";
 
 const props = defineProps<{
@@ -487,6 +491,13 @@ const {
   signalLabel,
   taskStatusLabel,
 } = useRoomActivityViewModel(props, { autoSelectLive: false });
+
+const wakeRules = injectRoomWakeRules();
+const NO_RULES: never[] = [];
+/** What an agent is waiting for; a quiet agent with rules is waiting, not stuck. */
+function waitingRules(agentKey: string | null | undefined) {
+  return (agentKey && wakeRules?.activeByAgentKey.value.get(agentKey)) || NO_RULES;
+}
 
 const selectedTruthfulId = ref<string | null>(null);
 const inspectorTruthfulAgents = computed(() =>

@@ -9,6 +9,7 @@
       @skip="emit('skip-message', $event)"
     />
     <AgentInspectorNow :now="projection.now" />
+    <AgentInspectorWaiting :agent-key="projection.agentKey" />
     <AgentInspectorTurnControl
       :entry-id="projection.entryId"
       :control="projection.turnControl"
@@ -64,6 +65,7 @@ import { describeAgentInspectorRuntimeControl } from "../../../../domain/agent-i
 import { formatFullTimestamp } from "../../../../domain/time";
 import AgentInspectorDeliveryProgress from "./AgentInspectorDeliveryProgress.vue";
 import AgentInspectorNow from "./AgentInspectorNow.vue";
+import AgentInspectorWaiting from "./AgentInspectorWaiting.vue";
 import AgentInspectorContinuationRecovery from "./AgentInspectorContinuationRecovery.vue";
 import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
 

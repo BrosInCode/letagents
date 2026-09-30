@@ -722,6 +722,13 @@
       "when": 1790725431220,
       "tag": "0102_room_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1790760000000,
+      "tag": "0103_agent_wake_rules",
+      "breakpoints": true
     }
   ]
 }

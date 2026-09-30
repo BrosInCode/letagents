@@ -46,6 +46,8 @@ export function formatActivationReason(reason: string): string {
       return "Continuing your conversation";
     case "jev_routed":
       return "Chosen by conversation routing";
+    case "wake_rule":
+      return "Its wake rule fired";
     case "self_message":
       return "Published by this agent";
     case "system_event":

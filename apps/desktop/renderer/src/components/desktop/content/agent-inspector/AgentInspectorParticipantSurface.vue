@@ -42,6 +42,7 @@
       <strong>{{ projection.heading }}</strong>
       <p>{{ projection.detail }}</p>
     </div>
+    <AgentInspectorWaiting :agent-key="workspaceAgentKey ?? null" />
 
     <template v-if="projection.kind === 'local_managed'">
       <div class="agent-inspector-actions" aria-label="Local agent actions">
@@ -161,6 +162,7 @@
 
 <script setup lang="ts">
 import AgentInspectorWorkspace from "./AgentInspectorWorkspace.vue";
+import AgentInspectorWaiting from "./AgentInspectorWaiting.vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopManagedAgentChangeSummary,

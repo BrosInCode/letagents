@@ -26,6 +26,7 @@
           :selectedKey="selectedParticipantKey"
           mode="live"
           showConnectionBadges
+          :wakeRulesByAgentKey="activeWakeRules"
           emptyMessage="No agents are connected to this room right now."
           @select="selectedParticipantKey = $event"
         />
@@ -56,6 +57,7 @@
           :selectedKey="selectedParticipantKey"
           mode="live"
           showConnectionBadges
+          :wakeRulesByAgentKey="activeWakeRules"
           :emptyMessage="clearedLiveCount > 0 ? 'Disconnected agents were cleared from the live roster.' : 'No recently disconnected agents have been seen yet.'"
           @select="selectedParticipantKey = $event"
         />
@@ -85,13 +87,20 @@
       v-if="selectedParticipant"
       :participant="selectedParticipant"
       :taskGithubStatus="taskGithubStatus"
+      :roomIdentifier="roomIdentifier"
+      :wakeRules="wakeRulesForAgent(activeWakeRules, selectedParticipant.agentKey)"
+      :recentWakeRules="wakeRulesForAgent(recentWakeRules, selectedParticipant.agentKey)"
+      :wakeRuleApi="wakeRuleApi"
       @openReasoning="emit('openReasoning', $event)"
+      @openMessage="emit('openMessage', $event)"
     />
   </div>
 </template>
 
 <script setup lang="ts">
+import type { WakeRule, WakeRuleApi } from '../../../../../../shared/wake-rules.mjs'
 import type { TaskGitHubArtifactStatus } from '@/composables/useRoom'
+import { wakeRulesForAgent } from '@/composables/roomWakeRules'
 import ActivityLiveDetail from './ActivityLiveDetail.vue'
 import ActivityRosterList from './ActivityRosterList.vue'
 import type { ActivityParticipant } from './types'
@@ -106,11 +115,16 @@ defineProps<{
   canManageParticipants: boolean
   clearBusy: boolean
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
+  roomIdentifier: string
+  activeWakeRules: ReadonlyMap<string, readonly WakeRule[]>
+  recentWakeRules: ReadonlyMap<string, readonly WakeRule[]>
+  wakeRuleApi: Pick<WakeRuleApi, 'cancel' | 'restore'> | null
 }>()
 
 const emit = defineEmits<{
   clearDisconnected: []
   openReasoning: [sessionId: string]
+  openMessage: [messageId: string]
 }>()
 
 const selectedParticipantKey = defineModel<string | null>('selectedParticipantKey', { required: true })

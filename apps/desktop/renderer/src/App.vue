@@ -376,6 +376,7 @@
 
 <script setup lang="ts">
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
+import { invalidateRoomWakeRules } from "./composables/useRoomWakeRules";
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -1367,7 +1368,8 @@ const {
 
 function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   if (event.type === "resource_invalidation") {
-    invalidateSelectedRoomAgentWork(event.roomIdentifier);
+    if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
+    else invalidateSelectedRoomAgentWork(event.roomIdentifier);
     return;
   }
   handleRoomStreamEvent(event);

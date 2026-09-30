@@ -9,6 +9,8 @@ import type { AgentSessionBearerCapability } from "../../shared/agent-session-be
 const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSessionBearerCapability }> = [
   { method: "GET", path: /^\/rooms\/.+\/(?:memory|attention|memory\/[^/]+\/history)$/, capability: "coordination.read" },
   { method: "GET", path: /^\/rooms\/.+\/agent-guidelines$/, capability: "coordination.read" },
+  { method: "GET", path: /^\/rooms\/.+\/wake-rules$/, capability: "coordination.read" },
+  { method: "POST", path: /^\/rooms\/.+\/wake-rules(?:\/[^/]+\/(?:cancel|restore))?$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/(?:memory|attention)$/, capability: "coordination.propose" },
   { method: "GET", path: /^\/rooms\/.+\/messages$/, capability: "messages.read" },
   { method: "GET", path: /^\/rooms\/.+\/messages\/(?:poll|stream|threads|msg_\d+|msg_\d+\/thread|msg_\d+\/info)$/, capability: "messages.read" },

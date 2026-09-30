@@ -32,7 +32,7 @@ export { getTasksGitHubArtifactStatus } from "./db/github/index.js";
 export { buildManualGitHubRepoRoomBindingInput, ensureGitHubRepoRoomBinding, getGitRoomBindingForRoom, getGitRoomBindingsForRooms, normalizeGitRoomVisibility, upsertGitRoomBinding } from "./db/git-room-bindings.js";
 export { buildRoomSharedArtifactIdentityKey, getRoomSharedArtifactByIdentityKey, getRoomSharedArtifacts, linkRoomSharedArtifactToTask, preserveManualRoomSharedArtifactInput, publishWorkerArtifactFenced, syncRoomSharedArtifactsForTask, upsertRoomSharedArtifact } from "./db/room-shared-artifacts.js";
 export { addMessage, addMessageWithCreateStatus, getMessageStreamCheckpoint, getMessages, getLatestMessages, getMessageById, getMessageRecipientAgentKeys, getMessageRecipientAgentTargets, getMessagesBefore, getMessagesAfter, getMessageThread, getMessageThreads, markMessageThreadRead, hydrateMessageReplies, getMessageThreadReadOverlays, getMessageAccountAgentRoutingById, getRoomMessageCountsBySender, getMessageAttachment, createMessageAttachmentUpload } from "./db/messages.js";
-export type { MessageCreateTransaction } from "./db/messages.js";
+export type { AddMessageOptions, MessageCreateTransaction } from "./db/messages.js";
 export type { MessageThreadInboxFilter, MessageThreadInboxItem, MessageThreadInboxPage } from "./db/messages.js";
 export type { MessageThreadReadOverlay, MessageThreadReadTarget } from "./db/messages.js";
 export { getMessageAttachmentUpload, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";

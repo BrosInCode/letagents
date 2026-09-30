@@ -49,6 +49,15 @@
   gap: 10px;
 }
 
+/* The shared wake-rule cards take the activity panel's card radius. */
+.activity-detail-waiting .wake-rule {
+  border-radius: 8px;
+}
+
+.activity-detail-waiting .wake-rule-mark {
+  border-radius: 6px;
+}
+
 .activity-detail-section-header {
   display: flex;
   align-items: center;

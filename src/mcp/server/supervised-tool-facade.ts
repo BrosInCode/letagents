@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { parsePositivePgIntegerScopedId } from "../../../shared/message-contracts.mjs";
+import { SUPERVISED_READ_ONLY_TOOLS } from "../../../shared/supervised-read-tools.mjs";
 
 import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
 import { runWithCurrentSupervisedRoom } from "./runtime/room-state.js";
@@ -14,25 +15,9 @@ import {
   type PreparedSupervisedEffect,
 } from "./runtime/supervisor-bridge.js";
 
-const READ_TOOLS = new Set([
-  "get_current_room",
-  "check_repo",
-  "check_repo_visibility",
-  "read_messages",
-  "wait_for_messages",
-  "get_board",
-  "get_board_settings",
-  "get_room_memory", "get_human_requests", "get_room_guidelines",
-  "get_room_artifacts",
-  "get_room_events",
-  "list_board_intents",
-  "get_onboarding_status",
-  "status_local_codex_session",
-  "rental_list_requests",
-]);
 
 export function supervisedToolIsMutation(toolName: string): boolean {
-  return !READ_TOOLS.has(toolName);
+  return !SUPERVISED_READ_ONLY_TOOLS.has(toolName);
 }
 
 // The desktop daemon's local control protocol intentionally uses small bounded

@@ -1,7 +1,7 @@
 import {
   addMessageWithCreateStatus,
+  type AddMessageOptions,
   type Message,
-  type MessageCreateTransaction,
 } from "../db.js";
 import { createBridgedEmitter } from "./event-bridge.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
@@ -36,6 +36,7 @@ export const artifactEvents = createBridgedEmitter("artifacts");
 export const agentWorkEvents = createBridgedEmitter("agent-work");
 export const agentApprovalEvents = createBridgedEmitter("agent-approval");
 export const executionDelegationEvents = createBridgedEmitter("execution-delegation");
+export const wakeRuleEvents = createBridgedEmitter("wake-rules");
 
 const ROOM_INVALIDATION_COALESCE_MS = 100;
 
@@ -82,6 +83,15 @@ export const queueExecutionDelegationInvalidation = createRoomInvalidationQueue(
   "execution_delegation:invalidated",
 );
 
+/**
+ * Coalesce wake-rule changes (created, fired, expired, cancelled) into a
+ * pointer-only room invalidation. Consumers re-read the room's wake rules.
+ */
+export const queueWakeRuleInvalidation = createRoomInvalidationQueue(
+  wakeRuleEvents,
+  "wake_rules:invalidated",
+);
+
 export async function emitProjectMessage(
   projectId: string,
   sender: string,
@@ -98,7 +108,8 @@ export async function emitProjectMessage(
     publisher_agent_session_id?: string | null;
     account_id?: string | null;
     account_agent_routing?: boolean;
-    with_created_message_in_transaction?: (tx: MessageCreateTransaction) => Promise<void>;
+    with_created_message_in_transaction?: AddMessageOptions["with_created_message_in_transaction"];
+    addressed_to?: AddMessageOptions["addressed_to"];
   }
 ): Promise<Message> {
   const {
@@ -119,6 +130,7 @@ export async function emitProjectMessage(
     account_id: options?.account_id ?? null,
     account_agent_routing: options?.account_agent_routing,
     with_created_message_in_transaction: options?.with_created_message_in_transaction,
+    addressed_to: options?.addressed_to,
   });
   if (created) {
     messageEvents.emit("message:created", {

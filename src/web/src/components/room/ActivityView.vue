@@ -84,8 +84,13 @@
       :can-manage-participants="props.canManageParticipants"
       :clear-busy="clearBusy"
       :task-github-status="props.taskGithubStatus"
+      :room-identifier="props.roomIdentifier"
+      :active-wake-rules="activeWakeRules"
+      :recent-wake-rules="recentWakeRules"
+      :wake-rule-api="wakeRuleApi"
       @clear-disconnected="handleClearDisconnected"
       @open-reasoning="selectedReasoningId = $event"
+      @open-message="emit('openMessage', $event)"
     />
 
     <ReasoningTraceModal
@@ -100,6 +105,7 @@
 <script setup lang="ts">
 import { toRef } from 'vue'
 import { useRoomAgentApprovals } from '@/composables/roomAgentApprovals'
+import { useRoomWakeRules } from '@/composables/roomWakeRules'
 import ReasoningTraceModal from './ReasoningTraceModal.vue'
 import ActivityApprovalEvidence from './activity/ActivityApprovalEvidence.vue'
 import ActivityArtifactsPanel from './activity/ActivityArtifactsPanel.vue'
@@ -111,6 +117,16 @@ import type { ActivityViewProps } from './activity/types'
 import { useActivityViewModel } from './activity/useActivityViewModel'
 
 const props = defineProps<ActivityViewProps>()
+const emit = defineEmits<{
+  /** Show a room message in the chat, e.g. the one that woke an agent. */
+  openMessage: [messageId: string]
+}>()
+
+const {
+  activeByAgentKey: activeWakeRules,
+  recentByAgentKey: recentWakeRules,
+  api: wakeRuleApi,
+} = useRoomWakeRules(toRef(props, 'roomIdentifier'))
 
 const {
   entries: approvalEntries,

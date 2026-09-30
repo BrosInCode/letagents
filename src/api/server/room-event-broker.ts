@@ -10,6 +10,13 @@ import type {
   Task,
 } from "../db.js";
 import type { MessageRecipientAgentTarget } from "../db/types.js";
+import {
+  ROOM_RESOURCE_AGENT_APPROVAL,
+  ROOM_RESOURCE_AGENT_WORK,
+  ROOM_RESOURCE_EXECUTION_DELEGATION,
+  ROOM_RESOURCE_WAKE_RULES,
+  type RoomResourceInvalidationResource,
+} from "../../../shared/room-resource-invalidation.mjs";
 import type { ActivityEvent } from "../rental/activity-emitter.js";
 import type { MessageInfoUpdatedEvent } from "./message-info-events.js";
 import type { RoomMessageOverlayTarget } from "./room-message-overlays.js";
@@ -41,9 +48,8 @@ export type RoomEvent =
   | { kind: "artifact_updated"; roomId: string; artifact: RoomSharedArtifact | null }
   | { kind: "rental_activity_created"; roomId: string; activity: ActivityEvent }
   | { kind: "message_info_updated"; roomId: string; messageIds: string[] | null }
-  | { kind: "agent_work_invalidated"; roomId: string }
-  | { kind: "agent_approval_invalidated"; roomId: string }
-  | { kind: "execution_delegation_invalidated"; roomId: string };
+  /** Pointer-only: consumers re-read the resource through its own authorized route. */
+  | { kind: "resource_invalidated"; roomId: string; resource: RoomResourceInvalidationResource };
 
 export type RoomEventKind = RoomEvent["kind"];
 export const MESSAGE_CREATED_EVENT_KINDS: ReadonlySet<RoomEventKind> = new Set(["message_created", "message_routed"]);
@@ -118,6 +124,7 @@ interface EventSourceDeps {
   agentWorkEvents?: EventEmitter;
   agentApprovalEvents?: EventEmitter;
   executionDelegationEvents?: EventEmitter;
+  wakeRuleEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
 }
 
@@ -275,22 +282,17 @@ export class RoomEventBroker {
         messageIds: event.messageIds,
       };
     });
-    if (deps.agentWorkEvents) {
-      this.addSource(deps.agentWorkEvents, "agent_work:invalidated", (payload) => {
+    const invalidationSources: ReadonlyArray<[EventEmitter | undefined, string, RoomResourceInvalidationResource]> = [
+      [deps.agentWorkEvents, "agent_work:invalidated", ROOM_RESOURCE_AGENT_WORK],
+      [deps.agentApprovalEvents, "agent_approval:invalidated", ROOM_RESOURCE_AGENT_APPROVAL],
+      [deps.executionDelegationEvents, "execution_delegation:invalidated", ROOM_RESOURCE_EXECUTION_DELEGATION],
+      [deps.wakeRuleEvents, "wake_rules:invalidated", ROOM_RESOURCE_WAKE_RULES],
+    ];
+    for (const [emitter, eventName, resource] of invalidationSources) {
+      if (!emitter) continue;
+      this.addSource(emitter, eventName, (payload) => {
         const event = payload as { projectId: string };
-        return { kind: "agent_work_invalidated", roomId: event.projectId };
-      });
-    }
-    if (deps.agentApprovalEvents) {
-      this.addSource(deps.agentApprovalEvents, "agent_approval:invalidated", (payload) => {
-        const event = payload as { projectId: string };
-        return { kind: "agent_approval_invalidated", roomId: event.projectId };
-      });
-    }
-    if (deps.executionDelegationEvents) {
-      this.addSource(deps.executionDelegationEvents, "execution_delegation:invalidated", (payload) => {
-        const event = payload as { projectId: string };
-        return { kind: "execution_delegation_invalidated", roomId: event.projectId };
+        return { kind: "resource_invalidated", roomId: event.projectId, resource };
       });
     }
     if (deps.bridgeLossEvents) {

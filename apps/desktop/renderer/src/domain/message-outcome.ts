@@ -20,6 +20,7 @@ export function messageTriggerLabel(activation: Record<string, unknown> | null |
     everyone: "Message addressed to everyone",
     human_message: "Message from a person", thread_reply: "Reply in an agent’s thread",
     task_continuation: "Continuing assigned work", task_assigned: "Task assigned",
+    wake_rule: "Its wake rule fired",
   };
   return typeof activation?.reason === "string" ? reasons[activation.reason] ?? "Room delivery requested a response" : "Room delivery requested a response";
 }

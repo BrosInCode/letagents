@@ -26,7 +26,9 @@ import {
   isUntrustedExternalActivationSource,
   isTaskOwnerFollowUpMessageText,
   type ActivationIdentity,
+  type AgentMessageActivationReason,
 } from "../../../shared/activation-routing.js";
+import { WAKE_NOTICE_SOURCE } from "../../../../shared/wake-rules.mjs";
 import { RequestValidationError } from "../../validation-error.js";
 import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answering-session.js";
 import { getSessionConnections } from "./session-connections.js";
@@ -146,7 +148,19 @@ export interface AddMessageOptions {
    * prior transaction already committed both the message and this side
    * effect together.
    */
-  with_created_message_in_transaction?: (tx: MessageCreateTransaction) => Promise<void>;
+  with_created_message_in_transaction?: (tx: MessageCreateTransaction, message: MessageRow) => Promise<void>;
+  /**
+   * A system notice for exactly one agent. Routing is skipped: this agent
+   * receives the only receipt, with this reason, and nobody else is woken or
+   * notified. When the agent has no live session the receipt goes to its
+   * latest one, which its next session inherits.
+   */
+  addressed_to?: { agent_key: string; reason: AgentMessageActivationReason };
+}
+
+/** System notices keep a separate line written for people. */
+function retainsDisplayText(source: string | undefined): boolean {
+  return source === "system" || source === WAKE_NOTICE_SOURCE;
 }
 
 export interface AddMessageResult {
@@ -296,7 +310,7 @@ export async function addMessageWithCreateStatus(
       thread_root_number: threadRootNumber,
       sender,
       text,
-      display_text: options?.source === "system" ? options.display_text?.trim() || null : null,
+      display_text: retainsDisplayText(options?.source) ? options?.display_text?.trim() || null : null,
       agent_prompt_kind: promptKind,
       source: options?.source ?? null,
       client_message_id: clientMessageId,
@@ -395,21 +409,22 @@ export async function addMessageWithCreateStatus(
         );
     }
 
+    const addressedTo = options?.addressed_to ?? null;
     let notificationEnqueueDurationMs = 0;
-    if (!createdMessageIsPromptOnly) {
+    if (!createdMessageIsPromptOnly && !addressedTo) {
       const notificationEnqueueStartedAtMs = Date.now();
       await enqueueDesktopPushNotifications(tx, createdMessage);
       notificationEnqueueDurationMs = Date.now() - notificationEnqueueStartedAtMs;
     }
 
     if (options?.with_created_message_in_transaction) {
-      await options.with_created_message_in_transaction(tx);
+      await options.with_created_message_in_transaction(tx, createdMessage);
     }
 
     // Send-time routing snapshot: resolve active worker sessions in this room and insert queued receipts
     const routingStartedAtMs = Date.now();
     const untrustedExternalEvent = isUntrustedExternalActivationSource(createdMessage.source);
-    const taskOwnerFollowUp = !untrustedExternalEvent
+    const taskOwnerFollowUp = !untrustedExternalEvent && !addressedTo
       && isTaskOwnerFollowUpMessageText(createdMessage.text);
     const leases = taskOwnerFollowUp
       ? await getBoundedActiveWorkLeaseOwners(tx, roomId)
@@ -535,7 +550,7 @@ export async function addMessageWithCreateStatus(
           candidateSessionCondition,
         )
       : candidateKeyCondition ?? candidateSessionCondition;
-    const activeSessions = !untrustedExternalEvent && (needsCompletePopulation || candidateCondition)
+    const activeSessions = !untrustedExternalEvent && !addressedTo && (needsCompletePopulation || candidateCondition)
       ? await tx
           .select({
             session_id: room_agent_sessions.session_id,
@@ -894,6 +909,13 @@ export async function addMessageWithCreateStatus(
       await insertMessageReceiptRows(tx, receiptRowsToInsert);
     }
 
+    if (addressedTo) {
+      const addressed = await routeAddressedMessage(tx, roomId, createdMessage, addressedTo);
+      receiptCount = addressed.length;
+      recipientAgentKeys = addressed.map((target) => target.agent_key);
+      recipientAgentTargets = addressed;
+    }
+
     // Notification fan-out and worker routing both stay synchronous and atomic
     // with the message. Account for their combined hot-path cost so rooms with
     // no live worker sessions do not hide a slow notification enqueue.
@@ -982,6 +1004,61 @@ export async function addMessageWithCreateStatus(
     });
   }
   return result;
+}
+
+async function routeAddressedMessage(
+  tx: MessageCreateTransaction,
+  roomId: string,
+  message: MessageRow,
+  addressedTo: NonNullable<AddMessageOptions["addressed_to"]>,
+): Promise<MessageRecipientAgentTarget[]> {
+  const sessions = await tx
+    .select({
+      session_id: room_agent_sessions.session_id,
+      actor_label: room_agent_sessions.actor_label,
+      agent_key: room_agent_sessions.agent_key,
+      owner_account_id: room_agent_sessions.owner_account_id,
+      created_at: room_agent_sessions.created_at,
+      last_seen_at: room_agent_sessions.last_seen_at,
+      ended_at: room_agent_sessions.ended_at,
+    })
+    .from(room_agent_sessions)
+    .where(and(
+      eq(room_agent_sessions.room_id, roomId),
+      eq(room_agent_sessions.agent_key, addressedTo.agent_key),
+      eq(room_agent_sessions.session_kind, "worker"),
+    ))
+    .orderBy(sql`${room_agent_sessions.ended_at} IS NULL DESC`, sql`${room_agent_sessions.ended_at} DESC NULLS FIRST`)
+    .limit(MAX_ACCOUNT_ROUTING_TARGETS + 1);
+  const live = sessions.filter((session) => session.ended_at === null);
+  let session: (typeof sessions)[number] | undefined;
+  if (live.length > 0) {
+    const connections = live.length > 1
+      ? (await getSessionConnections(tx, roomId, live.map((candidate) => candidate.session_id))).connected
+      : new Set<string>();
+    session = chooseAnsweringSession(live, connections);
+  } else {
+    session = sessions[0];
+  }
+  if (!session) return [];
+  await insertMessageReceiptRows(tx, [{
+    id: `rcpt_${randomUUID().replace(/-/g, "")}`,
+    message_room_id: roomId,
+    message_number: message.number,
+    room_id: roomId,
+    agent_session_id: session.session_id,
+    agent_key: addressedTo.agent_key,
+    actor_label: session.actor_label,
+    activation_reason: addressedTo.reason,
+    receipt_state: "queued",
+    created_at: message.timestamp,
+    updated_at: message.timestamp,
+  }]);
+  return [{
+    agent_key: addressedTo.agent_key,
+    agent_session_id: session.session_id,
+    owner_account_id: session.owner_account_id,
+  }];
 }
 
 // Build the complete acknowledgement before commit: a failed attachment,
