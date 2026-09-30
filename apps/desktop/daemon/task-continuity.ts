@@ -1,3 +1,5 @@
+import { NO_REPLY_FAILURE, noReplyFailureKind } from "../../../shared/room-turn-no-reply.mjs";
+
 /** A snapshot of work already owned by the exact worker, never a new claim. */
 export type ContinuityTask = { id: string; title: string; leaseId: string; epoch: number };
 export type TaskContinuation = {
@@ -7,13 +9,37 @@ export type TaskContinuation = {
   tasks: ContinuityTask[] | null;
 };
 
-export function taskFailurePolicy(error: string | null, attempt: number): { automatic: boolean; detail: string } {
+export type TaskFailurePolicy = {
+  automatic: boolean;
+  detail: string;
+  /** Stop without a follow-up and without blocking the queue; `detail` is kept on the failed message. */
+  settle?: true;
+  /** Added to the follow-up prompt so the next turn can avoid the same failure. */
+  note?: string;
+};
+
+export function taskFailurePolicy(error: string | null, attempt: number): TaskFailurePolicy {
   const retry = "Resolve this issue, then use Retry delivery to continue the existing task.";
   if (/\b402\b|insufficient.{0,30}(?:credit|balance|quota)|(?:account|credit).{0,60}(?:output budget|exhausted)|(?:usage|spend|credit) limit|quota[ _-](?:exhausted|reached|exceeded)/i.test(error ?? "")) {
     return { automatic: false, detail: `The model provider has insufficient credit or quota. ${retry}` };
   }
   if (/\b40[13]\b|unauthorized|invalid api key|authentication|sign[ -]?in required|access.{0,15}denied/i.test(error ?? "")) {
     return { automatic: false, detail: `The model provider needs authentication or account access. ${retry}` };
+  }
+  // The turn finished without an answer. That usually repeats, so allow one
+  // follow-up turn (never a replay), then stop without blocking later messages.
+  const noReply = noReplyFailureKind(error);
+  if (noReply === "contentFilter") {
+    return { automatic: false, settle: true, detail: `${NO_REPLY_FAILURE.contentFilter} The unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
+  }
+  if (noReply) {
+    if (attempt > 1) {
+      return { automatic: false, settle: true, detail: `${NO_REPLY_FAILURE[noReply]} It happened again, so the unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
+    }
+    return { automatic: true, detail: "The model stopped before writing a reply. Continuing the unfinished task after a short delay.",
+      note: noReply === "outputLimit"
+        ? "Your previous turn hit the model's output limit before it wrote a reply. Keep replies short and split large tool calls."
+        : "Your previous turn ended without a reply. End this turn with a short reply." };
   }
   if (attempt > 3) return { automatic: false, detail: `Automatic task recovery stopped after three continuations. Check the provider, then use Retry delivery. Existing work is preserved.` };
   if (/\b(?:429|500|502|503|504|529)\b|rate.?limit|temporar(?:y|ily)|overloaded|service unavailable|connection reset|ECONNRESET|ETIMEDOUT|socket closed|network error/i.test(error ?? "")) {

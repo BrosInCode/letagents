@@ -1527,6 +1527,60 @@ test("current v13 repair rolls back its temporary journal backup as one atomic u
   } finally { await env.cleanup(); }
 });
 
+test("every re-block within one attempt is journaled, after trimmed history and after restarts", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const blockedEvents = async (agent: string) => (await store.receipts(agent))[0]!.timeline.filter((event) => event.phase === "blocked").length;
+
+    // Retry re-reads the same turn; retention may already have trimmed older events.
+    await store.ingestPoll({ agent_id: "reread", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    const item = (await store.claimHead("reread"))!;
+    await store.checkpointTurnStarted(item.inbox_item_id, "turn-1", TEST_PROVIDER_TURN_AUTHORITY);
+    const reblock = async () => {
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, "result_recovery", { last_error: "Re-reading the same completed turn." });
+      await store.transition(item.inbox_item_id, "blocked", { last_error: "Still unreadable; not rerun." });
+    };
+    await reblock();
+    await store.retryBlocked(item.inbox_item_id); await store.claimHead("reread"); await reblock();
+    assert.equal(await blockedEvents("reread"), 2);
+    const trim = new DatabaseSync(env.database);
+    trim.prepare(`DELETE FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='blocked'
+      AND event_sequence=(SELECT MIN(event_sequence) FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='blocked')`)
+      .run(item.inbox_item_id, item.inbox_item_id);
+    trim.close();
+    await store.retryBlocked(item.inbox_item_id); await store.claimHead("reread"); await reblock();
+    assert.equal(await blockedEvents("reread"), 2, "the third block is kept although an older one was trimmed");
+
+    // Startup recovery blocks the same unstarted dispatch twice within attempt 0.
+    await store.ingestPoll({ agent_id: "restarts", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    const restarted = (await store.claimHead("restarts"))!;
+    await store.normalizeStartupRecovery("restarts");
+    await store.retryBlocked(restarted.inbox_item_id); await store.claimHead("restarts");
+    await store.normalizeStartupRecovery("restarts");
+    assert.equal((await store.get(restarted.inbox_item_id))?.state, "blocked");
+    assert.equal(await blockedEvents("restarts"), 2);
+    await store.normalizeStartupRecovery("restarts");
+    assert.equal(await blockedEvents("restarts"), 2, "a row left blocked is not journaled again");
+
+    // A row that stays in result_recovery across two restarts is one fact, journaled once.
+    await store.ingestPoll({ agent_id: "rereading", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    const rereading = (await store.claimHead("rereading"))!;
+    await store.checkpointTurnStarted(rereading.inbox_item_id, "turn-1", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.transition(rereading.inbox_item_id, "awaiting_result");
+    await store.transition(rereading.inbox_item_id, "result_recovery", { last_error: "Re-reading the same completed turn." });
+    await store.normalizeStartupRecovery("rereading");
+    await store.normalizeStartupRecovery("rereading");
+    const recoveryEvents = (await store.receipts("rereading"))[0]!.timeline
+      .filter((event) => event.phase === "result_unreadable" && /no new model turn will start/.test(event.detail ?? ""));
+    assert.equal(recoveryEvents.length, 1);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("skip message is honest, pre-turn only, and releases the next FIFO item", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);

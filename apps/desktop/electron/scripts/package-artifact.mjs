@@ -247,6 +247,7 @@ const required = [
     "shared/agent-codenames.mjs",
     "shared/message-contracts.mjs",
     "shared/permission-review.mjs",
+    "shared/room-turn-no-reply.mjs",
     "shared/routing-aliases.mjs",
     "shared/scratch-workspace-repository.mjs",
     "shared/sqlite-thread-routing.mjs",
