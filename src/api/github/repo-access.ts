@@ -48,6 +48,11 @@ const REPO_VISIBILITY_UNKNOWN_TTL_MS = 1000 * 10;
 // How long a definitive answer may stand in while GitHub gives none (rate
 // limit, outage, timeout). Webhook invalidation discards it immediately.
 const REPO_VISIBILITY_LAST_KNOWN_MAX_AGE_MS = 1000 * 60 * 60;
+// Token-less lookups share GitHub's per-IP budget across every room. After
+// GitHub says it is exhausted, wait for its reset instead of retrying.
+const REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS = 1000 * 60;
+const REPO_VISIBILITY_RATE_LIMIT_MAX_BACKOFF_MS = 1000 * 60 * 60;
+let anonymousVisibilityLookupsBlockedUntil = 0;
 const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
 const REPO_CACHE_MAX_ENTRIES = 5_000;
 const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; expiresAt: number }>();
@@ -177,8 +182,7 @@ function pruneKeyCache(cache: Map<string, object>, maxEntries: number): void {
   }
 }
 
-export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
-  const roomKey = normalizeCacheKey(roomName);
+function forgetRoomAccess(roomKey: string): void {
   const prefix = `${roomKey}::`;
   rotateCacheGeneration(repoRoomCacheGeneration, roomKey);
   repoVisibilityCache.delete(roomKey);
@@ -194,11 +198,15 @@ export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.roomKey === roomKey) repoAccessInflight.delete(flightKey);
   }
+}
+
+export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
+  const roomKey = normalizeCacheKey(roomName);
+  forgetRoomAccess(roomKey);
   githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: roomKey });
 }
 
-export function clearGitHubRepoAccessCacheForLogin(login: string): void {
-  const loginKey = normalizeCacheKey(login);
+function forgetLoginAccess(loginKey: string): void {
   const suffix = `::${loginKey}`;
   rotateCacheGeneration(repoLoginCacheGeneration, loginKey);
   for (const cacheKey of repoAccessCache.keys()) {
@@ -209,7 +217,28 @@ export function clearGitHubRepoAccessCacheForLogin(login: string): void {
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.loginKey === loginKey) repoAccessInflight.delete(flightKey);
   }
+}
+
+export function clearGitHubRepoAccessCacheForLogin(login: string): void {
+  const loginKey = normalizeCacheKey(login);
+  forgetLoginAccess(loginKey);
   githubRepoAccessInvalidationEvents.emit("invalidate", { login: loginKey });
+}
+
+// A webhook received by another API instance arrives here through the bridge
+// (emitLocal, never re-published). Forget this instance's copy as well, or
+// its cached and remembered visibility would outlive the change. Local
+// invalidations also pass through here; forgetting twice is harmless.
+githubRepoAccessInvalidationEvents.on("invalidate", (payload: unknown) => {
+  const invalidation = payload && typeof payload === "object"
+    ? payload as { roomName?: unknown; login?: unknown }
+    : {};
+  if (typeof invalidation.roomName === "string") forgetRoomAccess(normalizeCacheKey(invalidation.roomName));
+  if (typeof invalidation.login === "string") forgetLoginAccess(normalizeCacheKey(invalidation.login));
+});
+
+export function resetGitHubRepoVisibilityBackoffForTests(): void {
+  anonymousVisibilityLookupsBlockedUntil = 0;
 }
 
 export function parseGitHubRepoName(roomName: string): { owner: string; repo: string } | null {
@@ -297,16 +326,21 @@ async function loadGitHubRepoVisibility(
 
   const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
   const isCurrentGeneration = () => getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration;
-  // When GitHub gives no answer (rate limit, outage, timeout), keep the last
-  // definitive visibility instead of treating a public room as private for
-  // anonymous readers. Fresh checks exist to see live access, so they never do.
+  const anonymous = !accessToken;
+  // When GitHub gives no answer, keep the last definitive visibility instead
+  // of treating a public room as private for anonymous readers. That includes
+  // the fresh checks behind anonymous live streams; a signed-in fresh check
+  // exists to see live access and never falls back.
   const lastKnownFallback = (): GitHubRepoVisibility | null => {
-    if (mode !== "anonymous" && mode !== "authenticated") return null;
+    if (mode === "fresh-authenticated") return null;
     const lastKnown = getLastKnownVisibility(roomName);
     // Retry GitHub no sooner than an unknown answer would be retried.
     if (lastKnown && isCurrentGeneration()) setCachedVisibility(roomName, lastKnown, REPO_VISIBILITY_UNKNOWN_TTL_MS);
     return lastKnown;
   };
+  if (anonymous && Date.now() < anonymousVisibilityLookupsBlockedUntil) {
+    return lastKnownFallback() ?? "unknown";
+  }
   let pending!: Promise<GitHubRepoVisibility>;
   pending = (async () => {
     let response: Response;
@@ -317,8 +351,12 @@ async function loadGitHubRepoVisibility(
       if (lastKnown) return lastKnown;
       throw error;
     }
-    const indeterminate = !response.ok && isIndeterminateGitHubAccessResponse(response);
-    if (indeterminate) {
+    const outcome = await classifyVisibilityLookupResponse(response, Date.now(), anonymous);
+    const unanswered = outcome.kind === "unanswered";
+    if (unanswered) {
+      if (anonymous && outcome.retryAt !== null) {
+        anonymousVisibilityLookupsBlockedUntil = Math.max(anonymousVisibilityLookupsBlockedUntil, outcome.retryAt);
+      }
       const lastKnown = lastKnownFallback();
       if (lastKnown) return lastKnown;
     }
@@ -329,9 +367,9 @@ async function loadGitHubRepoVisibility(
     }
     if (isCurrentGeneration()) {
       // A fresh check that got no answer must not replace what other readers see.
-      if (!indeterminate || !getLastKnownVisibility(roomName)) setCachedVisibility(roomName, visibility);
-      // A definitive "not visible" (404) also retires a remembered public answer.
-      if (!indeterminate) setLastKnownVisibility(roomName, visibility);
+      if (!unanswered || !getLastKnownVisibility(roomName)) setCachedVisibility(roomName, visibility);
+      // A definitive refusal (404, 401, a plain 403) also retires a remembered public answer.
+      if (!unanswered) setLastKnownVisibility(roomName, visibility);
     }
     return visibility;
   })().finally(() => {
@@ -341,6 +379,52 @@ async function loadGitHubRepoVisibility(
   });
   repoVisibilityInflight.set(flightKey, { roomKey, promise: pending });
   return pending;
+}
+
+type VisibilityLookupOutcome =
+  | { kind: "answered" }
+  | { kind: "unanswered"; retryAt: number | null };
+
+// Only throttling, timeouts and server errors mean GitHub gave no answer.
+// Anything else, including a 403 refusal such as a blocked repository and a
+// 401 to a token-less call, answers the question: the repository is not
+// public. This is deliberately narrower than isIndeterminateGitHubAccessResponse.
+// A 401 to a signed-in token only says the token is dead, not the visibility.
+async function classifyVisibilityLookupResponse(
+  response: Response,
+  now: number,
+  anonymous: boolean,
+): Promise<VisibilityLookupOutcome> {
+  if (response.ok) return { kind: "answered" };
+  if (response.status === 408 || response.status >= 500 || (response.status === 401 && !anonymous)) {
+    return { kind: "unanswered", retryAt: null };
+  }
+  if (response.status !== 403 && response.status !== 429) return { kind: "answered" };
+  const retryAfter = response.headers.get("retry-after");
+  const exhausted = response.headers.get("x-ratelimit-remaining") === "0";
+  let retryAt: number | null = null;
+  if (retryAfter !== null) {
+    const seconds = Number(retryAfter);
+    retryAt = Number.isFinite(seconds) && seconds >= 0
+      ? now + seconds * 1000
+      : now + REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS;
+  } else if (exhausted) {
+    const resetSeconds = Number(response.headers.get("x-ratelimit-reset"));
+    retryAt = Number.isFinite(resetSeconds) && resetSeconds > 0
+      ? resetSeconds * 1000
+      : now + REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS;
+  } else if (response.status === 429
+    || /secondary rate limit/i.test(await response.text().catch(() => ""))) {
+    retryAt = now + REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS;
+  }
+  if (retryAt === null) return { kind: "answered" };
+  return {
+    kind: "unanswered",
+    retryAt: Math.min(
+      Math.max(retryAt, now + REPO_VISIBILITY_UNKNOWN_TTL_MS),
+      now + REPO_VISIBILITY_RATE_LIMIT_MAX_BACKOFF_MS,
+    ),
+  };
 }
 
 export async function isGitHubRepoCollaborator(input: {
