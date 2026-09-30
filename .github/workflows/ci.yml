@@ -294,6 +294,7 @@ jobs:
           --import ./node_modules/tsx/dist/loader.mjs
           --test
           src/api/__tests__/repo-room-access-integration.test.ts
+          src/api/__tests__/github-repo-access.test.ts
 
       - name: Run repo migration tests
         run: >-
