@@ -40,6 +40,11 @@ export function pinWorkerConnection(statePath: string, session: StoredAgentSessi
   connections.set(`${statePath}\n${session.session_id}`, structuredClone(session));
 }
 
+/** The connection this process registered for a session, if it did. */
+export function heldWorkerConnection(statePath: string, sessionId: string): StoredAgentSessionState | null {
+  return connections.get(`${statePath}\n${sessionId}`) ?? null;
+}
+
 export function pinnedWorkerConnection(statePath: string, sessionId: string): StoredAgentSessionState | null {
   const call = currentWorkerCall();
   return call?.session_id === sessionId ? call : connections.get(`${statePath}\n${sessionId}`) ?? null;

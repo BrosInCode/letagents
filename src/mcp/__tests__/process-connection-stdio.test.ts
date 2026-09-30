@@ -145,14 +145,20 @@ test("a process holds its connection open, learns when its session is ended, and
       "it speaks for the connection it held, not for the session");
 
     // A room server that predates the connection answers 404. That says
-    // nothing about the session, so the process keeps it and stops asking.
+    // nothing about the session, so the process keeps it, and asks again
+    // only much later, in case the server has been replaced by then.
     processConnection = "unknown";
     const second = await openClient();
     const older = await call(second.client, "register_agent_session",
       { room_id: "room_shared", display_name: "Cedar", registration_key: "chat-b-random-key" });
     await new Promise((resolveWait) => setTimeout(resolveWait, 1_500));
     assert.equal(state().agent_sessions?.[older.agent_session.session_id]?.ended_at ?? null, null);
-    assert.equal(opened.length, 3, "an unsupported connection is not retried");
+    assert.equal(opened.length, 3, "a server that does not know the route is not asked again at once");
+    // The server is replaced by one that knows it, and the process is asked
+    // for again at the next of its long intervals.
+    processConnection = "served";
+    await until(() => opened.some((connection) => connection.session_id === older.agent_session.session_id),
+      "the connection to open once the route is known", 20_000);
     await call(second.client, "register_agent_session", { worker_id: older.worker_id, room_id: "room_shared" });
     await second.client.close();
 
