@@ -1214,7 +1214,9 @@ const continuityTask = { id: "task_1", title: "Existing work", leaseId: "lease-1
 /** A lease holder whose provider turns end with `failures` in order, then succeed with no reply. */
 async function runNoReplyContinuity(failures: readonly string[], rounds: readonly (readonly string[])[]) {
   const root = await mkdtemp(join(tmpdir(), "continuity-no-reply-"));
-  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let tick = 0;
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"),
+    () => new Date(Date.parse("2026-10-01T00:00:00.000Z") + (tick++) * 1_000).toISOString());
   const sources: string[] = []; const prompts: string[] = [];
   const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
     await options?.beforeNativeDispatch?.();
@@ -1257,7 +1259,12 @@ test("a model that hits its output limit every turn never blocks later room mess
   assert.deepEqual(sources, ["1", "continuation", "2", "3", "continuation"]);
   assert.ok(receipts.every((item) => item.state === "acknowledged_failed"), JSON.stringify(receipts.map((item) => item.state)));
   assert.equal(receipts.length, 5, "no blocked follow-up was queued");
-  assert.match(receipts[1]!.last_error ?? "", /happened again.*send a message to continue it/);
+  for (const index of [0, 1, 3, 4]) {
+    assert.match(receipts[index]!.last_error ?? "", /happened again.*send a message to continue it/,
+      "the reason reaches the follow-up and the room message it continued");
+    assert.ok(receipts[index]!.updated_at > receipts[index]!.acknowledged_at!, "the change is visible to change detection");
+  }
+  assert.equal(receipts[2]!.last_error, limit, "a message with no follow-up keeps its own reason");
 });
 
 test("a content-filter failure is settled without a follow-up and without blocking later messages", async () => {

@@ -473,14 +473,24 @@ export class SupervisedAgentInboxStore {
       const childSource = `task-continuation:${parent.inbox_item_id}`;
       run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
         JSON.stringify({ ...parent.activation, task_continuity_considered: childSource }), parent.inbox_item_id);
+      const setLastError = database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?");
       if (this.hasUncertainTaskEffects(database, parent)) {
-        run(database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?"),
-          "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.", parent.inbox_item_id);
+        run(setLastError, "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.", this.now(), parent.inbox_item_id);
         return null;
       }
       if (input.tasks?.length === 0) return null;
       if (input.settleReason) {
-        run(database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?"), input.settleReason, parent.inbox_item_id);
+        // Also show the reason on the room message the task continued from;
+        // a synthetic follow-up has no chat message of its own.
+        let origin = parent;
+        for (let depth = 0; depth < 8 && origin.source_message_id.startsWith("task-continuation:"); depth += 1) {
+          const parentId = parseTaskContinuation(origin.activation.task_continuity)?.parentId;
+          const row = parentId ? database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(parentId) as Row | undefined : undefined;
+          if (!row) break;
+          origin = rowToItem(row);
+        }
+        const timestamp = this.now();
+        for (const id of new Set([parent.inbox_item_id, origin.inbox_item_id])) run(setLastError, input.settleReason, timestamp, id);
         return null;
       }
       // No model turn is replayed. The same native conversation retains its files and tool history.
