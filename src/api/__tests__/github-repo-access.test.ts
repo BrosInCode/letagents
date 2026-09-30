@@ -649,3 +649,39 @@ test("a dead signed-in token says nothing about visibility and cannot unsettle a
     assert.equal(await getGitHubRepoVisibility(roomName), "public", "the remembered answer was not retired");
   });
 });
+
+test("a signed-in token refused by GitHub cannot retire a remembered public answer", async () => {
+  const roomName = `github.com/brosincode/sso-token-${Date.now()}`;
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls += 1;
+    if (calls === 1) return jsonResponse(200, { private: false });
+    if (new Headers(init?.headers).get("authorization")) {
+      return jsonResponse(403, { message: "Resource protected by organization SAML enforcement." });
+    }
+    return jsonResponse(429, { message: "slow down" });
+  }) as typeof fetch;
+
+  assert.equal(await getGitHubRepoVisibility(roomName), "public");
+  assert.equal(await getGitHubRepoVisibility(roomName, "sso-token", { bypassCache: true }), "unknown");
+  await withClockOffset(61_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName), "public", "anonymous readers keep the remembered answer");
+  });
+});
+
+test("a signed-in not-found answer still retires a remembered public answer", async () => {
+  const roomName = `github.com/brosincode/signed-in-404-${Date.now()}`;
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls += 1;
+    if (calls === 1) return jsonResponse(200, { private: false });
+    if (new Headers(init?.headers).get("authorization")) return jsonResponse(404, { message: "Not Found" });
+    return jsonResponse(429, { message: "slow down" });
+  }) as typeof fetch;
+
+  assert.equal(await getGitHubRepoVisibility(roomName), "public");
+  assert.equal(await getGitHubRepoVisibility(roomName, "token", { bypassCache: true }), "unknown");
+  await withClockOffset(61_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName), "unknown");
+  });
+});

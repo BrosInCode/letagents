@@ -389,7 +389,8 @@ type VisibilityLookupOutcome =
 // Anything else, including a 403 refusal such as a blocked repository and a
 // 401 to a token-less call, answers the question: the repository is not
 // public. This is deliberately narrower than isIndeterminateGitHubAccessResponse.
-// A 401 to a signed-in token only says the token is dead, not the visibility.
+// A 401 or a plain 403 to a signed-in token (dead token, SSO not authorized,
+// suspended account) says something about that token, not the visibility.
 async function classifyVisibilityLookupResponse(
   response: Response,
   now: number,
@@ -417,7 +418,7 @@ async function classifyVisibilityLookupResponse(
     || /secondary rate limit/i.test(await response.text().catch(() => ""))) {
     retryAt = now + REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS;
   }
-  if (retryAt === null) return { kind: "answered" };
+  if (retryAt === null) return anonymous ? { kind: "answered" } : { kind: "unanswered", retryAt: null };
   return {
     kind: "unanswered",
     retryAt: Math.min(
