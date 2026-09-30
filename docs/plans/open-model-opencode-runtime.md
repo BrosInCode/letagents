@@ -49,30 +49,63 @@ Codex-backed implementation.
   `AGENTS.md`; `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` would drop both and is
   not set. The contract smoke checks this and the skills setting against the
   pinned binary, from a planted home directory and Git project.
-- A room's scratch workspace is launched with
-  `OPENCODE_DISABLE_PROJECT_CONFIG=1`. OpenCode looks for `AGENTS.md`,
-  `CLAUDE.md`, `opencode.json` and `.opencode` directories from the working
-  directory up to the root of its Git repository. A scratch workspace has no
-  repository and lies under the owner's home, so without the setting an
-  `AGENTS.md` in the home directory, or instructions named by an
-  `opencode.json` there, reached the agent, and a `.opencode` directory on
-  the way gave it an agent definition and had packages installed into it. A scratch workspace has no project files
-  of its own to lose. Git worktrees are launched without the setting. A
-  launch that does not say which kind of workspace it has is refused. The
-  contract smoke checks both kinds.
-- The setting does not stop plugins. OpenCode 1.18.20 has a second search
-  with no switch. From a scratch workspace it still imports, inside the
-  server process, which holds the provider key:
-  - plugins in a `.opencode` directory anywhere between the workspace and
-    the file system root;
-  - plugins named by an `opencode.json` in one of those directories, and it
-    fetches packages that file names.
+- Every room's scratch workspace is the root of its own empty Git
+  repository. The daemon writes it as files when it provisions the
+  workspace, without running Git, and checks it before every launch: a
+  workspace made by an older version gets one, and anything at `.git` that
+  Git would not take as a repository (a file, a link, a partial directory,
+  a HEAD that names no ref or object) is moved aside to
+  `.git.replaced.<time>.<uuid>` and replaced; the newest three such entries
+  are kept. If that fails, the agent is shown as failed with the reason and
+  retried with backoff (5 seconds doubling to 5 minutes, starting over after
+  a success or Stop). It has no remote and no commits; the daemon's
+  marker file is in its `info/exclude`. OpenCode looks for `AGENTS.md`,
+  `CLAUDE.md`, `opencode.json` and `.opencode` directories, and for plugins,
+  from the working directory up to the root of its Git repository, so the
+  search now ends at the workspace. Before, a scratch workspace had no
+  repository and lay under the owner's home, and the search climbed to the
+  file system root. Measured on 1.18.20 from a planted home directory:
 
-  No launch setting bounds that search; `OPENCODE_PURE` also drops the
-  credential-boundary plugin. A Git repository at the workspace, or at its
-  parent `room-only` directory, does stop it. The workspace is deliberately
-  not a repository, so that is a decision about the workspace, not about
-  this launch. The contract smoke asserts the known state.
+  | Planted file | No repository (before) | Repository in `room-only` | Repository in the workspace (now) |
+  | --- | --- | --- | --- |
+  | plugin in `~/.letagents/.opencode/plugin/` | imported | not imported | not imported |
+  | plugin in `~/.letagents/worktrees/.opencode/plugin/` | imported | not imported | not imported |
+  | plugin in `~/.letagents/worktrees/room-only/.opencode/plugin/` | imported | imported | not imported |
+  | plugin named by `plugin` in `~/opencode.json` | imported | not imported | not imported |
+  | plugin named by `plugins` in `~/opencode.json` (contract smoke) | imported | not tested | not imported |
+  | plugin in `~/.opencode/plugin/` | imported | imported | imported |
+
+  A repository in the parent `room-only` directory would have covered less
+  and made every other room's workspace part of the project: with the Auto
+  access level, a write to `../<other room>/x` and `cat ../<other room>/notes.txt`
+  became ordinary permission requests instead of being refused. With the
+  repository in the workspace both are refused, as before.
+- The plugin boundary needs a working `git` for OpenCode. Without one,
+  OpenCode does not see the repository and searches up to the file system
+  root again (measured with no `git` on its `PATH`: every plugin above was
+  imported). On a Mac without the command line tools, `/usr/bin/git` is
+  Apple's stub: OpenCode runs it once it finds `.git`, it fails, and it may
+  ask the owner to install the tools. That case is read from OpenCode's
+  source, not reproduced. Every Open Model launch into a scratch workspace
+  runs `git -C <workspace> rev-parse --git-dir`, as OpenCode does, with the
+  launch's environment (two-second bound). On macOS, when that `git` is
+  `/usr/bin/git`, `xcode-select -p` is checked first, and Git is not run
+  when it fails, so the check never brings up Apple's prompt itself. The
+  launch goes ahead either way. A problem becomes an activity entry on the
+  agent ("Plugin boundary not in effect: …"), shown in the agent
+  inspector's Diagnostics, and a daemon log line.
+- The scratch workspace is also still launched with
+  `OPENCODE_DISABLE_PROJECT_CONFIG=1`. It has no project files of its own
+  to lose. Without a working `git` it still keeps out the instruction
+  files, agent definitions and package installs above the workspace, but
+  not plugins. Git worktrees are launched without the
+  setting. A launch that does not say which kind of workspace it has is
+  refused. The contract smoke checks both kinds, provisions the scratch
+  workspace with the daemon's own code, and asserts that no plugin above it
+  is imported.
+- Neither covers a plugin in the workspace's own `.opencode` directory: an
+  agent that writes one there has it imported by its next OpenCode server.
+  The contract smoke asserts this as its positive control.
 - `~/.opencode` is still read as an OpenCode config directory, for every
   workspace. Seen on 1.18.20: instruction files named in its `opencode.json`
   were loaded, a definition there of the primary agent, `build`, replaced

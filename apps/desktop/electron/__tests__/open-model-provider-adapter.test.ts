@@ -86,6 +86,8 @@ function createHarness() {
   const permissionReplies: Array<{ requestId: string; reply: string }> = [];
   const eventStreams = new Set<{ send(event: Record<string, unknown>): void; close(): void }>();
   let eventConnections = 0;
+  const gitProbes: Array<{ workspace: string; environment: NodeJS.ProcessEnv }> = [];
+  let gitProblem: string | null = null;
 
   const neverExits = new Promise<ProviderProcessExit>(() => {});
   observedProcessExit = neverExits;
@@ -216,10 +218,16 @@ function createHarness() {
       assert.fail(`Unexpected OpenCode request: ${init?.method ?? "GET"} ${url.pathname}`);
     },
     now: () => "2026-07-28T00:00:00.000Z",
+    async probeGit(workspace, environment) {
+      gitProbes.push({ workspace, environment });
+      return gitProblem;
+    },
   };
 
   return {
     dependencies,
+    gitProbes,
+    set gitProblem(value: string | null) { gitProblem = value; },
     launches,
     promptBodies,
     signals,
@@ -325,8 +333,7 @@ function spawnRequest(overrides: Partial<ProviderSpawnRequest> = {}): ProviderSp
   };
 }
 
-async function spawnAdapter(overrides: Partial<ProviderSpawnRequest> = {}) {
-  const harness = createHarness();
+async function spawnAdapter(overrides: Partial<ProviderSpawnRequest> = {}, harness = createHarness()) {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-adapter-"));
   const adapter = new OpenModelProviderAdapter({
     binary: "/opt/letagents/opencode",
@@ -1849,6 +1856,39 @@ test("Open Model keeps OpenCode's project search inside a room's scratch workspa
   const worktree = await spawnAdapter({ workspaceKind: "git_worktree" });
   t.after(() => rm(worktree.runtimeRoot, { recursive: true, force: true }));
   assert.equal(worktree.harness.launches[0]?.env.OPENCODE_DISABLE_PROJECT_CONFIG, undefined);
+});
+
+test("Open Model reports, and does not fail on, a scratch workspace whose Git OpenCode cannot run", async (t) => {
+  const warnings: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => { warnings.push(args); });
+  const working = await spawnAdapter({ workspaceKind: "room_scratch" });
+  t.after(() => rm(working.runtimeRoot, { recursive: true, force: true }));
+  const probe = working.harness.gitProbes[0]!;
+  const launched = working.harness.launches[0]!;
+  assert.equal(working.harness.gitProbes.length, 1);
+  assert.equal(probe.workspace, launched.cwd, "the check runs in the workspace OpenCode opens");
+  // The launch's own environment, not the daemon's: its config home is private to the runtime.
+  assert.equal(probe.environment.XDG_CONFIG_HOME, launched.env.XDG_CONFIG_HOME);
+  assert.notEqual(probe.environment.XDG_CONFIG_HOME, process.env.XDG_CONFIG_HOME);
+  assert.equal(probe.environment.PATH, launched.env.PATH);
+  assert.equal(working.handle.launchNotices?.length ?? 0, 0);
+  assert.equal(warnings.length, 0);
+
+  const harness = createHarness();
+  harness.gitProblem = "the Xcode command line tools are not installed (xcode-select -p failed), so /usr/bin/git cannot run";
+  const broken = await spawnAdapter({ workspaceKind: "room_scratch" }, harness);
+  t.after(() => rm(broken.runtimeRoot, { recursive: true, force: true }));
+  assert.equal(broken.harness.launches.length, 1, "the launch goes ahead");
+  assert.deepEqual(broken.handle.launchNotices, [
+    "Plugin boundary not in effect: the Xcode command line tools are not installed (xcode-select -p failed), so /usr/bin/git cannot run. OpenCode cannot see this room's workspace repository, so plugins in folders above the workspace can load into it.",
+  ]);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.[0], "[open_model_workspace_boundary]");
+
+  // A Git worktree needs no check: its repository is the owner's.
+  const worktree = await spawnAdapter({ workspaceKind: "git_worktree" });
+  t.after(() => rm(worktree.runtimeRoot, { recursive: true, force: true }));
+  assert.equal(worktree.harness.gitProbes.length, 0);
 });
 
 test("Open Model does not launch into a workspace whose kind it was not told", async (t) => {
