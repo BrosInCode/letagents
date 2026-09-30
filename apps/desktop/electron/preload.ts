@@ -170,6 +170,16 @@ const api: DesktopApi = {
     createAdHocFocusRoom: (roomIdentifier: string, title: string) =>
       ipcRenderer.invoke("desktop:room:create-ad-hoc-focus-room", roomIdentifier, title),
     getConversationRouting: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-conversation-routing", roomIdentifier),
+    getAccountActivity: () => ipcRenderer.invoke("desktop:room:get-account-activity"),
+    restartAccountActivity: () => ipcRenderer.invoke("desktop:room:restart-account-activity"),
+    stopAccountActivity: () => ipcRenderer.invoke("desktop:room:stop-account-activity"),
+    onAccountActivity: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:account-activity:changed", listener);
+      return () => {
+        ipcRenderer.off("desktop:account-activity:changed", listener);
+      };
+    },
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
     getGitHubEventFilter: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-github-event-filter", roomIdentifier),
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: string[]) => ipcRenderer.invoke("desktop:room:set-github-event-filter", roomIdentifier, enabledKinds),

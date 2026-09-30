@@ -1,5 +1,6 @@
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
+import type { DesktopAccountActivityState } from "./account-activity.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
 import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
 import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
@@ -280,6 +281,12 @@ export interface DesktopApi {
       title: string
     ) => Promise<DesktopFocusRoomMutationResult>;
     getConversationRouting: (roomIdentifier: string) => Promise<DesktopConversationRoutingSettings>;
+    /** Who is working in each of the account's rooms, and each room's latest message. */
+    getAccountActivity?: () => Promise<DesktopAccountActivityState>;
+    /** Opens the account's activity stream, or reopens it to watch a changed set of rooms. */
+    restartAccountActivity?: () => Promise<void>;
+    stopAccountActivity?: () => Promise<void>;
+    onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
     getGitHubEventFilter: (roomIdentifier: string) => Promise<GitHubRoomChatEventFilter>;
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: GitHubRoomChatEventKind[]) => Promise<GitHubRoomChatEventFilter>;
