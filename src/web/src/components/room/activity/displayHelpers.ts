@@ -1,7 +1,9 @@
+import type { WakeRule } from '../../../../../../shared/wake-rules.mjs'
 import type {
   RoomReasoningSession,
   TaskGitHubArtifactStatus,
 } from '../../../composables/room/types'
+import { wakeRulesForAgent } from '../../../composables/roomWakeRules'
 import { describeAgentReachability } from '../reachability'
 import { ACTIVITY_STATE_LABELS } from './labels'
 import { formatLastSeen } from './time'
@@ -35,6 +37,23 @@ export function participantNote(participant: ActivityParticipant | HistoryPartic
   return participant.messageCount > 0
     ? 'Seen via browser room activity'
     : 'Known from task history'
+}
+
+const NO_WAKE_RULES: readonly WakeRule[] = Object.freeze([])
+
+/**
+ * The wake rules a roster row shows in place of its generic line. A quiet
+ * agent with rules is waiting, not stuck. A blocked or unreachable agent keeps
+ * its own line: that needs a person, whatever the agent is waiting for.
+ */
+export function rosterWaitingRules(
+  participant: ActivityParticipant | HistoryParticipant,
+  mode: 'live' | 'history',
+  wakeRulesByAgentKey: ReadonlyMap<string, readonly WakeRule[]> | null | undefined,
+): readonly WakeRule[] {
+  if (mode !== 'live' || participant.kind !== 'agent' || !('agentKey' in participant)) return NO_WAKE_RULES
+  if (participant.workSignal?.state === 'blocked' || participant.activityState === 'offline') return NO_WAKE_RULES
+  return wakeRulesForAgent(wakeRulesByAgentKey, participant.agentKey)
 }
 
 export function historyLastSeenLabel(value: string | null): string {

@@ -141,6 +141,21 @@ test("every cloud profile can read room guidelines, and reading them is never a 
   assert.equal(supervisedToolIsMutation("get_room_guidelines"), false);
 });
 
+test("every cloud profile can wait with a wake rule; listing is a read and changing is journaled", () => {
+  for (const [profile, provider] of [
+    ["autonomous_mcp_worker", null], ["interactive_desktop", null],
+    ["supervised_room_turn", "cursor"], ["supervised_room_turn", "codex"], ["supervised_room_turn", "claude-code"],
+    ["supervised_mcp_polling", "codex"],
+  ] as const) {
+    for (const name of ["add_wake_rule", "list_wake_rules", "cancel_wake_rule"]) {
+      assert.equal(discovered(profile, provider).has(name), true, `${profile}/${provider} has ${name}`);
+    }
+  }
+  assert.equal(supervisedToolIsMutation("list_wake_rules"), false);
+  assert.equal(supervisedToolIsMutation("add_wake_rule"), true);
+  assert.equal(supervisedToolIsMutation("cancel_wake_rule"), true);
+});
+
 test("local native discovery and runtime contract agree and expose an executable closeout path", async () => {
   for (const provider of ["cursor", "codex", "claude-code"]) {
     const server = new McpServer({ name: "local-tool-contract", version: "1" });
@@ -155,7 +170,7 @@ test("local native discovery and runtime contract agree and expose an executable
       for (const name of ["get_board", "read_messages", "claim_task", "complete_task", "update_task", "send_thread_message", "set_reply_thread", "publish_room_artifact"]) {
         assert.ok(tools.some(tool => tool.name === name), `${provider} keeps ${name}`);
       }
-      for (const name of ["join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "get_room_guidelines", "submit_review_verdict"]) {
+      for (const name of ["join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "get_room_guidelines", "submit_review_verdict", "add_wake_rule", "list_wake_rules", "cancel_wake_rule"]) {
         assert.ok(!tools.some(tool => tool.name === name), `${provider} cannot discover unsupported ${name}`);
       }
       assert.match(tools.find(tool => tool.name === "update_task")!.description!, /merged work with status 'done'; no close intent or replacement work lease/);

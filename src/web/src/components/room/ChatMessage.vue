@@ -7,12 +7,29 @@
       'thinking-message': Boolean(thinkingCard),
       'reply-message': Boolean(message.reply_to),
       'has-thread': hasThread,
+      'wake-notice': isWakeNotice,
     }"
     :data-msg-id="message.id"
     @contextmenu="openContextMenu"
   >
-    <div class="message-avatar" :style="{ '--sender-color': senderColor }" />
-    <div class="message-body">
+    <WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" />
+    <div v-else class="message-avatar" :style="{ '--sender-color': senderColor }" />
+    <div v-if="isWakeNotice" class="message-body wake-notice-body">
+      <p class="wake-notice-line">
+        <span class="wake-notice-text">{{ visibleText }}</span>
+        <time :datetime="message.timestamp" :title="fullTimestamp">{{ formattedTime }}</time>
+      </p>
+      <ThreadMarker
+        v-if="hasThread"
+        :latest-id="threadLatestId"
+        :label="threadLabel"
+        :latest-display-name="threadLatestDisplayName"
+        :latest-preview="threadLatestPreview"
+        :action-label="threadActionLabel"
+        @scroll-to-reply="emit('scrollToReply', $event)"
+      />
+    </div>
+    <div v-else class="message-body">
       <MessageMeta
         :display-name="displayName"
         :owner-attribution="identity.ownerAttribution"
@@ -107,7 +124,7 @@
         @keydown="handleMenuKeydown"
       >
         <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
-        <button type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+        <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
         <div class="web-message-context-menu-separator" role="separator" />
         <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
       </div>
@@ -127,6 +144,8 @@ import ReasoningAnchor from './chat-message/ReasoningAnchor.vue'
 import ReplyPreview from './chat-message/ReplyPreview.vue'
 import StalePromptActions from './chat-message/StalePromptActions.vue'
 import ThreadMarker from './chat-message/ThreadMarker.vue'
+import WakeGlyph from '../../../../../shared/ui/WakeGlyph.vue'
+import { WAKE_NOTICE_SOURCE } from '../../../../../shared/wake-rules.mjs'
 import {
   formatMessageTime,
   messageDisplayText,
@@ -157,6 +176,8 @@ const props = defineProps<{
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   reasoningSession?: RoomReasoningSession | null
   taskReferenceIds?: ReadonlySet<string>
+  /** Appended live while the room was open, not loaded or scrolled back to. */
+  arriving?: boolean
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
@@ -269,6 +290,8 @@ const isSystem = computed(() => ['letagents', 'system'].includes((props.message.
 const isAmbientSystem = computed(() =>
   isAmbientSystemMessage(props.message.sender, visibleText.value)
 )
+/** An agent's wake rule fired: one quiet line, not a conversation to reply to. */
+const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE)
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
 const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
@@ -355,6 +378,12 @@ const provenanceBadge = computed<ProvenanceBadge | null>(() => {
 
 const visibleText = computed(() => messageDisplayText(props.message))
 const formattedTime = computed(() => formatMessageTime(props.message.timestamp))
+const fullTimestamp = computed(() => {
+  const date = new Date(props.message.timestamp)
+  return Number.isNaN(date.getTime())
+    ? ''
+    : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+})
 const renderedContent = computed(() => renderMessageContent(
   isAmbientSystem.value
     ? stripStatusPrefix(visibleText.value)
@@ -579,8 +608,62 @@ const renderedContent = computed(() => renderMessageContent(
   line-height: 1.5;
 }
 
+/* A wake notice keeps the ambient rhythm; the crescent stands in for the dot. */
+.message.wake-notice {
+  gap: 9px;
+  padding: 5px 0;
+}
+
+.wake-notice-glyph {
+  width: 12px;
+  height: 12px;
+  margin-top: 4px;
+  color: var(--text-tertiary, #71717a);
+}
+
+.wake-notice-body {
+  flex-basis: 72ch;
+}
+
+.wake-notice-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: -2px -6px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: var(--muted, #a1a1aa);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  transition: background-color 200ms ease;
+}
+
+.wake-notice-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wake-notice-line time {
+  color: var(--text-tertiary, #71717a);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.message.wake-notice.jump-target .wake-notice-line {
+  background: color-mix(in srgb, var(--text, #fafafa) 7%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wake-notice-line { transition: none; }
+}
+
 @media (max-width: 768px) {
   .message { gap: 10px; padding: 10px 0; }
+  .message.wake-notice { gap: 9px; padding: 5px 0; }
   .message-avatar::before {
     width: 8px;
     height: 8px;

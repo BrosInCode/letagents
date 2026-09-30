@@ -175,6 +175,9 @@ const api: DesktopApi = {
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: string[]) => ipcRenderer.invoke("desktop:room:set-github-event-filter", roomIdentifier, enabledKinds),
     getAgentGuidelines: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-agent-guidelines", roomIdentifier),
     setAgentGuidelines: (roomIdentifier: string, guidelines: string) => ipcRenderer.invoke("desktop:room:set-agent-guidelines", roomIdentifier, guidelines),
+    getWakeRules: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-wake-rules", roomIdentifier),
+    cancelWakeRule: (roomIdentifier: string, ruleId: string) => ipcRenderer.invoke("desktop:room:cancel-wake-rule", roomIdentifier, ruleId),
+    restoreWakeRule: (roomIdentifier: string, ruleId: string) => ipcRenderer.invoke("desktop:room:restore-wake-rule", roomIdentifier, ruleId),
     updateFocusRoomSettings: (roomIdentifier: string, focusKey: string, settings) =>
       ipcRenderer.invoke("desktop:room:update-focus-room-settings", roomIdentifier, focusKey, settings),
     concludeFocusRoom: (roomIdentifier: string, focusKey: string, summary: string, details, quickClose) =>

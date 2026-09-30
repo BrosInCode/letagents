@@ -1,5 +1,6 @@
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
 import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
+import { cancelDesktopRoomWakeRule, getDesktopRoomWakeRules, restoreDesktopRoomWakeRule } from "../rooms/wake-rules.js";
 import { getDesktopNeedsYou, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain } from "electron";
 
@@ -435,6 +436,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:set-github-event-filter", (_event, roomIdentifier: string, enabledKinds: unknown) => setDesktopGitHubEventFilter(roomIdentifier, enabledKinds));
   targetIpcMain.handle("desktop:room:get-agent-guidelines", (_event, roomIdentifier: string) => getDesktopRoomAgentGuidelines(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-agent-guidelines", (_event, roomIdentifier: string, guidelines: unknown) => setDesktopRoomAgentGuidelines(roomIdentifier, guidelines));
+  targetIpcMain.handle("desktop:room:get-wake-rules", (_event, roomIdentifier: string) => getDesktopRoomWakeRules(roomIdentifier));
+  targetIpcMain.handle("desktop:room:cancel-wake-rule", (_event, roomIdentifier: string, ruleId: string) => cancelDesktopRoomWakeRule(roomIdentifier, ruleId));
+  targetIpcMain.handle("desktop:room:restore-wake-rule", (_event, roomIdentifier: string, ruleId: string) => restoreDesktopRoomWakeRule(roomIdentifier, ruleId));
   targetIpcMain.handle(
     "desktop:room:update-focus-room-settings",
     async (

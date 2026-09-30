@@ -72,6 +72,7 @@ function assertStreamUrl(
 const { createRoomStream } = await import('./room/stream.js')
 const { lastMessageInfoInvalidation, invalidationCoversMessage } = await import('../components/room/messageInfoInvalidation.js')
 const { lastAgentApprovalInvalidation } = await import('./roomAgentApprovalInvalidation.js')
+const { lastWakeRuleInvalidation } = await import('./roomWakeRuleInvalidation.js')
 
 test('message-info null preserves room scope, refresh signaling, and the subscribed cursor without a gap', () => {
   let reconciles = 0
@@ -200,6 +201,67 @@ test('resource pointers negotiate once, advance inertly, and fail closed when ma
   assertStreamUrl(FakeEventSource.instances.at(-1)!, 'room_pointer', 'broker_future')
   stream.stop()
   lastAgentApprovalInvalidation.value = null
+})
+
+test('wake-rule pointers re-read the room\'s rules, wait behind a gap snapshot, and follow a repair', async () => {
+  assert.equal(parseRoomResourceInvalidation({
+    room_id: 'room_wake', resource: 'wake_rules',
+  }).status, 'supported')
+
+  let releaseSnapshot!: () => void
+  const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve })
+  let snapshotStarted = false
+  let renders = 0
+  const stream = createRoomStream({
+    setConnectionState: () => {},
+    setStreaming: () => {},
+    appendMessage: () => { renders += 1; return true },
+    onGitHubMessage: () => { renders += 1 },
+    onGitHubEvent: () => { renders += 1 },
+    onTaskLifecycleMessage: () => { renders += 1 },
+    onArtifactUpdate: () => { renders += 1 },
+    onAgentActivityMessage: () => { renders += 1 },
+    onParticipantActivityMessage: () => { renders += 1 },
+    upsertTask: () => { renders += 1 },
+    upsertReasoningSession: () => { renders += 1 },
+    removeReasoningSession: () => { renders += 1 },
+    getMessageCursor: () => null,
+    resyncMessages: async (_roomIdentifier, after) => ({ success: true, cursor: after }),
+    reconcileFullState: async () => {
+      snapshotStarted = true
+      await snapshotGate
+      return true
+    },
+  })
+
+  try {
+    stream.start('room_wake')
+    const source = FakeEventSource.instances.at(-1)!
+    source.dispatch(ROOM_RESOURCE_INVALIDATION_CAPABILITY, {
+      room_id: 'room_wake', resource: 'wake_rules',
+    }, 'broker_1')
+    assert.equal(lastWakeRuleInvalidation.value?.roomId, 'room_wake')
+    assert.equal(renders, 0, 'the pointer carries no content to render')
+    const afterPointer = lastWakeRuleInvalidation.value
+
+    source.dispatch('room_sync', { gap: true, event_cursor: 'broker_2' })
+    await waitFor(() => snapshotStarted)
+    source.dispatch(ROOM_RESOURCE_INVALIDATION_CAPABILITY, {
+      room_id: 'room_wake', resource: 'wake_rules',
+    }, 'broker_3')
+    assert.equal(lastWakeRuleInvalidation.value, afterPointer, 'a pointer over a gap waits for the repaired snapshot')
+
+    releaseSnapshot()
+    await waitFor(() => lastWakeRuleInvalidation.value !== afterPointer)
+    assert.equal(lastWakeRuleInvalidation.value?.roomId, 'room_wake', 'rules changed during the gap are re-read')
+
+    stream.stop()
+    stream.start('room_wake')
+    assertStreamUrl(FakeEventSource.instances.at(-1)!, 'room_wake', 'broker_3')
+  } finally {
+    stream.stop()
+    lastWakeRuleInvalidation.value = null
+  }
 })
 
 test('room stream forwards typed GitHub event invalidations', () => {

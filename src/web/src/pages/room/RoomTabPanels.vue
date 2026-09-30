@@ -14,11 +14,13 @@
         :searchQuery="searchQuery"
         :stalePromptTaskStates="stalePromptTaskStates"
         :taskReferenceIds="taskReferenceIds"
+        :revealMessageId="revealMessageId"
         @loadOlder="emit('loadOlder')"
         @reply="emit('reply', $event)"
         @openImageViewer="emit('openImageViewer', $event)"
         @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
         @openTask="emit('openTask', $event)"
+        @revealed="handleMessageRevealed"
       />
 
       <GitHubEventFeed
@@ -73,6 +75,7 @@
         :clearDisconnectedParticipants="clearDisconnectedParticipants"
         :taskGithubStatus="taskGithubStatus"
         :isLoading="activityLoading"
+        @openMessage="openMessageInChat"
       />
 
       <FocusRoomsView
@@ -112,7 +115,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
@@ -212,6 +215,7 @@ const emit = defineEmits<{
   shareResults: [summary: string, details: FocusRoomConclusionDetails | null]
   updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
   openTask: [taskId: string]
+  openChat: []
 }>()
 
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
@@ -219,6 +223,25 @@ const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
   new Set(props.tasks.map(task => task.id))
 )
+
+// A message another tab asked to show; the chat reveals it once it is open.
+const revealMessageId = ref<string | null>(null)
+
+function openMessageInChat(messageId: string) {
+  revealMessageId.value = messageId
+  emit('openChat')
+}
+
+function handleMessageRevealed(messageId: string) {
+  if (revealMessageId.value === messageId) revealMessageId.value = null
+}
+
+watch(() => props.activeTab, (tab) => {
+  if (tab !== 'chat') revealMessageId.value = null
+})
+watch(() => props.room?.identifier, () => {
+  revealMessageId.value = null
+})
 
 function emitShareResults(summary: string, details: FocusRoomConclusionDetails | null) {
   emit('shareResults', summary, details)

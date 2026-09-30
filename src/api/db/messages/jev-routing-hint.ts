@@ -2,6 +2,7 @@ import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 
 import { isPromptOnlyAgentMessage } from "../../../shared/room-agent-prompts.js";
+import { WAKE_NOTICE_SOURCE } from "../../../../shared/wake-rules.mjs";
 import { createBoundedExecutor } from "../../bounded-async.js";
 import {
   JEV_MAX_CANDIDATE_AGENTS,
@@ -26,7 +27,7 @@ const RECENT_MESSAGE_WINDOW = 40;
 const RECENT_CONVERSATION_ENTRIES = 15;
 const AGENT_SNIPPETS_PER_AGENT = 2;
 /** Room activity that is context noise for a responder decision. */
-const EXCLUDED_CONTEXT_SOURCES = new Set(["system", "github", "managed_agent_failure"]);
+const EXCLUDED_CONTEXT_SOURCES = new Set(["system", WAKE_NOTICE_SOURCE, "github", "managed_agent_failure"]);
 
 // One inference per send; a slow gateway must shed load, not queue sends.
 const runBoundedJevEvaluation = createBoundedExecutor({

@@ -49,6 +49,17 @@
       </article>
     </div>
 
+    <WakeRulesPanel
+      v-if="participant.kind === 'agent' && participant.agentKey"
+      :key="participant.agentKey"
+      class="activity-detail-waiting"
+      :room-id="roomIdentifier"
+      :rules="wakeRules"
+      :recent="recentWakeRules"
+      :api="wakeRuleApi"
+      @open-message="emit('openMessage', $event)"
+    />
+
     <section
       v-if="participant.kind === 'agent' && participant.thinkingSnapshot"
       class="activity-detail-section"
@@ -224,6 +235,8 @@
 </template>
 
 <script setup lang="ts">
+import WakeRulesPanel from '../../../../../../shared/ui/WakeRulesPanel.vue'
+import type { WakeRule, WakeRuleApi } from '../../../../../../shared/wake-rules.mjs'
 import type { TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import AgentThinkingCard from '../AgentThinkingCard.vue'
 import ActivityTaskList from './ActivityTaskList.vue'
@@ -248,13 +261,25 @@ import type {
   ActivityTaskListItem,
 } from './types'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   participant: ActivityParticipant
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
-}>()
+  roomIdentifier?: string
+  /** The selected agent's active wake rules, soonest first. */
+  wakeRules?: readonly WakeRule[]
+  recentWakeRules?: readonly WakeRule[]
+  /** Without an API the wake rules are read-only. */
+  wakeRuleApi?: Pick<WakeRuleApi, 'cancel' | 'restore'> | null
+}>(), {
+  roomIdentifier: '',
+  wakeRules: () => [],
+  recentWakeRules: () => [],
+  wakeRuleApi: null,
+})
 
 const emit = defineEmits<{
   openReasoning: [sessionId: string]
+  openMessage: [messageId: string]
 }>()
 
 function getTaskLink(task: ActivityTaskListItem): { label: string; url: string } | null {

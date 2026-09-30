@@ -1,6 +1,7 @@
 import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
 import { registerRoomSettingsRoutes } from "../routes/rooms/settings.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
+import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
@@ -184,6 +185,7 @@ import {
   messageEvents,
   reasoningEvents,
   taskEvents,
+  wakeRuleEvents,
   emitProjectMessage,
 } from "./events.js";
 import {
@@ -223,6 +225,7 @@ function getRoomEventBroker(): RoomEventBroker {
     agentApprovalEvents,
     agentWorkEvents,
     executionDelegationEvents,
+    wakeRuleEvents,
     rentalActivityEvents,
     messageInfoEvents,
     bridgeLossEvents: roomEventBridgeLossEvents,
@@ -503,6 +506,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
   registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
+  registerWakeRuleRoutes(app, roomMessageRouteDeps);
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
   registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
   registerExecutionDelegationRoutes(app, roomPresenceRouteDeps);

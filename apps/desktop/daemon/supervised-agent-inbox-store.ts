@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { SUPERVISED_READ_ONLY_TOOLS } from "../../../shared/supervised-read-tools.mjs";
 import { PreparedReadStatements } from "./prepared-reads.js";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
@@ -154,13 +155,6 @@ const MAX_EFFECT_REQUEST_BYTES_PER_PROVIDER_TURN = 512 * 1024;
 const MAX_EFFECT_RESULT_BYTES = 256 * 1024;
 const MAX_EFFECT_RESULT_BYTES_PER_PROVIDER_TURN = 1024 * 1024;
 const MAX_EFFECT_ERROR_BYTES = 16 * 1024;
-const READ_ONLY_EFFECT_TOOLS = new Set([
-  "get_current_room", "check_repo", "check_repo_visibility",
-  "read_messages", "wait_for_messages", "get_board", "get_board_settings",
-  "get_room_memory", "get_human_requests", "get_room_guidelines",
-  "get_room_artifacts", "get_room_events", "list_board_intents",
-  "get_onboarding_status", "status_local_codex_session", "rental_list_requests",
-]);
 export type ProviderContinuationRepair = {
   repair_id: string;
   agent_id: string;
@@ -1168,7 +1162,7 @@ export class SupervisedAgentInboxStore {
     if (input.tool_name === "set_reply_thread" && requestJson !== "{}") {
       throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
     }
-    const expectedMutation = !READ_ONLY_EFFECT_TOOLS.has(input.tool_name);
+    const expectedMutation = !SUPERVISED_READ_ONLY_TOOLS.has(input.tool_name);
     if (input.mutation !== undefined && input.mutation !== expectedMutation) {
       throw new Error("The supervised effect classification does not match the registered tool policy.");
     }

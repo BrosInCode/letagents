@@ -471,6 +471,7 @@ import {
 } from "./room-shell/useDesktopRoomPreferences";
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../ipc/index.js";
+import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
 
 const props = defineProps<{
   sidebarMode: SidebarMode;
@@ -625,6 +626,15 @@ const selectedAgentDetailTarget = computed<AgentInspectorSelection | null>(() =>
     request,
     props.room.identifier,
   );
+});
+const roomIdentifierRef = computed(() => props.room.identifier);
+const roomWakeRules = useRoomWakeRules(roomIdentifierRef, computed(() => props.storage.effectiveMode !== "local"));
+provideRoomWakeRules({
+  roomIdentifier: roomIdentifierRef,
+  activeByAgentKey: roomWakeRules.activeByAgentKey,
+  recentByAgentKey: roomWakeRules.recentByAgentKey,
+  api: roomWakeRules.api,
+  openMessage: (messageId) => { void revealWakeMessage(messageId); },
 });
 const agentInspectorProjections = computed(() => {
   return projectAgentInspectors(supervisorEntries.value, {
@@ -2520,6 +2530,13 @@ async function loadAgentInspectorWorkDetail(
       void loadAgentInspectorWorkDetail(defaultSource);
     }
   });
+}
+
+/** A wake message is an ordinary room message: show it in the chat. */
+async function revealWakeMessage(messageId: string): Promise<void> {
+  activeTab.value = "chat";
+  await revealRoomMessage(messageId);
+  if (agentInspectorCompact.value) closeAgentDetail();
 }
 
 async function revealAgentInspectorWorkMessage(canonicalMessageId: string): Promise<void> {
