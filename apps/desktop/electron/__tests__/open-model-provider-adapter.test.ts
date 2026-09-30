@@ -33,6 +33,7 @@ import {
 } from "../main/agents/opencode-server-client.js";
 import { seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
+import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 
 type LaunchRecord = {
   binary: string;
@@ -1114,7 +1115,7 @@ test("Open Model classifies the exact no-reply sentinel and a finished empty ans
     outcome: "failed",
     text: null,
     evidence: "transcript",
-    error: "The model finished without writing a reply.",
+    error: NO_REPLY_FAILURE.emptyAnswer,
   });
   assert.equal(empty.harness.promptBodies.length, 1);
 });
@@ -1140,7 +1141,7 @@ test("Open Model settles a turn that hit its output limit before writing text, a
     outcome: "failed",
     text: null,
     evidence: "transcript",
-    error: "The model hit its output limit before writing a reply.",
+    error: NO_REPLY_FAILURE.outputLimit,
   };
   assert.deepEqual(result, settled);
   assert.deepEqual(checkpointed, [settled], "the exact terminal is checkpointed before the adapter returns");
@@ -1225,7 +1226,7 @@ test("an Open Model turn that hit its output limit settles its room message and 
 
     const receipts = await store.receipts(agent.agentId);
     assert.deepEqual(receipts.map((item: { state: string }) => item.state), ["acknowledged_failed", "acknowledged"]);
-    assert.equal(receipts[0].last_error, "The model hit its output limit before writing a reply.");
+    assert.equal(receipts[0].last_error, NO_REPLY_FAILURE.outputLimit);
     assert.equal(receipts[0].attempt_count, 1);
     assert.equal(receipts[0].timeline.some((event: { phase: string }) => ["result_unreadable", "blocked"].includes(event.phase)), false);
     assert.deepEqual(published, ["Second message answered."]);

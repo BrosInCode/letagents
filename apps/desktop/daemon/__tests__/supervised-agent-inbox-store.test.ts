@@ -1564,6 +1564,19 @@ test("every re-block within one attempt is journaled, after trimmed history and 
     assert.equal(await blockedEvents("restarts"), 2);
     await store.normalizeStartupRecovery("restarts");
     assert.equal(await blockedEvents("restarts"), 2, "a row left blocked is not journaled again");
+
+    // A row that stays in result_recovery across two restarts is one fact, journaled once.
+    await store.ingestPoll({ agent_id: "rereading", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    const rereading = (await store.claimHead("rereading"))!;
+    await store.checkpointTurnStarted(rereading.inbox_item_id, "turn-1", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.transition(rereading.inbox_item_id, "awaiting_result");
+    await store.transition(rereading.inbox_item_id, "result_recovery", { last_error: "Re-reading the same completed turn." });
+    await store.normalizeStartupRecovery("rereading");
+    await store.normalizeStartupRecovery("rereading");
+    const recoveryEvents = (await store.receipts("rereading"))[0]!.timeline
+      .filter((event) => event.phase === "result_unreadable" && /no new model turn will start/.test(event.detail ?? ""));
+    assert.equal(recoveryEvents.length, 1);
     await store.close();
   } finally { await env.cleanup(); }
 });

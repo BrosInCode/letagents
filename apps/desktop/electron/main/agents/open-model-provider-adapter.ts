@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import { probeScratchWorkspaceGit } from "../../../../../shared/scratch-workspace-repository.mjs";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
 import {
@@ -186,9 +187,9 @@ function unansweredCompletionReason(message: OpenCodeMessage): string | null {
   if (messageText(message)) return null;
   const finish = messageFinishReason(message);
   if (!finish || finish === "tool-calls") return null;
-  if (finish === "length") return "The model hit its output limit before writing a reply.";
-  if (finish === "content-filter") return "The model provider's content filter stopped the reply before any text was written.";
-  return "The model finished without writing a reply.";
+  if (finish === "length") return NO_REPLY_FAILURE.outputLimit;
+  if (finish === "content-filter") return NO_REPLY_FAILURE.contentFilter;
+  return NO_REPLY_FAILURE.emptyAnswer;
 }
 
 function safeRuntimeId(value: string): string {

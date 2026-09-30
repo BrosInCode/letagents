@@ -449,7 +449,11 @@ export class SupervisedAgentInboxStore {
   /** The considered marker and child commit together; a restart can fill the gap after terminal settlement. */
   async enqueueTaskContinuation(input: { parentId: string; agentId: string; roomId: string; workAttemptId: string;
     providerContinuationId: string; agentSessionId: string; tasks: ContinuityTask[] | null;
-    blockReason: string | null; detail: string; delayMs: number }): Promise<SupervisedInboxItem | null> {
+    blockReason: string | null; detail: string; delayMs: number;
+    /** Stop without a follow-up, keeping this reason on the failed message, so later messages are not blocked. */
+    settleReason?: string | null;
+    /** Guidance for the follow-up turn about why the previous one failed. */
+    note?: string | null }): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(input.agentId) as Row | undefined;
       if (!row || row.inbox_item_id !== input.parentId) return null;
@@ -475,12 +479,17 @@ export class SupervisedAgentInboxStore {
         return null;
       }
       if (input.tasks?.length === 0) return null;
+      if (input.settleReason) {
+        run(database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?"), input.settleReason, parent.inbox_item_id);
+        return null;
+      }
       // No model turn is replayed. The same native conversation retains its files and tool history.
       const source = parent.source_message && typeof parent.source_message === "object" ? parent.source_message as Record<string, unknown> : {};
       const child = this.insertSyntheticMessage(database, { agent_id: input.agentId, room_id: input.roomId,
         source_message_id: childSource, activation: { task_continuity: continuation },
         source_message: { ...source, sender: "letagents", source: "system", text: [
           "Continue the unfinished task after a provider failure. This is a new continuation of existing authorized work, not a replay of the original request.",
+          ...(input.note ? [input.note] : []),
           `Tasks and exact work leases: ${JSON.stringify(input.tasks)}`,
           "Preserve existing work. Inspect the current files, Git status, task board, and your prior tool results before proceeding. Do not repeat completed actions, claims, commits, PRs, or merges. Verify any uncertain external action before attempting it again; report a blocker if its result cannot be established.",
           "Continue only these tasks while you still hold their work leases. Keep the existing scope and approval requirements. If they are already finished or no longer yours, take no action.",

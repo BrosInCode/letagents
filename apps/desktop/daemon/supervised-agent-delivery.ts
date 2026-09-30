@@ -1168,6 +1168,7 @@ export class SupervisedAgentDelivery {
               providerContinuationId: binding.provider_continuation_id, agentSessionId: agent.agentSessionId,
               tasks: lookupError ? null : prior?.tasks ? tasks.filter((task) => prior.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)) : tasks,
               blockReason: lookupError ?? (policy.automatic ? null : policy.detail), detail: policy.detail,
+              settleReason: policy.settle ? policy.detail : null, note: policy.note ?? null,
               delayMs: this.retryDelayMs === 0 ? 0 : Math.min(60_000, 10_000 * 2 ** Math.min(attempt - 1, 3)),
             });
             if (queued) continue;
