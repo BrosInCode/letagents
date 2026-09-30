@@ -45,9 +45,13 @@ interface RepoRoomAccessDecisionDeps {
 // missed/delayed webhook delivery (especially public -> private transitions).
 const REPO_VISIBILITY_TTL_MS = 1000 * 60;
 const REPO_VISIBILITY_UNKNOWN_TTL_MS = 1000 * 10;
+// How long a definitive answer may stand in while GitHub gives none (rate
+// limit, outage, timeout). Webhook invalidation discards it immediately.
+const REPO_VISIBILITY_LAST_KNOWN_MAX_AGE_MS = 1000 * 60 * 60;
 const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
 const REPO_CACHE_MAX_ENTRIES = 5_000;
 const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; expiresAt: number }>();
+const repoVisibilityLastKnown = new Map<string, { visibility: "public" | "private"; expiresAt: number }>();
 const repoAccessCache = new Map<string, { allowed: boolean; expiresAt: number }>();
 const repoVisibilityInflight = new Map<string, {
   roomKey: string;
@@ -82,13 +86,31 @@ function getCachedVisibility(roomName: string, includeUnknown: boolean): GitHubR
   return cached.visibility;
 }
 
-function setCachedVisibility(roomName: string, visibility: GitHubRepoVisibility): void {
+function setCachedVisibility(roomName: string, visibility: GitHubRepoVisibility, ttlMs?: number): void {
   pruneExpiringCache(repoVisibilityCache, REPO_CACHE_MAX_ENTRIES);
   repoVisibilityCache.set(normalizeCacheKey(roomName), {
     visibility,
     expiresAt: Date.now() + (
-      visibility === "unknown" ? REPO_VISIBILITY_UNKNOWN_TTL_MS : REPO_VISIBILITY_TTL_MS
+      ttlMs ?? (visibility === "unknown" ? REPO_VISIBILITY_UNKNOWN_TTL_MS : REPO_VISIBILITY_TTL_MS)
     ),
+  });
+}
+
+function getLastKnownVisibility(roomName: string): "public" | "private" | null {
+  const lastKnown = repoVisibilityLastKnown.get(normalizeCacheKey(roomName));
+  return lastKnown && lastKnown.expiresAt > Date.now() ? lastKnown.visibility : null;
+}
+
+function setLastKnownVisibility(roomName: string, visibility: GitHubRepoVisibility): void {
+  const roomKey = normalizeCacheKey(roomName);
+  if (visibility === "unknown") {
+    repoVisibilityLastKnown.delete(roomKey);
+    return;
+  }
+  pruneExpiringCache(repoVisibilityLastKnown, REPO_CACHE_MAX_ENTRIES);
+  repoVisibilityLastKnown.set(roomKey, {
+    visibility,
+    expiresAt: Date.now() + REPO_VISIBILITY_LAST_KNOWN_MAX_AGE_MS,
   });
 }
 
@@ -160,6 +182,7 @@ export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
   const prefix = `${roomKey}::`;
   rotateCacheGeneration(repoRoomCacheGeneration, roomKey);
   repoVisibilityCache.delete(roomKey);
+  repoVisibilityLastKnown.delete(roomKey);
   for (const cacheKey of repoAccessCache.keys()) {
     if (cacheKey.startsWith(prefix)) {
       repoAccessCache.delete(cacheKey);
@@ -273,16 +296,42 @@ async function loadGitHubRepoVisibility(
   if (existing) return existing.promise;
 
   const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
+  const isCurrentGeneration = () => getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration;
+  // When GitHub gives no answer (rate limit, outage, timeout), keep the last
+  // definitive visibility instead of treating a public room as private for
+  // anonymous readers. Fresh checks exist to see live access, so they never do.
+  const lastKnownFallback = (): GitHubRepoVisibility | null => {
+    if (mode !== "anonymous" && mode !== "authenticated") return null;
+    const lastKnown = getLastKnownVisibility(roomName);
+    // Retry GitHub no sooner than an unknown answer would be retried.
+    if (lastKnown && isCurrentGeneration()) setCachedVisibility(roomName, lastKnown, REPO_VISIBILITY_UNKNOWN_TTL_MS);
+    return lastKnown;
+  };
   let pending!: Promise<GitHubRepoVisibility>;
   pending = (async () => {
-    const response = await fetchGitHubRepo(roomName, accessToken);
+    let response: Response;
+    try {
+      response = await fetchGitHubRepo(roomName, accessToken);
+    } catch (error) {
+      const lastKnown = lastKnownFallback();
+      if (lastKnown) return lastKnown;
+      throw error;
+    }
+    const indeterminate = !response.ok && isIndeterminateGitHubAccessResponse(response);
+    if (indeterminate) {
+      const lastKnown = lastKnownFallback();
+      if (lastKnown) return lastKnown;
+    }
     let visibility: GitHubRepoVisibility = "unknown";
     if (response.ok) {
       const payload = (await response.json()) as GitHubRepo;
       visibility = payload.private ? "private" : "public";
     }
-    if (getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration) {
-      setCachedVisibility(roomName, visibility);
+    if (isCurrentGeneration()) {
+      // A fresh check that got no answer must not replace what other readers see.
+      if (!indeterminate || !getLastKnownVisibility(roomName)) setCachedVisibility(roomName, visibility);
+      // A definitive "not visible" (404) also retires a remembered public answer.
+      if (!indeterminate) setLastKnownVisibility(roomName, visibility);
     }
     return visibility;
   })().finally(() => {

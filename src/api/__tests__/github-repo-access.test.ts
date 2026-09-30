@@ -391,3 +391,109 @@ test("isGitHubRepoCollaborator does not cache negative collaborator checks", asy
     2,
   );
 });
+
+// Anonymous reads of a public room returned 401 about once in 50 requests:
+// a rate-limited or failed visibility refresh became "unknown", which reads
+// as private. A remembered definitive answer now stands in until GitHub answers.
+async function withClockOffset<T>(offsetMs: number, run: () => Promise<T>): Promise<T> {
+  const realNow = Date.now;
+  Date.now = () => realNow() + offsetMs;
+  try {
+    return await run();
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+test("a public room stays public for anonymous readers when GitHub cannot answer a refresh", async () => {
+  const roomName = `github.com/brosincode/public-flap-${Date.now()}`;
+  const replies: Array<() => Response> = [
+    () => jsonResponse(200, { private: false }),
+    () => jsonResponse(403, { message: "API rate limit exceeded" }, { "x-ratelimit-remaining": "0" }),
+    () => jsonResponse(503, { message: "unavailable" }),
+    () => { throw new TypeError("fetch failed"); },
+  ];
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    const reply = replies[Math.min(calls, replies.length - 1)]!;
+    calls += 1;
+    return reply();
+  }) as typeof fetch;
+
+  assert.equal(await getGitHubRepoVisibility(roomName), "public");
+  for (const [index, offsetMs] of [61_000, 122_000, 183_000].entries()) {
+    await withClockOffset(offsetMs, async () => {
+      assert.equal(await getGitHubRepoVisibility(roomName), "public", `refresh ${index + 1} keeps the known answer`);
+      assert.deepEqual(
+        await resolveGitHubRepoRoomAccessDecision({ roomName, sessionAccount: null }),
+        { kind: "allow" },
+      );
+    });
+  }
+  assert.equal(calls, 4, "each refresh still asks GitHub once");
+
+  await withClockOffset(2 * 60 * 60 * 1000, async () => {
+    await assert.rejects(getGitHubRepoVisibility(roomName), /fetch failed/, "a long outage no longer vouches for the room");
+  });
+});
+
+test("a definitive not-found answer retires a remembered public visibility", async () => {
+  const roomName = `github.com/brosincode/went-private-${Date.now()}`;
+  const replies = [
+    () => jsonResponse(200, { private: false }),
+    () => jsonResponse(404, { message: "Not Found" }),
+    () => jsonResponse(429, { message: "slow down" }),
+  ];
+  let calls = 0;
+  globalThis.fetch = (async () => replies[Math.min(calls++, replies.length - 1)]!()) as typeof fetch;
+
+  assert.equal(await getGitHubRepoVisibility(roomName), "public");
+  await withClockOffset(61_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName), "unknown");
+  });
+  await withClockOffset(122_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName), "unknown");
+    assert.deepEqual(
+      await resolveGitHubRepoRoomAccessDecision({ roomName, sessionAccount: null }),
+      { kind: "auth_required" },
+    );
+  });
+});
+
+test("fresh visibility checks see GitHub's answer and do not unsettle other readers", async () => {
+  const roomName = `github.com/brosincode/fresh-flap-${Date.now()}`;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return calls === 1
+      ? jsonResponse(200, { private: false })
+      : jsonResponse(503, { message: "unavailable" });
+  }) as typeof fetch;
+
+  assert.equal(await getGitHubRepoVisibility(roomName), "public");
+  assert.equal(await getGitHubRepoVisibility(roomName, "token", { bypassCache: true }), "unknown");
+  assert.equal(await getGitHubRepoVisibility(roomName), "public");
+  assert.equal(calls, 2, "anonymous readers keep the cached answer");
+});
+
+test("repository webhook invalidation discards the remembered visibility", async () => {
+  const roomName = `github.com/brosincode/invalidated-${Date.now()}`;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return calls === 1
+      ? jsonResponse(200, { private: false })
+      : jsonResponse(403, { message: "API rate limit exceeded" }, { "x-ratelimit-remaining": "0" });
+  }) as typeof fetch;
+
+  assert.equal(await getGitHubRepoVisibility(roomName), "public");
+  clearGitHubRepoAccessCacheForRoom(roomName);
+  assert.equal(await getGitHubRepoVisibility(roomName), "unknown");
+});
