@@ -449,7 +449,11 @@ export class SupervisedAgentInboxStore {
   /** The considered marker and child commit together; a restart can fill the gap after terminal settlement. */
   async enqueueTaskContinuation(input: { parentId: string; agentId: string; roomId: string; workAttemptId: string;
     providerContinuationId: string; agentSessionId: string; tasks: ContinuityTask[] | null;
-    blockReason: string | null; detail: string; delayMs: number }): Promise<SupervisedInboxItem | null> {
+    blockReason: string | null; detail: string; delayMs: number;
+    /** Stop without a follow-up, keeping this reason on the failed message, so later messages are not blocked. */
+    settleReason?: string | null;
+    /** Guidance for the follow-up turn about why the previous one failed. */
+    note?: string | null }): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(input.agentId) as Row | undefined;
       if (!row || row.inbox_item_id !== input.parentId) return null;
@@ -469,18 +473,33 @@ export class SupervisedAgentInboxStore {
       const childSource = `task-continuation:${parent.inbox_item_id}`;
       run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
         JSON.stringify({ ...parent.activation, task_continuity_considered: childSource }), parent.inbox_item_id);
+      const setLastError = database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?");
       if (this.hasUncertainTaskEffects(database, parent)) {
-        run(database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?"),
-          "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.", parent.inbox_item_id);
+        run(setLastError, "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.", this.now(), parent.inbox_item_id);
         return null;
       }
       if (input.tasks?.length === 0) return null;
+      if (input.settleReason) {
+        // Also show the reason on the room message the task continued from;
+        // a synthetic follow-up has no chat message of its own.
+        let origin = parent;
+        for (let depth = 0; depth < 8 && origin.source_message_id.startsWith("task-continuation:"); depth += 1) {
+          const parentId = parseTaskContinuation(origin.activation.task_continuity)?.parentId;
+          const row = parentId ? database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(parentId) as Row | undefined : undefined;
+          if (!row) break;
+          origin = rowToItem(row);
+        }
+        const timestamp = this.now();
+        for (const id of new Set([parent.inbox_item_id, origin.inbox_item_id])) run(setLastError, input.settleReason, timestamp, id);
+        return null;
+      }
       // No model turn is replayed. The same native conversation retains its files and tool history.
       const source = parent.source_message && typeof parent.source_message === "object" ? parent.source_message as Record<string, unknown> : {};
       const child = this.insertSyntheticMessage(database, { agent_id: input.agentId, room_id: input.roomId,
         source_message_id: childSource, activation: { task_continuity: continuation },
         source_message: { ...source, sender: "letagents", source: "system", text: [
           "Continue the unfinished task after a provider failure. This is a new continuation of existing authorized work, not a replay of the original request.",
+          ...(input.note ? [input.note] : []),
           `Tasks and exact work leases: ${JSON.stringify(input.tasks)}`,
           "Preserve existing work. Inspect the current files, Git status, task board, and your prior tool results before proceeding. Do not repeat completed actions, claims, commits, PRs, or merges. Verify any uncertain external action before attempting it again; report a blocker if its result cannot be established.",
           "Continue only these tasks while you still hold their work leases. Keep the existing scope and approval requirements. If they are already finished or no longer yours, take no action.",
@@ -800,7 +819,7 @@ export class SupervisedAgentInboxStore {
         const ordinal = event === "retry_scheduled" || event === "queued"
           ? Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase=?").get(inboxItemId, event) as Row).value) + 1
           : updated.attempt_count;
-        this.recordEvent(database, inboxItemId, `${event}:${ordinal}`, event, timestamp, updated.last_error);
+        this.recordEvent(database, inboxItemId, this.occurrenceKey(database, inboxItemId, `${event}:${ordinal}`, event), event, timestamp, updated.last_error);
       }
       if (finalStates.has(next)) {
         this.settleTerminalItem(database, item, timestamp);
@@ -2043,7 +2062,9 @@ export class SupervisedAgentInboxStore {
           next, error, timestamp, finalStates.has(next) ? timestamp : null, item.inbox_item_id);
         const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
         const phase = phaseForTransition(next);
-        if (phase) this.recordEvent(database, updated.inbox_item_id, `recovery:${phase}:${updated.attempt_count}`, phase, timestamp, error);
+        const key = `recovery:${phase}:${updated.attempt_count}`;
+        // A row left in its state is the same fact again; a real transition is recorded every time.
+        if (phase) this.recordEvent(database, updated.inbox_item_id, next === item.state ? key : this.occurrenceKey(database, updated.inbox_item_id, key, phase), phase, timestamp, error);
         if (finalStates.has(next)) {
           this.settleTerminalItem(database, item, timestamp);
           this.pruneAgentHistory(database, item.agent_id);
@@ -2361,6 +2382,18 @@ export class SupervisedAgentInboxStore {
     run(database.prepare(`UPDATE supervised_agent_effects
       SET state='prepared',error=?,updated_at=?
       WHERE state='executing' AND tool_name='complete_room_turn'${scope}`), ...completionArgs);
+  }
+  /**
+   * Retry re-reads the same completed turn without a new attempt, so a re-read
+   * and its re-block recur within one attempt. Their keys also carry the next
+   * journal sequence, which only grows (retention keeps the newest events),
+   * so no occurrence is silently dropped as a duplicate.
+   */
+  private occurrenceKey(database: DatabaseSync, inboxItemId: string, key: string, phase: SupervisedInboxEvent["phase"]): string {
+    if (phase !== "blocked" && phase !== "result_unreadable") return key;
+    const next = Number((database.prepare("SELECT COALESCE(MAX(event_sequence),0)+1 AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=?")
+      .get(inboxItemId) as Row).value);
+    return `${key}:${next}`;
   }
   private recordEvent(database: DatabaseSync, inboxItemId: string, idempotencyKey: string, phase: SupervisedInboxEvent["phase"], observedAt: string, detail: string | null): void {
     // The ordinal is allocated in the same inbox transaction as its state

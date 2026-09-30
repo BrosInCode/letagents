@@ -33,6 +33,7 @@ import {
 } from "../main/agents/opencode-server-client.js";
 import { seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
+import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 
 type LaunchRecord = {
   binary: string;
@@ -378,6 +379,18 @@ function assistantMessage(
     parts: [
       ...(text === null ? [] : [{ id: `${id}-text`, type: "text", text }]),
       { id: `${id}-finish`, type: "step-finish", reason },
+    ],
+  };
+}
+
+/** What OpenCode keeps when a model spends its whole output budget reasoning: no text part. */
+function outputLimitedAssistant(turnId: string, id: string, created: number): TranscriptMessage {
+  return {
+    info: { id, role: "assistant", parentID: turnId, time: { created, completed: created + 1 }, finish: "length" },
+    parts: [
+      { id: `${id}-start`, type: "step-start" },
+      { id: `${id}-reasoning`, type: "reasoning", text: "Reviewing every file in the pull request first." },
+      { id: `${id}-finish`, type: "step-finish", reason: "length" },
     ],
   };
 }
@@ -1076,7 +1089,7 @@ test("Open Model does not mistake prompt materialization lag for an empty comple
   assert.equal(harness.messageReads, 2);
 });
 
-test("Open Model classifies the exact no-reply sentinel and unreadable completion without rerunning", async () => {
+test("Open Model classifies the exact no-reply sentinel and a finished empty answer without rerunning", async () => {
   const sentinel = await spawnAdapter();
   sentinel.harness.setAssistantText("LETAGENTS_NO_ROOM_REPLY");
   const noReply = await sentinel.adapter.runRoomTurn(sentinel.handle, {
@@ -1088,16 +1101,142 @@ test("Open Model classifies the exact no-reply sentinel and unreadable completio
   assert.equal(noReply.outcome, "no_reply");
   assert.equal(sentinel.harness.promptBodies.length, 1);
 
-  const unreadable = await spawnAdapter();
-  unreadable.harness.omitAssistantText();
-  const missingText = await unreadable.adapter.runRoomTurn(unreadable.handle, {
-    inboxItemId: "inbox-unreadable",
+  const empty = await spawnAdapter();
+  empty.harness.omitAssistantText();
+  const missingText = await empty.adapter.runRoomTurn(empty.handle, {
+    inboxItemId: "inbox-empty",
     sourceMessage: { text: "reply" },
     activation: { decision: "activate" },
-    actionId: "unreadable",
+    actionId: "empty",
   });
-  assert.equal(missingText.outcome, "unreadable");
-  assert.equal(unreadable.harness.promptBodies.length, 1);
+  assert.deepEqual(missingText, {
+    turnId: String(empty.harness.promptBodies[0]?.messageID),
+    providerContinuationId: empty.handle.providerContinuationId,
+    outcome: "failed",
+    text: null,
+    evidence: "transcript",
+    error: NO_REPLY_FAILURE.emptyAnswer,
+  });
+  assert.equal(empty.harness.promptBodies.length, 1);
+});
+
+test("Open Model settles a turn that hit its output limit before writing text, and a re-read agrees", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  const checkpointed: ProviderRoomTurnResult[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setTranscriptFactories([(turnId) => [outputLimitedAssistant(turnId, "assistant-length", 10)]]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-output-limit",
+    sourceMessage: { text: "review the pull request" },
+    activation: { decision: "activate" },
+    actionId: "output-limit",
+  }, { checkpointTerminalResult: async (terminal) => { checkpointed.push(terminal); } });
+
+  const turnId = String(harness.promptBodies[0]?.messageID);
+  const settled = {
+    turnId,
+    providerContinuationId: handle.providerContinuationId,
+    outcome: "failed",
+    text: null,
+    evidence: "transcript",
+    error: NO_REPLY_FAILURE.outputLimit,
+  };
+  assert.deepEqual(result, settled);
+  assert.deepEqual(checkpointed, [settled], "the exact terminal is checkpointed before the adapter returns");
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
+    && fact.providerTurnId === turnId && fact.turnOutcome === "failed"));
+
+  // Retry delivery re-reads the same completed turn. It must reach the same
+  // settled answer, not "unreadable", and never prompt the model again.
+  const reread = await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-output-limit", providerTurnId: turnId });
+  assert.deepEqual(reread, settled);
+  assert.equal(harness.promptBodies.length, 1);
+});
+
+test("Open Model does not settle an earlier empty step while the turn's last step is unfinished", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.setTranscriptFactories([(turnId) => [
+    outputLimitedAssistant(turnId, "assistant-length", 10),
+    { info: { id: "assistant-next", role: "assistant", parentID: turnId, time: { created: 20 } }, parts: [] },
+  ]]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-unfinished",
+    sourceMessage: { text: "review the pull request" },
+    activation: { decision: "activate" },
+    actionId: "unfinished",
+  });
+
+  assert.deepEqual(result, {
+    turnId: String(harness.promptBodies[0]?.messageID),
+    outcome: "unreadable",
+    text: null,
+    evidence: "none",
+  });
+});
+
+test("an Open Model turn that hit its output limit settles its room message and the next one is delivered", async () => {
+  const { SupervisedAgentDelivery } = await import(new URL("../../daemon/supervised-agent-delivery.ts", import.meta.url).href);
+  const { SupervisedAgentInboxStore } = await import(new URL("../../daemon/supervised-agent-inbox-store.ts", import.meta.url).href);
+  const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+  const harness = createHarness();
+  const root = await mkdtemp(join(tmpdir(), "letagents-open-model-delivery-"));
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: join(root, "runtime"),
+    dependencies: harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
+    turnTimeoutMs: 100,
+  });
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const handle = await router.spawn({ provider: "open-model", ...spawnRequest() });
+  // The first room message gets the reasoning-only answer seen in the field;
+  // the second gets an ordinary reply.
+  harness.setTranscriptFactories([(turnId) => harness.promptBodies.length === 1
+    ? [outputLimitedAssistant(turnId, "assistant-length", 10)]
+    : [assistantMessage(turnId, "assistant-reply", 20, "Second message answered.")]]);
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const published: string[] = [];
+  let recoveries = 0;
+  const recoverRoomTurn = adapter.recoverRoomTurn.bind(adapter);
+  adapter.recoverRoomTurn = async (...args) => { recoveries += 1; return recoverRoomTurn(...args); };
+  const delivery = new SupervisedAgentDelivery(store, router, {
+    poll: async () => ({}),
+    publish: async (input: { roomId: string; text: string }) => {
+      published.push(input.text);
+      return { messageId: `reply-${published.length}`, roomId: input.roomId };
+    },
+  }, async () => true);
+  const agent = {
+    agentId: "open-model-agent", roomId: "room", provider: "open-model", deliveryMode: "daemon_inbox" as const,
+    apiUrl: "https://letagents.test", agentSessionId: "worker-session", bearer: "memory",
+    executionGenerationId: "generation-1", daemonGeneration: 1, handle,
+    workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId,
+    providerConnection: handle.providerConnection,
+  };
+  try {
+    await delivery.pump(agent);
+    for (const id of ["1", "2"]) {
+      await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id,
+        messages: [{ source_message_id: id, source_message: { id }, activation: {} }] });
+    }
+    await delivery.pump(agent);
+
+    const receipts = await store.receipts(agent.agentId);
+    assert.deepEqual(receipts.map((item: { state: string }) => item.state), ["acknowledged_failed", "acknowledged"]);
+    assert.equal(receipts[0].last_error, NO_REPLY_FAILURE.outputLimit);
+    assert.equal(receipts[0].attempt_count, 1);
+    assert.equal(receipts[0].timeline.some((event: { phase: string }) => ["result_unreadable", "blocked"].includes(event.phase)), false);
+    assert.deepEqual(published, ["Second message answered."]);
+    assert.equal(harness.promptBodies.length, 2, "each room message reached the model exactly once");
+    assert.equal(recoveries, 0, "a settled answer is never re-read");
+  } finally {
+    await delivery.fenceAndDrain();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Open Model checkpoints an exact terminal provider rejection before surfacing it", async () => {
@@ -3357,7 +3496,7 @@ test("Open Model emits exact structural tool outcomes before display without pro
   assert.deepEqual(harness.aborts, []);
 });
 
-test("Open Model typed turns preserve native model errors, next-turn reuse, and unreadable/no-reply outcomes", async () => {
+test("Open Model typed turns preserve native model errors, next-turn reuse, and empty/no-reply outcomes", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const observations: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, (event) => observations.push(event));
@@ -3369,9 +3508,9 @@ test("Open Model typed turns preserve native model errors, next-turn reuse, and 
   assert.equal(noReply.outcome, "no_reply");
   assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === noReply.turnId && fact.turnOutcome === "completed"));
   harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant_empty", 30, null)]]);
-  const unreadable = await adapter.runRoomTurn(handle, { inboxItemId: "empty", sourceMessage: {}, activation: {}, actionId: "empty" });
-  assert.equal(unreadable.outcome, "unreadable");
-  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === unreadable.turnId && fact.turnOutcome === "unreadable"));
+  const empty = await adapter.runRoomTurn(handle, { inboxItemId: "empty", sourceMessage: {}, activation: {}, actionId: "empty" });
+  assert.equal(empty.outcome, "failed", "a finished step without text cannot become readable on a re-read");
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === empty.turnId && fact.turnOutcome === "failed"));
   assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), false);
   assert.equal(harness.launches.length, 1);
 });

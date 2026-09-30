@@ -17,6 +17,8 @@ import {
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
+import { taskFailurePolicy } from "../task-continuity.js";
+import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 
 const agent = {
@@ -1209,6 +1211,69 @@ test("a transient provider failure continues its unfinished task without another
 
 const continuityTask = { id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 };
 
+/** A lease holder whose provider turns end with `failures` in order, then succeed with no reply. */
+async function runNoReplyContinuity(failures: readonly string[], rounds: readonly (readonly string[])[]) {
+  const root = await mkdtemp(join(tmpdir(), "continuity-no-reply-"));
+  let tick = 0;
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"),
+    () => new Date(Date.parse("2026-10-01T00:00:00.000Z") + (tick++) * 1_000).toISOString());
+  const sources: string[] = []; const prompts: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    const source = request.sourceMessage as { id?: string; source?: string; text?: string };
+    sources.push(source.source === "system" ? "continuation" : String(source.id));
+    if (source.source === "system") prompts.push(String(source.text));
+    const turnId = `turn-${sources.length}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    const error = failures[sources.length - 1];
+    return error
+      ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "transcript", error }
+      : { turnId, outcome: "no_reply", text: null };
+  }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] },
+  currentAuthority, 0, async () => {});
+  try {
+    for (const ids of rounds) {
+      for (const id of ids) await ingest(store, id);
+      await delivery.pump(agent);
+    }
+    return { receipts: await store.receipts(agent.agentId), sources, prompts };
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+}
+
+for (const kind of ["outputLimit", "emptyAnswer"] as const) {
+  test(`a lease holder's ${kind} failure gets one follow-up turn that says why, without blocking later messages`, async () => {
+    const policy = taskFailurePolicy(NO_REPLY_FAILURE[kind], 1);
+    assert.equal(policy.automatic, true);
+    assert.equal(taskFailurePolicy(NO_REPLY_FAILURE[kind], 2).settle, true, "a repeat stops instead of blocking");
+    const { receipts, sources, prompts } = await runNoReplyContinuity([NO_REPLY_FAILURE[kind]], [["1"], ["2"]]);
+    assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply", "acknowledged_no_reply"]);
+    assert.deepEqual(sources, ["1", "continuation", "2"], "the follow-up is a new turn and the next room message still runs");
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0]!.includes(policy.note!), "the follow-up prompt says why the previous turn failed");
+  });
+}
+
+test("a model that hits its output limit every turn never blocks later room messages", async () => {
+  const limit = NO_REPLY_FAILURE.outputLimit;
+  const { receipts, sources } = await runNoReplyContinuity([limit, limit, limit, limit, limit], [["1"], ["2", "3"]]);
+  assert.deepEqual(sources, ["1", "continuation", "2", "3", "continuation"]);
+  assert.ok(receipts.every((item) => item.state === "acknowledged_failed"), JSON.stringify(receipts.map((item) => item.state)));
+  assert.equal(receipts.length, 5, "no blocked follow-up was queued");
+  for (const index of [0, 1, 3, 4]) {
+    assert.match(receipts[index]!.last_error ?? "", /happened again.*send a message to continue it/,
+      "the reason reaches the follow-up and the room message it continued");
+    assert.ok(receipts[index]!.updated_at > receipts[index]!.acknowledged_at!, "the change is visible to change detection");
+  }
+  assert.equal(receipts[2]!.last_error, limit, "a message with no follow-up keeps its own reason");
+});
+
+test("a content-filter failure is settled without a follow-up and without blocking later messages", async () => {
+  const { receipts, sources } = await runNoReplyContinuity([NO_REPLY_FAILURE.contentFilter], [["1"], ["2"]]);
+  assert.deepEqual(sources, ["1", "2"]);
+  assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
+  assert.match(receipts[0]!.last_error ?? "", /content filter.*not continued automatically/);
+});
+
 test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
   const root = await mkdtemp(join(tmpdir(), "continuity-restart-"));
   const path = join(root, "state.sqlite");
@@ -1715,6 +1780,77 @@ for (const initialState of ["dispatching", "result_recovery"] as const) test(`ex
     assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 3);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an unreadable completed turn is re-read, not rerun, and publishes the answer the re-read finds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-transient-unreadable-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let runs = 0; let recoveries = 0;
+  const published: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("turn-1");
+    return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
+  }, async (_handle, request) => {
+    recoveries += 1;
+    assert.equal(request.providerTurnId, "turn-1");
+    return { turnId: "turn-1", outcome: "reply", text: "Found on the re-read.", evidence: "transcript" };
+  }), {
+    poll: async () => ({}),
+    publish: async (input) => { published.push(input.text); return { messageId: "reply-1", roomId: input.roomId }; },
+  }, currentAuthority);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(receipt.state, "acknowledged");
+    assert.deepEqual(published, ["Found on the re-read."]);
+    assert.equal(runs, 1); assert.equal(recoveries, 1);
+    assert.equal(receipt.attempt_count, 1, "a re-read is not a new model turn");
+    assert.ok(receipt.timeline.some((event) => event.phase === "result_unreadable"));
+  } finally {
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("each re-block of a still unreadable turn is recorded, including after Retry delivery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-reblock-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let runs = 0; let recoveries = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("turn-1");
+    return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
+  }, async () => {
+    recoveries += 1;
+    return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
+  }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    const blockedEvents = async () => (await store.receipts(agent.agentId))[0]!.timeline
+      .filter((event) => event.phase === "blocked");
+    assert.equal((await store.receipts(agent.agentId))[0]!.state, "blocked");
+    assert.equal((await blockedEvents()).length, 1);
+
+    await delivery.retry(agent, "1");
+    await waitForAsync(async () => (await blockedEvents()).length === 2);
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(receipt.state, "blocked");
+    assert.deepEqual(receipt.timeline.slice(-4).map((event) => event.phase),
+      ["blocked", "queued", "result_unreadable", "blocked"]);
+    assert.match(receipt.timeline.at(-1)!.detail ?? "", /re-read and was not rerun/);
+    assert.equal(runs, 1, "Retry re-reads the completed turn and never reruns it");
+    assert.equal(recoveries, 3);
+    assert.equal(receipt.attempt_count, 1);
+    assert.equal(receipt.provider_turn_id, "turn-1");
+  } finally {
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("a fresh agent observes history at the tail, advances across silent messages, and dispatches only exact activation", async () => {
