@@ -482,6 +482,10 @@ async function startManagedAgent(
         supervisedLaunch.dismiss();
         return;
       }
+      // The agent now exists with this first task even if the request went
+      // stale meanwhile (provider switch, dialog closed, room change), so the
+      // task must not pre-fill the next launch.
+      configuration.consumeSupervisedCharter(entry.charter);
       if (!setupActions.isCurrentRequest(requestVersion)) {
         if (props.open && props.roomIdentifier === requestRoomIdentifier) {
           supervisedLaunch.offerRecoveryCandidate(entry);

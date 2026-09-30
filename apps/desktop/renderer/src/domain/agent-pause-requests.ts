@@ -21,14 +21,21 @@ export function useAgentPauseRequests(entries: Readonly<Ref<readonly DesktopSupe
       current.find((entry) => entry.id === entryId)?.desiredState !== "running");
   }, { flush: "sync" });
 
-  function begin(entryId: string): void {
-    entryIds.value = new Set([...entryIds.value, entryId]);
-  }
-
-  /** The request failed, so the agent's own state is the truth again. */
-  function fail(entryId: string): void {
+  /** The request no longer decides the state: it failed, or the agent was resumed. */
+  function clear(entryId: string): void {
     entryIds.value = without(entryIds.value, (candidate) => candidate === entryId);
   }
 
-  return { entryIds, begin, fail };
+  /** Runs a Pause request; the agent reads as pausing until its saved state arrives. */
+  async function run<T>(entryId: string, request: () => Promise<T>): Promise<T> {
+    entryIds.value = new Set([...entryIds.value, entryId]);
+    try {
+      return await request();
+    } catch (error) {
+      clear(entryId);
+      throw error;
+    }
+  }
+
+  return { entryIds, run, clear };
 }

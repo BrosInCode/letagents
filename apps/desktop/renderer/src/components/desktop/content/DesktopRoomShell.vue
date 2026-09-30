@@ -2642,14 +2642,12 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
   try {
     let updated: DesktopSupervisorManifestEntry | null = null;
     if (intent.kind === "pause") {
-      agentPauseRequests.begin(intent.entryId);
-      try {
-        updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "paused");
-      } catch (error) {
-        agentPauseRequests.fail(intent.entryId);
-        throw error;
-      }
+      updated = await agentPauseRequests.run(
+        intent.entryId,
+        () => desktopIpc.supervisor.setDesiredState(intent.entryId, "paused"),
+      );
     } else if (intent.kind === "resume") {
+      agentPauseRequests.clear(intent.entryId);
       updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "running");
     } else if (intent.kind === "recover") {
       updated = await desktopIpc.supervisor.recoverAgentRuntime({ entryId: intent.entryId });

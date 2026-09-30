@@ -351,7 +351,7 @@ test("a pause reads as Pausing… while it drains and Paused once saved, never S
   assert.equal(agentInspectorOverallState(entry({ observedState: "stopped" })), "retired");
 });
 
-test("a pause stays Pausing… for the room until its saved state arrives, whoever closes the Inspector", () => {
+test("a pause stays Pausing… for the room until its saved state arrives, whoever closes the Inspector", async () => {
   const entries = ref<DesktopSupervisorManifestEntry[]>([entry(), entry({ id: "supervised_2" })]);
   const pauses = useAgentPauseRequests(entries);
   const label = () => projectAgentInspector(entries.value[0]!, {
@@ -359,11 +359,15 @@ test("a pause stays Pausing… for the room until its saved state arrives, whoev
     pauseRequestedEntryIds: pauses.entryIds.value,
   })?.overallLabel;
 
-  pauses.begin("supervised_1");
+  let answer!: (value: string) => void;
+  const request = pauses.run("supervised_1", () => new Promise<string>((resolve) => { answer = resolve; }));
   assert.equal(label(), "Pausing…");
   // A push that still says running (delivery draining) keeps the request open.
   entries.value = [entry({ observedState: "working" }), entry({ id: "supervised_2" })];
   assert.equal(label(), "Pausing…");
+  answer("saved");
+  assert.equal(await request, "saved");
+  assert.equal(label(), "Pausing…", "the reply alone does not end it; the saved state does");
   // The saved pause arrives by push, not by the Inspector's own reply.
   entries.value = [entry({ desiredState: "paused", observedState: "stopping" }), entry({ id: "supervised_2" })];
   assert.deepEqual([...pauses.entryIds.value], []);
@@ -372,9 +376,11 @@ test("a pause stays Pausing… for the room until its saved state arrives, whoev
   entries.value = [entry(), entry({ id: "supervised_2" })];
   assert.equal(label(), "Online");
 
-  pauses.begin("supervised_2");
-  pauses.fail("supervised_2");
+  await assert.rejects(pauses.run("supervised_2", async () => { throw new Error("daemon unavailable"); }));
   assert.deepEqual([...pauses.entryIds.value], [], "a failed request hands the state back to the agent");
+  void pauses.run("supervised_2", () => new Promise(() => undefined));
+  pauses.clear("supervised_2");
+  assert.deepEqual([...pauses.entryIds.value], [], "resuming elsewhere ends a pause that was never observed");
 });
 
 test("overall state follows the complete product precedence table", () => {
