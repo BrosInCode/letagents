@@ -39,7 +39,7 @@ export function isImageAttachment(attachment: RoomMessageAttachment): boolean {
   return attachmentMimeType(attachment).startsWith('image/') && attachmentHref(attachment) !== '#'
 }
 
-export function formatAttachmentSize(bytes: number): string {
+function formatAttachmentSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return ''
   const units = ['B', 'KB', 'MB', 'GB']
   let size = bytes

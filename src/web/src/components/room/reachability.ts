@@ -91,7 +91,7 @@ export function describeAgentReachability(input: {
   return 'Recorded in room history'
 }
 
-export function normalizeMentionToken(value: string): string {
+function normalizeMentionToken(value: string): string {
   return String(value || '')
     .trim()
     .replace(/^@+/, '')
