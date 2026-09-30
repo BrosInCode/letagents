@@ -161,6 +161,7 @@ import {
   getReplyPreviewText,
 } from '@/composables/useRoom'
 import { buildMentionCandidates } from './reachability'
+import { attentionResponseAgentNames, messageDisplayText } from './chat-message/formatting'
 import AttachmentTray from './composer/AttachmentTray.vue'
 import MentionPanel from './composer/MentionPanel.vue'
 import ReplyDraft from './composer/ReplyDraft.vue'
@@ -272,7 +273,10 @@ const replyDisplayName = computed(() => {
   return parseAgentIdentity(reply.sender).displayName || reply.sender
 })
 
-const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
+const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo && {
+  ...props.replyTo,
+  display_text: messageDisplayText(props.replyTo, attentionResponseAgentNames([...props.participants, ...props.presence])),
+}))
 
 const mentionCandidates = computed(() => {
   return buildMentionCandidates({

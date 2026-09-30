@@ -22,4 +22,6 @@ export function createKnowledgeRecord(room_id: string, type: KnowledgeType, inpu
 export function reviseKnowledgeRecord(record: KnowledgeRecord, input: KnowledgeRevisionInput, actor: KnowledgeActor, now?: string): KnowledgeRecord;
 export function assertKnowledgeReplay(existing: KnowledgeRecord, candidate: KnowledgeRecord): void;
 
+export function attentionResponseHandle(agentKey: string | null | undefined): string;
 export function formatAttentionResponse(record: KnowledgeRecord): string;
+export function attentionResponseDisplayText(text: string, agentName: (handle: string) => string | null | undefined): string | null;

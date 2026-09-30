@@ -17,6 +17,7 @@ import {
   type AgentThinkingTimelineEntry,
 } from '../agentThinking'
 import type { AgentReachabilitySource } from '../reachability'
+import { messageDisplayText } from '../chat-message/formatting'
 import {
   COMPLETED_TASK_STATUSES,
   INACTIVE_REASONING_STATUSES,
@@ -251,7 +252,7 @@ export function buildHumanParticipant(input: {
     activityState: null,
     hasCanonicalPresence: false,
     status: null,
-    statusText: latestMessage ? previewMessage(latestMessage.text) : null,
+    statusText: latestMessage ? previewMessage(messageDisplayText(latestMessage)) : null,
     livenessObservation: null,
     workSignal: null,
     lastSeenAt: latestTimestamp(

@@ -288,7 +288,8 @@
 
 <script setup lang="ts">
 import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
-import { computed, nextTick, onBeforeUnmount, ref } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, ref } from "vue";
+import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
 import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -482,8 +483,11 @@ const provenanceLabel = computed(() =>
 const replyDisplayName = computed(() =>
   props.message.replyTo ? parseSenderIdentity(props.message.replyTo).displayName : "unknown"
 );
-const replyPreviewText = computed(() => truncate((props.message.replyTo?.displayText || props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
-const visibleText = computed(() => props.message.displayText || props.message.text);
+const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
+const replyPreviewText = computed(() => truncate((props.message.replyTo
+  ? roomMessageVisibleText(props.message.replyTo, attentionResponseAgentNames?.value)
+  : "").replace(/\s+/g, " ").trim(), 160));
+const visibleText = computed(() => roomMessageVisibleText(props.message, attentionResponseAgentNames?.value));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
 const renderedMarkdown = computed(() => {
   const text = visibleText.value || "No message body.";

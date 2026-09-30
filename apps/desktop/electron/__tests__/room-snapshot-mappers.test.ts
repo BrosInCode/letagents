@@ -6,6 +6,7 @@ import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
 import { readySourceStates } from "../main/rooms/snapshot/snapshots.js";
 import { canonicalJoinedRoomIdentifier, roomInfoCacheKey, roomInfoCacheKeys } from "../main/rooms/room-info.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
+import { mapDesktopTaskSummaryPayload } from "../main/rooms/tasks/mappers.js";
 
 const emptySnapshotData: RoomSnapshotData = {
   focusRoomsData: { focus_rooms: [] },
@@ -383,6 +384,29 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
     app_name: "GitHub Actions",
     head_branch: "codex/desktop-events",
   });
+});
+
+test("task leases carry the holder's room label, not only its agent handle", () => {
+  // The lease shape the server sends for GET /rooms/:room/tasks.
+  const task = mapDesktopTaskSummaryPayload({
+    id: "task_1",
+    status: "done",
+    active_leases: [{
+      id: "tl_review",
+      kind: "review",
+      status: "active",
+      agent_key: "EmmyMay/desktop-codex-30e2dae522e0062dd4da65ab597b685d",
+      agent_session_id: "agent_session_1330",
+      actor_label: "ScarletHarbor | EmmyMay's agent | Codex",
+    }],
+  });
+  assert.equal(task.activeLeases[0]?.holderLabel, "ScarletHarbor | EmmyMay's agent | Codex");
+  assert.equal(task.activeLeases[0]?.agentKey, "EmmyMay/desktop-codex-30e2dae522e0062dd4da65ab597b685d");
+  // Local tasks still name their holder with holder_label.
+  assert.equal(mapDesktopTaskSummaryPayload({
+    id: "task_2",
+    active_leases: [{ id: "local", kind: "work", holder_label: "Local reviewer", actor_label: "ignored" }],
+  }).activeLeases[0]?.holderLabel, "Local reviewer");
 });
 
 test("mapSnapshotData carries per-source states through unchanged", () => {

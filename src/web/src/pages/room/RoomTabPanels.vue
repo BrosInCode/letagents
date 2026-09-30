@@ -15,6 +15,7 @@
         :stalePromptTaskStates="stalePromptTaskStates"
         :taskReferenceIds="taskReferenceIds"
         :revealMessageId="revealMessageId"
+        :agentNames="agentNames"
         @loadOlder="emit('loadOlder')"
         @reply="emit('reply', $event)"
         @openImageViewer="emit('openImageViewer', $event)"
@@ -121,6 +122,7 @@ import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
 import MessageList from '@/components/room/MessageList.vue'
+import { attentionResponseAgentNames } from '@/components/room/chat-message/formatting'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 import type {
   FocusRoomConclusionDetails,
@@ -223,6 +225,8 @@ const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
   new Set(props.tasks.map(task => task.id))
 )
+// Messages name agents by room display name, never by their routing handle.
+const agentNames = computed(() => attentionResponseAgentNames([...props.participants, ...props.presence]))
 
 // A message another tab asked to show; the chat reveals it once it is open.
 const revealMessageId = ref<string | null>(null)

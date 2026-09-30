@@ -58,6 +58,7 @@
 import { computed, ref, toRef, watch } from 'vue'
 import { type RoomInfo, type RoomMessage, useRoom } from '@/composables/useRoom'
 import DrawerBrand from './room-drawer/DrawerBrand.vue'
+import { messageDisplayText } from './chat-message/formatting'
 import GitHubIntegrationPanel from './room-drawer/GitHubIntegrationPanel.vue'
 import ParentRoomPanel from './room-drawer/ParentRoomPanel.vue'
 import RoomNotesPanel from './room-drawer/RoomNotesPanel.vue'
@@ -130,7 +131,7 @@ function toggleTheme() {
 function exportChat() {
   if (!props.messages.length) return
   const lines = props.messages.map(m =>
-    `[${new Date(m.timestamp).toLocaleString()}] ${m.sender}: ${m.text}`,
+    `[${new Date(m.timestamp).toLocaleString()}] ${m.sender}: ${messageDisplayText(m)}`,
   )
   const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
   const url = URL.createObjectURL(blob)

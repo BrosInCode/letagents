@@ -105,12 +105,12 @@
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
         <strong>{{ replyHeading }}</strong>
-        <span>{{ replyPreview(replyTo.isSelection ? replyTo.text : replyTo.displayText || replyTo.text) }}</span>
+        <span>{{ replyPreview(replyTo.isSelection ? replyTo.text : roomMessageVisibleText(replyTo, attentionResponseAgentNames)) }}</span>
       </div>
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
     <RoomComposerEventChips
-      :event-previews="eventPreviews"
+      :event-previews="visibleEventPreviews"
       @open-event-preview="openEventPreview"
       @dismiss-event-preview="emit('dismiss-event-preview', $event)"
     />
@@ -210,7 +210,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ArrowUp, LoaderCircle, Plus, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentPermissionDecisionBehavior,
@@ -227,12 +227,15 @@ import { desktopIpc } from "../../../../ipc";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
+import { visibleComposerEventPreviews } from "./composer-event-preview";
+import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export interface RoomComposerReplyTarget {
   id: string;
   sender: string;
   text: string;
   displayText?: string | null;
+  source?: string | null;
   isSelection?: boolean;
   sourceMessageId?: string | null;
 }
@@ -273,6 +276,12 @@ const emit = defineEmits<{
 const maxComposerInputHeight = 156;
 const { text: draft, captureSubmittedDraft } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
+const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
+const visibleEventPreviews = computed(() => [...visibleComposerEventPreviews(props.eventPreviews, {
+  draft: draft.value,
+  attachmentCount: props.attachmentDrafts.length + props.pendingAttachmentDrafts.length,
+  replying: Boolean(props.replyTo),
+})]);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const hostApprovals = ref<DesktopHostApproval[]>([]);

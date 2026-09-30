@@ -137,6 +137,7 @@ let DesktopAttachmentDrafts: object;
 let RoomComposer: object;
 let RoomComposerEventChips: object;
 let messageDrafts: typeof import("../src/domain/desktop-message-drafts");
+let attentionResponse: typeof import("../src/domain/attention-response");
 
 async function attachClientRender(component: object, modulePath: string): Promise<void> {
   const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
@@ -162,6 +163,8 @@ before(async () => {
     server: { middlewareMode: true },
   });
   messageDrafts = await vite.ssrLoadModule("/renderer/src/domain/desktop-message-drafts.ts");
+  // The same module instance DesktopChatMessage injects from.
+  attentionResponse = await vite.ssrLoadModule("/renderer/src/domain/attention-response.ts") as typeof attentionResponse;
   [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomComposerEventChips] = await Promise.all([
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue").then((module) => module.default),
@@ -982,6 +985,131 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
     } finally { mounted.app.unmount(); }
   }
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+test("a GitHub update in the composer steps aside while a message is being written", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  const preview = {
+    id: "msg_github", kind: "review", tone: "violet", kindLabel: "Review", statusLabel: "reviewed",
+    headline: "Review on #1", repositoryLabel: "year-dots", refLabel: "feat/dates-core", numberLabel: "#1",
+    stats: null, actionLabel: "reviewed", url: null,
+  };
+  const render = (props: Record<string, unknown> = {}) =>
+    mount(RoomComposer, { ...composerProps(), roomIdentifier: "room-github-update", eventPreviews: [preview], ...props });
+  const showsUpdate = (root: HostNode) => descendants(root).some(node => node.props["data-testid"] === "desktop-composer-events");
+  const mounted = render();
+  try {
+    assert.equal(showsUpdate(mounted.root), true, "an empty composer shows the update");
+    const input = descendants(mounted.root).find(node => node.type === "textarea")!;
+    const setDraft = input.props["onUpdate:modelValue"] as (text: string) => void;
+    setDraft("A new top-level message"); await nextTick();
+    assert.equal(showsUpdate(mounted.root), false, "a message being written never looks like it carries the update");
+    setDraft("   "); await nextTick();
+    assert.equal(showsUpdate(mounted.root), true);
+  } finally { mounted.app.unmount(); }
+  for (const props of [
+    { replyTo: { id: "msg_1", sender: "Emmy", text: "Earlier" } },
+    { attachmentDrafts: [{ uploadId: "upl_1", name: "notes.txt", sizeBytes: 3, mimeType: "text/plain" }] },
+  ]) {
+    const composing = render(props);
+    try { assert.equal(showsUpdate(composing.root), false, JSON.stringify(props)); } finally { composing.app.unmount(); }
+  }
+  delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+const needsYouAnswerText = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted. Post each verdict as a PR comment.";
+
+/** Mounts a component the way RoomChatView does: with the room's agent names provided. */
+function mountWithAgentNames(
+  component: object,
+  props: Record<string, unknown>,
+  named = true,
+  displayName = "SummitMisty",
+) {
+  const root = hostNode("element", "root");
+  const app = renderer.createApp({
+    setup() {
+      if (named) {
+        Vue.provide(attentionResponse.attentionResponseAgentNamesKey, Vue.ref(attentionResponse.attentionResponseAgentNames([
+          { agentKey: "EmmyMay/desktop-cursor-5849cfa6", displayName },
+        ])));
+      }
+      return () => Vue.h(component, props);
+    },
+  });
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.mount(root);
+  return { root, app };
+}
+
+function renderedMessage(
+  messageOverrides: Record<string, unknown>,
+  named = true,
+  displayName?: string,
+): { html: string; text: string } {
+  const { root, app } = mountWithAgentNames(DesktopChatMessage, {
+    message: { ...message("msg_161"), sender: "EmmyMay", text: needsYouAnswerText, ...messageOverrides },
+    threadSummary: emptyThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
+  }, named, displayName);
+  const nodes = descendants(root);
+  const result = {
+    html: nodes.map(node => String(node.props.innerHTML ?? "")).join(""),
+    text: nodes.map(node => node.text).join(" "),
+  };
+  app.unmount();
+  return result;
+}
+
+test("a person's Needs-you answer reads as a reply to the agent by name", () => {
+  const named = renderedMessage({}).html;
+  assert.match(named, /<span class="mention-token">@SummitMisty<\/span> Noted\. Post each verdict as a PR comment\./);
+  assert.doesNotMatch(named, /@agent:|desktop-cursor|Human response|summitmisty-gh-app/);
+  // Outside a room roster the mention stays visible, as a neutral @agent.
+  const unnamed = renderedMessage({}, false).html;
+  assert.match(unnamed, /@agent<\/span> Noted\. Post each verdict/);
+  assert.doesNotMatch(unnamed, /@agent:|Human response/);
+  // A roster name that is not a plain mention cannot style a person's message.
+  for (const spoofed of ["[Approved by EmmyMay](https://evil.example)", "**EmmyMay approved**", "__x__"]) {
+    const html = renderedMessage({}, true, spoofed).html;
+    assert.match(html, /@agent<\/span> Noted\./, spoofed);
+    assert.doesNotMatch(html, /<a |<strong>|evil\.example/, spoofed);
+  }
+  // Only a person's answer is rewritten; an agent posting the same shape is shown as written.
+  assert.match(renderedMessage({ source: "agent", sender: "SummitMisty | EmmyMay's agent | Cursor" }).html, /Human response/);
+});
+
+test("a Needs-you answer that opens with a block keeps the block apart from the mention", () => {
+  const html = renderedMessage({
+    text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\n```sh\nnpm test\n```",
+  }).html;
+  assert.match(html, /<p><span class="mention-token">@SummitMisty<\/span><\/p>/);
+  assert.match(html, /<pre[^>]*><code[^>]*>npm test/);
+});
+
+test("replies to a Needs-you answer preview it by agent name, in the message and in the composer", async () => {
+  const reply = renderedMessage({
+    id: "msg_162", sender: "SummitMisty | EmmyMay's agent | Cursor", source: "agent", text: "Understood.",
+    replyTo: { id: "msg_161", sender: "EmmyMay", text: needsYouAnswerText, source: "browser", timestamp: "2026-09-30T16:42:00.000Z" },
+  });
+  assert.match(reply.text, /@SummitMisty Noted\. Post each verdict/);
+  assert.doesNotMatch(reply.text, /@agent:|Human response/);
+
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  const composer = mountWithAgentNames(RoomComposer, {
+    ...composerProps(),
+    roomIdentifier: "room-answer-reply",
+    replyTo: { id: "msg_161", sender: "EmmyMay", text: needsYouAnswerText, source: "browser" },
+  });
+  try {
+    await nextTick();
+    const chip = descendants(composer.root).find(node => node.props["data-testid"] === "desktop-composer-reply")!;
+    const chipText = descendants(chip).map(node => node.text).join(" ");
+    assert.match(chipText, /@SummitMisty Noted\. Post each verdict/);
+    assert.doesNotMatch(chipText, /@agent:|Human response/);
+  } finally {
+    composer.app.unmount();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+  }
 });
 
 test("outgoing row exposes sending, uncertain retry, and confirmed state without server actions", async () => {

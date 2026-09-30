@@ -215,7 +215,7 @@
 
 <script setup lang="ts">
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, toRef, watch } from "vue";
 import type { CSSProperties } from "vue";
 import type {
   DesktopAgentPresence,
@@ -263,6 +263,7 @@ import { useRoomAttachments } from "./room-chat/useRoomAttachments";
 import { useRoomImages } from "./room-chat/useRoomImages";
 import { desktopIpc } from "../../../ipc/index.js";
 import { roomMessageRevealDestination } from "../../../domain/room-message-reveal";
+import { attentionResponseAgentNames, attentionResponseAgentNamesKey } from "../../../domain/attention-response";
 
 const props = defineProps<{
   active: boolean;
@@ -370,6 +371,10 @@ const lastMarkedThreadReadKey = ref<string | null>(null);
 let transientHighlightTimeout: number | null = null;
 let threadPaneResizeState: { startX: number; startWidth: number; cursor: string; userSelect: string } | null = null;
 let threadLayoutResizeObserver: ResizeObserver | null = null;
+// Messages name agents by room display name, never by their routing handle.
+provide(attentionResponseAgentNamesKey, computed(() =>
+  attentionResponseAgentNames([...props.participants, ...props.presence])
+));
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
 const threadLayoutStyle = computed<CSSProperties>(() => ({

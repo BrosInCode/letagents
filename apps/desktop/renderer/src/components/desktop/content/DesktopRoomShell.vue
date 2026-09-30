@@ -362,6 +362,7 @@ import {
 } from "../../../domain/managed-agents";
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
+import { attentionResponseAgentNames } from "../../../domain/attention-response";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import { useAgentPauseRequests } from "../../../domain/agent-pause-requests";
 import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
@@ -803,7 +804,7 @@ const {
   toggleSearch: toggleSearchOpen,
   closeSearch,
   moveSearch,
-} = useDesktopRoomSearch(visibleMessages);
+} = useDesktopRoomSearch(visibleMessages, () => roomAttentionResponseNames.value);
 
 const {
   selectedReasoningSessionId,
@@ -889,6 +890,10 @@ const managedAgentRepoRootPath = computed(() =>
     gitRoomMatchesActiveRepo: props.gitRoomMatchesActiveRepo,
     durableProjectRootPath: props.durableProjectRootPath,
   })
+);
+// Room agents by Needs-you answer handle, for surfaces outside the chat view.
+const roomAttentionResponseNames = computed(() =>
+  attentionResponseAgentNames([...roomParticipants.value, ...roomPresence.value])
 );
 const roomPresence = computed(() =>
   mergeDesktopManagedAgentPresence(props.presence, roomManagedAgentSessions.value, props.room.identifier)
@@ -1271,7 +1276,7 @@ watchRoomNotifications({
   visibleMessages,
   ownMessageIds,
   playRoomSound,
-  showRoomNotification: (message) => showRoomNotification(message, props.room.displayName),
+  showRoomNotification: (message) => showRoomNotification(message, props.room.displayName, roomAttentionResponseNames.value),
 });
 
 const tabs = computed<RoomTab[]>(() => {
@@ -2988,6 +2993,6 @@ async function copyRoomLink(): Promise<void> {
 }
 
 function exportChat(): void {
-  exportRoomChat(props.room, visibleMessages.value);
+  exportRoomChat(props.room, visibleMessages.value, roomAttentionResponseNames.value);
 }
 </script>
