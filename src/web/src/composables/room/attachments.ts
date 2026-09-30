@@ -21,7 +21,7 @@ export async function prepareMessageAttachments(
   return prepared
 }
 
-export function resolveAttachmentUploadTarget(target: AttachmentUploadTarget): {
+function resolveAttachmentUploadTarget(target: AttachmentUploadTarget): {
   uploadId: string
   uploadUrl: string
 } {
