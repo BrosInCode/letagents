@@ -175,6 +175,22 @@ function classifyTurn(turnId: string, text: string | null): ProviderRoomTurnResu
   return { turnId, outcome: "reply", text: normalized, evidence: "transcript" };
 }
 
+/**
+ * Why a completed step that OpenCode ended with a finish reason has no answer.
+ * OpenCode writes every text part before it marks the step completed, so a
+ * re-read can only return the same empty answer: this is a settled failure,
+ * not an unreadable result. A step without a finish reason (for example one
+ * stopped while a retry was waiting) remains unreadable.
+ */
+function unansweredCompletionReason(message: OpenCodeMessage): string | null {
+  if (messageText(message)) return null;
+  const finish = messageFinishReason(message);
+  if (!finish || finish === "tool-calls") return null;
+  if (finish === "length") return "The model hit its output limit before writing a reply.";
+  if (finish === "content-filter") return "The model provider's content filter stopped the reply before any text was written.";
+  return "The model finished without writing a reply.";
+}
+
 function safeRuntimeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160);
 }
@@ -1578,12 +1594,27 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         if (terminalResult) this.emitTurnTerminal(handle, turnId, "failed");
         throw new OpenCodeTerminalTurnError(terminalError, terminalResult);
       }
-      const result = finalAssistant && messageCompleted(finalAssistant) ? classifyTurn(turnId, messageText(finalAssistant)) : null;
+      const completed = finalAssistant && messageCompleted(finalAssistant) ? finalAssistant : null;
+      // Only the turn's last step can settle it; an earlier finished step
+      // with a later step still unfinished is not the turn's answer.
+      const unanswered = completed && exactSession && completed === assistants.at(-1)
+        ? unansweredCompletionReason(completed)
+        : null;
+      const result: ProviderRoomTurnResult | null = !completed ? null
+        : unanswered ? {
+          turnId,
+          providerContinuationId: handle.providerContinuationId,
+          outcome: "failed",
+          text: null,
+          evidence: "transcript",
+          error: unanswered,
+        }
+        : classifyTurn(turnId, messageText(completed));
       return {
         assistantCount: assistants.length,
         result,
         terminalOutcome: exactSession && result && messageFinishReason(finalAssistant) !== "tool-calls"
-          ? result.outcome === "unreadable" ? "unreadable" : "completed" : null,
+          ? result.outcome === "unreadable" || result.outcome === "failed" ? result.outcome : "completed" : null,
       };
     };
     const resultAtSessionBoundary = (

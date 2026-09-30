@@ -1717,6 +1717,77 @@ for (const initialState of ["dispatching", "result_recovery"] as const) test(`ex
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("an unreadable completed turn is re-read, not rerun, and publishes the answer the re-read finds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-transient-unreadable-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let runs = 0; let recoveries = 0;
+  const published: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("turn-1");
+    return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
+  }, async (_handle, request) => {
+    recoveries += 1;
+    assert.equal(request.providerTurnId, "turn-1");
+    return { turnId: "turn-1", outcome: "reply", text: "Found on the re-read.", evidence: "transcript" };
+  }), {
+    poll: async () => ({}),
+    publish: async (input) => { published.push(input.text); return { messageId: "reply-1", roomId: input.roomId }; },
+  }, currentAuthority);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(receipt.state, "acknowledged");
+    assert.deepEqual(published, ["Found on the re-read."]);
+    assert.equal(runs, 1); assert.equal(recoveries, 1);
+    assert.equal(receipt.attempt_count, 1, "a re-read is not a new model turn");
+    assert.ok(receipt.timeline.some((event) => event.phase === "result_unreadable"));
+  } finally {
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("each re-block of a still unreadable turn is recorded, including after Retry delivery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-reblock-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let runs = 0; let recoveries = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("turn-1");
+    return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
+  }, async () => {
+    recoveries += 1;
+    return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
+  }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    const blockedEvents = async () => (await store.receipts(agent.agentId))[0]!.timeline
+      .filter((event) => event.phase === "blocked");
+    assert.equal((await store.receipts(agent.agentId))[0]!.state, "blocked");
+    assert.equal((await blockedEvents()).length, 1);
+
+    await delivery.retry(agent, "1");
+    await waitForAsync(async () => (await blockedEvents()).length === 2);
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(receipt.state, "blocked");
+    assert.deepEqual(receipt.timeline.slice(-4).map((event) => event.phase),
+      ["blocked", "queued", "result_unreadable", "blocked"]);
+    assert.match(receipt.timeline.at(-1)!.detail ?? "", /re-read and was not rerun/);
+    assert.equal(runs, 1, "Retry re-reads the completed turn and never reruns it");
+    assert.equal(recoveries, 3);
+    assert.equal(receipt.attempt_count, 1);
+    assert.equal(receipt.provider_turn_id, "turn-1");
+  } finally {
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a fresh agent observes history at the tail, advances across silent messages, and dispatches only exact activation", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-bootstrap-"));
   try {

@@ -797,10 +797,14 @@ export class SupervisedAgentInboxStore {
       const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
       const event = phaseForTransition(next);
       if (event) {
-        const ordinal = event === "retry_scheduled" || event === "queued"
-          ? Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase=?").get(inboxItemId, event) as Row).value) + 1
-          : updated.attempt_count;
-        this.recordEvent(database, inboxItemId, `${event}:${ordinal}`, event, timestamp, updated.last_error);
+        const occurrence = () => Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase=?").get(inboxItemId, event) as Row).value) + 1;
+        // Retry re-reads the same completed turn without a new attempt, so a
+        // re-read and its re-block recur within one attempt. Each occurrence
+        // gets its own key; the attempt-only key would silently drop them.
+        const key = event === "retry_scheduled" || event === "queued" ? `${event}:${occurrence()}`
+          : event === "result_unreadable" || event === "blocked" ? `${event}:${updated.attempt_count}:${occurrence()}`
+          : `${event}:${updated.attempt_count}`;
+        this.recordEvent(database, inboxItemId, key, event, timestamp, updated.last_error);
       }
       if (finalStates.has(next)) {
         this.settleTerminalItem(database, item, timestamp);
