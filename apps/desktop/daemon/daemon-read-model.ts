@@ -47,7 +47,7 @@ export type DaemonReadModelPorts = {
   inbox: Pick<
     SupervisedAgentInboxStore,
     "detail" | "ingressHealth" | "latestContinuationRepair" | "receiptProjection"
-  >;
+  > & Partial<Pick<SupervisedAgentInboxStore, "blockedHeadSkip">>;
   durability: Pick<WorkDurabilityStore, "getAttempt">;
   workerAuthority: Pick<WorkerAuthorityCoordinator, "currentHostGrant" | "pollingContract">;
   liveHandles: Map<string, ProviderActionHandle>;
@@ -145,6 +145,10 @@ export class DaemonReadModel {
       ? await this.ports.bindings.get(entry.id)
       : projectedBinding;
     const receipts = await this.ports.inbox.receiptProjection(entry.id);
+    const blockedHeadSkip = await this.ports.inbox.blockedHeadSkip?.(entry.id, {
+      work_attempt_id: entry.work_attempt_id ?? null,
+      provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
+    }) ?? null;
     const credential = bindingMatchesRoomAgentGeneration(entry, binding)
       ? await this.ports.bindings.credentialFor(binding)
       : null;
@@ -185,6 +189,7 @@ export class DaemonReadModel {
       ingressHealth: persistedIngress,
       continuationRepair,
       receipts,
+      blockedHeadSkip,
       activeTurn,
       nowMs: projectionNowMs,
       workplaceLivenessStaleAfterMs: workplaceLivenessStaleAfterMs(),

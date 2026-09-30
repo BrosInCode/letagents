@@ -1618,6 +1618,73 @@ test("skip message is honest, pre-turn only, and releases the next FIFO item", a
   } finally { await env.cleanup(); }
 });
 
+test("a started message can be skipped once its turn is finished or belongs to a replaced conversation", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const current = { work_attempt_id: TEST_PROVIDER_TURN_AUTHORITY.work_attempt_id, provider_continuation_id: TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id };
+    const ingest = (agent: string, ids: string[]) => store.ingestPoll({ agent_id: agent, room_id: "room", last_observed_message_id: ids.at(-1)!,
+      messages: ids.map((id) => ({ source_message_id: id, source_message: {}, activation: {} })) });
+    const startBlocked = async (agent: string, id: string, terminal: "unreadable" | "reply" | null) => {
+      const item = (await store.claimHead(agent))!;
+      assert.equal(item.source_message_id, id);
+      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${id}`, TEST_PROVIDER_TURN_AUTHORITY);
+      if (terminal) {
+        await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: agent,
+          execution_generation_id: TEST_PROVIDER_TURN_AUTHORITY.origin_execution_generation_id, provider_turn_id: `turn-${id}`,
+          outcome: terminal, text: terminal === "reply" ? "Saved answer" : null, evidence: terminal === "reply" ? "stream" : "none", terminal_evidence: {} });
+      }
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, terminal === "reply" ? "publishing" : "result_recovery");
+      return store.transition(item.inbox_item_id, "blocked", { last_error: "The same turn was re-read and was not rerun." });
+    };
+
+    // The field case: the model finished with no readable answer, then the
+    // agent was paused and resumed, so a new runtime generation owns it.
+    const [, next] = await ingest("finished", ["1", "2"]);
+    const finished = await startBlocked("finished", "1", "unreadable");
+    assert.deepEqual(await store.blockedHeadSkip("finished", current), { inbox_item_id: finished.inbox_item_id, refusal: null });
+    const skipped = await store.skipBlocked(finished.inbox_item_id, current);
+    assert.equal(skipped.state, "cancelled_by_user");
+    assert.match(skipped.last_error ?? "", /not rerun and its answer was dropped/);
+    const event = (await store.receipts("finished"))[0]!.timeline.at(-1)!;
+    assert.equal(event.phase, "user_cancelled");
+    assert.match(event.detail ?? "", /not rerun/);
+    assert.equal((await store.claimHead("finished"))?.inbox_item_id, next!.inbox_item_id);
+    await assert.rejects(store.retryBlocked(finished.inbox_item_id), /Invalid supervised inbox transition/);
+
+    // Retry and Skip on the same blocked head: exactly one of them applies.
+    await ingest("race", ["1"]);
+    const raced = await startBlocked("race", "1", "unreadable");
+    const outcomes = await Promise.allSettled([store.retryBlocked(raced.inbox_item_id), store.skipBlocked(raced.inbox_item_id, current)]);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+    assert.equal((await store.get(raced.inbox_item_id))?.state, "pending", "the first serialized request wins");
+
+    // No terminal result: skippable only once the conversation that ran it was replaced.
+    await ingest("unsettled", ["1"]);
+    const unsettled = await startBlocked("unsettled", "1", null);
+    const running = /provider work may already have started and may still be running/;
+    assert.match((await store.blockedHeadSkip("unsettled", current))?.refusal ?? "", running);
+    await assert.rejects(store.skipBlocked(unsettled.inbox_item_id, current), running);
+    await assert.rejects(store.skipBlocked(unsettled.inbox_item_id), running);
+    const replaced = { ...current, provider_continuation_id: "replacement-continuation" };
+    assert.equal((await store.blockedHeadSkip("unsettled", replaced))?.refusal, null);
+    assert.equal((await store.skipBlocked(unsettled.inbox_item_id, replaced)).state, "cancelled_by_user");
+
+    // A saved reply is posted by Retry, never dropped by Skip.
+    await ingest("saved", ["1"]);
+    const saved = await startBlocked("saved", "1", "reply");
+    assert.match((await store.blockedHeadSkip("saved", replaced))?.refusal ?? "", /saved reply/);
+    await assert.rejects(store.skipBlocked(saved.inbox_item_id, replaced), /saved reply/);
+    assert.equal((await store.get(saved.inbox_item_id))?.state, "blocked");
+
+    // A message waiting behind the blocked head is not itself skippable.
+    const [, later] = await ingest("head", ["1", "2"]);
+    await store.transition((await store.claimHead("head"))!.inbox_item_id, "blocked", { last_error: "blocked head" });
+    await assert.rejects(store.skipBlocked(later!.inbox_item_id, current), /no longer blocked/);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("repeated pre-turn skips retain exactly bounded physical history", async () => {
   const env = await fixture();
   const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:00:00.000Z");

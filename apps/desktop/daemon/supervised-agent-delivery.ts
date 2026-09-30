@@ -1072,7 +1072,15 @@ export class SupervisedAgentDelivery {
     const item = (await this.inbox.receipts(agent.agentId)).find((candidate) =>
       candidate.source_message_id === sourceMessageId && candidate.state === "blocked");
     if (!item) throw new Error("The blocked room message is no longer available for this exact agent.");
-    await this.inbox.skipBlocked(item.inbox_item_id);
+    // Blocked rows have no live consumer; refuse if this process still has one.
+    if (this.activeTurns.get(agent.agentId)?.inboxItemId === item.inbox_item_id
+      || this.activeTurnAborts.get(agent.agentId)?.inboxItemId === item.inbox_item_id) {
+      throw new Error("This message is still being delivered. Try again once it settles.");
+    }
+    await this.inbox.skipBlocked(item.inbox_item_id, {
+      work_attempt_id: agent.workAttemptId,
+      provider_continuation_id: agent.handle?.providerContinuationId ?? agent.providerContinuationId,
+    });
     if (!await this.hasIngressAuthority(agent, controller)) {
       throw new Error("The room delivery binding changed after the message was safely skipped.");
     }

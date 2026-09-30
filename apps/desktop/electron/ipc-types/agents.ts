@@ -643,6 +643,27 @@ export interface DesktopRoomAgentStateProjection {
   };
 }
 
+/**
+ * The agent's oldest unsettled room message is blocked; later messages wait
+ * behind it until a person retries or skips it. `condition` stays about the
+ * runtime, so read this for message-level attention.
+ */
+export interface DesktopRoomAgentDeliveryAttention {
+  reason: "message_blocked";
+  sourceMessageId: string;
+  blockedSince: string;
+  detail: string | null;
+  /** Messages waiting behind the blocked one. */
+  waitingCount: number;
+  /** The message reached the provider, or may have. */
+  providerWorkStarted: boolean;
+  /** What Retry delivery does: re-read the saved turn (never rerun it), start the turn, or restore the conversation first. */
+  retry: "reread_saved_turn" | "start_turn" | "restore_conversation";
+  /** The supervisor accepts Skip now. Skipping never reruns the turn and drops any answer it had. */
+  canSkip: boolean;
+  skipUnavailableReason: string | null;
+}
+
 export interface DesktopSupervisorManifestEntry {
   /** Opaque exact native process birth, used only to fence cached read evidence. */
   runtimeGenerationId?: string | null;
@@ -697,6 +718,8 @@ export interface DesktopSupervisorManifestEntry {
   lastTurnControlSequence: number;
   /** Additive causal projection for daemon-owned bounded room delivery. */
   roomAgentState?: DesktopRoomAgentStateProjection | null;
+  /** Set while this agent's oldest unsettled room message is blocked and needs a person. */
+  deliveryAttention?: DesktopRoomAgentDeliveryAttention | null;
   deliveryReceipts?: DesktopRoomAgentDeliveryReceipt[];
   turnControl: {
     actionId: string;

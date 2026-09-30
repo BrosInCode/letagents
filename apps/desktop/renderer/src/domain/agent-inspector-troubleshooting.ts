@@ -15,6 +15,9 @@ export interface AgentDiagnosticCheck {
   observedAt: string | null;
   action: AgentInspectorActionAvailability | null;
   actionImpact: string | null;
+  /** A second remedy offered alongside the first, such as skipping a blocked message. */
+  secondaryAction: AgentInspectorActionAvailability | null;
+  secondaryActionImpact: string | null;
   destination: "overview" | "work" | null;
 }
 export interface AgentTroubleshooting {
@@ -66,7 +69,7 @@ export function projectAgentTroubleshooting(
     nextStep: string, observedAt: string | null = null, recovery: AgentInspectorActionAvailability | null = null,
     destination: AgentDiagnosticCheck["destination"] = null): AgentDiagnosticCheck => ({
     id, label, state, summary, detail: safeDiagnosticText(explanation), nextStep, observedAt, action: recovery,
-    actionImpact: recovery ? actionImpacts[recovery.kind] ?? null : null, destination,
+    actionImpact: recovery ? actionImpacts[recovery.kind] ?? null : null, secondaryAction: null, secondaryActionImpact: null, destination,
   });
 
   const service = check("service", "Background service", daemon?.healthy && fresh ? "passed" : "unknown",
@@ -156,6 +159,9 @@ export function projectAgentTroubleshooting(
     const uncertain = projection.turnControl?.status === "uncertain" || Boolean(detail?.uncertain_effects.length);
     const active = ["dispatching", "responding", "publishing", "retrying"].includes(room.turn.state);
     const queued = room.inbox.pendingCount > 0;
+    // The supervisor's account of the blocked message, when it has one.
+    const attention = entry.deliveryAttention ?? null;
+    const rereads = blocked && attention?.retry === "reread_saved_turn";
     delivery = check("delivery", "Message delivery", held ? "paused" : uncertain || blocked ? "attention" : repairing || active || queued ? "pending" : "passed",
       held ? "Waiting for the agent to resume" : uncertain ? "An outcome needs verification" : repairing ? "Restoring the conversation"
       : blocked ? missing ? "Saved conversation is missing" : "A message needs attention"
@@ -169,15 +175,26 @@ export function projectAgentTroubleshooting(
         : queued ? "Messages are waiting in this agent’s inbox." : "The current inbox has no pending messages. This does not mean every earlier request succeeded."),
       uncertain ? "Open the recorded work and verify the affected operation before retrying."
       : blocked ? missing ? "Restore the conversation when available, then verify that the blocked message progresses."
+        : rereads ? "The agent already worked on this message. Read the reply again to re-check its saved answer, or skip the message so the messages behind it can continue. Neither reruns the turn."
         : "Inspect the blocked message in Work. Retry delivery when the exact message is eligible."
       : repairing || active || queued ? "Open Work for the message timeline, or refresh checks for the latest delivery state."
       : "If a reply is missing, open Work to see whether the message was received, completed, or published.",
       null, held || uncertain || repairing ? null : blocked ? action(missing ? "restore_conversation" : "retry_delivery") : null,
       projection.turnControl?.status === "uncertain" ? "overview" : "work");
+    if (rereads && delivery.action?.kind === "retry_delivery") {
+      delivery.actionImpact = "Read the finished turn’s saved answer again. The turn is not rerun.";
+    }
+    const skip = blocked && !held && !uncertain && !repairing ? action("skip_message") : null;
+    if (skip && skip.sourceMessageId === (attention?.sourceMessageId ?? room.inbox.blockedByMessageId)) {
+      delivery.secondaryAction = skip;
+      delivery.secondaryActionImpact = attention?.providerWorkStarted
+        ? "Skip this message so the messages behind it can continue. The agent’s turn is not rerun, and any answer it produced is dropped."
+        : "Skip this message so the messages behind it can continue. The agent won’t work on it.";
+    }
   }
   // A disconnected observer must never paint cached per-agent facts as healthy.
   const checks = [service, provider, connection, delivery].map(row => !fresh && row.id !== "service"
-    ? { ...row, state: "unknown" as const, summary: "Waiting for fresh state", detail: "The desktop is showing a previous observation. Reconnect to the background service before relying on this check.", action: null, actionImpact: null }
+    ? { ...row, state: "unknown" as const, summary: "Waiting for fresh state", detail: "The desktop is showing a previous observation. Reconnect to the background service before relying on this check.", action: null, actionImpact: null, secondaryAction: null, secondaryActionImpact: null }
     : row);
   const firstIssue = checks.find(row => row.state === "attention") ?? checks.find(row => row.state === "unknown")
     ?? checks.find(row => row.state === "pending") ?? checks.find(row => row.state === "paused") ?? checks[0]!;

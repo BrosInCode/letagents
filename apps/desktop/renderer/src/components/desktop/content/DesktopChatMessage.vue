@@ -186,9 +186,10 @@
               type="button"
               :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId)"
               :aria-label="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
-              :title="deliveryRecoveryAvailable ? 'Retry delivery' : 'Retry will be available when delivery recovery is connected'"
+              :title="!deliveryRecoveryAvailable ? 'Retry will be available when delivery recovery is connected'
+                : receipt.providerTurnId ? 'Reads the finished turn’s answer again. The turn is not rerun.' : 'Retry delivery'"
               @click="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) && $emit('retry-delivery', receipt.agentId, message.id)"
-            >{{ retryingReceipt(receipt.agentId) ? "Retrying…" : deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
+            >{{ retryingReceipt(receipt.agentId) ? "Retrying…" : !deliveryRecoveryAvailable ? "Retry unavailable" : receipt.providerTurnId ? "Read again" : "Retry" }}</button>
             <small v-if="!deliveryRecoveryAvailable">Retry will be available when delivery recovery is connected.</small>
           </template>
         </li>

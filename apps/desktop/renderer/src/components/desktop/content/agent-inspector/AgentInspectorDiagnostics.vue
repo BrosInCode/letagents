@@ -55,7 +55,19 @@
         <p v-if="selectedCheck.id === 'delivery' && assessment.nextAttemptAt" class="diagnostics-retry-time"><Clock3 :size="14" aria-hidden="true" /> Retry scheduled for {{ formatFullTimestamp(assessment.nextAttemptAt) }}</p>
         <div v-if="selectedCheck.action && !showRuntimeRecovery" class="diagnostics-remedy">
           <p>{{ selectedCheck.actionImpact }}</p>
-          <button type="button" class="diagnostics-primary" :disabled="busy || checking" @click="runRecovery"><Wrench :size="15" aria-hidden="true" />{{ selectedCheck.action.label }}<ArrowRight :size="15" aria-hidden="true" /></button>
+          <button type="button" class="diagnostics-primary" :disabled="busy || checking" @click="runRecovery()"><Wrench :size="15" aria-hidden="true" />{{ selectedCheck.action.label }}<ArrowRight :size="15" aria-hidden="true" /></button>
+        </div>
+        <div v-if="selectedCheck.secondaryAction && !showRuntimeRecovery" class="diagnostics-remedy">
+          <template v-if="!confirmSkip">
+            <p>{{ selectedCheck.secondaryActionImpact }}</p>
+            <button type="button" class="diagnostics-secondary" :disabled="busy || checking" @click="reviewSkip">{{ selectedCheck.secondaryAction.label }}</button>
+          </template>
+          <div v-else class="diagnostics-recovery-confirm diagnostics-step-content">
+            <h4 ref="skipConfirmTitle" tabindex="-1">Skip this message?</h4>
+            <p>{{ skipConfirmation }}</p>
+            <button type="button" class="diagnostics-primary" :disabled="busy || checking" @click="runRecovery(selectedCheck.secondaryAction)">Skip message</button>
+            <button type="button" class="diagnostics-secondary" :disabled="busy || checking" @click="confirmSkip = false">Cancel</button>
+          </div>
         </div>
         <section v-if="showRuntimeRecovery" class="diagnostics-runtime-recovery" aria-label="Runtime recovery">
           <template v-if="!confirmRuntimeRecovery">
@@ -168,6 +180,17 @@ type RuntimeRecoveryKind = "reconnect_runtime" | "restart_runtime" | "fresh_runt
 const runtimeChoice = ref<RuntimeRecoveryKind>("reconnect_runtime");
 const confirmRuntimeRecovery = ref(false);
 const recoveryConfirmTitle = ref<HTMLElement | null>(null);
+const confirmSkip = ref(false);
+const skipConfirmTitle = ref<HTMLElement | null>(null);
+const skipConfirmation = computed(() => props.projection.entry.deliveryAttention?.providerWorkStarted
+  ? "The agent’s turn for this message won’t be rerun, and any answer it produced will be dropped. The messages waiting behind it will continue."
+  : "The agent won’t work on this message. The messages waiting behind it will continue.");
+async function reviewSkip(): Promise<void> {
+  if (props.busy || checking.value) return;
+  confirmSkip.value = true;
+  await nextTick();
+  skipConfirmTitle.value?.focus({ preventScroll: true });
+}
 const runtimeChoices = computed(() => {
   if (!props.daemonStatus?.capabilities.agentRuntimeRecoveryV2) return [];
   const descriptions: Record<RuntimeRecoveryKind, string> = {
@@ -226,6 +249,7 @@ async function focusGuide(): Promise<void> {
 }
 function openCheck(id: DiagnosticCheckId): void {
   confirmRuntimeRecovery.value = false;
+  confirmSkip.value = false;
   runtimeRecoveryRequested.value = false;
   refreshMessage.value = ""; refreshFailed.value = false;
   selectedId.value = id; stage.value = "resolve"; verification.value = "idle"; recoveryRequested.value = false;
@@ -240,9 +264,9 @@ function reviewCheck(): void {
   stage.value = "resolve";
   void focusGuide();
 }
-function runRecovery(): void {
+function runRecovery(action = selectedCheck.value?.action): void {
   runtimeRecoveryRequested.value = false;
-  const action = selectedCheck.value?.action;
+  confirmSkip.value = false;
   if (!action || props.busy || checking.value || props.projection.resourceFreshness !== "fresh") return;
   const current = props.projection.actions.find(candidate => candidate.available && candidate.kind === action.kind && candidate.sourceMessageId === action.sourceMessageId);
   if (!current) return;
@@ -286,7 +310,7 @@ watch(recoveryChecksPassed, passed => {
   }
 });
 watch([() => props.projection.entryId, () => props.projection.roomId], () => {
-  confirmRuntimeRecovery.value = false; runtimeChoice.value = "reconnect_runtime";
+  confirmRuntimeRecovery.value = false; confirmSkip.value = false; runtimeChoice.value = "reconnect_runtime";
   requestVersion++; selectedId.value = null; checking.value = false; refreshMessage.value = "";
   verification.value = "idle"; recoveryRequested.value = false; copyState.value = "idle"; copying.value = false;
 });

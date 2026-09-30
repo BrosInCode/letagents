@@ -36,6 +36,8 @@ export type RoomAgentStateProjectionInput = {
   ingressHealth: RoomAgentIngressHealth | null;
   continuationRepair: Pick<ProviderContinuationRepair, "inbox_item_id" | "phase"> | null;
   receipts: readonly SupervisedInboxReceiptProjection[];
+  /** The inbox store's skip decision for the blocked FIFO head, if any. */
+  blockedHeadSkip?: { inbox_item_id: string; refusal: string | null } | null;
   activeTurn: RoomAgentActiveTurn;
   nowMs: number;
   workplaceLivenessStaleAfterMs: number;
@@ -251,6 +253,26 @@ export function projectRoomAgentManifestEntry(
         detail: entry.delivery_cutover?.error ?? "Legacy polling turn cutover is uncertain; daemon ingress is fenced.",
       }
     : projectedTurn;
+  const blockedHead = head?.state === "blocked" && !activeContinuationRepair ? head : null;
+  const skip = blockedHead && input.blockedHeadSkip?.inbox_item_id === blockedHead.inbox_item_id
+    ? input.blockedHeadSkip
+    : null;
+  const deliveryAttention: DaemonManifestEntryView["delivery_attention"] = blockedHead
+    && entry.delivery_mode === "daemon_inbox" && entry.desired_state !== "stopped"
+    ? {
+        reason: "message_blocked",
+        source_message_id: blockedHead.source_message_id,
+        blocked_since: blockedHead.updated_at,
+        detail: blockedHead.last_error,
+        waiting_count: nonfinal.length - 1,
+        // Same rule as the inbox store's providerWorkStarted.
+        provider_work_started: blockedHead.attempt_count !== 0 || Boolean(blockedHead.provider_turn_id || blockedHead.outcome),
+        retry: blockedHead.failure_code === "provider_continuation_missing" ? "restore_conversation"
+          : blockedHead.provider_turn_id ? "reread_saved_turn" : "start_turn",
+        can_skip: Boolean(skip && skip.refusal === null),
+        skip_unavailable_reason: skip?.refusal ?? null,
+      }
+    : null;
 
   return {
     ...entry,
@@ -294,6 +316,7 @@ export function projectRoomAgentManifestEntry(
       turn,
       task: { state: "none", task_id: null, title: null },
     },
+    delivery_attention: deliveryAttention,
     delivery_receipts: deliveryReceipts,
   };
 }

@@ -334,6 +334,35 @@ test("conversation repair targets only the exact eligible blocked message", () =
   assert.equal(fixture.assess().checks[3]!.action, null);
 });
 
+test("a blocked message the agent already worked on offers an honest re-read and a skip that says what it drops", () => {
+  const fixture = diagnosticFixture();
+  const detail = "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun.";
+  fixture.entry.roomAgentState.inbox = { state: "blocked", pendingCount: 3, blockedByMessageId: "msg_1", detail };
+  fixture.entry.deliveryReceipts = [{ state: "blocked", failureCode: null, sourceMessageId: "msg_1", attemptCount: 1, providerTurnId: "turn_1", fifoSequence: 1, timeline: [] }];
+  fixture.entry.deliveryAttention = { reason: "message_blocked", sourceMessageId: "msg_1", blockedSince: "2026-09-14T10:00:00Z", detail,
+    waitingCount: 2, providerWorkStarted: true, retry: "reread_saved_turn", canSkip: true, skipUnavailableReason: null };
+  const check = fixture.assess().checks[3]!;
+  assert.equal(check.state, "attention");
+  assert.deepEqual([check.action?.kind, check.action?.label], ["retry_delivery", "Read the reply again"]);
+  assert.match(check.actionImpact!, /not rerun/);
+  assert.match(check.nextStep, /Neither reruns the turn/);
+  assert.deepEqual([check.secondaryAction?.kind, check.secondaryAction?.sourceMessageId], ["skip_message", "msg_1"]);
+  assert.match(check.secondaryActionImpact!, /turn is not rerun, and any answer it produced is dropped/);
+
+  fixture.entry.deliveryAttention.canSkip = false;
+  fixture.entry.deliveryAttention.skipUnavailableReason = "Provider work may still be running.";
+  assert.equal(fixture.assess().checks[3]!.secondaryAction, null, "Skip follows the supervisor's decision");
+  fixture.entry.deliveryAttention.canSkip = true;
+  assert.equal(fixture.assess("stale").checks[3]!.secondaryAction, null, "a stale snapshot offers no remedy");
+
+  // Skipping asks first, in plain words: the turn is not rerun and its answer is dropped.
+  const component = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorDiagnostics.vue", import.meta.url)), "utf8");
+  assert.match(component, /@click="reviewSkip"/);
+  assert.match(component, /Skip this message\?/);
+  assert.match(component, /turn for this message won’t be rerun, and any answer it produced will be dropped/);
+  assert.match(component, /runRecovery\(selectedCheck\.secondaryAction\)/);
+});
+
 test("uncertain side effects suppress retry and send the user to evidence", () => {
   const fixture = diagnosticFixture();
   fixture.entry.roomAgentState.inbox.state = "blocked";

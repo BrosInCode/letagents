@@ -453,6 +453,48 @@ test("an idle Cursor replacement cannot hide a failed FIFO head", () => {
     receipts: [failed], activeTurn: null })).condition, "quarantined");
 });
 
+test("a blocked FIFO head is projected as delivery attention through to the inspector", () => {
+  const idleEntry = { ...entry, provider: "open-model", observed_state: "idle" as const };
+  const blocked = receipt({ state: "blocked", receipt_state: "blocked", attempt_count: 1, provider_turn_id: "turn_1",
+    outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }), updated_at: "2026-08-26T00:01:30.000Z",
+    last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
+  const later = receipt({ inbox_item_id: "inbox_2", source_message_id: "message_2", fifo_sequence: 2, receipt_state: "queued_behind_blocked" });
+  const projected = projectRoomAgentManifestEntry(facts({ entry: idleEntry, receipts: [blocked, later], activeTurn: null,
+    blockedHeadSkip: { inbox_item_id: "inbox_1", refusal: null } }));
+  assert.equal(projected.condition, "none", "runtime condition stays about the runtime");
+  assert.deepEqual(projected.delivery_attention, {
+    reason: "message_blocked", source_message_id: "message_1", blocked_since: "2026-08-26T00:01:30.000Z",
+    detail: blocked.last_error, waiting_count: 1, provider_work_started: true, retry: "reread_saved_turn",
+    can_skip: true, skip_unavailable_reason: null,
+  });
+
+  const desktop = mapEntry(projected);
+  assert.equal(desktop.deliveryAttention?.canSkip, true);
+  assert.equal(desktop.deliveryAttention?.retry, "reread_saved_turn");
+  assert.equal(agentInspectorOverallState(desktop), "needs_attention");
+  const inspector = projectAgentInspector(desktop, { roomId: entry.room_id, deliveryRetryAvailable: true, roomDeliverySkipAvailable: true });
+  const skip = inspector?.actions.find((action) => action.kind === "skip_message");
+  assert.deepEqual([skip?.available, skip?.sourceMessageId], [true, "message_1"]);
+
+  const refused = projectRoomAgentManifestEntry(facts({ entry: idleEntry, receipts: [blocked, later], activeTurn: null,
+    blockedHeadSkip: { inbox_item_id: "inbox_1", refusal: "Provider work may still be running." } }));
+  assert.equal(refused.delivery_attention?.can_skip, false);
+  assert.equal(refused.delivery_attention?.skip_unavailable_reason, "Provider work may still be running.");
+  assert.equal(projectAgentInspector(mapEntry(refused), { roomId: entry.room_id, roomDeliverySkipAvailable: true })
+    ?.actions.find((action) => action.kind === "skip_message")?.available, false);
+  assert.equal(projectRoomAgentManifestEntry(facts({ entry: idleEntry, receipts: [blocked], activeTurn: null,
+    blockedHeadSkip: { inbox_item_id: "another_inbox", refusal: null } })).delivery_attention?.can_skip, false,
+  "a skip decision for another row never applies");
+
+  const unstarted = projectRoomAgentManifestEntry(facts({ entry: idleEntry, activeTurn: null,
+    receipts: [receipt({ state: "blocked", receipt_state: "blocked", last_error: "Tools unavailable." })] }));
+  assert.equal(unstarted.delivery_attention?.provider_work_started, false);
+  assert.equal(unstarted.delivery_attention?.retry, "start_turn");
+  assert.equal(projectRoomAgentManifestEntry(facts({ receipts: [receipt()] })).delivery_attention, null);
+  assert.equal(projectRoomAgentManifestEntry(facts({ receipts: [{ ...blocked, state: "cancelled_by_user", receipt_state: "cancelled_by_user" }] }))
+    .delivery_attention, null, "Skip clears the attention immediately");
+});
+
 test("exact stopped ingress authority clears its observed timestamp", () => {
   const projected = projectRoomAgentManifestEntry(facts({
     ingressHealth: {

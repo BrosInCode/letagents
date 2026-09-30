@@ -1754,6 +1754,84 @@ test("bounded room turns never resolve or inject the legacy charter", async () =
   }
 });
 
+test("Skip moves past a finished turn that stays unreadable after Pause and Resume, without rerunning it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-skip-started-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const runs: string[] = []; let recoveries = 0;
+  const reread = deferred<void>(); let holdReread = false;
+  const published: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    const id = String((request.sourceMessage as { id?: string }).id);
+    runs.push(id);
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.(`turn-${id}`);
+    return id === "1"
+      ? { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" }
+      : { turnId: `turn-${id}`, outcome: "reply", text: "Second message answered.", evidence: "transcript" };
+  }, async () => {
+    recoveries += 1;
+    if (holdReread) await reread.promise;
+    return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
+  }), {
+    poll: async () => ({}),
+    publish: async (input) => { published.push(input.text); return { messageId: `reply-${published.length}`, roomId: input.roomId }; },
+  }, currentAuthority);
+  try {
+    await ingest(store, "1"); await ingest(store, "2");
+    await delivery.pump(agent);
+    assert.deepEqual((await store.receipts(agent.agentId)).map((item) => item.receipt_state), ["blocked", "queued_behind_blocked"]);
+
+    // Pause and Resume start a new runtime generation for the same agent.
+    const resumed = { ...agent, executionGenerationId: "generation-2", daemonGeneration: 2 };
+    // While Retry is re-reading the turn, the message is not blocked and cannot be skipped.
+    holdReread = true;
+    await delivery.retry(resumed, "1");
+    await waitFor(() => recoveries === 2);
+    await assert.rejects(delivery.skipMessage(resumed, "1"), /no longer available/);
+    reread.resolve();
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]!.state === "blocked");
+
+    await delivery.skipMessage(resumed, "1");
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[1]?.state === "acknowledged");
+    const [skipped] = await store.receipts(agent.agentId);
+    assert.equal(skipped!.state, "cancelled_by_user");
+    assert.equal(skipped!.timeline.at(-1)?.phase, "user_cancelled");
+    assert.deepEqual(runs, ["1", "2"], "the finished turn is never rerun");
+    assert.equal(recoveries, 3, "Skip itself never reads or runs the provider");
+    assert.deepEqual(published, ["Second message answered."]);
+    await assert.rejects(delivery.retry(resumed, "1"), /no longer available/);
+  } finally {
+    reread.resolve();
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Skip refuses a started turn that may still run in the current conversation, and accepts it once that conversation is replaced", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-skip-running-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let runs = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("turn-1");
+    throw Object.assign(new Error("The provider turn's result could not be established."), { roomTurnRecoveryOutcome: "ambiguous" });
+  }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    assert.equal((await store.receipts(agent.agentId))[0]!.state, "blocked");
+    await assert.rejects(delivery.skipMessage(agent, "1"), /may still be running/);
+    const replaced = { ...agent, providerContinuationId: "thread-2", handle: { ...agent.handle, providerContinuationId: "thread-2" } };
+    await delivery.skipMessage(replaced, "1");
+    assert.equal((await store.receipts(agent.agentId))[0]!.state, "cancelled_by_user");
+    assert.equal(runs, 1);
+  } finally {
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 for (const initialState of ["dispatching", "result_recovery"] as const) test(`exact result recovery from ${initialState} uses its own bounded backoff`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-result-recovery-"));
   try {
@@ -4131,6 +4209,11 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
     });
     const skippable = await internals.supervisedInbox.claimHead("stone");
     await internals.supervisedInbox.transition(skippable!.inbox_item_id, "blocked", { last_error: "safe pre-turn block" });
+    const attention = async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{
+      id: string; delivery_attention?: { source_message_id: string; retry: string; can_skip: boolean; skip_unavailable_reason: string | null } | null;
+    }>).find((entry) => entry.id === "stone")?.delivery_attention;
+    assert.deepEqual(await attention(), { reason: "message_blocked", source_message_id: "msg_2", blocked_since: (await internals.supervisedInbox.get(skippable!.inbox_item_id))!.updated_at,
+      detail: "safe pre-turn block", waiting_count: 0, provider_work_started: false, retry: "start_turn", can_skip: true, skip_unavailable_reason: null });
     const skipExact = { ...exact, source_message_id: "msg_2" };
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.skip_room_delivery", skipExact)).ok, true);
     assert.equal((await internals.supervisedInbox.get(skippable!.inbox_item_id))?.state, "cancelled_by_user");
@@ -4140,7 +4223,13 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       messages: [{ source_message_id: "msg_3", source_message: { id: "msg_3" }, activation: {} }],
     });
     const ambiguous = await internals.supervisedInbox.claimHead("stone");
-    await internals.supervisedInbox.checkpointTurnStarted(ambiguous!.inbox_item_id, "turn-ambiguous", TEST_PROVIDER_TURN_AUTHORITY);
+    // The turn ran in the agent's current conversation and has no terminal
+    // result, so it may still be running there.
+    await internals.supervisedInbox.checkpointTurnStarted(ambiguous!.inbox_item_id, "turn-ambiguous", {
+      work_attempt_id: identity.attempt,
+      origin_execution_generation_id: identity.execution,
+      provider_continuation_id: "thread-replacement",
+    });
     await internals.supervisedInbox.transition(ambiguous!.inbox_item_id, "blocked", { last_error: "ambiguous native result" });
     assert.equal(
       (await daemonRequest(paths.socketPath, "supervisor.skip_room_delivery", {
@@ -4148,8 +4237,11 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
         source_message_id: "msg_3",
       })).ok,
       false,
-      "skip is unavailable after an exact provider turn starts",
+      "skip is unavailable while a started provider turn may still be running",
     );
+    const refused = await attention();
+    assert.deepEqual([refused?.source_message_id, refused?.retry, refused?.can_skip], ["msg_3", "reread_saved_turn", false]);
+    assert.match(refused?.skip_unavailable_reason ?? "", /may still be running/);
 
     await daemon.stop();
     daemon = null;
