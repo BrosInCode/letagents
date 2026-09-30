@@ -853,8 +853,7 @@
   }
 }
 
-.first-run-card .mcp-install-step,
-.first-run-card .mcp-done-step {
+.first-run-card .mcp-install-step {
   min-height: 300px;
 }
 
@@ -880,8 +879,7 @@
   justify-content: center;
 }
 
-.first-run-card .mcp-install-step,
-.first-run-card .mcp-done-step {
+.first-run-card .mcp-install-step {
   width: min(680px, 100%);
   justify-self: center;
 }
@@ -903,25 +901,6 @@
   border-color: var(--setup-bg);
 }
 
-.first-run-card .mcp-done-targets .mcp-target-mark {
-  background: var(--setup-surface-muted);
-  box-shadow: none;
-}
-
-.first-run-card .mcp-done-targets .mcp-harness-icon {
-  filter: none;
-}
-
-.first-run-card .mcp-done-targets li {
-  color: var(--setup-muted-strong);
-}
-
-.first-run-card .mcp-done-target-check {
-  border-color: var(--setup-bg);
-  animation: first-run-success-pop 260ms var(--first-run-motion-ease) 150ms backwards;
-}
-
-.first-run-card .mcp-done-target-check path,
 .first-run-room-ready-check path {
   stroke-dasharray: 28;
   stroke-dashoffset: 28;
@@ -1911,13 +1890,11 @@
   .first-run-stage-motion .mcp-choice-card,
   .first-run-stage-motion .first-run-room-path,
   .first-run-card .mcp-progress > span[data-active="true"] > strong,
-  .first-run-card .mcp-done-target-check,
   .github-mark,
   .first-run-room-ready-check {
     animation: none;
   }
 
-  .first-run-card .mcp-done-target-check path,
   .first-run-room-ready-check path,
   .first-run-progress-glyph-enter-active path {
     animation: none;
