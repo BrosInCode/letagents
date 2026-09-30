@@ -1618,6 +1618,94 @@ test("skip message is honest, pre-turn only, and releases the next FIFO item", a
   } finally { await env.cleanup(); }
 });
 
+test("a started message can be skipped once its turn is finished or belongs to a replaced conversation", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const seed = (agentId: string, providerContinuationId: string) => seedActiveAgent(env, { agentId, roomId: "room",
+      workAttemptId: TEST_PROVIDER_TURN_AUTHORITY.work_attempt_id, executionGenerationId: "generation-2", providerContinuationId });
+    const ingest = (agent: string, ids: string[]) => store.ingestPoll({ agent_id: agent, room_id: "room", last_observed_message_id: ids.at(-1)!,
+      messages: ids.map((id) => ({ source_message_id: id, source_message: {}, activation: {} })) });
+    const startBlocked = async (agent: string, id: string, terminal: "unreadable" | "reply" | null) => {
+      const item = (await store.claimHead(agent))!;
+      assert.equal(item.source_message_id, id);
+      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${id}`, TEST_PROVIDER_TURN_AUTHORITY);
+      if (terminal) {
+        await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: agent,
+          execution_generation_id: TEST_PROVIDER_TURN_AUTHORITY.origin_execution_generation_id, provider_turn_id: `turn-${id}`,
+          outcome: terminal, text: terminal === "reply" ? "Saved answer" : null, evidence: terminal === "reply" ? "stream" : "none", terminal_evidence: {} });
+      }
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, terminal === "reply" ? "publishing" : "result_recovery");
+      return store.transition(item.inbox_item_id, "blocked", { last_error: "The same turn was re-read and was not rerun." });
+    };
+
+    // The field case: the model finished with no readable answer, then the
+    // agent was paused and resumed, so a new runtime generation owns it.
+    const [, next] = await ingest("finished", ["1", "2"]);
+    await seed("finished", TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id);
+    const finished = await startBlocked("finished", "1", "unreadable");
+    assert.deepEqual(await store.blockedHeadSkip("finished"), { inbox_item_id: finished.inbox_item_id, refusal: null });
+    const skipped = await store.skipBlocked(finished.inbox_item_id);
+    assert.equal(skipped.state, "cancelled_by_user");
+    assert.match(skipped.last_error ?? "", /not rerun and its answer was dropped/);
+    const event = (await store.receipts("finished"))[0]!.timeline.at(-1)!;
+    assert.equal(event.phase, "user_cancelled");
+    assert.match(event.detail ?? "", /not rerun/);
+    assert.equal((await store.claimHead("finished"))?.inbox_item_id, next!.inbox_item_id);
+    await assert.rejects(store.retryBlocked(finished.inbox_item_id), /Invalid supervised inbox transition/);
+
+    // Retry and Skip on the same blocked head: exactly one of them applies.
+    await ingest("race", ["1"]);
+    const raced = await startBlocked("race", "1", "unreadable");
+    const outcomes = await Promise.allSettled([store.retryBlocked(raced.inbox_item_id), store.skipBlocked(raced.inbox_item_id)]);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+    assert.equal((await store.get(raced.inbox_item_id))?.state, "pending", "the first serialized request wins");
+
+    // No terminal result: skippable only once the agent's own runtime record
+    // shows the conversation that ran it was replaced.
+    await ingest("unsettled", ["1"]);
+    const unsettled = await startBlocked("unsettled", "1", null);
+    const running = /provider work may already have started and may still be running.*Retry delivery.*Start fresh/;
+    await assert.rejects(store.skipBlocked(unsettled.inbox_item_id), running, "no runtime record proves nothing");
+    await seed("unsettled", TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id);
+    assert.match((await store.blockedHeadSkip("unsettled"))?.refusal ?? "", running);
+    await assert.rejects(store.skipBlocked(unsettled.inbox_item_id), running);
+    await seed("unsettled", "replacement-continuation");
+    assert.equal((await store.blockedHeadSkip("unsettled"))?.refusal, null);
+    assert.equal((await store.skipBlocked(unsettled.inbox_item_id)).state, "cancelled_by_user");
+
+    // A saved reply is posted by Retry, never dropped by Skip.
+    await ingest("saved", ["1"]);
+    await seed("saved", "replacement-continuation");
+    const saved = await startBlocked("saved", "1", "reply");
+    assert.match((await store.blockedHeadSkip("saved"))?.refusal ?? "", /saved reply/);
+    await assert.rejects(store.skipBlocked(saved.inbox_item_id), /saved reply/);
+    assert.equal((await store.get(saved.inbox_item_id))?.state, "blocked");
+
+    // A stop or correction that is still settling this message owns it.
+    await ingest("stopping", ["1"]);
+    await seed("stopping", TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id);
+    const stopping = await startBlocked("stopping", "1", "unreadable");
+    const journal = new DatabaseSync(env.database);
+    journal.prepare(`INSERT INTO turn_control_journals(agent_id,turn_control_present,inbox_item_id) VALUES(?,1,?)
+      ON CONFLICT(agent_id) DO UPDATE SET turn_control_present=1,inbox_item_id=excluded.inbox_item_id`).run("stopping", stopping.inbox_item_id);
+    await assert.rejects(store.skipBlocked(stopping.inbox_item_id), /stop or correction for this message is still being settled/);
+    journal.prepare("UPDATE turn_control_journals SET turn_control_present=0 WHERE agent_id=?").run("stopping");
+    journal.close();
+    assert.equal((await store.skipBlocked(stopping.inbox_item_id)).state, "cancelled_by_user");
+
+    // Only the FIFO head can be skipped, even if a later row reads as blocked.
+    const [head, later] = await ingest("head", ["1", "2"]);
+    await store.transition((await store.claimHead("head"))!.inbox_item_id, "blocked", { last_error: "blocked head" });
+    const corrupt = new DatabaseSync(env.database);
+    corrupt.prepare("UPDATE supervised_agent_inbox SET state='blocked' WHERE inbox_item_id=?").run(later!.inbox_item_id);
+    corrupt.close();
+    await assert.rejects(store.skipBlocked(later!.inbox_item_id), /Only the current FIFO head/);
+    assert.equal((await store.get(head!.inbox_item_id))?.state, "blocked");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("repeated pre-turn skips retain exactly bounded physical history", async () => {
   const env = await fixture();
   const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:00:00.000Z");

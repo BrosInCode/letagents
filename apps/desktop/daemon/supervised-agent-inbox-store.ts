@@ -1921,24 +1921,78 @@ export class SupervisedAgentInboxStore {
     });
   }
 
+  /**
+   * Settle a blocked FIFO head as skipped by the user. Nothing is sent to the
+   * provider: a turn that already ran is never rerun, and its answer is
+   * dropped.
+   */
   async skipBlocked(inboxItemId: string): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!row) throw new Error("The blocked room message no longer exists.");
       const item = rowToItem(row);
-      if (item.state !== "blocked" || item.attempt_count !== 0 || item.provider_turn_id || item.outcome) {
-        throw new Error("This message cannot be skipped because provider work may already have started.");
-      }
+      if (item.state !== "blocked") throw new Error("This message is no longer blocked, so it cannot be skipped.");
       this.assertCurrentHead(database, item);
+      const refusal = this.blockedSkipRefusal(database, item);
+      if (refusal) throw new Error(refusal);
+      const started = providerWorkStarted(item);
+      const detail = started
+        ? "Skipped by the user. The provider's turn was not rerun and its answer was dropped."
+        : "Skipped by the user before any provider turn started.";
       const timestamp = this.now();
       run(database.prepare(`UPDATE supervised_agent_inbox
-        SET state='cancelled_by_user',last_error=NULL,failure_code=NULL,updated_at=?,acknowledged_at=?
-        WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
+        SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
+        WHERE inbox_item_id=?`), started ? detail : null, timestamp, timestamp, inboxItemId);
       this.settleTerminalItem(database, item, timestamp);
-      this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, "Skipped by the user before any provider turn started.");
+      this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, detail);
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
+  }
+
+  /** Whether the agent's blocked FIFO head may be skipped now, by the same rule skipBlocked enforces. */
+  async blockedHeadSkip(agentId: string): Promise<{ inbox_item_id: string; refusal: string | null } | null> {
+    return this.read(async (database) => {
+      const row = database.prepare(`SELECT * FROM supervised_agent_inbox WHERE agent_id=?
+        AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+        ORDER BY fifo_sequence LIMIT 1`).get(agentId) as Row | undefined;
+      if (!row || String(row.state) !== "blocked") return null;
+      const item = rowToItemMetadata(row);
+      return { inbox_item_id: item.inbox_item_id, refusal: this.blockedSkipRefusal(database, item) };
+    });
+  }
+
+  /**
+   * Why a blocked message may not be skipped now, or null. A started turn is
+   * skippable only when it cannot still be running: its terminal result is
+   * recorded, or the agent's current runtime (read here, in the same
+   * transaction) has a different work attempt or conversation. The daemon
+   * installs those only after the old runtime is proven stopped, or, for a
+   * same-process conversation repair, only while no provider turn is active.
+   */
+  private blockedSkipRefusal(database: DatabaseSync, item: SupervisedInboxItemMetadata): string | null {
+    if (persistedTerminalOutcome(item.outcome)?.kind === "reply"
+      || database.prepare("SELECT 1 FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id)) {
+      return "This message has a saved reply that wasn't posted. Post the saved reply instead; the provider is not asked again.";
+    }
+    if (database.prepare("SELECT 1 FROM turn_control_journals WHERE agent_id=? AND inbox_item_id=? AND turn_control_present=1")
+      .get(item.agent_id, item.inbox_item_id)) {
+      return "A stop or correction for this message is still being settled. Try again once it finishes.";
+    }
+    if (!providerWorkStarted(item)) return null;
+    // The provider finished this exact turn; only its answer is dropped.
+    const terminal = database.prepare("SELECT provider_turn_id FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+      .get(item.inbox_item_id) as Row | undefined;
+    if (terminal && item.provider_turn_id && String(terminal.provider_turn_id) === item.provider_turn_id) return null;
+    const binding = database.prepare("SELECT work_attempt_id,provider_continuation_id FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
+      .get(item.inbox_item_id) as Row | undefined;
+    const current = database.prepare(`SELECT CASE WHEN work_attempt_id_present=1 THEN work_attempt_id END AS work_attempt_id,
+      CASE WHEN provider_ref_present=1 THEN provider_continuation_id END AS provider_continuation_id
+      FROM runtime_deployments WHERE agent_id=?`).get(item.agent_id) as Row | undefined;
+    if (binding && current?.work_attempt_id && current.provider_continuation_id
+      && (String(binding.work_attempt_id) !== String(current.work_attempt_id)
+        || String(binding.provider_continuation_id) !== String(current.provider_continuation_id))) return null;
+    return "This message can't be skipped yet: provider work may already have started and may still be running. Retry delivery to read its saved turn again, or use Start fresh to replace the agent's conversation; Skip is available after either one settles it.";
   }
   /**
    * Settle the in-flight FIFO head as user-cancelled when a Stop (or a
@@ -2530,6 +2584,11 @@ function rowToTombstonedEffect(row: Row): SupervisedEffectRecord {
 
 function valueOrCurrent<T extends object, K extends keyof T>(patch: T, key: K, current: T[K]): T[K] {
   return Object.hasOwn(patch, key) ? patch[key] : current;
+}
+
+/** Any durable sign that this message reached, or may have reached, a provider turn. */
+function providerWorkStarted(item: Pick<SupervisedInboxItemMetadata, "attempt_count" | "provider_turn_id" | "outcome">): boolean {
+  return item.attempt_count !== 0 || Boolean(item.provider_turn_id) || Boolean(item.outcome);
 }
 
 function persistedTerminalOutcome(outcome: string | null): { kind: "reply"; text: string } | { kind: "no_reply" } | { kind: "unreadable" } | null {
