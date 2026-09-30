@@ -244,6 +244,10 @@ type WireEntry = {
     turn: { state: string; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
     task: { state: string; task_id: string | null; title: string | null };
   } | null;
+  delivery_attention?: {
+    reason: string; source_message_id: string; blocked_since: string; detail: string | null; waiting_count: number;
+    provider_work_started: boolean; retry: string; can_skip: boolean; skip_unavailable_reason: string | null;
+  } | null;
   delivery_receipts?: Array<{
     inbox_item_id: string; source_message_id: string; fifo_sequence?: number; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
     provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code?: string | null; terminal_reason?: string | null; updated_at: string;
@@ -2446,6 +2450,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     activity: boundedWireActivity(entry.activity, activityLimit).map(mapActivity),
     lastTurnControlSequence: entry.last_turn_control_sequence ?? 0,
     roomAgentState: projectRoomAgentState(entry.room_agent_state),
+    deliveryAttention: projectDeliveryAttention(entry.delivery_attention),
     deliveryReceipts: projectDeliveryReceipts(entry.delivery_receipts),
     turnControl: entry.turn_control ? {
       actionId: entry.turn_control.action_id,
@@ -2542,6 +2547,22 @@ function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["
     turn: { state: turnState, inboxItemId, sourceMessageId, providerTurnId, detail: turnDetail },
     task: { state: taskState, taskId, title },
   };
+}
+
+function projectDeliveryAttention(value: unknown): DesktopSupervisorManifestEntry["deliveryAttention"] {
+  const root = record(value);
+  if (!root) return null;
+  const reason = enumValue(root.reason, ["message_blocked"] as const);
+  const sourceMessageId = nonEmptyString(root.source_message_id);
+  const blockedSince = nonEmptyString(root.blocked_since);
+  const detail = nullableString(root.detail);
+  const retry = enumValue(root.retry, ["reread_saved_turn", "publish_saved_reply", "start_turn", "restore_conversation"] as const);
+  const skipUnavailableReason = nullableString(root.skip_unavailable_reason);
+  if (!reason || !sourceMessageId || !blockedSince || detail === undefined || !retry || skipUnavailableReason === undefined
+    || typeof root.waiting_count !== "number" || !Number.isSafeInteger(root.waiting_count) || root.waiting_count < 0
+    || typeof root.provider_work_started !== "boolean" || typeof root.can_skip !== "boolean") return null;
+  return { reason, sourceMessageId, blockedSince, detail, waitingCount: root.waiting_count,
+    providerWorkStarted: root.provider_work_started, retry, canSkip: root.can_skip, skipUnavailableReason };
 }
 
 function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry["deliveryReceipts"] {

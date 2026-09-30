@@ -438,6 +438,7 @@ export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry
   if (
     entry.condition !== "none"
     || entry.observedState === "failed"
+    || Boolean(entry.deliveryAttention)
     || room?.ingress.state === "blocked"
     || room?.inbox.state === "blocked"
     || room?.turn.state === "failed"
@@ -928,6 +929,12 @@ function actionAvailability(
     && missingContinuationReceipt.attemptCount === 0
     && !missingContinuationReceipt.providerTurnId,
   );
+  // The supervisor decides whether any other blocked message may be skipped.
+  const attention = entry.deliveryAttention ?? null;
+  const skipSourceMessageId = safeToRestoreOrSkip
+    ? missingContinuationReceipt?.sourceMessageId
+    : attention?.canSkip ? attention.sourceMessageId : undefined;
+  const retryKind = attention && attention.sourceMessageId === blockedReceipt?.sourceMessageId ? attention.retry : null;
   const stateDependentActionsAvailable = resourceFreshness === "fresh";
   const canStopTurn = turnControl?.canStop === true;
   const canRestartRuntime = stateDependentActionsAvailable && entry.deliveryMode === "daemon_inbox"
@@ -947,7 +954,8 @@ function actionAvailability(
     { kind: "retry_turn_control", label: "Retry previous turn control", available: stateDependentActionsAvailable && turnControl?.canRetry === true },
     {
       kind: "retry_delivery",
-      label: "Retry delivery",
+      label: retryKind === "reread_saved_turn" ? "Read the reply again"
+        : retryKind === "publish_saved_reply" ? "Post the saved reply" : "Retry delivery",
       available: Boolean(
         stateDependentActionsAvailable
         && deliveryRetryAvailable
@@ -966,8 +974,8 @@ function actionAvailability(
     {
       kind: "skip_message",
       label: "Skip message",
-      available: Boolean(stateDependentActionsAvailable && roomDeliverySkipAvailable && safeToRestoreOrSkip && !recoveryIsActive),
-      sourceMessageId: missingContinuationReceipt?.sourceMessageId,
+      available: Boolean(stateDependentActionsAvailable && roomDeliverySkipAvailable && skipSourceMessageId && !recoveryIsActive),
+      sourceMessageId: skipSourceMessageId,
     },
     { kind: "retire_agent", label: "Retire agent", available: stateDependentActionsAvailable && entry.desiredState !== "stopped", danger: true },
   ];
@@ -1000,7 +1008,8 @@ function continuationRecovery(
         ? "The provider remains connected while LetAgents verifies and repairs the missing conversation."
         : "Couldn’t restore this agent’s Codex conversation.",
     canRestore: actions.some((action) => action.kind === "restore_conversation" && action.available),
-    canSkip: actions.some((action) => action.kind === "skip_message" && action.available),
+    canSkip: actions.some((action) => action.kind === "skip_message" && action.available
+      && action.sourceMessageId === receipt.sourceMessageId),
   };
 }
 

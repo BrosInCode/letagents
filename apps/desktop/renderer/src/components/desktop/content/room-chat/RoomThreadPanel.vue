@@ -227,6 +227,7 @@ import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
   DesktopRoomMessage,
+  DesktopRoomAgentDeliveryAttention,
   DesktopRoomAgentWork,
   DesktopRoomMessageThreadSummary,
   DesktopStagedAttachment,
@@ -277,7 +278,7 @@ const props = defineProps<{
   searchQuery: string;
   activeSearchMessageId: string | null;
   taskReferenceIds: ReadonlySet<string>;
-  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null; retry?: DesktopRoomAgentDeliveryAttention["retry"] | null }> >;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
