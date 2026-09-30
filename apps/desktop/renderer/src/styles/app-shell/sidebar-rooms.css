@@ -18,41 +18,14 @@
   position: relative;
   display: grid;
   align-content: start;
-  gap: 4px;
+  gap: 1px;
   min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overflow-anchor: none;
-  overscroll-behavior: contain;
-  padding: 3px 4px var(--scroll-fade-size-active) 0;
-  scroll-padding-block: 8px var(--scroll-fade-size-active);
-  --sidebar-scroll-mask-edge: var(--scroll-fade-size);
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    #000,
-    #000 calc(100% - var(--sidebar-scroll-mask-edge)),
-    transparent
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    #000,
-    #000 calc(100% - var(--sidebar-scroll-mask-edge)),
-    transparent
-  );
-  transition: --sidebar-scroll-mask-edge var(--duration-normal) var(--ease-out);
-}
-
-.project-list:hover,
-.project-list:focus-within,
-.pinned-list:hover,
-.pinned-list:focus-within {
-  --sidebar-scroll-mask-edge: var(--scroll-fade-size-active);
 }
 
 .project-group {
   position: relative;
   display: grid;
-  gap: 3px;
+  gap: 1px;
 }
 
 .sidebar-room-order-move {
@@ -73,7 +46,7 @@
 }
 
 .sidebar-project-row-shell:has(> .project-toggle) > :is(.pinned-room, .project-row) {
-  padding-right: 42px;
+  padding-right: 32px;
 }
 
 .sidebar-project-row-shell > .project-toggle {
@@ -87,25 +60,25 @@
   position: relative;
   display: block;
   min-width: 0;
-  min-height: 44px;
-  padding: 6px 7px;
-  border: 1px solid transparent;
-  border-radius: 9px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
   background: transparent;
 }
 
 .project-row-main {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   min-width: 0;
+  min-height: 32px;
 }
 
 .sidebar-selection-indicator {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
-  margin: 4px;
 }
 
 .project-copy,
@@ -114,6 +87,10 @@
   display: grid;
   gap: 2px;
   min-width: 0;
+}
+
+.project-copy {
+  flex: 1 1 auto;
 }
 
 .project-copy small {
@@ -128,9 +105,15 @@
 
 .room-title-line {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
+}
+
+/* The title takes the free space, so working and unread marks line up at the row's end. */
+.room-title-line > :first-child {
+  margin-right: auto;
 }
 
 .room-title-line .project-name,
@@ -143,9 +126,9 @@
 .system-copy > span {
   overflow: hidden;
   color: var(--text);
-  font-size: 0.9rem;
-  font-weight: 590;
-  line-height: 1.2;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -156,33 +139,32 @@
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--sidebar-selection);
-  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.14);
 }
 
+/* Child rooms hang from a hairline under their parent's icon. */
 .project-room-list {
   position: relative;
   display: grid;
-  gap: 2px;
-  margin: 1px 0 6px;
-  padding-left: 38px;
+  gap: 1px;
+  margin: 0 0 4px;
+  padding-left: 18px;
 }
 
 .project-room-list::before {
   content: "";
   position: absolute;
-  top: 7px;
-  bottom: 7px;
-  left: 14px;
+  top: 2px;
+  bottom: 2px;
+  left: 15.5px;
   width: 1px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.085);
+  background: var(--border-strong);
 }
 
 .sidebar-child-selection-indicator {
   position: absolute;
   z-index: 1;
   top: 50%;
-  left: -33px;
+  left: -14px;
   width: 18px;
   height: 18px;
   transform: translateY(-50%);
@@ -239,14 +221,14 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 30px;
-  padding: 4px 8px;
-  border: 1px solid transparent;
+  min-height: 28px;
+  padding: 0 8px 0 12px;
+  border: 0;
   border-radius: 7px;
   background: transparent;
   color: var(--text-tertiary);
-  font-size: 0.7rem;
-  font-weight: 620;
+  font-size: 0.75rem;
+  font-weight: 500;
   text-align: left;
   transition:
     background-color var(--duration-fast) ease,
@@ -274,26 +256,8 @@
 
 .sidebar-pinned-section {
   display: grid;
-  flex: 0 1 auto;
-  grid-template-rows: max-content minmax(0, 1fr);
-  gap: 6px;
-  min-height: 0;
-  max-height: 50%;
-  overflow: hidden;
-}
-
-.sidebar-room-sections:has(
-    > .sidebar-section > .sidebar-section-header[data-collapsed="true"],
-    > .sidebar-section[data-empty="true"]
-  ) > .sidebar-pinned-section {
-  max-height: 100%;
-}
-
-.pinned-section-header {
-  min-height: 30px;
-}
-
-.pinned-list {
+  flex: 0 0 auto;
+  grid-template-rows: max-content max-content;
   gap: 2px;
 }
 
@@ -301,13 +265,20 @@
   position: relative;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   min-width: 0;
-  min-height: 40px;
-  padding: 5px 8px;
-  border: 1px solid transparent;
-  border-radius: 9px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
   background: transparent;
+}
+
+.pinned-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
 }
 
 .pinned-title,
@@ -315,19 +286,9 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 0.84rem;
-  font-weight: 570;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pinned-meta {
-  overflow: hidden;
-  color: var(--text-tertiary);
-  font-size: 0.7rem;
+  font-size: 0.8125rem;
   font-weight: 500;
-  line-height: 1.25;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -335,7 +296,7 @@
 .pinned-room[data-unread="true"] .pinned-title,
 .project-row[data-unread="true"] .project-name,
 .room-row[data-unread="true"] .room-title {
-  font-weight: 680;
+  font-weight: 600;
 }
 
 .room-row {
@@ -343,36 +304,32 @@
   grid-template-columns: minmax(0, 1fr);
   align-items: center;
   min-width: 0;
-  min-height: 35px;
-  padding: 6px 8px;
-  border: 1px solid transparent;
+  min-height: 28px;
+  padding: 0 8px 0 12px;
+  border: 0;
   border-radius: 7px;
   background: transparent;
 }
 
-.room-focus[data-kind="branch"] {
-  min-height: 39px;
-  gap: 2px;
-}
-
 .room-focus[data-active="true"] {
-  border-color: transparent;
   background: var(--sidebar-selected);
-  box-shadow:
-    inset 2px 0 0 var(--sidebar-selection),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+  box-shadow: none;
 }
 
+/* Several rooms picked for a batch action. */
 :is(.pinned-room, .project-row, .room-row)[data-selected="true"] {
-  border-color: color-mix(in srgb, var(--sidebar-selection) 22%, transparent);
-  background: color-mix(in srgb, var(--sidebar-selection) 10%, transparent);
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--sidebar-selection) 76%, white);
+  background: color-mix(in srgb, var(--sidebar-selection) 12%, transparent);
+  box-shadow: none;
 }
 
+/* Child rooms read a step quieter than their parent until they are open or new. */
 .room-focus .room-title {
   grid-column: 1;
-  font-size: 0.8rem;
-  line-height: 1.25;
+  color: var(--text-secondary);
+}
+
+.room-focus:is([data-active="true"], [data-unread="true"]) .room-title {
+  color: var(--text);
 }
 
 .room-child-meta,
@@ -485,45 +442,5 @@
   .sidebar-child-selection-indicator,
   .sidebar-room-order-move {
     transition: none;
-  }
-}
-
-/* Short or zoomed windows need room to read a complete row. Keep the
-   toolbar and footer fixed while navigation shares a single scroll area. */
-@media (max-height: 640px) {
-  .sidebar-navigation {
-    grid-template-rows: max-content max-content;
-    align-content: start;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scroll-padding-block: 4px;
-  }
-
-  .sidebar-pinned-section,
-  .sidebar-section {
-    flex: 0 0 auto;
-    grid-template-rows: max-content max-content;
-  }
-
-  .sidebar-room-sections,
-  .sidebar-pinned-section,
-  .sidebar-section {
-    max-height: none;
-    overflow: visible;
-  }
-
-  .sidebar-room-sections:has(
-      > .sidebar-section > .sidebar-section-header[data-collapsed="true"],
-      > .sidebar-section[data-empty="true"]
-    ) > .sidebar-pinned-section {
-    max-height: none;
-  }
-
-  .project-list,
-  .pinned-list {
-    overflow: visible;
-    padding-bottom: 0;
-    -webkit-mask-image: none;
-    mask-image: none;
   }
 }

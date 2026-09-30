@@ -214,12 +214,12 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", handleOutsideP
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   width: 100%;
-  min-height: 48px;
-  padding: 6px 8px;
+  min-height: 40px;
+  padding: 4px 8px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: 7px;
   background: transparent;
   color: var(--text);
   text-align: left;
@@ -229,7 +229,6 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", handleOutsideP
 
 .sidebar-account-trigger:hover,
 .sidebar-account-trigger[aria-expanded="true"] {
-  border-color: var(--border);
   background: var(--accent-hover);
 }
 
@@ -245,14 +244,14 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", handleOutsideP
   place-items: center;
   overflow: hidden;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--green) 74%, #111827);
-  color: white;
+  background: var(--accent-active);
+  color: var(--text);
   object-fit: cover;
   font-weight: 720;
   letter-spacing: -0.02em;
 }
 
-.sidebar-account-avatar[data-size="small"] { width: 30px; height: 30px; font-size: 0.67rem; }
+.sidebar-account-avatar[data-size="small"] { width: 24px; height: 24px; font-size: 0.65rem; }
 .sidebar-account-avatar[data-size="large"] { width: 38px; height: 38px; font-size: 0.74rem; }
 .sidebar-account-avatar[data-signed-out="true"] { background: var(--accent-active); color: var(--text-secondary); }
 
@@ -266,8 +265,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", handleOutsideP
 .sidebar-account-trigger-copy strong,
 .sidebar-account-card strong {
   overflow: hidden;
-  font-size: 0.86rem;
-  font-weight: 660;
+  font-size: 0.8125rem;
+  font-weight: 500;
   line-height: 1.15;
   text-overflow: ellipsis;
   white-space: nowrap;

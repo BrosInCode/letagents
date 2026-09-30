@@ -1,3 +1,4 @@
+export type * from "./ipc-types/account-activity.js";
 export type * from "./ipc-types/activity.js";
 export * from "./ipc-types/agents.js";
 export type * from "./ipc-types/app-agent.js";

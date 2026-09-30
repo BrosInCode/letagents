@@ -61,6 +61,11 @@ import {
 import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js";
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
+import { registerAccountActivityStreamRoute } from "../routes/account/activity-stream.js";
+import { AccountActivityHub } from "../account-activity/hub.js";
+import { databaseAccountActivityLoaders } from "../account-activity/loaders.js";
+import { getAccountRoomsForAccount } from "../account-room-membership/list.js";
+import { presenceChangeEvents } from "./presence-change-events.js";
 import { registerAppLoginRoutes } from "../routes/auth/app-login.js";
 import { registerConversationRoutes } from "../routes/conversations.js";
 import {
@@ -214,6 +219,15 @@ import {
 
 let sharedRoomEventBroker: RoomEventBroker | null = null;
 let sharedRoomMessageOverlayBatcher: RoomMessageOverlayBatcher | null = null;
+let sharedAccountActivityHub: AccountActivityHub | null = null;
+
+function getAccountActivityHub(): AccountActivityHub {
+  if (!sharedAccountActivityHub) {
+    sharedAccountActivityHub = new AccountActivityHub(databaseAccountActivityLoaders);
+    sharedAccountActivityHub.attach({ presence: presenceChangeEvents, messages: messageEvents });
+  }
+  return sharedAccountActivityHub;
+}
 
 function getRoomEventBroker(): RoomEventBroker {
   sharedRoomEventBroker ??= createRoomEventBroker({
@@ -230,7 +244,9 @@ function getRoomEventBroker(): RoomEventBroker {
     messageInfoEvents,
     bridgeLossEvents: roomEventBridgeLossEvents,
   });
-  setRoomEventBridgeInterestPredicate((roomId) => sharedRoomEventBroker?.hasInterest(roomId) ?? false);
+  // The sidebar's activity stream needs a room's events too, even when no room stream is open on it here.
+  setRoomEventBridgeInterestPredicate((roomId) =>
+    (sharedRoomEventBroker?.hasInterest(roomId) ?? false) || (sharedAccountActivityHub?.watches(roomId) ?? false));
   return sharedRoomEventBroker;
 }
 
@@ -239,6 +255,8 @@ export function closeApiRouteEventBroker(): void {
   sharedRoomEventBroker = null;
   sharedRoomMessageOverlayBatcher?.close();
   sharedRoomMessageOverlayBatcher = null;
+  sharedAccountActivityHub?.close();
+  sharedAccountActivityHub = null;
   setRoomEventBridgeInterestPredicate(null);
 }
 
@@ -493,6 +511,7 @@ export function registerApiRoutes(app: Express): void {
   registerAppLoginRoutes(app);
   registerConversationRoutes(app);
   registerAccountRoomRoutes(app);
+  registerAccountActivityStreamRoute(app, { hub: getAccountActivityHub(), getAccountRoomsForAccount });
   registerDesktopPushRoutes(app);
 
   registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);

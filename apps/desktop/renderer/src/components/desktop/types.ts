@@ -1,4 +1,5 @@
 import type { DesktopGitRoomInfo } from "../../../../electron/ipc-types";
+import type { SidebarRoomActivity } from "../../domain/sidebar-room-display";
 
 export type RoomEntry = {
   id: string;
@@ -22,6 +23,8 @@ export type RoomEntry = {
   latestMessageId: string | null;
   latestMessageAt: string | null;
   hasUnread: boolean;
+  /** Agents working in this room right now, as the activity stream reports. */
+  activity?: SidebarRoomActivity | null;
   pinned: boolean;
   source: "current" | "account" | "recent";
 };

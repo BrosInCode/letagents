@@ -483,6 +483,13 @@ import {
 } from "./domain/app-agent";
 import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
 import { shouldSkipPollTick } from "./domain/visibility-polling";
+import { useAccountActivity } from "./composables/useAccountActivity";
+import {
+  ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS,
+  newerLatestMessage,
+  sidebarActivityFor,
+  streamedLatestMessage,
+} from "./domain/account-activity";
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
 import InboxView from "./components/desktop/content/InboxView.vue";
 import type { InboxSection } from "./components/desktop/content/room-inbox/universal";
@@ -540,6 +547,19 @@ const chatScrollTopByRoom = ref<Record<string, number>>({});
 const loadingChatScrollRoomIdentifiers = ref<Set<string>>(new Set());
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
+// Who is working in each room, and each room's latest message, pushed by the server.
+const accountActivity = useAccountActivity({
+  authenticated: computed(() => Boolean(authStatus.value?.authenticated)),
+  roomIds: computed(() => accountRooms.value.flatMap((room) => [
+    room.roomIdentifier,
+    ...room.focusRooms.map((focusRoom) => focusRoom.roomIdentifier),
+  ])),
+});
+let lastSidebarMetadataRefreshAt = 0;
+// While the stream was open the sidebar barely polled, so catch up the moment it drops.
+watch(() => accountActivity.connected.value, (connected, wasConnected) => {
+  if (wasConnected && !connected) void refreshSidebarRoomMetadata();
+});
 const rentalRequestCount = ref(0);
 const inboxRentals = ref<DesktopRentalRequest[]>([]);
 const inboxRentalError = ref('');
@@ -854,6 +874,7 @@ function setSidebarWidth(value: number): void {
 async function refreshSidebarRoomMetadata(): Promise<void> {
   if (showFirstRunGate.value || !authStatus.value?.authenticated || sidebarMetadataRefreshInFlight) return;
   sidebarMetadataRefreshInFlight = true;
+  lastSidebarMetadataRefreshAt = Date.now();
   try {
     await refreshAccountRooms().catch(() => undefined);
     await refreshSidebarLatestMessages();
@@ -1107,6 +1128,7 @@ function withRoomUnreadState(entry: RoomEntry): RoomEntry {
   const latestMessageId = latestMessageIdForEntry(entry);
   return {
     ...entry,
+    activity: sidebarActivityFor(accountActivity.index.value, entry.roomIdentifier),
     latestMessageId,
     latestMessageAt: latestMessageAtForEntry(entry),
     hasUnread: hasUnreadRoomActivity({
@@ -1134,7 +1156,10 @@ function latestMessageAtForEntry(entry: RoomEntry): string | null {
 
 function latestMessageForEntry(entry: RoomEntry): DesktopRoomLatestMessage | null {
   const key = roomReadKey(entry.roomIdentifier);
-  return key ? sidebarLatestMessages.value[key] || null : null;
+  return newerLatestMessage(
+    key ? sidebarLatestMessages.value[key] : null,
+    streamedLatestMessage(accountActivity.index.value, entry.roomIdentifier),
+  );
 }
 
 function selectedSnapshotMatchesEntry(entry: RoomEntry): boolean {
@@ -2505,6 +2530,11 @@ onMounted(() => {
   unsubscribeRepoStatusChanged = desktopIpc.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
   accountRoomsRefreshInterval = window.setInterval(() => {
     if (shouldSkipPollTick({ hidden: document.hidden })) return;
+    // While the activity stream is open it pushes messages and work as they
+    // happen; the room list is then refreshed only rarely, to pick up rooms
+    // that were renamed or created elsewhere.
+    if (accountActivity.connected.value
+      && Date.now() - lastSidebarMetadataRefreshAt < ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS) return;
     void refreshSidebarRoomMetadata();
   }, SIDEBAR_METADATA_REFRESH_INTERVAL_MS);
   window.addEventListener("focus", handleWindowFocus);
