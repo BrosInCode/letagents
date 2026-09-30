@@ -27,8 +27,3 @@ export function requiredAgentSessionRouteCapability(method: string, path: string
   const normalized = path.replace(/^\/api(?=\/rooms\/)/, "");
   return ROUTES.find((route) => route.method === method.toUpperCase() && route.path.test(normalized))?.capability ?? null;
 }
-
-export function hasRequiredAgentSessionRouteCapability(input: { method: string; path: string; capabilities: readonly AgentSessionBearerCapability[] }): boolean {
-  const required = requiredAgentSessionRouteCapability(input.method, input.path);
-  return Boolean(required && input.capabilities.includes(required));
-}

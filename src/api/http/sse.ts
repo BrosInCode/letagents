@@ -29,7 +29,7 @@ export async function waitForSseCleanupDrain(): Promise<void> {
   }
 }
 
-export function startSseStream(res: Response): NodeJS.Timeout {
+function startSseStream(res: Response): NodeJS.Timeout {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -102,7 +102,7 @@ function waitForDrain(res: Response, label: string, timeoutMs: number): Promise<
   });
 }
 
-export function stopSseStream(res: Response, heartbeat: NodeJS.Timeout): void {
+function stopSseStream(res: Response, heartbeat: NodeJS.Timeout): void {
   clearInterval(heartbeat);
   if (!res.writableEnded && !res.destroyed) {
     res.end();
