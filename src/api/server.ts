@@ -4,6 +4,8 @@ import { startRoomEventBridge, stopRoomEventBridge } from "./server/event-bridge
 import { startLivenessSweep, stopLivenessSweep } from "./server/liveness.js";
 import { startJevRoutingWorker } from "./messages/jev-routing-worker.js";
 import { startDesktopPushWorker } from "./notifications/worker.js";
+import { startWakeRuleScheduler } from "./wake-rules/scheduler.js";
+import { githubRoomEvents, taskEvents, wakeRuleEvents } from "./server/events.js";
 import { assertMessageThreadProjectionReady } from "./db/messages/projection-readiness.js";
 import { closeApiRouteEventBroker } from "./server/routes.js";
 import { pool } from "./db/client.js";
@@ -30,6 +32,7 @@ startRoomEventBridge();
 startLivenessSweep();
 const stopDesktopPushWorker = startDesktopPushWorker();
 const stopJevRoutingWorker = startJevRoutingWorker();
+const stopWakeRuleScheduler = startWakeRuleScheduler({ taskEvents, githubRoomEvents, wakeRuleEvents });
 process.once("exit", closeApiRouteEventBroker);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -48,7 +51,7 @@ const stopIntake = () => closeHttpServerIntake(server);
 const shutdown = createGracefulShutdownController({
   stopIntake,
   stopWorkers: async () => {
-    await Promise.all([stopLivenessSweep(), stopDesktopPushWorker(), stopJevRoutingWorker()]);
+    await Promise.all([stopLivenessSweep(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopWakeRuleScheduler()]);
   },
   stopBridge: stopRoomEventBridge,
   closeBroker: async () => {

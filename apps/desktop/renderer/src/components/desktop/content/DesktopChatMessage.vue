@@ -9,7 +9,8 @@
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
       'is-compact-continuation': compactWithPrevious,
-      'is-ambient-system-message': isAmbientSystem,
+      'is-ambient-system-message': isAmbientSystem || isWakeNotice,
+      'is-wake-notice': isWakeNotice,
       'is-arriving': animateArrival,
       'is-thread-context': context !== 'timeline',
       'is-thread-root-context': context === 'thread-root',
@@ -23,7 +24,9 @@
     @contextmenu="openContextMenu"
     @pointerup="handleSelectionPointerUp"
   >
+    <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
     <div
+      v-else
       class="room-chat-avatar"
       :style="{ '--avatar-color': senderColor }"
       aria-hidden="true"
@@ -315,6 +318,8 @@ import {
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
+import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
+import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
 
 const props = withDefaults(defineProps<{
   message: DesktopRoomMessage;
@@ -454,6 +459,8 @@ const ownerAttribution = computed(() => resolveOwnerAttribution({
 }));
 const ideLabel = computed(() => props.providerLabel || props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
 const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
+/** An agent's wake rule fired: a quiet line, not a conversation. */
+const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE);
 const isAmbientSystem = computed(() =>
   isAmbientSystemMessage(props.message.sender, props.message.text || "")
 );
