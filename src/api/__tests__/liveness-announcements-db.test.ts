@@ -88,7 +88,16 @@ async function fetchCandidate(roomId: string, deliveryKey: string) {
     delivery_key: deliveryKey,
   });
   assert.ok(candidate, "expected the delivery session to exist");
-  return candidate!;
+  return holdingWork(candidate!);
+}
+
+/**
+ * These journeys seed label-only workers, which cannot hold leases. Only a
+ * worker holding work is announced, so give the candidate one; the lease
+ * lookup itself is covered by the runtime-evidence test below.
+ */
+function holdingWork<T extends { active_work_task_ids?: string[] }>(candidate: T): T {
+  return { ...candidate, active_work_task_ids: ["task_1"] };
 }
 
 test(
@@ -97,7 +106,7 @@ test(
   async () => {
     const roomId = await seedConnectedWorker();
 
-    // First death: clean disconnect 30 minutes ago, announced 28 minutes ago —
+    // First death: clean disconnect 45 minutes ago, announced 40 minutes ago —
     // explicit stamps keep the marker causally after its outage epoch, the way
     // real sweeps behave.
     const disconnected = await markRoomAgentDeliveryDisconnected!({
@@ -106,9 +115,9 @@ test(
     });
     const deliveryKey = disconnected!.delivery_key;
     await backdateDelivery(roomId, deliveryKey, {
-      updated_at: 30,
-      last_disconnected_at: 30,
-      reconnect_grace_expires_at: 30,
+      updated_at: 45,
+      last_disconnected_at: 45,
+      reconnect_grace_expires_at: 45,
     });
 
     const listed = (await listLivenessAnnouncementCandidates!()).find(
@@ -116,14 +125,20 @@ test(
     );
     assert.ok(listed, "expected the disconnected worker to be listed");
     assert.equal(listed!.agent_session_ended_at, null);
+    assert.deepEqual(listed!.active_work_task_ids, []);
+    assert.deepEqual(
+      selectLivenessTransitions({ candidates: [listed!] }),
+      [],
+      "an absent worker holding no work is never announced"
+    );
 
-    let [transition] = selectLivenessTransitions({ candidates: [listed!] });
+    let [transition] = selectLivenessTransitions({ candidates: [holdingWork(listed!)] });
     assert.equal(transition?.kind, "offline");
     assert.equal(
       await markAgentOfflineAnnounced!({
         room_id: roomId,
         delivery_key: deliveryKey,
-        announced_at: isoMinutesAgo(28),
+        announced_at: isoMinutesAgo(40),
       }),
       true
     );
@@ -153,15 +168,15 @@ test(
     // Second death: another clean disconnect starts a new epoch and re-announces.
     await markRoomAgentDeliveryDisconnected!({ room_id: roomId, actor_label: ACTOR_LABEL });
     await backdateDelivery(roomId, deliveryKey, {
-      updated_at: 6,
-      last_disconnected_at: 6,
-      reconnect_grace_expires_at: 6,
+      updated_at: 31,
+      last_disconnected_at: 31,
+      reconnect_grace_expires_at: 31,
     });
     const relisted = (await listLivenessAnnouncementCandidates!()).find(
       (entry) => entry.session.room_id === roomId && entry.session.delivery_key === deliveryKey
     );
     assert.ok(relisted, "expected the re-disconnected worker to be listed again");
-    [transition] = selectLivenessTransitions({ candidates: [relisted!] });
+    [transition] = selectLivenessTransitions({ candidates: [holdingWork(relisted!)] });
     assert.equal(transition?.kind, "offline");
   }
 );
@@ -177,15 +192,15 @@ test(
     });
     const deliveryKey = disconnected!.delivery_key;
     await backdateDelivery(roomId, deliveryKey, {
-      updated_at: 30,
-      last_disconnected_at: 30,
-      reconnect_grace_expires_at: 30,
+      updated_at: 45,
+      last_disconnected_at: 45,
+      reconnect_grace_expires_at: 45,
     });
     assert.equal(
       await markAgentOfflineAnnounced!({
         room_id: roomId,
         delivery_key: deliveryKey,
-        announced_at: isoMinutesAgo(28),
+        announced_at: isoMinutesAgo(40),
       }),
       true
     );
@@ -202,7 +217,7 @@ test(
 
     // Second death: the process freezes — the socket never closes, so
     // last_disconnected_at stays NULL and only the heartbeat goes stale.
-    await backdateDelivery(roomId, deliveryKey, { updated_at: 5 });
+    await backdateDelivery(roomId, deliveryKey, { updated_at: 31 });
 
     const relisted = (await listLivenessAnnouncementCandidates!()).find(
       (entry) => entry.session.room_id === roomId && entry.session.delivery_key === deliveryKey
@@ -210,7 +225,7 @@ test(
     assert.ok(relisted, "dead-socket death after a recovery must re-enter the candidate list");
     assert.equal(relisted!.session.last_disconnected_at, null);
 
-    const [transition] = selectLivenessTransitions({ candidates: [relisted!] });
+    const [transition] = selectLivenessTransitions({ candidates: [holdingWork(relisted!)] });
     assert.equal(transition?.kind, "offline");
   }
 );
@@ -373,10 +388,39 @@ test(
     });
     const deliveryKey = disconnected!.delivery_key;
     await backdateDelivery(project.id, deliveryKey, {
-      updated_at: 5,
-      last_disconnected_at: 5,
-      reconnect_grace_expires_at: 5,
+      updated_at: 31,
+      last_disconnected_at: 31,
+      reconnect_grace_expires_at: 31,
     });
+
+    // Without work the outage is roster state only, never a room message.
+    let candidate = await getLivenessAnnouncementCandidate!({
+      room_id: project.id,
+      delivery_key: deliveryKey,
+    });
+    assert.deepEqual(candidate?.active_work_task_ids, []);
+    assert.deepEqual(selectLivenessTransitions({ candidates: [candidate!] }), []);
+
+    // Active work leases held by this session surface on the candidate;
+    // released leases and other kinds do not.
+    const { createTaskLease, releaseTaskLease } = dbModule!;
+    const leaseBase = {
+      room_id: project.id,
+      agent_key: "EmmyMay/field-signal",
+      actor_label: ACTOR_LABEL,
+      agent_session_id: session.session_id,
+      created_by: ACTOR_LABEL,
+    };
+    await createTaskLease!({ ...leaseBase, task_id: "task_9", kind: "work" });
+    await createTaskLease!({ ...leaseBase, task_id: "task_3", kind: "work" });
+    await createTaskLease!({ ...leaseBase, task_id: "task_5", kind: "review" });
+    const released = await createTaskLease!({ ...leaseBase, task_id: "task_7", kind: "work" });
+    await releaseTaskLease!(project.id, released.id);
+    candidate = await getLivenessAnnouncementCandidate!({
+      room_id: project.id,
+      delivery_key: deliveryKey,
+    });
+    assert.deepEqual(candidate?.active_work_task_ids, ["task_3", "task_9"]);
 
     // Generic MCP/session traffic cannot prove native execution activity and
     // therefore cannot suppress a workplace-reachability notice.
@@ -387,7 +431,7 @@ test(
       last_observed_at: isoMinutesAgo(1),
       last_tool_call_at: isoMinutesAgo(1),
     });
-    let candidate = await getLivenessAnnouncementCandidate!({
+    candidate = await getLivenessAnnouncementCandidate!({
       room_id: project.id,
       delivery_key: deliveryKey,
     });
@@ -416,7 +460,7 @@ test(
     // Stale runtime evidence: now it is a real death, classified as such.
     await pool!.query(
       "UPDATE room_agent_liveness_observations SET last_observed_at = $2, last_tool_call_at = $2 WHERE agent_session_id = $1",
-      [session.session_id, new Date(Date.now() - 20 * 60_000)]
+      [session.session_id, new Date(Date.now() - 40 * 60_000)]
     );
     candidate = await getLivenessAnnouncementCandidate!({
       room_id: project.id,

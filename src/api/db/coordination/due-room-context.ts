@@ -15,45 +15,27 @@ function boundedRoomIds(roomIds: readonly string[]): string[] {
 
 export interface LivenessRoomContext {
   suppressed_actor_labels: ReadonlySet<string>;
-  active_manager_session_id: string | null;
 }
 
-/** Two set-based reads replace suppression + manager N+1s for one due page. */
+/** One set-based read replaces per-room suppression lookups for one due page. */
 export async function getLivenessRoomContexts(
   roomIds: readonly string[],
 ): Promise<Map<string, LivenessRoomContext>> {
   const ids = boundedRoomIds(roomIds);
   const result = new Map<string, LivenessRoomContext>(ids.map((roomId) => [roomId, {
     suppressed_actor_labels: new Set<string>(),
-    active_manager_session_id: null,
   }]));
   if (ids.length === 0) return result;
-  const [suppressions, managers] = await Promise.all([
-    db.execute<{ room_id: string; actor_label: string }>(sql`
-      SELECT room_id, actor_label FROM room_live_agent_suppressions
-       WHERE room_id IN (
-         SELECT jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)
-       )
-    `),
-    db.execute<{ room_id: string; agent_session_id: string }>(sql`
-      SELECT assignment.room_id, assignment.agent_session_id
-        FROM board_manager_assignments AS assignment
-        JOIN room_agent_sessions AS session
-          ON session.room_id = assignment.room_id
-         AND session.session_id = assignment.agent_session_id
-         AND session.session_kind = 'worker'
-         AND session.ended_at IS NULL
-       WHERE assignment.status = 'active'
-         AND assignment.room_id IN (
-           SELECT jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)
-         )
-    `),
-  ]);
+  const suppressions = await db.execute<{ room_id: string; actor_label: string }>(sql`
+    SELECT room_id, actor_label FROM room_live_agent_suppressions
+     WHERE room_id IN (
+       SELECT jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)
+     )
+  `);
   for (const row of suppressions.rows) {
     const label = normalizeRoomActorLabel(row.actor_label);
     if (label) (result.get(row.room_id)!.suppressed_actor_labels as Set<string>).add(label);
   }
-  for (const row of managers.rows) result.get(row.room_id)!.active_manager_session_id = row.agent_session_id;
   return result;
 }
 
