@@ -1,7 +1,11 @@
 import { computed, ref, watch, type Ref } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import { roomMessageVisibleText } from "../../../../domain/attention-response";
 
-export function useDesktopRoomSearch(messages: Readonly<Ref<readonly DesktopRoomMessage[]>>) {
+export function useDesktopRoomSearch(
+  messages: Readonly<Ref<readonly DesktopRoomMessage[]>>,
+  agentNames: () => ReadonlyMap<string, string> | null = () => null,
+) {
   const searchOpen = ref(false);
   const searchQuery = ref("");
   const activeSearchIndex = ref(0);
@@ -11,10 +15,14 @@ export function useDesktopRoomSearch(messages: Readonly<Ref<readonly DesktopRoom
     const query = normalizedSearchQuery.value;
     if (!query) return [];
     return messages.value.filter((message) => {
+      // What people read and what was sent both match, so "@Amber" finds a
+      // Needs-you answer as well as its raw handle does.
       const haystack = [
         message.sender,
         message.displayText || message.text,
+        roomMessageVisibleText(message, agentNames()),
         message.replyTo?.displayText || message.replyTo?.text || "",
+        message.replyTo ? roomMessageVisibleText(message.replyTo, agentNames()) : "",
         ...message.attachments.map((attachment) => attachment.fileName || attachment.name || ""),
       ].join("\n").toLowerCase();
       return haystack.includes(query);

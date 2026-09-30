@@ -178,6 +178,8 @@ const props = defineProps<{
   taskReferenceIds?: ReadonlySet<string>
   /** Appended live while the room was open, not loaded or scrolled back to. */
   arriving?: boolean
+  /** Room agents by answer handle, so answers name the agent, not its handle. */
+  agentNames?: ReadonlyMap<string, string>
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
@@ -335,7 +337,10 @@ const replyDisplayName = computed(() => {
   if (!reply) return 'unknown'
   return parseAgentIdentity(reply.sender).displayName || reply.sender || 'unknown'
 })
-const replyPreviewText = computed(() => getReplyPreviewText(props.message.reply_to))
+const replyPreviewText = computed(() => getReplyPreviewText(props.message.reply_to && {
+  ...props.message.reply_to,
+  display_text: messageDisplayText(props.message.reply_to, props.agentNames),
+}))
 
 const hasThread = computed(() => Boolean(props.thread?.count && props.thread.count > 0))
 const threadLabel = computed(() => {
@@ -348,7 +353,10 @@ const threadLatestDisplayName = computed(() => {
   if (!sender) return 'Latest'
   return parseAgentIdentity(sender).displayName || sender
 })
-const threadLatestPreview = computed(() => getReplyPreviewText(props.thread?.latest))
+const threadLatestPreview = computed(() => getReplyPreviewText(props.thread?.latest && {
+  ...props.thread.latest,
+  display_text: messageDisplayText(props.thread.latest, props.agentNames),
+}))
 const threadActionLabel = computed(() => `Open ${threadLabel.value}`)
 
 const reasoningTitle = computed(() =>
@@ -376,7 +384,7 @@ const provenanceBadge = computed<ProvenanceBadge | null>(() => {
   return null
 })
 
-const visibleText = computed(() => messageDisplayText(props.message))
+const visibleText = computed(() => messageDisplayText(props.message, props.agentNames))
 const formattedTime = computed(() => formatMessageTime(props.message.timestamp))
 const fullTimestamp = computed(() => {
   const date = new Date(props.message.timestamp)

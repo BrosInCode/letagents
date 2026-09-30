@@ -227,7 +227,7 @@
             <span>{{ message.source === 'browser' ? 'Browser' : 'Agent message' }}</span>
             <span>{{ formatLastSeen(message.timestamp) }}</span>
           </div>
-          <p>{{ previewMessage(message.display_text || message.text) }}</p>
+          <p>{{ previewMessage(messageDisplayText(message)) }}</p>
         </article>
       </div>
     </section>
@@ -239,6 +239,7 @@ import WakeRulesPanel from '../../../../../../shared/ui/WakeRulesPanel.vue'
 import type { WakeRule, WakeRuleApi } from '../../../../../../shared/wake-rules.mjs'
 import type { TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import AgentThinkingCard from '../AgentThinkingCard.vue'
+import { messageDisplayText } from '../chat-message/formatting'
 import ActivityTaskList from './ActivityTaskList.vue'
 import {
   connectionLabel,
