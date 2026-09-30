@@ -3,6 +3,7 @@ import type {
   DesktopRoomMessageReply,
   DesktopRoomMessageThreadParticipant,
 } from "../../../../../../electron/ipc-types";
+import { roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export interface ThreadSummary {
   count: number;
@@ -111,6 +112,7 @@ export function resolveThreadParent(
 export function buildThreadIndicatorSummary(
   parent: DesktopRoomMessage,
   fallback: ThreadSummary | null,
+  agentNames: ReadonlyMap<string, string> | null = null,
 ): ThreadIndicatorSummary {
   const thread = parent.thread;
   const metadataLatest = thread?.latestReply ? threadReplyToMessage(thread.latestReply) : null;
@@ -129,8 +131,8 @@ export function buildThreadIndicatorSummary(
     ),
     latest,
     latestPreview: fallbackIsLatest
-      ? fallbackLatest?.displayText || fallbackLatest?.text || null
-      : metadataLatest?.displayText || metadataLatest?.text || latest?.displayText || latest?.text || null,
+      ? threadPreviewText(agentNames, fallbackLatest)
+      : threadPreviewText(agentNames, metadataLatest, latest),
     latestTimestamp: latest?.timestamp || null,
     participants: parseThreadParticipants(thread?.participants ?? []),
     hasPartialHistory: false,
@@ -174,8 +176,26 @@ export function threadReadState(
   };
 }
 
-export function threadQuotePreview(message: DesktopRoomMessage): string {
-  const text = (message.displayText || message.text).replace(/\s+/g, " ").trim();
+function threadPreviewText(
+  agentNames: ReadonlyMap<string, string> | null,
+  ...messages: Array<DesktopRoomMessage | null>
+): string | null {
+  for (const message of messages) {
+    const text = message ? roomMessageVisibleText(message, agentNames) : "";
+    if (text) return text;
+  }
+  return null;
+}
+
+export function threadQuotePreview(
+  message: DesktopRoomMessage,
+  agentNames: ReadonlyMap<string, string> | null = null,
+): string {
+  return threadQuoteText(message, roomMessageVisibleText(message, agentNames));
+}
+
+function threadQuoteText(message: DesktopRoomMessage, visibleText: string): string {
+  const text = visibleText.replace(/\s+/g, " ").trim();
   if (text) return truncateThreadText(text, 140);
   if (message.attachments.length === 1) return "1 attachment";
   if (message.attachments.length > 1) return `${message.attachments.length} attachments`;
@@ -186,7 +206,8 @@ export function applyThreadQuoteToDraft(draft: string, quote: DesktopRoomMessage
   const text = draft.trim();
   if (!quote) return text;
   const sender = quote.agentIdentity?.displayName || quote.sender;
-  return `> ${sender}: ${threadQuotePreview(quote)}\n\n${text}`;
+  // Sent text, not a preview: quoting keeps what the message said, unchanged.
+  return `> ${sender}: ${threadQuoteText(quote, quote.displayText || quote.text)}\n\n${text}`;
 }
 
 export function threadParentId(message: DesktopRoomMessage): string | null {

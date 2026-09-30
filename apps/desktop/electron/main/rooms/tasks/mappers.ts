@@ -30,6 +30,8 @@ export type DesktopTaskSummaryPayload = {
     kind?: string;
     holder_label?: string | null;
     agent_label?: string | null;
+    /** The server's lease label, e.g. "ScarletHarbor | Emmy's agent | Codex". */
+    actor_label?: string | null;
     agent_key?: string | null;
     agent_session_id?: string | null;
     status?: string;
@@ -89,7 +91,7 @@ export function mapDesktopTaskSummaryPayload(
       .map((lease) => ({
         id: lease.id || "",
         kind: lease.kind || "work",
-        holderLabel: lease.holder_label || lease.agent_label || null,
+        holderLabel: lease.holder_label || lease.agent_label || lease.actor_label || null,
         agentKey: lease.agent_key || null,
         agentSessionId: lease.agent_session_id || null,
         status: lease.status || "active",

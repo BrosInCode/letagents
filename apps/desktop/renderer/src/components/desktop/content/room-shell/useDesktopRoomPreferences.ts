@@ -6,6 +6,7 @@ import {
   readSoundEnabled,
 } from "./preferences";
 import { playRoomInteractionSound } from "./roomSounds";
+import { roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export function useDesktopRoomPreferences() {
   const soundEnabled = ref(readSoundEnabled());
@@ -69,12 +70,16 @@ export function useDesktopRoomPreferences() {
     }
   }
 
-  function showRoomNotification(message: DesktopRoomMessage, roomDisplayName: string): void {
+  function showRoomNotification(
+    message: DesktopRoomMessage,
+    roomDisplayName: string,
+    agentNames: ReadonlyMap<string, string> | null = null,
+  ): void {
     if (nativeNotificationsActive.value) return;
     if (!notificationsEnabled.value || typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && document.hasFocus()) return;
     const sender = message.sender.split("|")[0]?.trim() || "LetAgents";
-    const body = (message.displayText || message.text).trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
+    const body = roomMessageVisibleText(message, agentNames).trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
     new Notification(`${sender} in ${roomDisplayName}`, {
       body,
       silent: true,
