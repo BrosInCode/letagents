@@ -8,6 +8,7 @@ import {
   CHANNEL_STALE_AFTER_MS,
   classifyDualAxisLiveness,
   createLivenessSweeper,
+  NO_WORK_RECHECK_MS,
   OFFLINE_ANNOUNCE_AFTER_MS,
   OFFLINE_ANNOUNCE_MAX_AGE_MS,
   resolveOfflineAnnounceAfterMs,
@@ -45,17 +46,17 @@ function buildSession(overrides: Partial<RoomAgentDeliverySession> = {}): RoomAg
     active_connection_count: overrides.active_connection_count ?? 0,
     last_connected_at: overrides.last_connected_at ?? isoMinutesAgo(30),
     last_disconnected_at:
-      overrides.last_disconnected_at === undefined ? isoMinutesAgo(6) : overrides.last_disconnected_at,
+      overrides.last_disconnected_at === undefined ? isoMinutesAgo(31) : overrides.last_disconnected_at,
     reconnect_grace_expires_at:
       overrides.reconnect_grace_expires_at === undefined
-        ? isoMinutesAgo(6)
+        ? isoMinutesAgo(31)
         : overrides.reconnect_grace_expires_at,
     offline_announced_at:
       overrides.offline_announced_at === undefined ? null : overrides.offline_announced_at,
     recovery_announced_at:
       overrides.recovery_announced_at === undefined ? null : overrides.recovery_announced_at,
     created_at: overrides.created_at ?? isoMinutesAgo(120),
-    updated_at: overrides.updated_at ?? isoMinutesAgo(6),
+    updated_at: overrides.updated_at ?? isoMinutesAgo(31),
   };
 }
 
@@ -72,16 +73,18 @@ function reachableSession(overrides: Partial<RoomAgentDeliverySession> = {}): Ro
 function candidate(
   session: RoomAgentDeliverySession,
   endedAt: string | null = null,
-  runtimeLastActiveAt: string | null = null
+  runtimeLastActiveAt: string | null = null,
+  workTaskIds: string[] = ["task_12"]
 ): LivenessAnnouncementCandidate {
   return {
     session,
     agent_session_ended_at: endedAt,
     runtime_last_active_at: runtimeLastActiveAt,
+    active_work_task_ids: workTaskIds,
   };
 }
 
-test("announces a worker offline past the threshold", () => {
+test("announces a worker holding work offline past the threshold", () => {
   const transitions = selectLivenessTransitions({
     candidates: [candidate(buildSession())],
     now: NOW,
@@ -89,7 +92,17 @@ test("announces a worker offline past the threshold", () => {
 
   assert.equal(transitions.length, 1);
   assert.equal(transitions[0]?.kind, "offline");
+  assert.deepEqual(transitions[0]?.work_task_ids, ["task_12"]);
   assert.ok(transitions[0]!.offline_for_ms >= OFFLINE_ANNOUNCE_AFTER_MS);
+});
+
+test("never posts presence changes for a worker that holds no work", () => {
+  const idle = candidate(buildSession(), null, null, []);
+  assert.deepEqual(selectLivenessTransitions({ candidates: [idle], now: NOW }), []);
+
+  // A candidate row without the lease column also counts as holding nothing.
+  const { active_work_task_ids: _omitted, ...legacyRow } = idle;
+  assert.deepEqual(selectLivenessTransitions({ candidates: [legacyRow], now: NOW }), []);
 });
 
 test("keeps daemon-supervised worker outages out of room chat", () => {
@@ -116,9 +129,9 @@ test("stays quiet inside the announce threshold and reconnect grace", () => {
     updated_at: new Date(NOW - 5_000).toISOString(),
   });
   const staleButInsideVisibleGrace = buildSession({
-    last_disconnected_at: isoMinutesAgo(3),
-    reconnect_grace_expires_at: isoMinutesAgo(3),
-    updated_at: isoMinutesAgo(3),
+    last_disconnected_at: isoMinutesAgo(20),
+    reconnect_grace_expires_at: isoMinutesAgo(20),
+    updated_at: isoMinutesAgo(20),
   });
 
   assert.deepEqual(
@@ -133,7 +146,7 @@ test("stays quiet inside the announce threshold and reconnect grace", () => {
     []
   );
   assert.equal(CHANNEL_STALE_AFTER_MS, 2 * 60_000);
-  assert.equal(OFFLINE_ANNOUNCE_AFTER_MS, 5 * 60_000);
+  assert.equal(OFFLINE_ANNOUNCE_AFTER_MS, 30 * 60_000);
 });
 
 test("visible notice grace is configurable without changing channel staleness", () => {
@@ -188,7 +201,7 @@ test("skips reachable, controller, suppressed, cleanly ended, and ancient sessio
 
 test("announces once per outage epoch and re-announces after a later clean disconnect", () => {
   const alreadyAnnounced = buildSession({
-    offline_announced_at: isoMinutesAgo(2),
+    offline_announced_at: isoMinutesAgo(1),
   });
   assert.deepEqual(
     selectLivenessTransitions({ candidates: [candidate(alreadyAnnounced)], now: NOW }),
@@ -196,8 +209,8 @@ test("announces once per outage epoch and re-announces after a later clean disco
   );
 
   const diedAgain = buildSession({
-    offline_announced_at: isoMinutesAgo(20),
-    last_disconnected_at: isoMinutesAgo(6),
+    offline_announced_at: isoMinutesAgo(45),
+    last_disconnected_at: isoMinutesAgo(31),
   });
   const transitions = selectLivenessTransitions({ candidates: [candidate(diedAgain)], now: NOW });
   assert.equal(transitions.length, 1);
@@ -209,7 +222,7 @@ test("detects a dead socket that never closed via stale heartbeat", () => {
     active_connection_count: 1,
     last_disconnected_at: null,
     reconnect_grace_expires_at: null,
-    updated_at: isoMinutesAgo(5),
+    updated_at: isoMinutesAgo(30),
   });
 
   const transitions = selectLivenessTransitions({
@@ -221,16 +234,16 @@ test("detects a dead socket that never closed via stale heartbeat", () => {
 });
 
 test("re-announces a dead-socket death after a full offline/recovery cycle", () => {
-  // Journey: announced offline at -20m, recovered and announced at -15m,
+  // Journey: announced offline at -50m, recovered and announced at -45m,
   // reconnected (last_disconnected_at cleared), then the process froze —
-  // heartbeats stopped at -5m with the socket still counted as connected.
+  // heartbeats stopped at -30m with the socket still counted as connected.
   const secondDeath = buildSession({
     active_connection_count: 1,
     last_disconnected_at: null,
     reconnect_grace_expires_at: null,
-    updated_at: isoMinutesAgo(5),
-    offline_announced_at: isoMinutesAgo(20),
-    recovery_announced_at: isoMinutesAgo(15),
+    updated_at: isoMinutesAgo(30),
+    offline_announced_at: isoMinutesAgo(50),
+    recovery_announced_at: isoMinutesAgo(45),
   });
 
   const transitions = selectLivenessTransitions({
@@ -265,44 +278,25 @@ test("emits a recovery transition only after an announced outage", () => {
   );
 });
 
-test("announcement text matches the runtime evidence and stays lease-aware", () => {
+test("announcement text names the held work and stays lease-aware", () => {
   const session = buildSession();
-  const unknown = buildOfflineAnnouncementText({
+  const text = buildOfflineAnnouncementText({
     session,
-    offline_for_ms: 6 * 60_000,
-    is_board_manager: false,
-    runtime_evidence: "none",
-    runtime_inactive_for_ms: null,
+    work_task_ids: ["task_12"],
+    offline_for_ms: 34 * 60_000,
   });
-  assert.ok(unknown.includes("has not connected to the room for 6m"));
-  assert.ok(unknown.includes("may still be working"));
-  assert.ok(unknown.includes("Do not take over its work based on this notice"));
-  assert.ok(unknown.includes("agent or its current supervisor confirms it has stopped"));
-  assert.ok(!unknown.includes("appears to be offline"));
-  assert.ok(!unknown.includes("Board Manager"));
+  assert.equal(
+    text,
+    "[status] FieldSignal has been offline for 34m while holding task_12. It may still be working; reassign only after it or its supervisor confirms it has stopped, or a human directs the transfer."
+  );
+  assert.ok(!text.includes("appears to be offline"));
 
-  // Stale ledger evidence never claims death — generic presence writes
-  // default last_tool_call_at, so it only adds the last-seen datapoint.
-  const stale = buildOfflineAnnouncementText({
+  const many = buildOfflineAnnouncementText({
     session,
-    offline_for_ms: 6 * 60_000,
-    is_board_manager: false,
-    runtime_evidence: "stale",
-    runtime_inactive_for_ms: 7 * 60_000,
+    work_task_ids: ["task_1", "task_2", "task_3", "task_4", "task_5"],
+    offline_for_ms: 34 * 60_000,
   });
-  assert.ok(!stale.includes("appears to be offline"));
-  assert.ok(stale.includes("No activity has been reported by its agent app for 7m"));
-  assert.ok(stale.includes("does not confirm that it has stopped"));
-  assert.ok(stale.includes("task assignment has been transferred"));
-
-  const manager = buildOfflineAnnouncementText({
-    session,
-    offline_for_ms: 6 * 60_000,
-    is_board_manager: true,
-    runtime_evidence: "none",
-    runtime_inactive_for_ms: null,
-  });
-  assert.ok(manager.includes("Board Manager"));
+  assert.ok(many.includes("while holding task_1, task_2, task_3 and 2 more."));
 
   assert.equal(
     buildRecoveryAnnouncementText({ session }),
@@ -311,24 +305,24 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
 });
 
 test("a silent channel with an active runtime is never announced", () => {
-  // The channel dropped 6 minutes ago, but the runtime made a tool call
+  // The channel dropped 31 minutes ago, but the runtime made a tool call
   // 1 minute ago — the agent is busy working, not dead.
   const busyWorker = candidate(buildSession(), null, isoMinutesAgo(1));
   assert.deepEqual(selectLivenessTransitions({ candidates: [busyWorker], now: NOW }), []);
 
   // Runtime activity in the band between the 2-minute internal stale signal
-  // and the 5-minute visible grace also suppresses the room notice. This is
+  // and the 30-minute visible grace also suppresses the room notice. This is
   // the ordinary long tool/test gap the separate visible timer protects.
-  const burstWorker = candidate(buildSession(), null, isoMinutesAgo(4));
+  const burstWorker = candidate(buildSession(), null, isoMinutesAgo(20));
   assert.deepEqual(selectLivenessTransitions({ candidates: [burstWorker], now: NOW }), []);
 
   // Once the runtime evidence also goes stale, the death announces with the
   // stronger stale-runtime classification.
-  const trulyDead = candidate(buildSession(), null, isoMinutesAgo(9));
+  const trulyDead = candidate(buildSession(), null, isoMinutesAgo(35));
   const [transition] = selectLivenessTransitions({ candidates: [trulyDead], now: NOW });
   assert.equal(transition?.kind, "offline");
   assert.equal(transition?.runtime_evidence, "stale");
-  assert.equal(transition?.runtime_inactive_for_ms, 9 * 60_000);
+  assert.equal(transition?.runtime_inactive_for_ms, 35 * 60_000);
 
   // Raw MCP workers with no telemetry classify as unknown.
   const noTelemetry = candidate(buildSession());
@@ -341,7 +335,6 @@ interface FakeDepsOptions {
   /** Per-delivery-key fresh rows returned by getCandidate; defaults to the listed candidate. */
   freshCandidates?: Map<string, LivenessAnnouncementCandidate | null>;
   offlineAnnounceAfterMs?: number;
-  managerSessionId?: string | null;
   suppressedFailsForRoom?: string;
   announceFails?: boolean;
 }
@@ -383,7 +376,6 @@ function buildFakeDeps(options: FakeDepsOptions) {
       }
       return new Set<string>();
     },
-    getActiveBoardManagerSessionId: async () => options.managerSessionId ?? null,
     announceOffline: async (input) => {
       if (announceFails) {
         throw new Error("announcement transaction failed");
@@ -436,7 +428,7 @@ test("sweepOnce announces offline workers with an epoch-stable client message id
   assert.equal(summary.announced_recovered, 0);
   assert.equal(announcedOffline.length, 1);
   assert.equal(announcedOffline[0]?.roomId, "focus_34");
-  assert.ok(announcedOffline[0]!.text.includes("FieldSignal has not connected to the room"));
+  assert.ok(announcedOffline[0]!.text.includes("FieldSignal has been offline for 31m while holding task_12"));
   assert.equal(
     announcedOffline[0]?.clientMessageId,
     `agent_liveness:offline:${session.delivery_key}:${session.last_disconnected_at}`
@@ -492,16 +484,27 @@ test("sweepOnce skips a worker that dropped between recovery selection and annou
   assert.deepEqual(announcedRecovered, []);
 });
 
-test("sweepOnce marks the dead Board Manager in the announcement", async () => {
-  const session = buildSession();
-  const { deps, announcedOffline } = buildFakeDeps({
-    candidates: [candidate(session)],
-    managerSessionId: session.agent_session_id,
+test("sweepOnce stays quiet on an absent worker with no work and rechecks sparsely", async () => {
+  const idle = (minutesAgo: number) => ({
+    ...candidate(buildSession({
+      last_disconnected_at: isoMinutesAgo(minutesAgo),
+      reconnect_grace_expires_at: isoMinutesAgo(minutesAgo),
+      updated_at: isoMinutesAgo(minutesAgo),
+    }), null, null, []),
+    claimed_check_at: isoMinutesAgo(0),
   });
-  await createLivenessSweeper(deps).sweepOnce();
+  const rescheduled: Array<string | null> = [];
+  const { deps, announcedOffline } = buildFakeDeps({ candidates: [idle(31), idle(57)] });
+  deps.rescheduleCandidate = async (input) => {
+    rescheduled.push(input.next_check_at);
+  };
 
-  assert.equal(announcedOffline.length, 1);
-  assert.ok(announcedOffline[0]!.text.includes("Board Manager"));
+  const summary = await createLivenessSweeper(deps).sweepOnce();
+  assert.equal(summary.announced_offline, 0);
+  assert.deepEqual(announcedOffline, []);
+  // It may still claim work over HTTP, which does not re-arm the delivery
+  // trigger, so it is rechecked every 5 minutes until the window closes.
+  assert.deepEqual(rescheduled, [new Date(NOW + NO_WORK_RECHECK_MS).toISOString(), null]);
 });
 
 test("sweepOnce isolates per-room failures and keeps sweeping other rooms", async () => {

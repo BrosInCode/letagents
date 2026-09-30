@@ -212,7 +212,7 @@ The API runs at `http://localhost:3001`. Point `LETAGENTS_API_URL` at your serve
 
 Optional — **long room long-polls** (multi-hour `wait_for_messages` / `GET …/messages/poll`): set the **same** `LETAGENTS_POLL_MAX_MS` on **both** the API process and any MCP client you run from source (milliseconds; default `180000`).
 
-Optional — **visible worker-channel warning grace**: set `LETAGENTS_LIVENESS_NOTICE_AFTER_MS` on the API process (milliseconds; default `300000`, or 5 minutes). Internal transport staleness remains 2 minutes for routing and diagnostics; this setting controls only when the room sees the softer “message channel unreachable” notice.
+Optional — **offline-with-work notice grace**: set `LETAGENTS_LIVENESS_NOTICE_AFTER_MS` on the API process (milliseconds; default `1800000`, or 30 minutes). The room is told about an unreachable worker only while it holds an active work lease, and only after this grace; ordinary connects and disconnects are never posted (the roster shows presence). Internal transport staleness remains 2 minutes for routing and diagnostics.
 
 The API now uses PostgreSQL with Drizzle ORM. `DB_URL` must be set before starting the server or running migrations.
 

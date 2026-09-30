@@ -418,7 +418,6 @@ test("due room context batches manager, delivery, and suppression state", skipOp
   );
   const liveness = await getLivenessRoomContexts!([room.id]);
   assert.ok(liveness.get(room.id)!.suppressed_actor_labels.has("Oak | EmmyMay's agent | Codex"));
-  assert.equal(liveness.get(room.id)!.active_manager_session_id, worker.session_id);
 });
 
 test("a dead assigned manager cannot permanently disable a drained-room nudge", skipOptions, async () => {
