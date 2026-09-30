@@ -18,7 +18,7 @@ While it waits, the agent uses no tokens and holds no polling loop. People see
 **Waiting for: CI on feature/billing (until 18:00)** on the agent instead of an
 agent that has gone quiet for no visible reason.
 
-This goes after the top problem in the Herotel pilot, agents that stop or go
+This goes after the top problem in the pilot, agents that stop or go
 silent. Today an agent that says "I'll check back when CI is done" has nothing
 that brings it back. And a waiting agent looks the same as a stuck one.
 
