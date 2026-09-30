@@ -17,6 +17,8 @@ import {
   projectAgentInspectorTurnControl,
 } from "../src/domain/agent-inspector";
 import type { AgentInspectorActionState } from "../src/domain/agent-inspector";
+import { useAgentPauseRequests } from "../src/domain/agent-pause-requests";
+import { ref } from "vue";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
 import {
   foldSupervisorActivityPush,
@@ -307,6 +309,78 @@ test("a reconnecting room keeps provider connectivity separate from delivery aut
   });
   assert.notEqual(projection?.overallLabel, "Online");
   assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
+});
+
+test("a pause reads as Pausing… while it drains and Paused once saved, never Stopped or Disconnected", () => {
+  // Mid-turn, the daemon drains room delivery before it saves desired=paused.
+  const draining = entry({
+    observedState: "working",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: "2026-07-23T10:00:05.000Z", detail: null },
+      ingress: { state: "stopped", observedAt: "2026-07-23T10:00:05.000Z", detail: "Ingress stopped by the supervisor." },
+      inbox: { state: "queued", pendingCount: 1, blockedByMessageId: null, detail: "Room delivery is queued." },
+    },
+  });
+  assert.equal(projectAgentInspector(draining, { roomId: "focus_1" })?.overallLabel, "Disconnected");
+  const pausing = projectAgentInspector(draining, {
+    roomId: "focus_1",
+    pauseRequestedEntryIds: new Set(["supervised_1"]),
+  });
+  assert.equal(pausing?.overallState, "paused");
+  assert.equal(pausing?.overallLabel, "Pausing…");
+  assert.equal(pausing?.now, null, "a drained queue is not a request for attention");
+  assert.equal(agentInspectorActivityGroupState(pausing!), "paused");
+  assert.equal(
+    projectAgentInspector(entry(), { roomId: "focus_1", pauseRequestedEntryIds: new Set(["supervised_2"]) })?.overallLabel,
+    "Online",
+    "another agent's pause request changes nothing here",
+  );
+
+  // Saved: the provider process then stops before the pause settles.
+  for (const observedState of ["stopping", "stopped", "paused"] as const) {
+    const saved = projectAgentInspector(entry({ desiredState: "paused", observedState }), {
+      roomId: "focus_1",
+      pauseRequestedEntryIds: new Set(["supervised_1"]),
+    });
+    assert.equal(saved?.overallState, "paused", observedState);
+    assert.equal(saved?.overallLabel, "Paused", observedState);
+    assert.equal(agentInspectorActivityGroupState(saved!), "paused", observedState);
+  }
+  assert.equal(agentInspectorOverallState(entry({ desiredState: "stopped", observedState: "stopping" })), "retired");
+  assert.equal(agentInspectorOverallState(entry({ observedState: "stopped" })), "retired");
+});
+
+test("a pause stays Pausing… for the room until its saved state arrives, whoever closes the Inspector", async () => {
+  const entries = ref<DesktopSupervisorManifestEntry[]>([entry(), entry({ id: "supervised_2" })]);
+  const pauses = useAgentPauseRequests(entries);
+  const label = () => projectAgentInspector(entries.value[0]!, {
+    roomId: "focus_1",
+    pauseRequestedEntryIds: pauses.entryIds.value,
+  })?.overallLabel;
+
+  let answer!: (value: string) => void;
+  const request = pauses.run("supervised_1", () => new Promise<string>((resolve) => { answer = resolve; }));
+  assert.equal(label(), "Pausing…");
+  // A push that still says running (delivery draining) keeps the request open.
+  entries.value = [entry({ observedState: "working" }), entry({ id: "supervised_2" })];
+  assert.equal(label(), "Pausing…");
+  answer("saved");
+  assert.equal(await request, "saved");
+  assert.equal(label(), "Pausing…", "the reply alone does not end it; the saved state does");
+  // The saved pause arrives by push, not by the Inspector's own reply.
+  entries.value = [entry({ desiredState: "paused", observedState: "stopping" }), entry({ id: "supervised_2" })];
+  assert.deepEqual([...pauses.entryIds.value], []);
+  assert.equal(label(), "Paused");
+  // A later Resume is not mistaken for the old pause.
+  entries.value = [entry(), entry({ id: "supervised_2" })];
+  assert.equal(label(), "Online");
+
+  await assert.rejects(pauses.run("supervised_2", async () => { throw new Error("daemon unavailable"); }));
+  assert.deepEqual([...pauses.entryIds.value], [], "a failed request hands the state back to the agent");
+  void pauses.run("supervised_2", () => new Promise(() => undefined));
+  pauses.clear("supervised_2");
+  assert.deepEqual([...pauses.entryIds.value], [], "resuming elsewhere ends a pause that was never observed");
 });
 
 test("overall state follows the complete product precedence table", () => {

@@ -894,8 +894,18 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       options.scheduleLiveMetadataRefresh(0);
       return;
     }
-    scheduleSelectedSnapshotRefresh();
+    // For the root room, refreshSelectedSnapshot only re-merges the local root
+    // copy, whose event-fed tasks, reasoning and artifacts are older than what
+    // is on screen. The full read scheduled below is the real refresh.
+    if (!selectedRoomReusesRootSnapshot(options.rootRoomSnapshot.value)) scheduleSelectedSnapshotRefresh();
     options.scheduleLiveMetadataRefresh(0);
+  }
+
+  /** Whether refreshSelectedSnapshot would show the root snapshot as-is. */
+  function selectedRoomReusesRootSnapshot(baseRootSnapshot: DesktopRoomSnapshot | null): boolean {
+    if (!baseRootSnapshot || options.activeEntry.value.type !== "room") return false;
+    const roomIdentifier = options.resolveSelectedRoomIdentifier(baseRootSnapshot);
+    return !roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier;
   }
 
   function handleMessageSent(message: DesktopRoomMessage): void {

@@ -23,6 +23,8 @@ import { contextualAddAgentError, type AddAgentFeedbackTone } from "./add-agent-
 
 export type AddAgentModelSelectionMode = "default" | "option" | "custom";
 
+export const defaultSupervisedCharter = "Join the room, check the board, and help move the available work forward.";
+
 interface ConfigurationBindings {
   open: () => boolean;
   roomIdentifier: () => string;
@@ -46,7 +48,7 @@ interface ConfigurationBindings {
 export function useAddAgentConfiguration() {
   const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
   const launchMode = ref<"legacy" | "supervised">("supervised");
-  const supervisedCharter = ref("Join the room, check the board, and help move the available work forward.");
+  const supervisedCharter = ref(defaultSupervisedCharter);
   const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
   const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
   const openModelBaseUrl = ref("");
@@ -80,6 +82,17 @@ export function useAddAgentConfiguration() {
     selectedProviderModelId.value = "";
     customModelId.value = "";
     selectedEffort.value = "";
+  }
+
+  /**
+   * A first task is sent once, to the agent saved with it. The dialog stays
+   * mounted across launches and provider switches, so a consumed task must not
+   * pre-fill the next agent's form. Text edited after the click is kept.
+   */
+  function consumeSupervisedCharter(launchedCharter: string): void {
+    if (supervisedCharter.value.trim() === launchedCharter.trim()) {
+      supervisedCharter.value = defaultSupervisedCharter;
+    }
   }
 
   function bind(bindings: ConfigurationBindings) {
@@ -439,6 +452,7 @@ export function useAddAgentConfiguration() {
     selectedPermissionProfileId,
     selectedPermissionProfileIdsByProvider,
     resetModelSelection,
+    consumeSupervisedCharter,
     bind,
   };
 }

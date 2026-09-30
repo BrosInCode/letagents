@@ -33,6 +33,15 @@ test("Activity opens the exact shared Inspector for supervised and generic parti
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);
 });
 
+test("the room shell runs Pause through the room's pause tracker and shows its state", () => {
+  // Mounting the shell needs the whole room; the tracker itself is tested
+  // behaviourally in agent-inspector.test.ts.
+  assert.match(shell, /const agentPauseRequests = useAgentPauseRequests\(supervisorEntries\);/);
+  assert.match(shell, /pauseRequestedEntryIds: agentPauseRequests\.entryIds\.value,/);
+  assert.match(shell, /intent\.kind === "pause"\) \{\s*updated = await agentPauseRequests\.run\(\s*intent\.entryId,\s*\(\) => desktopIpc\.supervisor\.setDesiredState\(intent\.entryId, "paused"\),/);
+  assert.match(shell, /intent\.kind === "resume"\) \{\s*agentPauseRequests\.clear\(intent\.entryId\);/);
+});
+
 test("Chat carries the clicked canonical message into exact supervised identity resolution", () => {
   assert.match(chatMessage, /messageId:\s*props\.message\.id/);
   assert.match(chatMessage, /clientMessageId:\s*props\.message\.clientMessageId/);

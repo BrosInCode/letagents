@@ -305,7 +305,7 @@ async function handleApproveIntent(intentId: string): Promise<void> {
   if (await decideIntent(intentId, "approve")) emit("refresh-room");
 }
 
-async function handleDenyIntent(intentId: string): Promise<void> {
-  if (await decideIntent(intentId, "deny")) emit("refresh-room");
+async function handleDenyIntent(intentId: string, reason: string | null): Promise<void> {
+  if (await decideIntent(intentId, "deny", reason)) emit("refresh-room");
 }
 </script>

@@ -362,6 +362,7 @@ import {
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
+import { useAgentPauseRequests } from "../../../domain/agent-pause-requests";
 import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import { roomMentionCandidates } from "../../../domain/participants";
@@ -583,6 +584,7 @@ const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier)
 const refreshedEnvironmentRepoStatus = ref<RepoStatus | null>(null);
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
+const agentPauseRequests = useAgentPauseRequests(supervisorEntries);
 const supervisorEntriesState = ref<SupervisorEntriesResource["state"]>("loading");
 const supervisorEntriesError = ref<string | null>(null);
 const supervisorEntriesHaveLoaded = ref(false);
@@ -646,6 +648,7 @@ const agentInspectorProjections = computed(() => {
     resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesState.value),
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
     deliveryRetryingKeys: deliveryRetryingKeys.value,
+    pauseRequestedEntryIds: agentPauseRequests.entryIds.value,
   });
 });
 const selectedAgentDetailProjection = computed(() => {
@@ -2639,8 +2642,12 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
   try {
     let updated: DesktopSupervisorManifestEntry | null = null;
     if (intent.kind === "pause") {
-      updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "paused");
+      updated = await agentPauseRequests.run(
+        intent.entryId,
+        () => desktopIpc.supervisor.setDesiredState(intent.entryId, "paused"),
+      );
     } else if (intent.kind === "resume") {
+      agentPauseRequests.clear(intent.entryId);
       updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "running");
     } else if (intent.kind === "recover") {
       updated = await desktopIpc.supervisor.recoverAgentRuntime({ entryId: intent.entryId });
