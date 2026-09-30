@@ -248,6 +248,7 @@ const required = [
     "shared/message-contracts.mjs",
     "shared/permission-review.mjs",
     "shared/routing-aliases.mjs",
+    "shared/scratch-workspace-repository.mjs",
     "shared/sqlite-thread-routing.mjs",
   ].map((relative) => ({
     absolutePath: join(contents, relative),
