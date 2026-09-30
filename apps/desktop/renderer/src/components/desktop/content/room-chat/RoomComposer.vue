@@ -220,6 +220,7 @@ import type {
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import type { DesktopHostApproval, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
 import { hostApprovalFields, hostApprovalTitle } from "./host-approval-presentation";
+import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import { desktopIpc } from "../../../../ipc";
@@ -276,6 +277,7 @@ const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const hostApprovals = ref<DesktopHostApproval[]>([]);
 const dismissedHostApprovalIds = ref(new Set<string>());
+const rememberedHostApprovalDismissals = ref(readHostApprovalDismissals());
 const showApprovalHistory = ref(false);
 const hostApprovalError = ref<string | null>(null);
 const hostApprovalBusy = ref<string | null>(null);
@@ -292,14 +294,22 @@ function hostApprovalStatus(status: HostApprovalStatus): string {
 const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approval =>
   (approval.status === "pending" || approval.status === "decision_recorded"
     || approval.status === "unavailable" || approval.status === "uncertain")
-  && !dismissedHostApprovalIds.value.has(approval.id)));
+  && !dismissedHostApprovalIds.value.has(approval.id)
+  && !(approval.dismissKey && rememberedHostApprovalDismissals.value.has(approval.dismissKey))));
 const attentionApprovalCount = computed(() => unresolvedHostApprovals.value.filter(approval =>
   approval.status === "uncertain" || approval.status === "unavailable").length);
 const visibleHostApprovals = computed(() => unresolvedHostApprovals.value.filter(approval =>
   showApprovalHistory.value || approval.status === "pending" || approval.status === "decision_recorded"));
 
+// An undecidable record stays dismissed across restarts until its status
+// changes. A live request is dismissed only for this session.
 function dismissHostApproval(id: string): void {
-  dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value, id]);
+  const dismissKey = hostApprovals.value.find(approval => approval.id === id)?.dismissKey;
+  if (dismissKey) {
+    rememberedHostApprovalDismissals.value = rememberHostApprovalDismissal(rememberedHostApprovalDismissals.value, dismissKey);
+  } else {
+    dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value, id]);
+  }
 }
 
 async function refreshHostApprovals(): Promise<void> {

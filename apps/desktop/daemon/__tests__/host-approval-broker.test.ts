@@ -14,6 +14,7 @@ import { WebSocketServer } from "ws";
 
 import type { HostApprovalReference } from "../../shared/host-approvals.js";
 import { HostApprovalBroker } from "../host-approval-broker.js";
+import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../../shared/execution-delegation-decision.mjs";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { assertHostToolScope, hostToolScopeSchema } from "../host-tool-rules.js";
 import { DaemonAuthority } from "../daemon-authority.js";
@@ -21,6 +22,7 @@ import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import type { RecordedApprovalDecision } from "../execution-approval-native-application.js";
 import { ManifestStore } from "../manifest-store.js";
+import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { systemProcessIdentity } from "../process-identity.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
@@ -1561,6 +1563,109 @@ for (const provider of ["claude-code", "codex"] as const) {
       } finally { await f.close(); }
     });
   }
+}
+
+// Requests are admitted at the broker clock (now + 10) and expire one applicability window later.
+const approvalExpiry = now + 10 + EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS;
+
+function retireRuntime(f: Awaited<ReturnType<typeof fixture>>, how: "replaced" | "stopped" | "removed") {
+  // No death witness: a replacement birth, a daemon stop recorded before witnesses
+  // existed, or a stopped agent with no provider reference left.
+  if (how === "replaced") f.db.prepare(`UPDATE runtime_deployments SET provider_connection_pid=4312,
+    provider_process_identity='replacement-birth' WHERE agent_id='agent'`).run();
+  else if (how === "stopped") f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
+    .run(JSON.stringify({ ended_at: new Date(now + 20).toISOString(), exit_code: null, signal: null, stdio_archive_ref: null,
+      stdio_tail: "", terminal_cause: "stopped", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation" }));
+  else f.db.prepare("UPDATE runtime_deployments SET provider_execution_generation_id=NULL WHERE agent_id='agent'").run();
+  f.emit([]);
+}
+
+for (const provider of ["claude-code", "codex", "open-model"] as const) {
+  for (const phase of ["requested", "selected", "dispatched"] as const) {
+    if (provider === "open-model" && phase === "dispatched") continue; // OpenCode confirms processing; nothing remains.
+    for (const how of ["replaced", "stopped", "removed"] as const) {
+      test(`${provider} expired ${phase} approval of a ${how} runtime closes without a death witness`, async () => {
+        const f = await fixture(provider);
+        try {
+          const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+          if (phase === "selected") f.state.failBefore = true;
+          if (phase === "selected") await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
+          else if (phase === "dispatched") await f.broker.decide(selected);
+          const before = (await f.store.getExecutionApproval(selected.expected))!;
+          retireRuntime(f, how);
+          assert.equal((await f.broker.list("room")).filter(item => item.reference).length, 1, "the retired prompt is still shown");
+          assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => approvalExpiry - 1,
+            async () => { throw new Error("an unexpired prompt must not request a write"); }), 0);
+          const reopened = new ManifestStore(f.path);
+          try {
+            await assert.rejects(reopened.settleWitnessedRuntimeApprovalClosures("agent", () => approvalExpiry,
+              async () => { throw new Error("ownership changed"); }), /ownership changed/);
+            assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => approvalExpiry, async commit => commit()), 1);
+            assert.deepEqual(await reopened.getExecutionApproval(selected.expected),
+              { ...before, request: { ...before.request, closedAtMs: approvalExpiry } }, "the decision and its certainty are unchanged");
+            assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => approvalExpiry + 10,
+              async () => { throw new Error("no empty write expected"); }), 0);
+          } finally { await reopened.close(); }
+          assert.deepEqual(await f.broker.list("room"), []);
+          assert.equal(f.sends.length, phase === "dispatched" ? 1 : 0);
+        } finally { await f.close(); }
+      });
+    }
+  }
+}
+
+test("expired retired-runtime closure skips resolved, unreadable, and other agents' records", async () => {
+  const resolved = await fixture("open-model");
+  try {
+    const [candidate] = await resolved.broker.list("room"); const selected = decision(candidate!);
+    assert.equal(await resolved.broker.decide(selected), "resolved");
+    retireRuntime(resolved, "replaced");
+    assert.equal(await resolved.store.settleWitnessedRuntimeApprovalClosures("agent", () => approvalExpiry,
+      async () => { throw new Error("a resolved record must not request a write"); }), 0);
+  } finally { await resolved.close(); }
+  const f = await fixture();
+  try {
+    const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+    f.state.failBefore = true;
+    await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
+    retireRuntime(f, "replaced");
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("other-agent", () => approvalExpiry,
+      async () => { throw new Error("another agent's record must not request a write"); }), 0);
+    // Legacy evidence that no longer reads must not fail convergence on every pass.
+    // The table still admits a legacy kind that the journal no longer reads.
+    f.db.exec("DROP TRIGGER execution_approval_request_immutable");
+    f.db.prepare("UPDATE execution_approval_requests SET kind='question'").run();
+    await assert.rejects(f.store.getExecutionApproval(selected.expected), /identity_mismatch/);
+    assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => approvalExpiry,
+      async () => { throw new Error("an unreadable record must not request a write"); }), 0);
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM execution_approval_request_closures").get()!.n, 0);
+  } finally { await f.close(); }
+});
+
+for (const live of ["current", "recovered_turn", "unverifiable_birth"] as const) {
+  test(`expired approval of a ${live} live runtime stays open`, async () => {
+    const f = await fixture();
+    try {
+      const [candidate] = await f.broker.list("room"); const expected = candidate!.reference!;
+      if (live === "recovered_turn") {
+        // The turn keeps its origin generation while a successor generation owns the same live birth.
+        f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
+          .run(JSON.stringify({ ended_at: new Date(now + 20).toISOString(), exit_code: null, signal: null, stdio_archive_ref: null,
+            stdio_tail: "", terminal_cause: "stopped", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation" }));
+        f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,NULL)")
+          .run(new Date(now + 21).toISOString());
+        const manifest = await f.store.load(); const [entry] = manifest.entries;
+        await f.store.write(manifest.generation, [{ ...entry!, run_id: "recovery-generation",
+          deployment_id: serializeDaemonDeploymentId("agent", "recovery-generation"),
+          provider_ref: { ...entry!.provider_ref!, execution_generation_id: "recovery-generation" } }]);
+      } else if (live === "unverifiable_birth") {
+        f.db.prepare("UPDATE runtime_deployments SET provider_connection_pid=NULL WHERE agent_id='agent'").run();
+      }
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => approvalExpiry + 60_000,
+        async () => { throw new Error("a live runtime's prompt must not request a write"); }), 0);
+      assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, null);
+    } finally { await f.close(); }
+  });
 }
 
 test("reconnected requests close together only after their turn ends, preserving the successor", async () => {

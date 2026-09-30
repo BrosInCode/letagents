@@ -96,8 +96,9 @@ test("host approval client authenticates raw presentations and restores exact re
     const client = new SupervisorDaemonClient(options);
     const first = await client.listHostApprovals("room_1"); assert.equal(first.available, true);
     const view = first.approvals[0]!;
-    assert.deepEqual(Object.keys(view).sort(), ["detail", "id", "presentation", "retryDecision", "status"]);
+    assert.deepEqual(Object.keys(view).sort(), ["detail", "dismissKey", "id", "presentation", "retryDecision", "status"]);
     assert.equal(view.presentation.details, candidate.presentation.details); assert.equal(view.retryDecision, null);
+    assert.equal(view.dismissKey, null, "a live request cannot be dismissed across restarts");
     assert.equal((await client.listHostApprovals("room_1")).approvals[0]!.id, view.id);
     assert.equal(loads, 1, "repeated polling reuses the already-unsealed main-process signer");
     view.presentation.details = "renderer replacement";
@@ -124,6 +125,7 @@ test("host approval client authenticates raw presentations and restores exact re
     for (const status of ["decision_sent", "uncertain", "resolved", "unavailable"] as const) {
       candidate.status = status;
       const current = await restarted.listHostApprovals("room_1"); assert.equal(current.approvals[0]!.retryDecision, null);
+      assert.equal(current.approvals[0]!.dismissKey, null, "a prompt on a live lane keeps its title and must reappear after restart");
       await assert.rejects(restarted.decideHostApproval({ id: current.approvals[0]!.id, decision: "allow_once" }), /Refresh/);
     }
     // Exact structural fallback from HostApprovalBroker.list after the native
@@ -132,6 +134,7 @@ test("host approval client authenticates raw presentations and restores exact re
     candidate.presentation.title = "Approval unavailable";
     candidate.presentation.details = "The native request is no longer available to inspect on this connection.";
     candidate.detail = "A dispatch was recorded. Missing native evidence is not confirmation that the decision was applied.";
+    const dismissKeys = new Set<string | null>();
     for (const reader of [restarted, new SupervisorDaemonClient(options)]) {
       for (let refresh = 0; refresh < 2; refresh += 1) {
         const snapshot = await reader.listHostApprovals("room_1");
@@ -140,12 +143,18 @@ test("host approval client authenticates raw presentations and restores exact re
         assert.equal(retained.status, "uncertain"); assert.equal(retained.retryDecision, null);
         assert.equal(retained.presentation.title, "Approval unavailable");
         assert.equal(retained.detail, candidate.detail);
-        assert.doesNotMatch(JSON.stringify(snapshot), /private-host-command|recordedDecision|projectionSha256/);
+        assert.match(retained.dismissKey ?? "", /^[a-f0-9]{64}$/); dismissKeys.add(retained.dismissKey);
+        assert.doesNotMatch(JSON.stringify(snapshot), /private-host-command|recordedDecision|projectionSha256|request_1/);
         for (const decision of ["allow_once", "deny"] as const) {
           await assert.rejects(reader.decideHostApproval({ id: retained.id, decision }), /Refresh/);
         }
       }
     }
+    assert.equal(dismissKeys.size, 1, "a dismissed record keeps its identity across Electron restarts");
+    candidate.status = "unavailable";
+    const changed = (await new SupervisorDaemonClient(options).listHostApprovals("room_1")).approvals[0]!;
+    assert.match(changed.dismissKey ?? "", /^[a-f0-9]{64}$/);
+    assert.equal(dismissKeys.has(changed.dismissKey), false, "a status change resurfaces a dismissed record");
     assert.equal(decisions.length, 3);
     assert.ok(wire.requests.every(request => request.method.startsWith("supervisor.host_approval_")), "no startup, handoff, configuration, or native action RPCs");
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
@@ -178,8 +187,12 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
       candidates = [{ ...base, status: "decision_recorded", recordedDecision: decision }];
       const snapshot = await client.listHostApprovals("room_1"); assert.equal(snapshot.available, true);
       assert.equal(snapshot.approvals[0]!.status, "unavailable"); assert.equal(snapshot.approvals[0]!.retryDecision, null);
+      assert.equal(snapshot.approvals[0]!.dismissKey, null, "a live decision downgraded to unavailable is not a durable record");
       await assert.rejects(client.decideHostApproval({ id: snapshot.approvals[0]!.id, decision: "allow_once" }), /Refresh/);
     }
+    candidates = [{ ...base, reference: null, status: "unavailable", presentation: { ...base.presentation, title: "Approval unavailable" } }];
+    const unobserved = await client.listHostApprovals("room_1"); assert.equal(unobserved.available, true);
+    assert.equal(unobserved.approvals[0]!.dismissKey, null, "an unobservable lane is a live condition, not a durable record");
     for (const invalid of [null, {}, { ...base, extra: "field" }, { ...base, status: "dispatching" },
       { ...base, recordedDecision: undefined }, { ...base, recordedDecision: { ...recorded, projectionSha256: "bad" } },
       { ...base, reference: null }, { ...base, reference: { ...base.reference, roomId: "foreign" } },

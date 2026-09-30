@@ -10,7 +10,7 @@ import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import {
   beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
-  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
+  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, expiredRetiredRuntimeApprovals, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
   type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
   type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
 } from "./execution-approval-journal.js";
@@ -722,9 +722,14 @@ export class ManifestStore {
     if (typeof commitFence !== "function" || typeof nowMs !== "function") throw new Error("Approval closure requires a clock and daemon ownership fence.");
     // Most convergence passes have nothing to settle. Avoid taking a write lock
     // in that case; re-read all evidence under the fence when there is work.
-    const pending = await this.serialize(async () => witnessedRuntimeApprovalClosures(await this.getDatabase(), agentId).length > 0);
+    const pending = await this.serialize(async () => {
+      const db = await this.getDatabase();
+      return witnessedRuntimeApprovalClosures(db, agentId).length > 0
+        || expiredRetiredRuntimeApprovals(db, agentId, nowMs(), () => this.readEntryFromDatabase(db, agentId)).length > 0;
+    });
     if (!pending) return 0;
-    return this.writeOperationalJournal(db => settleWitnessedRuntimeApprovalClosures(db, agentId, nowMs), commitFence);
+    return this.writeOperationalJournal(db => settleWitnessedRuntimeApprovalClosures(db, agentId, nowMs,
+      () => this.readEntryFromDatabase(db, agentId)), commitFence);
   }
 
   async loseExecutionApproval(input: LoseExecutionApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
