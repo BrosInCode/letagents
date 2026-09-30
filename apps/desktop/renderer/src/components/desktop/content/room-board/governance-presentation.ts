@@ -60,8 +60,8 @@ export function readableIntentAction(actionType: string): string {
 
 /**
  * Presence arrives in last-activity order, which changes on every room
- * refresh. The picker orders by identity instead so rows stay under the
- * cursor while the manager or mode changes: current manager first, then name.
+ * refresh. The picker orders by name so rows never move under the cursor,
+ * even when the manager changes; the Current badge marks the manager.
  */
 export function liveManagerCandidates(
   governance: DesktopBoardGovernanceSnapshot,
@@ -87,8 +87,7 @@ export function liveManagerCandidates(
       };
     })
     .sort((left, right) =>
-      Number(right.isActiveManager) - Number(left.isActiveManager)
-      || managerCandidateName(left).localeCompare(managerCandidateName(right))
+      managerCandidateName(left).localeCompare(managerCandidateName(right))
       || left.agentSessionId.localeCompare(right.agentSessionId)
     );
 }

@@ -33,14 +33,6 @@ test("Activity opens the exact shared Inspector for supervised and generic parti
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);
 });
 
-test("an open Pause request drives every Inspector surface until the daemon saves it", () => {
-  assert.match(
-    shell,
-    /const pauseRequestedEntryIds = computed\(\(\) => \{\s*const state = agentInspectorActionState\.value;\s*return new Set\(state\?\.kind === "pause" && state\.status === "running" \? \[state\.entryId\] : \[\]\);/,
-  );
-  assert.match(shell, /projectAgentInspectors\(supervisorEntries\.value, \{[\s\S]*?pauseRequestedEntryIds: pauseRequestedEntryIds\.value,/);
-});
-
 test("Chat carries the clicked canonical message into exact supervised identity resolution", () => {
   assert.match(chatMessage, /messageId:\s*props\.message\.id/);
   assert.match(chatMessage, /clientMessageId:\s*props\.message\.clientMessageId/);

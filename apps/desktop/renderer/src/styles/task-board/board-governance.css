@@ -66,8 +66,14 @@
 }
 
 .desktop-board-governance-close:active,
-.desktop-board-secondary-action:active:not(:disabled) {
+.desktop-board-secondary-action:active:not(:disabled):not([aria-disabled="true"]) {
   transform: scale(0.97);
+}
+
+.desktop-board-secondary-action:disabled,
+.desktop-board-secondary-action[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .desktop-board-governance-close:focus-visible {
@@ -383,52 +389,28 @@
   gap: 8px;
 }
 
-.desktop-board-governance-deny,
-.desktop-board-governance-deny-field {
+.desktop-board-governance-deny {
   display: grid;
   gap: 8px;
 }
 
-.desktop-board-governance-deny-field > span {
-  color: var(--text-secondary);
-  font-size: 0.7rem;
-  font-weight: 650;
-}
-
-.desktop-board-governance-deny-field small {
-  color: var(--text-tertiary);
-  font-size: 0.68rem;
-  font-weight: 500;
-}
-
-.desktop-board-governance-deny-field textarea {
-  width: 100%;
+/* Field chrome comes from .desktop-task-create-field; this is the compact size. */
+.desktop-task-create-field.desktop-board-governance-deny-field textarea {
   min-height: 64px;
   padding: 9px 11px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  outline: none;
   background: var(--bg);
-  color: var(--text);
-  font: inherit;
   font-size: 0.78rem;
   line-height: 1.45;
-  resize: vertical;
-  transition:
-    border-color var(--duration-fast) ease,
-    background-color var(--duration-fast) ease,
-    box-shadow var(--duration-fast) ease;
 }
 
-.desktop-board-governance-deny-field textarea::placeholder {
-  color: var(--text-tertiary);
-  opacity: 1;
+.desktop-task-create-field.desktop-board-governance-deny-field textarea[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.72;
 }
 
-.desktop-board-governance-deny-field textarea:focus {
-  border-color: var(--blue);
-  background: var(--bg-elevated);
-  box-shadow: 0 0 0 3px var(--blue-dim);
+.desktop-board-governance-intent:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .desktop-board-governance-intent p,
@@ -447,7 +429,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .desktop-board-governance-close:hover,
-  .desktop-board-secondary-action:hover:not(:disabled),
+  .desktop-board-secondary-action:hover:not(:disabled):not([aria-disabled="true"]),
   .desktop-board-governance-candidate:hover {
     border-color: var(--border-accent);
     background: var(--accent-hover);
@@ -486,7 +468,6 @@
   }
 
   .desktop-board-governance-actions {
-    flex-direction: column-reverse;
     justify-content: stretch;
   }
 

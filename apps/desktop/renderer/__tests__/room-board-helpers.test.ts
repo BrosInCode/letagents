@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, effectScope, h, nextTick, reactive } from "vue";
+import { createSSRApp, effectScope, h, nextTick, reactive, ref } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 
-import { readFileSync } from "node:fs";
 import type {
   DesktopAgentPresence,
   DesktopBoardGovernanceSnapshot,
@@ -34,6 +33,11 @@ import {
   readableIntentBody,
 } from "../src/components/desktop/content/room-board/governance-presentation";
 import { reviewAssignmentCandidates } from "../src/components/desktop/content/room-board/review-candidates";
+import { useBoardGovernance } from "../src/components/desktop/content/room-board/useBoardGovernance";
+import {
+  useGovernanceDenyForm,
+  type DenyFormFocusTarget,
+} from "../src/components/desktop/content/room-board/useGovernanceDenyForm";
 import {
   executionAuthorityState,
   reviewPanelState,
@@ -144,9 +148,13 @@ describe("board manager panel", () => {
       liveManagerCandidates(snapshot, liveAgents).map(managerCandidateName);
     assert.deepEqual(names([casey, blake, avery]), ["Avery", "Blake", "Casey"]);
     assert.deepEqual(names([blake, avery, casey]), ["Avery", "Blake", "Casey"]);
+    // Assigning a manager marks the row as Current without moving it.
     const managed = governance({ activeManager: activeManager("session_casey") });
-    assert.deepEqual(names([avery, casey, blake], managed), ["Casey", "Avery", "Blake"]);
-    assert.deepEqual(names([blake, avery, casey], managed), ["Casey", "Avery", "Blake"]);
+    assert.deepEqual(names([avery, casey, blake], managed), ["Avery", "Blake", "Casey"]);
+    assert.deepEqual(
+      liveManagerCandidates(managed, [blake, avery, casey]).map((candidate) => candidate.isActiveManager),
+      [false, false, true],
+    );
   });
 
   it("keeps the primary action in place when a manager is assigned", async () => {
@@ -176,17 +184,93 @@ describe("board manager panel", () => {
       }),
     }));
     assert.match(html, /data-testid="board-governance-deny"[^>]*>\s*Deny\s*</);
-    const source = (relative: string) => readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
-    const intentSection = source("../src/components/desktop/content/room-board/RoomBoardGovernanceIntentSection.vue");
-    assert.match(intentSection, /emit\("deny-intent", intentId, denyIntentReason\(denyReason\.value\)\)/);
-    assert.match(
-      source("../src/components/desktop/content/room-board/RoomBoardGovernancePanel.vue"),
-      /@deny-intent="\(intentId, reason\) => emit\('deny-intent', intentId, reason\)"/,
-    );
-    assert.match(
-      source("../src/components/desktop/content/RoomBoardView.vue"),
-      /decideIntent\(intentId, "deny", reason\)/,
-    );
+    assert.doesNotMatch(html, /board-governance-deny-reason/, "the reason field opens only when asked");
+  });
+
+  it("runs the deny form: open, keep each reason, submit once, close and move focus when the request leaves", () => {
+    const intents = ref([
+      intent({ id: "intent_a", actionType: "task_close", taskId: "task_1" }),
+      intent({ id: "intent_b", actionType: "task_claim", taskId: "task_2" }),
+      intent({ id: "intent_c", actionType: "task_claim", taskId: "task_3" }),
+    ]);
+    const busy = ref(false);
+    const denied: Array<[string, string | null]> = [];
+    const focused: DenyFormFocusTarget[] = [];
+    const form = useGovernanceDenyForm({
+      intents: () => intents.value,
+      busy: () => busy.value,
+      deny: (intentId, reason) => denied.push([intentId, reason]),
+      focus: (target) => focused.push(target),
+    });
+
+    form.start("intent_a");
+    assert.equal(form.denyingIntentId.value, "intent_a");
+    assert.deepEqual(focused.at(-1), { kind: "reason", intentId: "intent_a" });
+    form.reason.value = "Already merged.";
+    // Opening another request's form keeps the first reason for later.
+    form.start("intent_b");
+    assert.equal(form.reason.value, "");
+    form.start("intent_a");
+    assert.equal(form.reason.value, "Already merged.");
+
+    form.submit();
+    busy.value = true;
+    form.submit();
+    form.cancel();
+    assert.deepEqual(denied, [["intent_a", "Already merged."]], "one request while busy; Cancel waits");
+    assert.equal(form.denyingIntentId.value, "intent_a", "the form stays open while the denial is in flight");
+
+    // A failed denial keeps the typed reason for a retry.
+    busy.value = false;
+    intents.value = [...intents.value];
+    assert.equal(form.reason.value, "Already merged.");
+
+    form.submit();
+    intents.value = intents.value.filter((candidate) => candidate.id !== "intent_a");
+    assert.equal(form.denyingIntentId.value, null);
+    assert.deepEqual(focused.at(-1), { kind: "request", intentId: "intent_b" }, "focus moves to the next request");
+
+    form.start("intent_c");
+    form.submit();
+    intents.value = intents.value.filter((candidate) => candidate.id !== "intent_c");
+    assert.deepEqual(focused.at(-1), { kind: "request", intentId: "intent_b" }, "the last request falls back to the one before it");
+
+    form.start("intent_b");
+    form.reason.value = "Not needed.";
+    form.cancel();
+    assert.deepEqual(focused.at(-1), { kind: "deny", intentId: "intent_b" });
+    form.start("intent_b");
+    assert.equal(form.reason.value, "", "Cancel discards the reason");
+    form.submit();
+    intents.value = [];
+    assert.deepEqual(focused.at(-1), { kind: "list" });
+    assert.deepEqual(denied.at(-1), ["intent_b", null]);
+  });
+
+  it("sends the deny reason to the board", async () => {
+    const decisions: unknown[] = [];
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        letagentsDesktop: {
+          room: {
+            decideBoardIntent: async (_room: string, intentId: string, input: unknown) => {
+              decisions.push({ intentId, input });
+              return { governance: governance() };
+            },
+          },
+        },
+      },
+    });
+    try {
+      const board = useBoardGovernance("room_1");
+      assert.equal(await board.decideIntent("intent_a", "deny", "Already merged."), true);
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "window", previous);
+      else delete (globalThis as { window?: unknown }).window;
+    }
+    assert.deepEqual(decisions, [{ intentId: "intent_a", input: { decision: "deny", reason: "Already merged." } }]);
   });
 });
 

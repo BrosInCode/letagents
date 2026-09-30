@@ -362,6 +362,7 @@ import {
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
+import { useAgentPauseRequests } from "../../../domain/agent-pause-requests";
 import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import { roomMentionCandidates } from "../../../domain/participants";
@@ -583,6 +584,7 @@ const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier)
 const refreshedEnvironmentRepoStatus = ref<RepoStatus | null>(null);
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
+const agentPauseRequests = useAgentPauseRequests(supervisorEntries);
 const supervisorEntriesState = ref<SupervisorEntriesResource["state"]>("loading");
 const supervisorEntriesError = ref<string | null>(null);
 const supervisorEntriesHaveLoaded = ref(false);
@@ -636,10 +638,6 @@ provideRoomWakeRules({
   api: roomWakeRules.api,
   openMessage: (messageId) => { void revealWakeMessage(messageId); },
 });
-const pauseRequestedEntryIds = computed(() => {
-  const state = agentInspectorActionState.value;
-  return new Set(state?.kind === "pause" && state.status === "running" ? [state.entryId] : []);
-});
 const agentInspectorProjections = computed(() => {
   return projectAgentInspectors(supervisorEntries.value, {
     roomId: props.room.identifier,
@@ -650,7 +648,7 @@ const agentInspectorProjections = computed(() => {
     resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesState.value),
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
     deliveryRetryingKeys: deliveryRetryingKeys.value,
-    pauseRequestedEntryIds: pauseRequestedEntryIds.value,
+    pauseRequestedEntryIds: agentPauseRequests.entryIds.value,
   });
 });
 const selectedAgentDetailProjection = computed(() => {
@@ -2644,7 +2642,13 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
   try {
     let updated: DesktopSupervisorManifestEntry | null = null;
     if (intent.kind === "pause") {
-      updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "paused");
+      agentPauseRequests.begin(intent.entryId);
+      try {
+        updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "paused");
+      } catch (error) {
+        agentPauseRequests.fail(intent.entryId);
+        throw error;
+      }
     } else if (intent.kind === "resume") {
       updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "running");
     } else if (intent.kind === "recover") {

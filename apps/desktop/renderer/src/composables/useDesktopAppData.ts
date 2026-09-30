@@ -686,21 +686,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   function upsertSelectedTask(task: DesktopTaskSummary): void {
     setSelectedSnapshot(upsertSnapshotTask(options.selectedSnapshot.value, task));
-    updateSelectedRootRoomSnapshot((snapshot) => upsertSnapshotTask(snapshot, task));
-  }
-
-  /**
-   * Refreshing the selected root room merges from rootRoomSnapshot, whose
-   * event-fed tasks otherwise only move on a full reload. Mirror task events
-   * into it so that refresh cannot roll the board back to an older list.
-   */
-  function updateSelectedRootRoomSnapshot(
-    update: (snapshot: DesktopRoomSnapshot) => DesktopRoomSnapshot | null,
-  ): void {
-    const rootSnapshot = options.rootRoomSnapshot.value;
-    const selectedSnapshot = options.selectedSnapshot.value;
-    if (!rootSnapshot || !selectedSnapshot || !roomSnapshotsMatch(rootSnapshot, selectedSnapshot)) return;
-    options.rootRoomSnapshot.value = update(rootSnapshot);
   }
 
   function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
@@ -788,9 +773,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (snapshot) setSelectedSnapshot({
         ...snapshot, tasks: snapshot.tasks.filter(task => task.id !== event.taskId),
       });
-      updateSelectedRootRoomSnapshot((rootSnapshot) => ({
-        ...rootSnapshot, tasks: rootSnapshot.tasks.filter(task => task.id !== event.taskId),
-      }));
       return;
     }
 
@@ -912,8 +894,18 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       options.scheduleLiveMetadataRefresh(0);
       return;
     }
-    scheduleSelectedSnapshotRefresh();
+    // For the root room, refreshSelectedSnapshot only re-merges the local root
+    // copy, whose event-fed tasks, reasoning and artifacts are older than what
+    // is on screen. The full read scheduled below is the real refresh.
+    if (!selectedRoomReusesRootSnapshot(options.rootRoomSnapshot.value)) scheduleSelectedSnapshotRefresh();
     options.scheduleLiveMetadataRefresh(0);
+  }
+
+  /** Whether refreshSelectedSnapshot would show the root snapshot as-is. */
+  function selectedRoomReusesRootSnapshot(baseRootSnapshot: DesktopRoomSnapshot | null): boolean {
+    if (!baseRootSnapshot || options.activeEntry.value.type !== "room") return false;
+    const roomIdentifier = options.resolveSelectedRoomIdentifier(baseRootSnapshot);
+    return !roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier;
   }
 
   function handleMessageSent(message: DesktopRoomMessage): void {

@@ -247,6 +247,7 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   onCopyAuthCommand: (command) => void setupActions.copyAgentAuthCommand(command),
   onRetry: () => retrySupervisedLaunch(),
   onMessage: setSetupMessage,
+  onSavedEntry: (entry) => configuration.consumeSupervisedCharter(entry.charter),
 });
 const launchStarted = supervisedLaunch.launchStarted;
 const supervisedConflict = supervisedLaunch.conflict;
@@ -481,7 +482,6 @@ async function startManagedAgent(
         supervisedLaunch.dismiss();
         return;
       }
-      configuration.consumeSupervisedCharter(requestCharter);
       if (!setupActions.isCurrentRequest(requestVersion)) {
         if (props.open && props.roomIdentifier === requestRoomIdentifier) {
           supervisedLaunch.offerRecoveryCandidate(entry);
