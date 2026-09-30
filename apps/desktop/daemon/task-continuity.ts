@@ -16,6 +16,11 @@ export function taskFailurePolicy(error: string | null, attempt: number): { auto
     return { automatic: false, detail: `The model provider needs authentication or account access. ${retry}` };
   }
   if (attempt > 3) return { automatic: false, detail: `Automatic task recovery stopped after three continuations. Check the provider, then use Retry delivery. Existing work is preserved.` };
+  // The Open Model adapter's reasons for a turn that finished without an
+  // answer. The next attempt is a new continuation turn, never a replay.
+  if (/model hit its output limit before writing a reply|model finished without writing a reply/i.test(error ?? "")) {
+    return { automatic: true, detail: "The model stopped before writing a reply. Continuing the unfinished task after a short delay." };
+  }
   if (/\b(?:429|500|502|503|504|529)\b|rate.?limit|temporar(?:y|ily)|overloaded|service unavailable|connection reset|ECONNRESET|ETIMEDOUT|socket closed|network error/i.test(error ?? "")) {
     return { automatic: true, detail: "The provider failed temporarily. Continuing the unfinished task after a short delay." };
   }

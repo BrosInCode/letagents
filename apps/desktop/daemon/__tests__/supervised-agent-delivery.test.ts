@@ -17,6 +17,7 @@ import {
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
+import { taskFailurePolicy } from "../task-continuity.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 
 const agent = {
@@ -1208,6 +1209,40 @@ test("a transient provider failure continues its unfinished task without another
 });
 
 const continuityTask = { id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 };
+
+for (const reason of ["The model hit its output limit before writing a reply.", "The model finished without writing a reply."]) {
+  test(`a lease holder's "${reason}" continues its task without blocking later room messages`, async () => {
+    assert.equal(taskFailurePolicy(reason, 3).automatic, true);
+    assert.equal(taskFailurePolicy(reason, 4).automatic, false, "automatic continuation stays capped at three");
+    const root = await mkdtemp(join(tmpdir(), "continuity-empty-answer-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const sources: string[] = [];
+    let finished = false;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.();
+      const source = request.sourceMessage as { id?: string; source?: string };
+      sources.push(source.source === "system" ? "continuation" : String(source.id));
+      const turnId = `turn-${sources.length}`;
+      await options?.checkpointTurnStarted?.(turnId);
+      if (sources.length === 1) {
+        return { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "transcript", error: reason };
+      }
+      if (sources.length === 2) {
+        assert.match(JSON.stringify(request.sourceMessage), /task_1/);
+        finished = true;
+      }
+      return { turnId, outcome: "no_reply", text: null };
+    }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => finished ? [] : [continuityTask] },
+    currentAuthority, 0, async () => {});
+    try {
+      await ingest(store, "1"); await delivery.pump(agent);
+      await ingest(store, "2"); await delivery.pump(agent);
+      const receipts = await store.receipts(agent.agentId);
+      assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply", "acknowledged_no_reply"]);
+      assert.deepEqual(sources, ["1", "continuation", "2"], "the continuation is a new turn and the next room message still runs");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+}
 
 test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
   const root = await mkdtemp(join(tmpdir(), "continuity-restart-"));
