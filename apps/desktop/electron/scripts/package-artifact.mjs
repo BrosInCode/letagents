@@ -250,6 +250,7 @@ const required = [
     "shared/routing-aliases.mjs",
     "shared/scratch-workspace-repository.mjs",
     "shared/sqlite-thread-routing.mjs",
+    "shared/supervised-read-tools.mjs",
   ].map((relative) => ({
     absolutePath: join(contents, relative),
     manifestPath: `Contents/${relative}`,
