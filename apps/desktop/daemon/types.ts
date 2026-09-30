@@ -360,6 +360,26 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
     turn: { state: "idle" | "dispatching" | "responding" | "publishing" | "retrying" | "failed"; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
     task: { state: "none" | "assigned" | "working" | "blocked"; task_id: string | null; title: string | null };
   } | null;
+  /**
+   * Ephemeral, never persisted. Set while the agent's oldest unsettled room
+   * message is blocked: later messages wait behind it until a person retries
+   * or skips it. `condition` keeps describing only the runtime.
+   */
+  delivery_attention?: {
+    reason: "message_blocked";
+    source_message_id: string;
+    blocked_since: string;
+    detail: string | null;
+    /** Messages waiting behind the blocked one. */
+    waiting_count: number;
+    /** The message reached the provider, or may have. */
+    provider_work_started: boolean;
+    /** What Retry delivery does: re-read the saved turn (never rerun it), post the saved reply, start the turn, or restore the conversation first. */
+    retry: "reread_saved_turn" | "publish_saved_reply" | "start_turn" | "restore_conversation";
+    /** Skip is accepted now; skipping never reruns the turn and drops any answer it had. */
+    can_skip: boolean;
+    skip_unavailable_reason: string | null;
+  } | null;
   delivery_receipts?: Array<{
     inbox_item_id: string; source_message_id: string; fifo_sequence: number;
     /** Deterministic publication identity used even before a canonical id was checkpointed. */

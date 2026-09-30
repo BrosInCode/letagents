@@ -615,6 +615,21 @@ test("mounted shared message retry button is a native, exact, capability-aware c
   assert.deepEqual(calls, [["oak", "message_1"]], "one activation carries exactly the receipt identity");
   available.app.unmount();
 
+  // A saved provider turn is only read again, and the button says so.
+  const reread = mount(DesktopChatMessage, { ...base, deliveryRecoveryAvailable: true,
+    deliveryReceipts: [{ agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null, providerTurnId: "turn_1", retry: "reread_saved_turn" }] });
+  const rereadButton = buttonByText(reread.root, "Read again");
+  assert.equal(rereadButton.props.title, "Reads the finished turn’s answer again. The turn is not rerun.");
+  (rereadButton.props.onClick as () => void)();
+  assert.deepEqual(calls.at(-1), ["oak", "message_1"], "it is the same exact Retry delivery request");
+  reread.app.unmount();
+
+  // A saved reply that failed to post has a provider turn too, but Retry posts it.
+  const unposted = mount(DesktopChatMessage, { ...base, deliveryRecoveryAvailable: true,
+    deliveryReceipts: [{ agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null, providerTurnId: "turn_1", retry: "publish_saved_reply" }] });
+  assert.equal(buttonByText(unposted.root, "Post reply").props.title, "Posts the saved reply. The provider is not asked again.");
+  unposted.app.unmount();
+
   const busy = mount(DesktopChatMessage, {
     ...base,
     deliveryRecoveryAvailable: true,
