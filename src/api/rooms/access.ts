@@ -127,7 +127,7 @@ export async function resolveProjectRepoAccessTarget(
   return null;
 }
 
-export function getPublicBaseUrl(): string {
+function getPublicBaseUrl(): string {
   const configuredBaseUrl = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL;
   if (configuredBaseUrl?.trim()) {
     return configuredBaseUrl.replace(/\/+$/, "");
@@ -136,7 +136,7 @@ export function getPublicBaseUrl(): string {
   return `http://localhost:${process.env.PORT || "3001"}`;
 }
 
-export function buildDeviceFlowUrl(roomName: string): string {
+function buildDeviceFlowUrl(roomName: string): string {
   const url = new URL("/auth/device/start", `${getPublicBaseUrl()}/`);
   url.searchParams.set("room_id", roomName);
   return url.toString();
