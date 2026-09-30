@@ -17,7 +17,7 @@ defineOptions({
   inheritAttrs: false,
 })
 
-const props = withDefaults(defineProps<{
+withDefaults(defineProps<{
   modelValue?: string | null
   disabled?: boolean
 }>(), {

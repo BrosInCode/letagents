@@ -22,7 +22,6 @@ import {
   githubEventsLoading,
   isConnected,
   joinError,
-  messages,
   messagesHasOlder,
   participantHiddenCount,
   participants,
