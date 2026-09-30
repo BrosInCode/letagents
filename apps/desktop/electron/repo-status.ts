@@ -644,10 +644,6 @@ export function normalizeGitRemoteToRoomIdentifier(remote: string): string | nul
   }
 }
 
-export function readConfiguredRoomIdentifier(workspaceRoot: string): string | null {
-  return readConfiguredRoomIdentifierAt(workspaceRoot);
-}
-
 function readConfiguredRoomIdentifierAt(repoRoot: string): string | null {
   try {
     const configPath = join(repoRoot, ".letagents.json");

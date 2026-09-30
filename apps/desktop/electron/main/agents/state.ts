@@ -561,10 +561,6 @@ export function listStoredCodexLiveSessions(roomId?: string | null): DesktopCode
   return codexLiveSessionStore.listStored(roomId);
 }
 
-export function isDesktopManagedCodexLiveSession(session: DesktopCodexLiveSessionState): boolean {
-  return codexLiveSessionStore.isManaged(session);
-}
-
 export function listDesktopManagedCodexLiveSessions(roomId?: string | null): DesktopCodexLiveSessionState[] {
   return dedupeDesktopManagedCodexLiveSessions(
     codexLiveSessionStore.listManaged(roomId),
@@ -763,10 +759,6 @@ export function getStoredCursorLiveSession(sessionId: string): DesktopCursorLive
 
 export function listStoredCursorLiveSessions(roomId?: string | null): DesktopCursorLiveSessionState[] {
   return cursorLiveSessionStore.listStored(roomId);
-}
-
-export function isDesktopManagedCursorLiveSession(session: DesktopCursorLiveSessionState): boolean {
-  return cursorLiveSessionStore.isManaged(session);
 }
 
 export function listDesktopManagedCursorLiveSessions(roomId?: string | null): DesktopCursorLiveSessionState[] {
