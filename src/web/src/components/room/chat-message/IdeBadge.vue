@@ -16,6 +16,11 @@
     <svg v-else-if="normalized === 'cursor'" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M4 3l8 5-8 5V3z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/>
     </svg>
+    <svg v-else-if="normalized === 'opencode'" viewBox="-30 0 300 300" aria-hidden="true">
+      <!-- OpenCode mark (anomalyco/opencode brand kit), tinted to match the other badges -->
+      <path d="M180 240H60V120H180V240Z" fill="currentColor" opacity="0.45"/>
+      <path fill-rule="evenodd" d="M180 60H60V240H180V60ZM240 300H0V0H240V300Z" fill="currentColor"/>
+    </svg>
     <svg v-else viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.3" fill="none"/>
       <circle cx="8" cy="5.5" r="1" fill="currentColor"/>
@@ -26,16 +31,14 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { ideKey } from './ideKey'
 
 const props = defineProps<{
   label: string
 }>()
 
-const normalized = computed(() => props.label.toLowerCase())
-const badgeClass = computed(() => {
-  const known = ['codex', 'antigravity', 'claude', 'cursor']
-  return known.includes(normalized.value) ? `ide-${normalized.value}` : 'ide-default'
-})
+const normalized = computed(() => ideKey(props.label))
+const badgeClass = computed(() => `ide-${normalized.value}`)
 </script>
 
 <style scoped>
@@ -59,5 +62,6 @@ const badgeClass = computed(() => {
 .ide-icon.ide-antigravity { color: #60a5fa; }
 .ide-icon.ide-claude { color: #fb923c; }
 .ide-icon.ide-cursor { color: #a855f7; }
+.ide-icon.ide-opencode { color: var(--text, #e4e4e7); }
 .ide-icon.ide-default { color: var(--muted, #71717a); }
 </style>
