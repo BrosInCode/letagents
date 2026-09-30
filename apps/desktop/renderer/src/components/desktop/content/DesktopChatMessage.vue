@@ -187,9 +187,11 @@
               :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId)"
               :aria-label="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
               :title="!deliveryRecoveryAvailable ? 'Retry will be available when delivery recovery is connected'
-                : receipt.providerTurnId ? 'Reads the finished turn’s answer again. The turn is not rerun.' : 'Retry delivery'"
+                : receipt.retry === 'reread_saved_turn' ? 'Reads the finished turn’s answer again. The turn is not rerun.'
+                : receipt.retry === 'publish_saved_reply' ? 'Posts the saved reply. The provider is not asked again.' : 'Retry delivery'"
               @click="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) && $emit('retry-delivery', receipt.agentId, message.id)"
-            >{{ retryingReceipt(receipt.agentId) ? "Retrying…" : !deliveryRecoveryAvailable ? "Retry unavailable" : receipt.providerTurnId ? "Read again" : "Retry" }}</button>
+            >{{ retryingReceipt(receipt.agentId) ? "Retrying…" : !deliveryRecoveryAvailable ? "Retry unavailable"
+              : receipt.retry === "reread_saved_turn" ? "Read again" : receipt.retry === "publish_saved_reply" ? "Post reply" : "Retry" }}</button>
             <small v-if="!deliveryRecoveryAvailable">Retry will be available when delivery recovery is connected.</small>
           </template>
         </li>
@@ -288,7 +290,7 @@
 import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
-import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
+import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
@@ -335,7 +337,7 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
-  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }>;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null; retry?: DesktopRoomAgentDeliveryAttention["retry"] | null }>;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;

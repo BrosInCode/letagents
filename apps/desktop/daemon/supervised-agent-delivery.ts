@@ -1077,10 +1077,7 @@ export class SupervisedAgentDelivery {
       || this.activeTurnAborts.get(agent.agentId)?.inboxItemId === item.inbox_item_id) {
       throw new Error("This message is still being delivered. Try again once it settles.");
     }
-    await this.inbox.skipBlocked(item.inbox_item_id, {
-      work_attempt_id: agent.workAttemptId,
-      provider_continuation_id: agent.handle?.providerContinuationId ?? agent.providerContinuationId,
-    });
+    await this.inbox.skipBlocked(item.inbox_item_id);
     if (!await this.hasIngressAuthority(agent, controller)) {
       throw new Error("The room delivery binding changed after the message was safely skipped.");
     }

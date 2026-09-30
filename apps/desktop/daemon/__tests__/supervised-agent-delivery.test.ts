@@ -1807,9 +1807,25 @@ test("Skip moves past a finished turn that stays unreadable after Pause and Resu
   }
 });
 
-test("Skip refuses a started turn that may still run in the current conversation, and accepts it once that conversation is replaced", async () => {
+async function writeAgentRuntime(path: string, providerContinuationId: string): Promise<void> {
+  const manifest = new ManifestStore(path);
+  try {
+    const loaded = await manifest.load();
+    await manifest.write(loaded.generation, [{
+      id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: "codex", model: null,
+      charter: "test", desired_state: "running", observed_state: "working", condition: "none",
+      permission_profile_id: null, delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
+      created_at: new Date().toISOString(), work_attempt_id: agent.workAttemptId,
+      provider_ref: { work_attempt_id: agent.workAttemptId, execution_generation_id: agent.executionGenerationId,
+        provider_continuation_id: providerContinuationId, provider_connection: agent.providerConnection },
+    }]);
+  } finally { await manifest.close(); }
+}
+
+test("Skip refuses a started turn that may still run in the agent's conversation, and accepts it once that conversation is replaced", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-skip-running-"));
-  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const path = join(root, "daemon.sqlite");
+  const store = new SupervisedAgentInboxStore(path);
   let runs = 0;
   const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
     runs += 1;
@@ -1818,14 +1834,40 @@ test("Skip refuses a started turn that may still run in the current conversation
     throw Object.assign(new Error("The provider turn's result could not be established."), { roomTurnRecoveryOutcome: "ambiguous" });
   }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
   try {
+    await writeAgentRuntime(path, agent.providerContinuationId);
     await ingest(store);
     await delivery.pump(agent);
     assert.equal((await store.receipts(agent.agentId))[0]!.state, "blocked");
     await assert.rejects(delivery.skipMessage(agent, "1"), /may still be running/);
-    const replaced = { ...agent, providerContinuationId: "thread-2", handle: { ...agent.handle, providerContinuationId: "thread-2" } };
-    await delivery.skipMessage(replaced, "1");
+    // A fresh start records a new conversation for the agent.
+    await writeAgentRuntime(path, "thread-2");
+    await delivery.skipMessage({ ...agent, providerContinuationId: "thread-2", handle: { ...agent.handle, providerContinuationId: "thread-2" } }, "1");
     assert.equal((await store.receipts(agent.agentId))[0]!.state, "cancelled_by_user");
     assert.equal(runs, 1);
+  } finally {
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Skip refuses a row this process is still delivering, even if the row already reads as blocked", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-skip-live-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery!: SupervisedAgentDelivery;
+  let refusal: unknown = null;
+  delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("turn-1");
+    // Another writer marked the row blocked while this delivery still owns it.
+    await store.transition(request.inboxItemId, "blocked", { last_error: "blocked under a live delivery" });
+    refusal = await delivery.skipMessage(agent, "1").then(() => null, (error: unknown) => error);
+    return { turnId: "turn-1", outcome: "no_reply", text: null };
+  }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+  try {
+    await ingest(store);
+    await delivery.pump(agent);
+    assert.match(refusal instanceof Error ? refusal.message : String(refusal), /still being delivered/);
+    assert.notEqual((await store.receipts(agent.agentId))[0]!.state, "cancelled_by_user");
   } finally {
     await delivery.fenceAndDrain(); await store.close();
     await rm(root, { recursive: true, force: true });

@@ -490,6 +490,11 @@ test("a blocked FIFO head is projected as delivery attention through to the insp
     receipts: [receipt({ state: "blocked", receipt_state: "blocked", last_error: "Tools unavailable." })] }));
   assert.equal(unstarted.delivery_attention?.provider_work_started, false);
   assert.equal(unstarted.delivery_attention?.retry, "start_turn");
+  const unposted = projectRoomAgentManifestEntry(facts({ entry: idleEntry, activeTurn: null, blockedHeadSkip: { inbox_item_id: "inbox_1", refusal: "saved reply" },
+    receipts: [{ ...blocked, outcome: JSON.stringify({ kind: "reply", text: "Saved answer", evidence: "stream" }) }] }));
+  assert.equal(unposted.delivery_attention?.retry, "publish_saved_reply", "Retry posts a saved reply; it is not a re-read");
+  assert.equal(projectAgentInspector(mapEntry(unposted), { roomId: entry.room_id, deliveryRetryAvailable: true })
+    ?.actions.find((action) => action.kind === "retry_delivery")?.label, "Post the saved reply");
   assert.equal(projectRoomAgentManifestEntry(facts({ receipts: [receipt()] })).delivery_attention, null);
   assert.equal(projectRoomAgentManifestEntry(facts({ receipts: [{ ...blocked, state: "cancelled_by_user", receipt_state: "cancelled_by_user" }] }))
     .delivery_attention, null, "Skip clears the attention immediately");

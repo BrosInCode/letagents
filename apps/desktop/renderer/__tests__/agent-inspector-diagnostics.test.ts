@@ -345,13 +345,26 @@ test("a blocked message the agent already worked on offers an honest re-read and
   assert.equal(check.state, "attention");
   assert.deepEqual([check.action?.kind, check.action?.label], ["retry_delivery", "Read the reply again"]);
   assert.match(check.actionImpact!, /not rerun/);
-  assert.match(check.nextStep, /Neither reruns the turn/);
+  assert.match(check.nextStep, /the turn is not rerun\. You can also skip the message/);
   assert.deepEqual([check.secondaryAction?.kind, check.secondaryAction?.sourceMessageId], ["skip_message", "msg_1"]);
   assert.match(check.secondaryActionImpact!, /turn is not rerun, and any answer it produced is dropped/);
 
   fixture.entry.deliveryAttention.canSkip = false;
   fixture.entry.deliveryAttention.skipUnavailableReason = "Provider work may still be running.";
-  assert.equal(fixture.assess().checks[3]!.secondaryAction, null, "Skip follows the supervisor's decision");
+  const refused = fixture.assess().checks[3]!;
+  assert.equal(refused.secondaryAction, null, "Skip follows the supervisor's decision");
+  assert.doesNotMatch(refused.nextStep, /You can also skip/);
+  assert.match(refused.nextStep, /Skip isn’t available: Provider work may still be running\./);
+
+  // A saved reply that failed to post is posted by Retry, not re-read.
+  fixture.entry.deliveryAttention.retry = "publish_saved_reply";
+  fixture.entry.deliveryAttention.skipUnavailableReason = "This message has a saved reply that wasn't posted.";
+  const unposted = fixture.assess().checks[3]!;
+  assert.deepEqual([unposted.action?.kind, unposted.action?.label], ["retry_delivery", "Post the saved reply"]);
+  assert.match(unposted.actionImpact!, /provider is not asked again/);
+  assert.match(unposted.nextStep, /saved but wasn’t posted/);
+  assert.doesNotMatch(unposted.nextStep, /Read the reply again/);
+  fixture.entry.deliveryAttention.retry = "reread_saved_turn";
   fixture.entry.deliveryAttention.canSkip = true;
   assert.equal(fixture.assess("stale").checks[3]!.secondaryAction, null, "a stale snapshot offers no remedy");
 
@@ -360,7 +373,9 @@ test("a blocked message the agent already worked on offers an honest re-read and
   assert.match(component, /@click="reviewSkip"/);
   assert.match(component, /Skip this message\?/);
   assert.match(component, /turn for this message won’t be rerun, and any answer it produced will be dropped/);
-  assert.match(component, /runRecovery\(selectedCheck\.secondaryAction\)/);
+  // The confirmation is bound to the message it named and closes if the head changes.
+  assert.match(component, /runRecovery\(\{ \.\.\.selectedCheck\.secondaryAction, sourceMessageId: skipTarget \}\)/);
+  assert.match(component, /sourceMessageId !== skipTarget\.value\) skipTarget\.value = null/);
 });
 
 test("uncertain side effects suppress retry and send the user to evidence", () => {

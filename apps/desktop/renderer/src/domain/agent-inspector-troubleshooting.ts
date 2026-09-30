@@ -162,6 +162,10 @@ export function projectAgentTroubleshooting(
     // The supervisor's account of the blocked message, when it has one.
     const attention = entry.deliveryAttention ?? null;
     const rereads = blocked && attention?.retry === "reread_saved_turn";
+    const posts = blocked && attention?.retry === "publish_saved_reply";
+    const skipNote = !attention ? ""
+      : attention.canSkip ? " You can also skip the message so the messages behind it can continue."
+      : attention.skipUnavailableReason ? ` Skip isn’t available: ${safeDiagnosticText(attention.skipUnavailableReason)}` : "";
     delivery = check("delivery", "Message delivery", held ? "paused" : uncertain || blocked ? "attention" : repairing || active || queued ? "pending" : "passed",
       held ? "Waiting for the agent to resume" : uncertain ? "An outcome needs verification" : repairing ? "Restoring the conversation"
       : blocked ? missing ? "Saved conversation is missing" : "A message needs attention"
@@ -175,14 +179,17 @@ export function projectAgentTroubleshooting(
         : queued ? "Messages are waiting in this agent’s inbox." : "The current inbox has no pending messages. This does not mean every earlier request succeeded."),
       uncertain ? "Open the recorded work and verify the affected operation before retrying."
       : blocked ? missing ? "Restore the conversation when available, then verify that the blocked message progresses."
-        : rereads ? "The agent already worked on this message. Read the reply again to re-check its saved answer, or skip the message so the messages behind it can continue. Neither reruns the turn."
-        : "Inspect the blocked message in Work. Retry delivery when the exact message is eligible."
+        : rereads ? `The agent already worked on this message. Read the reply again to re-check its saved answer; the turn is not rerun.${skipNote}`
+        : posts ? `The agent’s reply is saved but wasn’t posted. Post the saved reply; the provider is not asked again.${skipNote}`
+        : `Inspect the blocked message in Work. Retry delivery when the exact message is eligible.${skipNote}`
       : repairing || active || queued ? "Open Work for the message timeline, or refresh checks for the latest delivery state."
       : "If a reply is missing, open Work to see whether the message was received, completed, or published.",
       null, held || uncertain || repairing ? null : blocked ? action(missing ? "restore_conversation" : "retry_delivery") : null,
       projection.turnControl?.status === "uncertain" ? "overview" : "work");
-    if (rereads && delivery.action?.kind === "retry_delivery") {
-      delivery.actionImpact = "Read the finished turn’s saved answer again. The turn is not rerun.";
+    if (delivery.action?.kind === "retry_delivery" && (rereads || posts)) {
+      delivery.actionImpact = rereads
+        ? "Read the finished turn’s saved answer again. The turn is not rerun."
+        : "Post the saved reply to the room. The provider is not asked again.";
     }
     const skip = blocked && !held && !uncertain && !repairing ? action("skip_message") : null;
     if (skip && skip.sourceMessageId === (attention?.sourceMessageId ?? room.inbox.blockedByMessageId)) {

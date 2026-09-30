@@ -322,6 +322,7 @@ import type {
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopRoomInfo,
+  DesktopRoomAgentDeliveryAttention,
   DesktopRoomAgentWork,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
@@ -690,8 +691,10 @@ const deliveryReceiptsByMessage = computed(() => {
     terminalReason: string | null;
     attemptCount: number;
     providerTurnId: string | null;
+    retry: DesktopRoomAgentDeliveryAttention["retry"] | null;
   }>> = {};
   for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
+    const attention = entry.deliveryAttention;
     (grouped[receipt.sourceMessageId] ??= []).push({
       agentId: entry.id,
       agentName: supervisedAgentDisplayLabel(entry.displayName, entry.id),
@@ -702,6 +705,7 @@ const deliveryReceiptsByMessage = computed(() => {
       terminalReason: receipt.terminalReason,
       attemptCount: receipt.attemptCount,
       providerTurnId: receipt.providerTurnId,
+      retry: receipt.state === "blocked" && attention?.sourceMessageId === receipt.sourceMessageId ? attention.retry : null,
     });
   }
   return grouped;

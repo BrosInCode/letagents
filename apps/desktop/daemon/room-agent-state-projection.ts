@@ -268,6 +268,7 @@ export function projectRoomAgentManifestEntry(
         // Same rule as the inbox store's providerWorkStarted.
         provider_work_started: blockedHead.attempt_count !== 0 || Boolean(blockedHead.provider_turn_id || blockedHead.outcome),
         retry: blockedHead.failure_code === "provider_continuation_missing" ? "restore_conversation"
+          : hasSavedReply(blockedHead.outcome) ? "publish_saved_reply"
           : blockedHead.provider_turn_id ? "reread_saved_turn" : "start_turn",
         can_skip: Boolean(skip && skip.refusal === null),
         skip_unavailable_reason: skip?.refusal ?? null,
@@ -319,6 +320,14 @@ export function projectRoomAgentManifestEntry(
     delivery_attention: deliveryAttention,
     delivery_receipts: deliveryReceipts,
   };
+}
+
+/** A normalized reply is saved; Retry posts it without asking the provider again. */
+function hasSavedReply(outcome: string | null): boolean {
+  try {
+    const parsed = outcome ? JSON.parse(outcome) as { kind?: unknown; text?: unknown } : null;
+    return parsed?.kind === "reply" && typeof parsed.text === "string" && Boolean(parsed.text.trim());
+  } catch { return false; }
 }
 
 function deriveLiveness<T extends string>(

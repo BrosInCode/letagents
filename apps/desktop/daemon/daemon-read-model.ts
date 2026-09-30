@@ -145,10 +145,9 @@ export class DaemonReadModel {
       ? await this.ports.bindings.get(entry.id)
       : projectedBinding;
     const receipts = await this.ports.inbox.receiptProjection(entry.id);
-    const blockedHeadSkip = await this.ports.inbox.blockedHeadSkip?.(entry.id, {
-      work_attempt_id: entry.work_attempt_id ?? null,
-      provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
-    }) ?? null;
+    const blockedHeadSkip = receipts.some((receipt) => receipt.receipt_state === "blocked")
+      ? await this.ports.inbox.blockedHeadSkip?.(entry.id) ?? null
+      : null;
     const credential = bindingMatchesRoomAgentGeneration(entry, binding)
       ? await this.ports.bindings.credentialFor(binding)
       : null;

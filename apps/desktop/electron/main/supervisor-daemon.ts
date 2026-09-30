@@ -2556,7 +2556,7 @@ function projectDeliveryAttention(value: unknown): DesktopSupervisorManifestEntr
   const sourceMessageId = nonEmptyString(root.source_message_id);
   const blockedSince = nonEmptyString(root.blocked_since);
   const detail = nullableString(root.detail);
-  const retry = enumValue(root.retry, ["reread_saved_turn", "start_turn", "restore_conversation"] as const);
+  const retry = enumValue(root.retry, ["reread_saved_turn", "publish_saved_reply", "start_turn", "restore_conversation"] as const);
   const skipUnavailableReason = nullableString(root.skip_unavailable_reason);
   if (!reason || !sourceMessageId || !blockedSince || detail === undefined || !retry || skipUnavailableReason === undefined
     || typeof root.waiting_count !== "number" || !Number.isSafeInteger(root.waiting_count) || root.waiting_count < 0

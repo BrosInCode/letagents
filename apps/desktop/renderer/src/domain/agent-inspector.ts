@@ -934,8 +934,7 @@ function actionAvailability(
   const skipSourceMessageId = safeToRestoreOrSkip
     ? missingContinuationReceipt?.sourceMessageId
     : attention?.canSkip ? attention.sourceMessageId : undefined;
-  const rereadsSavedTurn = attention?.retry === "reread_saved_turn"
-    && attention.sourceMessageId === blockedReceipt?.sourceMessageId;
+  const retryKind = attention && attention.sourceMessageId === blockedReceipt?.sourceMessageId ? attention.retry : null;
   const stateDependentActionsAvailable = resourceFreshness === "fresh";
   const canStopTurn = turnControl?.canStop === true;
   const canRestartRuntime = stateDependentActionsAvailable && entry.deliveryMode === "daemon_inbox"
@@ -955,7 +954,8 @@ function actionAvailability(
     { kind: "retry_turn_control", label: "Retry previous turn control", available: stateDependentActionsAvailable && turnControl?.canRetry === true },
     {
       kind: "retry_delivery",
-      label: rereadsSavedTurn ? "Read the reply again" : "Retry delivery",
+      label: retryKind === "reread_saved_turn" ? "Read the reply again"
+        : retryKind === "publish_saved_reply" ? "Post the saved reply" : "Retry delivery",
       available: Boolean(
         stateDependentActionsAvailable
         && deliveryRetryAvailable

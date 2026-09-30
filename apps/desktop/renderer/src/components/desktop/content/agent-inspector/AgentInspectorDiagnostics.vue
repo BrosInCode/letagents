@@ -58,15 +58,15 @@
           <button type="button" class="diagnostics-primary" :disabled="busy || checking" @click="runRecovery()"><Wrench :size="15" aria-hidden="true" />{{ selectedCheck.action.label }}<ArrowRight :size="15" aria-hidden="true" /></button>
         </div>
         <div v-if="selectedCheck.secondaryAction && !showRuntimeRecovery" class="diagnostics-remedy">
-          <template v-if="!confirmSkip">
+          <template v-if="skipTarget === null">
             <p>{{ selectedCheck.secondaryActionImpact }}</p>
             <button type="button" class="diagnostics-secondary" :disabled="busy || checking" @click="reviewSkip">{{ selectedCheck.secondaryAction.label }}</button>
           </template>
           <div v-else class="diagnostics-recovery-confirm diagnostics-step-content">
             <h4 ref="skipConfirmTitle" tabindex="-1">Skip this message?</h4>
             <p>{{ skipConfirmation }}</p>
-            <button type="button" class="diagnostics-primary" :disabled="busy || checking" @click="runRecovery(selectedCheck.secondaryAction)">Skip message</button>
-            <button type="button" class="diagnostics-secondary" :disabled="busy || checking" @click="confirmSkip = false">Cancel</button>
+            <button type="button" class="diagnostics-primary" :disabled="busy || checking" @click="runRecovery({ ...selectedCheck.secondaryAction, sourceMessageId: skipTarget })">Skip message</button>
+            <button type="button" class="diagnostics-secondary" :disabled="busy || checking" @click="skipTarget = null">Cancel</button>
           </div>
         </div>
         <section v-if="showRuntimeRecovery" class="diagnostics-runtime-recovery" aria-label="Runtime recovery">
@@ -180,17 +180,22 @@ type RuntimeRecoveryKind = "reconnect_runtime" | "restart_runtime" | "fresh_runt
 const runtimeChoice = ref<RuntimeRecoveryKind>("reconnect_runtime");
 const confirmRuntimeRecovery = ref(false);
 const recoveryConfirmTitle = ref<HTMLElement | null>(null);
-const confirmSkip = ref(false);
+// The confirmation belongs to the one message it named.
+const skipTarget = ref<string | null>(null);
 const skipConfirmTitle = ref<HTMLElement | null>(null);
 const skipConfirmation = computed(() => props.projection.entry.deliveryAttention?.providerWorkStarted
   ? "The agent’s turn for this message won’t be rerun, and any answer it produced will be dropped. The messages waiting behind it will continue."
   : "The agent won’t work on this message. The messages waiting behind it will continue.");
 async function reviewSkip(): Promise<void> {
-  if (props.busy || checking.value) return;
-  confirmSkip.value = true;
+  const target = selectedCheck.value?.secondaryAction?.sourceMessageId;
+  if (props.busy || checking.value || !target) return;
+  skipTarget.value = target;
   await nextTick();
   skipConfirmTitle.value?.focus({ preventScroll: true });
 }
+watch(() => selectedCheck.value?.secondaryAction?.sourceMessageId, (sourceMessageId) => {
+  if (skipTarget.value !== null && sourceMessageId !== skipTarget.value) skipTarget.value = null;
+});
 const runtimeChoices = computed(() => {
   if (!props.daemonStatus?.capabilities.agentRuntimeRecoveryV2) return [];
   const descriptions: Record<RuntimeRecoveryKind, string> = {
@@ -249,7 +254,7 @@ async function focusGuide(): Promise<void> {
 }
 function openCheck(id: DiagnosticCheckId): void {
   confirmRuntimeRecovery.value = false;
-  confirmSkip.value = false;
+  skipTarget.value = null;
   runtimeRecoveryRequested.value = false;
   refreshMessage.value = ""; refreshFailed.value = false;
   selectedId.value = id; stage.value = "resolve"; verification.value = "idle"; recoveryRequested.value = false;
@@ -266,7 +271,7 @@ function reviewCheck(): void {
 }
 function runRecovery(action = selectedCheck.value?.action): void {
   runtimeRecoveryRequested.value = false;
-  confirmSkip.value = false;
+  skipTarget.value = null;
   if (!action || props.busy || checking.value || props.projection.resourceFreshness !== "fresh") return;
   const current = props.projection.actions.find(candidate => candidate.available && candidate.kind === action.kind && candidate.sourceMessageId === action.sourceMessageId);
   if (!current) return;
@@ -310,7 +315,7 @@ watch(recoveryChecksPassed, passed => {
   }
 });
 watch([() => props.projection.entryId, () => props.projection.roomId], () => {
-  confirmRuntimeRecovery.value = false; confirmSkip.value = false; runtimeChoice.value = "reconnect_runtime";
+  confirmRuntimeRecovery.value = false; skipTarget.value = null; runtimeChoice.value = "reconnect_runtime";
   requestVersion++; selectedId.value = null; checking.value = false; refreshMessage.value = "";
   verification.value = "idle"; recoveryRequested.value = false; copyState.value = "idle"; copying.value = false;
 });

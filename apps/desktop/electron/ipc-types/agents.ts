@@ -657,8 +657,8 @@ export interface DesktopRoomAgentDeliveryAttention {
   waitingCount: number;
   /** The message reached the provider, or may have. */
   providerWorkStarted: boolean;
-  /** What Retry delivery does: re-read the saved turn (never rerun it), start the turn, or restore the conversation first. */
-  retry: "reread_saved_turn" | "start_turn" | "restore_conversation";
+  /** What Retry delivery does: re-read the saved turn (never rerun it), post the saved reply, start the turn, or restore the conversation first. */
+  retry: "reread_saved_turn" | "publish_saved_reply" | "start_turn" | "restore_conversation";
   /** The supervisor accepts Skip now. Skipping never reruns the turn and drops any answer it had. */
   canSkip: boolean;
   skipUnavailableReason: string | null;
