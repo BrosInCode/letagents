@@ -163,8 +163,8 @@ export async function seedOpenCodeConfigHome(
  * drop both.
  *
  * Only that one file is covered. OpenCode still reads what the owner keeps
- * under `~/.opencode`. Its climb out of a workspace that is not a Git
- * repository is narrowed by `workspaceOpenCodeEnvironment`.
+ * under `~/.opencode`. What it reads above a room's scratch workspace is
+ * covered by `workspaceOpenCodeEnvironment`.
  *
  * The file is made empty on every call, whatever was there. Anything else
  * at that path is replaced, not written through, so a link named `AGENTS.md`
@@ -202,17 +202,27 @@ export async function shieldOwnerInstructions(configHome: string): Promise<void>
  * Keeps OpenCode inside a room's scratch workspace.
  *
  * OpenCode looks for project files from the working directory up to the
- * root of its Git repository. A scratch workspace has no repository, so the
- * search climbs to the file system root: it reads `AGENTS.md`, `CLAUDE.md`,
- * `opencode.json` and `.opencode` directories from every directory above,
- * and the workspace lies under the owner's home. A scratch workspace has no
- * project files of its own, so the search is switched off for it.
+ * root of its Git repository. The daemon makes every scratch workspace the
+ * root of its own empty repository (`ensureScratchWorkspaceRepository` in
+ * `shared/scratch-workspace-repository.mjs`), so that search ends at the
+ * workspace. Without the repository it climbed to the file system root and
+ * imported plugins from any `.opencode` directory on the way, and plugins
+ * named by an `opencode.json` there, into the server process that holds the
+ * provider key; no launch setting stops that on 1.18.20. The repository is
+ * in the workspace and not in the `room-only` directory above it: there,
+ * every other room's workspace would be inside the project, and
+ * `external_directory: "deny"` would no longer refuse them.
  *
- * The setting does not cover plugins. OpenCode 1.18.20 has a second search
- * with no switch, and it still imports plugins from a `.opencode` directory
- * above the workspace and plugins named by an `opencode.json` there, inside
- * the server process. Only a project root at or above the workspace stops
- * that search, and for OpenCode a project root is a Git repository.
+ * The workspace still launches with project configuration switched off. It
+ * has no project files of its own to lose. If OpenCode cannot run Git, it
+ * does not see the repository and searches up to the file system root
+ * again, so the plugin boundary is not in effect; the setting then still
+ * keeps out the instruction files, agent definitions and package installs
+ * above the workspace, but not plugins. Each scratch launch checks Git with
+ * `probeScratchWorkspaceGit` and reports a problem as a launch notice, shown
+ * in the agent's activity, without failing.
+ * Neither covers a plugin in the workspace's own `.opencode` directory, or
+ * `~/.opencode`, which OpenCode reads for every workspace.
  *
  * A Git worktree is untouched: there the search stops at the repository root.
  * The kind is never guessed. A launch that does not say which it is would

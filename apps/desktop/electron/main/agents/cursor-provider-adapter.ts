@@ -1853,8 +1853,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
           // is proven do we atomically reseal the stable profile and mint the
           // real MCP child's exact turn capability.
           // Scratch attempts already run in a disposable room-only workspace. A
-          // Git-backed generation here would either fail for the ordinary
-          // non-repository directory or walk up into an unrelated owner repo.
+          // Git-backed generation here would fail: the workspace's own
+          // repository is empty and has no commit to pin.
           if (
             roomTurnId
             && cursorPermissionUsesWorkspaceGeneration(handle.spawnRequest.permissionProfileId)

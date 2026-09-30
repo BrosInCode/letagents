@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../../shared/provider-acquisition-evidence.mjs";
 
 import { supervisedProviderLabel } from "./cloud-http.js";
+import { sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import {
@@ -35,6 +36,7 @@ import {
   assertSupervisedRentalPermissionProfileAvailable,
 } from "./supervised-permission-profiles.js";
 import type {
+  DaemonActivityEvent,
   DaemonManifestEntry,
   ExecutionTerminalPayload,
   TaskWorkAttempt,
@@ -64,6 +66,8 @@ import { matchesPollingActivationRuntime, type PollingActivationRecord } from ".
 // runtime that stays unattachable costs one cheap check per half hour.
 const UNATTACHABLE_GENERATION_RECHECK_MS = 60_000;
 const UNATTACHABLE_GENERATION_RECHECK_MAX_MS = 30 * 60_000;
+const WORKSPACE_REPOSITORY_RETRY_MS = 5_000;
+const WORKSPACE_REPOSITORY_RETRY_MAX_MS = 5 * 60_000;
 const UNATTACHABLE_GENERATION_CAUSE = "durable execution generation remains live without an attachable provider handle";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
@@ -244,7 +248,7 @@ export type ProviderExecutionCoordinatorOptions = {
     clearSuccessfulRecovery(entryId: string): void;
   };
   workspace: {
-    ephemeral: Pick<EphemeralWorkspaceProvisioner, "provision">;
+    ephemeral: Pick<EphemeralWorkspaceProvisioner, "provision" | "ensureRepository">;
     git: Pick<WorkspaceProvisioner, "provision">;
     gitCommand: GitCommand;
   };
@@ -273,6 +277,7 @@ export class ProviderExecutionCoordinator {
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly recoveryDueAtMs = new Map<string, number>();
   private readonly unattachableRechecks = new Map<string, number>();
+  private readonly workspaceRepositoryRetries = new Map<string, number>();
   private readonly dispatchReservations = new Map<Promise<void>, string>();
   private readonly activeDispatches = new Map<symbol, DispatchReservation>();
   private fatalDispatchError: unknown = null;
@@ -393,6 +398,7 @@ export class ProviderExecutionCoordinator {
     this.recoveryTimers.clear();
     this.recoveryDueAtMs.clear();
     this.unattachableRechecks.clear();
+    this.workspaceRepositoryRetries.clear();
   }
 
   async drainDispatches(entryIds?: readonly string[]): Promise<void> {
@@ -447,6 +453,31 @@ export class ProviderExecutionCoordinator {
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch
       || current?.desired_state !== "running") return null;
     return current;
+  }
+
+  /**
+   * Puts a provider's launch warnings in the agent's activity, which the
+   * agent inspector shows, instead of only in the daemon's discarded output.
+   */
+  private async recordLaunchNotices(entryId: string, notices: readonly string[]): Promise<void> {
+    await this.options.updateManifestEntry(entryId, (current) => {
+      let sequence = current.activity?.at(-1)?.sequence ?? 0;
+      const observedAt = new Date(this.options.nowMs()).toISOString();
+      const events = notices.map((notice): DaemonActivityEvent => sanitizeDaemonActivityEvent({
+        observed_at: observedAt,
+        sequence: ++sequence,
+        provider: current.provider,
+        kind: "launch_notice",
+        method: "workspace_boundary",
+        summary: notice.slice(0, 500),
+        status: "idle",
+        payload: { notice },
+        payload_truncated: false,
+        payload_redacted: false,
+        durable_payload_ref: null,
+      }));
+      return { ...current, activity: [...(current.activity ?? []), ...events].slice(-200) };
+    });
   }
 
   async ensureWorkAttempt(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
@@ -1038,6 +1069,7 @@ export class ProviderExecutionCoordinator {
     let entry = await this.options.store.getEntry(entryId);
     if (!entry) {
       this.failedLaunchAdmissions.delete(entryId);
+      this.workspaceRepositoryRetries.delete(entryId);
       return;
     }
     let launchControlEpoch = this.options.concurrency.currentControlEpoch(entryId);
@@ -1060,6 +1092,8 @@ export class ProviderExecutionCoordinator {
       return;
     }
     this.failedLaunchAdmissions.delete(entryId);
+    // A stopped agent starts its next attempt at the shortest wait.
+    this.workspaceRepositoryRetries.delete(entryId);
     await this.convergeStopped(entry);
   }
 
@@ -1450,6 +1484,32 @@ export class ProviderExecutionCoordinator {
       const grant = this.options.host.currentGrant(entry);
       if (!grant || !await this.options.authority.ownsDaemonGeneration(grant.daemonGeneration)) return;
     }
+    if (isEphemeralWorkspaceMarker(attempt.workspace_identity)) {
+      // A room-only workspace made by an older version gets its own
+      // repository before any provider starts in it. This runs before the
+      // entry says "starting": a failure is reported and retried, instead of
+      // leaving the agent starting with nothing to wake it.
+      try {
+        await this.options.workspace.ephemeral.ensureRepository(attempt.workspace_path);
+        this.workspaceRepositoryRetries.delete(entry.id);
+      } catch (error) {
+        const retries = (this.workspaceRepositoryRetries.get(entry.id) ?? 0) + 1;
+        this.workspaceRepositoryRetries.set(entry.id, retries);
+        const delayMs = Math.min(
+          WORKSPACE_REPOSITORY_RETRY_MS * 2 ** Math.min(retries - 1, 10),
+          WORKSPACE_REPOSITORY_RETRY_MAX_MS,
+        );
+        await this.options.transition(
+          entry.id,
+          "failed",
+          "coordination_blocked",
+          `Could not prepare the agent's room-only workspace (${error instanceof Error ? error.message : String(error)}). Retrying in ${Math.round(delayMs / 1000)} seconds.`,
+          "daemon-convergence",
+        );
+        this.scheduleRecovery(entry.id, delayMs);
+        return;
+      }
+    }
     await this.options.transition(
       entry.id,
       entry.provider_ref ? "recovering" : "starting",
@@ -1642,6 +1702,7 @@ export class ProviderExecutionCoordinator {
           // Its successor can reconcile the secondary attempt checkpoint from
           // that durable manifest without extending the handoff boundary.
           if (this.options.authority.isHandoffScheduled()) return;
+          if (handle.launchNotices?.length) await this.recordLaunchNotices(entry.id, handle.launchNotices);
           await this.options.durability.checkpoint(attempt.work_attempt_id, {
             room_cursor: launchConfiguration.polling_contract
               ? spawn.supervisorWorkerSession?.roomCursor ?? null

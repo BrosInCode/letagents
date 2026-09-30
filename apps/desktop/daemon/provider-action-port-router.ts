@@ -33,6 +33,7 @@ type NativeHandle = {
   pid: number | null;
   providerContinuationId: string | null;
   providerConnection?: ProviderActionHandle["providerConnection"];
+  launchNotices?: readonly string[];
   observedState(): ProviderActionHandle["observedState"];
 };
 
@@ -86,6 +87,7 @@ function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: numbe
     get providerConnection() { return handle.providerConnection ?? null; },
     ...(appliedConfigurationRevision === undefined ? {} : { appliedConfigurationRevision }),
     ...(handle.custodyLaunchAgentSessionId === undefined ? {} : { custodyLaunchAgentSessionId: handle.custodyLaunchAgentSessionId }),
+    ...(handle.launchNotices?.length ? { launchNotices: [...handle.launchNotices] } : {}),
     get observedState() { return handle.observedState(); },
   };
 }

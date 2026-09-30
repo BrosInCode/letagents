@@ -325,7 +325,10 @@ function harness(input: {
       clearSuccessfulRecovery: () => {},
     },
     workspace: {
-      ephemeral: { provision: async () => { throw new Error("unused"); } },
+      ephemeral: {
+        provision: async () => { throw new Error("unused"); },
+        ensureRepository: async () => "present" as const,
+      },
       git: { provision: async () => { throw new Error("unused"); } },
       gitCommand: async () => "",
     },
@@ -830,22 +833,73 @@ for (const { label, entryPatch, workspaceIdentity, expectedWorkspaceKind } of [
 ] as const) {
   test(`provider births declare the ${label} boundary as ${expectedWorkspaceKind}`, async () => {
     let workspaceKind: "git_worktree" | "room_scratch" | undefined;
+    const events: string[] = [];
     const runtime = harness({
       entry: { ...baseEntry(), ...entryPatch },
       workspaceIdentity,
       provider: provider({
         spawn: async request => {
           workspaceKind = request.workspaceKind;
+          events.push(`spawn:${request.cwd}`);
           return returnedHandle;
         },
       }),
     });
+    runtime.options.workspace.ephemeral.ensureRepository = async (path) => {
+      events.push(`repository:${path}`);
+      return "created";
+    };
 
     await runtime.coordinator.converge("agent-1");
 
     assert.equal(workspaceKind, expectedWorkspaceKind);
+    const cwd = events.at(-1)?.slice("spawn:".length);
+    // Existing room-only workspaces are upgraded before a provider starts in them.
+    assert.deepEqual(events, expectedWorkspaceKind === "room_scratch"
+      ? [`repository:${cwd}`, `spawn:${cwd}`]
+      : [`spawn:${cwd}`]);
   });
 }
+
+test("a room-only workspace whose repository cannot be written reports it, never says starting, and retries", async () => {
+  let launches = 0;
+  const runtime = harness({
+    entry: { ...baseEntry(), source_repo_path: null },
+    workspaceIdentity: scratchWorkspaceIdentity,
+    provider: provider({ spawn: async () => { launches++; return returnedHandle; } }),
+  });
+  const states: string[] = [];
+  const transition = runtime.options.transition;
+  runtime.options.transition = async (...args) => { states.push(args[1]); return transition(...args); };
+  let failures = 1;
+  runtime.options.workspace.ephemeral.ensureRepository = async () => {
+    if (failures-- > 0) throw new Error("EROFS: read-only file system");
+    return "created";
+  };
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+    setTimeout: ((callback: () => void, delay: number) => {
+      timers.push({ callback, delay });
+      return { unref() {} };
+    }) as unknown as typeof setTimeout,
+    clearTimeout: (() => {}) as typeof clearTimeout,
+  });
+
+  await coordinator.converge("agent-1");
+
+  assert.equal(launches, 0);
+  assert.equal(runtime.executionGenerations.length, 0, "no execution generation starts for a launch that cannot happen");
+  assert.deepEqual(states, ["failed"], "the entry never claims to be starting");
+  assert.equal(runtime.entry().observed_state, "failed");
+  assert.equal(runtime.entry().condition, "coordination_blocked");
+  assert.equal(runtime.entry().last_error,
+    "Could not prepare the agent's room-only workspace (EROFS: read-only file system). Retrying in 5 seconds.");
+  assert.deepEqual(timers.map((timer) => timer.delay), [5_000]);
+
+  timers[0].callback();
+  await coordinator.drainConvergence();
+  assert.equal(launches, 1, "the retry launches once the workspace can be prepared");
+});
 
 for (const { label, providerId, handle } of [
   { label: "Codex", providerId: "codex", handle: returnedHandle },
@@ -1686,4 +1740,62 @@ test("failed attach closure is retried from durable terminal without reattaching
   assert.equal(await runtime.coordinator.attachLiveProvider(entry), null);
   assert.equal(closes, 2); assert.equal(attaches, 1); assert.equal(runtime.terminalWrites.length, 1);
   assert.equal(releases, 1, "retry completes the release interrupted by the failed closure");
+});
+
+test("room-only workspace retries back off, cap at five minutes, and start over after success or Stop", async () => {
+  const runtime = harness({
+    entry: { ...baseEntry(), source_repo_path: null },
+    workspaceIdentity: scratchWorkspaceIdentity,
+    // The provider never comes up, so every convergence tries a fresh launch.
+    provider: provider({ spawn: async () => { throw new Error("provider bootstrap failed"); } }),
+  });
+  let failing = true;
+  runtime.options.workspace.ephemeral.ensureRepository = async () => {
+    if (failing) throw new Error("EACCES");
+    return "present";
+  };
+  const delays: number[] = [];
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+    setTimeout: ((_callback: () => void, delay: number) => { delays.push(delay); return { unref() {} }; }) as unknown as typeof setTimeout,
+    clearTimeout: (() => {}) as typeof clearTimeout,
+  });
+  const attempt = async () => {
+    coordinator.clearRecovery("agent-1");
+    await coordinator.converge("agent-1").catch(() => {});
+  };
+
+  for (let index = 0; index < 9; index++) await attempt();
+  assert.deepEqual(delays, [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000]);
+  assert.match(runtime.entry().last_error ?? "", /Retrying in 300 seconds\.$/);
+
+  // A success starts the count over.
+  failing = false;
+  await attempt();
+  failing = true;
+  delays.length = 0;
+  await attempt();
+  assert.deepEqual(delays, [5_000]);
+
+  // So does Stop.
+  await attempt();
+  assert.deepEqual(delays, [5_000, 10_000]);
+  runtime.setEntry({ ...runtime.entry(), desired_state: "stopped" });
+  await coordinator.converge("agent-1");
+  runtime.setEntry({ ...runtime.entry(), desired_state: "running" });
+  delays.length = 0;
+  await attempt();
+  assert.deepEqual(delays, [5_000]);
+});
+
+test("a provider's launch notices are recorded in the agent's activity", async () => {
+  const runtime = harness({
+    entry: { ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", source_repo_path: null },
+    workspaceIdentity: scratchWorkspaceIdentity,
+    provider: provider({ spawn: async () => ({ ...openModelHandle, launchNotices: ["Plugin boundary not in effect: no git on the launch's PATH."] }) }),
+  });
+  await runtime.coordinator.converge("agent-1");
+  const notices = (runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice");
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0]!.summary, "Plugin boundary not in effect: no git on the launch's PATH.");
+  assert.equal(notices[0]!.method, "workspace_boundary");
 });

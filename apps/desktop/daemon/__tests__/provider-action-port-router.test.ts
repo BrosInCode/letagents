@@ -1730,3 +1730,15 @@ test("Claude permissions route exact native turn evidence and one-shot dispatch"
   } }), /binding changed/);
   assert.equal(calls.filter(value => value === "send").length, 1);
 });
+
+test("a provider's launch notices reach the daemon with its handle", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const spawn = adapter.spawn.bind(adapter);
+  adapter.spawn = async (request) => Object.assign(await spawn(request), { launchNotices: ["Plugin boundary not in effect: no git."] });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "notice", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  assert.deepEqual(handle.launchNotices, ["Plugin boundary not in effect: no git."]);
+  const quiet = await new ProviderActionPortRouter({ codex: async () => fakeAdapter("codex", []) })
+    .spawn({ provider: "codex", workAttemptId: "quiet", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  assert.equal(quiet.launchNotices, undefined);
+});

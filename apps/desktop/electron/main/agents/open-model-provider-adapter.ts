@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { probeScratchWorkspaceGit } from "../../../../../shared/scratch-workspace-repository.mjs";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
 import {
   ProviderContinuationMissingError,
@@ -111,6 +112,8 @@ export interface OpenModelProviderAdapterDependencies {
   discoverRuntimeConnection(runtimeRoot: string): Promise<{ pid: number; url: string } | null>;
   fetch(input: string, init?: RequestInit): Promise<Response>;
   now(): string;
+  /** Null when Git, run with the launch's environment, takes the workspace as a repository. */
+  probeGit(workspace: string, environment: NodeJS.ProcessEnv): Promise<string | null>;
 }
 
 export interface OpenModelProviderAdapterOptions {
@@ -453,6 +456,7 @@ const defaultDependencies: OpenModelProviderAdapterDependencies = {
   observeProcessExit: defaultObserveProcessExit,
   signalProcess: defaultSignalProcess,
   allocatePort: defaultAllocatePort,
+  probeGit: (workspace, environment) => probeScratchWorkspaceGit(workspace, environment),
   discoverRuntimeConnection: defaultDiscoverRuntimeConnection,
   fetch: (input, init) => fetch(input, init),
   now: () => new Date().toISOString(),
@@ -471,6 +475,7 @@ class OpenModelHandle implements ProviderHandle {
   readonly execution: ProviderExecutionObserver;
   controlLoss: HardControlEvidence | null = null;
   observedTurn: { id: string; terminal: TurnOutcome | "lost" | null } | null = null;
+  launchNotices: readonly string[] = [];
 
   constructor(
     readonly workAttemptId: string,
@@ -570,6 +575,24 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       this.spawnWithRuntimeOwnership(req, lifecycleAuthorityMode, credential, runtimeRoot));
   }
 
+  /**
+   * A scratch workspace's repository keeps OpenCode from importing plugins
+   * above it only if Git, run as OpenCode will run it, reads the repository.
+   * This never fails the launch. A problem comes back as an owner-visible
+   * launch notice, which the daemon records in the agent's activity.
+   */
+  private async checkScratchWorkspaceBoundary(
+    workspace: string,
+    runtimeRoot: string,
+    env: NodeJS.ProcessEnv,
+  ): Promise<string | null> {
+    const problem = await this.deps.probeGit(workspace, env)
+      .catch((error: unknown) => `git check failed: ${String(error)}`);
+    if (!problem) return null;
+    console.warn("[open_model_workspace_boundary]", JSON.stringify({ runtimeRoot, detail: problem }));
+    return `Plugin boundary not in effect: ${problem}. OpenCode cannot see this room's workspace repository, so plugins in folders above the workspace can load into it.`;
+  }
+
   private async spawnWithRuntimeOwnership(
     req: ProviderSpawnRequest,
     lifecycleAuthorityMode: NonNullable<ProviderSpawnRequest["lifecycleAuthorityMode"]>,
@@ -648,6 +671,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
       ...workspaceEnvironment,
     });
+    const launchNotice = req.workspaceKind === "room_scratch"
+      ? await this.checkScratchWorkspaceBoundary(req.cwd, runtimeRoot, env)
+      : null;
     const intentControl: OpenCodeRuntimeControl = {
       ...initialControl,
       startupIntent: { url },
@@ -746,6 +772,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       this.deps.now,
     );
     handle.nativeOrderingVerified = true;
+    if (launchNotice) handle.launchNotices = [launchNotice];
     this.handles.set(req.workAttemptId, handle);
     this.observeTerminal(handle, launch.exited);
     this.emitRuntimeReady(handle);

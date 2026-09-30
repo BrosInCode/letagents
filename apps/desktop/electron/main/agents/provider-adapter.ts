@@ -304,6 +304,8 @@ export interface ProviderHandle {
   readonly providerContinuationId: string | null;
   /** Persist this with the continuation so a fresh adapter can verify/reattach. */
   readonly providerConnection?: ProviderConnectionRef | null;
+  /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
+  readonly launchNotices?: readonly string[];
   observedState(): ProviderObservedState;
 }
 
