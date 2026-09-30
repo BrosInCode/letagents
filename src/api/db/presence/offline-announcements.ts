@@ -25,6 +25,11 @@ export interface LivenessAnnouncementCandidate {
   runtime_last_active_at: string | null;
   /** Native harness axis only; never inferred from MCP/tool traffic. */
   native_last_active_at?: string | null;
+  /**
+   * Tasks this worker session holds an active work lease on. Only these make
+   * an outage worth a room message; missing means none.
+   */
+  active_work_task_ids?: string[];
 }
 
 const runtimeLastActiveAt = sql<string | null>`(
@@ -35,12 +40,22 @@ const runtimeLastActiveAt = sql<string | null>`(
     AND o.source = 'native_harness'
 )`;
 
+const activeWorkTaskIds = sql<string[]>`COALESCE((
+  SELECT array_agg(l.task_id ORDER BY l.task_id)
+  FROM task_leases l
+  WHERE l.room_id = ${room_agent_delivery_sessions.room_id}
+    AND l.agent_session_id = ${room_agent_delivery_sessions.agent_session_id}
+    AND l.kind = 'work'
+    AND l.status = 'active'
+), ARRAY[]::text[])`;
+
 const candidateSelection = {
   session: room_agent_delivery_sessions,
   agent_session_ended_at: room_agent_sessions.ended_at,
   supervisor_managed: sql<boolean>`${room_agent_sessions.supervisor_grant_id} IS NOT NULL`,
   runtime_last_active_at: runtimeLastActiveAt,
   native_last_active_at: runtimeLastActiveAt,
+  active_work_task_ids: activeWorkTaskIds,
 };
 
 function toCandidate(row: {
@@ -49,6 +64,7 @@ function toCandidate(row: {
   supervisor_managed: boolean;
   runtime_last_active_at: string | null;
   native_last_active_at: string | null;
+  active_work_task_ids: string[] | null;
 }): LivenessAnnouncementCandidate {
   return {
     session: toRoomAgentDeliverySession(row.session as RoomAgentDeliverySessionRow),
@@ -56,6 +72,7 @@ function toCandidate(row: {
     supervisor_managed: Boolean(row.supervisor_managed),
     runtime_last_active_at: row.runtime_last_active_at ?? null,
     native_last_active_at: row.native_last_active_at ?? null,
+    active_work_task_ids: row.active_work_task_ids ?? [],
   };
 }
 

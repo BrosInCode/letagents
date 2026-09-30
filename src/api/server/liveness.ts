@@ -103,8 +103,6 @@ const livenessSweeper = createLivenessSweeper({
   getCandidate: getLivenessAnnouncementCandidate,
   rescheduleCandidate: rescheduleLivenessAnnouncementCandidate,
   getSuppressedActorLabels: getRoomLiveAgentSuppressionActorLabels,
-  getActiveBoardManagerSessionId: async (roomId) =>
-    (await getActiveBoardManager(roomId))?.agent_session_id ?? null,
   getRoomContexts: getLivenessRoomContexts,
   announceOffline,
   announceRecovery,

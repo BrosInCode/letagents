@@ -15,12 +15,14 @@ import {
 export const CHANNEL_STALE_AFTER_MS = 2 * 60 * 1000;
 
 /**
- * A worker must be unreachable for this long before the room hears about it.
- * Keeping the visible grace separate from CHANNEL_STALE_AFTER_MS prevents an
- * ordinary tool/test gap from looking like a death while preserving internal
- * reachability state for routing and diagnostics.
+ * A worker holding task work must be unreachable for this long before the
+ * room hears about it. Plain presence changes are never posted: the roster
+ * shows who is connected, and a sleeping laptop or a long tool run is not
+ * worth a room message. Only claimed work going quiet is. Keeping the visible
+ * grace separate from CHANNEL_STALE_AFTER_MS preserves internal reachability
+ * state for routing and diagnostics.
  */
-export const OFFLINE_ANNOUNCE_AFTER_MS = 5 * 60 * 1000;
+export const OFFLINE_ANNOUNCE_AFTER_MS = 30 * 60 * 1000;
 
 /**
  * Never announce sessions whose last activity is older than this. Bounds
@@ -29,6 +31,9 @@ export const OFFLINE_ANNOUNCE_AFTER_MS = 5 * 60 * 1000;
 export const OFFLINE_ANNOUNCE_MAX_AGE_MS = 60 * 60 * 1000;
 
 export const LIVENESS_SWEEP_INTERVAL_MS = 60 * 1000;
+
+/** Recheck cadence for an unreachable worker holding no work (it may still claim some). */
+export const NO_WORK_RECHECK_MS = 5 * 60 * 1000;
 
 /** Resolve the API's optional visible-notice override, falling back safely. */
 export function resolveOfflineAnnounceAfterMs(value: string | undefined): number {
@@ -49,13 +54,14 @@ export type LivenessRuntimeEvidence = "none" | "stale";
 export interface LivenessTransition {
   kind: "offline" | "recovered";
   session: RoomAgentDeliverySession;
+  /** Active work leases the offline agent still holds; empty for recoveries. */
+  work_task_ids: readonly string[];
   offline_for_ms: number;
   /**
-   * "none": the agent reports no runtime telemetry (raw MCP worker) — the
-   * silent channel is the only signal, so the announcement says activity is
-   * unknown. "stale": runtime telemetry exists but has also gone quiet — a
-   * stronger death signal. Agents whose runtime is demonstrably ACTIVE are
-   * never selected at all.
+   * Diagnostic only; the announcement text does not use it. "none": the
+   * agent reports no runtime telemetry (raw MCP worker). "stale": runtime
+   * telemetry exists but has also gone quiet. Agents whose runtime is
+   * demonstrably ACTIVE are never selected at all.
    */
   runtime_evidence: LivenessRuntimeEvidence;
   runtime_inactive_for_ms: number | null;
@@ -143,11 +149,19 @@ export function selectLivenessTransitions(input: {
         transitions.push({
           kind: "recovered",
           session,
+          work_task_ids: [],
           offline_for_ms: 0,
           runtime_evidence: "none",
           runtime_inactive_for_ms: null,
         });
       }
+      continue;
+    }
+
+    // Presence alone is roster state, not room news. An absent agent only
+    // matters to the room when it still holds task work.
+    const workTaskIds = candidate.active_work_task_ids ?? [];
+    if (workTaskIds.length === 0) {
       continue;
     }
 
@@ -181,6 +195,7 @@ export function selectLivenessTransitions(input: {
     transitions.push({
       kind: "offline",
       session,
+      work_task_ids: workTaskIds,
       offline_for_ms: offlineForMs,
       runtime_evidence: runtimeLastActiveAt === null ? "none" : "stale",
       runtime_inactive_for_ms: runtimeLastActiveAt === null ? null : now - runtimeLastActiveAt,
@@ -190,30 +205,26 @@ export function selectLivenessTransitions(input: {
   return transitions;
 }
 
+const MAX_NAMED_WORK_TASKS = 3;
+
+function formatWorkTasks(taskIds: readonly string[]): string {
+  const named = taskIds.slice(0, MAX_NAMED_WORK_TASKS).join(", ");
+  const more = taskIds.length - MAX_NAMED_WORK_TASKS;
+  return more > 0 ? `${named} and ${more} more` : named;
+}
+
 export function buildOfflineAnnouncementText(input: {
   session: Pick<RoomAgentDeliverySession, "actor_label" | "display_name">;
+  work_task_ids: readonly string[];
   offline_for_ms: number;
-  is_board_manager: boolean;
-  runtime_evidence: LivenessRuntimeEvidence;
-  runtime_inactive_for_ms: number | null;
 }): string {
   const label = getAgentPrimaryLabel(input.session.actor_label) || input.session.display_name;
   const offlineFor = formatOfflineDuration(input.offline_for_ms);
-  // Transport loss stays visible, but it is never claimed as death: the
-  // ledger's generic presence writes default last_tool_call_at, so even
-  // "stale" evidence cannot prove a stopped runtime — it only adds the
-  // last-seen datapoint. Taking over someone's work is a lease decision,
+  // Transport loss is never claimed as death: the ledger's generic presence
+  // writes default last_tool_call_at, so even stale runtime evidence cannot
+  // prove a stopped runtime. Taking over someone's work is a lease decision,
   // not a reflex.
-  const staleNote =
-    input.runtime_evidence === "stale"
-      ? ` No activity has been reported by its agent app for ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)} either. This does not confirm that it has stopped.`
-      : "";
-  const base = `[status] ${label} has not connected to the room for ${offlineFor} and may still be working.${staleNote} Do not take over its work based on this notice. Reassign only after the agent or its current supervisor confirms it has stopped and the task assignment has been transferred, or when a human explicitly directs the transfer.`;
-  if (!input.is_board_manager) {
-    return base;
-  }
-
-  return `${base} ${label} holds the Board Manager role, so approval requests and task creation are waiting until it returns or the role is reassigned.`;
+  return `[status] ${label} has been offline for ${offlineFor} while holding ${formatWorkTasks(input.work_task_ids)}. It may still be working; reassign only after it or its supervisor confirms it has stopped, or a human directs the transfer.`;
 }
 
 export function buildRecoveryAnnouncementText(input: {
@@ -245,10 +256,8 @@ export interface LivenessSweeperDeps {
     next_check_at: string | null;
   }): Promise<void>;
   getSuppressedActorLabels(roomId: string): Promise<ReadonlySet<string>>;
-  getActiveBoardManagerSessionId(roomId: string): Promise<string | null>;
   getRoomContexts?(roomIds: readonly string[]): Promise<ReadonlyMap<string, {
     suppressed_actor_labels: ReadonlySet<string>;
-    active_manager_session_id: string | null;
   }>>;
   /**
    * Post the announcement AND persist its marker atomically (one DB
@@ -287,7 +296,6 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
     roomId: string,
     selected: LivenessTransition,
     suppressedActors: ReadonlySet<string>,
-    managerSessionId: string | null,
     now: number,
     summary: LivenessSweepSummary
   ): Promise<void> {
@@ -319,12 +327,8 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
         delivery_key: session.delivery_key,
         text: buildOfflineAnnouncementText({
           session,
+          work_task_ids: transition.work_task_ids,
           offline_for_ms: transition.offline_for_ms,
-          is_board_manager: Boolean(
-            managerSessionId && session.agent_session_id === managerSessionId
-          ),
-          runtime_evidence: transition.runtime_evidence,
-          runtime_inactive_for_ms: transition.runtime_inactive_for_ms,
         }),
         client_message_id: `agent_liveness:offline:${session.delivery_key}:${epoch}`,
         announced_at: announcedAt,
@@ -350,7 +354,6 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
     summary: LivenessSweepSummary,
     prefetchedContext?: {
       suppressed_actor_labels: ReadonlySet<string>;
-      active_manager_session_id: string | null;
     },
   ): Promise<void> {
     const suppressedActors = prefetchedContext?.suppressed_actor_labels
@@ -375,6 +378,15 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
           const announcedAt = parseTime(session.offline_announced_at);
           if (isRoomAgentDeliverySessionReachable(session, now)) {
             nextCheckAt = new Date(now + offlineAnnounceAfterMs).toISOString();
+          } else if ((candidate.active_work_task_ids ?? []).length === 0) {
+            // Nothing to announce now. A reconnect or heartbeat re-arms the
+            // check through the delivery trigger, but a lease claimed over
+            // HTTP does not touch the delivery row, so keep a sparse
+            // fallback until the announce window closes.
+            const fallbackAt = now + NO_WORK_RECHECK_MS;
+            nextCheckAt = lastSeenAt !== null && fallbackAt < lastSeenAt + OFFLINE_ANNOUNCE_MAX_AGE_MS
+              ? new Date(fallbackAt).toISOString()
+              : null;
           } else if (lastSeenAt !== null && now - lastSeenAt < offlineAnnounceAfterMs) {
             nextCheckAt = new Date(lastSeenAt + offlineAnnounceAfterMs).toISOString();
           } else {
@@ -401,12 +413,9 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
       return;
     }
 
-    const managerSessionId = prefetchedContext
-      ? prefetchedContext.active_manager_session_id
-      : await deps.getActiveBoardManagerSessionId(roomId);
     for (const transition of transitions) {
       try {
-        await processTransition(roomId, transition, suppressedActors, managerSessionId, now, summary);
+        await processTransition(roomId, transition, suppressedActors, now, summary);
       } catch (error) {
         summary.failed_transitions += 1;
         deps.onError?.(roomId, error);
