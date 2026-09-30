@@ -11,6 +11,7 @@ import type {
   DesktopTaskSummary,
 } from "../../../../../../electron/ipc-types";
 import { presentDesktopGitHubEvent } from "../room-events/presenter";
+import { roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export type DesktopInboxFilter = "actionable" | "all";
 
@@ -178,8 +179,8 @@ function threadInboxItems(
     .map(({ root, summary }) => ({
       id: `thread:${root.id}`,
       kind: "thread" as const,
-      title: (root.displayText || root.text).trim() || "Thread",
-      preview: (summary.latestReply?.displayText || summary.latestReply?.text)?.trim() || null,
+      title: roomMessageVisibleText(root, null).trim() || "Thread",
+      preview: summary.latestReply ? roomMessageVisibleText(summary.latestReply, null).trim() || null : null,
       context: summary.latestReply ? `Latest reply from ${summary.latestReply.sender}` : null,
       timestamp: summary.latestReply?.timestamp || root.timestamp || null,
       firstSeenTimestamp: root.timestamp || null,
@@ -317,7 +318,7 @@ function threadActivity(
       ? {
           id: `thread-reply:${summary.latestReply.id}`,
           label: `Latest reply from ${summary.latestReply.sender}`,
-          description: (summary.latestReply.displayText || summary.latestReply.text)?.trim() || null,
+          description: roomMessageVisibleText(summary.latestReply, null).trim() || null,
           timestamp: summary.latestReply.timestamp,
           tone: summary.unreadCount > 0 || summary.hasUnread ? "new" : "neutral",
         }
@@ -325,7 +326,7 @@ function threadActivity(
     {
       id: `thread-root:${root.id}`,
       label: `Thread started by ${root.sender}`,
-      description: (root.displayText || root.text).trim() || null,
+      description: roomMessageVisibleText(root, null).trim() || null,
       timestamp: root.timestamp || null,
       tone: "neutral",
     },

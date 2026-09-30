@@ -26,7 +26,7 @@ export const attentionResponseAgentNamesKey: InjectionKey<Readonly<Ref<ReadonlyM
  * room reads it as a reply to the agent by name instead.
  */
 export function roomMessageVisibleText(
-  message: { text: string; displayText?: string | null; source: string | null },
+  message: { text: string; displayText?: string | null; source?: string | null },
   agentNames: ReadonlyMap<string, string> | null | undefined,
 ): string {
   if (message.displayText) return message.displayText;

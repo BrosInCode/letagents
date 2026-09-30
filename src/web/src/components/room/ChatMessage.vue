@@ -353,7 +353,10 @@ const threadLatestDisplayName = computed(() => {
   if (!sender) return 'Latest'
   return parseAgentIdentity(sender).displayName || sender
 })
-const threadLatestPreview = computed(() => getReplyPreviewText(props.thread?.latest))
+const threadLatestPreview = computed(() => getReplyPreviewText(props.thread?.latest && {
+  ...props.thread.latest,
+  display_text: messageDisplayText(props.thread.latest, props.agentNames),
+}))
 const threadActionLabel = computed(() => `Open ${threadLabel.value}`)
 
 const reasoningTitle = computed(() =>

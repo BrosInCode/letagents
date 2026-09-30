@@ -1002,37 +1002,84 @@ test("a GitHub update in the composer steps aside while a message is being writt
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;
 });
 
-test("a person's Needs-you answer reads as a reply to the agent by name", async () => {
-  const answer = {
-    ...message("msg_161"),
-    sender: "EmmyMay",
-    text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted. Post each verdict as a PR comment.",
+const needsYouAnswerText = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted. Post each verdict as a PR comment.";
+
+/** Mounts a component the way RoomChatView does: with the room's agent names provided. */
+function mountWithAgentNames(component: object, props: Record<string, unknown>, named = true) {
+  const root = hostNode("element", "root");
+  const app = renderer.createApp({
+    setup() {
+      if (named) {
+        Vue.provide(attentionResponse.attentionResponseAgentNamesKey, Vue.ref(attentionResponse.attentionResponseAgentNames([
+          { agentKey: "EmmyMay/desktop-cursor-5849cfa6", displayName: "SummitMisty" },
+        ])));
+      }
+      return () => Vue.h(component, props);
+    },
+  });
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.mount(root);
+  return { root, app };
+}
+
+function renderedMessage(messageOverrides: Record<string, unknown>, named = true): { html: string; text: string } {
+  const { root, app } = mountWithAgentNames(DesktopChatMessage, {
+    message: { ...message("msg_161"), sender: "EmmyMay", text: needsYouAnswerText, ...messageOverrides },
+    threadSummary: emptyThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
+  }, named);
+  const nodes = descendants(root);
+  const result = {
+    html: nodes.map(node => String(node.props.innerHTML ?? "")).join(""),
+    text: nodes.map(node => node.text).join(" "),
   };
-  const rendered = (names: ReadonlyMap<string, string> | null) => {
-    const root = hostNode("element", "root");
-    const app = renderer.createApp({
-      setup() {
-        if (names) Vue.provide(attentionResponse.attentionResponseAgentNamesKey, Vue.ref(names));
-        return () => Vue.h(DesktopChatMessage, {
-          message: answer, threadSummary: emptyThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
-        });
-      },
-    });
-    app.provide(ssrContextKey, { modules: new Set<string>() });
-    app.mount(root);
-    const html = descendants(root).map(node => String(node.props.innerHTML ?? "")).join("");
-    app.unmount();
-    return html;
-  };
-  const named = rendered(attentionResponse.attentionResponseAgentNames([
-    { agentKey: "EmmyMay/desktop-cursor-5849cfa6", displayName: "SummitMisty" },
-  ]));
+  app.unmount();
+  return result;
+}
+
+test("a person's Needs-you answer reads as a reply to the agent by name", () => {
+  const named = renderedMessage({}).html;
   assert.match(named, /<span class="mention-token">@SummitMisty<\/span> Noted\. Post each verdict as a PR comment\./);
   assert.doesNotMatch(named, /@agent:|desktop-cursor|Human response|summitmisty-gh-app/);
-  // Outside a room roster the answer still reads cleanly, without the handle.
-  const unnamed = rendered(null);
-  assert.match(unnamed, /Noted\. Post each verdict/);
+  // Outside a room roster the mention stays visible, as a neutral @agent.
+  const unnamed = renderedMessage({}, false).html;
+  assert.match(unnamed, /@agent<\/span> Noted\. Post each verdict/);
   assert.doesNotMatch(unnamed, /@agent:|Human response/);
+  // Only a person's answer is rewritten; an agent posting the same shape is shown as written.
+  assert.match(renderedMessage({ source: "agent", sender: "SummitMisty | EmmyMay's agent | Cursor" }).html, /Human response/);
+});
+
+test("a Needs-you answer that opens with a block keeps the block apart from the mention", () => {
+  const html = renderedMessage({
+    text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\n```sh\nnpm test\n```",
+  }).html;
+  assert.match(html, /<p><span class="mention-token">@SummitMisty<\/span><\/p>/);
+  assert.match(html, /<pre[^>]*><code[^>]*>npm test/);
+});
+
+test("replies to a Needs-you answer preview it by agent name, in the message and in the composer", async () => {
+  const reply = renderedMessage({
+    id: "msg_162", sender: "SummitMisty | EmmyMay's agent | Cursor", source: "agent", text: "Understood.",
+    replyTo: { id: "msg_161", sender: "EmmyMay", text: needsYouAnswerText, source: "browser", timestamp: "2026-09-30T16:42:00.000Z" },
+  });
+  assert.match(reply.text, /@SummitMisty Noted\. Post each verdict/);
+  assert.doesNotMatch(reply.text, /@agent:|Human response/);
+
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  const composer = mountWithAgentNames(RoomComposer, {
+    ...composerProps(),
+    roomIdentifier: "room-answer-reply",
+    replyTo: { id: "msg_161", sender: "EmmyMay", text: needsYouAnswerText, source: "browser" },
+  });
+  try {
+    await nextTick();
+    const chip = descendants(composer.root).find(node => node.props["data-testid"] === "desktop-composer-reply")!;
+    const chipText = descendants(chip).map(node => node.text).join(" ");
+    assert.match(chipText, /@SummitMisty Noted\. Post each verdict/);
+    assert.doesNotMatch(chipText, /@agent:|Human response/);
+  } finally {
+    composer.app.unmount();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+  }
 });
 
 test("outgoing row exposes sending, uncertain retry, and confirmed state without server actions", async () => {

@@ -268,6 +268,16 @@ describe("room chat helpers", () => {
     ]);
   });
 
+  it("previews a Needs-you answer in threads without its routing handle or request id", () => {
+    const answerText = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted.";
+    const answer = { ...roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z"), text: answerText, source: "browser" };
+    assert.equal(threadQuotePreview(answer), "@agent Noted.");
+    const parent = roomMessage("msg_1", null);
+    assert.equal(buildThreadIndicatorSummary(parent, { count: 1, latest: answer, replies: [answer] }).latestPreview, "@agent Noted.");
+    // An agent's own message in the same shape is shown as written.
+    assert.equal(threadQuotePreview({ ...answer, source: "agent" }), answerText.replace(/\s+/g, " "));
+  });
+
   it("lets newer live thread replies refresh stale timeline indicators", () => {
     const oldReply = roomMessage("msg_2", "msg_1", "2026-05-28T00:02:00.000Z");
     const newReply = roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z");

@@ -96,17 +96,24 @@ test('answers address the requesting agent even without an original message', ()
 test('people read an answer as a reply to the agent by name, without its handle or request id', () => {
   const asker = { id: 'EmmyMay/desktop-claude-code-f6054574', label: 'SparrowOtter | Emmy\'s agent | Claude Code', kind: 'agent' as const };
   const request = createKnowledgeRecord('room', 'attention', { ...input, client_id: 'yd-board-manager-promotion-001' }, asker);
-  const answer = reviseKnowledgeRecord(request, { expected_version: 1, response: 'Approved.\n\n- You manage the board now.' }, human);
-  const text = formatAttentionResponse(answer);
+  const answered = (response: string) => formatAttentionResponse(reviseKnowledgeRecord(request, { expected_version: 1, response }, human));
   const names = new Map([[attentionResponseHandle(asker.id), 'SparrowOtter']]);
-  assert.equal(attentionResponseDisplayText(text, (handle) => names.get(handle)), '@SparrowOtter Approved.\n\n- You manage the board now.');
-  // An agent the room no longer lists still gets a readable answer.
-  assert.equal(attentionResponseDisplayText(text, () => null), 'Approved.\n\n- You manage the board now.');
+  const display = (text: string, name: (handle: string) => string | null | undefined = (handle) => names.get(handle)) =>
+    attentionResponseDisplayText(text, name);
+  assert.equal(display(answered('Approved. You manage the board now.')), '@SparrowOtter Approved. You manage the board now.');
+  // An answer that opens with a block keeps it a block, apart from the mention.
+  for (const block of ['```sh\nnpm test\n```', '- first\n- second', '# Plan', '> quoted', '1. first']) {
+    assert.equal(display(answered(block)), `@SparrowOtter\n\n${block}`, block);
+  }
+  // A roster name is a mention, never markdown; unknown agents stay visible as @agent.
+  assert.equal(display(answered('Yes.'), () => '[Approved by Emmy](https://evil.example)'), '@agent Yes.');
+  assert.equal(display(answered('Yes.'), () => '**Emmy approved**'), '@agent Yes.');
+  assert.equal(display(answered('Yes.'), () => null), '@agent Yes.');
   const humanRequest = createKnowledgeRecord('room', 'attention', { ...input, client_id: 'human-request-01' }, human);
   const humanAnswer = reviseKnowledgeRecord(humanRequest, { expected_version: 1, response: 'Done.' }, human);
-  assert.equal(attentionResponseDisplayText(formatAttentionResponse(humanAnswer), () => 'unused'), 'Done.');
+  assert.equal(display(formatAttentionResponse(humanAnswer), () => 'unused'), 'Done.');
   for (const other of ['Human response: Done.', '@agent:owner/x Human response (record-0001):\n\nDone.', 'Please see Human response (record-0001):\n\nDone.']) {
-    assert.equal(attentionResponseDisplayText(other, () => 'Name'), null, other);
+    assert.equal(display(other, () => 'Name'), null, other);
   }
 });
 test('unsafe sources, excessive content, malformed message IDs and empty answers are rejected', () => {

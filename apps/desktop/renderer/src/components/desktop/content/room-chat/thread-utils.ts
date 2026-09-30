@@ -3,6 +3,7 @@ import type {
   DesktopRoomMessageReply,
   DesktopRoomMessageThreadParticipant,
 } from "../../../../../../electron/ipc-types";
+import { roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export interface ThreadSummary {
   count: number;
@@ -128,9 +129,7 @@ export function buildThreadIndicatorSummary(
       fallbackUnreadCount(parent, fallback, readUntilId, metadataCount),
     ),
     latest,
-    latestPreview: fallbackIsLatest
-      ? fallbackLatest?.displayText || fallbackLatest?.text || null
-      : metadataLatest?.displayText || metadataLatest?.text || latest?.displayText || latest?.text || null,
+    latestPreview: fallbackIsLatest ? threadPreviewText(fallbackLatest) : threadPreviewText(metadataLatest, latest),
     latestTimestamp: latest?.timestamp || null,
     participants: parseThreadParticipants(thread?.participants ?? []),
     hasPartialHistory: false,
@@ -174,8 +173,16 @@ export function threadReadState(
   };
 }
 
+function threadPreviewText(...messages: Array<DesktopRoomMessage | null>): string | null {
+  for (const message of messages) {
+    const text = message ? roomMessageVisibleText(message, null) : "";
+    if (text) return text;
+  }
+  return null;
+}
+
 export function threadQuotePreview(message: DesktopRoomMessage): string {
-  const text = (message.displayText || message.text).replace(/\s+/g, " ").trim();
+  const text = roomMessageVisibleText(message, null).replace(/\s+/g, " ").trim();
   if (text) return truncateThreadText(text, 140);
   if (message.attachments.length === 1) return "1 attachment";
   if (message.attachments.length > 1) return `${message.attachments.length} attachments`;

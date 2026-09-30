@@ -7,9 +7,10 @@ import type { GitHubEventPresentation } from "../desktop-chat-message/types";
 import type { ComposerEventPreview } from "./RoomComposerEventChips.vue";
 
 /**
- * A GitHub update shown in the composer is a notification. It is never sent
- * with the message, but once someone starts writing it reads as attached, so
- * it steps aside until the composer is empty again.
+ * A GitHub update shown in the composer is a short-lived notification. It is
+ * never sent with the message, but while someone is writing it reads as
+ * attached, so it stays hidden then; its timer keeps running, so it is gone
+ * for good once that expires.
  */
 export function visibleComposerEventPreviews<T>(
   previews: readonly T[],

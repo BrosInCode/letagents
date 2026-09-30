@@ -31,6 +31,7 @@ const names = attentionResponseAgentNames([
 
 let vite: ViteDevServer
 let ChatMessage: unknown
+let Composer: unknown
 
 before(async () => {
   // The room composables read saved preferences when they load.
@@ -49,6 +50,7 @@ before(async () => {
     server: { middlewareMode: true },
   })
   ChatMessage = (await vite.ssrLoadModule('/src/components/room/ChatMessage.vue')).default
+  Composer = (await vite.ssrLoadModule('/src/components/room/Composer.vue')).default
 })
 
 after(async () => {
@@ -57,10 +59,29 @@ after(async () => {
 
 test('a Needs-you answer names the agent and hides its handle and request id', () => {
   assert.equal(messageDisplayText(message(), names), '@SummitMisty Noted. Post each verdict as a PR comment.')
-  assert.equal(messageDisplayText(message()), 'Noted. Post each verdict as a PR comment.')
+  // Without a roster entry the mention stays visible as a neutral @agent.
+  assert.equal(messageDisplayText(message()), '@agent Noted. Post each verdict as a PR comment.')
+  // A roster name is used as a mention only; markdown in it is not trusted.
+  const spoofed = attentionResponseAgentNames([{ agent_key: 'EmmyMay/desktop-cursor-5849cfa6', display_name: '[Approved by EmmyMay](https://evil.example)' }])
+  assert.equal(messageDisplayText(message(), spoofed), '@agent Noted. Post each verdict as a PR comment.')
   // Only a person's answer is rewritten, and a server display line always wins.
   assert.equal(messageDisplayText(message({ source: 'agent' }), names), answerText)
   assert.equal(messageDisplayText(message({ display_text: 'Server line' }), names), 'Server line')
+})
+
+test('an answer that opens with a block keeps the block apart from the mention', async () => {
+  const render = (answer: string) => renderToString(createSSRApp({
+    render: () => h(ChatMessage as object, {
+      roomIdentifier: 'github.com/emmymay/year-dots',
+      agentNames: names,
+      message: message({ text: answerText.replace('Noted. Post each verdict as a PR comment.', answer) }),
+    }),
+  }))
+  const fence = await render('```sh\nnpm test\n```')
+  assert.match(fence, /<p><span class="mention-token">@SummitMisty<\/span><\/p>/)
+  assert.match(fence, /<pre[^>]*><code[^>]*>npm test/)
+  assert.match(await render('- first\n- second'), /<ul[^>]*>\s*<li[^>]*>first<\/li>/)
+  assert.match(await render('# Plan'), /<h[1-6][^>]*>Plan<\/h[1-6]>/)
 })
 
 test('the room shows the answer as a reply to the agent, in the message and in reply previews', async () => {
@@ -82,4 +103,28 @@ test('the room shows the answer as a reply to the agent, in the message and in r
   })
   assert.match(reply, /@SummitMisty Noted\. Post each verdict/)
   assert.doesNotMatch(reply, /@agent:|Human response/)
+})
+
+test('thread previews and the composer reply chip show the answer by agent name', async () => {
+  const thread = await renderToString(createSSRApp({
+    render: () => h(ChatMessage as object, {
+      roomIdentifier: 'github.com/emmymay/year-dots',
+      agentNames: names,
+      message: message({ id: 'msg_160', source: 'agent', sender: 'SummitMisty', text: 'Can I get PR write?' }),
+      thread: { count: 1, latest: message() },
+    }),
+  }))
+  assert.match(thread, /@SummitMisty Noted\. Post each verdict/)
+  assert.doesNotMatch(thread, /@agent:|Human response/)
+
+  const composer = await renderToString(createSSRApp({
+    render: () => h(Composer as object, {
+      roomIdentifier: 'github.com/emmymay/year-dots',
+      isSignedIn: true,
+      replyTo: message(),
+      participants: [{ agent_key: 'EmmyMay/desktop-cursor-5849cfa6', display_name: 'SummitMisty', kind: 'agent' }],
+    }),
+  }))
+  assert.match(composer, /@SummitMisty Noted\. Post each verdict/)
+  assert.doesNotMatch(composer, /@agent:|Human response/)
 })

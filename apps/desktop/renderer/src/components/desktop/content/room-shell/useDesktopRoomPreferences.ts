@@ -6,6 +6,7 @@ import {
   readSoundEnabled,
 } from "./preferences";
 import { playRoomInteractionSound } from "./roomSounds";
+import { roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export function useDesktopRoomPreferences() {
   const soundEnabled = ref(readSoundEnabled());
@@ -74,7 +75,7 @@ export function useDesktopRoomPreferences() {
     if (!notificationsEnabled.value || typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && document.hasFocus()) return;
     const sender = message.sender.split("|")[0]?.trim() || "LetAgents";
-    const body = (message.displayText || message.text).trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
+    const body = roomMessageVisibleText(message, null).trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
     new Notification(`${sender} in ${roomDisplayName}`, {
       body,
       silent: true,
