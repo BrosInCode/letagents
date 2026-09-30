@@ -145,7 +145,7 @@
               <House v-else />
             </span>
             <span class="sidebar-search-result-copy">
-              <strong>{{ result.entry.title }}</strong>
+              <strong>{{ sidebarRoomTitle(result.entry) }}</strong>
               <small>{{ result.context }}</small>
             </span>
             <span v-if="result.entry.hasUnread" class="room-unread-dot" aria-label="Unread messages"></span>
@@ -268,6 +268,7 @@
                 :draggable="parentReorderEnabled"
                 type="button"
                 :data-testid="`pinned-room-${project.parent.id}`"
+                :title="sidebarProjectDetails(project)"
                 @click="handleProjectActivation($event, project)"
                 @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
                 @dragstart="startParentDrag($event, project)"
@@ -290,6 +291,7 @@
                 <span class="pinned-main">
                   <span class="room-title-line">
                     <span class="pinned-title">{{ project.roomName }}</span>
+                    <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
                     <span
                       v-if="project.parent.hasUnread"
                       class="room-unread-dot"
@@ -297,7 +299,6 @@
                       title="Unread messages"
                     ></span>
                   </span>
-                  <span class="pinned-meta">{{ projectSubtitle(project) }}</span>
                 </span>
               </button>
               <button
@@ -415,6 +416,7 @@
                 :draggable="parentReorderEnabled"
                 type="button"
                 :data-testid="`room-parent-${project.parent.id}`"
+                :title="sidebarProjectDetails(project)"
                 @click="handleProjectActivation($event, project)"
                 @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
                 @dragstart="startParentDrag($event, project)"
@@ -438,6 +440,7 @@
                   <span class="project-copy">
                     <span class="room-title-line">
                       <span class="project-name">{{ project.roomName }}</span>
+                      <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
                       <span
                         v-if="project.parent.hasUnread"
                         class="room-unread-dot"
@@ -445,9 +448,6 @@
                         title="Unread messages"
                       ></span>
                     </span>
-                    <small>
-                      {{ projectSubtitle(project) }}
-                    </small>
                   </span>
                 </span>
               </button>
@@ -694,6 +694,8 @@ import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/Des
 import { sidebarProjectForEntry } from "../../../domain/sidebar-zen-mode";
 import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
+import SidebarRoomActivity from "./SidebarRoomActivity.vue";
+import { sidebarGroupActivity, sidebarProjectDetails, sidebarRoomTitle } from "../../../domain/sidebar-room-display";
 import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -1078,20 +1080,6 @@ function handleBackgroundContextMenuSelect(item: DesktopContextMenuItem): void {
 async function copyText(value: string | null): Promise<void> {
   if (!value) return;
   await copyTextToClipboard(value);
-}
-
-function projectSubtitle(project: ProjectGroup): string {
-  const branchCount = project.branchRooms.length;
-  const focusCount = project.focusRooms.length;
-  if (project.parent.gitRoom && branchCount) {
-    const branchLabel = `${branchCount} ${branchCount === 1 ? "branch" : "branches"}`;
-    const focusLabel = focusCount ? ` · ${focusCount} focus ${focusCount === 1 ? "room" : "rooms"}` : "";
-    return `${project.parent.meta} · ${branchLabel}${focusLabel}`;
-  }
-  if (focusCount) {
-    return `${focusCount} focus ${focusCount === 1 ? "room" : "rooms"}`;
-  }
-  return project.parent.meta;
 }
 
 function projectChildRooms(project: ProjectGroup | null | undefined): RoomEntry[] {

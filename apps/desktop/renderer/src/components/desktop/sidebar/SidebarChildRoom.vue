@@ -11,6 +11,7 @@
     :aria-describedby="reorderEnabled ? 'sidebar-room-reorder-instructions' : undefined"
     :aria-keyshortcuts="reorderEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined"
     :draggable="reorderEnabled"
+    :title="entry.meta ? `${entry.title} · ${entry.meta}` : entry.title"
     type="button"
   >
     <span
@@ -22,8 +23,9 @@
       <Check v-if="selected" />
     </span>
     <span class="room-title-line">
-      <span class="room-title">{{ entry.title }}</span>
+      <span class="room-title">{{ sidebarRoomTitle(entry) }}</span>
       <span v-if="entry.currentWorkspace" class="room-workspace-pill">Current</span>
+      <SidebarRoomActivity :activity="entry.activity" />
       <span
         v-if="entry.hasUnread"
         class="room-unread-dot"
@@ -31,7 +33,6 @@
         title="Unread messages"
       ></span>
     </span>
-    <small v-if="entry.meta" class="room-child-meta">{{ entry.meta }}</small>
     <small
       v-if="entry.suggestedAction && !entry.currentWorkspace"
       class="room-suggested-action"
@@ -43,6 +44,8 @@
 
 <script setup lang="ts">
 import { Check } from "@lucide/vue";
+import { sidebarRoomTitle } from "../../../domain/sidebar-room-display";
+import SidebarRoomActivity from "./SidebarRoomActivity.vue";
 import type { RoomEntry } from "../types";
 
 defineProps<{
