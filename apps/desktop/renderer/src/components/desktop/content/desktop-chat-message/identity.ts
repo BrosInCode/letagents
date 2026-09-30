@@ -52,6 +52,7 @@ function normalizeIdeLabel(label: string): string | null {
   if (normalized === "antigravity") return "Antigravity";
   if (normalized === "claude") return "Claude";
   if (normalized === "cursor") return "Cursor";
+  if (normalized === "opencode") return "OpenCode";
   if (normalized === "agent") return null;
   return normalized.split(/[^a-z0-9]+/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
 }

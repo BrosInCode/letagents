@@ -145,6 +145,7 @@ function normalizeIdeLabel(label: string): string | null {
     antigravity: 'Antigravity',
     claude: 'Claude',
     cursor: 'Cursor',
+    opencode: 'OpenCode',
     agent: 'Agent',
   }
   return (
