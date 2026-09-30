@@ -9,15 +9,9 @@ import {
 } from './room/data'
 import { createRoomFocusActions } from './room/focusRoomActions'
 import {
-  getReplyPreviewText,
   getSenderColor,
-  hasInlinePromptInjection,
   isHumanSender,
-  isVisibleRoomMessage,
-  isPromptOnlyRoomMessage,
-  normalizeAgentPromptKind,
   parseAgentIdentity,
-  resolveAgentIdentity,
 } from './room/identity'
 import { createRoomLifecycle } from './room/lifecycle'
 import { createRoomMessageActions } from './room/messageActions'
