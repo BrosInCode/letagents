@@ -29,7 +29,8 @@ export function messageMatchesSearch(
   normalizedQuery: string,
   agentNames?: ReadonlyMap<string, string>,
 ): boolean {
-  return [message.display_text || message.text || '', messageDisplayText(message, agentNames), message.sender || '']
+  // Stored messages can lack text (attachment-only or partial payloads).
+  return [message.display_text || message.text || '', String(messageDisplayText(message, agentNames) ?? ''), message.sender || '']
     .some(value => value.toLowerCase().includes(normalizedQuery))
 }
 

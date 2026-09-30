@@ -136,6 +136,12 @@ test('room search finds an answer by the agent name people see, and by its raw h
     assert.equal(messageMatchesSearch(message(), query, names), true, query)
   }
   assert.equal(messageMatchesSearch(message({ text: 'Unrelated.' }), '@summitmisty', names), false)
+  // A message without text (attachment-only or partial) is searchable by sender, not an error.
+  for (const text of [undefined, null]) {
+    const textless = message({ text: text as unknown as string, sender: 'EmmyMay' })
+    assert.equal(messageMatchesSearch(textless, 'emmymay', names), true)
+    assert.equal(messageMatchesSearch(textless, 'noted', names), false)
+  }
 })
 
 test('the Activity status line shows a person\'s answer without its handle', () => {
