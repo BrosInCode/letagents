@@ -20,7 +20,6 @@
           :stalePromptTaskStates="stalePromptTaskStates"
           :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
           :class="messageClasses(msg)"
-          :searchQuery="searchQuery"
           :taskReferenceIds="taskReferenceIds"
           @reply="emit('reply', $event)"
           @info="handleOpenMessageInfo($event)"
@@ -60,7 +59,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 import MessageInfoSurface from './MessageInfoSurface.vue'
-import { getAppendedMessageIds, mergeMessageArrivalIds } from './messageArrival'
+import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival'
 import { buildMessageThreadSummaries } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
 
@@ -196,41 +195,32 @@ watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
   void retiring.dispose()
 })
 
-watch(() => props.messages, async (newMessages, oldMessages) => {
-  const newLen = newMessages.length
-  const oldLen = oldMessages?.length || 0
-  if (newLen > oldLen) {
-    const oldFirstId = oldMessages?.[0]?.id
-    const oldLastId = oldMessages?.[oldLen - 1]?.id
-    const newFirstId = newMessages[0]?.id
-    const newLastId = newMessages[newLen - 1]?.id
-    const isPrepend = Boolean(oldFirstId && oldLastId && newFirstId !== oldFirstId && newLastId === oldLastId)
-    if (isPrepend) {
-      const el = messagesEl.value
-      const previousScrollHeight = el?.scrollHeight || 0
-      await nextTick()
-      if (el) {
-        el.scrollTop += el.scrollHeight - previousScrollHeight
-      }
-      return
+watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, addedCount }) => {
+  if (prepended) {
+    const el = messagesEl.value
+    const previousScrollHeight = el?.scrollHeight || 0
+    await nextTick()
+    if (el) {
+      el.scrollTop += el.scrollHeight - previousScrollHeight
     }
-
-    const appendedIds = getAppendedMessageIds(
-      (oldMessages || []).map((message) => message.id),
-      newMessages.map((message) => message.id),
-    )
-    if (appendedIds.length > 0) {
-      arrivingMessageIds.value = mergeMessageArrivalIds(arrivingMessageIds.value, appendedIds)
-    }
-
-    if (isScrolledToBottom) {
-      await nextTick()
-      scrollToBottom()
-    } else {
-      unreadCount.value += newLen - oldLen
-    }
-    nextTick(() => setupReadObserver())
+    observeMessageRows()
+    return
   }
+
+  if (appendedIds.length > 0) {
+    arrivingMessageIds.value = mergeMessageArrivalIds(arrivingMessageIds.value, appendedIds)
+  }
+
+  if (isScrolledToBottom) {
+    await nextTick()
+    scrollToBottom()
+  } else {
+    unreadCount.value += addedCount
+  }
+  nextTick(() => {
+    if (readObserver) observeMessageRows()
+    else setupReadObserver()
+  })
 })
 
 // Viewport-based read evidence reporting. Each row must individually stay
@@ -269,7 +259,13 @@ function clearVisibleMessageTimers() {
 }
 
 function handleDocumentVisibilityChange() {
-  if (!readEvidenceAllowed()) clearVisibleMessageTimers()
+  if (!readEvidenceAllowed()) {
+    clearVisibleMessageTimers()
+    return
+  }
+  // The observer only reports rows whose visibility changes, so rows that
+  // stayed on screen while the window was away need a fresh observer.
+  setupReadObserver()
 }
 
 function setupReadObserver() {
@@ -317,7 +313,13 @@ function setupReadObserver() {
     { root: messagesEl.value, threshold: [0, 0.25, 0.5] }
   )
 
-  const elements = messagesEl.value.querySelectorAll('.message[data-msg-id]')
+  observeMessageRows()
+}
+
+// Observing a row that is already observed does nothing, so rows already on
+// screen keep their pending 600 ms timers while new messages keep arriving.
+function observeMessageRows() {
+  const elements = messagesEl.value?.querySelectorAll('.message[data-msg-id]') ?? []
   elements.forEach((el) => readObserver?.observe(el))
 }
 
@@ -325,6 +327,7 @@ onMounted(() => {
   messagesEl.value?.addEventListener('scroll', checkScroll)
   document.addEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.addEventListener('blur', handleDocumentVisibilityChange)
+  window.addEventListener('focus', handleDocumentVisibilityChange)
   /* Use 'instant' so re-entering the chat tab doesn't visibly scroll from top */
   nextTick(() => {
     scrollToBottom('instant')
@@ -336,6 +339,7 @@ onUnmounted(() => {
   messagesEl.value?.removeEventListener('scroll', checkScroll)
   document.removeEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.removeEventListener('blur', handleDocumentVisibilityChange)
+  window.removeEventListener('focus', handleDocumentVisibilityChange)
   if (readObserver) readObserver.disconnect()
   clearVisibleMessageTimers()
   void readReporter.dispose()
