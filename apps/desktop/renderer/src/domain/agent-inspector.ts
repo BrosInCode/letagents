@@ -333,6 +333,8 @@ export interface AgentInspectorProjectionOptions {
   resourceFreshness?: "fresh" | "stale";
   mentionInsertTextByEntryId?: ReadonlyMap<string, string>;
   deliveryRetryingKeys?: ReadonlySet<string>;
+  /** Entries this desktop has asked to pause and whose request is still open. */
+  pauseRequestedEntryIds?: ReadonlySet<string>;
 }
 
 const ACTIVE_TURN_STATES = new Set(["dispatching", "responding", "publishing", "retrying"]);
@@ -424,12 +426,13 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
 
 export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry): AgentInspectorOverallState {
   const room = entry.roomAgentState;
-  if (entry.desiredState === "stopped" || entry.observedState === "stopped" || entry.observedState === "stopping") {
-    return "retired";
-  }
+  if (entry.desiredState === "stopped") return "retired";
+  // A pause stops the provider process, so a paused agent passes through
+  // observed stopping before it settles. That is still a pause, not retirement.
   if (entry.desiredState === "paused" || entry.observedState === "paused" || entry.observedState === "pausing") {
     return "paused";
   }
+  if (entry.observedState === "stopped" || entry.observedState === "stopping") return "retired";
   if (room?.inbox.state === "restoring_conversation") return "restoring_conversation";
   if (roomAccessRecoveryIsActive(entry)) return "recovering";
   if (
@@ -483,6 +486,11 @@ function overallPresentation(state: AgentInspectorOverallState): { label: string
     case "disconnected": return { label: "Disconnected", detail: "The provider is not currently reachable." };
   }
 }
+
+const pausingPresentation = {
+  label: "Pausing…",
+  detail: "Stopping room delivery. New room work is held until you resume the agent.",
+};
 
 function turnStartedAt(entry: DesktopSupervisorManifestEntry): string | null {
   const turn = entry.roomAgentState?.turn;
@@ -1001,8 +1009,12 @@ export function projectAgentInspector(
   options: AgentInspectorProjectionOptions,
 ): AgentInspectorProjection | null {
   if (!options.roomId || entry.roomId !== options.roomId) return null;
-  const overallState = agentInspectorOverallState(entry);
-  const presentation = overallPresentation(overallState);
+  // Pause drains room delivery before it saves the paused state, which can
+  // take a while mid-turn. The drained delivery would read as disconnected
+  // meanwhile, so this desktop's open request decides the state until then.
+  const pausing = entry.desiredState === "running" && Boolean(options.pauseRequestedEntryIds?.has(entry.id));
+  const overallState = pausing ? "paused" : agentInspectorOverallState(entry);
+  const presentation = pausing ? pausingPresentation : overallPresentation(overallState);
   const resourceFreshness = options.resourceFreshness ?? "fresh";
   const now = nowProjection(resourceFreshness === "fresh" ? entry : { ...entry, providerProgress: null }, overallState);
   const mentionInsertText = options.mentionInsertTextByEntryId?.get(entry.id) ?? null;

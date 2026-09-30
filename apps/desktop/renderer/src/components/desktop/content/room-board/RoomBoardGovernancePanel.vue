@@ -102,7 +102,7 @@
           :governance="governance"
           :busy="busy"
           @approve-intent="emit('approve-intent', $event)"
-          @deny-intent="emit('deny-intent', $event)"
+          @deny-intent="(intentId, reason) => emit('deny-intent', intentId, reason)"
         />
       </div>
       <div
@@ -155,7 +155,7 @@ const emit = defineEmits<{
   "release-manager": [];
   "set-manager-mode": [mode: DesktopBoardManagerMode];
   "approve-intent": [intentId: string];
-  "deny-intent": [intentId: string];
+  "deny-intent": [intentId: string, reason: string | null];
   retry: [];
 }>();
 

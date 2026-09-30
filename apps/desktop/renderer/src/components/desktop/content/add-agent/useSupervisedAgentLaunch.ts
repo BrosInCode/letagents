@@ -41,6 +41,8 @@ export function useSupervisedAgentLaunch(options: {
   onCopyAuthCommand: (command: string) => void;
   onRetry: () => void | Promise<void>;
   onMessage: (message: string | null, tone?: AddAgentFeedbackTone) => void;
+  /** Once per saved agent this launch learns about, however it learns it. */
+  onSavedEntry?: (entry: DesktopSupervisorManifestEntry) => void;
   recoveryScanTimeoutMs?: number;
 }) {
   const attachments = createSupervisedLaunchAttachments();
@@ -140,6 +142,16 @@ export function useSupervisedAgentLaunch(options: {
   const recoverDetectedLaunch = recovery.recover;
   const offerRecoveryCandidate = recovery.offer;
   const offerAmbiguousCreationCandidate = recovery.offerAmbiguousCreation;
+  // A saved agent has its first task, whether this launch created it, found it
+  // again after a failed create, or offers it back for recovery.
+  const reportedSavedEntryIds = new Set<string>();
+  watch([conflict, recoveryCandidate], (entries) => {
+    for (const entry of entries) {
+      if (!entry || reportedSavedEntryIds.has(entry.id)) continue;
+      reportedSavedEntryIds.add(entry.id);
+      options.onSavedEntry?.(entry);
+    }
+  }, { flush: "sync" });
 
   function begin(): string {
     recovery.invalidateAmbiguousLookups();

@@ -58,6 +58,11 @@ export function readableIntentAction(actionType: string): string {
   return actionType.replace(/^task_/, "").replaceAll("_", " ");
 }
 
+/**
+ * Presence arrives in last-activity order, which changes on every room
+ * refresh. The picker orders by name so rows never move under the cursor,
+ * even when the manager changes; the Current badge marks the manager.
+ */
 export function liveManagerCandidates(
   governance: DesktopBoardGovernanceSnapshot,
   liveAgents: DesktopAgentPresence[]
@@ -80,7 +85,11 @@ export function liveManagerCandidates(
           || governance.activeManager?.agentSessionId === agentSessionId
           || false,
       };
-    });
+    })
+    .sort((left, right) =>
+      managerCandidateName(left).localeCompare(managerCandidateName(right))
+      || left.agentSessionId.localeCompare(right.agentSessionId)
+    );
 }
 
 export function managerCandidateName(candidate: LiveManagerCandidate): string {
@@ -177,6 +186,11 @@ export function readableIntentBody(intent: DesktopBoardIntentSummary): string {
 
 export function approveIntentLabel(intent: DesktopBoardIntentSummary): string {
   return intent.actionType === "task_create" ? "Create task" : "Approve";
+}
+
+/** A denial reason is optional; blank input sends none rather than "". */
+export function denyIntentReason(value: string): string | null {
+  return value.trim() || null;
 }
 
 export function readableAuditEvent(entry: DesktopBoardGovernanceAuditEntry): string {

@@ -1569,6 +1569,67 @@ it("keeps watcher statistics when room refresh finishes later and when reopening
   });
 });
 
+describe("useDesktopAppData root room refresh", () => {
+  it("keeps live tasks, reasoning and artifacts when a board action refreshes the root room", async () => {
+    const harness = createHarness();
+    harness.activeEntry.value = parentEntry();
+    harness.rootRoomSnapshot.value = roomSnapshot("room_parent", {
+      tasks: [
+        { ...taskSummary("task_1"), status: "merged" },
+        { ...taskSummary("task_2"), status: "in_progress" },
+      ],
+    });
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      harness.getSnapshotRequests.length = 0;
+      harness.metadataRefreshCalls.length = 0;
+      harness.nextArtifacts = [sharedArtifact("artifact:pr:1")];
+      harness.state.handleRoomStreamEvent({
+        type: "task_update",
+        roomIdentifier: "room_parent",
+        task: { ...taskSummary("task_2"), status: "merged" },
+      });
+      harness.state.handleRoomStreamEvent({
+        type: "reasoning_update",
+        roomIdentifier: "room_parent",
+        session: reasoningSession("reason_live"),
+      });
+      harness.state.handleRoomStreamEvent({
+        type: "artifact_update",
+        roomIdentifier: "room_parent",
+        artifact: sharedArtifact("artifact:pr:1"),
+      });
+      await flushAsync();
+      // Board "Mark Done" hands back the saved task, then asks for a refresh.
+      harness.state.upsertSelectedTask({ ...taskSummary("task_1"), status: "done" });
+      harness.state.handleRefreshRoom();
+      await flushAsync();
+    });
+
+    const selected = harness.selectedSnapshot.value;
+    assert.deepEqual(selected?.tasks.map((task) => `${task.id}:${task.status}`), ["task_1:done", "task_2:merged"]);
+    assert.deepEqual(selected?.reasoningSessions.map((session) => session.id), ["reason_live"]);
+    assert.deepEqual(selected?.roomArtifacts.map((artifact) => artifact.identityKey), ["artifact:pr:1"]);
+    // The full server read owns the refresh; the root copy is left as it was.
+    assert.deepEqual(harness.metadataRefreshCalls, [0]);
+    assert.deepEqual(harness.rootRoomSnapshot.value?.tasks.map((task) => task.status), ["merged", "in_progress"]);
+  });
+
+  it("still reloads a focus room's own snapshot when it is refreshed", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot([]);
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.state.handleRefreshRoom();
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+    assert.deepEqual(harness.metadataRefreshCalls, [0]);
+  });
+});
+
 describe("useDesktopAppData session invalidation", () => {
   it("drops a pre-sign-out root and account refresh that resolves after the session is cleared", async () => {
     const harness = createHarness();

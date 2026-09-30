@@ -66,8 +66,14 @@
 }
 
 .desktop-board-governance-close:active,
-.desktop-board-secondary-action:active:not(:disabled) {
+.desktop-board-secondary-action:active:not(:disabled):not([aria-disabled="true"]) {
   transform: scale(0.97);
+}
+
+.desktop-board-secondary-action:disabled,
+.desktop-board-secondary-action[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .desktop-board-governance-close:focus-visible {
@@ -383,6 +389,30 @@
   gap: 8px;
 }
 
+.desktop-board-governance-deny {
+  display: grid;
+  gap: 8px;
+}
+
+/* Field chrome comes from .desktop-task-create-field; this is the compact size. */
+.desktop-task-create-field.desktop-board-governance-deny-field textarea {
+  min-height: 64px;
+  padding: 9px 11px;
+  background: var(--bg);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.desktop-task-create-field.desktop-board-governance-deny-field textarea[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.72;
+}
+
+.desktop-board-governance-intent:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
 .desktop-board-governance-intent p,
 .desktop-board-governance-audit-entry p {
   margin: 0;
@@ -399,7 +429,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .desktop-board-governance-close:hover,
-  .desktop-board-secondary-action:hover:not(:disabled),
+  .desktop-board-secondary-action:hover:not(:disabled):not([aria-disabled="true"]),
   .desktop-board-governance-candidate:hover {
     border-color: var(--border-accent);
     background: var(--accent-hover);

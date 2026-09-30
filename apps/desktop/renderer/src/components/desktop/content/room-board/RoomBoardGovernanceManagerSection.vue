@@ -46,17 +46,9 @@
       </label>
     </div>
 
+    <!-- Release renders before the primary action so the primary keeps its
+         place when a manager is assigned; a repeated click can't release. -->
     <div v-if="canAssign || canRelease" class="desktop-board-governance-actions">
-      <button
-        v-if="canAssign"
-        type="button"
-        class="desktop-board-primary-action"
-        :disabled="busy || !canPromoteSelectedCandidate"
-        data-testid="board-governance-promote"
-        @click="selectedCandidateId && emit('assign-manager', selectedCandidateId)"
-      >
-        {{ managerActionLabel }}
-      </button>
       <button
         v-if="canRelease && governance.activeManager"
         type="button"
@@ -66,6 +58,16 @@
         @click="emit('release-manager')"
       >
         Release
+      </button>
+      <button
+        v-if="canAssign"
+        type="button"
+        class="desktop-board-primary-action"
+        :disabled="busy || !canPromoteSelectedCandidate"
+        data-testid="board-governance-promote"
+        @click="selectedCandidateId && emit('assign-manager', selectedCandidateId)"
+      >
+        {{ managerActionLabel }}
       </button>
     </div>
   </section>
