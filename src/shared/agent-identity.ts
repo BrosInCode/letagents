@@ -4,7 +4,11 @@ const IDE_LABELS = new Map<string, string>([
   ["agent", "Agent"],
   ["antigravity", "Antigravity"],
   ["claude", "Claude"],
+  ["claude-code", "Claude Code"],
   ["codex", "Codex"],
+  ["cursor", "Cursor"],
+  ["open-model", "Open Model"],
+  ["opencode", "OpenCode"],
   ["orchestrator", "Orchestrator"],
 ]);
 

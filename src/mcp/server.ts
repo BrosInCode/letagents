@@ -7,12 +7,15 @@ import { attachMcpServer, autoJoinFromContext, shutdownRuntime } from "./server/
 import { requireValidWorkerBearerRuntime } from "./server/runtime/worker-bearer.js";
 import { announceProcessExit } from "./server/runtime/process-connection.js";
 import { executionProfile } from "./server/runtime/execution-profile.js";
+import { setMcpClientNameSource } from "./server/runtime/identity/config.js";
 import { WORKSPACE_CAPTURE_INSTRUCTIONS } from "./server/tools/workspace.js";
 import {
   LETAGENTS_RUNTIME_CONTRACT_ARG,
   letAgentsRuntimeContract,
   registerRuntimeReadinessResource,
 } from "./server/runtime-contract.js";
+
+const CLIENT_INITIALIZE_WAIT_MS = 5_000;
 
 async function main() {
   if (process.argv.slice(2).includes(LETAGENTS_RUNTIME_CONTRACT_ARG)) {
@@ -30,9 +33,19 @@ async function main() {
   registerTools(server, profile, supervisedProvider);
   registerRuntimeReadinessResource(server, profile, supervisedProvider);
   requireValidWorkerBearerRuntime();
+  // Auto-join resolves the agent identity, whose IDE label comes from the
+  // host's clientInfo, so wait (briefly) for the host to finish initialize.
+  setMcpClientNameSource(() => server.server.getClientVersion()?.name);
+  const initialized = new Promise<void>((resolve) => {
+    server.server.oninitialized = resolve;
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("🔌 Let Agents Chat MCP server running on stdio (v0.6.0)");
+  await Promise.race([
+    initialized,
+    new Promise<void>((resolve) => setTimeout(resolve, CLIENT_INITIALIZE_WAIT_MS).unref()),
+  ]);
   await autoJoinFromContext();
 }
 

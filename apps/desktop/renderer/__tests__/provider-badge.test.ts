@@ -42,11 +42,26 @@ test("provider badges render platform artwork with accessible names", async () =
   }
 });
 
+test("provider badges match label spellings from MCP hosts and managed agents", async () => {
+  for (const [label, providerKey] of [
+    ["claude-code", "claude"],
+    ["Claude", "claude"],
+    ["OpenCode", "open-model"],
+    ["open-model", "open-model"],
+  ] as const) {
+    const html = await renderBadge(label);
+    assert.match(html, new RegExp(`room-provider-badge--${providerKey}`), label);
+  }
+  const openCode = await renderBadge("OpenCode");
+  assert.match(openCode, /aria-label="OpenCode provider"/);
+  assert.match(openCode, /<img/, "OpenCode shows its logo, not the unknown-provider glyph");
+});
+
 test("provider badges preserve meaningful fallback labels", async () => {
   const openModel = await renderBadge("Open Model");
   assert.match(openModel, /room-provider-badge--open-model/);
   assert.match(openModel, /aria-label="Open Model provider"/);
-  assert.doesNotMatch(openModel, /<img/);
+  assert.match(openModel, /<img/, "Open Model agents run on OpenCode and show its logo");
 
   const unknown = await renderBadge("Future IDE");
   assert.match(unknown, /room-provider-badge--other/);
