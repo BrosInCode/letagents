@@ -5,13 +5,18 @@ import {
   agentDisplayNameKey,
   allocateAgentDisplayName,
   isNameHeldByAnotherAgent,
+  nameComesFreeAtMs,
   resolveSupervisedWorkerDisplayName,
   selectReleasableNameHolders,
   type RoomWorkerNameHolder,
 } from "../rooms/agent-display-name-allocation.js";
 import {
+  AGENT_DELIVERY_LINGERS_MS,
   AGENT_PROCESS_EXITED,
   AGENT_PROCESS_GONE_AFTER_MS,
+  AGENT_WITHOUT_EVIDENCE_GONE_AFTER_MS,
+  agentProcessGoneSoonAtMs,
+  hasAgentProcessExited,
   AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS,
   isAgentProcessGone,
 } from "../../shared/agent-presence.js";
@@ -156,13 +161,124 @@ test("a name lost to a concurrent claim is not offered again", () => {
 const nowMs = Date.parse("2026-01-01T12:00:00.000Z");
 const ago = (ms: number) => new Date(nowMs - ms).toISOString();
 
+test("a session that offers no evidence is believed gone only after a long silence, and only if it can recover", () => {
+  const observer = { now_ms: nowMs, process_host_id: "host_a" };
+  const silent = (msAgo: number) => ({ process_seen_at: null, last_seen_at: ago(msAgo), agent_heard_at: ago(msAgo) });
+  const hour = AGENT_WITHOUT_EVIDENCE_GONE_AFTER_MS;
+  const month = 30 * 24 * 3_600_000;
+  assert.ok(hour > AGENT_PROCESS_GONE_AFTER_MS, "silence is believed later than evidence is");
+
+  // An older client that starts a new session when told its old one is over.
+  const legacy = { agent_instance_id: "8f14e45f-ceea-467f-a0e6-6f5b5f0e3a1c" };
+  assert.equal(isAgentProcessGone({ ...silent(AGENT_PROCESS_GONE_AFTER_MS), ...legacy }, observer), false);
+  assert.equal(isAgentProcessGone({ ...silent(hour - 1), ...legacy }, observer), false);
+  assert.equal(isAgentProcessGone({ ...silent(hour), ...legacy }, observer), true);
+  assert.equal(isAgentProcessGone({ ...silent(month), ...legacy, delivery_connected: true }, observer), false,
+    "it is waiting for messages on a connection that is open now");
+  // The server's bookkeeping is not the agent, but with no other evidence it
+  // is read the cautious way: any sign at all keeps the session.
+  assert.equal(isAgentProcessGone({ ...silent(month), ...legacy, last_seen_at: ago(60_000) }, observer), false);
+
+  // An older client that cannot: its worker answers from the session it
+  // holds until its process is restarted. It is never taken for gone.
+  const durable = { agent_instance_id: `worker_${"a".repeat(32)}` };
+  assert.equal(isAgentProcessGone({ ...silent(hour), ...durable }, observer), false);
+  assert.equal(isAgentProcessGone({ ...silent(month), ...durable }, observer), false);
+  // The same worker on a client that knows of process connections, which
+  // has not opened one: it is told when its session ends, and starts another.
+  assert.equal(isAgentProcessGone({ ...silent(hour - 1), ...durable, process_host_id: "host_a" }, observer), false);
+  assert.equal(isAgentProcessGone({ ...silent(hour), ...durable, process_host_id: "host_a" }, observer), true);
+  // And one that has disconnected: nothing is ended by letting its name go.
+  assert.equal(isAgentProcessGone({ ...silent(AGENT_PROCESS_GONE_AFTER_MS - 1), ...durable, ended_at: ago(AGENT_PROCESS_GONE_AFTER_MS - 1) }, observer), false);
+  assert.equal(isAgentProcessGone({ ...silent(AGENT_PROCESS_GONE_AFTER_MS), ...durable, ended_at: ago(AGENT_PROCESS_GONE_AFTER_MS) }, observer), true);
+});
+
+test("a process is known to have exited only on its own word or its machine's, never for being silent", () => {
+  const here = { now_ms: nowMs, process_host_id: "host_a" };
+  const elsewhere = { now_ms: nowMs, process_host_id: "host_b" };
+  const month = 30 * 24 * 3_600_000;
+  const closed = (msAgo: number) => ({
+    process_seen_at: ago(msAgo), process_disconnected_at: ago(msAgo), last_seen_at: ago(msAgo),
+    agent_heard_at: ago(msAgo), process_host_id: "host_a", process_connection_id: "closed-connection",
+  });
+  const exited = { ...closed(1_000), process_connection_id: AGENT_PROCESS_EXITED };
+
+  assert.equal(hasAgentProcessExited(exited, elsewhere), true);
+  assert.equal(hasAgentProcessExited(closed(AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS), here), true);
+  assert.equal(hasAgentProcessExited(closed(AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS - 1), here), false);
+  // Everything that lets a name pass on for silence says nothing here.
+  assert.equal(hasAgentProcessExited(closed(month), elsewhere), false);
+  assert.equal(isAgentProcessGone(closed(month), elsewhere), true);
+  assert.equal(hasAgentProcessExited({ process_seen_at: ago(month), last_seen_at: ago(month), agent_heard_at: ago(month) }, here), false);
+  assert.equal(hasAgentProcessExited({ process_seen_at: null, last_seen_at: ago(month), agent_heard_at: ago(month),
+    agent_instance_id: "8f14e45f-ceea-467f-a0e6-6f5b5f0e3a1c" }, here), false);
+  // And what refutes the one refutes the other.
+  assert.equal(hasAgentProcessExited({ ...exited, agent_heard_at: ago(500) }, elsewhere), false);
+  assert.equal(hasAgentProcessExited({ ...exited, delivery_connected: true }, elsewhere), false);
+  // A connection that closed after the session ended was let go of, not lost.
+  const letGo = { ...closed(AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS), ended_at: ago(AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS + 1_000) };
+  assert.equal(hasAgentProcessExited(letGo, here), false);
+  assert.equal(hasAgentProcessExited({ ...letGo, ended_at: ago(AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS - 1_000) }, here), true,
+    "one that closed before the end was lost");
+});
+
+test("the moment a process will be taken for gone is known only when it is moments away", () => {
+  const here = { now_ms: nowMs, process_host_id: "host_a" };
+  const elsewhere = { now_ms: nowMs, process_host_id: "host_b" };
+  const closed = (msAgo: number) => ({
+    process_seen_at: ago(msAgo), process_disconnected_at: ago(msAgo), last_seen_at: ago(msAgo),
+    agent_heard_at: ago(msAgo), process_host_id: "host_a", process_connection_id: "closed-connection",
+  });
+  const at = (msAgo: number, after: number) => nowMs - msAgo + after;
+
+  // Its connection closed three seconds ago, on this machine.
+  assert.equal(agentProcessGoneSoonAtMs(closed(3_000), here), at(3_000, AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS));
+  assert.equal(agentProcessGoneSoonAtMs(closed(3_000), elsewhere), null, "from elsewhere only a long silence would show it");
+  // It said it was exiting, and was waiting for messages when it did: the
+  // room still holds that request as open, for a known while.
+  const exited = { ...closed(3_000), process_connection_id: AGENT_PROCESS_EXITED };
+  assert.equal(agentProcessGoneSoonAtMs({ ...exited, delivery_connected: true }, elsewhere), at(3_000, AGENT_DELIVERY_LINGERS_MS));
+  assert.equal(agentProcessGoneSoonAtMs({ ...closed(3_000), delivery_connected: true }, here),
+    at(3_000, AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS));
+  // The agent made a call after its connection closed: it is there.
+  assert.equal(agentProcessGoneSoonAtMs({ ...closed(3_000), agent_heard_at: ago(1_000) }, here), null);
+  // Still connected, or never connected: nothing is about to happen.
+  assert.equal(agentProcessGoneSoonAtMs({ ...closed(3_000), process_disconnected_at: null }, here), null);
+  assert.equal(agentProcessGoneSoonAtMs({ ...closed(3_000), process_seen_at: null }, here), null);
+});
+
+test("a name is waited for only when everyone holding it is about to be gone", () => {
+  const closing = {
+    display_name: "MossDawn", owner_account_id: "acct_me", supervisor_grant_id: null, process_host_id: "host_a",
+    process_seen_at: ago(3_000), process_disconnected_at: ago(3_000), process_connection_id: "closed-connection",
+    last_seen_at: ago(3_000), agent_heard_at: ago(3_000),
+  };
+  const ask = (holders: RoomWorkerNameHolder[]) => nameComesFreeAtMs({
+    display_name: "MossDawn", owner_account_id: "acct_me", agent_key: "me/mossdawn",
+    agent_instance_id: "process-2", process_host_id: "host_a", holders, now_ms: nowMs,
+  });
+  const old = holder({ ...closing, agent_key: "me/mossdawn", session_id: "old", agent_instance_id: "process-1" });
+  const freeAt = nowMs - 3_000 + AGENT_PROCESS_GONE_ON_SAME_HOST_AFTER_MS;
+
+  assert.equal(ask([]), null, "nobody holds it");
+  assert.equal(ask([old]), freeAt);
+  assert.equal(ask([old, holder({ ...closing, agent_key: "me/other-name", session_id: "other", display_name: "CedarPeak" })]), freeAt);
+  assert.equal(ask([holder({ ...closing, agent_key: "me/mossdawn", session_id: "self", agent_instance_id: "process-2" })]), null,
+    "its own session holds nothing against it");
+  // Anyone else holding the name settles it: there is nothing to wait for.
+  assert.equal(ask([old, holder({ ...closing, agent_key: "me/alive", session_id: "alive", process_disconnected_at: null })]), null);
+  assert.equal(ask([old, holder({ ...closing, agent_key: "you/theirs", session_id: "theirs", owner_account_id: "acct_you" })]), null);
+  assert.equal(ask([old, holder({ ...closing, agent_key: "me/supervised", session_id: "supervised", supervisor_grant_id: "grant_1" })]), null);
+  // One that is gone already is not waited for.
+  assert.equal(ask([holder({ ...closing, agent_key: "me/gone", session_id: "gone",
+    process_disconnected_at: ago(60_000), agent_heard_at: ago(60_000), last_seen_at: ago(60_000) })]), null);
+});
+
 test("a process is gone only on evidence, never for being quiet", () => {
   const here = { now_ms: nowMs, process_host_id: "host_a" };
   const elsewhere = { now_ms: nowMs, process_host_id: "host_b" };
   const month = 30 * 24 * 3_600_000;
 
-  // No process connection was ever opened: nothing is known.
-  assert.equal(isAgentProcessGone({ process_seen_at: null, last_seen_at: ago(month), process_host_id: "host_a" }, here), false);
   // Connected, and busy or waiting: the agent itself was last seen long ago.
   assert.equal(isAgentProcessGone({ process_seen_at: ago(20_000), last_seen_at: ago(month), process_host_id: "host_a" }, here), false);
   // Active, though its connection has not been seen for the whole window.
@@ -206,7 +322,8 @@ test("a name passes on only from a session of the same owner whose process is go
     holder({ ...gone, agent_key: "legacy/mossdawn", session_id: "keyed" }),
     // None of these give up the name.
     holder({ ...gone, agent_key: "me/quiet", session_id: "quiet", process_seen_at: ago(20_000) }),
-    holder({ ...gone, agent_key: "me/older-client", session_id: "older-client", process_seen_at: null }),
+    holder({ ...gone, agent_key: "me/older-client", session_id: "older-client", process_seen_at: null,
+      agent_instance_id: `worker_${"a".repeat(32)}`, process_host_id: null }),
     holder({ ...gone, agent_key: "you/theirs", session_id: "theirs", owner_account_id: "acct_you" }),
     holder({ ...gone, agent_key: "me/supervised", session_id: "supervised", supervisor_grant_id: "grant_1" }),
     holder({ ...gone, agent_key: "me/other-name", session_id: "other-name", display_name: "CedarPeak" }),

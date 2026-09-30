@@ -14,7 +14,11 @@ import {
   upsertRoomParticipant,
 } from "../db.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
-import { resolveRequestAgentIdentity, type ResolvedRequestAgentIdentity } from "../request/agent-identity.js";
+import {
+  describeRefusedAgentSession,
+  resolveRequestAgentIdentity,
+  type ResolvedRequestAgentIdentity,
+} from "../request/agent-identity.js";
 import {
   LETAGENTS_AGENT_SESSION_ID_HEADER,
   LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
@@ -347,6 +351,8 @@ roomAgentCredentialInvalidationEvents.on("invalidate", (payload: unknown) => {
 
 export interface RoomAgentDeliveryDeps {
   resolveRequestAgentIdentity: typeof resolveRequestAgentIdentity;
+  /** Absent in tests that stand in for the store: the refusal is then plain. */
+  describeRefusedAgentSession?: typeof describeRefusedAgentSession;
   markRoomAgentDeliveryConnected: typeof markRoomAgentDeliveryConnected;
   forceDisconnectRoomAgentDeliverySession: typeof forceDisconnectRoomAgentDeliverySession;
   markRoomAgentDeliveryDisconnected: typeof markRoomAgentDeliveryDisconnected;
@@ -359,6 +365,7 @@ export interface RoomAgentDeliveryDeps {
 
 const defaultRoomAgentDeliveryDeps: RoomAgentDeliveryDeps = {
   resolveRequestAgentIdentity,
+  describeRefusedAgentSession,
   markRoomAgentDeliveryConnected,
   forceDisconnectRoomAgentDeliverySession,
   markRoomAgentDeliveryDisconnected,
@@ -609,7 +616,9 @@ export async function beginRoomAgentDelivery(input: {
     });
     if (!identity) {
       if (hasAgentSessionCredentials) {
-        throw new InvalidRoomAgentDeliverySessionError();
+        throw new InvalidRoomAgentDeliverySessionError(await deps.describeRefusedAgentSession?.({
+          req: input.req, agent_session_id: agentSessionId, agent_session_token: agentSessionToken, room_id: input.roomId,
+        }));
       }
       return null;
     }

@@ -1,6 +1,8 @@
 import crypto, { randomUUID } from "node:crypto";
 import { isMcpWorkerId, isMcpConnectionToken } from "../../../shared/mcp-worker.js";
 import { getSessionConnections } from "../messages/session-connections.js";
+import { adoptTaskLeasesFromEndedSessionsTx, relabelTaskWorkTx, type AdoptedTaskLease } from "../coordination/lease-adoption.js";
+import { agentDisplayNameKey } from "../../rooms/agent-display-name-allocation.js";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
@@ -187,6 +189,12 @@ export interface CreateRoomAgentSessionInput {
   connection_token?: string;
   /** The machine the registering process runs on, as the process derived it. */
   process_host_id?: string | null;
+  /**
+   * A durable worker keeps the name it was given when it reconnects. Set
+   * when it was given another name only because the one it asked for was
+   * held, and that name is now free: then it takes the name it asked for.
+   */
+  takes_requested_name?: boolean;
 }
 
 export const SAME_INSTANCE_RECLAIM_STALE_AFTER_MS =
@@ -411,6 +419,8 @@ export async function createFencedRoomAgentSession(
   session: CreatedRoomAgentSession;
   replaced_session_ids: string[];
   taken_over_session_ids: string[];
+  /** Leases this agent's ended sessions held, which the new session now holds. */
+  adopted_task_leases: AdoptedTaskLease[];
 }> {
   const durable = isMcpWorkerId(input.agent_instance_id);
   if ((durable && input.session_kind !== "worker") || durable !== Boolean(input.connection_token)
@@ -422,6 +432,7 @@ export async function createFencedRoomAgentSession(
       session: await createRoomAgentSession(input),
       replaced_session_ids: [],
       taken_over_session_ids: [],
+      adopted_task_leases: [],
     };
   }
 
@@ -445,25 +456,37 @@ export async function createFencedRoomAgentSession(
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mcp_worker_names:${input.room_id}`}, 0))`);
     }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_instance:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
-    const predecessors = await tx
+    const isPredecessor = and(
+      eq(room_agent_sessions.agent_key, input.agent_key),
+      eq(room_agent_sessions.agent_instance_id, instanceId),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      ...(durable ? [] : [isNull(room_agent_sessions.ended_at)]),
+    );
+    // Board Manager failover share-locks both manager session rows before
+    // entering the delivery-key lock domain. Every multi-session auth
+    // mutation must acquire those rows in the same deterministic order or
+    // replacement and failover can each hold one row while waiting on the
+    // other. Product-level predecessor ranking happens after the locks are
+    // held; lock order must not encode selection policy.
+    //
+    // The sessions this registration replaces and the ones whose name it
+    // takes are locked in one statement for that reason: in two, each in its
+    // own order, a registration could hold one of its own rows while waiting
+    // for a holder that sorts before it.
+    const lockedRows = await tx
       .select()
       .from(room_agent_sessions)
       .where(and(
         eq(room_agent_sessions.room_id, input.room_id),
-        eq(room_agent_sessions.agent_key, input.agent_key),
-        eq(room_agent_sessions.agent_instance_id, instanceId),
-        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
-        ...(durable ? [] : [isNull(room_agent_sessions.ended_at)]),
+        takeover.length > 0 ? or(isPredecessor, inArray(room_agent_sessions.session_id, takeover)) : isPredecessor,
       ))
-      // Board Manager failover share-locks both manager session rows before
-      // entering the delivery-key lock domain. Every multi-session auth
-      // mutation must acquire those rows in the same deterministic order or
-      // replacement and failover can each hold one row while waiting on the
-      // other. Product-level predecessor ranking happens after the locks are
-      // held; lock order must not encode selection policy.
       .orderBy(asc(room_agent_sessions.session_id))
-      .limit(MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION + 1)
-      .for("update");
+      .limit(MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION + 1 + takeover.length)
+      .for("update") as RoomAgentSessionRow[];
+    const predecessors = lockedRows.filter((row) => row.agent_key === input.agent_key
+      && row.agent_instance_id === instanceId
+      && row.session_kind === "worker"
+      && (durable || !row.ended_at));
 
     if (predecessors.length > MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION) {
       throw new Error("Too many active agent sessions to replace atomically.");
@@ -484,6 +507,7 @@ export async function createFencedRoomAgentSession(
           session: { ...toRoomAgentSession(prior), session_token: input.connection_token!, worker_bearer: null },
           replaced_session_ids: [],
           taken_over_session_ids: [],
+          adopted_task_leases: [],
         }, invalidations: [] };
       }
     }
@@ -522,16 +546,7 @@ export async function createFencedRoomAgentSession(
     // transaction began, and a process can come back in between.
     const takenOver: RoomAgentSessionRow[] = [];
     if (takeover.length > 0) {
-      if (predecessors.length > 0) {
-        throw nameConflict("A registration that has a session of its own takes no name from another.");
-      }
-      const holders = await tx.select().from(room_agent_sessions)
-        .where(and(
-          eq(room_agent_sessions.room_id, input.room_id),
-          inArray(room_agent_sessions.session_id, takeover),
-        ))
-        .orderBy(asc(room_agent_sessions.session_id))
-        .for("update") as RoomAgentSessionRow[];
+      const holders = lockedRows.filter((row) => takeover.includes(row.session_id));
       // Read inside the transaction, like the rest of the evidence.
       const { connected } = await getSessionConnections(tx, input.room_id, takeover, nowMs);
       for (const sessionId of takeover) {
@@ -550,40 +565,47 @@ export async function createFencedRoomAgentSession(
     }
     const takenOverIds = new Set(takenOver.map((row) => row.session_id));
 
-    // A durable worker's name stays reserved while it is offline, until there
-    // is evidence its process is gone. Then another agent of the same owner
-    // may take the name, and this reservation no longer counts.
-    const reservedByAnotherWorker = async (actorLabel: string): Promise<boolean> => {
-      const rows = await tx.select().from(room_agent_sessions).where(and(
-        eq(room_agent_sessions.room_id, input.room_id),
-        eq(room_agent_sessions.actor_label, actorLabel),
-        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+    // A durable worker's name stays reserved while it is offline, until its
+    // process is taken for gone. Then another agent of the same owner may
+    // take the name, and this reservation no longer counts.
+    //
+    // Names are compared as names. A label also carries the owner and the
+    // IDE, so two workers under one name can differ in label, and a check on
+    // labels would let both live under it.
+    const roomHolders = durable ? await getRoomWorkerNameHolders(input.room_id, tx) : [];
+    // Of two workers living under one name, the older keeps it: a pair
+    // converges without both moving. A live worker keeping its own name is
+    // therefore not held off it by a namesake that came later. One whose
+    // session had ended is not living under the name: whoever took it while
+    // it was away holds it now.
+    const heldByAnotherWorker = (displayName: string, since?: string): boolean => {
+      const key = agentDisplayNameKey(displayName);
+      const sinceMs = since ? Date.parse(since) : null;
+      return roomHolders.some((row) => {
+        if (agentDisplayNameKey(row.display_name) !== key) return false;
         // A session registered without an instance id is still another session.
-        sql`${room_agent_sessions.agent_instance_id} IS DISTINCT FROM ${instanceId}`,
-        or(
-          isNull(room_agent_sessions.ended_at),
-          sql`${room_agent_sessions.agent_instance_id} LIKE 'worker\\_%'`,
-        ),
-      )).orderBy(asc(room_agent_sessions.session_id)).limit(64) as RoomAgentSessionRow[];
-      return rows.some((row) => {
+        if (row.agent_instance_id === instanceId) return false;
         if (takenOverIds.has(row.session_id)) return false;
-        // Whoever is living under the label holds it.
+        if (sinceMs !== null && Date.parse(row.created_at) > sinceMs) return false;
+        // Whoever is living under the name holds it.
         if (!row.ended_at) return true;
         return !(row.owner_account_id === input.owner_account_id
           && !row.supervisor_grant_id
           && isAgentProcessGone(row, observer));
       });
     };
-    if (durable && replacementTarget
-      && !(await reservedByAnotherWorker(replacementTarget.actor_label))) {
+    const livingSince = replacementTarget && !replacementTarget.ended_at ? replacementTarget.created_at : undefined;
+    const keepsOwnName = Boolean(durable && replacementTarget && !input.takes_requested_name
+      && !heldByAnotherWorker(replacementTarget.display_name, livingSince));
+    if (keepsOwnName) {
       // Reconnecting is not a rename: keep the name originally assigned. The
       // one exception is a name another agent took while this worker was
       // gone; then the name the caller allocated stands.
-      input = { ...input, display_name: replacementTarget.display_name,
-        actor_label: replacementTarget.actor_label,
-        assigned_base_display_name: replacementTarget.assigned_base_display_name };
+      input = { ...input, display_name: replacementTarget!.display_name,
+        actor_label: replacementTarget!.actor_label,
+        assigned_base_display_name: replacementTarget!.assigned_base_display_name };
     }
-    if (durable && await reservedByAnotherWorker(input.actor_label)) {
+    if (durable && heldByAnotherWorker(input.display_name, keepsOwnName ? livingSince : undefined)) {
       throw nameConflict("Worker name is reserved.");
     }
     if (takenOver.length > 0) {
@@ -674,16 +696,40 @@ export async function createFencedRoomAgentSession(
     // key to the new session, and only an agent that has no live session
     // left loses what it had not answered.
     const endedAt = new Date(nowMs).toISOString();
+    if (replacementTarget && !input.supervisor_grant_id
+      && replacementTarget.actor_label !== session.actor_label) {
+      // The same session under another label: its work is shown under the
+      // label it works as.
+      await relabelTaskWorkTx(tx, {
+        room_id: input.room_id, agent_key: input.agent_key, session_id: session.session_id,
+        actor_label: session.actor_label, now: endedAt,
+      });
+    }
     for (const holder of takenOver) {
       unavailableReceiptTargets.push(
         ...await markUnresolvedReceiptsUnavailableTx(tx, holder, endedAt),
       );
     }
+    // A supervised worker's leases move only on its supervisor's word.
+    const adoptedTaskLeases = input.supervisor_grant_id ? [] : await adoptTaskLeasesFromEndedSessionsTx(tx, {
+      room_id: input.room_id,
+      agent_key: input.agent_key,
+      owner_account_id: input.owner_account_id,
+      successor: {
+        session_id: session.session_id,
+        agent_instance_id: instanceId,
+        actor_label: session.actor_label,
+        display_name: session.display_name,
+        process_host_id: input.process_host_id ?? null,
+      },
+      now: endedAt,
+    });
     return {
       result: {
         session,
         replaced_session_ids: replacedSessionIds,
         taken_over_session_ids: takenOver.map((row) => row.session_id),
+        adopted_task_leases: adoptedTaskLeases,
       },
       invalidations,
     };
@@ -777,7 +823,12 @@ export async function recordRoomAgentProcessExit(input: {
   return Boolean(row);
 }
 
-/** Records that the connection closed, unless a newer one has replaced it. */
+/**
+ * Records that the connection closed, unless a newer one has replaced it or
+ * the session has ended. A session ends on one server while its connection
+ * may be held on another; the close that follows says only that the process
+ * let go of a session it no longer has, and nothing about the process.
+ */
 export async function closeRoomAgentProcessConnection(input: {
   session_id: string;
   connection_id: string;
@@ -788,6 +839,7 @@ export async function closeRoomAgentProcessConnection(input: {
     .where(and(
       eq(room_agent_sessions.session_id, input.session_id),
       eq(room_agent_sessions.process_connection_id, input.connection_id),
+      isNull(room_agent_sessions.ended_at),
     ));
 }
 
