@@ -636,6 +636,10 @@ provideRoomWakeRules({
   api: roomWakeRules.api,
   openMessage: (messageId) => { void revealWakeMessage(messageId); },
 });
+const pauseRequestedEntryIds = computed(() => {
+  const state = agentInspectorActionState.value;
+  return new Set(state?.kind === "pause" && state.status === "running" ? [state.entryId] : []);
+});
 const agentInspectorProjections = computed(() => {
   return projectAgentInspectors(supervisorEntries.value, {
     roomId: props.room.identifier,
@@ -646,6 +650,7 @@ const agentInspectorProjections = computed(() => {
     resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesState.value),
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
     deliveryRetryingKeys: deliveryRetryingKeys.value,
+    pauseRequestedEntryIds: pauseRequestedEntryIds.value,
   });
 });
 const selectedAgentDetailProjection = computed(() => {

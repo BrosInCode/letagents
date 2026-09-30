@@ -5,8 +5,10 @@ import { createSSRApp, effectScope, h, nextTick, reactive } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 
+import { readFileSync } from "node:fs";
 import type {
   DesktopAgentPresence,
+  DesktopBoardGovernanceSnapshot,
   DesktopBoardIntentSummary,
   DesktopTaskSummary,
   WorkerSnapshot,
@@ -25,6 +27,8 @@ import { findLocalRoomWorker } from "../src/components/desktop/content/room-boar
 import { useRoomBoardPresentation } from "../src/components/desktop/content/room-board/useRoomBoardPresentation";
 import {
   activeBoardManagerAgents,
+  denyIntentReason,
+  liveManagerCandidates,
   managerCandidateName,
   managerCandidateRuntime,
   readableIntentBody,
@@ -41,6 +45,8 @@ let vite: ViteDevServer;
 let TaskCard: object;
 let Kanban: object;
 let Toolbar: object;
+let GovernanceManagerSection: object;
+let GovernanceIntentSection: object;
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL("../..", import.meta.url)),
@@ -51,6 +57,8 @@ before(async () => {
   TaskCard = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardTaskCard.vue")).default;
   Kanban = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardKanban.vue")).default;
   Toolbar = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardToolbar.vue")).default;
+  GovernanceManagerSection = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardGovernanceManagerSection.vue")).default;
+  GovernanceIntentSection = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardGovernanceIntentSection.vue")).default;
 });
 after(async () => { await vite?.close(); });
 
@@ -123,6 +131,62 @@ describe("board card hierarchy", () => {
     assert.match(html, /aria-controls="desktop-task-group-accepted"/);
     assert.match(html, /id="desktop-task-group-accepted"/);
     assert.match(html, /display:none/);
+  });
+});
+
+describe("board manager panel", () => {
+  const casey = presence({ agentSessionId: "session_casey", actorLabel: "Casey | Cursor", displayName: "Casey" });
+  const blake = presence();
+  const avery = presence({ agentSessionId: "session_avery", actorLabel: "Avery | Claude", displayName: "Avery" });
+
+  it("keeps live candidates in a stable order across presence refreshes", () => {
+    const names = (liveAgents: DesktopAgentPresence[], snapshot = governance()) =>
+      liveManagerCandidates(snapshot, liveAgents).map(managerCandidateName);
+    assert.deepEqual(names([casey, blake, avery]), ["Avery", "Blake", "Casey"]);
+    assert.deepEqual(names([blake, avery, casey]), ["Avery", "Blake", "Casey"]);
+    const managed = governance({ activeManager: activeManager("session_casey") });
+    assert.deepEqual(names([avery, casey, blake], managed), ["Casey", "Avery", "Blake"]);
+    assert.deepEqual(names([blake, avery, casey], managed), ["Casey", "Avery", "Blake"]);
+  });
+
+  it("keeps the primary action in place when a manager is assigned", async () => {
+    const render = (snapshot: DesktopBoardGovernanceSnapshot, selectedCandidateId: string | null) => renderToString(createSSRApp({
+      render: () => h(GovernanceManagerSection, {
+        governance: snapshot, busy: false, selectedCandidateId, liveAgents: [blake, casey],
+      }),
+    }));
+    const actions = (html: string) => [...html.matchAll(/data-testid="board-governance-(promote|release)"/g)].map((match) => match[1]);
+    const before = await render(governance(), "session_blake");
+    assert.deepEqual(actions(before), ["promote"]);
+    assert.match(before, />\s*Make manager\s*</);
+    const after = await render(governance({ activeManager: activeManager("session_blake") }), "session_blake");
+    // The primary stays last (rightmost), so a second click lands on the
+    // disabled "Current manager" button instead of the new Release button.
+    assert.deepEqual(actions(after), ["release", "promote"]);
+    assert.match(after, /<button[^>]*disabled[^>]*data-testid="board-governance-promote"[^>]*>\s*Current manager\s*</);
+  });
+
+  it("offers an optional reason when a request is denied", async () => {
+    assert.equal(denyIntentReason("  Duplicate of task_2.  "), "Duplicate of task_2.");
+    assert.equal(denyIntentReason("   "), null);
+    const html = await renderToString(createSSRApp({
+      render: () => h(GovernanceIntentSection, {
+        governance: governance({ pendingIntents: [intent({ id: "intent_close", actionType: "task_close", taskId: "task_2" })] }),
+        busy: false,
+      }),
+    }));
+    assert.match(html, /data-testid="board-governance-deny"[^>]*>\s*Deny\s*</);
+    const source = (relative: string) => readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
+    const intentSection = source("../src/components/desktop/content/room-board/RoomBoardGovernanceIntentSection.vue");
+    assert.match(intentSection, /emit\("deny-intent", intentId, denyIntentReason\(denyReason\.value\)\)/);
+    assert.match(
+      source("../src/components/desktop/content/room-board/RoomBoardGovernancePanel.vue"),
+      /@deny-intent="\(intentId, reason\) => emit\('deny-intent', intentId, reason\)"/,
+    );
+    assert.match(
+      source("../src/components/desktop/content/RoomBoardView.vue"),
+      /decideIntent\(intentId, "deny", reason\)/,
+    );
   });
 });
 
@@ -512,6 +576,41 @@ function worker(overrides: Partial<WorkerSnapshot> = {}): WorkerSnapshot {
     agentSessionId: "session_blake",
     detail: "Blake",
     ...overrides,
+  };
+}
+
+function governance(
+  overrides: Partial<DesktopBoardGovernanceSnapshot> = {}
+): DesktopBoardGovernanceSnapshot {
+  return {
+    roomId: "room_1",
+    managerMode: "manager_optional",
+    activeManager: null,
+    candidates: [],
+    pendingIntents: [],
+    pendingIntentCount: 0,
+    audit: [],
+    warnings: [],
+    capabilities: {
+      canViewGovernance: true,
+      canAssignManager: true,
+      canReleaseManager: true,
+      canSetManagerMode: true,
+      canDecideIntents: true,
+    },
+    ...overrides,
+  };
+}
+
+function activeManager(agentSessionId: string): NonNullable<DesktopBoardGovernanceSnapshot["activeManager"]> {
+  return {
+    assignmentId: `assignment_${agentSessionId}`,
+    agentSessionId,
+    agentKey: `agent/${agentSessionId}`,
+    actorLabel: agentSessionId,
+    runtimeSource: "desktop_managed",
+    assignedBy: "EmmyMay",
+    lastHeartbeatAt: null,
   };
 }
 

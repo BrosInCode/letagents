@@ -383,6 +383,54 @@
   gap: 8px;
 }
 
+.desktop-board-governance-deny,
+.desktop-board-governance-deny-field {
+  display: grid;
+  gap: 8px;
+}
+
+.desktop-board-governance-deny-field > span {
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.desktop-board-governance-deny-field small {
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.desktop-board-governance-deny-field textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  resize: vertical;
+  transition:
+    border-color var(--duration-fast) ease,
+    background-color var(--duration-fast) ease,
+    box-shadow var(--duration-fast) ease;
+}
+
+.desktop-board-governance-deny-field textarea::placeholder {
+  color: var(--text-tertiary);
+  opacity: 1;
+}
+
+.desktop-board-governance-deny-field textarea:focus {
+  border-color: var(--blue);
+  background: var(--bg-elevated);
+  box-shadow: 0 0 0 3px var(--blue-dim);
+}
+
 .desktop-board-governance-intent p,
 .desktop-board-governance-audit-entry p {
   margin: 0;
@@ -438,6 +486,7 @@
   }
 
   .desktop-board-governance-actions {
+    flex-direction: column-reverse;
     justify-content: stretch;
   }
 

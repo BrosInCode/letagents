@@ -686,6 +686,21 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   function upsertSelectedTask(task: DesktopTaskSummary): void {
     setSelectedSnapshot(upsertSnapshotTask(options.selectedSnapshot.value, task));
+    updateSelectedRootRoomSnapshot((snapshot) => upsertSnapshotTask(snapshot, task));
+  }
+
+  /**
+   * Refreshing the selected root room merges from rootRoomSnapshot, whose
+   * event-fed tasks otherwise only move on a full reload. Mirror task events
+   * into it so that refresh cannot roll the board back to an older list.
+   */
+  function updateSelectedRootRoomSnapshot(
+    update: (snapshot: DesktopRoomSnapshot) => DesktopRoomSnapshot | null,
+  ): void {
+    const rootSnapshot = options.rootRoomSnapshot.value;
+    const selectedSnapshot = options.selectedSnapshot.value;
+    if (!rootSnapshot || !selectedSnapshot || !roomSnapshotsMatch(rootSnapshot, selectedSnapshot)) return;
+    options.rootRoomSnapshot.value = update(rootSnapshot);
   }
 
   function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
@@ -773,6 +788,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (snapshot) setSelectedSnapshot({
         ...snapshot, tasks: snapshot.tasks.filter(task => task.id !== event.taskId),
       });
+      updateSelectedRootRoomSnapshot((rootSnapshot) => ({
+        ...rootSnapshot, tasks: rootSnapshot.tasks.filter(task => task.id !== event.taskId),
+      }));
       return;
     }
 

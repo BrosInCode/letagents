@@ -1569,6 +1569,51 @@ it("keeps watcher statistics when room refresh finishes later and when reopening
   });
 });
 
+describe("useDesktopAppData root room task freshness", () => {
+  it("keeps a board refresh from rolling task events back to the loaded root tasks", async () => {
+    const harness = createHarness();
+    harness.activeEntry.value = parentEntry();
+    harness.rootRoomSnapshot.value = roomSnapshot("room_parent", {
+      tasks: [
+        { ...taskSummary("task_1"), status: "merged" },
+        { ...taskSummary("task_2"), status: "in_progress" },
+        { ...taskSummary("task_3"), status: "accepted" },
+      ],
+    });
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      // Board "Mark Done" hands back the saved task, then asks for a refresh.
+      harness.state.upsertSelectedTask({ ...taskSummary("task_1"), status: "done" });
+      harness.state.handleRoomStreamEvent({
+        type: "task_update",
+        roomIdentifier: "room_parent",
+        task: { ...taskSummary("task_2"), status: "merged" },
+      });
+      harness.state.handleRoomStreamEvent({ type: "task_remove", roomIdentifier: "room_parent", taskId: "task_3" });
+      harness.state.handleRefreshRoom();
+      await flushAsync();
+    });
+
+    const statuses = (snapshot: DesktopRoomSnapshot | null) =>
+      snapshot?.tasks.map((task) => `${task.id}:${task.status}`);
+    assert.deepEqual(statuses(harness.selectedSnapshot.value), ["task_1:done", "task_2:merged"]);
+    assert.deepEqual(statuses(harness.rootRoomSnapshot.value), ["task_1:done", "task_2:merged"]);
+  });
+
+  it("leaves the root room tasks alone while a focus room is selected", async () => {
+    const harness = createHarness();
+    harness.rootRoomSnapshot.value = roomSnapshot("room_parent", {
+      tasks: [{ ...taskSummary("task_1"), status: "merged" }],
+    });
+    harness.selectedSnapshot.value = focusSnapshot([]);
+
+    harness.state.upsertSelectedTask({ ...taskSummary("task_1"), status: "done" });
+
+    assert.deepEqual(harness.rootRoomSnapshot.value?.tasks.map((task) => task.status), ["merged"]);
+  });
+});
+
 describe("useDesktopAppData session invalidation", () => {
   it("drops a pre-sign-out root and account refresh that resolves after the session is cleared", async () => {
     const harness = createHarness();

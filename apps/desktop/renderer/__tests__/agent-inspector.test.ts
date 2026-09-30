@@ -309,6 +309,46 @@ test("a reconnecting room keeps provider connectivity separate from delivery aut
   assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
 });
 
+test("a pause reads as Pausing… while it drains and Paused once saved, never Stopped or Disconnected", () => {
+  // Mid-turn, the daemon drains room delivery before it saves desired=paused.
+  const draining = entry({
+    observedState: "working",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: "2026-07-23T10:00:05.000Z", detail: null },
+      ingress: { state: "stopped", observedAt: "2026-07-23T10:00:05.000Z", detail: "Ingress stopped by the supervisor." },
+      inbox: { state: "queued", pendingCount: 1, blockedByMessageId: null, detail: "Room delivery is queued." },
+    },
+  });
+  assert.equal(projectAgentInspector(draining, { roomId: "focus_1" })?.overallLabel, "Disconnected");
+  const pausing = projectAgentInspector(draining, {
+    roomId: "focus_1",
+    pauseRequestedEntryIds: new Set(["supervised_1"]),
+  });
+  assert.equal(pausing?.overallState, "paused");
+  assert.equal(pausing?.overallLabel, "Pausing…");
+  assert.equal(pausing?.now, null, "a drained queue is not a request for attention");
+  assert.equal(agentInspectorActivityGroupState(pausing!), "paused");
+  assert.equal(
+    projectAgentInspector(entry(), { roomId: "focus_1", pauseRequestedEntryIds: new Set(["supervised_2"]) })?.overallLabel,
+    "Online",
+    "another agent's pause request changes nothing here",
+  );
+
+  // Saved: the provider process then stops before the pause settles.
+  for (const observedState of ["stopping", "stopped", "paused"] as const) {
+    const saved = projectAgentInspector(entry({ desiredState: "paused", observedState }), {
+      roomId: "focus_1",
+      pauseRequestedEntryIds: new Set(["supervised_1"]),
+    });
+    assert.equal(saved?.overallState, "paused", observedState);
+    assert.equal(saved?.overallLabel, "Paused", observedState);
+    assert.equal(agentInspectorActivityGroupState(saved!), "paused", observedState);
+  }
+  assert.equal(agentInspectorOverallState(entry({ desiredState: "stopped", observedState: "stopping" })), "retired");
+  assert.equal(agentInspectorOverallState(entry({ observedState: "stopped" })), "retired");
+});
+
 test("overall state follows the complete product precedence table", () => {
   const withRoom = (overrides: Partial<NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>>) => {
     const current = entry().roomAgentState!;

@@ -481,6 +481,7 @@ async function startManagedAgent(
         supervisedLaunch.dismiss();
         return;
       }
+      configuration.consumeSupervisedCharter(requestCharter);
       if (!setupActions.isCurrentRequest(requestVersion)) {
         if (props.open && props.roomIdentifier === requestRoomIdentifier) {
           supervisedLaunch.offerRecoveryCandidate(entry);
