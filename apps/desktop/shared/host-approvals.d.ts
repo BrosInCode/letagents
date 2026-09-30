@@ -33,6 +33,12 @@ export type DesktopHostApproval = {
   id: string; presentation: HostApprovalPresentation; status: HostApprovalStatus; detail: string | null;
   /** Only an already-recorded, provably undispatched decision may be retried. */
   retryDecision: HostApprovalChoice | null;
+  /**
+   * Opaque identity of a durable record that can no longer be decided. It is
+   * stable across app restarts so a dismissal can be remembered, changes when
+   * the record's status changes, and is accepted by no main-process operation.
+   */
+  dismissKey: string | null;
 };
 export type DesktopHostApprovalSnapshot = {
   available: boolean; approvals: DesktopHostApproval[]; error: string | null;

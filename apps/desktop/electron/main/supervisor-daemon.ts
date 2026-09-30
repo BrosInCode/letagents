@@ -695,7 +695,7 @@ export class SupervisorDaemonClient {
           item.roomId === roomId && JSON.stringify(item.challenge) === JSON.stringify(challenge) && item.presentationSha256 === presentationSha256
           && JSON.stringify(item.candidate.reference) === JSON.stringify(candidate.reference));
         if (!cached) {
-          cached = { roomId, view: { id: randomUUID(), presentation: candidate.presentation, status: candidate.status, detail: candidate.detail, retryDecision: null },
+          cached = { roomId, view: { id: randomUUID(), presentation: candidate.presentation, status: candidate.status, detail: candidate.detail, retryDecision: null, dismissKey: null },
             candidate, challenge, presentationSha256, touchedAt: now, decision: null };
           this.approvalPresentations.set(cached.view.id, cached);
         }
@@ -719,6 +719,15 @@ export class SupervisorDaemonClient {
           cached.view.status = "unavailable";
           cached.view.detail = "The recorded decision identity is unavailable. No new decision will be created.";
         }
+        // The daemon keeps an undecidable record visible across restarts until it
+        // expires on a retired runtime, and the presentation ID is random per
+        // session. Give the owner's dismissal a stable identity. Only a durable
+        // record carries a reference with this reserved title; a prompt still on
+        // a live lane keeps its own title even once expired, and must reappear.
+        cached.view.dismissKey = candidate.reference && candidate.presentation.title === "Approval unavailable"
+          ? createHash("sha256").update(JSON.stringify(["host-approval-dismissal", roomId,
+            candidate.reference.requestId, candidate.reference.requestVersion, cached.view.status])).digest("hex")
+          : null;
         approvals.push(structuredClone(cached.view));
       }
       const retained = new Set(approvals.map(item => item.id));
