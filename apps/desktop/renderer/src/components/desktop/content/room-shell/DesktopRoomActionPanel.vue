@@ -228,17 +228,12 @@
               </Transition>
             </div>
             <div class="room-settings-row-action">
-              <button
-                class="room-settings-switch"
-                type="button"
-                role="switch"
-                aria-labelledby="room-settings-sound-title"
-                aria-describedby="room-settings-sound-description"
-                :aria-checked="soundEnabled"
-                @click="$emit('toggle-sound')"
-              >
-                <span class="room-settings-switch-track"><span class="room-settings-switch-knob" /></span>
-              </button>
+              <DesktopSwitch
+                labelledby="room-settings-sound-title"
+                describedby="room-settings-sound-description"
+                :checked="soundEnabled"
+                @toggle="$emit('toggle-sound')"
+              />
             </div>
           </div>
 
@@ -261,18 +256,13 @@
               </Transition>
             </div>
             <div class="room-settings-row-action">
-              <button
-                class="room-settings-switch"
-                type="button"
-                role="switch"
-                aria-labelledby="room-settings-notifications-title"
-                aria-describedby="room-settings-notifications-description"
-                :aria-checked="notificationsEnabled"
+              <DesktopSwitch
+                labelledby="room-settings-notifications-title"
+                describedby="room-settings-notifications-description"
+                :checked="notificationsEnabled"
                 :disabled="notificationPermission === 'unsupported'"
-                @click="$emit('toggle-notifications')"
-              >
-                <span class="room-settings-switch-track"><span class="room-settings-switch-knob" /></span>
-              </button>
+                @toggle="$emit('toggle-notifications')"
+              />
             </div>
           </div>
         </div>
@@ -341,17 +331,12 @@
               </Transition>
             </div>
             <div class="room-settings-row-action">
-              <button
-                class="room-settings-switch"
-                type="button"
-                role="switch"
-                aria-labelledby="room-settings-events-title"
-                aria-describedby="room-settings-events-description"
-                :aria-checked="githubEventsVisible"
-                @click="$emit('toggle-github-events-visible')"
-              >
-                <span class="room-settings-switch-track"><span class="room-settings-switch-knob" /></span>
-              </button>
+              <DesktopSwitch
+                labelledby="room-settings-events-title"
+                describedby="room-settings-events-description"
+                :checked="githubEventsVisible"
+                @toggle="$emit('toggle-github-events-visible')"
+              />
             </div>
           </div>
         </div>
@@ -367,6 +352,7 @@ import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
 import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
 import SmoothHeight from "./SmoothHeight.vue";
+import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
   DesktopGitHubIntegrationStatus,

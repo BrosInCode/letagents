@@ -5,7 +5,7 @@
         <p class="settings-control-title">{{ title }}</p>
         <span v-if="badge" class="state-pill" :data-state="badgeState">{{ badge }}</span>
       </div>
-      <p v-if="description" class="settings-control-description">{{ description }}</p>
+      <p v-if="description" :id="descriptionId" class="settings-control-description">{{ description }}</p>
       <slot />
     </div>
     <div v-if="$slots.action" class="settings-control-action">
@@ -18,6 +18,8 @@
 defineProps<{
   title: string;
   description?: string;
+  /** Lets a control in the row name this description with `aria-describedby`. */
+  descriptionId?: string;
   badge?: string;
   badgeState?: string;
   emphasis?: "normal" | "warning" | "danger";

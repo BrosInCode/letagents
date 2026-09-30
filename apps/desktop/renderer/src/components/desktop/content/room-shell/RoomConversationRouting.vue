@@ -16,20 +16,15 @@
       <p class="sr-only" role="status">{{ busy ? "Saving…" : "" }}</p>
     </div>
     <div class="room-settings-row-action">
-      <button
+      <DesktopSwitch
         v-if="settings"
-        class="room-settings-switch"
-        type="button"
-        role="switch"
-        aria-labelledby="room-settings-routing-title"
-        aria-describedby="room-settings-routing-description"
-        :aria-checked="pendingEnabled ?? settings.enabled"
+        labelledby="room-settings-routing-title"
+        describedby="room-settings-routing-description"
+        :checked="pendingEnabled ?? settings.enabled"
         :disabled="!settings.can_manage || (!settings.enabled && !settings.available)"
-        :aria-disabled="busy"
-        @click="toggle"
-      >
-        <span class="room-settings-switch-track"><span class="room-settings-switch-knob" /></span>
-      </button>
+        :busy="busy"
+        @toggle="toggle"
+      />
       <button v-else-if="error" class="room-settings-button" type="button" @click="load">Try again</button>
     </div>
   </div>
@@ -37,6 +32,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import type { DesktopConversationRoutingSettings } from "../../../../../../electron/ipc-types/api";
 import { desktopIpc } from "../../../../ipc/index";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
