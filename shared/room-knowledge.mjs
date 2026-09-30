@@ -68,7 +68,26 @@ export function assertKnowledgeReplay(existing, candidate) {
   }
 }
 
+/** The `@agent:` handle an answer uses to wake the agent that asked. */
+export function attentionResponseHandle(agentKey) {
+  return String(agentKey ?? '').trim().replace(/[A-Z]/g, c => c.toLowerCase()).replace(/[^a-z0-9_.:/-]+/g, '');
+}
+
 export function formatAttentionResponse(record) {
-  const handle = record.author.kind === 'agent' ? record.author.id.trim().replace(/[A-Z]/g, c => c.toLowerCase()).replace(/[^a-z0-9_.:/-]+/g, '') : '';
+  const handle = record.author.kind === 'agent' ? attentionResponseHandle(record.author.id) : '';
   return `${handle ? `@agent:${handle}\n\n` : ''}Human response (${record.id}):\n\n${record.response.body}`;
+}
+
+const ATTENTION_RESPONSE_TEXT = /^(?:@agent:([a-z0-9_.:/-]+)\n\n)?Human response \([a-zA-Z0-9_-]{8,80}\):\n\n([\s\S]+)$/;
+
+/**
+ * What people see for a message formatAttentionResponse wrote. The handle and
+ * request id route the answer to the agent that asked; the room reads it as a
+ * reply to that agent by name. Null for any other text.
+ */
+export function attentionResponseDisplayText(text, agentName) {
+  const match = ATTENTION_RESPONSE_TEXT.exec(typeof text === 'string' ? text : '');
+  if (!match) return null;
+  const name = match[1] ? String(agentName(match[1]) ?? '').trim() : '';
+  return name ? `@${name} ${match[2]}` : match[2];
 }

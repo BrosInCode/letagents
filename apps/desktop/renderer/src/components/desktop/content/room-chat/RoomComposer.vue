@@ -110,7 +110,7 @@
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
     <RoomComposerEventChips
-      :event-previews="eventPreviews"
+      :event-previews="visibleEventPreviews"
       @open-event-preview="openEventPreview"
       @dismiss-event-preview="emit('dismiss-event-preview', $event)"
     />
@@ -227,6 +227,7 @@ import { desktopIpc } from "../../../../ipc";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
+import { visibleComposerEventPreviews } from "./composer-event-preview";
 
 export interface RoomComposerReplyTarget {
   id: string;
@@ -273,6 +274,11 @@ const emit = defineEmits<{
 const maxComposerInputHeight = 156;
 const { text: draft, captureSubmittedDraft } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
+const visibleEventPreviews = computed(() => [...visibleComposerEventPreviews(props.eventPreviews, {
+  draft: draft.value,
+  attachmentCount: props.attachmentDrafts.length + props.pendingAttachmentDrafts.length,
+  replying: Boolean(props.replyTo),
+})]);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const hostApprovals = ref<DesktopHostApproval[]>([]);

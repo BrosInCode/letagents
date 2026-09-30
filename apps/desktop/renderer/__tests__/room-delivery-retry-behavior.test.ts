@@ -137,6 +137,7 @@ let DesktopAttachmentDrafts: object;
 let RoomComposer: object;
 let RoomComposerEventChips: object;
 let messageDrafts: typeof import("../src/domain/desktop-message-drafts");
+let attentionResponse: typeof import("../src/domain/attention-response");
 
 async function attachClientRender(component: object, modulePath: string): Promise<void> {
   const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
@@ -162,6 +163,8 @@ before(async () => {
     server: { middlewareMode: true },
   });
   messageDrafts = await vite.ssrLoadModule("/renderer/src/domain/desktop-message-drafts.ts");
+  // The same module instance DesktopChatMessage injects from.
+  attentionResponse = await vite.ssrLoadModule("/renderer/src/domain/attention-response.ts") as typeof attentionResponse;
   [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomComposerEventChips] = await Promise.all([
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue").then((module) => module.default),
@@ -967,6 +970,69 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
     } finally { mounted.app.unmount(); }
   }
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+test("a GitHub update in the composer steps aside while a message is being written", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  const preview = {
+    id: "msg_github", kind: "review", tone: "violet", kindLabel: "Review", statusLabel: "reviewed",
+    headline: "Review on #1", repositoryLabel: "year-dots", refLabel: "feat/dates-core", numberLabel: "#1",
+    stats: null, actionLabel: "reviewed", url: null,
+  };
+  const render = (props: Record<string, unknown> = {}) =>
+    mount(RoomComposer, { ...composerProps(), roomIdentifier: "room-github-update", eventPreviews: [preview], ...props });
+  const showsUpdate = (root: HostNode) => descendants(root).some(node => node.props["data-testid"] === "desktop-composer-events");
+  const mounted = render();
+  try {
+    assert.equal(showsUpdate(mounted.root), true, "an empty composer shows the update");
+    const input = descendants(mounted.root).find(node => node.type === "textarea")!;
+    const setDraft = input.props["onUpdate:modelValue"] as (text: string) => void;
+    setDraft("A new top-level message"); await nextTick();
+    assert.equal(showsUpdate(mounted.root), false, "a message being written never looks like it carries the update");
+    setDraft("   "); await nextTick();
+    assert.equal(showsUpdate(mounted.root), true);
+  } finally { mounted.app.unmount(); }
+  for (const props of [
+    { replyTo: { id: "msg_1", sender: "Emmy", text: "Earlier" } },
+    { attachmentDrafts: [{ uploadId: "upl_1", name: "notes.txt", sizeBytes: 3, mimeType: "text/plain" }] },
+  ]) {
+    const composing = render(props);
+    try { assert.equal(showsUpdate(composing.root), false, JSON.stringify(props)); } finally { composing.app.unmount(); }
+  }
+  delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+test("a person's Needs-you answer reads as a reply to the agent by name", async () => {
+  const answer = {
+    ...message("msg_161"),
+    sender: "EmmyMay",
+    text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted. Post each verdict as a PR comment.",
+  };
+  const rendered = (names: ReadonlyMap<string, string> | null) => {
+    const root = hostNode("element", "root");
+    const app = renderer.createApp({
+      setup() {
+        if (names) Vue.provide(attentionResponse.attentionResponseAgentNamesKey, Vue.ref(names));
+        return () => Vue.h(DesktopChatMessage, {
+          message: answer, threadSummary: emptyThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
+        });
+      },
+    });
+    app.provide(ssrContextKey, { modules: new Set<string>() });
+    app.mount(root);
+    const html = descendants(root).map(node => String(node.props.innerHTML ?? "")).join("");
+    app.unmount();
+    return html;
+  };
+  const named = rendered(attentionResponse.attentionResponseAgentNames([
+    { agentKey: "EmmyMay/desktop-cursor-5849cfa6", displayName: "SummitMisty" },
+  ]));
+  assert.match(named, /<span class="mention-token">@SummitMisty<\/span> Noted\. Post each verdict as a PR comment\./);
+  assert.doesNotMatch(named, /@agent:|desktop-cursor|Human response|summitmisty-gh-app/);
+  // Outside a room roster the answer still reads cleanly, without the handle.
+  const unnamed = rendered(null);
+  assert.match(unnamed, /Noted\. Post each verdict/);
+  assert.doesNotMatch(unnamed, /@agent:|Human response/);
 });
 
 test("outgoing row exposes sending, uncertain retry, and confirmed state without server actions", async () => {

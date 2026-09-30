@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { createKnowledgeRecord, formatAttentionResponse, parseKnowledgeInput, reviseKnowledgeRecord } from '../../../shared/room-knowledge.mjs';
+import { attentionResponseDisplayText, attentionResponseHandle, createKnowledgeRecord, formatAttentionResponse, parseKnowledgeInput, reviseKnowledgeRecord } from '../../../shared/room-knowledge.mjs';
 import { getLocalKnowledge, listLocalKnowledge, localKnowledgeHistory, saveLocalKnowledge } from '../../../shared/local-room-knowledge.mjs';
 import { resolveGloballyAddressedAgentKeys } from '../../shared/activation-routing.js';
 
@@ -92,6 +92,22 @@ test('answers address the requesting agent even without an original message', ()
   ]);
   assert.deepEqual([...keys.explicitMentionKeys], [agent.id]);
   assert.doesNotMatch(formatAttentionResponse(answer), /@everyone/);
+});
+test('people read an answer as a reply to the agent by name, without its handle or request id', () => {
+  const asker = { id: 'EmmyMay/desktop-claude-code-f6054574', label: 'SparrowOtter | Emmy\'s agent | Claude Code', kind: 'agent' as const };
+  const request = createKnowledgeRecord('room', 'attention', { ...input, client_id: 'yd-board-manager-promotion-001' }, asker);
+  const answer = reviseKnowledgeRecord(request, { expected_version: 1, response: 'Approved.\n\n- You manage the board now.' }, human);
+  const text = formatAttentionResponse(answer);
+  const names = new Map([[attentionResponseHandle(asker.id), 'SparrowOtter']]);
+  assert.equal(attentionResponseDisplayText(text, (handle) => names.get(handle)), '@SparrowOtter Approved.\n\n- You manage the board now.');
+  // An agent the room no longer lists still gets a readable answer.
+  assert.equal(attentionResponseDisplayText(text, () => null), 'Approved.\n\n- You manage the board now.');
+  const humanRequest = createKnowledgeRecord('room', 'attention', { ...input, client_id: 'human-request-01' }, human);
+  const humanAnswer = reviseKnowledgeRecord(humanRequest, { expected_version: 1, response: 'Done.' }, human);
+  assert.equal(attentionResponseDisplayText(formatAttentionResponse(humanAnswer), () => 'unused'), 'Done.');
+  for (const other of ['Human response: Done.', '@agent:owner/x Human response (record-0001):\n\nDone.', 'Please see Human response (record-0001):\n\nDone.']) {
+    assert.equal(attentionResponseDisplayText(other, () => 'Name'), null, other);
+  }
 });
 test('unsafe sources, excessive content, malformed message IDs and empty answers are rejected', () => {
   for (const source_url of ['javascript:alert(1)', 'file:///secret', 'https://user:password@example.com']) assert.throws(() => parseKnowledgeInput('memory', { ...input, source_url }), /Source URL/);

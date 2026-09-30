@@ -22,6 +22,7 @@
           :class="messageClasses(msg)"
           :taskReferenceIds="taskReferenceIds"
           :arriving="arrivingMessageIds.has(msg.id)"
+          :agentNames="agentNames"
           @reply="emit('reply', $event)"
           @info="handleOpenMessageInfo($event)"
           @openImageViewer="emit('openImageViewer', $event)"
@@ -83,6 +84,7 @@ const props = defineProps<{
   taskReferenceIds?: ReadonlySet<string>
   /** A message another view asked to show, e.g. the one that woke an agent. */
   revealMessageId?: string | null
+  agentNames?: ReadonlyMap<string, string>
 }>()
 const emit = defineEmits<{
   loadOlder: []

@@ -6,6 +6,18 @@ import { repoEnvironmentRoomRefLabel } from "../../../../domain/repo-environment
 import type { GitHubEventPresentation } from "../desktop-chat-message/types";
 import type { ComposerEventPreview } from "./RoomComposerEventChips.vue";
 
+/**
+ * A GitHub update shown in the composer is a notification. It is never sent
+ * with the message, but once someone starts writing it reads as attached, so
+ * it steps aside until the composer is empty again.
+ */
+export function visibleComposerEventPreviews<T>(
+  previews: readonly T[],
+  composer: { draft: string; attachmentCount: number; replying: boolean },
+): readonly T[] {
+  return composer.draft.trim() || composer.attachmentCount > 0 || composer.replying ? [] : previews;
+}
+
 export function buildComposerEventPreview(
   messageId: string,
   event: GitHubEventPresentation,
