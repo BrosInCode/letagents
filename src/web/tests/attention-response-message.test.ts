@@ -9,7 +9,9 @@ import type { RoomMessage } from '../src/composables/useRoom'
 import {
   attentionResponseAgentNames,
   messageDisplayText,
+  messageMatchesSearch,
 } from '../src/components/room/chat-message/formatting'
+import { buildHumanParticipant } from '../src/components/room/activity/liveParticipants'
 
 const answerText = '@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted. Post each verdict as a PR comment.'
 
@@ -127,4 +129,27 @@ test('thread previews and the composer reply chip show the answer by agent name'
   }))
   assert.match(composer, /@SummitMisty Noted\. Post each verdict/)
   assert.doesNotMatch(composer, /@agent:|Human response/)
+})
+
+test('room search finds an answer by the agent name people see, and by its raw handle', () => {
+  for (const query of ['@summitmisty', 'desktop-cursor', 'noted', 'emmymay']) {
+    assert.equal(messageMatchesSearch(message(), query, names), true, query)
+  }
+  assert.equal(messageMatchesSearch(message({ text: 'Unrelated.' }), '@summitmisty', names), false)
+})
+
+test('the Activity status line shows a person\'s answer without its handle', () => {
+  const participant = buildHumanParticipant({
+    participant: {
+      room_id: 'room', participant_key: 'human:emmymay', kind: 'human', actor_label: null, agent_key: null,
+      github_login: 'EmmyMay', display_name: 'EmmyMay', owner_label: null, ide_label: null, hidden_at: null,
+      hidden_by: null, last_seen_at: '2026-09-30T16:42:00.000Z', last_room_activity_at: null,
+      last_live_heartbeat_at: null, activity_state: null, source_flags: ['messages'],
+      created_at: '2026-09-30T16:00:00.000Z', updated_at: '2026-09-30T16:42:00.000Z',
+    },
+    messages: [message()],
+    tasks: [],
+  })
+  assert.match(participant.statusText || '', /^@agent Noted\./)
+  assert.doesNotMatch(participant.statusText || '', /@agent:|Human response/)
 })

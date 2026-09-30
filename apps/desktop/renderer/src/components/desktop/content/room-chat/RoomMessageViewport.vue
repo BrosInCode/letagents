@@ -145,7 +145,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
+import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
 import type {
   DesktopAgentPresence,
   DesktopRoomAgentWork,
@@ -218,6 +219,7 @@ const props = defineProps<{
   initialScrollTop?: number | null;
 }>();
 
+const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
 const emit = defineEmits<{
   "load-older": [];
   "open-workspace": [work: DesktopRoomAgentWork];
@@ -886,7 +888,7 @@ function setInstantScrollTop(element: HTMLElement, scrollTop: number): void {
 }
 
 function threadIndicatorSummary(message: DesktopRoomMessage) {
-  return buildThreadIndicatorSummary(message, threadSummaries.value.get(message.id) || null);
+  return buildThreadIndicatorSummary(message, threadSummaries.value.get(message.id) || null, attentionResponseAgentNames?.value);
 }
 
 defineExpose({
@@ -926,7 +928,7 @@ function buildThreadActivityNotice(reply: DesktopRoomMessage, parentId: string):
   return {
     parentId,
     title: `${senderName} replied`,
-    preview: `${replyCount} ${replyCount === 1 ? "reply" : "replies"} · ${truncate(threadQuotePreview(reply), 92)}`,
+    preview: `${replyCount} ${replyCount === 1 ? "reply" : "replies"} · ${truncate(threadQuotePreview(reply, attentionResponseAgentNames?.value), 92)}`,
   };
 }
 

@@ -11,7 +11,7 @@ import type {
   DesktopTaskSummary,
 } from "../../../../../../electron/ipc-types";
 import { presentDesktopGitHubEvent } from "../room-events/presenter";
-import { roomMessageVisibleText } from "../../../../domain/attention-response";
+import { attentionResponseAgentNames, roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export type DesktopInboxFilter = "actionable" | "all";
 
@@ -129,7 +129,7 @@ export interface BuildDesktopInboxItemsInput {
 
 export function buildDesktopInboxItems(input: BuildDesktopInboxItemsInput): DesktopInboxItem[] {
   const items: DesktopInboxItem[] = [
-    ...threadInboxItems(input.threadPage, input.filter),
+    ...threadInboxItems(input.threadPage, input.filter, attentionResponseAgentNames(input.presence || [])),
     ...taskInboxItems(input.tasks),
     ...githubFailureInboxItems(input.githubEvents, input.fallbackRepository ?? null),
     ...agentBlockedInboxItems(input.reasoningSessions),
@@ -173,20 +173,21 @@ export function desktopInboxItemFingerprint(item: DesktopInboxItem): string {
 function threadInboxItems(
   threadPage: DesktopRoomThreadInboxPage | null,
   filter: DesktopInboxFilter,
+  agentNames: ReadonlyMap<string, string>,
 ): DesktopInboxItem[] {
   return (threadPage?.threads || [])
     .filter((item) => filter === "all" || item.summary.unreadCount > 0 || item.summary.hasUnread)
     .map(({ root, summary }) => ({
       id: `thread:${root.id}`,
       kind: "thread" as const,
-      title: roomMessageVisibleText(root, null).trim() || "Thread",
-      preview: summary.latestReply ? roomMessageVisibleText(summary.latestReply, null).trim() || null : null,
+      title: roomMessageVisibleText(root, agentNames).trim() || "Thread",
+      preview: summary.latestReply ? roomMessageVisibleText(summary.latestReply, agentNames).trim() || null : null,
       context: summary.latestReply ? `Latest reply from ${summary.latestReply.sender}` : null,
       timestamp: summary.latestReply?.timestamp || root.timestamp || null,
       firstSeenTimestamp: root.timestamp || null,
       occurrenceCount: 1,
       actionable: summary.unreadCount > 0 || summary.hasUnread,
-      activity: threadActivity(root, summary),
+      activity: threadActivity(root, summary, agentNames),
       root,
       summary,
       unreadCount: summary.unreadCount,
@@ -312,13 +313,14 @@ function agentOfflineInboxItems(
 function threadActivity(
   root: DesktopRoomMessage,
   summary: DesktopRoomMessageThreadSummary,
+  agentNames: ReadonlyMap<string, string>,
 ): DesktopInboxActivity[] {
   return sortActivity([
     summary.latestReply
       ? {
           id: `thread-reply:${summary.latestReply.id}`,
           label: `Latest reply from ${summary.latestReply.sender}`,
-          description: roomMessageVisibleText(summary.latestReply, null).trim() || null,
+          description: roomMessageVisibleText(summary.latestReply, agentNames).trim() || null,
           timestamp: summary.latestReply.timestamp,
           tone: summary.unreadCount > 0 || summary.hasUnread ? "new" : "neutral",
         }
@@ -326,7 +328,7 @@ function threadActivity(
     {
       id: `thread-root:${root.id}`,
       label: `Thread started by ${root.sender}`,
-      description: roomMessageVisibleText(root, null).trim() || null,
+      description: roomMessageVisibleText(root, agentNames).trim() || null,
       timestamp: root.timestamp || null,
       tone: "neutral",
     },

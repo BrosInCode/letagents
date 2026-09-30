@@ -79,8 +79,9 @@ export function formatAttentionResponse(record) {
 }
 
 const ATTENTION_RESPONSE_TEXT = /^(?:@agent:([a-z0-9_.:/-]+)\n\n)?Human response \([a-zA-Z0-9_-]{8,80}\):\n\n([\s\S]+)$/;
-// A room display name used as a mention: never markdown, never spaces.
-const MENTION_NAME = /^[A-Za-z0-9._:-]{1,64}$/;
+// A room display name used as a mention: never markdown, never spaces, and
+// no underscore that could open emphasis (leading, or doubled anywhere).
+const MENTION_NAME = /^(?!_)(?!.*__)[A-Za-z0-9._:-]{1,64}$/;
 // Answers that open with a block (fence, list, heading, quote, table, rule or
 // indented code) keep it as a block instead of joining the mention's line.
 const OPENS_WITH_BLOCK = /^(?: {4}|\t| {0,3}(?:`{3}|~{3}|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|#{1,6}(?:\s|$)|>|\||(?:[-*_] *){3,}$))/;
@@ -99,5 +100,6 @@ export function attentionResponseDisplayText(text, agentName) {
   if (!match[1]) return answer;
   const name = String(agentName(match[1]) ?? '').trim();
   const mention = `@${MENTION_NAME.test(name) ? name : 'agent'}`;
-  return OPENS_WITH_BLOCK.test(answer.split('\n', 1)[0]) ? `${mention}\n\n${answer}` : `${mention} ${answer}`;
+  // trimEnd: a CRLF line keeps its \r, and trailing space must not hide a rule.
+  return OPENS_WITH_BLOCK.test(answer.split('\n', 1)[0].trimEnd()) ? `${mention}\n\n${answer}` : `${mention} ${answer}`;
 }

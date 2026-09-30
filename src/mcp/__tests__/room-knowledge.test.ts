@@ -102,12 +102,25 @@ test('people read an answer as a reply to the agent by name, without its handle 
     attentionResponseDisplayText(text, name);
   assert.equal(display(answered('Approved. You manage the board now.')), '@SparrowOtter Approved. You manage the board now.');
   // An answer that opens with a block keeps it a block, apart from the mention.
-  for (const block of ['```sh\nnpm test\n```', '- first\n- second', '# Plan', '> quoted', '1. first']) {
-    assert.equal(display(answered(block)), `@SparrowOtter\n\n${block}`, block);
+  for (const block of [
+    '```sh\nnpm test\n```', '~~~\nnpm test\n~~~', '- first\n- second', '# Plan', '> quoted', '1. first', '1) first',
+    '---\nafter', '---\r\nafter', '* * *', '| a | b |\n|---|---|', '```\r\nnpm test\r\n```',
+  ]) {
+    assert.equal(display(answered(block)), `@SparrowOtter\n\n${block}`, JSON.stringify(block));
+  }
+  // Answers are trimmed when saved, so indented code only arrives in hand-written text.
+  const handwritten = `@agent:${attentionResponseHandle(asker.id)}\n\nHuman response (yd-board-manager-promotion-001):\n\n    npm test`;
+  assert.equal(display(handwritten), '@SparrowOtter\n\n    npm test');
+  for (const inline of ['*Yes*, go ahead.', '#hashtag is fine', '1.5 hours is fine', '-1 is the answer']) {
+    assert.equal(display(answered(inline)), `@SparrowOtter ${inline}`, inline);
   }
   // A roster name is a mention, never markdown; unknown agents stay visible as @agent.
   assert.equal(display(answered('Yes.'), () => '[Approved by Emmy](https://evil.example)'), '@agent Yes.');
   assert.equal(display(answered('Yes.'), () => '**Emmy approved**'), '@agent Yes.');
+  for (const emphasis of ['_x_', '__x__', 'a__b', '_Amber']) {
+    assert.equal(display(answered('Yes.'), () => emphasis), '@agent Yes.', emphasis);
+  }
+  assert.equal(display(answered('Yes.'), () => 'amber_river'), '@amber_river Yes.');
   assert.equal(display(answered('Yes.'), () => null), '@agent Yes.');
   const humanRequest = createKnowledgeRecord('room', 'attention', { ...input, client_id: 'human-request-01' }, human);
   const humanAnswer = reviseKnowledgeRecord(humanRequest, { expected_version: 1, response: 'Done.' }, human);

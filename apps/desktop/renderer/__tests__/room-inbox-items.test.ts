@@ -85,9 +85,27 @@ describe("desktop room inbox items", () => {
       githubEvents: [],
       reasoningSessions: [],
     });
-    assert.equal(item?.title, "@agent Noted.");
+    assert.equal(item?.title, "@agent Noted.", "without a roster the mention stays neutral");
     assert.equal(item?.preview, "@agent Noted.");
     assert.doesNotMatch(JSON.stringify(item?.activity), /@agent:|Human response/);
+    const [named] = buildDesktopInboxItems({
+      filter: "all",
+      threadPage: {
+        threads: [{ root: roomMessage("msg_7", answer, "2026-06-01T10:00:00.000Z"), summary }],
+        hasMore: false,
+        unreadThreadCount: 1,
+      },
+      tasks: [],
+      githubEvents: [],
+      reasoningSessions: [],
+      presence: [{
+        ...presence("SummitMisty | EmmyMay's agent | Cursor", "worker", "active"),
+        agentKey: "EmmyMay/desktop-cursor-5849cfa6",
+      }],
+    });
+    assert.equal(named?.title, "@SummitMisty Noted.");
+    assert.equal(named?.preview, "@SummitMisty Noted.");
+    assert.match(JSON.stringify(named?.activity), /@SummitMisty Noted\./);
   });
 
   it("derives actionable inbox rows from threads, tasks, GitHub failures, and blocked agents", () => {

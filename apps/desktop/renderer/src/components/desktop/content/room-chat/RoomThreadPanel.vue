@@ -138,7 +138,7 @@
       <div v-if="quoteTarget" class="room-thread-quote-preview" data-testid="room-thread-quote-preview">
         <div>
           <strong>{{ selectedQuoteText ? "Quoting selection from" : "Quoting" }} {{ displayName(quoteTarget) }}</strong>
-          <span>{{ selectedQuoteText || threadQuotePreview(quoteTarget) }}</span>
+          <span>{{ selectedQuoteText || threadQuotePreview(quoteTarget, attentionResponseAgentNames) }}</span>
         </div>
         <button type="button" aria-label="Cancel quote" @click="clearThreadQuote">
           <X :size="14" aria-hidden="true" />
@@ -221,7 +221,8 @@
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import RoomContribution from "./RoomContribution.vue";
 import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, inject, nextTick, ref, watch } from "vue";
+import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
 import { MessageSquarePlus, Paperclip, X } from "@lucide/vue";
 import type {
   DesktopAgentPresence,
@@ -286,6 +287,7 @@ const props = defineProps<{
   roomDeliverySkipKeys?: ReadonlySet<string>;
 }>();
 
+const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
 const emit = defineEmits<{
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   close: [];
@@ -331,7 +333,7 @@ const threadSummary = computed(() =>
     count: props.replies.length,
     latest: props.replies[props.replies.length - 1] || null,
     replies: props.replies,
-  })
+  }, attentionResponseAgentNames?.value)
 );
 const readStateParent = computed(() =>
   props.initialThreadSummary ? { ...props.parent, thread: props.initialThreadSummary } : props.parent

@@ -1005,13 +1005,18 @@ test("a GitHub update in the composer steps aside while a message is being writt
 const needsYouAnswerText = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted. Post each verdict as a PR comment.";
 
 /** Mounts a component the way RoomChatView does: with the room's agent names provided. */
-function mountWithAgentNames(component: object, props: Record<string, unknown>, named = true) {
+function mountWithAgentNames(
+  component: object,
+  props: Record<string, unknown>,
+  named = true,
+  displayName = "SummitMisty",
+) {
   const root = hostNode("element", "root");
   const app = renderer.createApp({
     setup() {
       if (named) {
         Vue.provide(attentionResponse.attentionResponseAgentNamesKey, Vue.ref(attentionResponse.attentionResponseAgentNames([
-          { agentKey: "EmmyMay/desktop-cursor-5849cfa6", displayName: "SummitMisty" },
+          { agentKey: "EmmyMay/desktop-cursor-5849cfa6", displayName },
         ])));
       }
       return () => Vue.h(component, props);
@@ -1022,11 +1027,15 @@ function mountWithAgentNames(component: object, props: Record<string, unknown>, 
   return { root, app };
 }
 
-function renderedMessage(messageOverrides: Record<string, unknown>, named = true): { html: string; text: string } {
+function renderedMessage(
+  messageOverrides: Record<string, unknown>,
+  named = true,
+  displayName?: string,
+): { html: string; text: string } {
   const { root, app } = mountWithAgentNames(DesktopChatMessage, {
     message: { ...message("msg_161"), sender: "EmmyMay", text: needsYouAnswerText, ...messageOverrides },
     threadSummary: emptyThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
-  }, named);
+  }, named, displayName);
   const nodes = descendants(root);
   const result = {
     html: nodes.map(node => String(node.props.innerHTML ?? "")).join(""),
@@ -1044,6 +1053,12 @@ test("a person's Needs-you answer reads as a reply to the agent by name", () => 
   const unnamed = renderedMessage({}, false).html;
   assert.match(unnamed, /@agent<\/span> Noted\. Post each verdict/);
   assert.doesNotMatch(unnamed, /@agent:|Human response/);
+  // A roster name that is not a plain mention cannot style a person's message.
+  for (const spoofed of ["[Approved by EmmyMay](https://evil.example)", "**EmmyMay approved**", "__x__"]) {
+    const html = renderedMessage({}, true, spoofed).html;
+    assert.match(html, /@agent<\/span> Noted\./, spoofed);
+    assert.doesNotMatch(html, /<a |<strong>|evil\.example/, spoofed);
+  }
   // Only a person's answer is rewritten; an agent posting the same shape is shown as written.
   assert.match(renderedMessage({ source: "agent", sender: "SummitMisty | EmmyMay's agent | Cursor" }).html, /Human response/);
 });

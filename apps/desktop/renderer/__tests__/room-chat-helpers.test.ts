@@ -272,10 +272,35 @@ describe("room chat helpers", () => {
     const answerText = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted.";
     const answer = { ...roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z"), text: answerText, source: "browser" };
     assert.equal(threadQuotePreview(answer), "@agent Noted.");
+    const names = new Map([["emmymay/desktop-cursor-5849cfa6", "SummitMisty"]]);
+    assert.equal(threadQuotePreview(answer, names), "@SummitMisty Noted.");
     const parent = roomMessage("msg_1", null);
     assert.equal(buildThreadIndicatorSummary(parent, { count: 1, latest: answer, replies: [answer] }).latestPreview, "@agent Noted.");
+    assert.equal(
+      buildThreadIndicatorSummary(parent, { count: 1, latest: answer, replies: [answer] }, names).latestPreview,
+      "@SummitMisty Noted.",
+    );
+    // A quote is sent text: it keeps what the message said, so routing is unchanged.
+    assert.equal(
+      applyThreadQuoteToDraft("Thanks", answer),
+      `> Emmy: ${answerText.replace(/\s+/g, " ")}\n\nThanks`,
+    );
     // An agent's own message in the same shape is shown as written.
     assert.equal(threadQuotePreview({ ...answer, source: "agent" }), answerText.replace(/\s+/g, " "));
+  });
+
+  it("finds a Needs-you answer by the agent name people see, and by its raw handle", () => {
+    const answer = {
+      ...roomMessage("msg_3", null, "2026-05-28T00:03:00.000Z"),
+      text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted.",
+      source: "browser",
+    };
+    const names = new Map([["emmymay/desktop-cursor-5849cfa6", "SummitMisty"]]);
+    const search = useDesktopRoomSearch(ref([answer]), () => names);
+    for (const query of ["@SummitMisty", "desktop-cursor", "noted"]) {
+      search.searchQuery.value = query;
+      assert.deepEqual(search.searchResults.value.map((message) => message.id), ["msg_3"], query);
+    }
   });
 
   it("lets newer live thread replies refresh stale timeline indicators", () => {

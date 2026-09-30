@@ -60,6 +60,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
+import { messageMatchesSearch } from './chat-message/formatting'
 import MessageInfoSurface from './MessageInfoSurface.vue'
 import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival'
 import { buildMessageThreadSummaries } from './messageThreading'
@@ -106,7 +107,7 @@ const matchedIds = computed(() => {
   if (!q) return new Set<string>()
   const ids = new Set<string>()
   for (const msg of props.messages) {
-    if ((msg.display_text || msg.text || '').toLowerCase().includes(q) || (msg.sender || '').toLowerCase().includes(q)) {
+    if (messageMatchesSearch(msg, q, props.agentNames)) {
       ids.add(msg.id)
     }
   }

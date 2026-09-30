@@ -20,6 +20,19 @@ export function messageDisplayText(
   return message.text
 }
 
+/**
+ * Room search. What people read and what was sent both match, so "@Amber"
+ * finds a Needs-you answer as well as its raw handle does.
+ */
+export function messageMatchesSearch(
+  message: { text: string; display_text?: string | null; source?: string | null; sender?: string | null },
+  normalizedQuery: string,
+  agentNames?: ReadonlyMap<string, string>,
+): boolean {
+  return [message.display_text || message.text || '', messageDisplayText(message, agentNames), message.sender || '']
+    .some(value => value.toLowerCase().includes(normalizedQuery))
+}
+
 /** Room agents' names keyed by the handle a Needs-you answer uses to wake them. */
 export function attentionResponseAgentNames(
   people: Iterable<{ agent_key: string | null; display_name: string | null }>,
