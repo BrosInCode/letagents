@@ -236,3 +236,12 @@ test("isSuppressibleDisconnectedPresence only suppresses delivery-backed stale a
     false,
   );
 });
+
+test("a registration that lost to another write is asked to retry, like one that found the room busy", async () => {
+  const { isLockTimeout } = await import("../routes/rooms/presence/helpers.js");
+  const failed = (code: string) => Object.assign(new Error("Failed query"), { cause: Object.assign(new Error("pg"), { code }) });
+  assert.equal(isLockTimeout(failed("55P03")), true, "it gave up waiting for a lock");
+  assert.equal(isLockTimeout(failed("40P01")), true, "it was chosen to give way in a deadlock");
+  assert.equal(isLockTimeout(failed("23505")), false);
+  assert.equal(isLockTimeout(new Error("anything else")), false);
+});

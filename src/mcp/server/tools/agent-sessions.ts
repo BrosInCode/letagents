@@ -40,11 +40,20 @@ import {
   workerModeDisabledToolResult,
 } from "../runtime/worker-bearer.js";
 import { bindSupervisedWorkerSessionWithContext } from "../runtime/supervisor-bridge.js";
-import { registerMcpWorker } from "../runtime/worker-handles.js";
+import { readAdoptedTaskLeases, recoverMcpWorker, registerMcpWorker, type AdoptedTaskLease } from "../runtime/worker-handles.js";
 import { holdProcessConnection, releaseProcessConnection } from "../runtime/process-connection.js";
 import { apiCallWhenFree } from "../runtime/api.js";
 import { getProcessHostId } from "../runtime/identity/liveness.js";
 import { WORKSPACE_CAPTURE_INSTRUCTIONS } from './workspace.js';
+
+/** Tells an agent which of its earlier work it holds again. */
+function describeAdoptedTaskLeases(leases: AdoptedTaskLease[] | undefined): { resumed_work?: string } {
+  if (!leases?.length) return {};
+  const held = leases.map((lease) => `${lease.task_id} (${lease.kind})`).join(", ");
+  return { resumed_work:
+    `An earlier session of this agent held these leases, and this session holds them now: ${held}. `
+    + "Carry on with that work, or release what is not yours to do." };
+}
 
 export function registerAgentSessionTools(server: McpServer): void {
   // -- register_agent_session -------------------------------------------------
@@ -75,17 +84,35 @@ export function registerAgentSessionTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Worker working directory used for branch detection and exact supervised Codex binding. Defaults to the MCP server's working directory."),
+      recover_lost_worker: z
+        .boolean()
+        .optional()
+        .describe("Pass true, with room_id and display_name and neither worker_id nor registration_key, ONLY when this same chat registered a worker earlier and has lost its worker_id. Returns that worker. Never use it to take a worker this chat did not register."),
     },
-    async ({ room_id, session_kind, runtime, display_name, cwd, worker_id, registration_key }) => {
-      if (worker_id !== undefined || registration_key !== undefined) {
+    async ({ room_id, session_kind, runtime, display_name, cwd, worker_id, registration_key, recover_lost_worker }) => {
+      if (recover_lost_worker || worker_id !== undefined || registration_key !== undefined) {
         if (session_kind === "controller") throw new Error("Durable handles identify workers, not controllers.");
         const roomId = room_id?.trim();
         if (!roomId) throw new Error("Pass room_id explicitly when registering or reconnecting this chat's worker.");
-        const result = await registerMcpWorker({ roomId, workerId: worker_id, registrationKey: registration_key,
-          displayName: display_name, runtime, cwd });
+        if (recover_lost_worker && (worker_id !== undefined || registration_key !== undefined || !display_name?.trim())) {
+          throw new Error("To recover a lost worker pass room_id and the display_name it registered under, and neither worker_id nor registration_key.");
+        }
+        const result = recover_lost_worker
+          ? await recoverMcpWorker({ roomId, displayName: display_name!, runtime, cwd })
+          : await registerMcpWorker({ roomId, workerId: worker_id, registrationKey: registration_key,
+            displayName: display_name, runtime, cwd });
         return { content: [{ type: "text" as const, text: JSON.stringify({
           success: true, worker_id: result.worker.worker_id,
           agent_session: toPublicAgentSession(result.session),
+          ...(result.name_held_here ? { name_notice:
+            `"${result.name_held_here}" is the name of a worker this MCP server registered in this room earlier and `
+            + `still holds, so this chat was registered as "${result.session.display_name}". If this is a chat of its `
+            + `own, carry on under that name. Only if this same chat registered as "${result.name_held_here}" before `
+            + `and lost its worker_id: call register_agent_session with recover_lost_worker true, this room_id and `
+            + `display_name "${result.name_held_here}", then disconnect_agent_session for worker_id `
+            + `"${result.worker.worker_id}".`,
+          } : {}),
+          ...describeAdoptedTaskLeases(result.adopted_task_leases),
           instruction: "Keep worker_id for this chat and pass it to room tools. After an MCP restart, reconnect with register_agent_session(worker_id, room_id). A separate chat needs its own registration_key. Credentials stay private to MCP.",
           workspace_instructions: WORKSPACE_CAPTURE_INSTRUCTIONS,
         }) }] };
@@ -318,6 +345,7 @@ export function registerAgentSessionTools(server: McpServer): void {
                 success: true,
                 agent_session: toPublicAgentSession(session),
                 agent_session_id: session.session_id,
+                ...describeAdoptedTaskLeases(readAdoptedTaskLeases(created.adopted_task_leases)),
                 use_agent_session_id: "Pass this exact agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, and task tools for this specific worker. Do not rely on a shared current session.",
               },
               null,

@@ -68,8 +68,13 @@ import {
   agentDisplayNameKey,
   allocateAgentDisplayName,
   isNameHeldByAnotherAgent,
+  nameComesFreeAtMs,
   selectReleasableNameHolders,
 } from "../../../rooms/agent-display-name-allocation.js";
+
+// Past the moment a name comes free, so that the clocks that stamped the
+// evidence and the one that reads it need not agree to the millisecond.
+const NAME_WAIT_MARGIN_MS = 500;
 
 export function desktopManagedPausePresence(input: {
   availability?: "failure" | "room_closed";
@@ -250,17 +255,64 @@ export function registerAgentSessionRoutes(
         });
         return;
       }
-      const [activeParticipants, activeSessionsForIdentity, durableWorkers, workerNameHolders] = await Promise.all([
-        getRoomParticipants(project.id, { limit: 200 }),
-        requestedSessionKind === "worker"
-          ? getActiveRoomAgentSessionsForWorkerIdentity({
-              room_id: project.id,
-              agent_key: agent.canonical_key,
-            })
-          : Promise.resolve([]),
-        getDurableRoomWorkerSessions(project.id),
-        getRoomWorkerNameHolders(project.id),
-      ]);
+      // Reduce a replayed, already-decorated label to its base ONLY from the
+      // client's explicit trusted base signal (`requested_base_display_name`),
+      // never from numeric shape or name history. Absent a valid signal the
+      // label is preserved verbatim (fail closed), so a deliberate
+      // numeric-ending name is never demoted and legacy accumulation is not
+      // "guessed" away.
+      const trustedRequestedBase = typeof requested_base_display_name === "string"
+        ? requested_base_display_name.trim()
+        : "";
+      const canonicalDisplayName = resolveReplayCanonicalBase(requestedDisplayName, trustedRequestedBase);
+      const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
+        requestedDisplayName,
+        canonicalDisplayName
+      );
+
+      const readRoom = async () => {
+        const [participants, sessionsForIdentity, durable, holders] = await Promise.all([
+          getRoomParticipants(project.id, { limit: 200 }),
+          requestedSessionKind === "worker"
+            ? getActiveRoomAgentSessionsForWorkerIdentity({
+                room_id: project.id,
+                agent_key: agent.canonical_key,
+              })
+            : Promise.resolve([]),
+          getDurableRoomWorkerSessions(project.id),
+          getRoomWorkerNameHolders(project.id),
+        ]);
+        const { connected } = await getSessionConnections(
+          db, project.id, holders.filter((holder) => !holder.ended_at).map((holder) => holder.session_id));
+        return {
+          participants, sessionsForIdentity, durable,
+          holders: holders.map((holder) => ({ ...holder, delivery_connected: connected.has(holder.session_id) })),
+        };
+      };
+      let room = await readRoom();
+      // A process that restarts registers within seconds of the one it
+      // replaces. If the name it asks for is held only by sessions whose
+      // process is about to be taken for gone, wait for that moment, once,
+      // instead of handing it another name that it would then keep.
+      if (requestedSessionKind === "worker" && normalizedAgentInstanceId) {
+        const comesFreeAt = nameComesFreeAtMs({
+          display_name: normalizedRequestedDisplayName || canonicalDisplayName,
+          owner_account_id: req.sessionAccount.account_id,
+          agent_key: agent.canonical_key,
+          agent_instance_id: normalizedAgentInstanceId,
+          process_host_id: processHostId,
+          holders: room.holders,
+          now_ms: Date.now(),
+        });
+        if (comesFreeAt !== null) {
+          await new Promise((resolve) => setTimeout(resolve, Math.max(0, comesFreeAt - Date.now()) + NAME_WAIT_MARGIN_MS));
+          room = await readRoom();
+        }
+      }
+      const activeParticipants = room.participants;
+      const activeSessionsForIdentity = room.sessionsForIdentity;
+      const durableWorkers = room.durable;
+      const workerNameHolders = room.holders;
       const replaceableSessionIds = new Set(
         activeSessionsForIdentity
           .filter((session) => normalizedAgentInstanceId
@@ -288,56 +340,40 @@ export function registerAgentSessionRoutes(
         (session) => !replaceableSessionIds.has(session.session_id),
       );
 
-      // Reduce a replayed, already-decorated label to its base ONLY from the
-      // client's explicit trusted base signal (`requested_base_display_name`),
-      // never from numeric shape or name history. Absent a valid signal the
-      // label is preserved verbatim (fail closed), so a deliberate
-      // numeric-ending name is never demoted and legacy accumulation is not
-      // "guessed" away.
-      const trustedRequestedBase = typeof requested_base_display_name === "string"
-        ? requested_base_display_name.trim()
-        : "";
-      const canonicalDisplayName = resolveReplayCanonicalBase(requestedDisplayName, trustedRequestedBase);
-      const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
-        requestedDisplayName,
-        canonicalDisplayName
-      );
-
       let baseDisplayName = isGenericName
         ? pickLocalCodename(agent.canonical_key).display_name
         : (normalizedRequestedDisplayName || canonicalDisplayName);
       // A name held by a session whose process is gone passes to a
-      // registration by the same owner that has no session of its own. A
-      // process that restarts leaves its session behind, and an agent that
-      // registers afresh leaves its registration behind; nothing else ends
-      // either, so without this each would refuse the agent its own name for
-      // ever.
+      // registration by the same owner. A process that restarts leaves its
+      // session behind, and an agent that registers afresh leaves its
+      // registration behind; nothing else ends either, so without this each
+      // would refuse the agent its own name for ever.
+      //
+      // That holds for a session that registers again as much as for a new
+      // one. An agent given another name, because its own was held when it
+      // asked, takes its own the next time it registers after the holder has
+      // gone.
       const ownCurrentSession = normalizedAgentInstanceId
         ? activeSessionsForIdentity.find((session) => session.agent_instance_id === normalizedAgentInstanceId) ?? null
         : null;
-      const registersAfresh = requestedSessionKind === "worker"
-        && Boolean(normalizedAgentInstanceId)
-        && !ownCurrentSession
-        && !durableWorkers.some((session) => session.agent_instance_id === normalizedAgentInstanceId
-          && session.agent_key === agent.canonical_key);
-      // A holder that has already ended has nothing left to end, so its
-      // reservation lapses for any registration. One that is still live can
-      // only be ended by a registration with no session of its own.
-      const { connected: deliveryConnected } = await getSessionConnections(
-        db, project.id, workerNameHolders.filter((holder) => !holder.ended_at).map((holder) => holder.session_id));
-      const workerNameHoldersWithConnections = workerNameHolders.map((holder) => ({
-        ...holder, delivery_connected: deliveryConnected.has(holder.session_id),
-      }));
+      // A durable worker reaches for the name it first asked for, whatever
+      // name it sends now.
+      const firstAsked = (durableWorker
+        ? durableWorkers.find((session) => session.agent_instance_id === normalizedAgentInstanceId
+          && session.agent_key === agent.canonical_key)?.assigned_base_display_name?.trim()
+        : null) || null;
+      const ownerAccountId = req.sessionAccount.account_id;
       const releasableHolders = requestedSessionKind === "worker" && normalizedAgentInstanceId
-        ? selectReleasableNameHolders({
-            display_name: baseDisplayName,
-            owner_account_id: req.sessionAccount.account_id,
-            agent_key: agent.canonical_key,
-            agent_instance_id: normalizedAgentInstanceId,
-            process_host_id: processHostId,
-            holders: workerNameHoldersWithConnections,
-            now_ms: Date.now(),
-          }).filter((holder) => holder.ended_at !== null || registersAfresh)
+        ? [...new Map([baseDisplayName, firstAsked ?? baseDisplayName].flatMap((displayName) =>
+            selectReleasableNameHolders({
+              display_name: displayName,
+              owner_account_id: ownerAccountId,
+              agent_key: agent.canonical_key,
+              agent_instance_id: normalizedAgentInstanceId,
+              process_host_id: processHostId,
+              holders: workerNameHolders,
+              now_ms: Date.now(),
+            })).map((holder) => [holder.session_id, holder] as const)).values()]
         : [];
       const releasedSessionIds = new Set(releasableHolders.map((holder) => holder.session_id));
       const releasedAgentKeys = new Set(releasableHolders
@@ -482,6 +518,23 @@ export function registerAgentSessionRoutes(
         }
       }
 
+      // A durable worker keeps the name it was given when it reconnects,
+      // whatever name it sends: it cannot rename itself. But if it was given
+      // that name only because the one it first asked for was held, it takes
+      // the one it asked for once that is free.
+      let takesRequestedName = false;
+      if (durablePredecessor && firstAsked
+        && agentDisplayNameKey(firstAsked) !== agentDisplayNameKey(durablePredecessor.display_name)
+        && !isHeld(firstAsked)) {
+        baseDisplayName = firstAsked;
+        takesRequestedName = true;
+      }
+      // The name a session already lives under, which it falls back to if
+      // the name it reached for turns out to be held after all.
+      const ownName = durablePredecessor?.display_name
+        ?? (durableWorker ? null : ownCurrentSession?.display_name ?? null);
+      let fellBackToOwnName = false;
+
       let offset = 0;
       const normalizedRepoBranch = normalizeOptionalText(repo_branch);
       const maxRegistrationAttempts = 25;
@@ -526,6 +579,7 @@ export function registerAgentSessionRoutes(
             runtime: normalizeRuntime(runtime || resolvedIdeLabel),
             registration_liveness: normalizedRegistrationLiveness,
             process_host_id: processHostId,
+            takes_requested_name: takesRequestedName,
             repo_branch: normalizedRepoBranch,
             actor_label: actorLabel,
             agent_key: agent.canonical_key,
@@ -557,7 +611,14 @@ export function registerAgentSessionRoutes(
               agent_session_id: replacedSessionId,
             });
           }
-          res.status(201).json(created.session);
+          // Said only when there is something to say: a client that
+          // predates it keeps what it is sent.
+          res.status(201).json(created.adopted_task_leases.length === 0 ? created.session : {
+            ...created.session,
+            adopted_task_leases: created.adopted_task_leases.map((lease) => ({
+              lease_id: lease.lease_id, task_id: lease.task_id, kind: lease.kind,
+            })),
+          });
           return;
         } catch (error) {
           if (isActiveAgentInstanceConflictError(error)) {
@@ -570,6 +631,17 @@ export function registerAgentSessionRoutes(
           }
           if (requestedSessionKind === "worker" && isActiveWorkerActorLabelConflict(error)) {
             usedDisplayNames.add(sessionDisplayName);
+            if (ownName && !fellBackToOwnName
+              && agentDisplayNameKey(ownName) !== agentDisplayNameKey(sessionDisplayName)) {
+              // It reached for another name and did not get it. It stays as
+              // it is rather than being moved to a third.
+              fellBackToOwnName = true;
+              takesRequestedName = false;
+              baseDisplayName = ownName;
+              usedDisplayNames.delete(ownName);
+              offset = 0;
+              continue;
+            }
             offset++;
             continue;
           }

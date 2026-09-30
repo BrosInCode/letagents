@@ -31,6 +31,11 @@ const RECONNECT_DELAYS_MS = [1_000, 2_000, AGENT_PROCESS_RECONNECT_MAX_DELAY_MS]
 // A server that refuses the connection is asked again, but seldom: it will
 // likely refuse again, and the agent's own room calls speak for it meanwhile.
 const REFUSED_DELAYS_MS = [AGENT_PROCESS_RECONNECT_MAX_DELAY_MS, 15_000, 60_000] as const;
+// A server that does not know the route is asked more seldom still. It may
+// be one of several behind the same address, not all of them yet replaced,
+// or be replaced while this process runs. A process that gave up on the
+// first such answer would offer no evidence for the rest of its life.
+const UNKNOWN_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as const;
 const ANSWER_TIMEOUT_MS = 10_000;
 const EXIT_ANNOUNCEMENT_TIMEOUT_MS = 1_500;
 
@@ -47,7 +52,7 @@ const held = new Map<string, HeldConnection>();
  * - dropped: the connection closed, or the server could not serve it.
  * - refused: the server answered, and declined.
  * - ended: the room says the session has ended.
- * - unsupported: the server does not know of process connections.
+ * - unsupported: the server does not know of process connections, for now.
  */
 type Outcome = "dropped" | "refused" | "ended" | "unsupported";
 
@@ -97,7 +102,7 @@ async function holdOnce(
       return "ended";
     }
     // A room server that predates this connection has no such route. That
-    // says nothing about the session, and there is nothing to ask again for.
+    // says nothing about the session.
     if (response.status === 404 || response.status === 405) {
       discard(response);
       return "unsupported";
@@ -163,12 +168,14 @@ async function hold(connection: HeldConnection): Promise<void> {
   const { session, controller } = connection;
   let drops = 0;
   let refusals = 0;
+  let unknowns = 0;
   while (!controller.signal.aborted) {
     let outcome: Outcome = "dropped";
     try {
       outcome = await holdOnce(session, controller.signal, (connectionId) => {
         drops = 0;
         refusals = 0;
+        unknowns = 0;
         connection.connectionId = connectionId;
       });
     } catch {
@@ -181,20 +188,22 @@ async function hold(connection: HeldConnection): Promise<void> {
       // registration starts a session instead of reusing this one.
       endStoredAgentSession(session.session_id, new Date().toISOString(), session.session_token);
     }
-    if (outcome === "ended" || outcome === "unsupported") {
+    if (outcome === "ended") {
       if (held.get(session.session_id) === connection) held.delete(session.session_id);
       return;
     }
-    if (outcome === "refused" && !stillOurs(session)) {
+    if (outcome !== "dropped" && !stillOurs(session)) {
       // The session was registered again with another credential, by this
       // process or another. Whoever did that holds its connection now.
       if (held.get(session.session_id) === connection) held.delete(session.session_id);
       return;
     }
-    const delays = outcome === "refused" ? REFUSED_DELAYS_MS : RECONNECT_DELAYS_MS;
-    const attempt = outcome === "refused" ? refusals : drops;
+    const [delays, attempt] = outcome === "unsupported" ? [UNKNOWN_DELAYS_MS, unknowns] as const
+      : outcome === "refused" ? [REFUSED_DELAYS_MS, refusals] as const
+        : [RECONNECT_DELAYS_MS, drops] as const;
     await sleep(delays[Math.min(attempt, delays.length - 1)]!, controller.signal);
-    if (outcome === "refused") refusals += 1;
+    if (outcome === "unsupported") unknowns += 1;
+    else if (outcome === "refused") refusals += 1;
     else drops += 1;
   }
 }

@@ -1,6 +1,11 @@
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
 import { currentWorkerCall } from "../../worker-call-context.js";
-import { LETAGENTS_AGENT_SESSION_TOKEN_HEADER } from "../../../shared/request-headers.js";
+import {
+  AGENT_SESSION_ENDED_ERROR,
+  LETAGENTS_AGENT_SESSION_ID_HEADER,
+  LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
+} from "../../../shared/request-headers.js";
+import { endStoredAgentSession } from "../../local-state/agent-sessions.js";
 import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import {
@@ -124,6 +129,31 @@ export function resolveApiPath(urlOrPath: string | undefined): string {
   }
 }
 
+/**
+ * The room says the session this request was made for has ended. Record it,
+ * so that the next registration starts a session instead of answering from
+ * the one the room no longer has.
+ */
+function forgetEndedSession(headers: Headers, body: unknown): void {
+  let sessionId = headers.get(LETAGENTS_AGENT_SESSION_ID_HEADER);
+  let sessionToken = headers.get(LETAGENTS_AGENT_SESSION_TOKEN_HEADER);
+  if ((!sessionId || !sessionToken) && typeof body === "string") {
+    try {
+      const sent = JSON.parse(body) as { agent_session_id?: unknown; agent_session_token?: unknown };
+      if (typeof sent.agent_session_id === "string") sessionId = sent.agent_session_id;
+      if (typeof sent.agent_session_token === "string") sessionToken = sent.agent_session_token;
+    } catch {
+      // Not a request that names a session.
+    }
+  }
+  if (!sessionId || !sessionToken) return;
+  try {
+    endStoredAgentSession(sessionId, new Date().toISOString(), sessionToken);
+  } catch {
+    // The error the agent is about to see tells it what to do.
+  }
+}
+
 const BUSY_RETRY_DELAYS_MS = [1_000, 2_000] as const;
 
 /**
@@ -180,6 +210,9 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
       const { clearStoredAuth } = await ownerAuthStoreLoader();
       clearStoredAuth();
       clearAuthenticatedAccountCache();
+    }
+    if (res.status === 401 && body.includes(AGENT_SESSION_ENDED_ERROR)) {
+      forgetEndedSession(headers, options?.body);
     }
     throw new ApiError(res.status, body);
   }
