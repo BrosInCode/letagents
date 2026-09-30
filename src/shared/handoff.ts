@@ -149,13 +149,6 @@ export function isSupportedHandoffExecutionMode(
   );
 }
 
-/** Default grant TTLs for v1 (strict boundaries); callers may shorten, not widen, without re-approval. */
-export const HANDOFF_DEFAULT_GRANT_TTL_MS: Record<HandoffOutputType, number> = {
-  research_note: 4 * 60 * 60 * 1000,
-  comment: 8 * 60 * 60 * 1000,
-  draft_pr: 48 * 60 * 60 * 1000,
-};
-
 export type HandoffPolicyErrorCode =
   | "unsupported_execution_mode"
   | "permission_profile_mismatch"

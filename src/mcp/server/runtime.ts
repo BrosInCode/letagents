@@ -127,7 +127,6 @@ export {
 export {
   clearPendingDeviceAuth,
   clearStoredAuth,
-  clearStoredAuth as clearStoredAuthorization,
   endStoredAgentSession,
   getCurrentAgentSession,
   getLocalStatePath,
