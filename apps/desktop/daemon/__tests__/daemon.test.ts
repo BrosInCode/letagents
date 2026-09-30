@@ -6,7 +6,7 @@ import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_pro
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
-import { createConnection, type AddressInfo } from "node:net";
+import { createConnection, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -12417,7 +12417,7 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
     const first = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
     const second = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "moved-branch" });
     assert.equal(first.reused, false); assert.equal(second.reused, true); assert.ok(commands.length > 2);
-    const refresh = commands.findIndex((args) => args.includes("fetch"));
+    const refresh = commands.findIndex((args) => args.includes("fetch") && args.includes("+refs/heads/*:refs/letagents/remotes/origin/*"));
     const resolution = commands.findIndex((args) => args.includes("abc^{commit}"));
     assert.ok(refresh >= 0 && refresh < resolution, "the verified origin is refreshed before revision resolution");
     assert.equal(commands[refresh]![1], await realpath(join(env.root, "repos", "repo.git")));
@@ -12611,6 +12611,11 @@ test("workspace provisioner refreshes an existing bare clone before resolving a 
       (await execFileAsync("git", ["--git-dir", join(daemonRoot, "repos", "repo.git"), "rev-parse", "refs/letagents/remotes/origin/fresh-after-clone"])).stdout.trim(),
       secondRevision,
     );
+    assert.equal(
+      (await execFileAsync("git", ["-C", second.path, "rev-parse", "origin/fresh-after-clone"])).stdout.trim(),
+      secondRevision,
+      "the daemon's refresh also updates agents' origin/* refs",
+    );
 
     await writeFile(join(source, "README.md"), "local only\n");
     await execFileAsync("git", ["-C", source, "add", "README.md"]);
@@ -12657,6 +12662,132 @@ test("workspace provisioner refreshes an existing bare clone before resolving a 
       tagOnlyRevision,
     );
   } finally { await env.cleanup(); }
+});
+
+async function originRemoteFixture(root: string) {
+  const remote = join(root, "origin.git");
+  const source = join(root, "source");
+  const git = async (args: string[]) => (await execFileAsync("git", args)).stdout.trim();
+  await git(["init", "--bare", remote]);
+  await git(["init", source]);
+  await git(["-C", source, "config", "user.email", "daemon@example.invalid"]);
+  await git(["-C", source, "config", "user.name", "Daemon Test"]);
+  await writeFile(join(source, "README.md"), "first\n");
+  await git(["-C", source, "add", "README.md"]);
+  await git(["-C", source, "commit", "-m", "first"]);
+  await git(["-C", source, "branch", "-M", "main"]);
+  await git(["-C", source, "remote", "add", "origin", remote]);
+  await git(["-C", source, "push", "origin", "main", "main:feature"]);
+  await git(["--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main"]);
+  return { remote, source, git, firstRevision: await git(["-C", source, "rev-parse", "HEAD"]) };
+}
+
+test("agent worktrees get origin tracking refs without the network, and the daemon's marker stays out of git", async () => {
+  const env = await fixture();
+  try {
+    const { remote, source, git, firstRevision } = await originRemoteFixture(env.root);
+    const daemonRoot = join(env.root, "daemon");
+    const provisioner = new WorkspaceProvisioner(daemonRoot, createGitCommand(daemonRoot));
+    const provision = (repo: string) => provisioner.provision({
+      repo, workAttemptId: randomUUID(), taskId: "task_tracking", remoteUrl: remote, revision: firstRevision,
+    });
+    const refspecs = async (bare: string) => (await git(["--git-dir", bare, "config", "--get-all", "remote.origin.fetch"])).split("\n");
+    const assertAgentReady = async (path: string, originMain: string) => {
+      assert.equal(await git(["-C", path, "rev-parse", "--verify", "origin/main^{commit}"]), originMain);
+      assert.equal(await git(["-C", path, "rev-parse", "--verify", "origin/feature^{commit}"]), firstRevision);
+      assert.equal(await git(["-C", path, "symbolic-ref", "refs/remotes/origin/HEAD"]), "refs/remotes/origin/main");
+      assert.equal(await git(["-C", path, "status", "--porcelain", "--untracked-files=all"]), "", "the workspace marker is not an untracked file");
+      await git(["-C", path, "check-ignore", "--quiet", ".letagents-work-attempt.json"]);
+    };
+
+    const fresh = await provision("fresh");
+    await assertAgentReady(fresh.path, firstRevision);
+    assert.deepEqual(await refspecs(fresh.identity.bare_path), ["+refs/heads/*:refs/remotes/origin/*"]);
+    await writeFile(join(source, "README.md"), "second\n");
+    await git(["-C", source, "commit", "-am", "second"]);
+    const secondRevision = await git(["-C", source, "rev-parse", "HEAD"]);
+    await git(["-C", source, "push", "origin", "main"]);
+    await git(["-C", fresh.path, "fetch", "--quiet", "origin"]);
+    assert.equal(await git(["-C", fresh.path, "rev-parse", "--verify", "origin/main^{commit}"]), secondRevision, "an agent's own fetch updates origin/main");
+
+    // A repository from an older daemon has no refspec and no origin refs.
+    // Its refresh copied the remote's branches, and its own branches now
+    // include an agent's, which must not pass for the remote's.
+    const legacyBare = join(daemonRoot, "repos", "legacy.git");
+    await git(["clone", "--bare", "--no-local", remote, legacyBare]);
+    await git(["--git-dir", legacyBare, "fetch", "--no-tags", "origin", "+refs/heads/*:refs/letagents/remotes/origin/*"]);
+    await git(["--git-dir", legacyBare, "branch", "agent-only", firstRevision]);
+    await assert.rejects(git(["--git-dir", legacyBare, "config", "--get-all", "remote.origin.fetch"]));
+    const repaired = await provision("legacy");
+    await assertAgentReady(repaired.path, secondRevision);
+    assert.deepEqual(await refspecs(legacyBare), ["+refs/heads/*:refs/remotes/origin/*"]);
+    await assert.rejects(git(["--git-dir", legacyBare, "rev-parse", "--verify", "refs/remotes/origin/agent-only"]));
+
+    // An agent's workaround edits the shared config, and a second agent repeats it.
+    await git(["--git-dir", legacyBare, "config", "--add", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    await git(["--git-dir", legacyBare, "config", "--add", "remote.origin.fetch", "refs/heads/*:refs/remotes/origin/*"]);
+    await git(["--git-dir", legacyBare, "config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/remotes/origin/tags/*"]);
+    await assertAgentReady((await provision("legacy")).path, secondRevision);
+    assert.deepEqual(await refspecs(legacyBare), [
+      "+refs/heads/*:refs/remotes/origin/*",
+      "+refs/tags/*:refs/remotes/origin/tags/*",
+    ], "duplicates collapse to one standard entry; an unrelated refspec is kept");
+    const excludes = (await readFile(join(legacyBare, "info", "exclude"), "utf8")).split("\n");
+    assert.equal(excludes.filter((line) => line === "/.letagents-work-attempt.json").length, 1, "the exclude is written once");
+    assert.equal(await git(["-C", repaired.path, "status", "--porcelain", "--untracked-files=all"]), "", "earlier worktrees share the exclude");
+
+    // With no copy of the remote's branches, the agent's own fetch fills them.
+    const unrefreshedBare = join(daemonRoot, "repos", "unrefreshed.git");
+    await git(["clone", "--bare", "--no-local", remote, unrefreshedBare]);
+    const unrefreshed = await provision("unrefreshed");
+    await assert.rejects(git(["-C", unrefreshed.path, "rev-parse", "--verify", "origin/main"]));
+    await git(["-C", unrefreshed.path, "fetch", "--quiet", "origin"]);
+    assert.equal(await git(["-C", unrefreshed.path, "rev-parse", "--verify", "origin/main^{commit}"]), secondRevision);
+
+    // The daemon never writes through a link planted in the shared repository.
+    const outside = join(env.root, "outside-exclude");
+    await writeFile(outside, "outside\n");
+    await rm(join(unrefreshedBare, "info", "exclude"));
+    await symlink(outside, join(unrefreshedBare, "info", "exclude"));
+    await assert.rejects(provision("unrefreshed"), /symlink/);
+    assert.equal(await readFile(outside, "utf8"), "outside\n");
+  } finally { await env.cleanup(); }
+});
+
+test("launching a cached commit never waits on an unreachable origin, and setup failures do not fail it", async () => {
+  const env = await fixture();
+  const connections = new Set<Socket>();
+  // Accepts connections and never answers, like a black-holed remote.
+  const server = createNetServer((socket) => { connections.add(socket); });
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const unreachable = `http://127.0.0.1:${(server.address() as AddressInfo).port}/repo.git`;
+    const { remote, git, firstRevision } = await originRemoteFixture(env.root);
+    const daemonRoot = join(env.root, "daemon");
+    const bare = join(daemonRoot, "repos", "offline.git");
+    await git(["clone", "--bare", "--no-local", remote, bare]);
+    await git(["--git-dir", bare, "remote", "set-url", "origin", unreachable]);
+    const provisioner = new WorkspaceProvisioner(daemonRoot, createGitCommand(daemonRoot));
+    const launch = () => provisioner.provision({
+      repo: "offline", workAttemptId: randomUUID(), taskId: "task_offline", remoteUrl: unreachable, revision: firstRevision,
+    });
+    const bounded = <T>(work: Promise<T>) => Promise.race([work, new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("the launch waited on the unreachable origin")), 10_000).unref();
+    })]);
+    const first = await bounded(launch());
+    assert.equal(await git(["-C", first.path, "rev-parse", "HEAD"]), firstRevision);
+    // A held config lock makes repairing a duplicated refspec fail; that
+    // setup is skipped, not fatal.
+    await git(["--git-dir", bare, "config", "--add", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    await writeFile(join(bare, "config.lock"), "");
+    const second = await bounded(launch());
+    assert.equal(await git(["-C", second.path, "rev-parse", "HEAD"]), firstRevision);
+    assert.equal(connections.size, 0, "provisioning never contacted origin");
+  } finally {
+    for (const socket of connections) socket.destroy();
+    server.close();
+    await env.cleanup();
+  }
 });
 
 test("repository transport errors get friendly bounded recovery, but auth failures do not", async () => {

@@ -3,14 +3,12 @@ import { chmod, lstat, mkdir, open, opendir, readFile, realpath, rename, rm, unl
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { ensureScratchWorkspaceRepository } from "../../../shared/scratch-workspace-repository.mjs";
-import { WORKSPACE_MARKER, type WorkspaceMarker } from "./workspace-provisioner.js";
+import { WORKSPACE_MARKER, WORKSPACE_MARKER_EXCLUDE, type WorkspaceMarker } from "./workspace-provisioner.js";
 
 const EPHEMERAL_REMOTE_PREFIX = "letagents-ephemeral:";
 const EMPTY_REVISION = "0".repeat(40);
 const EPHEMERAL_REPO = "room-only";
 const WORK_ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-// The daemon's own files in a workspace stay out of an agent's `git add` and `git clean`.
-const REPOSITORY_EXCLUDE = [`/${WORKSPACE_MARKER}`, `/${WORKSPACE_MARKER}.*.tmp`];
 
 function inside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
@@ -95,7 +93,7 @@ export class EphemeralWorkspaceProvisioner {
     // After the marker: orphan collection fails closed on a directory with
     // a `.git` and no marker, so a crash in between must leave the marker.
     // A reused workspace from an older version gets its repository here.
-    await this.writeRepository(canonicalPath, { exclude: REPOSITORY_EXCLUDE });
+    await this.writeRepository(canonicalPath, { exclude: WORKSPACE_MARKER_EXCLUDE });
     return { path: canonicalPath, reused, identity };
   }
 
@@ -119,7 +117,7 @@ export class EphemeralWorkspaceProvisioner {
     if (dirname(canonicalPath) !== await realpath(parent) || !WORK_ATTEMPT_ID.test(basename(canonicalPath))) {
       throw new Error("Ephemeral workspace is not a room-only workspace.");
     }
-    return this.writeRepository(canonicalPath, { exclude: REPOSITORY_EXCLUDE });
+    return this.writeRepository(canonicalPath, { exclude: WORKSPACE_MARKER_EXCLUDE });
   }
 
   /** Remove crash-orphaned room-only directories that have no durable attempt. */
