@@ -91,25 +91,28 @@
       :session="reasoningSession || null"
       @close="reasoningOpen = false"
     />
+    <!-- Keep the Teleport inside the row: a second root would make this a
+         fragment, and MessageList's arrival and search classes would never
+         reach the row. -->
+    <Teleport to="body">
+      <div
+        v-if="contextMenuOpen"
+        ref="contextMenuRef"
+        class="web-message-context-menu"
+        :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
+        role="menu"
+        aria-label="Message actions"
+        data-testid="web-message-context-menu"
+        @contextmenu.prevent.stop
+        @keydown="handleMenuKeydown"
+      >
+        <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
+        <button type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+        <div class="web-message-context-menu-separator" role="separator" />
+        <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
+      </div>
+    </Teleport>
   </div>
-  <Teleport to="body">
-    <div
-      v-if="contextMenuOpen"
-      ref="contextMenuRef"
-      class="web-message-context-menu"
-      :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
-      role="menu"
-      aria-label="Message actions"
-      data-testid="web-message-context-menu"
-      @contextmenu.prevent.stop
-      @keydown="handleMenuKeydown"
-    >
-      <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
-      <button type="button" role="menuitem" @click="replyFromMenu">Reply</button>
-      <div class="web-message-context-menu-separator" role="separator" />
-      <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
-    </div>
-  </Teleport>
 </template>
 
 <script setup lang="ts">
