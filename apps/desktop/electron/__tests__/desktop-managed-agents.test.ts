@@ -564,7 +564,7 @@ test("managed agent permission profiles map provider-specific available and gate
     assert.equal(supervised.status, "available");
     assert.equal(supervised.risk, "high");
     assert.match(supervised.detail ?? "", provider === "open-model"
-      ? /Each command is sent to LetAgents and to Jev/
+      ? /Reading and checking commands are sent to LetAgents and to Jev/
       : /Anything a room message asks for counts as approved/);
   }
   assert.throws(() => assertManagedAgentPermissionProfileAvailable("cursor", "auto_review", "supervised"), /Unknown permission profile 'auto_review'/);

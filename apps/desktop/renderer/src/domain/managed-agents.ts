@@ -1223,7 +1223,7 @@ export function supervisedPermissionProfilePresentation(
   if (profile.id === "auto_review" && providerId === "open-model") {
     return { ...profile, status: "available",
       description: "Lets LetAgents review each command before it runs. Routine commands and edits to project files run without asking.",
-      detail: "Each command is sent to LetAgents and to Jev, a decision model, for review. A command that deletes, publishes, installs, or reaches the network still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project." };
+      detail: "Reading and checking commands are sent to LetAgents and to Jev, a decision model, for review. Committing, fetching, reading pull requests, and pushing to the agent's own LetAgents branch run without asking. A command that deletes, installs, force-pushes, or pushes anywhere else still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project." };
   }
   if (profile.id === "auto_review" && providerId === "codex") {
     return { ...profile, status: "available",
@@ -1235,7 +1235,7 @@ export function supervisedPermissionProfilePresentation(
   if (providerId === "claude-code") {
     return { ...profile, status: "available",
       description: "Requires approval before Claude can change files or run write-capable commands.",
-      detail: "Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available." };
+      detail: "Commands that only read the project, its history, or its pull requests run without asking. Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available." };
   }
   if (providerId === "open-model") {
     return {
