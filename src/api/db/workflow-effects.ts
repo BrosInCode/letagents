@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
+import { repositoryRoomIds } from "./github/repository-rooms.js";
 import { task_leases, workflow_effects } from "./schema.js";
 import type { WorkflowEffect, WorkflowEffectKind, WorkflowEffectRow, WorkflowEffectState } from "./types.js";
 
@@ -424,4 +425,67 @@ export async function pruneSettledWorkflowEffects(input: {
     RETURNING ${workflow_effects.id}
   `);
   return result.rows.length;
+}
+
+/** The marker the broker writes into every review it publishes. */
+const REVIEW_EFFECT_MARKER = /<!-- letagents-effect:(lae_[0-9a-f]{32}) -->/;
+const REVIEW_EFFECT_MARKER_SQL = "<!-- letagents-effect:(lae_[0-9a-f]{32}) -->";
+
+/**
+ * Whether a GitHub approval may take a task out of blocked. Only the review
+ * the journal published for a review lease on this task counts, and only
+ * when it approves the pull request's current head and no other reviewer's
+ * request for changes still stands. Anyone who can review the repository can
+ * approve it on GitHub; that alone must not undo a reviewer's requested
+ * changes, nor can a copied journal marker stand in for the journal's review.
+ */
+export async function journalApprovalSettlesRequestedChanges(input: {
+  room_id: string;
+  task_id: string;
+  pull_number: number;
+  head_sha: string | null | undefined;
+  review_id: string;
+  review_body: string | null | undefined;
+  reviewer_login: string | null | undefined;
+}): Promise<boolean> {
+  const correlationKey = input.review_body?.match(REVIEW_EFFECT_MARKER)?.[1];
+  // The broker publishes as the GitHub App, whose reviews are a bot's.
+  if (!correlationKey || !input.head_sha || !input.reviewer_login?.endsWith("[bot]")) return false;
+  const [effect] = (await db.execute<{ external_id: string | null; request_payload: Record<string, unknown>; agent_key: string }>(sql`
+    SELECT effect.external_id, effect.request_payload, lease.agent_key
+      FROM workflow_effects AS effect
+      JOIN task_leases AS lease ON lease.id = effect.lease_id
+     WHERE effect.provider = 'github' AND effect.correlation_key = ${correlationKey}
+       AND effect.kind = 'github_review_verdict'
+       AND effect.room_id = ${input.room_id} AND effect.task_id = ${input.task_id}
+       AND lease.kind = 'review' AND lease.room_id = ${input.room_id} AND lease.task_id = ${input.task_id}
+     LIMIT 1
+  `)).rows;
+  if (!effect
+    || effect.request_payload.verdict !== "approve"
+    || Number(effect.request_payload.pull_number) !== input.pull_number
+    || String(effect.request_payload.expected_head_sha ?? "").toLowerCase() !== input.head_sha.toLowerCase()
+    || (effect.external_id && effect.external_id !== input.review_id)) return false;
+
+  // Each reviewer's latest decisive review. A journal review belongs to the
+  // agent whose lease published it, since every one is posted by the same bot.
+  const standing = await db.execute<{ reviewer: string; state: string }>(sql`
+    SELECT DISTINCT ON (reviewer) reviewer, state FROM (
+      SELECT COALESCE(lease.agent_key, 'github:' || lower(COALESCE(review.actor_login, ''))) AS reviewer,
+             lower(review.state) AS state, review.event_order_at, review.created_at, review.id
+        FROM github_room_events AS review
+        LEFT JOIN workflow_effects AS effect
+          ON effect.provider = 'github'
+         AND effect.correlation_key = substring(review.metadata->>'body' from ${REVIEW_EFFECT_MARKER_SQL})
+         AND (effect.external_id IS NULL
+           OR effect.external_id = substring(review.github_object_url from '#pullrequestreview-([0-9]+)$'))
+        LEFT JOIN task_leases AS lease ON lease.id = effect.lease_id
+       WHERE review.event_type = 'pull_request_review'
+         AND review.github_object_id = ${String(input.pull_number)}
+         AND lower(review.state) IN ('approved', 'changes_requested', 'dismissed')
+         AND review.room_id IN ${repositoryRoomIds(input.room_id)}
+    ) AS decisive
+    ORDER BY reviewer, event_order_at DESC, created_at DESC, id DESC
+  `);
+  return !standing.rows.some((row) => row.reviewer !== effect.agent_key && row.state === "changes_requested");
 }

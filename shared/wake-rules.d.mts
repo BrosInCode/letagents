@@ -73,7 +73,8 @@ export interface WakeRuleApi {
   restore(roomId: string, ruleId: string): Promise<WakeRule>;
 }
 
-export type WakeNoticeOutcome = "fired" | "expired";
+/** `ended`: what the rule waited for can no longer happen; `endedReason` says why. */
+export type WakeNoticeOutcome = "fired" | "expired" | "ended";
 
 export interface WakeCheckFact { name: string; conclusion: string; url: string | null }
 export interface WakeCheckPushFact { head_ref: string | null; checks: WakeCheckFact[] }
@@ -126,7 +127,7 @@ export function formatWakeNotice(input: {
   outcome: WakeNoticeOutcome;
   facts: WakeOccurrenceFacts;
   agentName: string | null | undefined;
-  /** This wake is the rule's last: what it watched is over. */
+  /** This wake is the rule's last: what it watched is over. Required for `ended`. */
   endedReason?: string | null;
 }): { text: string; display_text: string };
 

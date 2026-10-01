@@ -49,6 +49,11 @@ export function projectPullRequestReviewEvent(input: {
   action: string;
   reviewState: string;
   currentStatus: TaskStatusLike;
+  /**
+   * The approval is the task's own re-review, checked against the effect
+   * journal by the caller. Any other approval leaves a blocked task blocked.
+   */
+  approvalSettlesRequestedChanges?: boolean;
 }): BoardProjectionResult | null {
   if (input.action !== "submitted") return null;
 
@@ -56,9 +61,9 @@ export function projectPullRequestReviewEvent(input: {
     return { newStatus: "blocked", reason: "review_changes_requested" };
   }
 
-  // An approval of the re-review settles the requested changes, so the task
-  // is back in review and its merge can move it on.
-  if (input.reviewState === "approved" && input.currentStatus === "blocked") {
+  // The re-review's approval settles the requested changes, so the task is
+  // back in review and its merge can move it on.
+  if (input.reviewState === "approved" && input.currentStatus === "blocked" && input.approvalSettlesRequestedChanges) {
     return { newStatus: "in_review", reason: "review_approved" };
   }
 
@@ -81,6 +86,7 @@ export function projectIssueEvent(input: {
 export function projectRepoRoomEvent(input: {
   event: RepoRoomEvent;
   currentStatus: TaskStatusLike;
+  approvalSettlesRequestedChanges?: boolean;
 }): BoardProjectionResult | null {
   switch (input.event.kind) {
     case "pull_request":
@@ -94,6 +100,7 @@ export function projectRepoRoomEvent(input: {
         action: input.event.action,
         reviewState: input.event.review.state,
         currentStatus: input.currentStatus,
+        approvalSettlesRequestedChanges: input.approvalSettlesRequestedChanges,
       });
     case "issue":
       return projectIssueEvent({

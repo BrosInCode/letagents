@@ -2,6 +2,7 @@ import {
   getActiveTaskLeases,
   getActiveTaskLocks,
   getProjectById,
+  journalApprovalSettlesRequestedChanges,
   updateTask,
   updateTaskLeaseWorkflowRefs,
   type Project,
@@ -45,7 +46,8 @@ const SHIPPED_TASK_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 
 function pullRequestState(event: Extract<RepoRoomEvent, { kind: "pull_request" }>): string {
   if (event.action === "closed") return event.pullRequest.merged ? "merged" : "closed";
-  return event.action === "converted_to_draft" ? "draft" : "open";
+  if (event.action === "ready_for_review") return "open";
+  return event.action === "converted_to_draft" || event.pullRequest.draft ? "draft" : "open";
 }
 
 /**
@@ -220,6 +222,17 @@ export async function applyRepoRoomEventToTask(
   const projectedTaskState = projectRepoRoomEvent({
     event,
     currentStatus: linkedTask.status,
+    approvalSettlesRequestedChanges: event.kind === "pull_request_review" && linkedTask.status === "blocked"
+      && event.review.state === "approved"
+      && await journalApprovalSettlesRequestedChanges({
+        room_id: project.id,
+        task_id: linkedTask.id,
+        pull_number: event.pullRequest.number,
+        head_sha: event.pullRequest.headSha,
+        review_id: event.review.id,
+        review_body: event.review.body,
+        reviewer_login: event.senderLogin,
+      }),
   });
 
   if (projectedTaskState) {

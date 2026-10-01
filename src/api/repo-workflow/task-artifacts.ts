@@ -242,18 +242,19 @@ export function normalizeTaskWorkflowArtifacts(input: {
 }
 
 /**
- * An open pull request on a task that already shipped, other than the one it
- * shipped with: a follow-up still waiting for review.
+ * A pull request on a task that already shipped, other than the one it
+ * shipped with, that is still open: a follow-up in review, or a draft of one.
  */
-function isOpenFollowUpPullRequest(
+function followUpPullRequestLabel(
   artifact: TaskWorkflowArtifact,
   input: { prUrl?: string | null; status?: string | null }
-): boolean {
-  return (input.status === "merged" || input.status === "done")
-    && (artifact.kind === "pull_request" || artifact.kind === "merge_request")
-    && artifact.state === "open"
-    && Boolean(artifact.url)
-    && artifact.url !== input.prUrl;
+): string | null {
+  if ((input.status !== "merged" && input.status !== "done")
+    || (artifact.kind !== "pull_request" && artifact.kind !== "merge_request")
+    || !artifact.url || artifact.url === input.prUrl) return null;
+  if (artifact.state === "open") return `Follow-up ${buildTaskWorkflowRefLabel(artifact)} in review`;
+  if (artifact.state === "draft") return `Follow-up ${buildTaskWorkflowRefLabel(artifact)} (draft)`;
+  return null;
 }
 
 export function buildTaskWorkflowRefs(input: {
@@ -266,9 +267,7 @@ export function buildTaskWorkflowRefs(input: {
     .map((artifact) => ({
       provider: artifact.provider,
       kind: artifact.kind,
-      label: isOpenFollowUpPullRequest(artifact, input)
-        ? `Follow-up ${buildTaskWorkflowRefLabel(artifact)} in review`
-        : buildTaskWorkflowRefLabel(artifact),
+      label: followUpPullRequestLabel(artifact, input) ?? buildTaskWorkflowRefLabel(artifact),
       url: artifact.url,
     }));
 }

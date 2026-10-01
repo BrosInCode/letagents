@@ -18,6 +18,7 @@ import {
   projectIssueEvent,
   projectPullRequestEvent,
   projectPullRequestReviewEvent,
+  projectRepoRoomEvent,
   shouldAutoPromptForBoardProjection,
   synchronizeTaskWorkflowArtifactsWithPrUrl,
   upsertTaskPullRequestArtifact,
@@ -661,15 +662,23 @@ test("projectPullRequestReviewEvent: approved review does NOT transition", () =>
   assert.equal(result, null);
 });
 
-test("projectPullRequestReviewEvent: an approving re-review moves blocked → in_review; other reviews leave it blocked", () => {
+test("projectPullRequestReviewEvent: only the task's own journal re-review approval moves blocked → in_review", () => {
   assert.deepEqual(
-    projectPullRequestReviewEvent({ action: "submitted", reviewState: "approved", currentStatus: "blocked" }),
+    projectPullRequestReviewEvent({ action: "submitted", reviewState: "approved", currentStatus: "blocked", approvalSettlesRequestedChanges: true }),
     { newStatus: "in_review", reason: "review_approved" },
   );
   for (const reviewState of ["changes_requested", "commented"]) {
-    assert.equal(projectPullRequestReviewEvent({ action: "submitted", reviewState, currentStatus: "blocked" }), null);
+    assert.equal(projectPullRequestReviewEvent({ action: "submitted", reviewState, currentStatus: "blocked", approvalSettlesRequestedChanges: true }), null);
   }
   assert.equal(shouldAutoPromptForBoardProjection({ newStatus: "in_review", reason: "review_approved" }), false);
+  // Anyone who can review the repository can approve on GitHub: a drive-by approval unblocks nothing.
+  const strangerApproval = {
+    kind: "pull_request_review", provider: "github", action: "submitted", senderLogin: "drive-by-stranger",
+    repositoryFullName: "o/r", pullRequest: { number: 7, url: "https://github.com/o/r/pull/7", title: "t", headRef: "feat" },
+    review: { id: "1", state: "approved", url: "u" },
+  } as const;
+  assert.equal(projectRepoRoomEvent({ event: strangerApproval, currentStatus: "blocked" }), null);
+  assert.equal(projectRepoRoomEvent({ event: strangerApproval, currentStatus: "blocked", approvalSettlesRequestedChanges: false }), null);
 });
 
 test("buildTaskWorkflowRefs shows an open follow-up pull request on a shipped task", () => {
@@ -686,6 +695,7 @@ test("buildTaskWorkflowRefs shows an open follow-up pull request on a shipped ta
   assert.deepEqual(labels("done"), ["PR #7", "Follow-up PR #8 in review"]);
   assert.deepEqual(labels("done", "merged"), ["PR #7", "PR #8"], "a merged follow-up is no longer in review");
   assert.deepEqual(labels("in_review"), ["PR #7", "PR #8"], "only a shipped task has follow-ups");
+  assert.deepEqual(labels("merged", "draft"), ["PR #7", "Follow-up PR #8 (draft)"], "a draft is not in review yet");
 });
 
 test("upsertTaskPullRequestArtifact adds a pull request once and keeps its state current", () => {

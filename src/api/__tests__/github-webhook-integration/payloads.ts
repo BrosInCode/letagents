@@ -40,7 +40,7 @@ export function buildCheckRunPayload(input: {
 }
 
 export function buildPullRequestPayload(input: {
-  action?: "opened" | "closed";
+  action?: "opened" | "closed" | "ready_for_review";
   number: number;
   title: string;
   body: string;
@@ -50,6 +50,7 @@ export function buildPullRequestPayload(input: {
   actor?: string;
   merged?: boolean;
   mergedBy?: string;
+  draft?: boolean;
 }) {
   return {
     action: input.action ?? "opened",
@@ -66,6 +67,7 @@ export function buildPullRequestPayload(input: {
       },
       merged: input.merged ?? false,
       merged_by: input.mergedBy ? { login: input.mergedBy } : undefined,
+      ...(input.draft ? { draft: true } : {}),
       user: { login: "octocat" },
     },
   };
@@ -80,6 +82,7 @@ export function buildPullRequestReviewPayload(input: {
   sha: string;
   reviewId: number;
   reviewState: string;
+  reviewBody?: string;
   actor?: string;
 }) {
   return {
@@ -100,6 +103,8 @@ export function buildPullRequestReviewPayload(input: {
       id: input.reviewId,
       state: input.reviewState,
       html_url: `${input.url}#pullrequestreview-${input.reviewId}`,
+      body: input.reviewBody ?? null,
+      user: { login: input.actor ?? "reviewer" },
     },
   };
 }

@@ -12,6 +12,7 @@ export function toGitHubRepoPullRequestRef(
     headRef: pullRequest.head?.ref,
     headSha: pullRequest.head?.sha,
     merged: pullRequest.merged,
+    ...(pullRequest.draft ? { draft: true } : {}),
     authorLogin: pullRequest.user?.login,
     mergedByLogin: pullRequest.merged_by?.login,
   };

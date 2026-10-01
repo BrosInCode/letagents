@@ -35,12 +35,13 @@ class WakeRuleFenceLost extends Error {}
  */
 export async function deliverWakeRule(
   rule: WakeRuleRow,
-  evaluation: Extract<WakeRuleEvaluation, { kind: "fire" | "expire" }>,
+  evaluation: Extract<WakeRuleEvaluation, { kind: "fire" | "expire" | "retire" }>,
   now = new Date(),
 ): Promise<boolean> {
-  const outcome = evaluation.kind === "fire" ? "fired" : "expired";
+  const outcome = evaluation.kind === "fire" ? "fired" : evaluation.kind === "expire" ? "expired" : "ended";
   const facts = evaluation.kind === "fire" ? evaluation.facts : {};
-  const endedReason = evaluation.kind === "fire" ? evaluation.endedReason ?? null : null;
+  const endedReason = evaluation.kind === "fire" ? evaluation.endedReason ?? null
+    : evaluation.kind === "retire" ? evaluation.reason : null;
   const notice = formatWakeNotice({
     rule: { ...rule, expires_at: new Date(rule.expires_at).toISOString() },
     outcome,
@@ -85,7 +86,7 @@ export async function checkWakeRules(
     try {
       const evaluation = await evaluateWakeRule(rule, now, deps);
       if (evaluation.kind === "wait") await scheduleWakeRuleCheck(rule, evaluation.nextCheckAt, { cursorAt: evaluation.cursorAt });
-      else if (evaluation.kind === "retire") {
+      else if (evaluation.kind === "retire" && !evaluation.wake) {
         if (await retireWakeRule(rule, evaluation.reason, now)) queueWakeRuleInvalidation(rule.room_id);
       } else await deliverWakeRule(rule, evaluation, now);
     } catch (error) {

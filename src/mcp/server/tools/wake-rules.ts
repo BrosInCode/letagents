@@ -44,7 +44,7 @@ export function registerWakeRuleTools(server: McpServer): void {
       + "github.review_submitted {pr | mine: true, states?: [approved, changes_requested, commented]}; "
       + "github.pr_closed {pr | mine: true, merged_only?}. "
       + "`mine` means the branches and pull requests of tasks you are working on. Rules expire after 24 hours unless you set expires_at (at most 7 days). "
-      + "A rule on one pull request ends when it merges or closes, and a task rule ends when the task is done or cancelled; you are woken for that only if it is what you wait for. "
+      + "A rule on one pull request ends when it merges (or stays closed for 10 minutes), and a task rule ends when the task is done or cancelled; you are woken once when that ends your wait, unless the rule already woke you. "
       + "Adding the same rule twice returns the existing one. People see what you are waiting for and can cancel it.",
     {
       event: z.enum(WAKE_RULE_EVENTS as [string, ...string[]]),

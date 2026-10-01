@@ -306,43 +306,67 @@ test("undo counts against the agent's limit and belongs to whoever cancelled", s
   await assert.rejects(store!.restoreWakeRule(room.id, first.rule.id, { kind: "human", id: "someone-else", label: "Ada" }), /./);
 });
 
-test("rules on a merged pull request or a finished task end without a wake, and say why", skip, async () => {
+test("rules on a merged pull request or a finished task end once, and say why", skip, async () => {
   const { room, agent } = await seed("wake-retire-room");
   await bindRepository([room.id]);
   const review = await service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(0), body: { event: "github.review_submitted", arguments: { pr: 7 }, repeat: true } });
+  const alreadyWoke = await service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(1), body: { event: "github.review_submitted", arguments: { pr: 7, states: ["approved"] }, repeat: true } });
+  await client!.pool.query("UPDATE agent_wake_rules SET fire_count = 1, last_fired_at = now() - interval '5 minutes' WHERE id = $1", [alreadyWoke.rule.id]);
   const merge = await service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(1), body: { event: "github.pr_closed", arguments: { pr: 7 }, repeat: true } });
   const task = await api!.createTask(room.id, "Tide", "owner");
   await client!.pool.query("UPDATE tasks SET status = 'in_review' WHERE room_id = $1 AND number = $2", [room.id, Number(task.id.slice(5))]);
-  const taskRule = await service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(0), body: { event: "task.status_changed", arguments: { task_id: task.id, to: ["blocked"] }, repeat: true } });
+  const taskRule = await service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(0), body: { event: "task.status_changed", arguments: { task_id: task.id, to: ["done"] } } });
 
   await api!.insertGitHubRoomEvent({
     room_id: room.id, event_type: "pull_request", action: "closed", idempotency_key: "pr-7-closed", github_object_id: "7",
     state: "merged", github_object_url: "https://github.com/org/repo/pull/7", provider_event_at: new Date(Date.now() - 60_000).toISOString(),
   });
-  await client!.pool.query("UPDATE tasks SET status = 'done' WHERE room_id = $1 AND number = $2", [room.id, Number(task.id.slice(5))]);
-  await scheduler!.checkWakeRules([await row(review.rule.id), await row(merge.rule.id), await row(taskRule.rule.id)]);
+  await client!.pool.query("UPDATE tasks SET status = 'cancelled' WHERE room_id = $1 AND number = $2", [room.id, Number(task.id.slice(5))]);
+  await scheduler!.checkWakeRules(await Promise.all([review, alreadyWoke, merge, taskRule].map(({ rule }) => row(rule.id))));
 
-  const retired = await row(review.rule.id);
-  assert.deepEqual([retired.status, retired.ended_reason, retired.wake_message_number, retired.fire_count], ["retired", "#7 was merged", null, 0]);
-  assert.ok(retired.ended_at);
-  const finishedTask = await row(taskRule.rule.id);
-  assert.deepEqual([finishedTask.status, finishedTask.ended_reason], ["retired", `${task.id} is done`]);
-  const lastWake = await row(merge.rule.id);
-  assert.deepEqual([lastWake.status, lastWake.ended_reason], ["fired", "#7 was merged"], "a repeating rule that waits for the merge wakes once, then ends");
-  const message = await api!.getMessageById(room.id, `msg_${lastWake.wake_message_number}`);
-  assert.match(message!.text, /This rule is finished \(#7 was merged\)/);
-  assert.equal((await client!.pool.query("SELECT count(*)::int AS n FROM messages WHERE room_id = $1 AND source = 'wake_rule'", [room.id])).rows[0].n, 1);
-  const recent = (await store!.listWakeRules(room.id)).recent.find((entry) => entry.id === review.rule.id);
+  const notice = async (ruleId: string) => {
+    const ended = await row(ruleId);
+    const message = ended.wake_message_number ? await api!.getMessageById(room.id, `msg_${ended.wake_message_number}`) : null;
+    return [ended.status, ended.ended_reason, message?.display_text ?? null];
+  };
+  assert.deepEqual(await notice(review.rule.id), ["retired", "#7 was merged", "Fable stopped waiting · #7 was merged"],
+    "the agent never got its review, so it is told once that the wait ended");
+  assert.match((await api!.getMessageById(room.id, `msg_${(await row(review.rule.id)).wake_message_number}`))!.text,
+    /^Your wake rule wake_\w+ ended because #7 was merged\. You were waiting for a review on #7\./);
+  assert.deepEqual(await notice(alreadyWoke.rule.id), ["retired", "#7 was merged", null], "a rule that already woke the agent ends quietly");
+  assert.deepEqual(await notice(merge.rule.id), ["fired", "#7 was merged", "Ada woke up · #7 was merged"],
+    "a repeating rule that waits for the merge wakes for it once, then ends");
+  assert.match((await api!.getMessageById(room.id, `msg_${(await row(merge.rule.id)).wake_message_number}`))!.text, /This rule is finished \(#7 was merged\)/);
+  assert.deepEqual(await notice(taskRule.rule.id), ["retired", `${task.id} was cancelled`, `Fable stopped waiting · ${task.id} was cancelled`]);
+  assert.equal((await client!.pool.query("SELECT count(*)::int AS n FROM messages WHERE room_id = $1 AND source = 'wake_rule'", [room.id])).rows[0].n, 3);
+  const recent = (await store!.listWakeRules(room.id)).recent.find((entry) => entry.id === alreadyWoke.rule.id);
   assert.deepEqual([recent?.status, recent?.ended_reason], ["retired", "#7 was merged"]);
 
-  // Waiting on a pull request that already ended is refused; a reopened one can be waited on again.
+  // Waiting on a merged pull request is refused.
   await assert.rejects(
     service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(0), body: { event: "github.check_completed", arguments: { pr: 7 } } }),
     /#7 is already merged/,
   );
+
+  // Closed without merging: the rules wait out the grace for a reopen, then end.
+  const closedAt = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
   await api!.insertGitHubRoomEvent({
-    room_id: room.id, event_type: "pull_request", action: "reopened", idempotency_key: "pr-7-reopened", github_object_id: "7",
+    room_id: room.id, event_type: "pull_request", action: "closed", idempotency_key: "pr-9-closed", github_object_id: "9",
+    state: "closed", provider_event_at: closedAt(2),
+  });
+  const ci = await service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(0), body: { event: "github.check_completed", arguments: { pr: 9 } } });
+  await scheduler!.checkWakeRules([await row(ci.rule.id)]);
+  assert.equal((await row(ci.rule.id)).status, "active", "a reopen may still come");
+  await client!.pool.query("UPDATE github_room_events SET event_order_at = $2 WHERE idempotency_key LIKE $1", ["pr-9-closed%", closedAt(11)]);
+  await scheduler!.checkWakeRules([await row(ci.rule.id)]);
+  assert.deepEqual(await notice(ci.rule.id), ["retired", "#9 was closed without merging", "Fable stopped waiting · #9 was closed without merging"]);
+
+  // Reopened, a pull request can be waited on again.
+  await api!.insertGitHubRoomEvent({
+    room_id: room.id, event_type: "pull_request", action: "reopened", idempotency_key: "pr-9-reopened", github_object_id: "9",
     state: "open", provider_event_at: new Date().toISOString(),
   });
-  assert.equal((await service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(0), body: { event: "github.check_completed", arguments: { pr: 7 } } })).created, true);
+  const again = await service!.addWakeRuleForAgent({ roomId: room.id, agent: agent(0), body: { event: "github.check_completed", arguments: { pr: 9 } } });
+  await scheduler!.checkWakeRules([await row(again.rule.id)]);
+  assert.equal((await row(again.rule.id)).status, "active");
 });

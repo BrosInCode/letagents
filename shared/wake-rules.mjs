@@ -18,7 +18,8 @@ export const WAKE_RULE_EVENTS = Object.freeze([
 
 /**
  * `retired`: the rule ended early because what it watched is over (its pull
- * request merged or closed, its task done or cancelled); `ended_reason` says which.
+ * request merged or closed, its task done or cancelled); `ended_reason` says
+ * which. The agent is told once, unless the rule already woke it.
  */
 export const WAKE_RULE_STATUSES = Object.freeze(["active", "fired", "expired", "cancelled", "retired"]);
 
@@ -335,6 +336,16 @@ function detailLines(rule, facts) {
 export function formatWakeNotice({ rule, outcome, facts, agentName, endedReason = null }) {
   const name = agentName?.trim() || "Agent";
   const waiting = describeWakeRule(rule);
+  if (outcome === "ended") {
+    return {
+      text: [
+        `Your wake rule ${rule.id} ended because ${endedReason}. You were waiting ${waiting.preposition} ${waiting.object}.`,
+        ...(rule.note ? [`Your note: ${rule.note}`] : []),
+        "Decide whether to wait for something else (add a new wake rule) or move on, and tell the room if plans changed.",
+      ].join("\n"),
+      display_text: `${name} stopped waiting · ${endedReason}`,
+    };
+  }
   if (outcome === "expired") {
     const fired = rule.fire_count ?? 0;
     return {

@@ -12,12 +12,23 @@ import type { WakeRuleRow } from "../db/wake-rules.js";
  */
 export const WAKE_RULE_FALLBACK_CHECK_MS = 5 * 60 * 1000;
 
+/**
+ * A merge ends a pull request at once. A close without one may be undone:
+ * closing and reopening is a common way to re-run CI, so it ends the rules
+ * on that pull request only once it has stayed closed this long.
+ */
+export const WAKE_RULE_UNMERGED_CLOSE_GRACE_MS = 10 * 60 * 1000;
+
 export type WakeRuleEvaluation =
   /** `endedReason`: this wake is the rule's last, because what it watched is over. */
   | { kind: "fire"; facts: WakeOccurrenceFacts; cursorAt: string; baseline: WakeRuleRow["baseline"]; endedReason?: string }
   | { kind: "expire" }
-  /** What the rule watched is over and nothing it waits for happened: end it without a wake. */
-  | { kind: "retire"; reason: string }
+  /**
+   * What the rule watched is over and nothing it waits for happened. `wake`
+   * when the agent never got what it waited for: it is told once that the
+   * wait ended. A rule that already woke it ends quietly.
+   */
+  | { kind: "retire"; reason: string; wake: boolean }
   /** `cursorAt` moves the rule past events that settled without qualifying. */
   | { kind: "wait"; nextCheckAt: string; cursorAt?: string };
 
@@ -30,8 +41,8 @@ export interface WakeRuleEvaluationDeps {
   readTaskStatus(roomId: string, taskNumber: number): Promise<string | null>;
   ownedWork(agentKey: string, ruleRoomId: string): Promise<{ branches: string[]; pullRequests: number[] }>;
   pullRequestBranches(ruleRoomId: string, pr: number): Promise<string[]>;
-  /** How the pull request ended, or null while it is open (or was reopened). */
-  pullRequestClosed(ruleRoomId: string, pr: number): Promise<{ merged: boolean } | null>;
+  /** How and when the pull request was closed, or null while it is open (or was reopened). */
+  pullRequestClosed(ruleRoomId: string, pr: number): Promise<{ merged: boolean; closed_at: string } | null>;
   githubEventsAfter(input: {
     ruleRoomId: string;
     eventType: "check_run" | "pull_request_review" | "pull_request";
@@ -76,7 +87,7 @@ export async function evaluateWakeRule(
   if (nowMs < quietUntilMs && quietUntilMs < expiresMs) return { kind: "wait", nextCheckAt: iso(quietUntilMs) };
   const occurrence = await findOccurrence(rule, nowMs, deps);
   if (occurrence.kind === "fire") return occurrence;
-  if (occurrence.endedReason) return { kind: "retire", reason: occurrence.endedReason };
+  if (occurrence.endedReason) return { kind: "retire", reason: occurrence.endedReason, wake: rule.fire_count === 0 };
   if (nowMs >= expiresMs) return { kind: "expire" };
   const fallback = nowMs + WAKE_RULE_FALLBACK_CHECK_MS;
   return {
@@ -97,17 +108,44 @@ function taskEndedReason(taskId: string, status: string): string {
   return status === "done" ? `${taskId} is done` : `${taskId} was cancelled`;
 }
 
-async function findOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEvaluationDeps): Promise<Occurrence> {
-  const occurrence = await findWatchedOccurrence(rule, nowMs, deps);
-  // A rule on one pull request ends with it. A rule that waits for the close
-  // itself still gets that wake first; anything else ends quietly.
-  const pr = rule.event.startsWith("github.") ? rule.arguments.pr : undefined;
-  if (!pr || occurrence.endedReason) return occurrence;
+/**
+ * Whether a rule's pull request has ended for good: merged, or closed past the
+ * grace for a reopen. While the grace runs, when to look again.
+ */
+async function findPullRequestEnd(
+  rule: WakeRuleRow,
+  pr: number,
+  nowMs: number,
+  deps: WakeRuleEvaluationDeps,
+): Promise<{ reason: string } | { finalAtMs: number } | null> {
   const closed = await deps.pullRequestClosed(rule.room_id, pr);
-  return closed ? { ...occurrence, endedReason: `#${pr} was ${closed.merged ? "merged" : "closed"}` } : occurrence;
+  if (!closed) return null;
+  if (closed.merged) return { reason: `#${pr} was merged` };
+  const finalAtMs = Date.parse(closed.closed_at) + WAKE_RULE_UNMERGED_CLOSE_GRACE_MS;
+  return nowMs >= finalAtMs ? { reason: `#${pr} was closed without merging` } : { finalAtMs };
 }
 
-async function findWatchedOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEvaluationDeps): Promise<Occurrence> {
+async function findOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEvaluationDeps): Promise<Occurrence> {
+  // A rule on one pull request ends with it. What happened before the end is
+  // still reported first, CI that had not settled included; the end is read
+  // before the events, so none recorded before it is missed.
+  const pr = rule.event.startsWith("github.") ? rule.arguments.pr : undefined;
+  const end = pr ? await findPullRequestEnd(rule, pr, nowMs, deps) : null;
+  const ended = end && "reason" in end ? end.reason : undefined;
+  const occurrence = await findWatchedOccurrence(rule, nowMs, deps, { ended: Boolean(ended) });
+  if (ended) return { ...occurrence, endedReason: ended };
+  if (end && "finalAtMs" in end && occurrence.kind === "none") {
+    return { ...occurrence, nextCheckMs: Math.min(occurrence.nextCheckMs ?? end.finalAtMs, end.finalAtMs) };
+  }
+  return occurrence;
+}
+
+async function findWatchedOccurrence(
+  rule: WakeRuleRow,
+  nowMs: number,
+  deps: WakeRuleEvaluationDeps,
+  options: { ended: boolean },
+): Promise<Occurrence> {
   const args = rule.arguments;
   switch (rule.event) {
     case "timer": {
@@ -121,8 +159,8 @@ async function findWatchedOccurrence(rule: WakeRuleRow, nowMs: number, deps: Wak
       const previous = rule.baseline?.status ?? null;
       const status = await deps.readTaskStatus(taskRoomId, Number(args.task_id!.slice("task_".length)));
       if (!status || status === previous) return { kind: "none" };
-      // Reaching done or cancelled since the rule last looked ends it: with a
-      // wake when it waits for that status, quietly when it waits for another.
+      // Reaching done or cancelled since the rule last looked ends the rule,
+      // with the wake for that status when it is one the rule waits for.
       const endedReason = FINISHED_TASK_STATUSES.has(status) ? taskEndedReason(args.task_id!, status) : undefined;
       if (args.to && !args.to.includes(status as never)) return { kind: "none", ...(endedReason ? { endedReason } : {}) };
       return {
@@ -134,7 +172,7 @@ async function findWatchedOccurrence(rule: WakeRuleRow, nowMs: number, deps: Wak
       };
     }
     case "github.check_completed":
-      return findCheckOccurrence(rule, nowMs, deps);
+      return findCheckOccurrence(rule, nowMs, deps, options);
     case "github.review_submitted":
     case "github.pr_closed": {
       const pullRequests = args.pr ? [args.pr] : (await deps.ownedWork(rule.agent_key, rule.room_id)).pullRequests;
@@ -183,9 +221,16 @@ interface CheckPush {
  * once), the ready ones wait for the others, and then every push that matters
  * is reported in one wake. No push is reported twice and none is skipped. A
  * one-shot rule ends when it fires, so it never waits, and nor does a rule
- * at its expiry: what already happened is reported, not lost.
+ * at its expiry: what already happened is reported, not lost. When the
+ * pull request has ended (`ended`), nothing more is coming for it: every
+ * push is reported as it stands, without waiting for its checks to settle.
  */
-async function findCheckOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEvaluationDeps): Promise<Occurrence> {
+async function findCheckOccurrence(
+  rule: WakeRuleRow,
+  nowMs: number,
+  deps: WakeRuleEvaluationDeps,
+  options: { ended: boolean },
+): Promise<Occurrence> {
   const args = rule.arguments;
   const branches = args.branch ? [args.branch]
     : args.pr ? await deps.pullRequestBranches(rule.room_id, args.pr)
@@ -224,8 +269,8 @@ async function findCheckOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeR
 
   const settleAt = (push: CheckPush) => push.newestMs + WAKE_RULE_LIMITS.checkSettleMs;
   const ordered = [...pushes.values()].sort((left, right) => left.newestMs - right.newestMs);
-  const ready = ordered.filter((push) => nowMs >= settleAt(push));
-  const settling = ordered.filter((push) => nowMs < settleAt(push));
+  const ready = ordered.filter((push) => options.ended || nowMs >= settleAt(push));
+  const settling = ordered.filter((push) => !options.ended && nowMs < settleAt(push));
   if (ready.length === 0) return { kind: "none", nextCheckMs: Math.min(...settling.map(settleAt)) };
 
   const readyUntilMs = ready.at(-1)!.newestMs;
