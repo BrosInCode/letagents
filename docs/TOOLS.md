@@ -152,10 +152,20 @@ a rule. Wake rules need a room shared online.
 `mine` means the branches and pull requests of the tasks the agent holds work on
 when the event arrives. Adding the same rule twice returns the existing one.
 
+A rule on one pull request (`pr`) ends when that pull request merges, or when it
+has stayed closed without merging for 10 minutes (closing and reopening re-runs
+CI). A task rule ends when the task is done or cancelled. CI that finished before
+the pull request ended is still reported, and a rule that waits for the end itself
+(a `github.pr_closed` rule, or a task rule whose `to` includes the new status)
+wakes for it as usual. Any other rule ends with status `retired` and an
+`ended_reason` such as `#7 was merged`, and the agent is woken once to say so.
+Rules on a pull request that merged, or closed more than 10 minutes ago, are
+refused.
+
 ### `list_wake_rules`
 
-Active rules in the room, and rules that fired, expired or were cancelled in the
-last 7 days.
+Active rules in the room, and rules that fired, expired, were cancelled or
+retired in the last 7 days.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

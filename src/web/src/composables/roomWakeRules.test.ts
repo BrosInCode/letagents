@@ -40,6 +40,7 @@ function rule(overrides: Partial<WakeRule> = {}): WakeRule {
     last_fired_at: null,
     wake_message_id: null,
     cancelled_by: null,
+    ended_reason: null,
     ...overrides,
   }
 }

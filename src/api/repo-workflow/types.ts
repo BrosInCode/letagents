@@ -24,6 +24,7 @@ export interface RepoPullRequestRef {
   headRef?: string | null;
   headSha?: string | null;
   merged?: boolean;
+  draft?: boolean;
   authorLogin?: string | null;
   mergedByLogin?: string | null;
 }
