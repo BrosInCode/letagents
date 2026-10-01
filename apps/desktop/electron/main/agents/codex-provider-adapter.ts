@@ -8,7 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import {
-  launchCodexAppServer,
+  launchManagedCodexAppServer,
   resolveCodexAppServerUrl,
   waitForLaunchedCodexAppServer,
   type CodexAppServerExit,
@@ -159,7 +159,7 @@ export interface CodexProviderAdapterDependencies {
     serverUrl: string,
     codexBin: string,
     options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string> },
-  ): CodexAppServerLaunch;
+  ): CodexAppServerLaunch | Promise<CodexAppServerLaunch>;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
     serverUrl: string,
@@ -671,7 +671,7 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   readMcpRuntimeContract,
   resolveServerUrl: () => resolveCodexAppServerUrl(null, { dedicated: true }),
   launchServer: (serverUrl, codexBin, options) =>
-    launchCodexAppServer(serverUrl, codexBin, options),
+    launchManagedCodexAppServer(serverUrl, codexBin, options),
   waitForServer: waitForLaunchedCodexAppServer,
   createRpcClient: (serverUrl, onNotification) =>
     new CodexRpcClient(serverUrl, onNotification),
@@ -1931,7 +1931,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ? boundedLaunchContract(req.supervisorWorkerSession?.apiUrl || desktopApiUrl, custodialTools)
       : undefined;
     const serverUrl = await this.deps.resolveServerUrl();
-    const launch = this.deps.launchServer(serverUrl, this.codexBin, {
+    const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
       configOverrides: custodialRuntime
         ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {

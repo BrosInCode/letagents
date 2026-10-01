@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
+import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 
 export type CursorReadOnlyMode = "ask" | "plan";
 export type CursorSandboxMode = "enabled" | "disabled";
@@ -100,7 +101,7 @@ export async function runCursorTurn(input: CursorTurnInput): Promise<CursorTurnR
   return new Promise((resolve) => {
     const child = spawn(executable, buildCursorAgentArgs(input), {
       cwd: input.cwd,
-      env: buildCursorChildEnv(input.env),
+      env: buildManagedCursorChildEnv(input.env),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const interrupt = (): void => {
@@ -194,6 +195,14 @@ export function buildCursorChildEnv(
   copyAllowedCursorEnv(env, desktopRuntimeEnvironment());
   copyAllowedCursorEnv(env, overrides);
   return env;
+}
+
+/** A managed agent's Cursor environment: commits use the owner's GitHub noreply identity, not the host's. */
+export function buildManagedCursorChildEnv(
+  overrides: Record<string, string | undefined> = {},
+  readCommitEnvironment: () => Record<string, string> = managedAgentCommitEnvironment,
+): NodeJS.ProcessEnv {
+  return { ...buildCursorChildEnv(overrides), ...readCommitEnvironment() };
 }
 
 const CURSOR_CHILD_ENV_ALLOWLIST = new Set([

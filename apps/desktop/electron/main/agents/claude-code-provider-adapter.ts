@@ -47,6 +47,7 @@ import {
   type NativeLifecycleCheckpoint,
 } from "./provider-execution-observer.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
+import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import {
   isRentalCredentialIsolationRequested,
   rentalCredentialIsolationMarker,
@@ -536,9 +537,14 @@ class ClaudeRoomTurnObservationDetachedError extends Error {}
  * session"), so a supervisor that itself runs under Claude Code must not leak
  * that marker into the worker. Daemon-owned turns borrow exact-generation
  * authority, so ambient owner and fixed worker credentials are also removed
- * before Claude or provider-started shell commands can inherit them.
+ * before Claude or provider-started shell commands can inherit them. Commits
+ * use the owner's GitHub noreply identity rather than the host's Git identity.
  */
-export function claudeCliEnv(base: NodeJS.ProcessEnv = desktopRuntimeEnvironment(), overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+export function claudeCliEnv(
+  base: NodeJS.ProcessEnv = desktopRuntimeEnvironment(),
+  overrides: NodeJS.ProcessEnv = {},
+  readCommitEnvironment: () => Record<string, string> = managedAgentCommitEnvironment,
+): NodeJS.ProcessEnv {
   const combined = { ...base, ...overrides };
   if (isRentalCredentialIsolationRequested(combined)) return rentalIsolatedChildEnvironment(combined);
   const {
@@ -546,7 +552,7 @@ export function claudeCliEnv(base: NodeJS.ProcessEnv = desktopRuntimeEnvironment
     LETAGENTS_TOKEN: _ownerToken,
     LETAGENTS_AGENT_SESSION_BEARER: _fixedWorkerBearer,
     ...env
-  } = combined;
+  } = { ...base, ...readCommitEnvironment(), ...overrides };
   return env;
 }
 

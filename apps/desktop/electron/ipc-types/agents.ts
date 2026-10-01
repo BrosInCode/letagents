@@ -895,3 +895,10 @@ export interface DesktopOpenModelSaveSettingsInput {
   /** A string saves a new key, null clears the saved key, undefined keeps the current key. */
   apiKey?: string | null;
 }
+
+export interface DesktopAgentCommitIdentitySettings {
+  /** True when the owner chose to keep the host's own Git identity for agent commits. */
+  useHostGitIdentity: boolean;
+  /** The signed-in GitHub account's noreply identity, or null when no GitHub account is known. */
+  githubIdentity: { name: string; email: string } | null;
+}

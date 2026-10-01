@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { link, lstat, mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 
 export const OPEN_MODEL_OPENCODE_PROVIDER_ID = "letagents-open-model";
@@ -337,6 +338,7 @@ export function openCodeAuthContent(apiKey: string | null): string {
 export function minimalOpenCodeEnvironment(
   source: NodeJS.ProcessEnv,
   extra: Record<string, string>,
+  readCommitEnvironment: () => Record<string, string> = managedAgentCommitEnvironment,
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const key of INHERITED_ENVIRONMENT_KEYS) {
@@ -344,6 +346,8 @@ export function minimalOpenCodeEnvironment(
   }
   return {
     ...environment,
+    // Commits use the owner's GitHub noreply identity, not the host's.
+    ...readCommitEnvironment(),
     // The supervised provider is fully declared in OPENCODE_CONFIG_CONTENT,
     // so OpenCode's models.dev catalog refresh is dead weight: on degraded
     // networks it stalls startup and floods the log with fetch timeouts.

@@ -1,5 +1,6 @@
 import type {
   DesktopAccountRoomEntry,
+  DesktopAgentCommitIdentitySettings,
   DesktopAppAgentActionMetadata,
   DesktopMcpInstallConfigPath,
 } from "../../../../../electron/ipc-types";
@@ -84,4 +85,17 @@ export function roleSourceLabel(room: DesktopAccountRoomEntry): string {
   if (room.source === "participant") return `${role} · Participant`;
   if (room.source === "focus") return `${role} · Focus activity`;
   return role;
+}
+
+/** What the agent-commit switch means right now, in the owner's terms. */
+export function agentCommitIdentityDescription(settings: DesktopAgentCommitIdentitySettings | null): string {
+  if (!settings) return "Checking how agents commit…";
+  if (settings.useHostGitIdentity) {
+    return "Agents commit with this Mac's own Git name and email. Applies when an agent next starts.";
+  }
+  if (!settings.githubIdentity) {
+    return "Connect GitHub so agents commit without your Git email. Until then they use this Mac's Git identity.";
+  }
+  const { name, email } = settings.githubIdentity;
+  return `Agents commit as ${name} <${email}>, so your Git email stays private. Applies when an agent next starts.`;
 }

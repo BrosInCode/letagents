@@ -3,6 +3,13 @@ import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
+import {
+  CODEX_OWNER_FEATURE_OVERRIDES,
+  codexMcpServerDisableOverride,
+  codexOwnerExtensionOverrides,
+  listCodexMcpServerNames,
+} from "./codex-launch-isolation.js";
+import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
@@ -419,41 +426,44 @@ function childExitPromise(
   });
 }
 
+function codexTrustedProjectOverrides(trustedProjectPath?: string | null): string[] {
+  const path = trustedProjectPath?.trim();
+  return path ? [`projects.${JSON.stringify(path)}.trust_level="trusted"`] : [];
+}
+
 export function codexAppServerLaunchArgs(
   serverUrl: string,
   options: CodexAppServerLaunchOptions = {},
 ): string[] {
   const args = ["app-server"];
-  const trustedProjectPath = options.trustedProjectPath?.trim();
-  if (trustedProjectPath) {
-    args.push(
-      "-c",
-      `projects.${JSON.stringify(trustedProjectPath)}.trust_level="trusted"`,
-    );
-  }
-  for (const override of options.configOverrides ?? []) {
+  for (const override of [...codexTrustedProjectOverrides(options.trustedProjectPath), ...(options.configOverrides ?? [])]) {
     args.push("-c", override);
   }
   args.push("--listen", serverUrl);
   return args;
 }
 
-export function launchCodexAppServer(
-  serverUrl: string,
-  codexBin: string,
-  options: CodexAppServerLaunchOptions = {},
-): CodexAppServerLaunch {
+/**
+ * The exact environment a launch gives the Codex app-server, and the commit
+ * identity it carries. Managed agents commit as the owner's GitHub noreply
+ * identity rather than the host's global Git identity; rental children keep
+ * only their isolated variables.
+ */
+export function codexAppServerEnvironment(
+  options: Pick<CodexAppServerLaunchOptions, "env"> = {},
+  readCommitEnvironment: () => Record<string, string> = managedAgentCommitEnvironment,
+): { env: NodeJS.ProcessEnv; commitEnvironment: Record<string, string> } {
   const runtimeEnv = desktopRuntimeEnvironment();
   const configuredEnv = options.env && Object.keys(options.env).length
     ? { ...runtimeEnv, ...options.env }
     : runtimeEnv;
   const custodialPolling = configuredEnv.LETAGENTS_EXECUTION_PROFILE === "supervised_mcp_polling";
-  const env = isRentalCredentialIsolationRequested(configuredEnv)
+  const rental = isRentalCredentialIsolationRequested(configuredEnv);
+  const commitEnvironment = rental ? {} : readCommitEnvironment();
+  const env = rental
     ? rentalIsolatedChildEnvironment(configuredEnv)
-    : configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1" || custodialPolling
-      ? { ...configuredEnv }
-      : configuredEnv;
-  if (env !== configuredEnv) {
+    : { ...configuredEnv, ...commitEnvironment };
+  if (rental || configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1" || custodialPolling) {
     // A custodial supervised worker borrows exact-generation authority from the
     // daemon. Ambient desktop owner or fixed worker credentials would bypass
     // that fence and would also leak into provider-started shell commands.
@@ -464,6 +474,33 @@ export function launchCodexAppServer(
       delete env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID;
     }
   }
+  return { env, commitEnvironment };
+}
+
+/**
+ * Codex builds each command's environment from its shell policy, which an
+ * owner may set to drop inherited variables. Setting the identity there as
+ * well keeps it on every command the agent runs.
+ */
+export function codexCommitIdentityOverrides(commitEnvironment: Record<string, string>): string[] {
+  return Object.entries(commitEnvironment)
+    .map(([key, value]) => `shell_environment_policy.set.${key}=${JSON.stringify(value)}`);
+}
+
+export function launchCodexAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: CodexAppServerLaunchOptions = {},
+): CodexAppServerLaunch {
+  const { env, commitEnvironment } = codexAppServerEnvironment(options);
+  options = {
+    ...options,
+    configOverrides: [
+      ...codexOwnerExtensionOverrides(env),
+      ...codexCommitIdentityOverrides(commitEnvironment),
+      ...(options.configOverrides ?? []),
+    ],
+  };
   const outputCapture = createCodexAppServerOutputCapture(
     sensitiveCodexAppServerLaunchValues(env, options),
   );
@@ -483,6 +520,33 @@ export function launchCodexAppServer(
     pid: child.pid ?? null,
     exited,
   };
+}
+
+/**
+ * Launch a managed agent's app-server with only the room's MCP server. Codex
+ * names every server it would configure, from the owner's config and any
+ * trusted project config, and each one other than LetAgents is turned off,
+ * like Claude's --strict-mcp-config. A launch that cannot get that list fails.
+ */
+export async function launchManagedCodexAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: CodexAppServerLaunchOptions = {},
+  listMcpServerNames: typeof listCodexMcpServerNames = listCodexMcpServerNames,
+): Promise<CodexAppServerLaunch> {
+  const { env } = codexAppServerEnvironment(options);
+  const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
+  const names = await listMcpServerNames(codexBin, {
+    cwd: trustedProjectPath,
+    env,
+    // The same project trust and features as the launch, so the list matches.
+    configOverrides: [...codexTrustedProjectOverrides(trustedProjectPath), ...CODEX_OWNER_FEATURE_OVERRIDES],
+  });
+  const mcpOverride = codexMcpServerDisableOverride(names);
+  return launchCodexAppServer(serverUrl, codexBin, {
+    ...options,
+    configOverrides: [...(mcpOverride ? [mcpOverride] : []), ...(options.configOverrides ?? [])],
+  });
 }
 
 export function terminateSpawnedProcess(pid: number): void {

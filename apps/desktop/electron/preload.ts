@@ -82,6 +82,11 @@ const api: DesktopApi = {
     saveSettings: (input) =>
       ipcRenderer.invoke("desktop:open-model:save-settings", input),
   },
+  agentCommitIdentity: {
+    getSettings: () => ipcRenderer.invoke("desktop:agent-commit-identity:get-settings"),
+    setUseHostGitIdentity: (useHostGitIdentity: boolean) =>
+      ipcRenderer.invoke("desktop:agent-commit-identity:set-use-host-git-identity", useHostGitIdentity),
+  },
   room: {
     getNeedsYou: (includeUpdates = false) => ipcRenderer.invoke("desktop:room:needs-you", includeUpdates),
     getKnowledge: (room, type) => ipcRenderer.invoke("desktop:room:knowledge", room, type),
