@@ -149,6 +149,8 @@ const agentStreamEmitter = new EventEmitter();
 const activitySequences = new Map<string, number>();
 let stateWatchOperation: Promise<void> | null = null;
 let stateWatchUnsupportedGeneration: number | null = null;
+/** Newest pushed manifest state; absent until the watch delivers one. */
+let latestSupervisorState: DesktopSupervisorStateSnapshot | null = null;
 /** The single agent whose live feed is currently subscribed (inspector focus). */
 let focusedAgentStreamEntryId: string | null = null;
 let focusedAgentStreamEpoch = 0;
@@ -2723,6 +2725,19 @@ export function onSupervisorState(
   return () => stateEmitter.off("state", listener);
 }
 
+/**
+ * Agents that are not retired, from the last pushed state and without activity
+ * history. App-wide attention reads this instead of a full-history
+ * `manifest.list` of every room; null until the watch has delivered state.
+ */
+export function liveSupervisorStateEntries(): DesktopSupervisorManifestEntry[] | null {
+  return latestSupervisorState ? projectLiveSupervisorEntries(latestSupervisorState.entries) : null;
+}
+
+export function projectLiveSupervisorEntries(entries: readonly DesktopSupervisorManifestEntry[]): DesktopSupervisorManifestEntry[] {
+  return entries.filter((entry) => entry.desiredState !== "stopped").map((entry) => ({ ...entry, activity: [] }));
+}
+
 function ensureSupervisorStateWatch(): void {
   if (stateWatchOperation || stateEmitter.listenerCount("state") === 0) return;
   stateWatchOperation = runSupervisorStateWatch().finally(() => {
@@ -2745,6 +2760,13 @@ export function supervisorStateWatchAcceptsStatus(
 }
 
 async function runSupervisorStateWatch(): Promise<void> {
+  try { await watchSupervisorState(); }
+  // Attention reads only what the current watch has confirmed: never state
+  // from a stopped, replaced, unsupported or unreachable daemon.
+  finally { latestSupervisorState = null; }
+}
+
+async function watchSupervisorState(): Promise<void> {
   let afterDaemonGeneration = 0;
   let afterSequence = 0;
   let consecutiveFailures = 0;
@@ -2753,6 +2775,7 @@ async function runSupervisorStateWatch(): Promise<void> {
       const status = await supervisorDaemonClient.connectIfRunning();
       if (!status) return;
       if (!supervisorStateWatchAcceptsStatus(status)) {
+        latestSupervisorState = null;
         // Startup may briefly attach to the previous desktop build's daemon
         // while the lifecycle owner performs a negotiated handoff. Do not
         // project its additive wire shape as current durable state.
@@ -2775,12 +2798,14 @@ async function runSupervisorStateWatch(): Promise<void> {
       afterDaemonGeneration = snapshot.daemonGeneration;
       afterSequence = snapshot.sequence;
       consecutiveFailures = 0;
+      latestSupervisorState = snapshot;
       stateEmitter.emit("state", snapshot);
     } catch {
       // The renderer keeps its last authoritative snapshot. Reconnection is a
       // transport concern and must not transiently dismantle its live controls.
       // A capped exponential delay avoids turning a persistent failure into a
       // tight background loop.
+      latestSupervisorState = null;
       consecutiveFailures += 1;
       await unrefDelay(supervisorStateWatchRetryDelay(consecutiveFailures));
     }

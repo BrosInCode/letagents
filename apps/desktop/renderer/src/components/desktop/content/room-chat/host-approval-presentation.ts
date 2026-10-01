@@ -1,4 +1,4 @@
-import type { HostApprovalPresentation } from "../../../../../../shared/host-approvals";
+import type { DesktopHostApproval, HostApprovalPresentation, HostApprovalStatus } from "../../../../../../shared/host-approvals";
 
 type Field = { label: string; value: string };
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object"
@@ -59,6 +59,29 @@ export function hostApprovalTitle(presentation: HostApprovalPresentation): strin
   }
   return presentation.title;
 }
+
+export function hostApprovalStatusLabel(status: HostApprovalStatus): string {
+  return { pending: "Needs your approval", decision_recorded: "Decision recorded", decision_sent: "Decision sent",
+    uncertain: "Approval unconfirmed", request_closed: "Approval request closed", resolved: "Decision applied", unavailable: "Approval unavailable" }[status];
+}
+
+/** "Agent · what it asks", or its status once no longer pending. */
+export function hostApprovalHeading(approval: Pick<DesktopHostApproval, "presentation" | "status">): string {
+  return `${approval.presentation.displayName} · ${approval.status === "pending"
+    ? hostApprovalTitle(approval.presentation) : hostApprovalStatusLabel(approval.status)}`;
+}
+
+export function hostApprovalAllowLabel(presentation: HostApprovalPresentation): string {
+  return presentation.title === "Grant for this turn" ? "Grant for this turn" : "Allow once";
+}
+
+export function hostApprovalAlwaysAllowLabel(presentation: HostApprovalPresentation): string | null {
+  const scope = presentation.alwaysAllow;
+  if (!scope) return null;
+  return `Always allow ${scope.toolLabel} in ${"kind" in scope ? "this room workspace" : scope.projectName}`;
+}
+
+export const HOST_APPROVAL_ALWAYS_ALLOW_HINT = "Saved for this agent. Revoke in Permissions. Configured access settings are unchanged.";
 
 /** Display the proposed action, leaving the signed native presentation untouched. */
 export function hostApprovalFields(presentation: HostApprovalPresentation): Field[] {

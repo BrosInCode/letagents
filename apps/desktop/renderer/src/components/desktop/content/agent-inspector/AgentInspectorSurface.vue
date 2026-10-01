@@ -171,7 +171,7 @@ const props = defineProps<{
   roomDisplayName?: string;
   daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
   refreshDiagnostics?: () => Promise<boolean>;
-  initialTab?: "overview" | "work" | "workspace";
+  initialTab?: "overview" | "work" | "workspace" | "diagnostics";
   roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
