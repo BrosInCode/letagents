@@ -4,7 +4,8 @@ import type { AuthenticatedRequest } from '../../http/helpers.js';
 import type { RoomMessageRouteDeps } from './messages/types.js';
 import { resolveParticipantRoom, routeParam } from './messages/helpers.js';
 import { requireWorkerRequestAgentIdentity } from '../../request/agent-identity.js';
-import { formatAttentionResponse, createKnowledgeRecord, knowledgeId, reviseKnowledgeRecord, RoomKnowledgeError, type KnowledgeActor, type KnowledgeInput, type KnowledgeType } from '../../../../shared/room-knowledge.mjs';
+import { createKnowledgeRecord, knowledgeId, reviseKnowledgeRecord, RoomKnowledgeError, type KnowledgeActor, type KnowledgeInput, type KnowledgeType } from '../../../../shared/room-knowledge.mjs';
+import { commitAttentionAnswer } from '../../rooms/attention-answers.js';
 import * as store from '../../db/room-knowledge.js';
 import { emitProjectMessage } from '../../server/events.js';
 import { getTasksForRooms } from '../../db.js';
@@ -80,15 +81,7 @@ export function registerRoomKnowledgeRoutes(app: Express, deps: KnowledgeRouteDe
         const next = reviseKnowledgeRecord(old, req.body ?? {}, person);
         await db.assertKnowledgeSource(project.id, next.source_message_id);
         if (type === 'attention') {
-          await publish(project.id, person.label, formatAttentionResponse(next), {
-            source: 'browser', reply_to: old.source_message_id || null,
-            client_message_id: `internal:attention-response:${id}`,
-            account_id: person.id,
-            with_created_message_in_transaction: tx => db.reviseRoomKnowledgeInTransaction(tx, next, old.version),
-          });
-          const committed = await db.getRoomKnowledge(project.id, id);
-          if (committed?.version !== next.version || committed.response?.body !== next.response?.body || committed.response?.actor.id !== person.id) throw new RoomKnowledgeError('The response could not be committed. Refresh and retry.', 409);
-          res.json({ record: committed }); return;
+          res.json({ record: await commitAttentionAnswer(project.id, old, next, person, { store: db, emitMessage: publish }) }); return;
         } else await db.reviseRoomKnowledge(next, old.version);
         res.json({ record: next });
       } catch (error) { fail(res, error); }
