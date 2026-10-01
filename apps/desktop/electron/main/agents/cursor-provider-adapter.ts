@@ -113,6 +113,7 @@ import {
 } from "./cursor-mcp-authority.js";
 import { resolveLetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
+import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { cursorPermissionProfileInstructionLines } from "./cursor-permission-profile.js";
 import {
   createSupervisedWorkspaceGeneration,
@@ -333,10 +334,10 @@ export function cursorLaunchPolicyArgs(value: unknown): string[] {
   return args;
 }
 
-function cursorDaemonChildEnv(
-  profileEnv: Record<string, string>,
+export function cursorDaemonChildEnv(
+  profileEnv: Record<string, string>, commitEnvironment: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
-  // Supervised children receive the established Cursor runtime allowlist only;
+  // Supervised children get the Cursor runtime allowlist plus the commit identity;
   // Electron often carries unrelated GitHub/cloud/npm/database credentials.
   const env = buildCursorChildEnv(profileEnv);
   // A bounded provider turn borrows only the daemon's exact-generation tool
@@ -358,7 +359,7 @@ function cursorDaemonChildEnv(
       delete env[key];
     }
   }
-  return env;
+  return { ...env, ...commitEnvironment };
 }
 
 function cursorSupervisorMcpEnv(
@@ -1882,7 +1883,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
             mcpConnectorSocketPath,
           });
           this.deps.bindPersonalIdentity(profile, personalIdentity);
-          childEnv = cursorDaemonChildEnv(profile.env);
+          childEnv = cursorDaemonChildEnv(profile.env, await managedCommitEnvironmentFor(handle.spawnRequest));
           const toolchainPath = cursorSandboxToolchainBinPaths();
           if (toolchainPath.length > 0) {
             // Apple's /usr/bin compiler drivers are xcrun shims, which require

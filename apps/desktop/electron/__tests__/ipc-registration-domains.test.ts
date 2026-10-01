@@ -20,6 +20,8 @@ const domainSources = {
 };
 
 const expectedDirectChannels = [
+  "desktop:agent-commit-identity:get-settings",
+  "desktop:agent-commit-identity:set-use-host-git-identity",
   "desktop:app-agent:get-settings-status",
   "desktop:app-agent:list-actions",
   "desktop:app-agent:run",
@@ -362,6 +364,7 @@ test("desktop IPC channel prefixes stay in their owning domains", () => {
       "desktop:notifications:",
       "desktop:app-agent:",
       "desktop:open-model:",
+      "desktop:agent-commit-identity:",
     ],
     authSetup: [
       "desktop:auth:",

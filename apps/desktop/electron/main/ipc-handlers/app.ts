@@ -13,11 +13,16 @@ import type {
   DesktopAppInfo,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
+  DesktopAgentCommitIdentitySettings,
   DesktopUpdateStatus,
 } from "../../ipc-types.js";
 import { getAppAgentSettingsStatus, saveAppAgentSettings } from "../app-agent/settings.js";
 import { listDesktopAppAgentActions, runDesktopAppAgent } from "../app-agent/runner.js";
 import { getOpenModelSettingsStatus, saveOpenModelSettings } from "../agents/open-model-settings.js";
+import {
+  getManagedAgentCommitIdentitySettings,
+  setManagedAgentCommitUsesHostIdentity,
+} from "../agents/managed-agent-commit-identity.js";
 import { openDesktopCredentialStorage } from "../credential-storage.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "../external-url.js";
 import { getGitHubPullRequestStats } from "../github-pr-stats.js";
@@ -153,5 +158,14 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
       _event,
       input: DesktopOpenModelSaveSettingsInput,
     ): Promise<DesktopOpenModelSettingsStatus> => saveOpenModelSettings(input),
+  );
+  targetIpcMain.handle(
+    "desktop:agent-commit-identity:get-settings",
+    async (): Promise<DesktopAgentCommitIdentitySettings> => getManagedAgentCommitIdentitySettings(),
+  );
+  targetIpcMain.handle(
+    "desktop:agent-commit-identity:set-use-host-git-identity",
+    async (_event, useHostGitIdentity: unknown): Promise<DesktopAgentCommitIdentitySettings> =>
+      setManagedAgentCommitUsesHostIdentity(useHostGitIdentity === true),
   );
 }
