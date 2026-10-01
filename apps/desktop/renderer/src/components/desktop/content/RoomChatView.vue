@@ -103,6 +103,7 @@
           :room-loading="roomLoading"
           :send-error="sendError"
           :sending="sending"
+          :correctable-agents="correctableAgents"
           @clear-reply="clearReplyTarget"
           @open-add-agent="emit('open-add-agent')"
           @open-permission-detail="emit('open-permission-detail', $event)"
@@ -113,6 +114,7 @@
           @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
           @stop-agent-turn="(agentId, approvalId) => emit('stop-agent-turn', agentId, approvalId)"
           @send-message="handleComposerSend"
+          @open-agent-correction="(handoff, opened) => emit('open-agent-correction', handoff, opened)"
         />
 
         <DesktopImageViewerModal
@@ -237,6 +239,7 @@ import {
   type ManagedAgentWorkIndicator,
 } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { AgentCorrectionTarget, ComposerCorrectionHandoff } from "../../../domain/agent-inspector";
 import {
   isGitHubRoomMessage,
   isLowSignalGitHubCheckMessage,
@@ -296,6 +299,7 @@ const props = defineProps<{
   participants: DesktopParticipantSummary[];
   presence: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
+  correctableAgents?: AgentCorrectionTarget[];
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   roomAgentWorkTruncated?: boolean;
@@ -326,6 +330,7 @@ const emit = defineEmits<{
   "open-reasoning": [sessionId: string];
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
   "open-agent-detail": [target: AgentModalTarget];
+  "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
   "open-add-agent": [];
   "open-permission-detail": [approval: ManagedAgentPermissionApproval];
   "scroll-position": [scrollTop: number];

@@ -599,3 +599,82 @@
     width: 100%;
   }
 }
+
+.desktop-new-room-path-form {
+  gap: 8px;
+}
+
+.desktop-new-room-path-form > label {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.desktop-new-room-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.desktop-new-room-recent {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.desktop-new-room-recent h3 {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.desktop-new-room-recent ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.desktop-new-room-recent button {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.024);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.desktop-new-room-recent button:hover:not(:disabled),
+.desktop-new-room-recent button:focus-visible {
+  border-color: color-mix(in srgb, var(--text) 18%, var(--border));
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.desktop-new-room-recent strong {
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.desktop-new-room-recent small {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -7,10 +7,12 @@ import type {
   DesktopAgentProvider,
   DesktopAgentProviderPreflight,
   DesktopGitRoomInfo,
+  DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
+import { supervisedPermissionProfilesForProvider } from "../../daemon/supervised-permission-profiles";
 import {
   activeManagedAgentWorkIndicators,
   agentSetupActionButtonLabel,
@@ -43,6 +45,7 @@ import {
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
   supervisedCursorPermissionProfilePresentation,
+  supervisedPermissionProfileLimits,
   supervisedPermissionProfilePresentation,
   supervisedProviderLaunchPolicy,
   autoReviewNotice,
@@ -1589,6 +1592,35 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
   });
   assert.equal(writable.label, "Workspace writes");
   assert.match(writable.description, /separate copy of your project/i);
+});
+
+test("every access level a supervised agent can use states what it does not allow", () => {
+  for (const providerId of ["codex", "claude-code", "open-model", "cursor"] as const) {
+    for (const profile of supervisedPermissionProfilesForProvider(providerId)) {
+      const presented = supervisedPermissionProfilePresentation(providerId, profile as DesktopManagedAgentPermissionProfile);
+      const limits = supervisedPermissionProfileLimits(providerId, presented);
+      if (profile.status === "available") {
+        assert.ok(limits, `${providerId} ${profile.id} needs a limits line`);
+      } else {
+        // The card already says the level is unavailable.
+        assert.equal(limits, null, `${providerId} ${profile.id}`);
+      }
+    }
+  }
+});
+
+test("every Cursor access level says it has no network, including compatibility", () => {
+  for (const profile of supervisedPermissionProfilesForProvider("cursor")) {
+    if (profile.status !== "available") continue;
+    assert.match(
+      supervisedPermissionProfileLimits("cursor", profile as DesktopManagedAgentPermissionProfile) ?? "",
+      /No network access: can't push or open PRs\./,
+      profile.id,
+    );
+  }
+  assert.equal(supervisedPermissionProfileLimits("codex", {
+    id: "sandboxed_write", status: "gated",
+  }), null);
 });
 
 test("supervised Codex presents ask-before-write without changing the legacy catalog", () => {

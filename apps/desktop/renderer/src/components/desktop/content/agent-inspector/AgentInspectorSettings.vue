@@ -38,6 +38,7 @@
               <strong>{{ profile.label }}</strong>
               <small>{{ resource.draft.permissionProfileId === profile.id ? `Selected · ${profile.description}` : profile.description }}</small>
               <small v-if="profile.detail || profile.status !== 'available'">{{ profile.detail || (profile.status === 'gated' ? 'This access option is not available yet.' : 'This agent app does not support this access option.') }}</small>
+              <small v-if="supervisedPermissionProfileLimits(resource.configuration.provider, profile)" class="agent-inspector-permission-limits">{{ supervisedPermissionProfileLimits(resource.configuration.provider, profile) }}</small>
             </span>
           </label>
         </fieldset>
@@ -108,6 +109,7 @@ import {
   type AgentInspectorConfigurationResource,
   type AgentInspectorRoomMoveResource,
 } from "../../../../domain/agent-inspector-settings";
+import { supervisedPermissionProfileLimits } from "../../../../domain/managed-agents";
 import { desktopIpc } from "../../../../ipc";
 import type { HostToolRule } from "../../../../../../shared/host-tool-rules";
 const props = defineProps<{ entryId: string; displayName: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean }>();

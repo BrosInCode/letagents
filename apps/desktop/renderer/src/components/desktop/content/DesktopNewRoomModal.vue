@@ -81,6 +81,73 @@
             {{ projectSelection ? "Change folder" : "Choose project folder" }}
           </button>
 
+          <form
+            class="desktop-new-room-field desktop-new-room-path-form"
+            data-testid="new-room-project-path-form"
+            @submit.prevent="emit('openProjectPath')"
+          >
+            <label for="new-room-project-path-input">Or enter the folder path</label>
+            <div class="desktop-new-room-path-row">
+              <input
+                id="new-room-project-path-input"
+                ref="projectPathInputElement"
+                v-model="projectPath"
+                type="text"
+                placeholder="~/code/my-project"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                :disabled="busy"
+                :aria-invalid="projectPathError ? 'true' : 'false'"
+                :aria-describedby="projectPathError ? 'new-room-project-path-error' : 'new-room-project-path-hint'"
+                data-testid="new-room-project-path-input"
+              />
+              <button
+                class="desktop-new-room-action-button"
+                type="submit"
+                :disabled="busy || !projectPath.trim()"
+                :aria-busy="activeAction === 'open_project_path' ? 'true' : 'false'"
+                data-testid="new-room-project-path-submit"
+              >
+                {{ activeAction === "open_project_path" ? "Opening…" : "Open" }}
+              </button>
+            </div>
+            <small
+              v-if="projectPathError"
+              id="new-room-project-path-error"
+              class="desktop-new-room-field-error"
+              role="alert"
+            >
+              {{ projectPathError }}
+            </small>
+            <small v-else id="new-room-project-path-hint" class="desktop-new-room-hint">
+              A Git repository opens its project room. Any other folder opens a room on this Mac.
+            </small>
+          </form>
+
+          <section
+            v-if="recentProjectFolders.length && !projectSelection"
+            class="desktop-new-room-recent"
+            aria-labelledby="new-room-recent-title"
+            data-testid="new-room-recent-folders"
+          >
+            <h3 id="new-room-recent-title">Recent project folders</h3>
+            <ul>
+              <li v-for="folder in recentProjectFolders" :key="folder.path">
+                <button
+                  type="button"
+                  :disabled="busy"
+                  :title="folder.path"
+                  data-testid="new-room-recent-folder"
+                  @click="emit('openProjectPath', folder.path)"
+                >
+                  <strong>{{ folder.label }}</strong>
+                  <small>{{ folder.path }}</small>
+                </button>
+              </li>
+            </ul>
+          </section>
+
           <div
             v-if="projectSelection"
             class="desktop-new-room-project-preview"
@@ -109,6 +176,7 @@
               {{ projectSelection.warning }}
             </p>
             <button
+              ref="confirmProjectElement"
               class="desktop-new-room-action-button primary desktop-new-room-full-button"
               type="button"
               :disabled="busy"
@@ -333,6 +401,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { FolderOpen, Hash, KeyRound, X } from "@lucide/vue";
 import type {
   NewRoomActiveAction,
+  NewRoomRecentProjectFolder,
   NewRoomStep,
   NewRoomStorageChoice,
   NewRoomSuccessState,
@@ -351,6 +420,8 @@ const props = defineProps<{
   feedback: string | null;
   feedbackState: "info" | "error" | "success";
   projectSelection: PendingProjectRoomSelection | null;
+  projectPathError: string | null;
+  recentProjectFolders: readonly NewRoomRecentProjectFolder[];
   success: NewRoomSuccessState | null;
   statusMessage: string | null;
   joinError: string | null;
@@ -361,6 +432,7 @@ const props = defineProps<{
 const joinCode = defineModel<string>("joinCode", { required: true });
 const roomName = defineModel<string>("roomName", { required: true });
 const storage = defineModel<NewRoomStorageChoice>("storage", { required: true });
+const projectPath = defineModel<string>("projectPath", { default: "" });
 
 const emit = defineEmits<{
   back: [];
@@ -374,12 +446,15 @@ const emit = defineEmits<{
   dismissSuccess: [];
   join: [];
   openProject: [];
+  openProjectPath: [path?: string];
   openSuccess: [];
   retry: [];
 }>();
 
 const dialogElement = ref<HTMLElement | null>(null);
 const joinInputElement = ref<HTMLInputElement | null>(null);
+const projectPathInputElement = ref<HTMLInputElement | null>(null);
+const confirmProjectElement = ref<HTMLButtonElement | null>(null);
 const errorElement = ref<HTMLElement | null>(null);
 const previousFocusElement = ref<HTMLElement | null>(null);
 const descriptionId = "new-room-description";
@@ -446,7 +521,7 @@ const title = computed(() => {
 const description = computed(() => {
   switch (props.step) {
     case "project":
-      return "Choose a folder, confirm the detected room, then open it.";
+      return "Choose or enter a folder, confirm the detected room, then open it.";
     case "standalone":
       return "Name the room and pick how it should be stored.";
     case "join":
@@ -515,6 +590,18 @@ watch(
       return;
     }
     focusInitialControl();
+  },
+);
+
+// Opening a typed path disables the field, which drops focus. Put it back
+// where the keyboard needs it next: the field to fix, or the room to open.
+watch(
+  () => [props.projectPathError, props.projectSelection] as const,
+  async ([error, selection], [previousError, previousSelection]) => {
+    if (props.step !== "project") return;
+    await nextTick();
+    if (error && error !== previousError) projectPathInputElement.value?.focus({ preventScroll: true });
+    else if (selection && selection !== previousSelection) confirmProjectElement.value?.focus({ preventScroll: true });
   },
 );
 

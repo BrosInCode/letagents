@@ -14,6 +14,7 @@
       :entry-id="projection.entryId"
       :control="projection.turnControl"
       :busy="busy"
+      :correction-request="correctionRequest"
       @stop="emit('stop-turn')"
       @correct="emit('correct-turn', $event)"
       @retry="emit('retry-turn-control')"
@@ -60,7 +61,7 @@
 import { computed } from "vue";
 import { friendlyRoomLabel } from "../../../../domain/git-rooms";
 import type { DesktopSupervisorAgentInspectorDetail } from "../../../../../../electron/ipc-types";
-import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
+import type { AgentInspectorCorrectionRequest, AgentInspectorProjection } from "../../../../domain/agent-inspector";
 import { describeAgentInspectorRuntimeControl } from "../../../../domain/agent-inspector-work";
 import { formatFullTimestamp } from "../../../../domain/time";
 import AgentInspectorDeliveryProgress from "./AgentInspectorDeliveryProgress.vue";
@@ -75,6 +76,7 @@ const props = defineProps<{
   busy: boolean;
   runtimeControl: DesktopSupervisorAgentInspectorDetail["runtime_control"] | null;
   runtimeControlPending: boolean;
+  correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
 const runtimeControl = computed(() => describeAgentInspectorRuntimeControl(props.runtimeControl));
 const emit = defineEmits<{

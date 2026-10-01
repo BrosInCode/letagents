@@ -299,7 +299,10 @@
         :active-action="newRoomActiveAction"
         :feedback="newRoomFeedback"
         :feedback-state="newRoomFeedbackState"
+        v-model:project-path="newRoomProjectPath"
         :project-selection="newRoomProjectSelection"
+        :project-path-error="newRoomProjectPathError"
+        :recent-project-folders="newRoomRecentProjectFolders"
         :success="newRoomSuccess"
         :status-message="newRoomStatusMessage"
         :join-error="newRoomJoinError"
@@ -315,6 +318,7 @@
         @create-standalone="createStandaloneRoom"
         @dismiss-success="dismissSuccess"
         @open-project="openProjectRoomFromModal"
+        @open-project-path="openProjectRoomFromPath"
         @open-success="openSuccessRoom"
         @join="joinRoomCodeFromModal"
         @retry="retryLastAction"
@@ -440,7 +444,7 @@ import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { clearDesktopMessageOutbox } from "./domain/message-outbox";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
-import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
+import { recentProjectFoldersFromRooms, useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
 import { invalidateRentalProviderDashboard, loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
@@ -534,6 +538,7 @@ const sidebarDefaultWidth = 296;
 const SIDEBAR_METADATA_REFRESH_INTERVAL_MS = 15_000;
 const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedRootRoomStorageKey));
 const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
+const newRoomRecentProjectFolders = computed(() => recentProjectFoldersFromRooms(recentRootRooms.value));
 const legacyRepositoryRootBindings = readRepositoryRootBindings(
   window.localStorage,
   legacyRepositoryRootBindingsStorageKey,
@@ -1516,12 +1521,15 @@ const {
   newRoomJoinError,
   newRoomModalOpen,
   newRoomName,
+  newRoomProjectPath,
+  newRoomProjectPathError,
   newRoomProjectSelection,
   newRoomStatusMessage,
   newRoomStep,
   newRoomStorage,
   newRoomSuccess,
   openProjectRoomFromModal,
+  openProjectRoomFromPath,
   openSuccessRoom,
   retryLastAction,
   selectNewRoomEntry,

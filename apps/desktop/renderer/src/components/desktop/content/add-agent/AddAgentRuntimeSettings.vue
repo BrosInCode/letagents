@@ -7,6 +7,10 @@
   >
     <label class="desktop-add-agent-model-custom-input">
       <small>First task</small>
+      <!-- An edit can arrive with only a change event, e.g. a value set through
+           accessibility automation. Without this the form kept the old task, and
+           the next re-render (choosing an access level re-runs setup) wrote it
+           back over the typed text. -->
       <textarea
         :value="charter"
         rows="3"
@@ -16,6 +20,7 @@
         :aria-describedby="!charter.trim() ? 'desktop-add-agent-supervised-charter-error' : undefined"
         data-testid="desktop-add-agent-supervised-charter"
         @input="emit('update:charter', ($event.target as HTMLTextAreaElement).value)"
+        @change="emit('update:charter', ($event.target as HTMLTextAreaElement).value)"
       />
       <small
         v-if="!charter.trim()"
@@ -54,6 +59,11 @@
           <strong>{{ profile.label }}</strong><em :data-risk="profile.risk">{{ profile.risk }}</em>
         </span>
         <small>{{ permissionOptionSummary(profile) }}</small>
+        <small
+          v-if="supervisedPermissionProfileLimits(provider?.id, profile)"
+          class="desktop-add-agent-permission-limits"
+          data-testid="desktop-add-agent-permission-limits"
+        >{{ supervisedPermissionProfileLimits(provider?.id, profile) }}</small>
       </button>
     </div>
     <p v-if="selectedPermissionProfile">{{ managedAgentPermissionProfileSummary(selectedPermissionProfile) }}</p>
@@ -70,6 +80,7 @@ import {
   hasSupervisedRuntime,
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
+  supervisedPermissionProfileLimits,
 } from "../../../../domain/managed-agents";
 
 defineProps<{

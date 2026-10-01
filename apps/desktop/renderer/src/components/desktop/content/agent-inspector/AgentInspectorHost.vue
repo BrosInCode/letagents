@@ -59,6 +59,7 @@ import {
   agentInspectorLiveAnnouncement,
   type AgentInspectorActionIntent,
   type AgentInspectorActionState,
+  type AgentInspectorCorrectionRequest,
   type AgentInspectorProjection,
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
@@ -112,6 +113,7 @@ const props = defineProps<{
   workspaceSourceMessageId?: string | null;
   managedSessions: readonly DesktopManagedAgentSession[];
   reasoningSessions: readonly DesktopReasoningSession[];
+  correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -210,6 +212,7 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
       roomDisplayName: props.roomDisplayName,
       settingsConflict: props.settingsConflict,
       liveFeed: props.liveFeed,
+      correctionRequest: props.correctionRequest ?? null,
     };
   }
   if (participantProjection.value) {

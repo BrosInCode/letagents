@@ -36,28 +36,43 @@
             :data-room-agent-state="group.key"
           >
             <header><div><h3>{{ group.label }}</h3><p v-if="group.description">{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
-            <button
+            <div
               v-for="agent in group.agents"
               :key="agent.entryId"
-              class="desktop-activity-roster-item"
-              :data-selected="selectedInspectorAgent?.entryId === agent.entryId"
-              :data-state="group.key"
-              type="button"
-              @click="selectInspectorAgent(agent)"
+              class="desktop-activity-roster-row"
             >
-              <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(agent.displayName) }}</span>
-              <span>
-                <strong>{{ agent.displayName }}</strong>
-                <small v-if="agent.resourceFreshness === 'stale'">Reconnecting to this agent…</small>
-                <small v-else-if="agent.overallDetail">{{ agent.overallDetail }}</small>
-                <small v-else-if="waitingRules(agent.agentKey).length"><WakeRuleLine :rules="waitingRules(agent.agentKey)" /></small>
-              </span>
-              <span class="desktop-activity-row-meta">
-                <span class="state-pill" :data-state="group.key">
-                  {{ group.key === "status_unavailable" ? "Status unavailable" : agent.overallLabel }}
+              <button
+                class="desktop-activity-roster-item"
+                :data-selected="selectedInspectorAgent?.entryId === agent.entryId"
+                :data-state="group.key"
+                type="button"
+                @click="selectInspectorAgent(agent)"
+              >
+                <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(agent.displayName) }}</span>
+                <span>
+                  <strong>{{ agent.displayName }}</strong>
+                  <small v-if="agent.resourceFreshness === 'stale'">Reconnecting to this agent…</small>
+                  <small v-else-if="agent.overallDetail">{{ agent.overallDetail }}</small>
+                  <small v-else-if="waitingRules(agent.agentKey).length"><WakeRuleLine :rules="waitingRules(agent.agentKey)" /></small>
                 </span>
-              </span>
-            </button>
+                <span class="desktop-activity-row-meta">
+                  <span class="state-pill" :data-state="group.key">
+                    {{ group.key === "status_unavailable" ? "Status unavailable" : agent.overallLabel }}
+                  </span>
+                </span>
+              </button>
+              <button
+                v-if="canCorrect(agent)"
+                class="desktop-activity-row-action"
+                type="button"
+                :aria-label="`Correct ${agent.displayName}'s current turn`"
+                title="Interrupt this turn and redirect the agent in the same session. Room messages wait until the turn ends."
+                data-testid="desktop-activity-correct-agent"
+                @click="correctAgent(agent)"
+              >
+                Correct
+              </button>
+            </div>
           </section>
 
           <section v-if="legacyReachableAgents.length" class="desktop-activity-group">
@@ -416,6 +431,7 @@ const emit = defineEmits<{
   "open-reasoning": [sessionId: string];
   "open-add-agent": [];
   "open-agent-detail": [request: AgentInspectorRequest];
+  "open-agent-correction": [entryId: string];
   "refresh-room": [];
   "reveal-message": [messageId: string];
   "clear-artifact-task-filter": [];
@@ -555,6 +571,17 @@ function selectInspectorAgent(agent: AgentInspectorProjection): void {
   emit("open-agent-detail", supervisedAgentInspectorRequest(agent.entry, {
     ownerAttribution: ownerAttribution(agent.entry.createdBy),
   }));
+}
+
+/** A busy agent's live turn can take a correction now; a room message would wait. */
+function canCorrect(agent: AgentInspectorProjection): boolean {
+  return agent.turnControl?.status === "ready" && agent.turnControl.canCorrect;
+}
+
+function correctAgent(agent: AgentInspectorProjection): void {
+  selectedLiveKey.value = null;
+  selectedTruthfulId.value = agent.entryId;
+  emit("open-agent-correction", agent.entryId);
 }
 
 function selectParticipantAgent(agent: Parameters<typeof activityParticipantToAgentTarget>[0]): void {

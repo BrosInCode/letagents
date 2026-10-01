@@ -72,6 +72,7 @@
           :busy="actionState?.status === 'running'"
           :runtime-control="workResource.detail?.runtime_control ?? null"
           :runtime-control-pending="workResource.status === 'loading' || workResource.status === 'refreshing'"
+          :correction-request="correctionRequest"
           @stop-turn="emitTurnControl('stop_turn')"
           @correct-turn="emitTurnControl('steer_turn', $event)"
           @retry-turn-control="emitTurnControl('retry_turn_control')"
@@ -146,6 +147,7 @@ import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import type {
   AgentInspectorActionIntent,
   AgentInspectorActionState,
+  AgentInspectorCorrectionRequest,
   AgentInspectorProjection,
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
@@ -188,6 +190,7 @@ const props = defineProps<{
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;
   liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
+  correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -269,7 +272,20 @@ function handleRetire(): void {
 }
 
 function focusInitial(): void {
+  if (focusCorrection()) return;
   closeButton.value?.focus({ preventScroll: true });
+}
+
+/** Opened to correct the current turn: land in the box, not on Close. */
+function focusCorrection(): boolean {
+  if (props.correctionRequest?.entryId !== props.projection.entryId || selectedTab.value !== "overview") return false;
+  const field = surfaceElement.value?.querySelector<HTMLTextAreaElement>(
+    `#agent-inspector-turn-correction-${CSS.escape(props.projection.entryId)}`,
+  );
+  if (!field || field.disabled) return false;
+  field.focus();
+  field.setSelectionRange(field.value.length, field.value.length);
+  return true;
 }
 
 function containsFocus(): boolean {
@@ -283,6 +299,11 @@ watch([() => props.projection.entryId, () => props.requestVersion, () => props.i
   confirmRetire.value = false;
   recoveryOptionsRequested.value = false;
 });
+
+// An already-open Inspector gets no new focusInitial from its host.
+watch(() => props.correctionRequest?.id, (id) => {
+  if (id !== undefined) focusCorrection();
+}, { flush: "post" });
 
 function selectTab(tab: InspectorTab): void {
   if (selectedTab.value === tab) return;

@@ -308,7 +308,7 @@ const api: DesktopApi = {
         ipcRenderer.off("desktop:repos:status-changed", listener);
       };
     },
-    openRoom: (rootPath) => ipcRenderer.invoke("desktop:repos:open-room", rootPath),
+    openRoom: (rootPath, options) => ipcRenderer.invoke("desktop:repos:open-room", rootPath, options ?? null),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
     listProjectBindings: () => ipcRenderer.invoke("desktop:repos:list-project-bindings"),
     migrateProjectBindings: (candidates) =>

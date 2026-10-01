@@ -9,6 +9,27 @@
       @open-event-preview="openEventPreview"
       @dismiss-event-preview="emit('dismiss-event-preview', $event)"
     />
+    <!-- The live region exists before the offer does, so the offer is announced.
+      It sits above the approval tray, so the offer never moves the tray's buttons. -->
+    <div class="desktop-composer-correction-live" aria-live="polite" data-testid="desktop-composer-correction-live">
+      <div
+        v-if="correctionOffer"
+        class="desktop-composer-correction-offer"
+        data-testid="desktop-composer-correction-offer"
+      >
+        <span>
+          <strong>{{ correctionOffer.target.displayName }}</strong> is in the middle of a turn. A room message waits until it ends.
+        </span>
+        <button
+          type="button"
+          :disabled="sending"
+          data-testid="desktop-composer-send-as-correction"
+          @click="sendAsCorrection"
+        >
+          Send as correction…
+        </button>
+      </div>
+    </div>
     <!-- One request at a time. Arrivals join its queue or appear above it, so
       they never move the buttons; details open over the messages on demand. -->
     <section v-if="currentHostApproval" :key="hostApprovalIdentity(currentHostApproval)"
@@ -266,6 +287,11 @@ import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomCompose
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
 import { visibleComposerEventPreviews } from "./composer-event-preview";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../../domain/attention-response";
+import {
+  mentionedCorrectionTarget,
+  type AgentCorrectionTarget,
+  type ComposerCorrectionHandoff,
+} from "../../../../domain/agent-inspector";
 
 export interface RoomComposerReplyTarget {
   id: string;
@@ -293,6 +319,7 @@ const props = defineProps<{
   roomLoading: boolean;
   sendError: string | null;
   sending: boolean;
+  correctableAgents?: readonly AgentCorrectionTarget[];
 }>();
 
 const emit = defineEmits<{
@@ -309,6 +336,7 @@ const emit = defineEmits<{
   "open-event-preview": [event: ComposerEventPreview];
   "dismiss-event-preview": [messageId: string];
   "stop-agent-turn": [agentId: string, approvalId: string];
+  "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
 }>();
 
 const maxComposerInputHeight = 156;
@@ -434,6 +462,13 @@ watch(hostApprovals, (approvals) => {
 const canSend = computed(() =>
   Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
 );
+// A correction is plain text for one agent's private session, so a reply,
+// a quote or attachments keep the message a room message.
+const correctionOffer = computed(() =>
+  props.correctableAgents?.length && !props.replyTo
+    && props.attachmentDrafts.length === 0 && props.pendingAttachmentDrafts.length === 0
+    ? mentionedCorrectionTarget(draft.value, props.correctableAgents)
+    : null);
 const primaryPermissionApproval = computed(() => props.permissionApprovals[0] ?? null);
 const permissionOverflowCount = computed(() => Math.max(0, props.permissionApprovals.length - 1));
 const composerInputLabel = computed(() => {
@@ -514,6 +549,23 @@ function submitMessage(): void {
       void nextTick(() => textareaElement.value?.focus());
     },
   );
+}
+
+/** Hand the draft to the Inspector's correction box; it leaves the composer only once that opened. */
+function sendAsCorrection(): void {
+  const offer = correctionOffer.value;
+  if (!offer || props.sending) return;
+  const handedOver = draft.value;
+  const handoff = {
+    entryId: offer.target.entryId,
+    text: offer.text,
+    draft: handedOver,
+    draftNamespace: props.messageNamespace || props.roomIdentifier,
+  };
+  emit("open-agent-correction", handoff, (opened) => {
+    // Opening may have restored an earlier, abandoned hand-over; keep that.
+    if (opened) draft.value = draft.value.replace(handedOver, "").trim();
+  });
 }
 
 function insertNewlineAtCursor(): void {
