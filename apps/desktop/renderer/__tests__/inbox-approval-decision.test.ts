@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
 import * as Vue from "vue";
-import { computed, createRenderer, defineComponent, h, nextTick, ssrContextKey } from "vue";
+import { computed, createRenderer, defineComponent, h, nextTick, ref, ssrContextKey } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 import type { DesktopHostApproval } from "../../shared/host-approvals";
 import type { DesktopNeedsYou } from "../../electron/ipc-types/knowledge.js";
@@ -12,12 +12,15 @@ import type { DesktopNeedsYou } from "../../electron/ipc-types/knowledge.js";
 interface HostNode {
   type?: string; text: string; children: HostNode[]; parent: HostNode | null; props: Record<string, unknown>;
   focus: () => void; getBoundingClientRect: () => { top: number; left: number };
+  addEventListener: () => void; removeEventListener: () => void;
 }
 
 let focused: HostNode | null = null;
 function hostNode(type?: string, text = ""): HostNode {
   const node: HostNode = { type, text, children: [], parent: null, props: {},
-    focus: () => { focused = node; }, getBoundingClientRect: () => ({ top: 0, left: 0 }) };
+    focus: () => { focused = node; }, getBoundingClientRect: () => ({ top: 0, left: 0 }),
+    // Form directives such as the room search's v-model listen on their element.
+    addEventListener: () => undefined, removeEventListener: () => undefined };
   return node;
 }
 
@@ -75,27 +78,32 @@ const approval: DesktopHostApproval = { id: "presentation-1", status: "pending",
 const data: DesktopNeedsYou = { rooms: [{ roomIdentifier: "room-a", displayName: "fern-reef", records: [], tasks: [], truncated: false }],
   failures: [], limited: false, signedOut: false, cloudUnavailable: false };
 
-test("deciding the only Needs you item keeps it open with its result and focuses its heading", async () => {
+/** Mount the Inbox with one pending approval in room-a, derived as App derives it, and decide it. */
+async function decideOnlyApproval(rooms = ref<string[]>([])) {
   Object.assign(globalThis, { window: { letagentsDesktop: { supervisor: {
     listHostApprovals: async () => ({ available: true, approvals: [structuredClone(approval)], error: null }),
     decideHostApproval: async () => "decision_sent",
   } } } });
   store.resetHostApprovals();
   await store.refreshHostApprovals("room-a");
-  // As in App: items are derived from the shared approval state.
   const Harness = defineComponent(() => {
     const items = computed(() => attention.buildAgentAttentionItems({ approvalRooms: store.hostApprovalRooms(), nowMs: Date.now() }));
-    return () => h(InboxView, { data, attention: items.value, loading: false, error: "" });
+    return () => h(InboxView, { data, attention: items.value, rooms: rooms.value, loading: false, error: "" });
   });
   const root = hostNode("root");
   const app = renderer.createApp(Harness);
   app.provide(ssrContextKey, { modules: new Set<string>() });
   app.mount(root);
+  const allow = descendants(root).find(node => node.type === "button" && text(node) === "Allow once");
+  assert.ok(allow, "the approval offers Allow once");
+  await (allow.props.onClick as () => Promise<void>)();
+  await nextTick(); await nextTick();
+  return { root, app };
+}
+
+test("deciding the only Needs you item keeps it open with its result and focuses its heading", async () => {
+  const { root, app } = await decideOnlyApproval();
   try {
-    const allow = descendants(root).find(node => node.type === "button" && text(node) === "Allow once");
-    assert.ok(allow, "the approval offers Allow once");
-    await (allow.props.onClick as () => Promise<void>)();
-    await nextTick(); await nextTick();
     const page = text(root);
     assert.doesNotMatch(page, /You’re clear for now/, "the decided item does not give way to the empty state");
     assert.match(page, /Decision sent/);
@@ -103,5 +111,16 @@ test("deciding the only Needs you item keeps it open with its result and focuses
     assert.ok(heading, "the detail pane stays mounted");
     assert.match(text(heading), /CopperRidge · Run a command/);
     assert.equal(focused, heading, "focus moves to the decided item's heading");
+  } finally { app.unmount(); }
+});
+
+test("filtering the decided item's room out of view lets it go", async () => {
+  const rooms = ref<string[]>([]);
+  const { root, app } = await decideOnlyApproval(rooms);
+  try {
+    assert.match(text(root), /Decision sent/);
+    rooms.value = ["room-b"];
+    await nextTick(); await nextTick();
+    assert.doesNotMatch(text(root), /CopperRidge · Run a command|Decision sent/, "room-a's decision is not shown under room-b");
   } finally { app.unmount(); }
 });
