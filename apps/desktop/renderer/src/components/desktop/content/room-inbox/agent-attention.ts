@@ -4,9 +4,12 @@ import type { DesktopHostApproval } from "../../../../../../shared/host-approval
 import { agentInspectorOverallState, projectAgentInspector } from "../../../../domain/agent-inspector";
 import { isLocalRoomIdentifier } from "../../../../domain/room-urls";
 import { hostApprovalBlocksTurn } from "../room-chat/host-approval-presentation";
-import type { HostApprovalRoomState } from "../room-chat/host-approvals";
+import { hostApprovalIdentity, type HostApprovalRoomState } from "../room-chat/host-approvals";
 
-/** A board manager answers most intents within its own turn; only a longer wait needs the owner. */
+/**
+ * A board manager answers most intents within its own turn; only a longer
+ * wait needs the owner. A request already sent to people needs them at once.
+ */
 export const BOARD_INTENT_ATTENTION_DELAY_MS = 3 * 60_000;
 /** Agents briefly report a blocked step while they recover on their own. */
 export const AGENT_ATTENTION_GRACE_MS = 30_000;
@@ -50,11 +53,13 @@ export function buildAgentAttentionItems(input: AgentAttentionInput): AgentAtten
     // After a failed listing main has dropped these presentations; they can no longer be decided.
     if (room.stale) continue;
     for (const approval of room.approvals) {
-      const seenAt = room.firstSeenAt[approval.id];
+      // One row per request: a re-presented request keeps its row, place and selection.
+      const identity = hostApprovalIdentity(approval);
+      const seenAt = room.firstSeenAt[identity];
       // A request its agent waits on that cannot be decided here leaves the
       // agent stuck once the grace has passed: its owner has to stop the turn.
       if (!isActionableHostApproval(approval) && !hostApprovalBlocksTurn(approval, seenAt, input.nowMs)) continue;
-      add({ kind: "tool_approval", key: JSON.stringify([roomIdentifier, "approval", approval.id]), roomIdentifier,
+      add({ kind: "tool_approval", key: JSON.stringify([roomIdentifier, "approval", identity]), roomIdentifier,
         timestamp: seenAt ?? "", approval });
     }
   }
@@ -73,7 +78,7 @@ export function buildAgentAttentionItems(input: AgentAttentionInput): AgentAtten
       const createdMs = Date.parse(intent.createdAt);
       const expiresMs = Date.parse(intent.expiresAt ?? "");
       if (intent.status !== "pending" || !Number.isFinite(createdMs)
-        || input.nowMs - createdMs < BOARD_INTENT_ATTENTION_DELAY_MS
+        || (!intent.escalatedAt && input.nowMs - createdMs < BOARD_INTENT_ATTENTION_DELAY_MS)
         || (Number.isFinite(expiresMs) && expiresMs <= input.nowMs)) continue;
       add({ kind: "board_intent", key: JSON.stringify([room.roomIdentifier, "board-intent", intent.id]),
         roomIdentifier: room.roomIdentifier, timestamp: intent.createdAt, intent });

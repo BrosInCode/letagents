@@ -701,7 +701,8 @@ export class SupervisorDaemonClient {
           item.roomId === roomId && JSON.stringify(item.challenge) === JSON.stringify(challenge) && item.presentationSha256 === presentationSha256
           && JSON.stringify(item.candidate.reference) === JSON.stringify(candidate.reference));
         if (!cached) {
-          cached = { roomId, view: { id: randomUUID(), presentation: candidate.presentation, status: candidate.status, detail: candidate.detail, retryDecision: null, dismissKey: null },
+          cached = { roomId, view: { id: randomUUID(), presentation: candidate.presentation, status: candidate.status, detail: candidate.detail, retryDecision: null, dismissKey: null,
+            requestKey: candidate.reference ? createHash("sha256").update(JSON.stringify(["host-approval-request", roomId, candidate.reference.requestId])).digest("hex") : null },
             candidate, challenge, presentationSha256, touchedAt: now, decision: null };
           this.approvalPresentations.set(cached.view.id, cached);
         }

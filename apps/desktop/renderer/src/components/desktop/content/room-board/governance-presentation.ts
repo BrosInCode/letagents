@@ -148,6 +148,11 @@ function payloadText(intent: DesktopBoardIntentSummary, key: string): string | n
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+/** An actor label reads "Name | owner | runtime"; requests name the agent only. */
+function payloadActorName(intent: DesktopBoardIntentSummary, key: string): string | null {
+  return payloadText(intent, key)?.split("|")[0]?.trim() || null;
+}
+
 export function readableIntentTitle(intent: DesktopBoardIntentSummary): string {
   return intent.actionType === "task_create"
     ? "Create task"
@@ -162,7 +167,7 @@ export function readableIntentBody(intent: DesktopBoardIntentSummary): string {
   }
   const taskId = payloadText(intent, "task_id") || intent.taskId || "task";
   const status = payloadText(intent, "status");
-  const assignee = payloadText(intent, "assignee");
+  const assignee = payloadActorName(intent, "assignee");
   const prUrl = payloadText(intent, "pr_url");
   if (intent.actionType === "task_claim") {
     return assignee ? `Assign ${taskId} to ${assignee}` : `Claim ${taskId}`;
@@ -176,7 +181,7 @@ export function readableIntentBody(intent: DesktopBoardIntentSummary): string {
   }
   if (intent.actionType === "task_override") {
     const action = payloadText(intent, "action");
-    const target = payloadText(intent, "target_actor_key");
+    const target = payloadActorName(intent, "target_actor_key");
     if (action === "handoff") return target ? `Hand off ${taskId} to ${target}` : `Hand off ${taskId}`;
     if (action === "release") return `Release work on ${taskId}`;
     if (status === "accepted") return `Move ${taskId} to accepted`;

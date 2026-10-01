@@ -104,6 +104,7 @@ const expectedDirectChannels = [
   "desktop:room:mark-thread-read",
   "desktop:room:memory-history",
   "desktop:room:needs-you",
+  "desktop:room:needs-you-room",
   "desktop:room:open-github-install",
   "desktop:room:pick-attachments",
   "desktop:room:poll-agent-work",

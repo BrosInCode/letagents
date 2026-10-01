@@ -5,7 +5,7 @@ import { createElectronTestEnv } from "./harness.js";
 
 createElectronTestEnv({ prefix: "needs-you-sources-" }).resetState({});
 
-const { mayHoldPendingBoardIntents } = await import("../main/rooms/knowledge.js");
+const { mayHoldPendingBoardIntents, readPendingBoardIntents } = await import("../main/rooms/knowledge.js");
 const { mapDesktopBoardIntent } = await import("../main/rooms/board-governance/mappers.js");
 const { liveSupervisorStateEntries, onSupervisorState, projectLiveSupervisorEntries, supervisorDaemonClient, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION } = await import("../main/supervisor-daemon.js");
 
@@ -21,6 +21,18 @@ test("Inbox asks only admin rooms active within an intent's lifetime for pending
   assert.equal(mayHoldPendingBoardIntents(room("admin", null), now), true, "an unknown latest message is still checked");
 });
 
+test("a quiet admin room is read as holding no intents, so a later read of that room includes them", async () => {
+  const now = Date.parse("2026-09-30T16:30:00.000Z");
+  const reads: string[] = [];
+  const list = async (roomIdentifier: string) => { reads.push(roomIdentifier); return []; };
+  const room = (role: "admin" | "participant", latestMessageAt: string | null) =>
+    ({ roomIdentifier: `${role}-${latestMessageAt}`, role, latestMessageAt }) as Parameters<typeof readPendingBoardIntents>[0];
+  assert.deepEqual(await readPendingBoardIntents(room("admin", "2026-09-28T16:00:00.000Z"), now, list), [], "an admin room, with nothing pending");
+  assert.equal(await readPendingBoardIntents(room("participant", "2026-09-30T16:10:00.000Z"), now, list), undefined, "not the account's to decide");
+  assert.deepEqual(await readPendingBoardIntents(room("admin", "2026-09-30T16:10:00.000Z"), now, list), []);
+  assert.deepEqual(reads, ["admin-2026-09-30T16:10:00.000Z"], "only an active admin room is asked");
+});
+
 test("pending board intents keep their proposer and timing for the Inbox", () => {
   assert.deepEqual(mapDesktopBoardIntent({
     id: "bi_1", room_id: "room", task_id: "task_7", action_type: "task_claim", payload: { task_id: "task_7" },
@@ -31,7 +43,19 @@ test("pending board intents keep their proposer and timing for the Inbox", () =>
   }), {
     id: "bi_1", taskId: "task_7", actionType: "task_claim", status: "pending", proposerActorLabel: "SummitMisty",
     payload: { task_id: "task_7" }, createdAt: "2026-09-30T16:00:00.000Z", expiresAt: "2026-10-01T16:00:00.000Z",
+    escalatedAt: null,
+  }, "a server that predates escalation reads as not escalated");
+});
+
+test("a board intent sent to people keeps when it was escalated for the Inbox", () => {
+  const intent = mapDesktopBoardIntent({
+    id: "bi_2", room_id: "room", task_id: "task_6", action_type: "task_claim", payload: { task_id: "task_6" },
+    payload_hash: "hash", status: "pending", proposer_actor_label: "HarborMarsh", proposer_actor_key: "emmymay/harbor",
+    proposer_actor_instance_id: null, proposer_agent_session_id: "session", decision_by: null, decision_reason: null,
+    approval_token_hash: null, decided_at: null, expires_at: null, escalated_at: "2026-09-30T16:00:01.000Z",
+    created_at: "2026-09-30T16:00:00.000Z", updated_at: "2026-09-30T16:00:01.000Z",
   });
+  assert.equal(intent.escalatedAt, "2026-09-30T16:00:01.000Z");
 });
 
 test("Needs you reads agents that are not retired, without their activity history", () => {

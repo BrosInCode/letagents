@@ -5,7 +5,7 @@ import { buildDesktopInboxItems, desktopInboxItemFingerprint, type DesktopInboxI
 import type { AgentAttentionItem } from './agent-attention';
 import type { AttentionNavigationIntent } from '../room-shell/types';
 import { mergeDesktopManagedAgentPresence } from '../../../../domain/managed-agents';
-import { hostApprovalFields, hostApprovalHeading } from '../room-chat/host-approval-presentation';
+import { hostApprovalHeading, hostApprovalSummary } from '../room-chat/host-approval-presentation';
 import { readableIntentBody } from '../room-board/governance-presentation';
 
 export type InboxSection = 'needs-you' | 'updates' | 'answered';
@@ -55,25 +55,65 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
       category: 'rental_request', title: activity.title, body: activity.kind === 'rental_request' ? activity.request.taskPrompt : '',
       timestamp: activity.timestamp || '', actor: 'Renting', activity, fingerprint: desktopInboxItemFingerprint(activity) });
   }
-  return result.sort((a, b) => {
-    if (a.section !== b.section) return a.section.localeCompare(b.section);
-    // Agent work stopped on you (tool approvals, stuck agents, waiting board
-    // requests) leads Needs you, longest-waiting first. Everything else reads
-    // newest-first, so a new request is never buried under old ones.
-    const blocking = Number(Boolean(b.attention)) - Number(Boolean(a.attention));
-    if (blocking) return blocking;
-    const newestFirst = (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0);
-    return (a.attention ? -newestFirst : newestFirst) || a.key.localeCompare(b.key);
-  });
+  return result.sort(compareUniversalInboxItems);
+}
+
+/**
+ * Agent work stopped on you (tool approvals, stuck agents, waiting board
+ * requests) leads Needs you, longest-waiting first. Everything else reads
+ * newest-first, so a new request is never buried under old ones.
+ */
+export function compareUniversalInboxItems(a: UniversalInboxItem, b: UniversalInboxItem): number {
+  if (a.section !== b.section) return a.section.localeCompare(b.section);
+  const blocking = Number(Boolean(b.attention)) - Number(Boolean(a.attention));
+  if (blocking) return blocking;
+  const newestFirst = (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0);
+  return (a.attention ? -newestFirst : newestFirst) || a.key.localeCompare(b.key);
+}
+
+/**
+ * Keep the list where the person last saw it. Rows already shown keep their
+ * order, and new rows join in the usual order but never at or above the
+ * selected row, so an arrival never moves the row being read or clicked.
+ * `sorted` is the current list in compareUniversalInboxItems order.
+ */
+export function stableInboxOrder(shownKeys: readonly string[], sorted: readonly UniversalInboxItem[], selectedKey: string | null): UniversalInboxItem[] {
+  const byKey = new Map(sorted.map(item => [item.key, item]));
+  const result = shownKeys.flatMap(key => byKey.get(key) ?? []);
+  if (!result.length) return [...sorted];
+  const shown = new Set(result.map(item => item.key));
+  const floor = result.findIndex(item => item.key === selectedKey) + 1;
+  for (const item of sorted) {
+    if (shown.has(item.key)) continue;
+    const before = result.findIndex((other, index) => index >= floor && compareUniversalInboxItems(item, other) < 0);
+    result.splice(before < 0 ? result.length : before, 0, item);
+  }
+  return result;
+}
+
+/**
+ * The row to select once `key` leaves the list: the one that took its place,
+ * else the one before it. `shown` is the list as it was displayed.
+ */
+export function nextInboxSelection(shown: readonly UniversalInboxItem[], current: readonly UniversalInboxItem[], key: string): UniversalInboxItem | null {
+  const present = new Set(current.map(item => item.key));
+  const index = shown.findIndex(item => item.key === key);
+  if (index < 0) return current[0] ?? null;
+  return shown.slice(index + 1).find(item => present.has(item.key) && item.key !== key)
+    ?? shown.slice(0, index).reverse().find(item => present.has(item.key))
+    ?? current.find(item => item.key !== key) ?? null;
 }
 
 function agentAttentionText(item: AgentAttentionItem): Pick<UniversalInboxItem, 'title' | 'body' | 'actor'> {
   if (item.kind === 'tool_approval') return { title: hostApprovalHeading(item.approval), actor: item.approval.presentation.displayName,
-    body: hostApprovalFields(item.approval.presentation).map(field => `${field.label}: ${field.value}`).join(' · ') };
+    body: hostApprovalSummary(item.approval.presentation) };
   if (item.kind === 'agent_attention') return { title: `${item.agentName} · Needs attention`, body: item.summary, actor: item.agentName };
   const create = item.intent.actionType === 'task_create';
+  // Sent to people: the Board Manager's own request, or one no manager answered.
+  const waiting = item.intent.escalatedAt ? 'Waiting for a person to decide. As a room admin, you can approve or deny it.'
+    : 'Waiting for a Board Manager decision. As a room admin, you can decide it.';
   return { title: create ? 'Create task' : readableIntentBody(item.intent),
-    body: `${create ? `${readableIntentBody(item.intent)}\n` : ''}Waiting for a Board Manager decision. As a room admin, you can decide it.`,
+    body: `${create ? `${readableIntentBody(item.intent)}\n` : ''}${waiting}`,
     actor: item.intent.proposerActorLabel?.split('|')[0]?.trim() || 'A participant' };
 }
 
