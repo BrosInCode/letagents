@@ -12,7 +12,10 @@ import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateData
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
 import { assertNoPollingActivation } from "./custodial-polling-activation.js";
 import { parseTaskContinuation, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
-import { foldEarlierNotices, queuedDeliveryKind, type QueuedDeliveryKind } from "./queued-delivery-order.js";
+import {
+  MAX_QUEUED_NOTICES_PER_TURN, peopleFirstOrder, queuedDeliveryKind, queuedNoticeIds, queuedNoticeReason, queuedNoticesFor, roomArrival,
+  type QueuedDeliveryKind,
+} from "./queued-delivery-order.js";
 import {
   cancelInterruptedSupervisedTurn,
   pruneSupervisedAgentHistory,
@@ -183,6 +186,14 @@ const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInbo
   retryable: ["pending", "blocked"], blocked: ["pending", "cancelled_by_user"], acknowledged: [], acknowledged_no_reply: [], acknowledged_failed: [], cancelled_by_room_move: [], cancelled_by_user: [],
 };
 
+/** A pending row exactly as ingested: no dispatch, retry, block, binding or turn-control history. Alias `i`. */
+const UNTOUCHED_PENDING_SQL = `(i.state='pending' AND i.attempt_count=0 AND i.provider_turn_id IS NULL
+  AND i.outcome IS NULL AND i.last_error IS NULL AND i.failure_code IS NULL AND i.blocked_by_inbox_item_id IS NULL
+  AND i.next_attempt_at_ms IS NULL AND i.terminal_reason IS NULL
+  AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e WHERE e.inbox_item_id=i.inbox_item_id
+    AND e.idempotency_key NOT IN ('received:0','queued:0','queued:person_first'))
+  AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
+  AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id))`;
 const RECEIPT_METADATA_COLUMNS = "i.inbox_item_id,i.agent_id,i.room_id,i.source_message_id,i.fifo_sequence,i.state,i.attempt_count,i.action_id,i.reply_client_message_id,i.provider_turn_id,i.outcome,i.last_error,i.failure_code,i.blocked_by_inbox_item_id,i.next_attempt_at_ms,i.terminal_reason,i.created_at,i.updated_at,i.acknowledged_at";
 const RECEIPT_SELECTION_SQL = `FROM supervised_agent_inbox i
         LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
@@ -375,7 +386,7 @@ export class SupervisedAgentInboxStore {
         created.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row));
       }
       if (newItemIds.size) {
-        this.orderQueuedDeliveries(database, input.agent_id, input.room_id, head ? Number(head.fifo_sequence) : 0, newItemIds, observedAt);
+        this.orderQueuedDeliveries(database, input.agent_id, input.room_id, head ? Number(head.fifo_sequence) : 0, observedAt);
         for (const [index, item] of created.entries()) {
           created[index] = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
         }
@@ -401,69 +412,83 @@ export class SupervisedAgentInboxStore {
   }
 
   /**
-   * Order the untouched queue behind the head after new room work arrives.
-   * Only rows that are still exactly as ingested move or settle: never the
-   * head, a row with any dispatch, retry, block or turn-control history, a
-   * daemon-authored row, or a row from another room. Such a row is a barrier;
-   * only the run after the last barrier is reordered.
-   *
-   * 1. The newest notice absorbs every older queued notice. Each older row
-   *    settles without a provider turn and records why; its text rides in the
-   *    newest notice's activation so the agent handles them in one turn.
-   * 2. People's messages go ahead of automated deliveries, FIFO among people.
+   * After new room work arrives, put people's messages ahead of earlier
+   * automated deliveries in the untouched queue behind the head (bounded by
+   * MAX_PERSON_PASSES). Only rows still exactly as ingested move. The head,
+   * any row with dispatch, retry, block, binding or turn-control history,
+   * daemon-authored rows and rows from another room are barriers; only the
+   * run after the last barrier is reordered. Nothing is settled here.
    */
-  private orderQueuedDeliveries(database: DatabaseSync, agentId: string, roomId: string, headSequence: number,
-    newItemIds: ReadonlySet<string>, timestamp: string): void {
-    const rows = database.prepare(`SELECT i.*,(i.state='pending' AND i.attempt_count=0 AND i.provider_turn_id IS NULL
-        AND i.outcome IS NULL AND i.last_error IS NULL AND i.failure_code IS NULL AND i.blocked_by_inbox_item_id IS NULL
-        AND i.next_attempt_at_ms IS NULL AND i.terminal_reason IS NULL
-        AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e WHERE e.inbox_item_id=i.inbox_item_id
-          AND e.idempotency_key NOT IN ('received:0','queued:0','queued:person_first'))
-        AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
-        AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id)) AS untouched
+  private orderQueuedDeliveries(database: DatabaseSync, agentId: string, roomId: string, headSequence: number, timestamp: string): void {
+    const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched
       FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
         AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       ORDER BY i.fifo_sequence`).all(agentId, headSequence) as Row[];
-    let queued: Array<{ item: SupervisedInboxItem; kind: QueuedDeliveryKind }> = [];
+    let queue: Array<{ item: SupervisedInboxItem; kind: QueuedDeliveryKind; arrival: bigint }> = [];
     for (const row of rows) {
       const item = rowToItem(row);
       const kind = queuedDeliveryKind(item.source_message_id, item.source_message);
-      if (Number(row.untouched) !== 1 || kind === "fixed" || item.room_id !== roomId) queued = [];
-      else queued.push({ item, kind });
+      if (Number(row.untouched) !== 1 || kind === "fixed" || item.room_id !== roomId) queue = [];
+      else queue.push({ item, kind, arrival: roomArrival(item.source_message_id) });
     }
-    const target = queued.filter((entry) => entry.kind === "notice").at(-1);
-    const folded = target && newItemIds.has(target.item.inbox_item_id)
-      ? queued.filter((entry) => entry.kind === "notice" && entry !== target) : [];
-    if (target && folded.length) {
-      const { earlier, reasons } = foldEarlierNotices(folded.map((entry) => entry.item), target.item);
-      run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
-        JSON.stringify({ ...target.item.activation, earlier_notices: earlier }), target.item.inbox_item_id);
-      for (const { item } of folded) {
-        const reason = reasons.get(item.source_message_id)!;
-        run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',last_error=?,updated_at=?,acknowledged_at=?
-          WHERE inbox_item_id=? AND state='pending'`), reason, timestamp, timestamp, item.inbox_item_id);
-        this.recordEvent(database, item.inbox_item_id, `notice_folded:${target.item.source_message_id}`, "no_reply", timestamp, reason);
-        this.settleTerminalItem(database, item, timestamp);
-      }
-      queued = queued.filter((entry) => !folded.includes(entry));
-    }
-    const slots = queued.map((entry) => entry.item.fifo_sequence);
-    const ordered = [...queued.filter((entry) => entry.kind === "person"), ...queued.filter((entry) => entry.kind !== "person")];
-    const moves = ordered.flatMap((entry, index) => entry.item.fifo_sequence === slots[index] ? [] : [{ entry, slot: slots[index]! }]);
+    const { order, passed } = peopleFirstOrder(queue);
+    const moves = order.flatMap((entry, index) => entry.item.fifo_sequence === queue[index]!.item.fifo_sequence
+      ? [] : [{ entry, slot: queue[index]!.item.fifo_sequence }]);
     if (!moves.length) return;
-    // Permute the existing slots through unused ones above the maximum so
-    // UNIQUE(agent_id,fifo_sequence) holds at every step; settled rows keep theirs.
+    // Permute the run's own slots through unused ones above the maximum so
+    // UNIQUE(agent_id,fifo_sequence) holds at every step; other rows keep theirs.
     let parked = Number((database.prepare("SELECT MAX(fifo_sequence) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(agentId) as Row).value);
     const move = database.prepare("UPDATE supervised_agent_inbox SET fifo_sequence=? WHERE inbox_item_id=?");
     for (const { entry } of moves) run(move, ++parked, entry.item.inbox_item_id);
     for (const { entry, slot } of moves) run(move, slot, entry.item.inbox_item_id);
-    const automated = queued.filter((entry) => entry.kind !== "person");
-    for (const { entry, slot } of moves) {
-      if (entry.kind !== "person") continue;
-      const passed = automated.filter((other) => other.item.fifo_sequence < entry.item.fifo_sequence && other.item.fifo_sequence >= slot).length;
-      if (passed) this.recordEvent(database, entry.item.inbox_item_id, "queued:person_first", "queued", timestamp,
-        `Queued ahead of ${passed} earlier automated ${passed === 1 ? "delivery" : "deliveries"}.`);
+    for (const [entry, count] of passed) {
+      this.recordEvent(database, entry.item.inbox_item_id, "queued:person_first", "queued", timestamp,
+        `Queued ahead of ${count} earlier automated ${count === 1 ? "delivery" : "deliveries"}.`);
     }
+  }
+
+  /**
+   * The activation a freshly claimed head is dispatched with. A notice head
+   * also lists the untouched notices queued behind it, up to the first
+   * person's message or barrier, so one turn handles them. They stay pending
+   * until that turn has durably started (checkpointTurnStarted settles them);
+   * a skip, stop or failure before then leaves them queued.
+   */
+  private dispatchActivation(database: DatabaseSync, head: SupervisedInboxItem): InboxActivation {
+    const { queued_notices: _stale, ...activation } = head.activation;
+    if (queuedDeliveryKind(head.source_message_id, head.source_message) !== "notice") return activation;
+    const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched
+      FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+      ORDER BY i.fifo_sequence`).all(head.agent_id, head.fifo_sequence) as Row[];
+    const queued: SupervisedInboxItem[] = [];
+    for (const row of rows) {
+      const item = rowToItem(row);
+      const kind = queuedDeliveryKind(item.source_message_id, item.source_message);
+      // A person's message or correction may change what a later notice means; never deliver past it.
+      if (Number(row.untouched) !== 1 || kind === "fixed" || kind === "person" || item.room_id !== head.room_id) break;
+      if (kind === "notice" && queued.push(item) === MAX_QUEUED_NOTICES_PER_TURN) break;
+    }
+    return queued.length ? { ...activation, queued_notices: queuedNoticesFor(head, queued) } : activation;
+  }
+
+  /** Settle the notices a started turn carried. Each must still be an untouched notice (never a person's message). */
+  private settleQueuedNotices(database: DatabaseSync, head: SupervisedInboxItem, timestamp: string): void {
+    let settled = false;
+    for (const sourceMessageId of queuedNoticeIds(head.activation)) {
+      const row = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched FROM supervised_agent_inbox i
+        WHERE i.agent_id=? AND i.room_id=? AND i.source_message_id=?`).get(head.agent_id, head.room_id, sourceMessageId) as Row | undefined;
+      if (!row || Number(row.untouched) !== 1) continue;
+      const item = rowToItem(row);
+      if (queuedDeliveryKind(item.source_message_id, item.source_message) !== "notice") continue;
+      const reason = queuedNoticeReason(head.activation, head.source_message_id, sourceMessageId);
+      run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',last_error=?,updated_at=?,acknowledged_at=?
+        WHERE inbox_item_id=? AND state='pending'`), reason, timestamp, timestamp, item.inbox_item_id);
+      this.recordEvent(database, item.inbox_item_id, `delivered_with:${head.inbox_item_id}`, "no_reply", timestamp, reason);
+      this.settleTerminalItem(database, item, timestamp);
+      settled = true;
+    }
+    if (settled) this.pruneAgentHistory(database, head.agent_id);
   }
 
   /**
@@ -940,6 +965,13 @@ export class SupervisedAgentInboxStore {
       this.assertCurrentHead(database, item);
       const timestamp = this.now();
       run(database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
+      // A recovering row keeps the activation its existing provider turn was started with.
+      if (!item.provider_turn_id && !item.outcome) {
+        const activation = this.dispatchActivation(database, item);
+        if (JSON.stringify(activation) !== JSON.stringify(item.activation)) {
+          run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"), JSON.stringify(activation), item.inbox_item_id);
+        }
+      }
       const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
       return updated;
     }));
@@ -1009,6 +1041,8 @@ export class SupervisedAgentInboxStore {
         authority.origin_execution_generation_id, authority.provider_continuation_id, providerTurnId);
       }
       this.recordEvent(database, inboxItemId, `turn_started:${nextAttemptCount}:${providerTurnId}`, "turn_started", timestamp, null);
+      // The started turn's prompt carried these notices; they need no turn of their own.
+      this.settleQueuedNotices(database, item, timestamp);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }

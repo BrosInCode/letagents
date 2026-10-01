@@ -2604,7 +2604,7 @@ test("room intake continues through a held provider turn while FIFO execution st
   } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("while a turn runs, a person's message overtakes queued work and older notices ride with the newest one", async () => {
+test("while a turn runs, a person's message overtakes queued work and a notice turn carries the notices behind it", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-priority-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   const firstTurn = deferred<void>(); const release = deferred<void>();
@@ -2615,7 +2615,7 @@ test("while a turn runs, a person's message overtakes queued work and older noti
   const pages = [[peer("1")], [notice("2"), peer("3"), notice("4"), { id: "5", sender: "Dana", source: "browser", agent_identity: null, text: "stop and look at this", activation: activate }]];
   let polls = 0;
   const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
-    const earlier = (request.activation as { earlier_notices?: { notices: Array<{ id: string }> } }).earlier_notices;
+    const earlier = (request.activation as { queued_notices?: { notices: Array<{ id: string }> } }).queued_notices;
     turns.push({ id: (request.sourceMessage as { id: string }).id, earlier: earlier?.notices.map((entry) => entry.id) ?? [] });
     if (turns.length === 1) { firstTurn.resolve(); await release.promise; }
     return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
@@ -2638,12 +2638,12 @@ test("while a turn runs, a person's message overtakes queued work and older noti
     assert.deepEqual(turns, [
       { id: "1", earlier: [] },
       { id: "5", earlier: [] },
+      { id: "2", earlier: ["4"] },
       { id: "3", earlier: [] },
-      { id: "4", earlier: ["2"] },
     ]);
-    const folded = (await store.getBySourceMessage(agent.agentId, agent.roomId, "2"))!;
-    assert.equal(folded.provider_turn_id, null, "the older notice never ran its own provider turn");
-    assert.equal(folded.last_error, "Delivered together with 4, a newer notice, instead of a separate turn.");
+    const carried = (await store.getBySourceMessage(agent.agentId, agent.roomId, "4"))!;
+    assert.equal(carried.provider_turn_id, null, "the later notice never ran its own provider turn");
+    assert.equal(carried.last_error, "Delivered in the turn for 2 together with other queued notices, so this notice had no separate turn.");
   } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 

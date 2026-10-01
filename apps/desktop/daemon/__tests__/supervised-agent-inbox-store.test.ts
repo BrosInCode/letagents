@@ -4217,13 +4217,24 @@ function taskWakeNotice(id: string, rule: string, task: string, from: string, to
 async function queueOrder(store: SupervisedAgentInboxStore, agentId: string): Promise<string[]> {
   return (await store.receipts(agentId)).filter((item) => !item.acknowledged_at).map((item) => item.source_message_id);
 }
+let queuedTurn = 0;
+/** Start the claimed head's provider turn and finish it without a reply. */
+async function runQueuedTurn(store: SupervisedAgentInboxStore, item: { inbox_item_id: string; agent_id: string }): Promise<void> {
+  const turn = `queued-turn-${++queuedTurn}`;
+  await store.checkpointTurnStarted(item.inbox_item_id, turn, TEST_PROVIDER_TURN_AUTHORITY);
+  await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: item.agent_id, execution_generation_id: "generation",
+    provider_turn_id: turn, outcome: "no_reply", text: null, evidence: "stream",
+    terminal_evidence: { turnId: turn, providerContinuationId: "continuation", outcome: "no_reply", text: null, evidence: "stream" } });
+  await store.transition(item.inbox_item_id, "awaiting_result");
+  await store.transition(item.inbox_item_id, "acknowledged_no_reply");
+}
+type QueuedNoticePayload = { instruction: string; activating_superseded_by: string | null; notices: Array<{ id: string; text: string; superseded_by: string | null }> };
 
 test("a person's message is queued ahead of untouched automated work behind the head, FIFO among people", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-10-01T07:00:00.000Z");
     const [head] = await store.ingestPoll({ agent_id: "busy", room_id: "room", last_observed_message_id: "1", messages: [agentMessage("1")] });
-    await store.transition(head!.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(head!.inbox_item_id, "turn_1", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.claimHead("busy");
     await store.ingestPoll({ agent_id: "busy", room_id: "room", last_observed_message_id: "4",
       messages: [boardNotice("2"), agentMessage("3"), personMessage("4")] });
     assert.deepEqual(await queueOrder(store, "busy"), ["1", "4", "2", "3"], "the person passes notices and agent messages, never the head");
@@ -4236,114 +4247,287 @@ test("a person's message is queued ahead of untouched automated work behind the 
     assert.deepEqual(await queueOrder(store, "busy"), ["1", "4", "6", "2", "3", "5"]);
     assert.equal((await store.get(head!.inbox_item_id))!.fifo_sequence, 1);
     assert.equal(await store.claimHead("busy"), null, "the in-flight head keeps FIFO authority");
-    await store.checkpointNormalizedTerminal({ inbox_item_id: head!.inbox_item_id, agent_id: "busy", execution_generation_id: "generation",
-      provider_turn_id: "turn_1", outcome: "no_reply", text: null, evidence: "stream",
-      terminal_evidence: { turnId: "turn_1", providerContinuationId: "continuation", outcome: "no_reply", text: null, evidence: "stream" } });
-    await store.transition(head!.inbox_item_id, "awaiting_result");
-    await store.transition(head!.inbox_item_id, "acknowledged_no_reply");
+    await runQueuedTurn(store, head!);
     const claimed: string[] = [];
     for (let item = await store.claimHead("busy"); item; item = await store.claimHead("busy")) {
       claimed.push(item.source_message_id);
-      await store.transition(item.inbox_item_id, "blocked", { last_error: "test stop" });
-      await store.skipBlocked(item.inbox_item_id);
+      await runQueuedTurn(store, item);
     }
     assert.deepEqual(claimed, ["4", "6", "2", "3", "5"]);
+    await store.ingestPoll({ agent_id: "paused", room_id: "room", last_observed_message_id: "1", messages: [agentMessage("1")] });
+    await store.ingestPoll({ agent_id: "paused", room_id: "room", last_observed_message_id: "2", messages: [personMessage("2")] });
+    assert.deepEqual(await queueOrder(store, "paused"), ["1", "2"], "an unclaimed head is never passed");
     await store.close();
   } finally { await env.cleanup(); }
 });
 
-test("a newer notice absorbs older queued notices once, records why, and keeps their text for one turn", async () => {
+test("people stop overtaking an automated delivery after five later people's messages passed it", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    await store.ingestPoll({ agent_id: "chatty", room_id: "room", last_observed_message_id: "2", messages: [agentMessage("1"), agentMessage("2")] });
+    await store.claimHead("chatty");
+    for (let id = 3; id <= 9; id += 1) {
+      await store.ingestPoll({ agent_id: "chatty", room_id: "room", last_observed_message_id: String(id), messages: [personMessage(String(id))] });
+    }
+    assert.deepEqual(await queueOrder(store, "chatty"), ["1", "3", "4", "5", "6", "7", "2", "8", "9"]);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a claimed notice carries the notices queued behind it, and they settle only when its turn starts", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-10-01T07:00:00.000Z");
     const [head] = await store.ingestPoll({ agent_id: "manager", room_id: "room", last_observed_message_id: "1", messages: [agentMessage("1")] });
-    await store.transition(head!.inbox_item_id, "dispatching");
-    await store.ingestPoll({ agent_id: "manager", room_id: "room", last_observed_message_id: "4", messages: [
-      taskWakeNotice("2", "wake_a", "task_4", "in_review", "merged"), boardNotice("3"), agentMessage("4"),
-    ] });
-    assert.deepEqual(await queueOrder(store, "manager"), ["1", "3", "4"], "notice 3 absorbed notice 2");
+    await store.claimHead("manager");
     await store.ingestPoll({ agent_id: "manager", room_id: "room", last_observed_message_id: "6", messages: [
-      taskWakeNotice("5", "wake_b", "task_4", "merged", "done"), personMessage("6"),
+      taskWakeNotice("2", "wake_a", "task_4", "in_review", "merged"), boardNotice("3"), agentMessage("4"),
+      taskWakeNotice("5", "wake_a", "task_4", "merged", "done"), taskWakeNotice("6", "wake_b", "task_4", "merged", "done"),
     ] });
-    assert.deepEqual(await queueOrder(store, "manager"), ["1", "6", "4", "5"]);
-    const target = (await store.getBySourceMessage("manager", "room", "5"))!;
-    const earlier = target.activation.earlier_notices as { instruction: string; omitted_count: number;
-      notices: Array<{ id: string; text: string; subject: string | null; superseded_by: string | null }> };
-    assert.deepEqual(earlier.notices.map(({ id, subject, superseded_by }) => ({ id, subject, superseded_by })), [
-      { id: "2", subject: "task_4", superseded_by: "5" },
-      { id: "3", subject: null, superseded_by: null },
-    ]);
-    assert.match(earlier.notices[1]!.text, /bi_3 was approved/);
-    assert.equal(earlier.omitted_count, 0);
-    assert.match(earlier.instruction, /Check the current board/);
-    assert.equal(target.activation.reason, "wake_rule", "the server activation is preserved");
-    const superseded = (await store.getBySourceMessage("manager", "room", "2"))!;
-    assert.equal(superseded.state, "acknowledged_no_reply");
-    assert.equal(superseded.attempt_count, 0);
-    assert.equal(superseded.provider_turn_id, null);
-    assert.equal(superseded.last_error, "Delivered together with 3, a newer notice, instead of a separate turn.",
-      "its reason was fixed when it was folded");
-    const folded = (await store.getBySourceMessage("manager", "room", "3"))!;
-    assert.equal(folded.last_error, "Delivered together with 5, a newer notice, instead of a separate turn.");
-    const timeline = (await store.receipts("manager")).find((item) => item.source_message_id === "3")!.timeline;
+    assert.deepEqual(await queueOrder(store, "manager"), ["1", "2", "3", "4", "5", "6"], "ingestion settles nothing");
+    await runQueuedTurn(store, head!);
+    const claimed = (await store.claimHead("manager"))!;
+    assert.equal(claimed.source_message_id, "2", "the oldest notice keeps its FIFO turn");
+    assert.equal(claimed.activation.reason, "wake_rule", "the server activation is preserved");
+    const payload = claimed.activation.queued_notices as QueuedNoticePayload;
+    assert.equal(payload.activating_superseded_by, "5", "a newer firing of the same rule about task_4");
+    assert.deepEqual(payload.notices.map(({ id, superseded_by }) => [id, superseded_by]), [["3", null], ["5", null], ["6", null]],
+      "another agent's message is not a notice; a different rule about the same task is not superseded");
+    assert.match(payload.notices[0]!.text, /bi_3 was approved/);
+    assert.match(payload.instruction, /Check the current board/);
+    assert.deepEqual(await queueOrder(store, "manager"), ["2", "3", "4", "5", "6"], "nothing settles before a provider turn starts");
+    await store.checkpointTurnStarted(claimed.inbox_item_id, "turn-2", TEST_PROVIDER_TURN_AUTHORITY);
+    assert.deepEqual(await queueOrder(store, "manager"), ["2", "4"]);
+    const settled = (await store.getBySourceMessage("manager", "room", "5"))!;
+    assert.equal(settled.state, "acknowledged_no_reply");
+    assert.equal(settled.provider_turn_id, null);
+    assert.equal(settled.attempt_count, 0);
+    assert.equal(settled.last_error, "Delivered in the turn for 2 together with other queued notices, so this notice had no separate turn.");
+    const timeline = (await store.receipts("manager")).find((item) => item.source_message_id === "5")!.timeline;
     assert.deepEqual(timeline.map((event) => event.phase), ["received", "queued", "no_reply"]);
-    await assert.rejects(store.transition(folded.inbox_item_id, "pending"), /Invalid supervised inbox transition/,
-      "a folded notice is settled exactly once");
-    await store.ingestPoll({ agent_id: "manager", room_id: "room", last_observed_message_id: "5",
-      messages: [taskWakeNotice("5", "wake_b", "task_4", "merged", "done")] });
-    assert.deepEqual((await store.getBySourceMessage("manager", "room", "5"))!.activation, target.activation, "a replay does not fold again");
+    await store.checkpointTurnStarted(claimed.inbox_item_id, "turn-2", TEST_PROVIDER_TURN_AUTHORITY);
+    assert.equal((await store.receipts("manager")).find((item) => item.source_message_id === "5")!.timeline.length, 3, "a repeated checkpoint settles nothing twice");
+    await assert.rejects(store.transition(settled.inbox_item_id, "pending"), /Invalid supervised inbox transition/);
     await store.close();
-    const reopened = new SupervisedAgentInboxStore(env.database);
-    assert.deepEqual((await reopened.getBySourceMessage("manager", "room", "5"))!.activation, target.activation);
-    await reopened.close();
   } finally { await env.cleanup(); }
 });
 
-test("same-subject wake notices are marked superseded and an idle burst becomes one delivery", async () => {
+test("a notice skipped, reset or retried before its turn starts leaves the notices behind it queued", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);
-    await store.ingestPoll({ agent_id: "idle", room_id: "room", last_observed_message_id: "4", messages: [
-      taskWakeNotice("1", "wake_a", "task_4", "in_review", "merged"),
-      boardNotice("2"),
-      taskWakeNotice("3", "wake_a", "task_4", "merged", "done"),
-      taskWakeNotice("4", "wake_b", "task_4", "merged", "done"),
+    await store.ingestPoll({ agent_id: "skipper", room_id: "room", last_observed_message_id: "3",
+      messages: [boardNotice("1"), taskWakeNotice("2", "wake_a", "task_4", "in_review", "merged"), boardNotice("3")] });
+    let head = (await store.claimHead("skipper"))!;
+    assert.deepEqual(queuedNoticeIdsOf(head), ["2", "3"]);
+    await store.resetPreNativeHandoff(head.inbox_item_id);
+    await store.ingestPoll({ agent_id: "skipper", room_id: "room", last_observed_message_id: "4", messages: [boardNotice("4")] });
+    head = (await store.claimHead("skipper"))!;
+    assert.deepEqual(queuedNoticeIdsOf(head), ["2", "3", "4"], "a new claim recomputes the batch");
+    await store.transition(head.inbox_item_id, "blocked", { last_error: "provider unavailable" });
+    await store.retryBlocked(head.inbox_item_id);
+    head = (await store.claimHead("skipper"))!;
+    assert.deepEqual(queuedNoticeIdsOf(head), ["2", "3", "4"]);
+    await store.transition(head.inbox_item_id, "blocked", { last_error: "provider unavailable" });
+    await store.skipBlocked(head.inbox_item_id);
+    assert.deepEqual(await queueOrder(store, "skipper"), ["2", "3", "4"], "skipping notice 1 drops only notice 1");
+    for (const id of ["2", "3", "4"]) assert.equal((await store.getBySourceMessage("skipper", "room", id))!.last_error, null);
+    const next = (await store.claimHead("skipper"))!;
+    assert.equal(next.source_message_id, "2");
+    assert.deepEqual(queuedNoticeIdsOf(next), ["3", "4"]);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+function queuedNoticeIdsOf(item: { activation: Record<string, unknown> }): string[] {
+  return ((item.activation.queued_notices as QueuedNoticePayload | undefined)?.notices ?? []).map((entry) => entry.id);
+}
+
+test("a steady stream of agent messages and notices cannot defer an older board intent", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const intent = (id: string) => boardNotice(id, `New board intent bi_${id}: use approve_board_intent or deny_board_intent to decide it.`);
+    const ciWake = (id: string) => ({ source_message_id: id, source_message: { id, sender: "letagents", source: "wake_rule", agent_identity: null,
+      text: `Your wake rule wake_${id} fired: CI finished on #8: 1 failed.\n\nThis rule keeps watching.` }, activation: ACTIVATE });
+    await store.ingestPoll({ agent_id: "m", room_id: "room", last_observed_message_id: "3", messages: [agentMessage("1"), intent("2"), agentMessage("3")] });
+    const ran: Array<{ id: string; carried: string[] }> = [];
+    const agentIds = ["1", "3"];
+    let next = 4;
+    for (let cycle = 0; cycle < 18; cycle += 1) {
+      const head = (await store.claimHead("m"))!;
+      ran.push({ id: head.source_message_id, carried: queuedNoticeIdsOf(head) });
+      // While this turn runs, one agent message and one wake notice arrive.
+      const agent = String(next++); const wake = String(next++);
+      agentIds.push(agent);
+      await store.ingestPoll({ agent_id: "m", room_id: "room", last_observed_message_id: wake, messages: [agentMessage(agent), ciWake(wake)] });
+      await runQueuedTurn(store, head);
+    }
+    assert.deepEqual(ran.slice(0, 3), [{ id: "1", carried: [] }, { id: "2", carried: ["5"] }, { id: "3", carried: [] }],
+      "the intent runs on turn 2, as in plain FIFO, carrying the wake notice that arrived meanwhile");
+    const agentTurns = ran.filter((turn) => agentIds.includes(turn.id)).map((turn) => Number(turn.id));
+    assert.deepEqual(agentTurns, agentIds.slice(0, agentTurns.length).map(Number), "agent messages keep FIFO order");
+    const pending = await queueOrder(store, "m");
+    const oldestPendingAgent = Math.min(...pending.filter((id) => agentIds.includes(id)).map(Number));
+    assert.ok(pending.filter((id) => !agentIds.includes(id)).every((id) => Number(id) > oldestPendingAgent),
+      "no notice waits behind an agent message that arrived after it");
+    const delivered = new Set(ran.flatMap((turn) => [turn.id, ...turn.carried]));
+    for (const receipt of await store.receipts("m")) {
+      if (!receipt.acknowledged_at) continue;
+      assert.ok(delivered.has(receipt.source_message_id), `${receipt.source_message_id} was settled only after a turn carried it`);
+    }
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("at most sixteen notices ride in one turn; the rest wait for the next notice turn and none are dropped", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [head] = await store.ingestPoll({ agent_id: "m", room_id: "room", last_observed_message_id: "100", messages: [personMessage("100")] });
+    await store.claimHead("m");
+    await store.ingestPoll({ agent_id: "m", room_id: "room", last_observed_message_id: "118", messages: [
+      boardNotice("101"), ...Array.from({ length: 17 }, (_, index) => boardNotice(String(102 + index))),
     ] });
-    assert.deepEqual(await queueOrder(store, "idle"), ["4"]);
-    assert.equal((await store.getBySourceMessage("idle", "room", "1"))!.last_error,
-      "Superseded by 4, a newer notice about task_4. Delivered with 4 instead of a separate turn.");
-    assert.equal((await store.getBySourceMessage("idle", "room", "3"))!.last_error,
-      "Superseded by 4, a newer notice about task_4. Delivered with 4 instead of a separate turn.");
-    const earlier = (await store.head("idle"))!.activation.earlier_notices as { notices: Array<{ id: string; superseded_by: string | null }> };
-    assert.deepEqual(earlier.notices.map(({ id, superseded_by }) => [id, superseded_by]), [["1", "4"], ["2", null], ["3", "4"]]);
+    await runQueuedTurn(store, head!);
+    const first = (await store.claimHead("m"))!;
+    assert.equal(first.source_message_id, "101");
+    assert.deepEqual(queuedNoticeIdsOf(first), Array.from({ length: 16 }, (_, index) => String(102 + index)));
+    await runQueuedTurn(store, first);
+    assert.deepEqual(await queueOrder(store, "m"), ["118"]);
     await store.close();
   } finally { await env.cleanup(); }
 });
 
-test("a blocked head, corrections and touched rows are barriers; nothing jumps or folds across them", async () => {
+const ROW_TOUCHES: Record<string, (database: DatabaseSync, item: { inbox_item_id: string; agent_id: string; room_id: string }) => void> = {
+  "a provider-turn binding": (database, item) => database.prepare(`INSERT INTO supervised_agent_provider_turn_bindings
+    (inbox_item_id,agent_id,room_id,work_attempt_id,origin_execution_generation_id,provider_continuation_id,provider_turn_id)
+    VALUES (?,?,?,'attempt','generation','continuation',?)`).run(item.inbox_item_id, item.agent_id, item.room_id, `bound-${item.agent_id}`),
+  "turn-control history": (database, item) => {
+    database.prepare(`INSERT INTO agent_identities(agent_id,created_by,created_at,sort_order)
+      VALUES (?,'test','2026-10-01T07:00:00.000Z',(SELECT COALESCE(MAX(sort_order),0)+1 FROM agent_identities))`).run(item.agent_id);
+    database.prepare("INSERT INTO turn_control_journals(agent_id,turn_control_present,inbox_item_id) VALUES (?,0,?)").run(item.agent_id, item.inbox_item_id);
+  },
+  "a retry event": (database, item) => database.prepare(`INSERT INTO supervised_agent_inbox_events
+    (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail) VALUES (?,3,'retry_failure:pre_dispatch:1','retry_scheduled','2026-10-01T07:00:00.000Z','x')`)
+    .run(item.inbox_item_id),
+  "a non-pending state": (database, item) => database.prepare("UPDATE supervised_agent_inbox SET state='retryable' WHERE inbox_item_id=?").run(item.inbox_item_id),
+};
+for (const [touch, apply] of Object.entries(ROW_TOUCHES)) {
+  test(`a queued row with ${touch} is a barrier for people and for notice batches`, async () => {
+    const env = await fixture();
+    const database = new DatabaseSync(env.database);
+    try {
+      const store = new SupervisedAgentInboxStore(env.database);
+      await store.ingestPoll({ agent_id: "people", room_id: "room", last_observed_message_id: "2", messages: [agentMessage("1"), boardNotice("2")] });
+      await store.claimHead("people");
+      apply(database, (await store.getBySourceMessage("people", "room", "2"))!);
+      await store.ingestPoll({ agent_id: "people", room_id: "room", last_observed_message_id: "4", messages: [boardNotice("3"), personMessage("4")] });
+      assert.deepEqual(await queueOrder(store, "people"), ["1", "2", "4", "3"], "the person does not pass the touched row");
+
+      await store.ingestPoll({ agent_id: "batch", room_id: "room", last_observed_message_id: "3", messages: [boardNotice("1"), boardNotice("2"), boardNotice("3")] });
+      apply(database, (await store.getBySourceMessage("batch", "room", "2"))!);
+      const head = (await store.claimHead("batch"))!;
+      assert.equal(head.source_message_id, "1");
+      assert.deepEqual(queuedNoticeIdsOf(head), [], "the batch stops at the touched row");
+      await store.close();
+    } finally { database.close(); await env.cleanup(); }
+  });
+}
+
+test("a row revived by a room-move rollback and rows from another room are barriers", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);
-    const [head] = await store.ingestPoll({ agent_id: "stuck", room_id: "room", last_observed_message_id: "2",
-      messages: [boardNotice("1"), boardNotice("2")] });
-    assert.deepEqual(await queueOrder(store, "stuck"), ["2"], "an idle burst folds before anything is claimed");
-    const claimed = await store.claimHead("stuck");
-    assert.equal(claimed?.source_message_id, "2");
-    await store.transition(claimed!.inbox_item_id, "blocked", { last_error: "provider failure" });
-    await store.ingestPoll({ agent_id: "stuck", room_id: "room", last_observed_message_id: "4", messages: [boardNotice("3"), personMessage("4")] });
-    assert.deepEqual(await queueOrder(store, "stuck"), ["2", "4", "3"], "the person waits behind the blocked head");
-    assert.deepEqual((await store.receipts("stuck")).filter((item) => !item.acknowledged_at).map((item) => item.receipt_state),
-      ["blocked", "queued_behind_blocked", "queued_behind_blocked"]);
-    assert.equal(await store.claimHead("stuck"), null);
-    await store.enqueueCorrection({ agent_id: "stuck", room_id: "room", source_message_id: "correction:action-1",
+    await store.bootstrapCursor({ agent_id: "mover", room_id: "old", last_observed_message_id: "9" });
+    const [current] = await store.ingestPoll({ agent_id: "mover", room_id: "old", expected_cursor: "9", last_observed_message_id: "11",
+      messages: [agentMessage("10"), boardNotice("11")] });
+    await store.claimHead("mover");
+    await store.checkpointTurnStarted(current!.inbox_item_id, "turn-move", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.commitRoomMoveQueue({ operation_id: "move_1", agent_id: "mover", old_room_id: "old", after_fifo_sequence: current!.fifo_sequence });
+    await store.commitRoomMoveCursor({ agent_id: "mover", source_room_id: "old", destination_room_id: "new", last_observed_message_id: "40" });
+    await store.rollbackRoomMoveIngress({ operation_id: "move_1", agent_id: "mover", source_room_id: "old", destination_room_id: "new",
+      source_cursor_present: true, source_cursor: "11", after_fifo_sequence: current!.fifo_sequence });
+    await store.ingestPoll({ agent_id: "mover", room_id: "old", last_observed_message_id: "13", messages: [boardNotice("12"), personMessage("13")] });
+    assert.deepEqual(await queueOrder(store, "mover"), ["10", "11", "13", "12"], "the person does not pass the revived row");
+
+    await store.ingestPoll({ agent_id: "rooms", room_id: "a", last_observed_message_id: "2", messages: [agentMessage("1"), boardNotice("2")] });
+    const inFlight = await store.claimHead("rooms");
+    await store.commitRoomMoveCursor({ agent_id: "rooms", source_room_id: "a", destination_room_id: "b", last_observed_message_id: "10" });
+    await store.ingestPoll({ agent_id: "rooms", room_id: "b", last_observed_message_id: "12", messages: [boardNotice("11"), personMessage("12")] });
+    assert.deepEqual(await queueOrder(store, "rooms"), ["1", "2", "12", "11"], "a room-b person does not pass a room-a row");
+    await runQueuedTurn(store, inFlight!);
+    const roomA = (await store.claimHead("rooms"))!;
+    assert.equal(roomA.source_message_id, "2");
+    assert.deepEqual(queuedNoticeIdsOf(roomA), [], "a room-a notice never carries a room-b notice");
+    await store.ingestPoll({ agent_id: "rooms2", room_id: "a", last_observed_message_id: "1", messages: [boardNotice("1")] });
+    await store.commitRoomMoveCursor({ agent_id: "rooms2", source_room_id: "a", destination_room_id: "b", last_observed_message_id: "10" });
+    await store.ingestPoll({ agent_id: "rooms2", room_id: "b", last_observed_message_id: "11", messages: [boardNotice("11")] });
+    assert.deepEqual(queuedNoticeIdsOf((await store.claimHead("rooms2"))!), [], "a room-a notice never carries the room-b notice behind it");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a started turn settles only untouched notices its own claim listed, never a person's message", async () => {
+  const env = await fixture();
+  const database = new DatabaseSync(env.database);
+  try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    await store.ingestPoll({ agent_id: "listed", room_id: "room", last_observed_message_id: "2", messages: [boardNotice("1"), boardNotice("2")] });
+    const head = (await store.claimHead("listed"))!;
+    await store.ingestPoll({ agent_id: "listed", room_id: "room", last_observed_message_id: "3", messages: [personMessage("3")] });
+    const activation = { ...head.activation, queued_notices: { notices: [{ id: "2" }, { id: "3" }] } };
+    database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?").run(JSON.stringify(activation), head.inbox_item_id);
+    await store.checkpointTurnStarted(head.inbox_item_id, "turn-listed", TEST_PROVIDER_TURN_AUTHORITY);
+    assert.equal((await store.getBySourceMessage("listed", "room", "2"))!.state, "acknowledged_no_reply");
+    assert.equal((await store.getBySourceMessage("listed", "room", "3"))!.state, "pending", "a listed person's message is never settled");
+
+    await store.ingestPoll({ agent_id: "injected", room_id: "room", last_observed_message_id: "2", messages: [
+      { ...personMessage("1"), activation: { ...ACTIVATE, queued_notices: { notices: [{ id: "2" }] } } }, boardNotice("2"),
+    ] });
+    const person = (await store.claimHead("injected"))!;
+    assert.equal(person.activation.queued_notices, undefined, "a server-supplied batch is never dispatched");
+    await store.checkpointTurnStarted(person.inbox_item_id, "turn-injected", TEST_PROVIDER_TURN_AUTHORITY);
+    assert.equal((await store.getBySourceMessage("injected", "room", "2"))!.state, "pending");
+
+    await store.ingestPoll({ agent_id: "moved", room_id: "room", last_observed_message_id: "2", messages: [boardNotice("1"), boardNotice("2")] });
+    const mover = (await store.claimHead("moved"))!;
+    assert.deepEqual(queuedNoticeIdsOf(mover), ["2"]);
+    await store.commitRoomMoveQueue({ operation_id: "move_q", agent_id: "moved", old_room_id: "room", after_fifo_sequence: mover.fifo_sequence });
+    await store.checkpointTurnStarted(mover.inbox_item_id, "turn-moved", TEST_PROVIDER_TURN_AUTHORITY);
+    const cancelled = (await store.receipts("moved")).find((item) => item.source_message_id === "2")!;
+    assert.equal(cancelled.state, "cancelled_by_room_move");
+    assert.equal(cancelled.timeline.at(-1)?.phase, "room_move_cancelled", "a listed row that changed before the turn started is left alone");
+    await store.close();
+  } finally { database.close(); await env.cleanup(); }
+});
+
+test("corrections are barriers, and a recovering turn keeps the batch it started with", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const correction = (agentId: string) => store.enqueueCorrection({ agent_id: agentId, room_id: "room", source_message_id: "correction:action-1",
       source_message: { text: "use the new plan", sender: { kind: "supervisor_correction" } },
       activation: { decision: "activate", reason: "human_correction", addressed: true } });
-    await store.ingestPoll({ agent_id: "stuck", room_id: "room", last_observed_message_id: "6", messages: [boardNotice("5"), personMessage("6")] });
-    assert.deepEqual(await queueOrder(store, "stuck"), ["2", "4", "3", "correction:action-1", "6", "5"],
-      "notice 3 is not folded across the correction and person 6 does not pass it");
-    assert.equal(head!.source_message_id, "1");
-    await store.retryBlocked(claimed!.inbox_item_id);
-    assert.equal((await store.claimHead("stuck"))?.source_message_id, "2", "retry resumes the exact blocked head");
-    await store.ingestPoll({ agent_id: "paused", room_id: "room", last_observed_message_id: "1", messages: [boardNotice("1")] });
-    await store.ingestPoll({ agent_id: "paused", room_id: "room", last_observed_message_id: "3", messages: [boardNotice("2"), personMessage("3")] });
-    assert.deepEqual(await queueOrder(store, "paused"), ["1", "3", "2"], "an unclaimed head is neither passed nor folded");
+    await store.ingestPoll({ agent_id: "corrected", room_id: "room", last_observed_message_id: "1", messages: [agentMessage("1")] });
+    await store.claimHead("corrected");
+    await correction("corrected");
+    await store.ingestPoll({ agent_id: "corrected", room_id: "room", last_observed_message_id: "3", messages: [boardNotice("2"), personMessage("3")] });
+    assert.deepEqual(await queueOrder(store, "corrected"), ["1", "correction:action-1", "3", "2"], "a person does not pass a correction");
+
+    await store.ingestPoll({ agent_id: "notified", room_id: "room", last_observed_message_id: "1", messages: [boardNotice("1")] });
+    await correction("notified");
+    await store.ingestPoll({ agent_id: "notified", room_id: "room", last_observed_message_id: "2", messages: [boardNotice("2")] });
+    assert.deepEqual(queuedNoticeIdsOf((await store.claimHead("notified"))!), [], "a notice batch never reaches past a correction");
+
+    await store.ingestPoll({ agent_id: "asked", room_id: "room", last_observed_message_id: "1", messages: [boardNotice("1")] });
+    await store.ingestPoll({ agent_id: "asked", room_id: "room", last_observed_message_id: "3", messages: [personMessage("2"), boardNotice("3")] });
+    assert.deepEqual(await queueOrder(store, "asked"), ["1", "2", "3"]);
+    assert.deepEqual(queuedNoticeIdsOf((await store.claimHead("asked"))!), [], "a notice batch never reaches past a person's message");
+
+    await store.ingestPoll({ agent_id: "recovering", room_id: "room", last_observed_message_id: "2", messages: [boardNotice("1"), boardNotice("2")] });
+    const started = (await store.claimHead("recovering"))!;
+    await store.checkpointTurnStarted(started.inbox_item_id, "turn-recover", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.normalizeStartupRecovery("recovering");
+    await store.ingestPoll({ agent_id: "recovering", room_id: "room", last_observed_message_id: "3", messages: [boardNotice("3")] });
+    const recovered = (await store.claimHead("recovering"))!;
+    assert.equal(recovered.provider_turn_id, "turn-recover");
+    assert.deepEqual(recovered.activation, started.activation, "the recovered turn's prompt is not rebuilt");
+    assert.deepEqual(await queueOrder(store, "recovering"), ["1", "3"]);
     await store.close();
   } finally { await env.cleanup(); }
 });
