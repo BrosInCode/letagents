@@ -56,10 +56,14 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
       timestamp: activity.timestamp || '', actor: 'Renting', activity, fingerprint: desktopInboxItemFingerprint(activity) });
   }
   return result.sort((a, b) => {
-    // Human requests wait oldest-first; updates and answers read newest-first.
     if (a.section !== b.section) return a.section.localeCompare(b.section);
-    const order = (Date.parse(a.timestamp) || 0) - (Date.parse(b.timestamp) || 0);
-    return (a.section === 'needs-you' ? order : -order) || a.key.localeCompare(b.key);
+    // Agent work stopped on you (tool approvals, stuck agents, waiting board
+    // requests) leads Needs you, longest-waiting first. Everything else reads
+    // newest-first, so a new request is never buried under old ones.
+    const blocking = Number(Boolean(b.attention)) - Number(Boolean(a.attention));
+    if (blocking) return blocking;
+    const newestFirst = (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0);
+    return (a.attention ? -newestFirst : newestFirst) || a.key.localeCompare(b.key);
   });
 }
 
@@ -92,6 +96,23 @@ export function inboxNavigationIntent(item: UniversalInboxItem, mode?: 'room' | 
   return intent;
 }
 
+/** Compact age for the queue: "Just now", "5m", "3h", "12d". */
+export function inboxRelativeTime(time: string, now = Date.now()): string {
+  const at = Date.parse(time);
+  if (!Number.isFinite(at)) return '';
+  const minutes = Math.max(0, Math.floor((now - at) / 60_000));
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
+/** Rooms matching a filter search, by name or identifier. */
+export function searchInboxRooms<T extends { roomIdentifier: string; displayName: string }>(rooms: readonly T[], query: string): T[] {
+  const needle = query.trim().toLocaleLowerCase();
+  return needle ? rooms.filter(room => room.displayName.toLocaleLowerCase().includes(needle) || room.roomIdentifier.toLocaleLowerCase().includes(needle)) : [...rooms];
+}
+
 export function inboxCategoryLabel(category: string): string {
   return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', blocked: 'Blocked task',
     in_review: 'Task review', done: 'Completed', merged: 'Merged', thread: 'Unread replies', github_failure: 'Failed check',
@@ -104,10 +125,15 @@ export function filterUniversalInbox(items: UniversalInboxItem[], section: Inbox
     && (item.section !== 'updates' || dismissals[item.key] !== item.fingerprint));
 }
 
+/** Rooms that failed to load, limited to the rooms being viewed. */
+export function inboxSourceFailures(data: DesktopNeedsYou | null, rooms: string[]): DesktopNeedsYou['failures'] {
+  return (data?.failures ?? []).filter(room => !rooms.length || rooms.includes(room.roomIdentifier));
+}
+
 /** Room names are not unique; acknowledge failures by source identity. */
 export function inboxSourceFailureKey(data: DesktopNeedsYou | null, rooms: string[], rentalError: string): string {
   return JSON.stringify([
-    (data?.failures ?? []).map(room => room.roomIdentifier).sort(),
+    inboxSourceFailures(data, rooms).map(room => room.roomIdentifier).sort(),
     (data?.rooms ?? []).filter(room => (!rooms.length || rooms.includes(room.roomIdentifier)) && room.updates?.unavailable.length)
       .map(room => [room.roomIdentifier, [...room.updates!.unavailable].sort()] as const)
       .sort((a, b) => a[0].localeCompare(b[0])),

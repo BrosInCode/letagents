@@ -133,13 +133,156 @@ test('opening Inbox during a badge refresh queues its update sources instead of 
   } finally { app.unmount(); Object.assign(globalThis, { window: priorWindow }); }
 });
 
-test('mixed-room updates never reorder human requests ahead of older requests', async () => {
+test('Needs you lists the newest request first across rooms, and updates never interleave with requests', async () => {
   const { buildUniversalInbox, filterUniversalInbox } = await import('../src/components/desktop/content/room-inbox/universal');
+  const answered = (id: string, at: string) => ({ ...record, id, response: { body: 'Done', actor: { id: 'human', label: 'Emmy', kind: 'human' as const }, at } });
   const items = buildUniversalInbox({ ...data, rooms: [
-    { ...data.rooms[0], records: [{ ...record, created_at: '2026-09-01T00:00:00Z' }], tasks: [{ id: 'task_1', title: 'Between requests', status: 'blocked', description: null, updated_at: '2026-09-02T00:00:00Z' }] },
-    { ...data.rooms[0], roomIdentifier: 'second-room', records: [{ ...record, created_at: '2026-09-03T00:00:00Z' }] },
+    { ...data.rooms[0], records: [{ ...record, created_at: '2026-09-01T00:00:00Z' }, answered('answered-older', '2026-09-05T00:00:00Z')],
+      tasks: [{ id: 'task_1', title: 'Between requests', status: 'blocked', description: null, updated_at: '2026-09-02T00:00:00Z' }] },
+    { ...data.rooms[0], roomIdentifier: 'second-room', records: [{ ...record, created_at: '2026-09-03T00:00:00Z' }, answered('answered-newer', '2026-09-06T00:00:00Z')],
+      tasks: [{ id: 'task_2', title: 'Later work', status: 'blocked', description: null, updated_at: '2026-09-04T00:00:00Z' }] },
   ] });
-  assert.deepEqual(filterUniversalInbox(items, 'needs-you', [], {}).map(item => item.timestamp), ['2026-09-01T00:00:00Z', '2026-09-03T00:00:00Z']);
+  assert.deepEqual(filterUniversalInbox(items, 'needs-you', [], {}).map(item => item.timestamp), ['2026-09-03T00:00:00Z', '2026-09-01T00:00:00Z'],
+    'a 12-day-old request from another room no longer sits above a new one');
+  assert.deepEqual(filterUniversalInbox(items, 'updates', [], {}).map(item => item.timestamp), ['2026-09-04T00:00:00Z', '2026-09-02T00:00:00Z'], 'Updates read newest-first');
+  assert.deepEqual(filterUniversalInbox(items, 'answered', [], {}).map(item => item.timestamp), ['2026-09-06T00:00:00Z', '2026-09-05T00:00:00Z'], 'Answered reads newest-first');
+});
+
+test('items with a missing or unreadable time keep a fixed place: after dated requests, before dated blocked work', async () => {
+  const { buildUniversalInbox, filterUniversalInbox } = await import('../src/components/desktop/content/room-inbox/universal');
+  const { buildAgentAttentionItems } = await import('../src/components/desktop/content/room-inbox/agent-attention');
+  const approval = (id: string) => ({ id, status: 'pending' as const, detail: null, retryDecision: null, dismissKey: null,
+    presentation: { agentId: 'agent', displayName: 'CopperRidge', provider: 'open-model' as const, title: 'Run a command' as const, details: '{}', denyScope: 'session_pending' as const } });
+  const records = [
+    { ...record, id: 'dated-newer', created_at: '2026-09-03T00:00:00Z' }, { ...record, id: 'a-no-time', created_at: '' },
+    { ...record, id: 'dated-older', created_at: '2026-09-01T00:00:00Z' }, { ...record, id: 'b-bad-time', created_at: 'not a date' },
+  ];
+  const approvals = [approval('dated-approval'), approval('undated-approval')];
+  const order = (shuffle: <T>(list: T[]) => T[]) => {
+    const attention = buildAgentAttentionItems({ nowMs: Date.parse('2026-09-30T00:00:00Z'), approvalRooms: new Map([['room', { stale: false,
+      approvals: shuffle(approvals), firstSeenAt: { 'dated-approval': '2026-09-02T00:00:00Z' } }]]) });
+    return filterUniversalInbox(buildUniversalInbox({ ...data, rooms: [{ ...data.rooms[0], records: shuffle(records) }] }, [], shuffle(attention)), 'needs-you', [], {})
+      .map(item => item.attention?.kind === 'tool_approval' ? item.attention.approval.id : item.record!.id);
+  };
+  const expected = ['undated-approval', 'dated-approval', 'dated-newer', 'dated-older', 'a-no-time', 'b-bad-time'];
+  assert.deepEqual(order(list => [...list]), expected);
+  assert.deepEqual(order(list => [...list].reverse()), expected, 'the input order does not matter');
+  assert.deepEqual(order(list => [...list.slice(1), list[0]]), expected);
+});
+
+test('blocked agent work leads Needs you longest-waiting first, then requests newest-first', async () => {
+  const { buildUniversalInbox, filterUniversalInbox } = await import('../src/components/desktop/content/room-inbox/universal');
+  const { buildAgentAttentionItems } = await import('../src/components/desktop/content/room-inbox/agent-attention');
+  const now = Date.parse('2026-09-30T16:30:00Z');
+  const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+  const approval = (id: string) => ({ id, status: 'pending' as const, detail: null, retryDecision: null, dismissKey: null,
+    presentation: { agentId: 'agent', displayName: 'CopperRidge', provider: 'open-model' as const, title: 'Run a command' as const, details: '{}', denyScope: 'session_pending' as const } });
+  const attention = buildAgentAttentionItems({ nowMs: now, approvalRooms: new Map([['room', { stale: false,
+    approvals: [approval('waiting-2m'), approval('waiting-20m')], firstSeenAt: { 'waiting-2m': ago(2), 'waiting-20m': ago(20) } }]]) });
+  const items = buildUniversalInbox({ ...data, rooms: [{ ...data.rooms[0], records: [
+    { ...record, id: 'fresh-question', created_at: ago(1) }, { ...record, id: 'older-question', created_at: ago(30) },
+  ] }] }, [], attention);
+  const order = filterUniversalInbox(items, 'needs-you', [], {}).map(item => item.attention?.kind === 'tool_approval' ? item.attention.approval.id : item.record!.id);
+  assert.deepEqual(order, ['waiting-20m', 'waiting-2m', 'fresh-question', 'older-question'],
+    'a fresh question sits below an older pending tool approval, and below a newer one too');
+});
+
+test('queue ages read in minutes under an hour', async () => {
+  const { inboxRelativeTime } = await import('../src/components/desktop/content/room-inbox/universal');
+  const now = Date.parse('2026-09-30T16:30:00Z');
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  assert.deepEqual([30_000, 6 * 60_000, 59 * 60_000, 60 * 60_000, 25 * 3_600_000, 12 * 86_400_000].map(ms => inboxRelativeTime(ago(ms), now)),
+    ['Just now', '6m', '59m', '1h', '1d', '12d']);
+  assert.equal(inboxRelativeTime(ago(-60_000), now), 'Just now', 'clock skew never shows a negative age');
+  assert.equal(inboxRelativeTime('not a date', now), '');
+});
+
+test('the room filter is searchable and remembered per account; a room chip scopes one visit without replacing it', async () => {
+  const { searchInboxRooms } = await import('../src/components/desktop/content/room-inbox/universal');
+  const { readInboxRoomFilter, useInboxRoomFilter } = await import('../src/composables/useInboxRoomFilter');
+  const rooms = [{ roomIdentifier: 'github.com/EmmyMay/year-dots', displayName: 'fern-reef' }, { roomIdentifier: 'maple', displayName: 'Maple River' }];
+  assert.deepEqual(searchInboxRooms(rooms, '  MAPLE ').map(room => room.roomIdentifier), ['maple']);
+  assert.deepEqual(searchInboxRooms(rooms, 'year-dots').map(room => room.displayName), ['fern-reef'], 'a room is also found by its repository');
+  assert.equal(searchInboxRooms(rooms, '').length, 2);
+  const priorWindow = globalThis.window;
+  const stored = new Map<string, string>();
+  Object.assign(globalThis, { window: { localStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); }, removeItem: (key: string) => { stored.delete(key); } } } });
+  try {
+    let account = 'account-1';
+    const filter = useInboxRoomFilter(() => account);
+    filter.choose(['maple']);
+    filter.open('github.com/EmmyMay/year-dots');
+    assert.deepEqual(filter.rooms.value, ['github.com/EmmyMay/year-dots'], 'the chip opens its own room');
+    assert.deepEqual(readInboxRoomFilter('account-1'), ['maple'], 'a chip-scoped visit does not replace the saved choice');
+    filter.open();
+    assert.deepEqual(filter.rooms.value, ['maple'], 'the next plain visit restores the saved choice');
+    account = 'account-2'; filter.reload();
+    assert.deepEqual(filter.rooms.value, [], 'another account keeps its own filter');
+    account = 'account-1'; filter.reload();
+    assert.deepEqual(filter.rooms.value, ['maple']);
+
+    filter.choose(['maple', 'gone', 'local_7f3a']);
+    filter.prune({ ...data, limited: true, rooms: [{ ...data.rooms[0], roomIdentifier: 'maple' }] });
+    assert.deepEqual(readInboxRoomFilter('account-1'), ['maple', 'gone', 'local_7f3a'], 'a capped room list proves nothing is gone');
+    filter.prune({ ...data, rooms: [{ ...data.rooms[0], roomIdentifier: 'maple' }] });
+    assert.deepEqual(readInboxRoomFilter('account-1'), ['maple', 'local_7f3a'], 'a room that no longer exists leaves the filter; local rooms stay');
+    assert.deepEqual(filter.rooms.value, ['maple', 'local_7f3a']);
+
+    filter.choose([]);
+    assert.equal(stored.has('letagents-desktop:inbox-rooms:account-1'), false);
+    stored.set('letagents-desktop:inbox-rooms:account-1', '{"broken"');
+    assert.deepEqual(readInboxRoomFilter('account-1'), []);
+    Object.assign(globalThis, { window: {} });
+    assert.doesNotThrow(() => filter.choose(['maple']), 'storage is optional');
+    assert.deepEqual(readInboxRoomFilter('account-1'), []);
+  } finally { Object.assign(globalThis, { window: priorWindow }); }
+});
+
+test('loading issues follow the room filter and Retry sources stays available during a refresh', async () => {
+  const { inboxSourceFailureKey, inboxSourceFailures } = await import('../src/components/desktop/content/room-inbox/universal');
+  const failed: DesktopNeedsYou = { ...data, rooms: [data.rooms[0], { ...data.rooms[0], roomIdentifier: 'other', displayName: 'amber-owl' }], failures: [{ roomIdentifier: 'other', displayName: 'amber-owl' }] };
+  assert.deepEqual(inboxSourceFailures(failed, ['room']), []);
+  assert.equal(inboxSourceFailures(failed, []).length, 1);
+  assert.equal(inboxSourceFailureKey(failed, ['room'], ''), inboxSourceFailureKey(data, ['room'], ''), 'a failure outside the filter is not a new notice');
+  const vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/InboxView.vue')).default;
+    const scoped = await renderToString(createSSRApp(component, { data: failed, rooms: ['room'], rentalError: 'Rental requests are unavailable.', loading: false, error: '' }));
+    assert.doesNotMatch(scoped, /amber-owl\./); assert.doesNotMatch(scoped, /Some updates couldn’t be loaded/); assert.doesNotMatch(scoped, /Rental requests are unavailable/);
+    const all = await renderToString(createSSRApp(component, { data: failed, loading: true, error: '' }));
+    assert.match(all, /Couldn’t load all inbox data for amber-owl\./);
+    const retry = /<button class="knowledge-button"([^>]*)>(?:(?!<\/button>).)*Retry sources<\/button>/s.exec(all);
+    assert.ok(retry, 'Retry sources is shown');
+    assert.doesNotMatch(retry[1], /disabled/, 'a retry can be queued while the current load finishes');
+    assert.match(retry[0], /knowledge-spin/);
+    assert.match(all, /placeholder="Find a room"/);
+    const noRooms = await renderToString(createSSRApp(component, { data: { ...data, rooms: [] }, loading: false, error: '' }));
+    assert.doesNotMatch(noRooms, /No rooms match/, 'an empty search never reports a miss');
+
+    const hidden = await renderToString(createSSRApp(component, { data, rooms: ['elsewhere'], loading: false, error: '' }));
+    assert.match(hidden, /1 hidden by the room filter/);
+    assert.match(hidden, /Nothing here in the selected rooms/); assert.doesNotMatch(hidden, /You’re clear for now/);
+  } finally { await vite.close(); }
+});
+
+test('a dismissed loading notice is kept per room filter, so switching filters never erases it', async () => {
+  const { inboxSourceFailureKey } = await import('../src/components/desktop/content/room-inbox/universal');
+  const failed: DesktopNeedsYou = { ...data, failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }] };
+  const priorWindow = globalThis.window;
+  const stored = new Map<string, string>([['letagents-desktop:inbox-hidden-notice:local', JSON.stringify({ '["room"]': inboxSourceFailureKey(failed, ['room'], '') })]]);
+  Object.assign(globalThis, { window: { localStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); }, removeItem: (key: string) => { stored.delete(key); } } } });
+  const vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/InboxView.vue')).default;
+    const filtered = await renderToString(createSSRApp(component, { data: failed, rooms: ['room'], loading: false, error: '' }));
+    assert.match(filtered, /Show loading issues/); assert.doesNotMatch(filtered, /<details class="inbox-source-notice"/);
+    const unfiltered = await renderToString(createSSRApp(component, { data: failed, loading: false, error: '' }));
+    assert.match(unfiltered, /<details class="inbox-source-notice"/, 'the unfiltered view has its own notice');
+    assert.ok(JSON.parse(stored.get('letagents-desktop:inbox-hidden-notice:local')!)['["room"]'], 'viewing another filter keeps the dismissal');
+    stored.set('letagents-desktop:inbox-hidden-notice:local', inboxSourceFailureKey(failed, [], ''));
+    const legacy = await renderToString(createSSRApp(component, { data: failed, loading: false, error: '' }));
+    assert.match(legacy, /Show loading issues/, 'an earlier unscoped dismissal still covers the unfiltered view');
+  } finally { await vite.close(); Object.assign(globalThis, { window: priorWindow }); }
 });
 
 test('unknown local managed agents remain visible in Updates only in their own room', async () => {

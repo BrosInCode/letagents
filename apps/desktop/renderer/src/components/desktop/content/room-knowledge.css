@@ -161,6 +161,9 @@
 .inbox-room-options > button { margin: 0 8px 4px; }
 .inbox-room-options label { display: flex; align-items: center; gap: 10px; padding: 10px 8px; font-size: 12px; overflow-wrap: anywhere; cursor: pointer; }
 .inbox-room-options input { accent-color: var(--text); flex-shrink: 0; }
+.inbox-room-options .inbox-room-search { position: sticky; top: 0; z-index: 1; width: 100%; margin-bottom: 6px; }
+.inbox-filter-hidden { display: flex; align-items: center; gap: 10px; margin: -8px 0 0; color: var(--text-secondary); font-size: 12px; }
+.inbox-room-empty { margin: 4px 8px 8px; color: var(--text-tertiary); font-size: 12px; overflow-wrap: anywhere; }
 .inbox-source-notice-container { position: relative; flex-shrink: 0; anchor-scope: --inbox-notice-summary; }
 /* Follow the summary's center even when its text wraps or the details expand. */
 .inbox-notice-dismiss { position: absolute; top: anchor(--inbox-notice-summary center); right: 8px; translate: 0 -50%; }
