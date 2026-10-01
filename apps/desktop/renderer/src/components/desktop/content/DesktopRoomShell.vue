@@ -120,6 +120,7 @@
       :reasoning-sessions="reasoningSessions"
       :tasks="tasks"
       :supervisor-entries="supervisorEntries"
+      :correctable-agents="correctableAgents"
       :search-query="searchQuery"
       :active-search-message-id="activeSearchMessageId"
       :initial-scroll-top="initialChatScrollTop ?? null"
@@ -129,6 +130,7 @@
       @open-reasoning="openReasoningInspector"
       @open-agent-reasoning-fallback="openAgentReasoningFallback"
       @open-agent-detail="openAgentDetailFromParticipant"
+      @open-agent-correction="openAgentCorrectionFromComposer"
       @open-add-agent="openAddAgentModal"
       @open-permission-detail="openComposerPermissionDetail"
       @restore-conversation="restoreAgentConversation"
@@ -215,6 +217,7 @@
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
+        @open-agent-correction="openAgentCorrectionOrInspector"
         @refresh-room="emit('refresh-room')"
         @reveal-message="revealRecordedWorkMessage"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
@@ -270,6 +273,7 @@
       :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
       :managed-sessions="roomManagedAgentSessions"
       :reasoning-sessions="reasoningSessions"
+      :correction-request="agentInspectorCorrectionRequest"
       @close="closeAgentDetail"
       @retry="retryAgentInspectorState"
       @live-selected="openAgentInspectorLive"
@@ -463,6 +467,7 @@ import { exportRoomChat } from "./room-shell/roomExport";
 import { isRoomTabId, type AttentionNavigationIntent, type RoomTab, type RoomTabId } from "./room-shell/types";
 import { useRoomAttentionNavigation } from "./room-shell/useRoomAttentionNavigation";
 import { useSupervisorStateSubscription } from "./room-shell/useSupervisorStateSubscription";
+import { useAgentCorrectionHandoff } from "./room-shell/useAgentCorrectionHandoff";
 import { useAgentInspectorObservations } from "./room-shell/useAgentInspectorObservations";
 import { useAgentInspectorConfigurationApply } from "./room-shell/useAgentInspectorConfigurationApply";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
@@ -661,6 +666,19 @@ const agentInspectorProjections = computed(() => {
     deliveryRetryingKeys: deliveryRetryingKeys.value,
     pauseRequestedEntryIds: agentPauseRequests.entryIds.value,
   });
+});
+const {
+  correctionRequest: agentInspectorCorrectionRequest,
+  correctableAgents,
+  openCorrectionOrInspector: openAgentCorrectionOrInspector,
+  openCorrectionFromComposer: openAgentCorrectionFromComposer,
+  releaseCorrection: releaseAgentCorrectionRequest,
+} = useAgentCorrectionHandoff({
+  roomIdentifier: () => props.room.identifier,
+  projections: () => agentInspectorProjections.value,
+  openInspector: (projection) => openAgentDetailRequest(supervisedAgentInspectorRequest(projection.entry, {
+    ownerAttribution: ownerAttributionLabel(projection.entry.createdBy),
+  })),
 });
 const selectedAgentDetailProjection = computed(() => {
   const target = selectedAgentDetailTarget.value;
@@ -1927,6 +1945,7 @@ function openAgentDetailRequest(request: AgentInspectorRequest): void {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
   agentInspectorActionState.value = null;
+  releaseAgentCorrectionRequest({ restoreComposerText: true });
   agentInspectorWorkRequestToken += 1;
   agentInspectorBackgroundRefresh.reset();
   agentInspectorDetailRequest.reset();
@@ -1960,6 +1979,7 @@ function closeAgentDetail(): void {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
   agentInspectorActionState.value = null;
+  releaseAgentCorrectionRequest({ restoreComposerText: true });
   agentInspectorWorkRequestToken += 1;
   agentInspectorBackgroundRefresh.reset();
   agentInspectorDetailRequest.reset();
@@ -2580,6 +2600,8 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         ? projection.turnControl?.canResolve === true && Boolean(intent.turnControlResolution)
         : false);
   if (!actionAvailable && (!turnControlIntent || !turnControlAvailable)) return;
+  // The handed-over text is now the person's own correction; never refill it.
+  if (intent.kind === "steer_turn") releaseAgentCorrectionRequest({ restoreComposerText: false });
 
   if (intent.kind === "mention") {
     const participant = roomParticipants.value.find((candidate) =>

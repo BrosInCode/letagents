@@ -38,8 +38,12 @@ export function registerDesktopRepoIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle(
     "desktop:repos:open-room",
-    async (_event, folderPath?: string | null): Promise<DesktopRepoRoomSelection> =>
-      openRepoRoomFromPath(folderPath || ""),
+    async (
+      _event,
+      folderPath?: string | null,
+      options?: { newProjectRoom?: unknown } | null,
+    ): Promise<DesktopRepoRoomSelection> =>
+      openRepoRoomFromPath(folderPath || "", { newProjectRoom: options?.newProjectRoom === true }),
   );
   targetIpcMain.handle(
     "desktop:repos:list-project-bindings",

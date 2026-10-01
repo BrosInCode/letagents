@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createSSRApp, effectScope, h, nextTick, reactive, ref } from "vue";
@@ -597,6 +598,42 @@ describe("room board helpers", () => {
       "Review",
       "Closeout",
     ]);
+  });
+
+  it("shows only the stages that hold cards in focused views, so review cards stay on screen", () => {
+    const tasks = [
+      task({ id: "task_review", status: "in_review" }),
+      task({ id: "task_blocked", status: "blocked" }),
+      task({ id: "task_unclaimed" }),
+    ];
+    const statuses = (filter: "open" | "needs-review" | "unclaimed" | "closeout") => visibleBoardGroups({
+      tasks, filter, searchQuery: "", localWorker: null,
+    }).map((group) => group.status);
+
+    // Blocked work needs a follow-up review too; the four empty stages before it are gone.
+    assert.deepEqual(statuses("needs-review"), ["blocked", "in_review"]);
+    assert.deepEqual(statuses("unclaimed"), ["accepted"]);
+    // The full lifecycle views keep every stage as a drop target.
+    assert.deepEqual(statuses("open"), TASK_STATUS_ORDER.slice(0, 6));
+    assert.deepEqual(statuses("closeout"), TASK_STATUS_ORDER.slice(6));
+  });
+
+  it("keeps an empty stage in a focused view when one of its cards can be dragged there", () => {
+    const accepted = task({ id: "task_accepted" });
+    const assigned = task({ id: "task_assigned", status: "assigned", assigneeAgentKey: "codex/blake" });
+    const statuses = (filter: "unclaimed" | "mine", tasks: DesktopTaskSummary[]) => visibleBoardGroups({
+      tasks, filter, searchQuery: "", localWorker: worker(),
+      dropTargets: (candidate) => candidate.status === "accepted" ? ["assigned"]
+        : candidate.status === "assigned" ? ["in_progress", "blocked"] : [],
+    }).map((group) => group.status);
+    // Claiming drags an Unclaimed card onto Assigned, which Unclaimed never holds.
+    assert.deepEqual(statuses("unclaimed", [accepted]), ["accepted", "assigned"]);
+    assert.deepEqual(statuses("mine", [assigned]).sort(), ["assigned", "blocked", "in_progress"]);
+  });
+
+  it("the board view gives focused views the drop targets of each card's actions", () => {
+    const view = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/RoomBoardView.vue", import.meta.url)), "utf8");
+    assert.match(view, /useRoomBoardPresentation\(props, emit, \{\s*dropTargets: \(task\) => actionsFor\(task\)\.flatMap\(\(action\) => action\.targetStatus/);
   });
 
   it("keeps board empty-state copy and actions deterministic", () => {

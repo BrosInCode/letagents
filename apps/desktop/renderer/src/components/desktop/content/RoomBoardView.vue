@@ -192,7 +192,9 @@ const {
   toggleGroup,
   visibleGroups,
   visibleTaskCount,
-} = useRoomBoardPresentation(props, emit);
+} = useRoomBoardPresentation(props, emit, {
+  dropTargets: (task) => actionsFor(task).flatMap((action) => action.targetStatus ? [action.targetStatus] : []),
+});
 
 const isCreateTaskDialogOpen = ref(false);
 const modalTaskActions = computed(() => modalTask.value ? actionsFor(modalTask.value) : []);

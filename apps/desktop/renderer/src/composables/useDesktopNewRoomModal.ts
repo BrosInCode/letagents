@@ -2,7 +2,7 @@ import { computed, ref } from "vue";
 import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "../../../electron/ipc-types";
 import { copyTextToClipboard } from "../domain/clipboard";
 import { normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
-import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
+import { rootPathLabel, type RecentRootRoom, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 import { desktopIpc } from "../ipc/index.js";
 
 export type NewRoomStep =
@@ -17,6 +17,7 @@ export type NewRoomStep =
 export type NewRoomStorageChoice = "cloud" | "local";
 export type NewRoomActiveAction =
   | "pick_project"
+  | "open_project_path"
   | "confirm_project"
   | "create_standalone"
   | "join"
@@ -61,6 +62,28 @@ export interface PendingProjectRoomSelection {
   warning: string | null;
 }
 
+export interface NewRoomRecentProjectFolder {
+  path: string;
+  label: string;
+}
+
+/** Project folders opened most recently first, one entry per folder. */
+export function recentProjectFoldersFromRooms(
+  rooms: readonly RecentRootRoom[],
+  limit = 5,
+): NewRoomRecentProjectFolder[] {
+  const folders: NewRoomRecentProjectFolder[] = [];
+  const seen = new Set<string>();
+  for (const room of rooms) {
+    const path = room.kind === "project" ? room.rootPath?.trim() : null;
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    folders.push({ path, label: rootPathLabel(path) || path });
+    if (folders.length >= limit) break;
+  }
+  return folders;
+}
+
 function generateDefaultRoomName(): string {
   const stamp = new Date();
   const hh = String(stamp.getHours()).padStart(2, "0");
@@ -81,6 +104,8 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   const newRoomName = ref("");
   const newRoomStorage = ref<NewRoomStorageChoice>("cloud");
   const newRoomProjectSelection = ref<PendingProjectRoomSelection | null>(null);
+  const newRoomProjectPath = ref("");
+  const newRoomProjectPathError = ref<string | null>(null);
   const newRoomSuccess = ref<NewRoomSuccessState | null>(null);
   const newRoomStatusMessage = ref<string | null>(null);
 
@@ -96,6 +121,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
     newRoomJoinError.value = null;
+    newRoomProjectPathError.value = null;
     newRoomStatusMessage.value = null;
   }
 
@@ -108,6 +134,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomName.value = generateDefaultRoomName();
     newRoomStorage.value = options.getDefaultStorageMode?.() === "local" ? "local" : "cloud";
     newRoomProjectSelection.value = null;
+    newRoomProjectPath.value = "";
     newRoomSuccess.value = null;
     resetTransientState();
   }
@@ -120,6 +147,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomJoinError.value = null;
     newRoomName.value = "";
     newRoomProjectSelection.value = null;
+    newRoomProjectPath.value = "";
     newRoomSuccess.value = null;
     resetTransientState();
   }
@@ -348,6 +376,44 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     }
   }
 
+  /**
+   * The typed-path twin of the folder picker, for keyboard and automation use.
+   * It stays on the project step: a bad path is a field error to correct, not
+   * a failure screen, and the typed text is kept.
+   */
+  async function openProjectRoomFromPath(folderPath?: string): Promise<void> {
+    if (newRoomBusy.value) return;
+    if (folderPath !== undefined) newRoomProjectPath.value = folderPath;
+    const path = newRoomProjectPath.value.trim();
+    if (!path) {
+      newRoomProjectPathError.value = "Enter the path to a project folder.";
+      return;
+    }
+    newRoomBusy.value = true;
+    newRoomActiveAction.value = "open_project_path";
+    newRoomReturnStep.value = "project";
+    newRoomProjectPathError.value = null;
+    // The preview always describes the latest folder asked for.
+    newRoomProjectSelection.value = null;
+    newRoomFeedback.value = null;
+    newRoomFeedbackState.value = "info";
+    try {
+      const result = await desktopIpc.repos.openRoom(path, { newProjectRoom: true });
+      if (result.error || !result.snapshot) {
+        newRoomProjectPathError.value = result.error || "LetAgents could not open a room from that folder.";
+        return;
+      }
+      newRoomProjectSelection.value = projectSelectionFromResult(result, result.snapshot);
+      newRoomFeedback.value = result.warning || null;
+      newRoomFeedbackState.value = result.warning ? "info" : "success";
+    } catch (error) {
+      newRoomProjectPathError.value = error instanceof Error ? error.message : "LetAgents could not open that folder.";
+    } finally {
+      newRoomBusy.value = false;
+      newRoomActiveAction.value = null;
+    }
+  }
+
   function confirmProjectRoomFromModal(): void {
     const selection = newRoomProjectSelection.value;
     if (!selection || newRoomBusy.value) return;
@@ -491,12 +557,15 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomJoinError,
     newRoomModalOpen,
     newRoomName,
+    newRoomProjectPath,
+    newRoomProjectPathError,
     newRoomProjectSelection,
     newRoomStatusMessage,
     newRoomStep,
     newRoomStorage,
     newRoomSuccess,
     openProjectRoomFromModal,
+    openProjectRoomFromPath,
     openSuccessRoom,
     retryLastAction,
     selectNewRoomEntry,

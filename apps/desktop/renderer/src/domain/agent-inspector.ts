@@ -1,3 +1,4 @@
+import { toRaw } from "vue";
 import type {
   DesktopRoomAgentTurnState,
   DesktopSupervisorActivityEvent,
@@ -857,6 +858,87 @@ export function projectAgentInspectorTurnControl(
         ? "The previous change was not applied. Retry that exact durable request before starting another change."
         : "Stop ends this response. A correction interrupts this turn, then continues on the same agent session.",
   };
+}
+
+/**
+ * A request from outside the Inspector (an Activity row, the composer) to open
+ * the Overview correction box for one exact live turn. It never applies the
+ * correction itself: the person still reviews the text and chooses Apply, so
+ * the Inspector's turn fences stay the only path to the provider.
+ */
+export interface AgentInspectorCorrectionRequest {
+  /** Distinguishes repeated requests for the same agent and turn. */
+  id: number;
+  entryId: string;
+  /** Prefill applies only while this exact provider turn is still the live one. */
+  providerTurnId: string | null;
+  text: string;
+}
+
+/** A busy agent a person can correct now instead of queueing a room message. */
+export interface AgentCorrectionTarget {
+  entryId: string;
+  displayName: string;
+  mentionInsertText: string;
+}
+
+/** Composer text handed to a correction, and the draft (and its room) it came from. */
+export interface ComposerCorrectionHandoff {
+  entryId: string;
+  text: string;
+  draft: string;
+  draftNamespace: string | null;
+}
+
+const correctionBoxTexts = new WeakMap<object, string>();
+
+/**
+ * What the correction box shows for a hand-over: the handed-over text at
+ * first, then whatever the person left in the box. The box remounts on every
+ * Inspector tab switch; that must neither empty it nor undo their edits.
+ */
+export function correctionBoxText(request: AgentInspectorCorrectionRequest): string {
+  const identity = toRaw(request);
+  return correctionBoxTexts.has(identity) ? correctionBoxTexts.get(identity)! : request.text;
+}
+
+export function rememberCorrectionBoxText(request: AgentInspectorCorrectionRequest, text: string): void {
+  correctionBoxTexts.set(toRaw(request), text);
+}
+
+export function agentCorrectionTargets(
+  projections: readonly Pick<AgentInspectorProjection, "entryId" | "displayName" | "mentionInsertText" | "turnControl">[],
+): AgentCorrectionTarget[] {
+  return projections.flatMap((projection) =>
+    projection.turnControl?.status === "ready" && projection.turnControl.canCorrect && projection.mentionInsertText
+      ? [{ entryId: projection.entryId, displayName: projection.displayName, mentionInsertText: projection.mentionInsertText }]
+      : []);
+}
+
+/**
+ * The one busy agent a draft @-mentions, and the draft without that mention.
+ * A correction reaches one agent's private session, so a draft that also
+ * mentions anyone else (another agent, a person, @everyone) stays a room
+ * message: moving it would hide that part from the people it was for.
+ */
+export function mentionedCorrectionTarget(
+  draft: string,
+  targets: readonly AgentCorrectionTarget[],
+): { target: AgentCorrectionTarget; text: string } | null {
+  const mentioned = targets.filter((target) => new RegExp(`(^|\\s)@${escapeRegExp(target.mentionInsertText)}${MENTION_END}`, "i").test(draft));
+  if (mentioned.length !== 1) return null;
+  const target = mentioned[0]!;
+  // The mention addressed the room; a correction already reaches the agent.
+  const mention = new RegExp(`(^|\\s)@${escapeRegExp(target.mentionInsertText)}[,;:]?${MENTION_END}\\s*`, "gi");
+  const text = draft.replace(mention, "$1").trim();
+  if (!text || /(^|\s)@[^\s@]/.test(text)) return null;
+  return { target, text };
+}
+
+const MENTION_END = "(?=$|[\\s.,;:!?)])";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
