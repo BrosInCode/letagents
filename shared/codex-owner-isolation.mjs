@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 
 // A Codex app-server that LetAgents launches works for a room, not as the
 // owner, yet it shares the owner's CODEX_HOME so Codex sign-in keeps working.
@@ -126,7 +126,7 @@ export function runCodexMcpList(codexBin, args, options) {
  * from the owner's config and any trusted project config. Pass the launch's
  * own overrides so the list matches what the app-server will see.
  */
-export async function listCodexMcpServerNames(codexBin, options, run = runCodexMcpList) {
+export async function listCodexMcpServers(codexBin, options, run = runCodexMcpList) {
   let output;
   try {
     output = await run(codexBin, [
@@ -148,25 +148,63 @@ export async function listCodexMcpServerNames(codexBin, options, run = runCodexM
   if (!Array.isArray(parsed) || !parsed.every((entry) => entry && typeof entry === "object" && typeof entry.name === "string")) {
     throw new Error("Codex returned an unreadable MCP server list, so LetAgents will not start it.");
   }
-  return parsed.map((entry) => entry.name);
+  return parsed;
+}
+
+export async function listCodexMcpServerNames(codexBin, options, run = runCodexMcpList) {
+  return (await listCodexMcpServers(codexBin, options, run)).map((entry) => entry.name);
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/** How Codex would start a server: its transport (command, args, env, URL...) and whether it is on. */
+function serverLaunchShape(entry) {
+  return entry ? stableJson({ enabled: entry.enabled ?? null, transport: entry.transport ?? null }) : null;
+}
+
+/**
+ * The LetAgents server keeps the owner's credentials, so a project must not
+ * change how it starts. Codex merges a trusted project's config into it key by
+ * key: a project could swap its args for its own script, or add NODE_OPTIONS,
+ * and run that with the owner's LETAGENTS_TOKEN. A launch override cannot
+ * remove merged keys, so such a launch is refused instead.
+ */
+export function assertProjectKeepsLetAgentsServer(inProject, outsideProject) {
+  const find = (entries) => entries.find((entry) => entry.name === LETAGENTS_MCP_SERVER_NAME);
+  if (serverLaunchShape(find(inProject)) !== serverLaunchShape(find(outsideProject))) {
+    throw new Error(
+      "This project's Codex config changes the LetAgents MCP server, so LetAgents will not start Codex here. "
+      + "Remove [mcp_servers.letagents] from the project's .codex/config.toml, or stop trusting the project in Codex.",
+    );
+  }
 }
 
 /**
  * Every override a LetAgents launch adds: the features, each personal skill,
- * and every MCP server but LetAgents. `configOverrides` are the launch's own
- * (for example project trust), used only to list servers. A launch that
- * cannot list its servers fails here instead of starting with them.
+ * and every MCP server but LetAgents. `cwd` is where the app-server starts and
+ * `configOverrides` are the launch's own (for example project trust), used to
+ * list servers as the launch will see them. A launch that cannot list its
+ * servers, or whose project changes the LetAgents server, fails here.
  */
 export async function codexOwnerIsolationOverrides(codexBin, options, run = runCodexMcpList) {
-  const [serverNames, skillFiles] = await Promise.all([
-    listCodexMcpServerNames(codexBin, {
-      cwd: options.cwd,
-      env: options.env,
-      configOverrides: [...(options.configOverrides ?? []), ...CODEX_OWNER_FEATURE_OVERRIDES],
-    }, run),
+  const listOptions = {
+    env: options.env,
+    configOverrides: [...(options.configOverrides ?? []), ...CODEX_OWNER_FEATURE_OVERRIDES],
+  };
+  const [inProject, outsideProject, skillFiles] = await Promise.all([
+    listCodexMcpServers(codexBin, { ...listOptions, cwd: options.cwd }, run),
+    // Outside any project only the owner's own config applies.
+    options.cwd ? listCodexMcpServers(codexBin, { ...listOptions, cwd: parse(options.cwd).root || "/" }, run) : null,
     codexPersonalSkillFiles(options.env),
   ]);
+  if (outsideProject) assertProjectKeepsLetAgentsServer(inProject, outsideProject);
   const skills = codexSkillDisableOverride(skillFiles);
-  const servers = codexMcpServerDisableOverride(serverNames);
+  const servers = codexMcpServerDisableOverride(inProject.map((entry) => entry.name));
   return [...CODEX_OWNER_FEATURE_OVERRIDES, ...(skills ? [skills] : []), ...(servers ? [servers] : [])];
 }

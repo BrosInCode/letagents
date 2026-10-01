@@ -12,6 +12,16 @@ export function codexPersonalSkillFiles(env: NodeJS.ProcessEnv): Promise<string[
 export function codexSkillDisableOverride(skillFiles: readonly string[]): string | null;
 export function codexMcpServerDisableOverride(serverNames: readonly string[]): string | null;
 export const runCodexMcpList: CodexMcpListRunner;
+export type CodexMcpServerEntry = { name: string; enabled?: boolean; transport?: unknown; [key: string]: unknown };
+export function listCodexMcpServers(
+  codexBin: string,
+  options: { cwd?: string; env: NodeJS.ProcessEnv; configOverrides: readonly string[] },
+  run?: CodexMcpListRunner,
+): Promise<CodexMcpServerEntry[]>;
+export function assertProjectKeepsLetAgentsServer(
+  inProject: readonly CodexMcpServerEntry[],
+  outsideProject: readonly CodexMcpServerEntry[],
+): void;
 export function listCodexMcpServerNames(
   codexBin: string,
   options: { cwd?: string; env: NodeJS.ProcessEnv; configOverrides: readonly string[] },

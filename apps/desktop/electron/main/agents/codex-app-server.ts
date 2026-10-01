@@ -519,8 +519,9 @@ export function launchCodexAppServer(
  * notifier or personal skills, and no MCP server but the room's own, like
  * Claude's --strict-mcp-config. Codex itself names the servers, from the
  * owner's config and any trusted project config; a launch that cannot get
- * that list fails. A project that would commit as the host's global Git
- * identity commits as the owner's GitHub noreply identity instead.
+ * that list, or whose project changes the LetAgents server, fails. A project
+ * that would commit as the host's global Git identity commits as the owner's
+ * GitHub noreply identity instead.
  */
 export async function launchManagedCodexAppServer(
   serverUrl: string,
@@ -530,9 +531,11 @@ export async function launchManagedCodexAppServer(
   const { env, rental } = codexAppServerEnvironment(options);
   const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
   const [isolation, commitEnvironment] = await Promise.all([
-    // The same project trust as the launch, so the server list matches.
+    // The launch's own trust and overrides, so the server list matches.
     codexOwnerIsolationOverrides(codexBin, {
-      cwd: trustedProjectPath, env, configOverrides: codexTrustedProjectOverrides(trustedProjectPath),
+      cwd: trustedProjectPath,
+      env,
+      configOverrides: [...codexTrustedProjectOverrides(trustedProjectPath), ...(options.configOverrides ?? [])],
     }),
     rental ? {} : managedAgentCommitEnvironment(trustedProjectPath),
   ]);

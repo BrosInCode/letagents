@@ -83,7 +83,8 @@ export function codexAppServerArgs(serverUrl: string, configOverrides: readonly 
  * The session works for the room, so its app-server gets none of the owner's
  * Codex plugins, connectors, hooks, personal skills or MCP servers. It keeps
  * the owner's LetAgents server, which it joins the room with. A launch that
- * cannot list the owner's servers fails rather than starting with them.
+ * cannot list the owner's servers, or whose project changes the LetAgents
+ * server, fails rather than starting.
  */
 export async function launchAppServer(
   serverUrl: string,
@@ -92,6 +93,8 @@ export async function launchAppServer(
 ): Promise<number | null> {
   const overrides = await codexOwnerIsolationOverrides(codexBin, { cwd: options.cwd, env: process.env });
   const child = spawn(codexBin, codexAppServerArgs(serverUrl, overrides), {
+    // Start where the servers were listed, so the project config matches.
+    ...(options.cwd ? { cwd: options.cwd } : {}),
     detached: true,
     stdio: "ignore",
   });
