@@ -2308,14 +2308,23 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // thread on this handle and must not inherit a permanent observation gap.
       return;
     }
-    if (exactEmptyFallback) return;
+    // A thread with no turn yet (daemon-inbox threads exist before their first
+    // room turn) has no work to observe. Leaving the attached handle working
+    // would report a turn forever and keep the agent from taking new work.
+    if (exactEmptyFallback) {
+      this.settleTurnlessAttach(handle, read);
+      return;
+    }
     const turns = read.thread?.turns;
     if (!Array.isArray(turns)) {
       handle.execution.markUnavailable();
       return;
     }
     const turn = turns.at(-1);
-    if (!turn) return;
+    if (!turn) {
+      this.settleTurnlessAttach(handle, read);
+      return;
+    }
     const providerTurnId = turn?.id;
     const status = extractTurnStatus(turn)?.trim().toLowerCase() ?? null;
     if (!nativeExecutionId(providerTurnId) || !status) {
@@ -2352,6 +2361,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
       turnOutcome: outcome,
       sideEffects: "none",
     });
+  }
+
+  /**
+   * Idle, unless the thread itself still reports activity. A thread in a
+   * system error is idle here too: daemon-inbox agents take their state from
+   * typed facts, so failing only the handle would leave the agent silent and
+   * unreachable instead of replaced; dispatch surfaces Codex's own error.
+   */
+  private settleTurnlessAttach(handle: CodexProviderHandle, read: ThreadReadResult): void {
+    if (String(recordValue(read.thread?.status)?.type) === "active") return;
+    handle.setLiveState("idle");
   }
 
   private queuedTurnLifecycleIsAmbiguous(
