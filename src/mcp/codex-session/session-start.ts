@@ -147,7 +147,7 @@ export async function startLocalCodexSession(
 
   try {
     if (launchedServer) {
-      serverPid = launchAppServer(serverUrl, codexBin);
+      serverPid = await launchAppServer(serverUrl, codexBin, { cwd });
       if (serverPid) {
         registerLaunchedAppServer(serverPid);
       }

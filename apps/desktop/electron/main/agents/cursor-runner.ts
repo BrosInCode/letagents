@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
+import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 
 export type CursorReadOnlyMode = "ask" | "plan";
 export type CursorSandboxMode = "enabled" | "disabled";
@@ -96,11 +97,13 @@ export async function runCursorTurn(input: CursorTurnInput): Promise<CursorTurnR
   };
   let stderr = "";
   let parseError: string | null = null;
+  // Commits use the owner's GitHub noreply identity when the workspace would use the host's global one.
+  const commitEnvironment = await managedCommitEnvironmentFor({ cwd: input.cwd });
 
   return new Promise((resolve) => {
     const child = spawn(executable, buildCursorAgentArgs(input), {
       cwd: input.cwd,
-      env: buildCursorChildEnv(input.env),
+      env: { ...buildCursorChildEnv(input.env), ...commitEnvironment },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const interrupt = (): void => {

@@ -14,6 +14,7 @@ import type {
   DesktopAuthStatus,
   DesktopPendingDeviceAuth,
 } from "../ipc-types.js";
+import { recordManagedAgentCommitAccount } from "./agents/managed-agent-commit-identity.js";
 import { apiUrl } from "./paths.js";
 import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
 
@@ -332,6 +333,17 @@ async function writeStoredAuth(nextAuth: StoredDesktopAuth): Promise<void> {
   // readStoredAuth (e.g. the Authorization header on the next apiFetch) reflects
   // this mutation without another disk read + keychain decrypt.
   cachedAuth = { ...nextAuth };
+  await mirrorAgentCommitAccount(nextAuth.account);
+}
+
+/** Managed agents commit as this account's GitHub noreply identity. */
+async function mirrorAgentCommitAccount(account: DesktopAuthAccount | null): Promise<void> {
+  try {
+    await recordManagedAgentCommitAccount(account);
+  } catch (error) {
+    // Agents then keep the previous identity; sign-in itself must not fail.
+    console.warn("[desktop-auth] Could not record the agent commit identity:", error);
+  }
 }
 
 async function updateStoredAuth(
@@ -363,6 +375,7 @@ export async function clearStoredAuth(): Promise<void> {
     await rm(getAuthStorePath(), { force: true });
     // Sign-out must also remove the token used by subsequent API requests.
     cachedAuth = emptyStoredAuth();
+    await mirrorAgentCommitAccount(null);
   });
 }
 

@@ -63,6 +63,7 @@ import type {
   DesktopSupervisorTurnControlResult,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
+  DesktopAgentCommitIdentitySettings,
 } from "./agents.js";
 import type { DesktopRentalApi } from "./rental.js";
 import type {
@@ -173,6 +174,10 @@ export interface DesktopApi {
   openModel: {
     getSettingsStatus: () => Promise<DesktopOpenModelSettingsStatus>;
     saveSettings: (input: DesktopOpenModelSaveSettingsInput) => Promise<DesktopOpenModelSettingsStatus>;
+  };
+  agentCommitIdentity?: {
+    getSettings: () => Promise<DesktopAgentCommitIdentitySettings>;
+    setUseHostGitIdentity: (useHostGitIdentity: boolean) => Promise<DesktopAgentCommitIdentitySettings>;
   };
   room: {
     getNeedsYou?: (includeUpdates?: boolean) => Promise<DesktopNeedsYou>;

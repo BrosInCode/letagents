@@ -29,7 +29,7 @@ import {
 } from "../rooms/local-store.js";
 import {
   isCodexAppServerReady,
-  launchCodexAppServer,
+  launchManagedCodexAppServer,
   resolveCodexAppServerUrl,
   terminateSpawnedProcess,
   waitForLaunchedCodexAppServer,
@@ -1113,7 +1113,7 @@ async function startDesktopManagedCodexEngineAgent(
 
   try {
     if (launchedServer) {
-      const launch = launchCodexAppServer(serverUrl, codexBin, {
+      const launch = await launchManagedCodexAppServer(serverUrl, codexBin, {
         trustedProjectPath: cwd,
         configOverrides: engine.launch.configOverrides,
         env: engine.launch.env,

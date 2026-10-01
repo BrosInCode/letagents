@@ -1,6 +1,8 @@
 import { spawn } from "child_process";
 import { createServer } from "net";
 
+import { codexOwnerIsolationOverrides } from "../../../shared/codex-owner-isolation.mjs";
+
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -73,8 +75,26 @@ export async function resolveCodexServerUrl(explicitServerUrl?: string): Promise
   return allocateLoopbackServerUrl();
 }
 
-export function launchAppServer(serverUrl: string, codexBin: string): number | null {
-  const child = spawn(codexBin, ["app-server", "--listen", serverUrl], {
+export function codexAppServerArgs(serverUrl: string, configOverrides: readonly string[]): string[] {
+  return ["app-server", ...configOverrides.flatMap((override) => ["-c", override]), "--listen", serverUrl];
+}
+
+/**
+ * The session works for the room, so its app-server gets none of the owner's
+ * Codex plugins, connectors, hooks, personal skills or MCP servers. It keeps
+ * the owner's LetAgents server, which it joins the room with. A launch that
+ * cannot list the owner's servers, or whose project changes the LetAgents
+ * server, fails rather than starting.
+ */
+export async function launchAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: { cwd?: string } = {},
+): Promise<number | null> {
+  const overrides = await codexOwnerIsolationOverrides(codexBin, { cwd: options.cwd, env: process.env });
+  const child = spawn(codexBin, codexAppServerArgs(serverUrl, overrides), {
+    // Start where the servers were listed, so the project config matches.
+    ...(options.cwd ? { cwd: options.cwd } : {}),
     detached: true,
     stdio: "ignore",
   });
