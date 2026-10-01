@@ -295,6 +295,7 @@ export function toTask(row: TaskRow): Task {
     workflow_refs: buildTaskWorkflowRefs({
       artifacts: workflowArtifacts,
       prUrl: row.pr_url,
+      status: row.status,
     }),
     created_at: row.created_at,
     updated_at: row.updated_at,

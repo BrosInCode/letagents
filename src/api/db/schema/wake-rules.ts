@@ -35,12 +35,14 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
   last_fired_at: timestamp("last_fired_at", { mode: "string", withTimezone: true }),
   wake_message_number: integer("wake_message_number"),
   cancelled_by: jsonb("cancelled_by").$type<WakeRuleActor>(),
+  /** Why a rule stopped before its expiry: its pull request closed or its task finished. */
+  ended_reason: text("ended_reason"),
   ended_at: timestamp("ended_at", { mode: "string", withTimezone: true }),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
   updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
 }, (table) => ({
   event_check: check("agent_wake_rules_event_check", sql`${table.event} IN ('timer', 'task.status_changed', 'github.check_completed', 'github.review_submitted', 'github.pr_closed')`),
-  status_check: check("agent_wake_rules_status_check", sql`${table.status} IN ('active', 'fired', 'expired', 'cancelled')`),
+  status_check: check("agent_wake_rules_status_check", sql`${table.status} IN ('active', 'fired', 'expired', 'cancelled', 'retired')`),
   active_identity_uq: uniqueIndex("agent_wake_rules_active_identity_uq")
     .on(table.room_id, table.agent_key, table.identity_key)
     .where(sql`${table.status} = 'active'`),

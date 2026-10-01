@@ -146,6 +146,7 @@ function rowHasFocus(ruleId: string): boolean {
 function outcomeLabel(rule: WakeRule): string {
   if (rule.status === "fired" || (rule.status === "active" && rule.fire_count > 0)) return "Woke";
   if (rule.status === "expired") return "Stopped waiting";
+  if (rule.status === "retired") return rule.ended_reason ? `Ended: ${rule.ended_reason}` : "Ended";
   return rule.cancelled_by ? `Cancelled by ${rule.cancelled_by.label}` : "Cancelled";
 }
 

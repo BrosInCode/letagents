@@ -241,18 +241,51 @@ export function normalizeTaskWorkflowArtifacts(input: {
   return merged.slice(-MAX_TASK_WORKFLOW_ARTIFACTS);
 }
 
+/**
+ * A pull request on a task that already shipped, other than the one it
+ * shipped with, that is still open: a follow-up in review, or a draft of one.
+ */
+function followUpPullRequestLabel(
+  artifact: TaskWorkflowArtifact,
+  input: { prUrl?: string | null; status?: string | null }
+): string | null {
+  if ((input.status !== "merged" && input.status !== "done")
+    || (artifact.kind !== "pull_request" && artifact.kind !== "merge_request")
+    || !artifact.url || artifact.url === input.prUrl) return null;
+  if (artifact.state === "open") return `Follow-up ${buildTaskWorkflowRefLabel(artifact)} in review`;
+  if (artifact.state === "draft") return `Follow-up ${buildTaskWorkflowRefLabel(artifact)} (draft)`;
+  return null;
+}
+
 export function buildTaskWorkflowRefs(input: {
   artifacts?: TaskWorkflowArtifact[] | null;
   prUrl?: string | null;
+  status?: string | null;
 }): TaskWorkflowRef[] {
   return normalizeTaskWorkflowArtifacts(input)
     .filter((artifact): artifact is TaskWorkflowArtifact & { url: string } => Boolean(artifact.url))
     .map((artifact) => ({
       provider: artifact.provider,
       kind: artifact.kind,
-      label: buildTaskWorkflowRefLabel(artifact),
+      label: followUpPullRequestLabel(artifact, input) ?? buildTaskWorkflowRefLabel(artifact),
       url: artifact.url,
     }));
+}
+
+/**
+ * Record a pull request on a task without making it the task's own, or bring
+ * its state up to date. Null when nothing changed.
+ */
+export function upsertTaskPullRequestArtifact(
+  artifacts: TaskWorkflowArtifact[],
+  pullRequest: TaskWorkflowArtifact & { url: string }
+): TaskWorkflowArtifact[] | null {
+  const index = artifacts.findIndex((artifact) => artifact.url === pullRequest.url);
+  if (index === -1) return [...artifacts, pullRequest];
+  const existing = artifacts[index]!;
+  const updated = { ...existing, ...pullRequest };
+  if (JSON.stringify(updated) === JSON.stringify(existing)) return null;
+  return artifacts.map((artifact, position) => (position === index ? updated : artifact));
 }
 
 function asOptionalString(

@@ -12,6 +12,7 @@ import {
   type WakeRulePage,
 } from "../../../shared/wake-rules.mjs";
 import { db } from "./client.js";
+import { repositoryRoomIds } from "./github/repository-rooms.js";
 import { agent_wake_rules } from "./schema.js";
 import type { MessageCreateTransaction } from "./messages/create.js";
 import type { WakeRuleEvaluationDeps } from "../wake-rules/evaluate.js";
@@ -42,6 +43,7 @@ export function toWakeRule(row: WakeRuleRow): WakeRule {
     last_fired_at: row.last_fired_at ? new Date(row.last_fired_at).toISOString() : null,
     wake_message_id: row.wake_message_number ? `msg_${row.wake_message_number}` : null,
     cancelled_by: row.cancelled_by ?? null,
+    ended_reason: row.ended_reason ?? null,
   };
 }
 
@@ -232,19 +234,23 @@ export async function scheduleWakeRuleCheck(
  * caller then rolls the message back.
  */
 export async function recordWakeRuleFiredTx(tx: Executor, rule: WakeRuleRow, input: {
-  outcome: "fired" | "expired";
+  /** `ended`: the agent was told that what the rule waited for can no longer happen. */
+  outcome: "fired" | "expired" | "ended";
   messageNumber: number;
   cursorAt: string;
   baseline: WakeRuleRow["baseline"];
   now: string;
+  /** Set when this wake is the rule's last because what it watched is over. */
+  endedReason?: string | null;
 }): Promise<boolean> {
-  const keepsWatching = input.outcome === "fired" && rule.repeat && Date.parse(rule.expires_at) > Date.parse(input.now);
+  const keepsWatching = input.outcome === "fired" && rule.repeat && !input.endedReason
+    && Date.parse(rule.expires_at) > Date.parse(input.now);
   const nextCheckAt = keepsWatching
     ? new Date(Math.min(Date.parse(input.now) + WAKE_RULE_LIMITS.repeatDebounceMs, Date.parse(rule.expires_at))).toISOString()
     : rule.next_check_at;
   const updated = await tx.update(agent_wake_rules)
     .set({
-      status: keepsWatching ? "active" : input.outcome === "expired" ? "expired" : "fired",
+      status: keepsWatching ? "active" : input.outcome === "fired" ? "fired" : input.outcome === "expired" ? "expired" : "retired",
       fire_count: rule.fire_count + 1,
       last_fired_at: input.now,
       wake_message_number: input.messageNumber,
@@ -252,6 +258,7 @@ export async function recordWakeRuleFiredTx(tx: Executor, rule: WakeRuleRow, inp
       baseline: input.baseline,
       next_check_at: nextCheckAt,
       ended_at: keepsWatching ? null : input.now,
+      ended_reason: keepsWatching ? null : input.endedReason ?? null,
       updated_at: input.now,
     })
     .where(and(eq(agent_wake_rules.id, rule.id), eq(agent_wake_rules.status, "active"), eq(agent_wake_rules.fire_count, rule.fire_count)))
@@ -260,30 +267,17 @@ export async function recordWakeRuleFiredTx(tx: Executor, rule: WakeRuleRow, inp
 }
 
 /**
- * Rooms whose GitHub events concern a room: itself, its parent, every room
- * bound to the same repository, and their focus rooms. Events land in a
- * branch room, a focus room or the repository room depending on routing; an
- * agent waiting on a branch should not care which. A subquery, not a list, so
- * a repository with thousands of branch rooms is never truncated.
+ * End a rule whose pull request closed, without waking the agent: the rule
+ * already woke it for that close. Fenced like a wake, so a concurrent wake
+ * wins and the next look decides again.
  */
-function repositoryRoomIds(roomId: string) {
-  return sql`(
-    WITH anchor AS (
-      SELECT ${roomId}::text AS room_id
-      UNION SELECT room.parent_room_id FROM rooms AS room WHERE room.id = ${roomId} AND room.parent_room_id IS NOT NULL
-    ), family AS (
-      SELECT room_id FROM anchor
-      UNION SELECT binding.room_id
-        FROM room_git_bindings AS binding
-        JOIN room_git_bindings AS bound
-          ON bound.provider = binding.provider
-         AND bound.host = binding.host
-         AND bound.repository_full_name = binding.repository_full_name
-       WHERE bound.room_id IN (SELECT room_id FROM anchor)
-    )
-    SELECT room_id FROM family
-    UNION SELECT room.id FROM rooms AS room WHERE room.parent_room_id IN (SELECT room_id FROM family)
-  )`;
+export async function retireWakeRule(rule: WakeRuleRow, reason: string, now = new Date()): Promise<boolean> {
+  const nowIso = now.toISOString();
+  const updated = await db.update(agent_wake_rules)
+    .set({ status: "retired", ended_reason: reason, ended_at: nowIso, updated_at: nowIso })
+    .where(and(eq(agent_wake_rules.id, rule.id), eq(agent_wake_rules.status, "active"), eq(agent_wake_rules.fire_count, rule.fire_count)))
+    .returning({ id: agent_wake_rules.id });
+  return updated.length === 1;
 }
 
 /** Whether GitHub activity can reach this room at all. */
@@ -330,6 +324,21 @@ export const wakeRuleEvaluationDeps: WakeRuleEvaluationDeps = {
          AND room_id IN ${repositoryRoomIds(ruleRoomId)}
     `);
     return result.rows.map((row) => row.head_ref);
+  },
+  async pullRequestClosed(ruleRoomId, pr) {
+    // The newest close or reopen decides, in GitHub's own order.
+    const result = await db.execute<{ action: string; state: string | null; event_order_at: string }>(sql`
+      SELECT action, state, event_order_at FROM github_room_events
+       WHERE event_type = 'pull_request' AND github_object_id = ${String(pr)}
+         AND action IN ('closed', 'reopened')
+         AND room_id IN ${repositoryRoomIds(ruleRoomId)}
+       ORDER BY event_order_at DESC, created_at DESC, id DESC
+       LIMIT 1
+    `);
+    const latest = result.rows[0];
+    return latest?.action === "closed"
+      ? { merged: latest.state === "merged", closed_at: new Date(latest.event_order_at).toISOString() }
+      : null;
   },
   async githubEventsAfter(input) {
     // CI can record hundreds of checks between looks: keep the newest. Reviews

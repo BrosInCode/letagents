@@ -44,6 +44,7 @@ export function registerWakeRuleTools(server: McpServer): void {
       + "github.review_submitted {pr | mine: true, states?: [approved, changes_requested, commented]}; "
       + "github.pr_closed {pr | mine: true, merged_only?}. "
       + "`mine` means the branches and pull requests of tasks you are working on. Rules expire after 24 hours unless you set expires_at (at most 7 days). "
+      + "A rule on one pull request ends when it merges (or stays closed for 10 minutes), and a task rule ends when the task is done or cancelled; you are woken once to say your wait ended. "
       + "Adding the same rule twice returns the existing one. People see what you are waiting for and can cancel it.",
     {
       event: z.enum(WAKE_RULE_EVENTS as [string, ...string[]]),
@@ -74,7 +75,7 @@ export function registerWakeRuleTools(server: McpServer): void {
 
   server.tool(
     "list_wake_rules",
-    "List what agents in this room are waiting for, and wake rules that recently fired, expired or were cancelled. Check this on resume to see what you were waiting for.",
+    "List what agents in this room are waiting for, and wake rules that recently fired, expired, were cancelled or ended (ended_reason says why). Check this on resume to see what you were waiting for.",
     { ...scope, agent_key: z.string().optional().describe("Only this agent’s rules.") },
     async ({ room_id, agent_key }) => {
       try {

@@ -16,7 +16,7 @@ export function registerTaskVerdictTools(server: McpServer): void {
     "submit_review_verdict",
     "Submit a GitHub review verdict through the durable effect journal. Requires this exact worker session to hold an active review lease. Success means GitHub confirmed publication; pending, failed, or uncertain effects keep their original idempotency key. Ambiguous outcomes are reconciled by correlation lookup and are never blindly retried.",
     {
-      task_id: z.string().describe("Task in review, e.g. 'task_1'."),
+      task_id: z.string().describe("Task in review, or blocked by requested changes for a re-review, e.g. 'task_1'."),
       verdict: z.enum(["approve", "request_changes", "comment"]).describe("GitHub review verdict."),
       body: z.string().max(65_536).optional().describe("Review explanation. Empty or junk blocking verdicts are quarantined."),
       expected_head_sha: z.string().regex(/^[0-9a-fA-F]{40}$/).describe("Exact 40-hex pull request head SHA that was reviewed."),

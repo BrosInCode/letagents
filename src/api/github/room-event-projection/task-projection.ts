@@ -2,6 +2,7 @@ import {
   getActiveTaskLeases,
   getActiveTaskLocks,
   getProjectById,
+  journalApprovalSettlesRequestedChanges,
   updateTask,
   updateTaskLeaseWorkflowRefs,
   type Project,
@@ -25,7 +26,9 @@ import {
 import {
   projectRepoRoomEvent,
   shouldAutoPromptForBoardProjection,
+  upsertTaskPullRequestArtifact,
   type RepoRoomEvent,
+  type TaskWorkflowArtifact,
 } from "../../repo-workflow.js";
 import {
   emitTaskAnchoredMessage,
@@ -36,6 +39,47 @@ import {
 export interface RepoRoomEventTaskProjection {
   task: Task | undefined;
   authoritative: boolean;
+}
+
+/** The GitHub App's own login, which every review the broker publishes carries. */
+async function githubAppLogin(): Promise<string | null> {
+  const slug = (await getGitHubAppConfig()).appSlug?.trim();
+  return slug ? `${slug}[bot]` : null;
+}
+
+/** A task in one of these already shipped its pull request. */
+const SHIPPED_TASK_STATUSES = new Set<TaskStatus>(["merged", "done"]);
+
+function pullRequestState(event: Extract<RepoRoomEvent, { kind: "pull_request" }>): string {
+  if (event.action === "closed") return event.pullRequest.merged ? "merged" : "closed";
+  if (event.action === "ready_for_review") return "open";
+  return event.action === "converted_to_draft" || event.pullRequest.draft ? "draft" : "open";
+}
+
+/**
+ * A pull request for a task that already shipped is a follow-up: the task
+ * keeps the pull request it shipped with and shows this one beside it while
+ * it is in review. Linking one needs the work lease like any workflow change
+ * (`link`); one already shown keeps its state current without it, so it stops
+ * showing as in review once it merges after the task closed. Undefined when
+ * the event is not a follow-up; null when nothing changed.
+ */
+function followUpPullRequestArtifacts(
+  task: Task,
+  event: RepoRoomEvent,
+  options: { link: boolean }
+): TaskWorkflowArtifact[] | null | undefined {
+  if (event.kind !== "pull_request" || !task.pr_url || task.pr_url === event.pullRequest.url
+    || !SHIPPED_TASK_STATUSES.has(task.status)) return undefined;
+  if (!options.link && !task.workflow_artifacts.some((artifact) => artifact.url === event.pullRequest.url)) return null;
+  return upsertTaskPullRequestArtifact(task.workflow_artifacts, {
+    provider: event.provider,
+    kind: "pull_request",
+    number: event.pullRequest.number,
+    title: event.pullRequest.title,
+    url: event.pullRequest.url,
+    state: pullRequestState(event),
+  });
 }
 
 export async function getProjectForResolvedTask(
@@ -162,7 +206,9 @@ export async function applyRepoRoomEventToTask(
             : null,
         }
       );
-      return { task: linkedTask, authoritative: false };
+      const followUp = followUpPullRequestArtifacts(linkedTask, event, { link: false });
+      const refreshed = followUp ? await updateTask(project.id, linkedTask.id, { workflow_artifacts: followUp }) : null;
+      return { task: refreshed ?? linkedTask, authoritative: false };
     }
 
     await updateTaskLeaseWorkflowRefs(project.id, decision.lease.id, {
@@ -171,14 +217,29 @@ export async function applyRepoRoomEventToTask(
     });
   }
 
-  const updates: { status?: TaskStatus; pr_url?: string } = {};
-  if (event.kind === "pull_request" && linkedTask.pr_url !== event.pullRequest.url) {
+  const updates: { status?: TaskStatus; pr_url?: string; workflow_artifacts?: TaskWorkflowArtifact[] } = {};
+  const followUp = followUpPullRequestArtifacts(linkedTask, event, { link: true });
+  if (followUp) {
+    updates.workflow_artifacts = followUp;
+  } else if (followUp === undefined && event.kind === "pull_request" && linkedTask.pr_url !== event.pullRequest.url) {
     updates.pr_url = event.pullRequest.url;
   }
 
   const projectedTaskState = projectRepoRoomEvent({
     event,
     currentStatus: linkedTask.status,
+    approvalSettlesRequestedChanges: event.kind === "pull_request_review" && linkedTask.status === "blocked"
+      && event.review.state === "approved"
+      && await journalApprovalSettlesRequestedChanges({
+        room_id: project.id,
+        task_id: linkedTask.id,
+        pull_number: event.pullRequest.number,
+        head_sha: event.pullRequest.headSha,
+        review_id: event.review.id,
+        review_body: event.review.body,
+        reviewer_login: event.senderLogin,
+        app_login: await githubAppLogin(),
+      }),
   });
 
   if (projectedTaskState) {
@@ -188,7 +249,7 @@ export async function applyRepoRoomEventToTask(
     }
   }
 
-  if (!updates.status && !updates.pr_url) {
+  if (!updates.status && !updates.pr_url && !updates.workflow_artifacts) {
     return { task: linkedTask, authoritative: true };
   }
 

@@ -77,6 +77,7 @@ export {
   pruneSettledWorkflowEffects,
   releaseWorkflowEffectLookup,
   reserveWorkflowEffect,
+  journalApprovalSettlesRequestedChanges,
   workflowEffectCorrelationKey,
   workflowEffectRequestFingerprint,
 } from "./db/workflow-effects.js";
