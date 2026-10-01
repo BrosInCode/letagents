@@ -794,6 +794,69 @@ test("failed resumed acquisition binds death to the saved continuation and immut
   });
 });
 
+test("a resumed conversation gets the longer startup budget a cold re-read needs; a fresh session does not", async () => {
+  for (const mode of ["resume", "fresh"] as const) {
+    const harness = createHarness({ omitBootstrapResult: true });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40, resumeInitTimeoutMs: 2_000 });
+    const request = spawnRequest({ workAttemptId: `wa-claude-${mode}` });
+    const starting = mode === "resume"
+      ? adapter.resume({ workAttemptId: request.workAttemptId, providerContinuationId: "saved-claude-continuation" }, request)
+      : adapter.spawn(request);
+    const outcome = starting.then(() => "ready", (error: unknown) => error);
+    while (!harness.children[0]?.written.length) await new Promise((resolve) => setImmediate(resolve));
+    const child = harness.children[0]!;
+    const bootstrapTurn = (JSON.parse(child.written[0]!) as { uuid: string }).uuid;
+    const sessionId = argValue(harness.launches[0]!.args, "--resume") ?? argValue(harness.launches[0]!.args, "--session-id");
+    // The answer arrives well after the fresh-session budget, as a cold
+    // re-read of a large saved conversation does.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (child.alive) child.emit({ type: "result", subtype: "success", is_error: false, session_id: sessionId,
+      user_message_uuid: bootstrapTurn, result: "LETAGENTS_CLAUDE_DAEMON_READY" });
+    const settled = await withLoopAlive(outcome);
+    if (mode === "resume") {
+      assert.equal(settled, "ready", "the resumed conversation finished its bootstrap inside its own budget");
+      assert.equal(child.alive, true);
+      harness.identities.set(child.pid!, null);
+      child.resolveExit({ type: "exit", code: null, signal: "SIGTERM" });
+      await flush();
+    } else {
+      assert.ok(settled instanceof Error);
+      assert.match(settled.message, /bootstrap turn \(deadline\).*budget_ms=40/);
+      assert.equal(child.alive, false);
+    }
+  }
+});
+
+test("Claude reports its process up once init is verified, before the bootstrap turn answers", async () => {
+  const harness = createHarness({ omitBootstrapResult: true });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 2_000 });
+  const hints: string[] = [];
+  const request = spawnRequest({ workAttemptId: "wa-claude-native-start" });
+  request.onNativeStarted = () => { hints.push(harness.children[0]?.written.length ? "after-init" : "before-launch"); };
+  const starting = adapter.resume({ workAttemptId: request.workAttemptId, providerContinuationId: "saved-claude-continuation" }, request);
+  for (let wait = 0; wait < 200 && !hints.length; wait += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(hints, ["after-init"], "the hint follows a verified init, while the bootstrap turn is still open");
+  const child = harness.children[0]!;
+  const bootstrapTurn = (JSON.parse(child.written[0]!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id: "saved-claude-continuation",
+    user_message_uuid: bootstrapTurn, result: "LETAGENTS_CLAUDE_DAEMON_READY" });
+  await withLoopAlive(starting);
+  assert.deepEqual(hints, ["after-init"], "reported once");
+  harness.identities.set(child.pid!, null);
+  child.resolveExit({ type: "exit", code: null, signal: "SIGTERM" });
+  await flush();
+});
+
+test("a CLI that never reports init never claims its process is up", async () => {
+  const harness = createHarness({ noInit: true });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+  let hinted = false;
+  const request = spawnRequest({ workAttemptId: "wa-claude-no-init" });
+  request.onNativeStarted = () => { hinted = true; };
+  await assert.rejects(adapter.spawn(request), /did not report its stream-json init/);
+  assert.equal(hinted, false);
+});
+
 // api_retry has the published SDKAPIRetryMessage shape. This reproduces the
 // capture boundary, not the native cause of any historical live failure.
 for (const withOptionalSink of [false, true]) {
