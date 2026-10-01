@@ -34,6 +34,7 @@ import {
 } from "../src/components/desktop/content/room-board/governance-presentation";
 import { reviewAssignmentCandidates } from "../src/components/desktop/content/room-board/review-candidates";
 import { useBoardGovernance } from "../src/components/desktop/content/room-board/useBoardGovernance";
+import { useRoomBoardController } from "../src/components/desktop/content/room-board/useRoomBoardController";
 import {
   useGovernanceDenyForm,
   type DenyFormFocusTarget,
@@ -271,6 +272,46 @@ describe("board manager panel", () => {
       else delete (globalThis as { window?: unknown }).window;
     }
     assert.deepEqual(decisions, [{ intentId: "intent_a", input: { decision: "deny", reason: "Already merged." } }]);
+  });
+});
+
+describe("board task actions", () => {
+  it("lets the owner release each reviewer's lease by name, including one a recovered agent left behind", async () => {
+    const reviewed = task({
+      status: "in_review",
+      activeLeases: [
+        lease({ id: "lease_work", kind: "work", agentKey: "owner/lunar-amber", agentSessionId: "session_lunar", holderLabel: "LunarAmber | Owner's agent | Open Model" }),
+        lease({ id: "lease_review_retired", kind: "review", agentKey: "owner/field-trail", agentSessionId: "session_retired", holderLabel: "FieldTrail | Owner's agent | Cursor" }),
+        lease({ id: "lease_review_harbor", kind: "review", agentKey: "owner/harbor-marsh", agentSessionId: "session_harbor", holderLabel: "HarborMarsh | Owner's agent | Codex" }),
+      ],
+    });
+    const board = useRoomBoardController({ roomIdentifier: "room_1", tasks: [reviewed], presence: [], workers: [] }, () => undefined);
+    const releases = board.actionsFor(reviewed).filter((action) => action.id.startsWith("release-review"));
+    assert.deepEqual(releases.map((action) => action.label), ["Release FieldTrail's review", "Release HarborMarsh's review"]);
+
+    const released: unknown[] = [];
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        letagentsDesktop: {
+          room: {
+            updateTaskReviewLease: async (room: string, taskId: string, input: { action: string; lease_id: string }) => {
+              released.push({ room, taskId, action: input.action, leaseId: input.lease_id });
+              return { task: reviewed };
+            },
+          },
+        },
+      },
+    });
+    try {
+      await board.runTaskAction(reviewed, releases[0]!);
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "window", previous);
+      else delete (globalThis as { window?: unknown }).window;
+    }
+    assert.equal(board.errorMessage.value, null);
+    assert.deepEqual(released, [{ room: "room_1", taskId: "task_1", action: "release", leaseId: "lease_review_retired" }]);
   });
 });
 

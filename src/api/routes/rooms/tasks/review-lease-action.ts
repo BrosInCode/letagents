@@ -13,6 +13,8 @@ import {
 import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
+import { isHumanAppWrite } from "../../../request/app-session.js";
+import { answerRequestsNamingLease } from "../../../rooms/attention-answers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import {
   normalizeTaskActorKey,
@@ -159,6 +161,15 @@ export function registerTaskReviewLeaseActionRoute(
         reason: deps.normalizeOptionalString(requestBody.reason)
           ?? `Released review lease ${reviewLease.id} for ${task.id}.`,
       });
+      // A person clearing a lease answers the requests that asked for it.
+      if (isHumanAppWrite(req, requestBody) && req.sessionAccount) {
+        await answerRequestsNamingLease({
+          room_id: project.id,
+          lease_id: releasedLease.id,
+          response: `Released the review lease ${releasedLease.id} on ${task.id}.`,
+          person: { id: req.sessionAccount.account_id, label: req.sessionAccount.login, kind: "human" },
+        });
+      }
 
       const taskWithDetails = await attachTaskDetails(project.id, task);
       deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });

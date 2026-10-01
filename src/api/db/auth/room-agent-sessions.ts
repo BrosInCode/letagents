@@ -710,7 +710,8 @@ export async function createFencedRoomAgentSession(
         ...await markUnresolvedReceiptsUnavailableTx(tx, holder, endedAt),
       );
     }
-    // A supervised worker's leases move only on its supervisor's word.
+    // A supervised worker's leases move only when its supervisor starts it
+    // again (createOrRotateSupervisorWorkerSession).
     const adoptedTaskLeases = input.supervisor_grant_id ? [] : await adoptTaskLeasesFromEndedSessionsTx(tx, {
       room_id: input.room_id,
       agent_key: input.agent_key,
@@ -896,7 +897,12 @@ export async function createOrRotateSupervisorWorkerSession(
     resolve_display_name?: (holders: readonly RoomWorkerNameHolderRow[]) =>
       { display_name: string; actor_label: string } | null;
   },
-): Promise<{ session: CreatedRoomAgentSession; bearer: RoomAgentSessionBearer }> {
+): Promise<{
+  session: CreatedRoomAgentSession;
+  bearer: RoomAgentSessionBearer;
+  /** Leases this agent's ended sessions held, which this session now holds. */
+  adopted_task_leases: AdoptedTaskLease[];
+}> {
   const instanceId = input.agent_instance_id.trim();
   if (!instanceId) throw new Error("Supervisor worker agent_instance_id is required.");
 
@@ -987,6 +993,25 @@ export async function createOrRotateSupervisorWorkerSession(
       isNull(room_agent_session_bearers.revoked_at),
     )).limit(1);
     if (!bearer) throw new Error("Worker bearer was not persisted.");
+    // A supervisor that starts its agent again after the agent's process
+    // ended (a crash, a restart, a recovery) gets a new session. The work the
+    // ended session held is this agent's, and it passes to this session now,
+    // or the agent could not finish or release it and nobody but a room admin
+    // could clear it.
+    const adoptedTaskLeases = await adoptTaskLeasesFromEndedSessionsTx(tx, {
+      room_id: input.room_id,
+      agent_key: input.agent_key,
+      owner_account_id: input.owner_account_id,
+      supervisor_grant_id: input.supervisor_grant_id,
+      successor: {
+        session_id: session.session_id,
+        agent_instance_id: instanceId,
+        actor_label: session.actor_label,
+        display_name: session.display_name,
+        process_host_id: null,
+      },
+      now: new Date().toISOString(),
+    });
     const invalidations = (existing as RoomAgentSessionRow[]).map((previous) => ({
       room_id: previous.room_id,
       agent_session_id: previous.session_id,
@@ -995,7 +1020,7 @@ export async function createOrRotateSupervisorWorkerSession(
     }));
     await queueRoomAgentCredentialInvalidationsTx(tx, invalidations);
     return {
-      result: { session, bearer: toRoomAgentSessionBearer(bearer) },
+      result: { session, bearer: toRoomAgentSessionBearer(bearer), adopted_task_leases: adoptedTaskLeases },
       invalidations,
     };
   });

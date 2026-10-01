@@ -8,8 +8,9 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import { findLocalRoomWorker } from "./board-workers";
 import { parseReviewCandidateValue, reviewAssignmentCandidates as getReviewAssignmentCandidates } from "./review-candidates";
+import { compactPerson } from "./formatters";
 import { reviewLeases, shouldShowReviewPanel, workLease } from "./task-state";
-import type { TaskAction } from "./types";
+import type { TaskAction, TaskLease } from "./types";
 import { desktopIpc } from "../../../../ipc/index.js";
 
 interface RoomBoardControllerProps {
@@ -51,16 +52,17 @@ export function useRoomBoardController(
   function actionsFor(task: DesktopTaskSummary): TaskAction[] {
     const actions: TaskAction[] = [];
     const work = workLease(task);
-    const review = reviewLeases(task)[0] || null;
+    const reviews = reviewLeases(task);
     const worker = localWorker.value;
     const workerOwnsTask = Boolean(worker && work && (
       work.agentSessionId === worker.agentSessionId
       || (!!work.agentKey && work.agentKey === worker.agentKey)
     ));
-    const workerReviewsTask = Boolean(worker && review && (
+    const workerHoldsReview = (review: TaskLease) => Boolean(worker && (
       review.agentSessionId === worker.agentSessionId
       || (!!review.agentKey && review.agentKey === worker.agentKey)
     ));
+    const workerReviewsTask = reviews.some(workerHoldsReview);
 
     if (task.status === "proposed") {
       actions.push(statusAction("accept", "Accept", "primary", "accepted"));
@@ -107,14 +109,19 @@ export function useRoomBoardController(
         })).task,
       });
     }
-    if (review) {
+    // Every reviewer's lease can be released on its own, and each action says
+    // whose it is: a task can have more than one, and one may belong to an
+    // agent's earlier session that can no longer release it.
+    for (const review of reviews) {
+      const ownReview = workerHoldsReview(review);
+      const holder = compactPerson(review.holderLabel || review.agentKey);
       actions.push({
-        id: "release-review",
-        label: "Release review",
+        id: `release-review:${review.id}`,
+        label: ownReview || !holder ? "Release review" : `Release ${holder}'s review`,
         busyLabel: "Releasing...",
         tone: "neutral",
         run: async (nextTask) => {
-          if (workerReviewsTask) {
+          if (ownReview) {
             return (await desktopIpc.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
               action: "release",
               lease_id: review.id,

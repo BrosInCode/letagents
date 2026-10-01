@@ -30,7 +30,8 @@ export function buildTaskRouteClient(input: {
       body: JSON.stringify(body),
     });
 
-  const leaseAction = (
+  const taskAction = (
+    action: "lease-action" | "review-lease-action",
     taskId: string,
     body: Record<string, unknown>,
     auth: { bearerToken?: string; sessionToken?: string } = {
@@ -38,7 +39,7 @@ export function buildTaskRouteClient(input: {
     },
   ) =>
     fetch(
-      `http://127.0.0.1:${input.port}${roomPath}/tasks/${encodeURIComponent(taskId)}/lease-action`,
+      `http://127.0.0.1:${input.port}${roomPath}/tasks/${encodeURIComponent(taskId)}/${action}`,
       {
         method: "POST",
         headers: {
@@ -54,5 +55,11 @@ export function buildTaskRouteClient(input: {
       },
     );
 
-  return { createTaskViaRoute, leaseAction, patchTask };
+  type Auth = { bearerToken?: string; sessionToken?: string };
+  const leaseAction = (taskId: string, body: Record<string, unknown>, auth?: Auth) =>
+    taskAction("lease-action", taskId, body, auth);
+  const reviewLeaseAction = (taskId: string, body: Record<string, unknown>, auth?: Auth) =>
+    taskAction("review-lease-action", taskId, body, auth);
+
+  return { createTaskViaRoute, leaseAction, patchTask, reviewLeaseAction };
 }
