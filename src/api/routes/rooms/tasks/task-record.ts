@@ -114,10 +114,21 @@ export function registerTaskRecordRoutes(
 
     let auditActorKey = actorKey;
     let boardIntentApproval: BoardIntentConsumptionInput | null = null;
+    const boardIntentId = deps.normalizeOptionalString(requestBody.board_intent_id);
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
+      // A worker bearer never holds admin authority. It may present the board
+      // intent approved for its own session instead, which authorizes exactly
+      // that status change (checked and consumed with the write) and nothing more.
+      const authorizeWithApprovedBoardIntent = Boolean(updates.status && adminOnlyStatuses.has(updates.status)
+        && req.authKind === "agent_session" && workerIdentity && boardIntentId);
       if (updates.status && adminOnlyStatuses.has(updates.status)) {
-        if (workerIdentity && (updates.status === "accepted" || updates.status === "cancelled")) {
+        if (authorizeWithApprovedBoardIntent) {
+          if (Object.keys(updates).some((key) => key !== "status" && key !== "pr_url")) {
+            res.status(403).json({ error: "An approved board intent authorizes only its exact status change." });
+            return;
+          }
+        } else if (workerIdentity && (updates.status === "accepted" || updates.status === "cancelled")) {
           if (Object.keys(updates).some((key) => key !== "status")) {
             res.status(403).json({ error: "Board Manager task decisions can only change status." });
             return;
@@ -230,11 +241,12 @@ export function registerTaskRecordRoutes(
         actorKey: verifiedActorKey,
         actorInstanceId,
         actorSessionId: workerIdentity?.agent_session_id ?? null,
-        boardIntentId: deps.normalizeOptionalString(requestBody.board_intent_id),
+        boardIntentId,
         boardApprovalToken: deps.normalizeOptionalString(requestBody.board_approval_token),
+        authorizeWithApprovedBoardIntent,
       });
       if (coordination.kind === "deny") {
-        res.status(409).json({ error: coordination.error, code: coordination.code });
+        res.status(authorizeWithApprovedBoardIntent ? 403 : 409).json({ error: coordination.error, code: coordination.code });
         return;
       }
       boardIntentApproval = coordination.boardIntentApproval ?? null;

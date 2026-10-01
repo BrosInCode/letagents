@@ -7,7 +7,7 @@ import {
 import { db } from "../client.js";
 import { room_agent_delivery_sessions, task_leases, tasks } from "../schema.js";
 import { toTask, toTaskLease } from "../mappers.js";
-import { assertConsumeBoardIntentApproval } from "./board-intents.js";
+import { assertConsumeBoardIntentApproval, supersedeBoardIntentsForTask } from "./board-intents.js";
 import {
   resolveTaskAssignmentState,
   type TaskAssignmentPatch,
@@ -148,7 +148,19 @@ export async function applyTaskWorkLeaseAction(input: {
       return actionConflict("lease_not_active");
     }
 
-    const assignment = resolveTaskAssignmentState(taskRow, input.task_updates);
+    // Lock the task after the lease (the order lease adoption uses) and work
+    // from that locked state, so the approval is compared with the task as it
+    // is written, not as first read.
+    const [lockedTaskRow] = (await tx
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.room_id, input.room_id), eq(tasks.number, taskNumber)))
+      .for("update")) as TaskRow[];
+    if (!lockedTaskRow) {
+      return actionConflict("task_not_found");
+    }
+
+    const assignment = resolveTaskAssignmentState(lockedTaskRow, input.task_updates);
 
     const [updatedTaskRow] = (await tx
       .update(tasks)
@@ -166,7 +178,10 @@ export async function applyTaskWorkLeaseAction(input: {
     }
 
     if (input.board_intent_approval) {
-      await assertConsumeBoardIntentApproval(input.board_intent_approval, tx);
+      await assertConsumeBoardIntentApproval({
+        ...input.board_intent_approval,
+        task_state: { status: lockedTaskRow.status, assignee_agent_key: lockedTaskRow.assignee_agent_key },
+      }, tx);
     }
 
     let newLeaseRow: TaskLeaseRow | null = null;
@@ -186,6 +201,14 @@ export async function applyTaskWorkLeaseAction(input: {
         .returning()) as TaskLeaseRow[];
       newLeaseRow = createdLeaseRow ?? null;
     }
+
+    // The named lease is gone, and the task may have changed hands or status.
+    await supersedeBoardIntentsForTask({
+      room_id: input.room_id,
+      task_changed: updatedTaskRow.status !== lockedTaskRow.status
+        || updatedTaskRow.assignee_agent_key !== lockedTaskRow.assignee_agent_key,
+      task: { id: input.task_id, status: updatedTaskRow.status, assignee_agent_key: updatedTaskRow.assignee_agent_key },
+    }, tx);
 
     return {
       task: toTask(updatedTaskRow),

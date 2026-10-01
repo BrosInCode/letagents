@@ -24,7 +24,8 @@ export type BoardIntentStatus =
   | "approved"
   | "denied"
   | "expired"
-  | "used";
+  | "used"
+  | "superseded";
 
 export type { BoardManagerFailoverMode } from "../../../shared/board-manager-failover.js";
 import type { BoardManagerFailoverMode } from "../../../shared/board-manager-failover.js";
@@ -75,6 +76,9 @@ export interface BoardIntent {
   expires_at: string | null;
   escalated_at: string | null;
   auto_approved: boolean;
+  approved_task_status: string | null;
+  approved_task_assignee_agent_key: string | null;
+  approved_manager_assignment_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -141,6 +145,9 @@ export interface BoardIntentRow {
   escalated_at: string | null;
   escalation_check_at: string | null;
   auto_approved: boolean;
+  approved_task_status: string | null;
+  approved_task_assignee_agent_key: string | null;
+  approved_manager_assignment_id: string | null;
   created_at: string;
   updated_at: string;
 }

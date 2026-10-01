@@ -361,7 +361,7 @@ export function registerBoardIntentTools(server: McpServer): void {
     "list_board_intents",
     "List Board Manager intents for this room, optionally filtered by status.",
     {
-      status: z.enum(["pending", "approved", "denied", "expired", "used"]).optional(),
+      status: z.enum(["pending", "approved", "denied", "expired", "used", "superseded"]).optional(),
       room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     },
     async ({ status, room_id }) => {
