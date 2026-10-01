@@ -75,6 +75,14 @@ export class SupervisorGrantRequestError extends Error {
   }
 }
 
+/** The room server answered a native-activity publication and refused it. */
+export class NativeActivityRejectedError extends Error {
+  /** null when the server accepted the request but refused the observation itself. */
+  constructor(message: string, readonly status: number | null) {
+    super(message);
+  }
+}
+
 export function supervisedProviderLabel(provider: string): string {
   switch (provider.trim().toLowerCase()) {
     case "codex": return "Codex";
@@ -619,7 +627,12 @@ export async function publishWorkerNativeActivity(input: {
     }),
     signal: AbortSignal.timeout(10_000),
   });
-  if (!response.ok) throw new Error(`Native activity endpoint rejected ${input.operation} with HTTP ${response.status}.`);
+  if (!response.ok) {
+    throw new NativeActivityRejectedError(
+      `Native activity endpoint rejected ${input.operation} with HTTP ${response.status}.`,
+      response.status,
+    );
+  }
   const payload = await response.json() as { accepted?: boolean };
   return payload.accepted !== false;
 }

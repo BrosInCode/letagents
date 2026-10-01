@@ -40,6 +40,7 @@ import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator
 import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { NativeActivityPublicationCoordinator } from "./native-activity-publication-coordinator.js";
+import { ConvergencePacer } from "./convergence-pacer.js";
 import { RoomWorkPublisher } from "./room-work-publisher.js";
 import { assertMacOS } from "./platform.js";
 import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
@@ -124,6 +125,7 @@ export class SupervisorDaemon {
   private readonly workerBindings: WorkerBindingStore;
   private readonly nativeActivity: NativeActivityPublicationCoordinator;
   private readonly workerAuthority: WorkerAuthorityCoordinator;
+  private readonly convergencePacer: ConvergencePacer;
   private readonly executionDelegations: ExecutionDelegationCoordinator;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
   private readonly supervisedInbox: SupervisedAgentInboxStore;
@@ -315,6 +317,9 @@ export class SupervisorDaemon {
     this.supervisedInbox = new SupervisedAgentInboxStore(
       paths.manifestPath, undefined, (agentId) => this.notifyStateChanged(agentId), /* schemaPrepared */ true,
     );
+    this.convergencePacer = new ConvergencePacer({ nowMs: recoveryClock.nowMs, random: recoveryClock.random,
+      hasPendingWork: async (entryId) => { const head = await this.supervisedInbox.head(entryId); return Boolean(head && head.state !== "blocked"); },
+    });
     this.workerAuthority = new WorkerAuthorityCoordinator({
       store: this.store,
       durability: this.durability,
@@ -355,7 +360,7 @@ export class SupervisorDaemon {
       nowMs: recoveryClock.nowMs ?? Date.now,
       setTimeout: recoveryClock.setTimeout ?? setTimeout,
       clearTimeout: recoveryClock.clearTimeout ?? clearTimeout,
-      sleep: recoveryClock.sleep, random: recoveryClock.random,
+      sleep: recoveryClock.sleep, random: recoveryClock.random, pacing: this.convergencePacer,
     });
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
@@ -475,6 +480,8 @@ export class SupervisorDaemon {
             this.workerAuthority.mintHostWorkerSession(entry, executionGenerationId),
           bindMintedSession: (entryId, session, mayPublish) =>
             this.workerAuthority.bindMintedHostWorkerSession(entryId, session, mayPublish),
+          awaitsBindingConfirmation: (entryId, generationId) => this.workerAuthority.awaitsBindingConfirmation(entryId, generationId),
+          confirmExactBinding: (entryId, mayPublish) => this.workerAuthority.confirmExactBinding(entryId, mayPublish),
           bearerNeedsRotation: (entry, binding) =>
             this.workerAuthority.hostWorkerBearerNeedsRotation(entry, binding),
           blockExpiredAuthority: (entry, detail) =>
@@ -498,6 +505,7 @@ export class SupervisorDaemon {
           this.recordSchedulerFailure(entryId, error, actor),
         ...(recoveryClock.setTimeout ? { setTimeout: recoveryClock.setTimeout } : {}),
         ...(recoveryClock.clearTimeout ? { clearTimeout: recoveryClock.clearTimeout } : {}),
+        pacing: this.convergencePacer,
       })
       : null;
     this.providerReconciliation = providerPort
@@ -886,7 +894,7 @@ export class SupervisorDaemon {
       drainTerminals: () => this.providerTerminals.drain(),
       beginRetirement: () => {
         this.providerTerminals.beginRetirement();
-        try { this.executionCapture?.sealForPlannedHandoff(); this.handoffScheduled = true; }
+        try { this.executionCapture?.sealForPlannedHandoff(); this.handoffScheduled = true; this.convergencePacer.close(); }
         catch (error) { this.providerTerminals.cancelRetirement(); throw error; }
       },
       retire: () => this.retireForHandoff(),
@@ -906,12 +914,13 @@ export class SupervisorDaemon {
       activateLegacyLane: this.activateLegacyLane.bind(this),
       appendActivity: this.appendActivity.bind(this),
       bindWorkerSession: this.workerAuthority.bindWorkerSession.bind(this.workerAuthority),
-      bootstrapRoomIngress: (input) => this.beginBootstrap(this.workerAuthority.bootstrapRoomIngress.bind(this.workerAuthority), input),
+      bootstrapRoomIngress: (input) => this.userAction(input.initial_message === undefined ? null : input.entry_id,
+        () => this.beginBootstrap(this.workerAuthority.bootstrapRoomIngress.bind(this.workerAuthority), input)),
       borrowWorkerCredential: this.workerAuthority.borrowWorkerCredential.bind(this.workerAuthority),
       authorizeCustodialPolling: this.workerAuthority.authorizeCustodialPolling.bind(this.workerAuthority),
       checkpointWorkerCursor: this.workerAuthority.checkpointWorkerCursor.bind(this.workerAuthority),
       commitInspectorRoomMove: (input) => this.roomMoves.commitInspector(input),
-      compareAndSetDesiredState: this.desiredStates.compareAndSet.bind(this.desiredStates),
+      compareAndSetDesiredState: (id, expected, desired) => this.userAction(id, () => this.desiredStates.compareAndSet(id, expected, desired)),
       completeBoundedEffect: this.boundedEffects.complete.bind(this.boundedEffects),
       executeBoundedTool: this.boundedEffects.execute.bind(this.boundedEffects),
       controlTurn: (input) => this.turnControls.control(input),
@@ -920,7 +929,7 @@ export class SupervisorDaemon {
       getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
       getCurrentInspectorRoomMove: (input) => this.roomMoves.getCurrentInspector(input),
       getInspectorRoomMove: (input) => this.roomMoves.getInspector(input),
-      installHostGrant: this.executionDelegations.installHostGrant.bind(this.executionDelegations),
+      installHostGrant: (input) => this.userAction(input.credential_only ? input.entry_id : null, () => this.executionDelegations.installHostGrant(input)),
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       listManifest: async (roomId) => this.entriesWithDerivedLiveness(roomId
@@ -930,9 +939,9 @@ export class SupervisorDaemon {
       prepareHandoff: () => this.handoff.prepare(),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
       purgeAgent: this.lifecycleAdministration.purgeAgent.bind(this.lifecycleAdministration),
-      putManifestEntry: this.putManifestEntry.bind(this),
+      putManifestEntry: (entry) => this.userAction(entry.id, () => this.putManifestEntry(entry)),
       readAttempt: this.readAttempt.bind(this),
-      recoverAgentRuntime: this.runtimeRecovery.recoverAgentRuntime.bind(this.runtimeRecovery),
+      recoverAgentRuntime: (id, generation, recovery) => this.userAction(id, () => this.runtimeRecovery.recoverAgentRuntime(id, generation, recovery)),
       releaseLegacyLane: this.releaseLegacyLane.bind(this),
       reserveLegacyLane: this.reserveLegacyLane.bind(this),
       resolveTurnControl: (input) => this.turnControls.resolve(input),
@@ -940,7 +949,7 @@ export class SupervisorDaemon {
       retireAgent: this.lifecycleAdministration.retireAgent.bind(this.lifecycleAdministration),
       retryRoomDelivery: this.retryRoomDelivery.bind(this),
       rollbackInspectorRoomMove: (input) => this.roomMoves.rollbackInspector(input),
-      setDesiredState: this.desiredStates.set.bind(this.desiredStates),
+      setDesiredState: (id, desired) => this.userAction(id, () => this.desiredStates.set(id, desired)),
       setDisplayName: this.setDisplayName.bind(this),
       skipRoomDelivery: this.skipRoomDelivery.bind(this),
       status: this.status.bind(this),
@@ -984,7 +993,7 @@ export class SupervisorDaemon {
         singleton: this.singleton, store: this.store, socket: this.socket,
         stores: [this.durability, this.workerBindings, this.supervisedInbox],
         status: () => this.status(),
-        retire: () => { this.handoffScheduled = true; this.boardOwnershipActive = false; },
+        retire: () => { this.handoffScheduled = true; this.boardOwnershipActive = false; this.convergencePacer.close(); },
       });
       this.boardOwnershipActive = true;
       registerDaemonBoardAccess(this.singleton, () =>
@@ -1056,6 +1065,7 @@ export class SupervisorDaemon {
     // continuations before awaiting any drain so they cannot retain a socket
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
+    this.convergencePacer.close();
     this.providerTerminals.close();
     this.hostApprovals.close();
     const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
@@ -1101,6 +1111,7 @@ export class SupervisorDaemon {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
     this.workerRuntimeCustody.destroyAllCredentials();
+    this.convergencePacer.close();
     this.wakeRoomMoveReconciliationWaiters();
     const failures: unknown[] = [...this.handoffCleanupFailures];
     try { await this.deliveryCutovers.fenceAndDrain(); } catch (error) { failures.push(error); }
@@ -1623,6 +1634,12 @@ export class SupervisorDaemon {
       assertCurrent: () => this.singleton.assertCurrent(),
       scheduleRecovery: (id, delayMs) => { if (!fence) this.scheduleRecoveryConvergence(id, delayMs); },
     });
+  }
+
+  /** A user's action on an agent goes ahead of background convergence in every pacing queue. */
+  private userAction<T>(entryId: string | null, operation: () => T): T {
+    if (entryId) this.convergencePacer.markInteractive(entryId);
+    return operation();
   }
 
   private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {

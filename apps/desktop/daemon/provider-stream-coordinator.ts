@@ -691,8 +691,15 @@ export class ProviderStreamCoordinator {
           && manifestEntry.observed_state === "recovering"
           && manifestEntry.condition === "coordination_blocked"
           && manifestEntry.last_error === "Provider is running; waiting for desktop credential handoff.";
-        if (!["working", "idle"].includes(manifestEntry.observed_state)
-          && !retriesCredentialHandoff) return;
+        const publishesLiveness = ["working", "idle"].includes(manifestEntry.observed_state)
+          || retriesCredentialHandoff;
+        // A recovering agent still holds its bound bearer. Keep renewing and
+        // rotating it, so a recovery that waits longer than the bearer lives
+        // cannot leave the agent with an expired credential and nothing to
+        // replace it. Liveness is published only once the agent is ready.
+        const custodyOnly = !publishesLiveness && manifestEntry.desired_state === "running"
+          && manifestEntry.observed_state === "recovering";
+        if (!publishesLiveness && !custodyOnly) return;
         if (!["working", "idle"].includes(current.observedState)) return;
         if (manifestEntry.delivery_mode === "daemon_inbox"
           && ["working", "idle"].includes(manifestEntry.observed_state)
@@ -718,6 +725,7 @@ export class ProviderStreamCoordinator {
             return;
           }
         }
+        if (custodyOnly) return;
         const status = current.observedState === "idle" ? "idle" : "working";
         await this.options.publishNativeActivity(
           entryId,

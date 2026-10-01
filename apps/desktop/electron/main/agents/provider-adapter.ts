@@ -220,6 +220,12 @@ export function sameProviderConnectionIdentity(
 export interface ProviderSpawnRequest {
   /** Host-only wake hint for a changed read-only progress projection. */
   onProgress?: () => void;
+  /**
+   * Host-only hint that the native process is up and talking. Whatever
+   * startup remains is a remote model round trip, so the daemon hands its
+   * provider-launch slot to the next agent here instead of at return.
+   */
+  onNativeStarted?: () => void;
   workAttemptId: string;
   roomId: string;
   /** Durable ingress owner selected by the daemon, never inferred from policy. */

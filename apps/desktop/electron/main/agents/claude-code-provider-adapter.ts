@@ -85,6 +85,12 @@ import { claudeApprovalProfileLabel, requireSupportedClaudeCodeVersion, resolveC
 // generation grant instead of inheriting desktop owner authority.
 
 const INIT_TIMEOUT_MS = 30_000;
+// Resuming re-reads the whole saved conversation. With the provider's prompt
+// cache expired, a ~110k-token session took 10 s to answer the bootstrap turn
+// on an idle machine and over 30 s during a daemon handoff. Waiting costs no
+// tokens; failing does, since the deadline is not retried and the user must
+// restart the agent by hand.
+const RESUME_INIT_TIMEOUT_MS = 90_000;
 const VERSION_TIMEOUT_MS = 8_000;
 
 /** One parsed stream-json line from the CLI. */
@@ -128,6 +134,8 @@ export interface ClaudeCodeProviderAdapterOptions {
   streamSink?: (event: ProviderStreamEvent) => void;
   /** Cumulative startup time outside positively observed compaction. */
   initTimeoutMs?: number;
+  /** The same budget for resuming a saved conversation; defaults to initTimeoutMs when only that is set. */
+  resumeInitTimeoutMs?: number;
   /** Cumulative time spent compacting during one startup; defaults to five minutes. */
   compactionTimeoutMs?: number;
   /** SIGTERM → SIGKILL escalation window for stop() and the attach-path fence. */
@@ -829,6 +837,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly initTimeoutMs: number;
+  private readonly resumeInitTimeoutMs: number;
   private readonly compactionTimeoutMs: number;
   private readonly compactions = new Map<string, ClaudeCompaction>();
   private readonly handleCompactions = new WeakMap<ClaudeProviderHandle, ClaudeCompaction>();
@@ -848,6 +857,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
     this.initTimeoutMs = options.initTimeoutMs ?? INIT_TIMEOUT_MS;
+    this.resumeInitTimeoutMs = options.resumeInitTimeoutMs ?? options.initTimeoutMs ?? RESUME_INIT_TIMEOUT_MS;
     this.compactionTimeoutMs = options.compactionTimeoutMs ?? 300_000;
     this.stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   }
@@ -1441,8 +1451,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
 
     let handle: ClaudeProviderHandle | null = null;
-    const diagnostics = new ClaudeBootstrapDiagnostics(expectedSessionId, bootstrapTurnId, this.initTimeoutMs);
-    const compaction = new ClaudeCompaction(expectedSessionId, this.initTimeoutMs,
+    const startupBudgetMs = resumeRef ? this.resumeInitTimeoutMs : this.initTimeoutMs;
+    const diagnostics = new ClaudeBootstrapDiagnostics(expectedSessionId, bootstrapTurnId, startupBudgetMs);
+    const compaction = new ClaudeCompaction(expectedSessionId, startupBudgetMs,
       this.compactionTimeoutMs, this.deps.now, req.onProgress);
     this.compactions.set(req.workAttemptId, compaction);
     const closeCompaction = () => {
@@ -1540,6 +1551,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.exitPromises.set(handle, exitPromise);
 
       diagnostics.initialized();
+      // The CLI and its MCP workplace are up. The bootstrap turn below is a
+      // model round trip (up to the resume budget), not local launch work.
+      try { req.onNativeStarted?.(); } catch { /* a host hint cannot fail the launch */ }
       this.publishStream(handle, streamMethod(observedInit), observedInit, "provider_event");
       const bootstrapResult = this.waitForExactRoomTurn(handle, bootstrapTurnId);
       for (const line of pendingLines.splice(0)) {

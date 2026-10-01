@@ -59,6 +59,7 @@ import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.j
 
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
+import type { ConvergencePacing } from "./convergence-pacer.js";
 
 // A live generation with no attachable handle resolves on its own once the
 // old process exits or answers again. Re-check with capped backoff so the
@@ -234,6 +235,8 @@ export type ProviderExecutionCoordinatorOptions = {
       session: BoundWorkerAuthorization,
       mayPublish?: () => boolean,
     ): Promise<void>;
+    awaitsBindingConfirmation(entryId: string, executionGenerationId: string): boolean;
+    confirmExactBinding(entryId: string, mayPublish: () => boolean): Promise<void>;
     bearerNeedsRotation(entry: DaemonManifestEntry, binding: WorkerSessionBinding): Promise<boolean>;
     blockExpiredAuthority(entry: DaemonManifestEntry, detail: string): Promise<void>;
     currentOpenModelCredential(
@@ -258,6 +261,8 @@ export type ProviderExecutionCoordinatorOptions = {
   recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void>;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+  /** Daemon-wide limit on concurrent cold provider launches. */
+  pacing?: ConvergencePacing;
 };
 
 type DispatchReservation = {
@@ -1277,6 +1282,24 @@ export class ProviderExecutionCoordinator {
           );
           return;
         }
+      } else if (entry.provider_ref?.execution_generation_id
+        && this.options.host.awaitsBindingConfirmation(entry.id, entry.provider_ref.execution_generation_id)) {
+        // A bind that failed after saving its binding leaves that binding
+        // exact, so this retry has nothing to mint. Skipping the bind would
+        // also skip the bookkeeping that clears the bind's recovery latch.
+        const executionGenerationId = entry.provider_ref.execution_generation_id;
+        try {
+          await this.options.host.confirmExactBinding(entry.id, () => !this.options.authority.isHandoffScheduled()
+            && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
+          entry = await this.options.store.getEntry(entry.id) ?? entry;
+        } catch (error) {
+          if (this.options.authority.isHandoffScheduled()
+            || this.options.authority.currentDaemonGeneration() !== daemonGeneration
+            || this.options.concurrency.currentControlEpoch(entry.id) !== controlEpoch
+            || this.options.host.currentGrant(entry) !== grant) return;
+          await this.options.host.recordBindingRecoveryFailure(entry.id, executionGenerationId, error);
+          return;
+        }
       }
       if (this.options.authority.isHandoffScheduled()
         || this.options.authority.currentDaemonGeneration() !== daemonGeneration
@@ -1594,8 +1617,12 @@ export class ProviderExecutionCoordinator {
     }
     const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
     let mintedHostSession: BoundWorkerAuthorization | null = null;
+    let releaseLaunchSlot: () => void = () => {};
     const spawn: ProviderActionSpawn = {
       onProgress: () => this.options.notifyProgressChanged?.(),
+      // A provider whose remaining startup is a remote model turn (Claude's
+      // bootstrap) returns its launch slot as soon as its process is up.
+      onNativeStarted: () => releaseLaunchSlot(),
       workAttemptId: attempt.work_attempt_id,
       roomId: entry.room_id,
       cwd: attempt.workspace_path,
@@ -1653,6 +1680,11 @@ export class ProviderExecutionCoordinator {
           },
         });
       }
+      // Cold launches share a daemon-wide limit. The slot is taken before the
+      // final authority check below, so a launch that queued behind other
+      // agents is checked again, and its own startup budget starts only once
+      // it is admitted. It covers the local process start; see onNativeStarted.
+      releaseLaunchSlot = this.options.pacing ? await this.options.pacing.acquire("launch", entry.id) : () => {};
       // Capture consumed inputs before the final existing authority check. No
       // new await is inserted between that check and native dispatch.
       const admission = await this.launchAdmission(initialEntry, launchControlEpoch, launchConfiguration,
@@ -1681,6 +1713,8 @@ export class ProviderExecutionCoordinator {
           } catch (error) {
             if (admission) this.failedLaunchAdmissions.set(entry.id, admission);
             throw error;
+          } finally {
+            releaseLaunchSlot();
           }
           this.failedLaunchAdmissions.delete(entry.id);
           providerDispatched = true;
@@ -1868,6 +1902,8 @@ export class ProviderExecutionCoordinator {
         );
       }
       throw error;
+    } finally {
+      releaseLaunchSlot();
     }
     if (!handle) throw new Error("Provider launch returned no handle.");
     if (requestedAuthorityMode !== "typed" && (["failed", "stopped"].includes(handle.observedState)

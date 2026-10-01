@@ -10,12 +10,14 @@ import {
   lifecycleLocalConformanceEligibility,
   ProviderStreamCoordinator,
   type ProviderInstallationToken,
+  type ProviderStreamCoordinatorOptions,
 } from "../provider-stream-coordinator.js";
 import { ProviderLiveDisplay } from "../provider-live-display.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
-import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
+import { WorkerRuntimeCustody, type InstalledHostGrant } from "../worker-runtime-custody.js";
+import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { LifecycleProjectionObservation } from "../lifecycle-projection-ledger.js";
 
 const cleanLifecycleProjection = () => ({
@@ -155,7 +157,8 @@ function coordinatorHarness(input: {
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
   startCutover?: (entryId: string) => Promise<void>;
-  bindingGet?: (entryId: string) => Promise<null>;
+  bindingGet?: (entryId: string) => Promise<WorkerSessionBinding | null>;
+  heartbeat?: Partial<ProviderStreamCoordinatorOptions["heartbeat"]>;
   publishNativeActivity?: () => Promise<void>;
   requestConvergence?: (entryId: string) => void;
   serializeManifest?: <T>(operation: () => Promise<T>) => Promise<T>;
@@ -256,6 +259,7 @@ function coordinatorHarness(input: {
       hostGrantNeedsRenewal: () => false,
       hostWorkerBearerNeedsRotation: async () => false,
       requestConvergence: input.requestConvergence ?? (() => {}),
+      ...input.heartbeat,
     },
     setInterval: input.setInterval
       ?? ((() => ({ unref() {} })) as unknown as typeof setInterval),
@@ -935,6 +939,53 @@ test("daemon-inbox heartbeats probe exact live runtimes without granting recover
   assert.equal(harness.getManifest().observed_state, "working");
   assert.equal(harness.getManifest().condition, "none");
   await harness.coordinator.disposeAll();
+});
+
+test("a recovering agent's heartbeat still renews and rotates its bound credentials without announcing liveness", async () => {
+  const grant: InstalledHostGrant = {
+    entryId: "agent-1", roomId: "room-1", agentKey: "owner/agent-1", grantId: "grant-1",
+    supervisorGrant: "supervisor-secret", grantGeneration: 1, apiUrl: "https://letagents.test",
+    daemonGeneration: 7, hostId: "host-1", installationId: "installation-1",
+    ownerAccountId: null, scopeKey: null, expiresAt: "2099-01-01T00:00:00.000Z",
+  };
+  const binding: WorkerSessionBinding = {
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+    execution_generation_id: "generation-2", agent_session_id: "session-1", credential_ref: "bearer-1",
+    api_url: grant.apiUrl, room_cursor: null, last_sequence: 0, last_observed_at_ms: 0,
+    updated_at: "2026-08-26T00:00:00.000Z",
+  };
+  for (const due of ["rotation", "renewal", "none"] as const) {
+    let heartbeat: (() => void) | null = null;
+    let activityCalls = 0;
+    let convergenceCalls = 0;
+    const harness = coordinatorHarness({
+      bindingGet: async () => binding,
+      publishNativeActivity: async () => { activityCalls += 1; },
+      requestConvergence: () => { convergenceCalls += 1; },
+      heartbeat: {
+        requiresHostGrant: () => true,
+        currentHostGrant: () => grant,
+        hostGrantNeedsRenewal: () => due === "renewal",
+        hostWorkerBearerNeedsRotation: async () => due === "rotation",
+      },
+      setInterval: ((callback: () => void) => {
+        heartbeat = callback;
+        return { unref() {} };
+      }) as unknown as typeof setInterval,
+    });
+    await harness.coordinator.install("agent-1", { ...handle, observedState: "idle" }, "generation-2");
+    harness.runtimeCustody.installLiveBinding("agent-1", {
+      agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+    });
+    // The latch a failed bind leaves behind: bound, but still recovering.
+    harness.setManifest({ ...harness.getManifest(), observed_state: "recovering", condition: "coordination_blocked",
+      last_error: "Restoring room access (attempt 1 of 3) failed: The operation was aborted due to timeout. Retrying automatically." });
+    heartbeat!();
+    await harness.coordinator.drainCallbacks();
+    assert.equal(convergenceCalls, due === "none" ? 0 : 1, due);
+    assert.equal(activityCalls, 0, `${due}: a recovering agent is not announced as live`);
+    await harness.coordinator.disposeAll();
+  }
 });
 
 test("control probes exclude non-daemon, non-live, generation-mismatched, and replaced runtimes", async () => {

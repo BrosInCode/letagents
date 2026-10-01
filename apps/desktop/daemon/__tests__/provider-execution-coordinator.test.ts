@@ -316,6 +316,8 @@ function harness(input: {
       recordMintedSession: async () => null,
       mintSession: async () => null,
       bindMintedSession: async () => {},
+      awaitsBindingConfirmation: () => false,
+      confirmExactBinding: async () => {},
       bearerNeedsRotation: async () => false,
       blockExpiredAuthority: async () => {},
       currentOpenModelCredential: (entryId, daemonGeneration) => manifestEntry.provider === "open-model"
@@ -669,6 +671,76 @@ test("handoff drains queued reminders without a successor admission", async () =
   await runtime.coordinator.drainConvergence();
   assert.equal(launches, 1);
   runtime.coordinator.detachConvergence();
+});
+
+test("a cold launch waits for a daemon-wide launch slot and rechecks its authority once admitted", async () => {
+  for (const outcome of ["launched", "stopped while queued"] as const) {
+    let launches = 0;
+    let admit!: () => void;
+    let released = false;
+    const acquired: string[] = [];
+    const heldDuringLaunch: boolean[] = [];
+    const heldDuringInstall: boolean[] = [];
+    const runtime = harness({ provider: provider({ spawn: async () => {
+      launches++;
+      heldDuringLaunch.push(!released);
+      return returnedHandle;
+    } }) });
+    const install = runtime.options.streams.install;
+    runtime.options.streams.install = async (...args) => { heldDuringInstall.push(!released); return install(...args); };
+    const coordinator = new ProviderExecutionCoordinator({
+      ...runtime.options,
+      pacing: {
+        acquire: async (lane, entryId) => {
+          acquired.push(`${lane}:${entryId}`);
+          await new Promise<void>((resolve) => { admit = resolve; });
+          return () => { released = true; };
+        },
+        run: async () => { throw new Error("launches pace through acquire"); },
+      },
+    });
+    const converging = coordinator.converge("agent-1");
+    for (let turn = 0; turn < 20 && !acquired.length; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(acquired, ["launch:agent-1"], outcome);
+    assert.equal(launches, 0, `${outcome}: nothing starts while queued`);
+    if (outcome === "stopped while queued") runtime.bumpControlEpoch();
+    admit();
+    await converging;
+    assert.equal(launches, outcome === "launched" ? 1 : 0, outcome);
+    assert.equal(runtime.installed.length, outcome === "launched" ? 1 : 0, outcome);
+    assert.equal(runtime.executionGenerations.at(-1)?.terminal ? "terminal" : "live",
+      outcome === "launched" ? "live" : "terminal", `${outcome}: an unlaunched generation is closed`);
+    assert.equal(released, true, `${outcome}: the slot is returned`);
+    if (outcome === "launched") {
+      assert.deepEqual(heldDuringLaunch, [true], "the slot covers the cold launch itself");
+      assert.deepEqual(heldDuringInstall, [false], "and is returned before the post-launch binding work");
+    }
+  }
+});
+
+test("a provider whose process is up returns its launch slot before its remote bootstrap turn finishes", async () => {
+  let released = false;
+  let releasedOnNativeStart: boolean | null = null;
+  let finishBootstrap: (() => void) | null = null;
+  const runtime = harness({ provider: provider({ spawn: async (request) => {
+    request.onNativeStarted?.();
+    releasedOnNativeStart = released;
+    await new Promise<void>((resolve) => { finishBootstrap = resolve; });
+    return returnedHandle;
+  } }) });
+  const coordinator = new ProviderExecutionCoordinator({
+    ...runtime.options,
+    pacing: {
+      acquire: async () => () => { released = true; },
+      run: async () => { throw new Error("launches pace through acquire"); },
+    },
+  });
+  const converging = coordinator.converge("agent-1");
+  for (let turn = 0; turn < 50 && !finishBootstrap; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releasedOnNativeStart, true, "the next agent can launch while this one waits on its model");
+  finishBootstrap!();
+  await converging;
+  assert.equal(runtime.installed.length, 1);
 });
 
 test("delivery handoff freezes convergence and draining never creates a successor", async () => {
@@ -1486,6 +1558,47 @@ test("malformed Cursor child PIDs cannot satisfy the exact host-binding predicat
 
     assert.equal(runtime.mintCalls, 1, String(pid));
     assert.equal(runtime.bindCalls, 1, String(pid));
+  }
+});
+
+test("a recovery retry on an exact binding left by a failed bind confirms it instead of skipping it", async () => {
+  for (const outcome of ["confirmed", "refused", "not awaiting"] as const) {
+    const runtime = ownedRecoveryHarness();
+    runtime.binding.execution_generation_id = "generation-2";
+    runtime.setEntry({ ...runtime.entry(), observed_state: "recovering", condition: "coordination_blocked",
+      last_error: "Restoring room access (attempt 1 of 3) failed: The operation was aborted due to timeout. Retrying automatically." });
+    runtime.liveHandles.set("agent-1", { ...returnedHandle, observedState: "idle" });
+    let confirmations = 0;
+    const refusal = new Error("Native activity endpoint rejected the daemon bridge with HTTP 403.");
+    runtime.options.host.awaitsBindingConfirmation = (entryId, executionGenerationId) =>
+      outcome !== "not awaiting" && entryId === "agent-1" && executionGenerationId === "generation-2";
+    let guard: (() => boolean) | null = null;
+    runtime.options.host.confirmExactBinding = async (_entryId, mayPublish) => {
+      confirmations += 1;
+      guard = mayPublish;
+      if (outcome === "refused") throw refusal;
+      runtime.setEntry({ ...runtime.entry(), observed_state: "idle", condition: "none", last_error: null });
+    };
+
+    await runtime.coordinator.converge("agent-1");
+
+    assert.equal(runtime.mintCalls, 0, outcome);
+    assert.equal(runtime.bindCalls, 0, outcome);
+    assert.equal(confirmations, outcome === "not awaiting" ? 0 : 1, outcome);
+    if (outcome === "confirmed") {
+      assert.equal(runtime.entry().observed_state, "idle");
+      assert.equal(runtime.entry().condition, "none");
+      assert.deepEqual(runtime.failures, []);
+      assert.equal(runtime.deliveryStarts, 1);
+      assert.equal(guard!(), true);
+      runtime.bumpControlEpoch();
+      assert.equal(guard!(), false, "a Stop during the retry withdraws its permission to publish");
+    } else if (outcome === "refused") {
+      assert.deepEqual(runtime.failures, [refusal], "a refused confirmation counts against the retry budget");
+      assert.equal(runtime.deliveryStarts, 0);
+    } else {
+      assert.equal(runtime.entry().condition, "coordination_blocked", "only a failed bind is confirmed");
+    }
   }
 });
 

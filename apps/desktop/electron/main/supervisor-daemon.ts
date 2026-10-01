@@ -67,7 +67,7 @@ const RETIRE_REQUEST_TIMEOUT_MS = 60_000;
 // those daemon-side requests is bounded at 20s, so the client deadline must
 // cover both plus overhead — the tight control-request timeout aborted real
 // launches on slow networks and orphaned their durable claims as paused.
-const BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS = 45_000;
+export const BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS = 45_000;
 // Host-grant installation attaches to the live provider (up to ~32s of
 // bounded probes) and mints a worker session (3 cloud attempts x 10s) inside
 // the entry lock; the tight control timeout aborted real launches while the
