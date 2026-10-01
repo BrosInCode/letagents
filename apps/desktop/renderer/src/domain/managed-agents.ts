@@ -1253,6 +1253,53 @@ export function supervisedPermissionProfilePresentation(
   };
 }
 
+const NOTHING_BLOCKED = "Nothing is blocked: it can reach the network and files outside the project.";
+const CURSOR_NO_NETWORK = "No network access: can't push or open PRs.";
+
+/**
+ * What an access level withholds, stated on its card. Each line follows the
+ * native authority the daemon launches with (provider-configuration.ts), so a
+ * label such as "compatibility" cannot imply access the agent does not get.
+ * Levels a provider cannot use yet have no line; their card already says so.
+ */
+const SUPERVISED_PERMISSION_PROFILE_LIMITS: Partial<Record<
+  DesktopAgentProviderId,
+  Partial<Record<DesktopManagedAgentPermissionProfileId, string>>
+>> = {
+  codex: {
+    full_access: NOTHING_BLOCKED,
+    ask_before_write: "Without your approval: no file changes, no write commands and no network access.",
+    auto_review: "No network access and no changes outside its working folder, unless Codex approves more.",
+  },
+  "claude-code": {
+    read_only: "Can't change files, run commands or browse the web.",
+    ask_before_write: "Can't change files or run write commands until you approve each one.",
+    auto_review: "Blocks only what Claude judges risky. It doesn't ask you first.",
+    full_access: NOTHING_BLOCKED,
+  },
+  "open-model": {
+    full_access: NOTHING_BLOCKED,
+    ask_before_write: "Can't run commands or change files until you approve each one.",
+    auto_review: "Can't open files outside the project. Commands that delete, publish, install or reach the network ask you first.",
+  },
+  // Cursor runs inside a macOS sandbox that denies network on every level;
+  // compatibility lifts Cursor's own command restrictions, not that sandbox.
+  cursor: {
+    read_only: `Can't edit files. ${CURSOR_NO_NETWORK}`,
+    sandboxed_write: `Can't write to files on this Mac directly. ${CURSOR_NO_NETWORK}`,
+    full_access: `Can't write to files on this Mac directly. ${CURSOR_NO_NETWORK}`,
+  },
+};
+
+export function supervisedPermissionProfileLimits(
+  providerId: DesktopAgentProviderId | string | null | undefined,
+  profile: Pick<DesktopManagedAgentPermissionProfile, "id" | "status">,
+): string | null {
+  if (profile.status !== "available") return null;
+  const provider = providerId === "claude" ? "claude-code" : providerId;
+  return SUPERVISED_PERMISSION_PROFILE_LIMITS[provider as DesktopAgentProviderId]?.[profile.id] ?? null;
+}
+
 /** Shown before launch. Auto still has a reviewer, so the Full access notice would mislead. */
 export function autoReviewNotice(providerName: string, providerId?: DesktopAgentProviderId | null): string {
   if (providerId === "open-model") {

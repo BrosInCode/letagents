@@ -31,9 +31,37 @@ export function setDesktopMessageDraftAccount(accountId: string | null): void {
   account.value = accountId;
 }
 
+function messageDraftKey(namespace: string | null, threadRootId: string | null): string {
+  return JSON.stringify([account.value, normalizeRoomIdentifier(namespace), threadRootId]);
+}
+
+const emptyDraft = (): MessageDraft => ({ text: "", textRevision: 0, quote: null, selectedQuoteText: null });
+
+/**
+ * Capture a room's composer draft for putting text back later. The room's
+ * composer may be gone by then (its room was switched away from), so the
+ * restore writes the shared draft store; it is dropped if the account changed
+ * or drafts were cleared meanwhile, never landing in another account's draft.
+ */
+export function captureDesktopMessageDraftRestore(namespace: string | null): (text: string) => boolean {
+  const key = messageDraftKey(namespace, null);
+  const capturedAccount = account.value;
+  const capturedGeneration = generation;
+  return (text) => {
+    if (!text.trim() || account.value !== capturedAccount || generation !== capturedGeneration) return false;
+    const saved = drafts.get(key) ?? emptyDraft();
+    drafts.set(key, {
+      ...saved,
+      text: saved.text.trim() ? `${saved.text}\n\n${text}` : text,
+      textRevision: ++revision,
+    });
+    return true;
+  };
+}
+
 export function useDesktopMessageDraft(namespace: () => string | null, threadRootId: () => string | null = () => null) {
-  const key = computed(() => JSON.stringify([account.value, normalizeRoomIdentifier(namespace()), threadRootId()]));
-  const empty = (): MessageDraft => ({ text: "", textRevision: 0, quote: null, selectedQuoteText: null });
+  const key = computed(() => messageDraftKey(namespace(), threadRootId()));
+  const empty = emptyDraft;
   const current = () => drafts.get(key.value) ?? empty();
   function update(patch: Partial<MessageDraft>, draftKey = key.value): void {
     const next = { ...(drafts.get(draftKey) ?? empty()), ...patch };

@@ -63,6 +63,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { Check, ChevronDown, Search } from "@lucide/vue";
+import { modelPickerFocusLeft } from "./model-picker-focus";
 
 export interface DesktopModelPickerOption {
   value: string;
@@ -184,9 +185,13 @@ function handleInput(): void {
 }
 
 function handleFocusOut(event: FocusEvent): void {
-  const nextTarget = event.relatedTarget;
-  if (nextTarget instanceof Node && rootElement.value?.contains(nextTarget)) return;
-  closePicker();
+  const root = rootElement.value;
+  const left = modelPickerFocusLeft(
+    event.relatedTarget,
+    (target) => target instanceof Node && Boolean(root?.contains(target)),
+    document.hasFocus(),
+  );
+  if (left) closePicker();
 }
 
 function handleKeydown(event: KeyboardEvent): void {

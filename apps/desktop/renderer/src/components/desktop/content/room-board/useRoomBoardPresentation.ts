@@ -31,7 +31,8 @@ type RoomBoardPresentationEmit = {
 
 export function useRoomBoardPresentation(
   props: RoomBoardPresentationProps,
-  emit: RoomBoardPresentationEmit
+  emit: RoomBoardPresentationEmit,
+  options: { dropTargets?: (task: DesktopTaskSummary) => readonly string[] } = {},
 ) {
   const searchQuery = ref("");
   const activeFilter = ref<BoardFilter>("open");
@@ -52,6 +53,7 @@ export function useRoomBoardPresentation(
     ownerFilter: ownerFilter.value,
     statusFilter: statusFilter.value,
     sort: sort.value,
+    dropTargets: options.dropTargets,
   }));
   const visibleTasks = computed(() =>
     visibleGroups.value.flatMap((group) => group.tasks)
