@@ -6,7 +6,7 @@
         <path v-else d="M8 3v6M8 12.2v.1" />
       </svg>
     </div>
-    <div>
+    <div class="agent-inspector-now-copy">
       <p id="agent-inspector-now-title">{{ now.label }}</p>
       <strong>{{ now.summary }}</strong>
     </div>
