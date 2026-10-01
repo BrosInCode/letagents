@@ -1,9 +1,11 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, parse } from "node:path";
 
 import type { DesktopAgentCommitIdentitySettings } from "../../ipc-types.js";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 /**
  * Who managed agents commit as.
@@ -11,9 +13,11 @@ import type { DesktopAgentCommitIdentitySettings } from "../../ipc-types.js";
  * Without an identity in its environment, a managed agent commits as the
  * host's global Git identity, which is often a personal email, and publishes
  * it in every public repository the agent pushes to. When the desktop knows
- * the signed-in GitHub account, managed launches carry that account's noreply
- * identity in GIT_AUTHOR_* and GIT_COMMITTER_* instead. Global and repository
- * Git config are never touched. The owner can keep the host identity.
+ * the signed-in GitHub account, a launch into a GitHub repository that would
+ * use that global identity carries the account's noreply identity in
+ * GIT_AUTHOR_* and GIT_COMMITTER_* instead. Identities set for a repository,
+ * by a conditional include or in the environment, and signing setups, are left
+ * alone. Git config is never written. The owner can keep the host identity.
  *
  * The desktop writes this small file and the supervisor daemon reads it at
  * each launch, so a change applies to the next agent start without a daemon
@@ -84,15 +88,124 @@ export function readManagedAgentCommitIdentitySettings(
   }
 }
 
+/** What Git would use for a commit in a workspace, as the owner's environment resolves it. */
+export type GitCommitIdentityFacts = {
+  /** Scope ("system", "global", "local", "worktree", "command") of the effective user.email. */
+  emailScope: string | null;
+  email: string | null;
+  /** user.email outside any repository, so without conditional includes. */
+  hostEmail: string | null;
+  /** Commits or tags are signed, or a signing key is configured. */
+  signing: boolean;
+  /** The configured origin URL, before any insteadOf rewrite. */
+  originUrl: string | null;
+  /** GIT_AUTHOR_* or GIT_COMMITTER_* is already set in the environment. */
+  environmentIdentity: boolean;
+};
+
+const GIT_IDENTITY_KEYS = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] as const;
+const GIT_PROBE_TIMEOUT_MS = 3_000;
+
+export function isGitHubRemoteUrl(url: string | null): boolean {
+  if (!url) return false;
+  return /^(?:https?|ssh|git|git\+ssh):\/\/(?:[^@/]+@)?github\.com(?::\d+)?\//i.test(url)
+    || /^[^@/:]+@github\.com:/i.test(url);
+}
+
+function gitBoolean(value: string | null | undefined): boolean {
+  // A key with no value is true in Git config.
+  return value === undefined || value === null || /^(?:true|yes|on|1)$/i.test(value.trim());
+}
+
+/**
+ * Only an identity the owner set for every repository is replaced, and only
+ * for a GitHub repository. A repository, worktree, conditional include or
+ * environment identity was chosen on purpose and stays. Signing stays intact:
+ * a key bound to the owner's email would not sign as the noreply identity.
+ */
+export function canUseNoreplyIdentity(facts: GitCommitIdentityFacts): boolean {
+  return (facts.emailScope === "global" || facts.emailScope === "system")
+    && facts.email !== null
+    && facts.email === facts.hostEmail
+    && !facts.signing
+    && !facts.environmentIdentity
+    && isGitHubRemoteUrl(facts.originUrl);
+}
+
+function gitProbeEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...source, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
+  // Resolve the workspace itself, not a repository the launching process points at.
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"]) delete env[key];
+  return env;
+}
+
+function runGit(args: string[], cwd: string, env: NodeJS.ProcessEnv): { ok: boolean; stdout: string } {
+  const result = spawnSync("git", args, {
+    cwd, env, encoding: "utf8", timeout: GIT_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024, stdio: ["ignore", "pipe", "ignore"],
+  });
+  return { ok: result.status === 0, stdout: result.stdout ?? "" };
+}
+
+/** Null when Git cannot answer, which leaves Git's own resolution alone. */
+export function readGitCommitIdentityFacts(
+  workspace: string,
+  source: NodeJS.ProcessEnv = desktopRuntimeEnvironment(),
+): GitCommitIdentityFacts | null {
+  const env = gitProbeEnvironment(source);
+  const listed = runGit(["config", "--show-scope", "--list", "-z"], workspace, env);
+  if (!listed.ok) return null;
+  // Entries are `scope NUL key LF value NUL`, or `scope NUL key NUL` without a value.
+  const values = new Map<string, { scope: string; value: string | null }>();
+  const tokens = listed.stdout.split("\0");
+  for (let index = 0; index + 1 < tokens.length; index += 2) {
+    const entry = tokens[index + 1]!;
+    const separator = entry.indexOf("\n");
+    const key = (separator === -1 ? entry : entry.slice(0, separator)).toLowerCase();
+    values.set(key, { scope: tokens[index]!, value: separator === -1 ? null : entry.slice(separator + 1) });
+  }
+  // Outside any repository, gitdir/onbranch/hasconfig includes cannot apply.
+  const host = runGit(["config", "--get", "user.email"], parse(workspace).root || "/", env);
+  const email = values.get("user.email");
+  const signingKey = values.get("user.signingkey");
+  const commitSign = values.get("commit.gpgsign");
+  const tagSign = values.get("tag.gpgsign");
+  return {
+    emailScope: email?.scope ?? null,
+    email: email?.value ?? null,
+    hostEmail: host.ok ? host.stdout.replace(/\r?\n$/, "") : null,
+    signing: Boolean(signingKey?.value) || (commitSign ? gitBoolean(commitSign.value) : false)
+      || (tagSign ? gitBoolean(tagSign.value) : false),
+    originUrl: values.get("remote.origin.url")?.value ?? null,
+    environmentIdentity: GIT_IDENTITY_KEYS.some((key) => Boolean(source[key]?.trim())),
+  };
+}
+
+/** The workspace whose Git identity a managed launch may set; rentals never carry the owner's. */
+export function managedAgentCommitWorkspace(
+  request: { cwd: string; supervisorEntryId?: string | null } | null | undefined,
+): string | null {
+  if (!request || request.supervisorEntryId?.startsWith("supervised_rental_")) return null;
+  return request.cwd?.trim() || null;
+}
+
+export type ManagedAgentCommitEnvironmentReader = (workspace: string | null | undefined) => Record<string, string>;
+
 /**
  * GIT_AUTHOR_* and GIT_COMMITTER_* for a managed agent's launch environment.
- * Empty when the owner keeps the host identity or no GitHub account is known,
- * so Git falls back to its usual configuration.
+ * Empty, so Git resolves its identity as usual, when the owner keeps the host
+ * identity, no GitHub account is known, or the workspace does not qualify.
  */
 export function managedAgentCommitEnvironment(
-  settings: ManagedAgentCommitIdentitySettings = readManagedAgentCommitIdentitySettings(),
+  workspace: string | null | undefined,
+  options: {
+    settings?: ManagedAgentCommitIdentitySettings;
+    readFacts?: (workspace: string) => GitCommitIdentityFacts | null;
+  } = {},
 ): Record<string, string> {
-  if (settings.useHostGitIdentity || !settings.githubAccount) return {};
+  const settings = options.settings ?? readManagedAgentCommitIdentitySettings();
+  if (settings.useHostGitIdentity || !settings.githubAccount || !workspace?.trim()) return {};
+  const facts = (options.readFacts ?? readGitCommitIdentityFacts)(workspace);
+  if (!facts || !canUseNoreplyIdentity(facts)) return {};
   const identity = githubNoreplyCommitIdentity(settings.githubAccount);
   return {
     GIT_AUTHOR_NAME: identity.name,

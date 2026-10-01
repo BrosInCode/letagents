@@ -13,7 +13,7 @@ test("the agent commit setting says who agents commit as", () => {
   assert.equal(agentCommitIdentityDescription(null), "Checking how agents commit…");
   assert.equal(
     agentCommitIdentityDescription({ useHostGitIdentity: false, githubIdentity: FAKE_IDENTITY }),
-    "Agents commit as octo-fake <424242+octo-fake@users.noreply.github.com>, so your Git email stays private. Applies when an agent next starts.",
+    "In GitHub repositories that would use your global Git email, agents commit as octo-fake <424242+octo-fake@users.noreply.github.com> instead. Applies when an agent next starts.",
   );
   assert.match(
     agentCommitIdentityDescription({ useHostGitIdentity: false, githubIdentity: null }),

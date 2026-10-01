@@ -9,7 +9,10 @@ import {
   codexOwnerExtensionOverrides,
   listCodexMcpServerNames,
 } from "./codex-launch-isolation.js";
-import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
+import {
+  managedAgentCommitEnvironment,
+  type ManagedAgentCommitEnvironmentReader,
+} from "./managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
@@ -445,13 +448,13 @@ export function codexAppServerLaunchArgs(
 
 /**
  * The exact environment a launch gives the Codex app-server, and the commit
- * identity it carries. Managed agents commit as the owner's GitHub noreply
- * identity rather than the host's global Git identity; rental children keep
- * only their isolated variables.
+ * identity it carries: the owner's GitHub noreply identity when the project
+ * would commit as the host's global Git identity. Rental children keep only
+ * their isolated variables.
  */
 export function codexAppServerEnvironment(
-  options: Pick<CodexAppServerLaunchOptions, "env"> = {},
-  readCommitEnvironment: () => Record<string, string> = managedAgentCommitEnvironment,
+  options: Pick<CodexAppServerLaunchOptions, "env" | "trustedProjectPath"> = {},
+  readCommitEnvironment: ManagedAgentCommitEnvironmentReader = managedAgentCommitEnvironment,
 ): { env: NodeJS.ProcessEnv; commitEnvironment: Record<string, string> } {
   const runtimeEnv = desktopRuntimeEnvironment();
   const configuredEnv = options.env && Object.keys(options.env).length
@@ -459,7 +462,7 @@ export function codexAppServerEnvironment(
     : runtimeEnv;
   const custodialPolling = configuredEnv.LETAGENTS_EXECUTION_PROFILE === "supervised_mcp_polling";
   const rental = isRentalCredentialIsolationRequested(configuredEnv);
-  const commitEnvironment = rental ? {} : readCommitEnvironment();
+  const commitEnvironment = rental ? {} : readCommitEnvironment(options.trustedProjectPath);
   const env = rental
     ? rentalIsolatedChildEnvironment(configuredEnv)
     : { ...configuredEnv, ...commitEnvironment };
@@ -534,7 +537,8 @@ export async function launchManagedCodexAppServer(
   options: CodexAppServerLaunchOptions = {},
   listMcpServerNames: typeof listCodexMcpServerNames = listCodexMcpServerNames,
 ): Promise<CodexAppServerLaunch> {
-  const { env } = codexAppServerEnvironment(options);
+  // Listing needs the launch's environment, not its commit identity.
+  const { env } = codexAppServerEnvironment(options, () => ({}));
   const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
   const names = await listMcpServerNames(codexBin, {
     cwd: trustedProjectPath,

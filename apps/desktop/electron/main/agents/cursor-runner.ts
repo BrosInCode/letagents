@@ -1,7 +1,11 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
-import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
+import {
+  managedAgentCommitEnvironment,
+  managedAgentCommitWorkspace,
+  type ManagedAgentCommitEnvironmentReader,
+} from "./managed-agent-commit-identity.js";
 
 export type CursorReadOnlyMode = "ask" | "plan";
 export type CursorSandboxMode = "enabled" | "disabled";
@@ -101,7 +105,7 @@ export async function runCursorTurn(input: CursorTurnInput): Promise<CursorTurnR
   return new Promise((resolve) => {
     const child = spawn(executable, buildCursorAgentArgs(input), {
       cwd: input.cwd,
-      env: buildManagedCursorChildEnv(input.env),
+      env: buildManagedCursorChildEnv(input.env, { cwd: input.cwd }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const interrupt = (): void => {
@@ -197,12 +201,13 @@ export function buildCursorChildEnv(
   return env;
 }
 
-/** A managed agent's Cursor environment: commits use the owner's GitHub noreply identity, not the host's. */
+/** A managed agent's Cursor environment, with the managed commit identity when its workspace qualifies. */
 export function buildManagedCursorChildEnv(
   overrides: Record<string, string | undefined> = {},
-  readCommitEnvironment: () => Record<string, string> = managedAgentCommitEnvironment,
+  commitRequest: { cwd: string; supervisorEntryId?: string | null } | null = null,
+  readCommitEnvironment: ManagedAgentCommitEnvironmentReader = managedAgentCommitEnvironment,
 ): NodeJS.ProcessEnv {
-  return { ...buildCursorChildEnv(overrides), ...readCommitEnvironment() };
+  return { ...buildCursorChildEnv(overrides), ...readCommitEnvironment(managedAgentCommitWorkspace(commitRequest)) };
 }
 
 const CURSOR_CHILD_ENV_ALLOWLIST = new Set([

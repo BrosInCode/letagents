@@ -335,11 +335,11 @@ export function cursorLaunchPolicyArgs(value: unknown): string[] {
 
 export function cursorDaemonChildEnv(
   profileEnv: Record<string, string>,
+  commitRequest: Pick<ProviderSpawnRequest, "cwd" | "supervisorEntryId"> | null = null,
 ): NodeJS.ProcessEnv {
-  // Supervised children receive the established Cursor runtime allowlist and the
-  // managed commit identity; Electron often carries unrelated GitHub/cloud/npm/
-  // database credentials.
-  const env = buildManagedCursorChildEnv(profileEnv);
+  // Supervised children get the Cursor runtime allowlist plus the commit identity;
+  // Electron often carries unrelated GitHub/cloud/npm/database credentials.
+  const env = buildManagedCursorChildEnv(profileEnv, commitRequest);
   // A bounded provider turn borrows only the daemon's exact-generation tool
   // authority. Ambient desktop owner/fixed-worker credentials and stale
   // supervisor coordinates must never leak into the Cursor child or its MCPs.
@@ -1883,7 +1883,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
             mcpConnectorSocketPath,
           });
           this.deps.bindPersonalIdentity(profile, personalIdentity);
-          childEnv = cursorDaemonChildEnv(profile.env);
+          childEnv = cursorDaemonChildEnv(profile.env, handle.spawnRequest);
           const toolchainPath = cursorSandboxToolchainBinPaths();
           if (toolchainPath.length > 0) {
             // Apple's /usr/bin compiler drivers are xcrun shims, which require

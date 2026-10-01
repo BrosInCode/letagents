@@ -3,35 +3,26 @@ import { readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../../../shared/codex-owner-isolation.mjs";
+
 /**
  * A managed Codex agent works for a room, not as the owner, yet the launch
- * shares the owner's CODEX_HOME so Codex sign-in keeps working. Codex would
- * otherwise load the owner's personal extensions into every managed thread:
- * installed plugins with their MCP servers and skills (the bundled computer-use
- * plugin drove the owner's signed-in Chrome), ChatGPT app connectors, the
- * owner's own MCP servers, personal skills and the turn-end notifier.
- *
- * These overrides turn each of them off for the launch only. The owner's
- * config, auth, and session history are not modified. The room's LetAgents
- * MCP server stays, and project skills and AGENTS.md still load.
+ * shares the owner's CODEX_HOME so Codex sign-in keeps working. The shared
+ * feature overrides turn off the owner's plugins, app connectors, computer and
+ * browser use, hooks, memories and notifier. This module adds what needs the
+ * owner's files: their personal skills, and every MCP server but LetAgents.
+ * The owner's config, auth, and session history are not modified, and the
+ * project's own skills and AGENTS.md still load.
  *
  * Codex has no launch switch for its global AGENTS.md or its saved command
  * rules, so those still reach a managed agent from CODEX_HOME.
  */
-export const CODEX_OWNER_FEATURE_OVERRIDES: readonly string[] = [
-  // Plugins bring their own MCP servers and skills.
-  "features.plugins=false",
-  // App connectors act through the owner's connected accounts.
-  "features.apps=false",
-  "features.computer_use=false",
-  "features.browser_use=false",
-  "features.browser_use_external=false",
-  // The owner's turn-end notifier launched the computer-use client.
-  "notify=[]",
-];
+export { CODEX_OWNER_FEATURE_OVERRIDES };
 
 const LETAGENTS_MCP_SERVER_NAME = "letagents";
-const MCP_LIST_TIMEOUT_MS = 15_000;
+// `codex mcp list` checks OAuth for HTTP servers, which can take seconds when
+// one is unreachable. A launch waits this long at most, then fails.
+const MCP_LIST_TIMEOUT_MS = 10_000;
 // Codex finds a SKILL.md at most six directories below a skill root.
 const MAX_SKILL_DEPTH = 6;
 const MAX_SKILL_FILES = 1_000;

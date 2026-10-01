@@ -47,7 +47,7 @@ import {
   type NativeLifecycleCheckpoint,
 } from "./provider-execution-observer.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
-import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
+import { managedAgentCommitEnvironment, type ManagedAgentCommitEnvironmentReader } from "./managed-agent-commit-identity.js";
 import {
   isRentalCredentialIsolationRequested,
   rentalCredentialIsolationMarker,
@@ -537,13 +537,15 @@ class ClaudeRoomTurnObservationDetachedError extends Error {}
  * session"), so a supervisor that itself runs under Claude Code must not leak
  * that marker into the worker. Daemon-owned turns borrow exact-generation
  * authority, so ambient owner and fixed worker credentials are also removed
- * before Claude or provider-started shell commands can inherit them. Commits
- * use the owner's GitHub noreply identity rather than the host's Git identity.
+ * before Claude or provider-started shell commands can inherit them. A
+ * workspace that would commit as the host's global Git identity gets the
+ * owner's GitHub noreply identity instead.
  */
 export function claudeCliEnv(
   base: NodeJS.ProcessEnv = desktopRuntimeEnvironment(),
   overrides: NodeJS.ProcessEnv = {},
-  readCommitEnvironment: () => Record<string, string> = managedAgentCommitEnvironment,
+  commitWorkspace: string | null = null,
+  readCommitEnvironment: ManagedAgentCommitEnvironmentReader = managedAgentCommitEnvironment,
 ): NodeJS.ProcessEnv {
   const combined = { ...base, ...overrides };
   if (isRentalCredentialIsolationRequested(combined)) return rentalIsolatedChildEnvironment(combined);
@@ -552,7 +554,7 @@ export function claudeCliEnv(
     LETAGENTS_TOKEN: _ownerToken,
     LETAGENTS_AGENT_SESSION_BEARER: _fixedWorkerBearer,
     ...env
-  } = { ...base, ...readCommitEnvironment(), ...overrides };
+  } = { ...base, ...readCommitEnvironment(commitWorkspace), ...overrides };
   return env;
 }
 
@@ -584,7 +586,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     detached: process.platform !== "win32",
     // The strict launch config supplies the API endpoint; these coordinates
     // make every LetAgents MCP effect borrow the exact daemon generation.
-    env: claudeCliEnv(desktopRuntimeEnvironment(), input.env),
+    env: claudeCliEnv(desktopRuntimeEnvironment(), input.env, input.cwd),
   });
 
   const lineListeners = new Set<(line: string) => void>();

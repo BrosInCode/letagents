@@ -13,6 +13,12 @@ const env = createElectronTestEnv({
   extraEnvFiles: { LETAGENTS_AGENT_COMMIT_IDENTITY_PATH: "agent-commit-identity.json" },
 });
 const FAKE_NOREPLY = "424242+octo-fake@users.noreply.github.com";
+// Every Git probe and provider in this file sees a scratch HOME, never the owner's.
+const scratchHome = join(env.tempDir, "scratch-home");
+mkdirSync(scratchHome, { recursive: true });
+writeFileSync(join(scratchHome, ".gitconfig"), "[user]\n\tname = Fake Owner\n\temail = owner@example.invalid\n");
+process.env.HOME = scratchHome;
+process.env.GIT_CONFIG_NOSYSTEM = "1";
 writeFileSync(process.env.LETAGENTS_AGENT_COMMIT_IDENTITY_PATH!, JSON.stringify({
   version: 1,
   useHostGitIdentity: false,
@@ -42,6 +48,14 @@ function fixture(name: string): string {
   const path = join(env.tempDir, `${name}-${fixtureSerial++}`);
   mkdirSync(path, { recursive: true });
   return path;
+}
+
+/** A repository whose commits would otherwise use the scratch global identity. */
+function githubRepo(name: string): string {
+  const repo = fixture(name);
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["remote", "add", "origin", "https://github.com/fake-org/fake-repo.git"], { cwd: repo });
+  return repo;
 }
 
 function writeSkill(directory: string, name: string, marker = name): string {
@@ -136,6 +150,8 @@ test("Codex override builders disable named skills and every MCP server but LetA
     "features.computer_use=false",
     "features.browser_use=false",
     "features.browser_use_external=false",
+    "features.hooks=false",
+    "features.memories=false",
     "notify=[]",
   ]);
 });
@@ -164,7 +180,7 @@ test("a managed Codex launch turns off the owner's extensions and commits as the
   const home = fixture("launch-home");
   const codexHome = join(home, ".codex");
   const personal = writeSkill(join(codexHome, "skills", "scope-guard"), "scope-guard");
-  const project = fixture("launch-project");
+  const project = githubRepo("launch-project");
 
   const launch = await launchManagedCodexAppServer("ws://127.0.0.1:1", codex.bin, {
     trustedProjectPath: project,
@@ -214,7 +230,8 @@ test("a managed Codex launch does not start when its MCP servers cannot be liste
 });
 
 test("rental Codex launches keep their isolated environment without the owner's commit identity", () => {
-  const ordinary = codexAppServerEnvironment({ env: { FAKE_CANARY: "kept" } });
+  const repo = githubRepo("environment-project");
+  const ordinary = codexAppServerEnvironment({ trustedProjectPath: repo, env: { FAKE_CANARY: "kept" } });
   assert.equal(ordinary.env.GIT_AUTHOR_EMAIL, FAKE_NOREPLY);
   assert.equal(ordinary.env.FAKE_CANARY, "kept");
   assert.deepEqual(codexCommitIdentityOverrides(ordinary.commitEnvironment), [
@@ -224,7 +241,10 @@ test("rental Codex launches keep their isolated environment without the owner's 
     `shell_environment_policy.set.GIT_COMMITTER_EMAIL=${JSON.stringify(FAKE_NOREPLY)}`,
   ]);
 
-  const rental = codexAppServerEnvironment({ env: { LETAGENTS_RENTAL_CREDENTIAL_ISOLATION: "1", FAKE_CANARY: "dropped" } });
+  const rental = codexAppServerEnvironment({
+    trustedProjectPath: repo,
+    env: { LETAGENTS_RENTAL_CREDENTIAL_ISOLATION: "1", FAKE_CANARY: "dropped" },
+  });
   assert.deepEqual(rental.commitEnvironment, {});
   assert.equal(rental.env.GIT_AUTHOR_EMAIL, undefined);
   assert.equal(rental.env.FAKE_CANARY, undefined);
@@ -232,7 +252,7 @@ test("rental Codex launches keep their isolated environment without the owner's 
 
 test("the Codex provider adapter launches its app-server through the managed launch", async () => {
   const codex = fakeCodex();
-  const project = fixture("adapter-project");
+  const project = githubRepo("adapter-project");
   const adapter = new CodexProviderAdapter({
     codexBin: codex.bin,
     dependencies: {
@@ -319,6 +339,11 @@ test("the installed Codex loads none of the owner's plugins, personal skills or 
     "",
   ].join("\n"));
   writeSkill(join(codexHome, "skills", "owner-skill"), "owner-skill");
+  const hookMarker = join(fixture("contract-hook"), "ran");
+  writeFileSync(join(codexHome, "hooks.json"), JSON.stringify({ hooks: {
+    SessionStart: [{ hooks: [{ type: "command", command: `touch ${hookMarker}` }] }],
+    PreToolUse: [{ matcher: ".*", hooks: [{ type: "command", command: `touch ${hookMarker}-pre` }] }],
+  } }));
   writeSkill(join(home, ".agents", "skills", "owner-agents-skill"), "owner-agents-skill");
 
   const market = fixture("contract-market");
@@ -340,8 +365,7 @@ test("the installed Codex loads none of the owner's plugins, personal skills or 
   execFileSync(codexBin, ["plugin", "marketplace", "add", market], { env: codexEnv, stdio: "ignore", timeout: 30_000 });
   execFileSync(codexBin, ["plugin", "add", "fake-cu@fake-market"], { env: codexEnv, stdio: "ignore", timeout: 30_000 });
 
-  const project = fixture("contract-project");
-  execFileSync("git", ["init", "-q"], { cwd: project });
+  const project = githubRepo("contract-project");
   writeSkill(join(project, ".agents", "skills", "repo-skill"), "repo-skill");
 
   const serverUrl = await freeLoopbackUrl();
@@ -362,6 +386,10 @@ test("the installed Codex loads none of the owner's plugins, personal skills or 
     assert.equal(byName.get("owner-skill")?.enabled, false);
     assert.equal(byName.get("owner-agents-skill")?.enabled, false);
     assert.equal([...byName.keys()].some((name) => name.includes("fake-cu")), false, "plugin skills are gone");
+
+    const hooks = await client.request<{ data: Array<{ hooks: unknown[] }> }>("hooks/list", { cwds: [project] });
+    assert.ok(hooks.data.length > 0);
+    assert.deepEqual(hooks.data.flatMap((entry) => entry.hooks), [], "the owner's hooks are not loaded");
 
     const mcp = await client.request<{ data: Array<{ name: string; tools?: Record<string, unknown> }> }>("mcpServerStatus/list", {});
     const servers = new Map(mcp.data.map((server) => [server.name, Object.keys(server.tools ?? {})]));

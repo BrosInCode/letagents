@@ -97,5 +97,5 @@ export function agentCommitIdentityDescription(settings: DesktopAgentCommitIdent
     return "Connect GitHub so agents commit without your Git email. Until then they use this Mac's Git identity.";
   }
   const { name, email } = settings.githubIdentity;
-  return `Agents commit as ${name} <${email}>, so your Git email stays private. Applies when an agent next starts.`;
+  return `In GitHub repositories that would use your global Git email, agents commit as ${name} <${email}> instead. Applies when an agent next starts.`;
 }

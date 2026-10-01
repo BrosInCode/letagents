@@ -1,6 +1,8 @@
 import { spawn } from "child_process";
 import { createServer } from "net";
 
+import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../shared/codex-owner-isolation.mjs";
+
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -73,8 +75,18 @@ export async function resolveCodexServerUrl(explicitServerUrl?: string): Promise
   return allocateLoopbackServerUrl();
 }
 
+/** The session works for the room: none of the owner's Codex plugins, connectors, hooks or notifier. */
+export function codexAppServerArgs(serverUrl: string): string[] {
+  return [
+    "app-server",
+    ...CODEX_OWNER_FEATURE_OVERRIDES.flatMap((override) => ["-c", override]),
+    "--listen",
+    serverUrl,
+  ];
+}
+
 export function launchAppServer(serverUrl: string, codexBin: string): number | null {
-  const child = spawn(codexBin, ["app-server", "--listen", serverUrl], {
+  const child = spawn(codexBin, codexAppServerArgs(serverUrl), {
     detached: true,
     stdio: "ignore",
   });

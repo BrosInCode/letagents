@@ -687,7 +687,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       XDG_STATE_HOME: join(runtimeRoot, "state"),
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
       ...workspaceEnvironment,
-    });
+    }, req);
     const launchNotice = req.workspaceKind === "room_scratch"
       ? await this.checkScratchWorkspaceBoundary(req.cwd, runtimeRoot, env)
       : null;
