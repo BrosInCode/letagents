@@ -7,6 +7,7 @@ import type {
   ProviderActionStreamEvent,
 } from "../provider-action-port.js";
 import {
+  CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS,
   lifecycleLocalConformanceEligibility,
   ProviderStreamCoordinator,
   type ProviderInstallationToken,
@@ -164,6 +165,7 @@ function coordinatorHarness(input: {
   serializeManifest?: <T>(operation: () => Promise<T>) => Promise<T>;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+  nowMs?: () => number;
 } = {}) {
   let manifest = entry();
   let manifestAvailable = true;
@@ -266,6 +268,7 @@ function coordinatorHarness(input: {
     clearInterval: input.clearInterval ?? ((() => {}) as typeof clearInterval),
     setTimeout: input.setTimeout,
     clearTimeout: input.clearTimeout,
+    nowMs: input.nowMs,
   });
   return {
     coordinator,
@@ -761,6 +764,81 @@ test("Cursor typed child births share one listener but never share operational a
   assert.deepEqual(activity, []);
   assert.deepEqual(activityOnly, ["cursor/a-before-ready", "cursor/b-after-ready"]);
   assert.deepEqual(childTokens, [tokenA, tokenB]);
+  await harness.coordinator.disposeAll();
+});
+
+test("Cursor readiness holds through a turn boundary instead of flashing unavailable", async () => {
+  let now = 1_000_000;
+  const admissions = new Map<ProviderInstallationToken, "pending" | "ready" | "unavailable">();
+  const idle = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
+  const cursorHandle: ProviderActionHandle = {
+    workAttemptId: "attempt-1", pid: null, providerContinuationId: "continuation-1",
+    observedState: "idle", appliedConfigurationRevision: 1, providerConnection: idle,
+  };
+  const cursorEntry = (connection: Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "cursor_cli" }>): DaemonManifestEntry => ({
+    ...entry(), provider: "cursor", observed_state: connection.pid === null ? "idle" : "working",
+    provider_ref: { ...entry().provider_ref!, provider_connection: connection },
+  });
+  const harness = coordinatorHarness({
+    typedLifecycleAdmission: installation => admissions.get(installation) ?? "unavailable",
+    onStream: async () => () => {},
+    nowMs: () => now,
+  });
+  harness.setManifest(cursorEntry(idle));
+  await harness.coordinator.install("agent-1", cursorHandle, "generation-2");
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), null);
+  let births = 0;
+  const startTurn = () => {
+    births += 1;
+    const birth = { kind: "cursor_cli" as const, pid: 200 + births, processIdentity: `cursor-boundary-birth-${births}` };
+    cursorHandle.pid = birth.pid; cursorHandle.providerConnection = birth; cursorHandle.observedState = "working";
+    harness.setManifest(cursorEntry(birth));
+    return harness.coordinator.activateCommittedCursorRuntime({
+      entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: "typed",
+    });
+  };
+  const finishTurn = async () => {
+    // The child is settled and leaves the handle before its idle checkpoint.
+    await harness.coordinator.settleCursorLifecycleBeforeIdle(
+      { agentId: "agent-1", handle: cursorHandle, executionGenerationId: "generation-2" },
+      { flush: () => {} }, { settle: async () => {} },
+    );
+    cursorHandle.pid = null; cursorHandle.providerConnection = idle; cursorHandle.observedState = "idle";
+  };
+  const checkpointIdle = () => {
+    harness.setManifest(cursorEntry(idle));
+    harness.coordinator.activateCommittedCursorRuntime({
+      entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: null,
+    });
+  };
+
+  // Turn start: the committed child birth waits for its typed evidence.
+  const token = startTurn();
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false, "delivery still waits for the exact birth");
+  now += 5_000;
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), null,
+    "the view keeps the lane's settled readiness while the new turn's evidence catches up");
+  admissions.set(token, "ready");
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "ready");
+
+  // Turn end: the finished turn keeps its readiness until the idle checkpoint.
+  await finishTurn();
+  now += 5_000;
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "ready");
+  // The hold is measured from the boundary itself, not from the first read.
+  now += CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS;
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "unavailable");
+  checkpointIdle();
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), null);
+
+  // A first read that arrives after the hold already expired shows the truth.
+  startTurn();
+  now += CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS + 1;
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "unavailable");
+  // A failed lane is never masked.
+  assert.equal(harness.coordinator.deliveryAdmission({ ...harness.getManifest(), observed_state: "failed" }), "unavailable");
   await harness.coordinator.disposeAll();
 });
 
