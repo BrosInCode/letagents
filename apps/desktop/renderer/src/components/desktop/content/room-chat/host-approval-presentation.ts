@@ -110,6 +110,18 @@ export function hostApprovalAlwaysAllowLabel(presentation: HostApprovalPresentat
 
 export const HOST_APPROVAL_ALWAYS_ALLOW_HINT = "Saved for this agent. Revoke in Permissions. Configured access settings are unchanged.";
 
+/**
+ * After a decision, the next request takes the decided one's place, under the
+ * pointer. Its decisions stay off this long, so a second click on the old
+ * request never answers a new one unread.
+ */
+export const HOST_APPROVAL_SETTLE_MS = 400;
+
+/** One line: what the request would do, for a list row or the composer tray. */
+export function hostApprovalSummary(presentation: HostApprovalPresentation): string {
+  return hostApprovalFields(presentation).map(field => `${field.label}: ${field.value}`).join(" · ").replace(/\s+/g, " ").trim();
+}
+
 /** Display the proposed action, leaving the signed native presentation untouched. */
 export function hostApprovalFields(presentation: HostApprovalPresentation): Field[] {
   let parsed: unknown;

@@ -67,6 +67,7 @@ export function mapDesktopBoardIntent(
     payload: intent.payload,
     createdAt: intent.created_at,
     expiresAt: intent.expires_at,
+    escalatedAt: intent.escalated_at ?? null,
   };
 }
 

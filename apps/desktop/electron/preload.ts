@@ -89,6 +89,7 @@ const api: DesktopApi = {
   },
   room: {
     getNeedsYou: (includeUpdates = false) => ipcRenderer.invoke("desktop:room:needs-you", includeUpdates),
+    getNeedsYouRoom: (room, includeBoardIntents) => ipcRenderer.invoke("desktop:room:needs-you-room", room, includeBoardIntents),
     getKnowledge: (room, type) => ipcRenderer.invoke("desktop:room:knowledge", room, type),
     createKnowledge: (room, type, input) => ipcRenderer.invoke("desktop:room:knowledge-create", room, type, input),
     reviseKnowledge: (room, type, id, input) => ipcRenderer.invoke("desktop:room:knowledge-revise", room, type, id, input),
@@ -402,6 +403,14 @@ const api: DesktopApi = {
         active = false;
         ipcRenderer.off("desktop:supervisor:state", listener);
       };
+    },
+    onLiveAgents: (callback) => {
+      // Project before contextBridge copies the argument, as Needs you reads
+      // agents: no retired agents and no activity history.
+      const listener = (_event: Electron.IpcRendererEvent, payload: { entries: Parameters<typeof callback>[0] }) =>
+        callback(payload.entries.filter((entry) => entry.desiredState !== "stopped").map((entry) => ({ ...entry, activity: [] })));
+      ipcRenderer.on("desktop:supervisor:state", listener);
+      return () => ipcRenderer.off("desktop:supervisor:state", listener);
     },
     onRetirement: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

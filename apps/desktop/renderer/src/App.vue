@@ -445,7 +445,8 @@ import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
 import { invalidateRentalProviderDashboard, loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
-import { appAgentEntry, needsYouEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, inboxRoomOpenReporter, needsYouEntry, openInboxRoom, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
+import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
   deriveSidebarLatestMessages,
@@ -494,7 +495,7 @@ import type { AttentionNavigationIntent } from "./components/desktop/content/roo
 import InboxView from "./components/desktop/content/InboxView.vue";
 import type { InboxSection } from "./components/desktop/content/room-inbox/universal";
 import type { DesktopRentalRequest } from "../../electron/ipc-types.js";
-import { useNeedsYou } from "./composables/useNeedsYou";
+import { useNeedsYou, useNeedsYouRoomActivity } from "./composables/useNeedsYou";
 import { useAgentAttention } from "./composables/useAgentAttention";
 import { resetHostApprovals } from "./components/desktop/content/room-chat/host-approvals";
 import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
@@ -569,16 +570,27 @@ const openConversationId = ref<string | null>(null);
 const openConversationNonce = ref(0);
 function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; openConversationNonce.value += 1; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
 const inboxSection = ref<InboxSection>('needs-you');
-const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
+const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
+useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
 const { items: agentAttentionItems, countForRoom: agentAttentionCountForRoom, refreshApprovals: refreshAgentApprovals } = useAgentAttention(needsYouData);
 const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
 const attentionIntent = ref<AttentionNavigationIntent | null>(null);
 let needsYouInterval: number | null = null;
+// A room opened from the Inbox loads in place; if that load fails, say so.
+const inboxRoomOpens = inboxRoomOpenReporter((error) => pushActionToast(
+  `Couldn't load this room. ${safeUserVisibleErrorDetail(error, "Try again from the sidebar.")}`, "error"));
 async function openNeedsYouRoom(intent: AttentionNavigationIntent) {
   attentionIntent.value = null;
   notificationRevealMessageId.value = null;
   try {
-    await openRoomFromAppAgent(intent.roomIdentifier);
+    await openInboxRoom(intent.roomIdentifier, {
+      findEntry: (room) => findSidebarRoomEntryByIdentifier(projectEntries.value, room),
+      selectEntry: (entry) => {
+        if (activeEntry.value.id !== entry.id) inboxRoomOpens.opened(entry.id);
+        selectSidebarEntry(entry);
+      },
+      openBySnapshot: openRoomFromAppAgent,
+    });
     attentionIntent.value = intent;
   } catch (error) { needsYouError.value = String(error); }
 }
@@ -2431,7 +2443,7 @@ watch(
     rememberStoredString(activeEntryStorageKey, nextEntry.id);
     if (!rootRoomSnapshot.value) return;
     if (nextEntry.id === previousEntry?.id) return;
-    await refreshSelectedSnapshot(rootRoomSnapshot.value);
+    await inboxRoomOpens.load(selectedEntryId, () => refreshSelectedSnapshot(rootRoomSnapshot.value));
     if (activeEntry.value.id !== selectedEntryId) return;
     markActiveRoomRead();
   }

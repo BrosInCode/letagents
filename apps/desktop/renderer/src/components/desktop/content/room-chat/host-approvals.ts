@@ -8,7 +8,7 @@ export interface HostApprovalRoomState {
   loading: boolean;
   /** The one presentation whose decision is being recorded. */
   busy: string | null;
-  /** When this desktop first listed each presentation; approvals carry no request time. */
+  /** When this desktop first listed each request, by hostApprovalIdentity; approvals carry no request time. */
   firstSeenAt: Record<string, string>;
   /** The last listing failed: main no longer holds these presentations, so none can be decided. */
   stale: boolean;
@@ -26,6 +26,14 @@ const EMPTY_ROOM: Readonly<HostApprovalRoomState> = Object.freeze({
 /** Main refuses a decision on a presentation it has replaced, expired or already decided. */
 const CHANGED_REQUEST = /refresh the approval|approval was refreshed|approval changed|different decision is already recorded/i;
 let generation = 0;
+
+/**
+ * One request across presentations: main mints a new presentation ID when it
+ * re-presents the same request, so rows and order follow the request instead.
+ */
+export function hostApprovalIdentity(approval: Pick<DesktopHostApproval, "id" | "requestKey">): string {
+  return approval.requestKey ?? approval.id;
+}
 
 /** Read-only view; a room is added only once it has been listed. */
 export function hostApprovalRoom(roomIdentifier: string | null | undefined): Readonly<HostApprovalRoomState> {
@@ -65,7 +73,10 @@ export async function refreshHostApprovals(roomIdentifier: string): Promise<void
     if (snapshot.available) {
       if (JSON.stringify(snapshot.approvals) !== JSON.stringify(state.approvals)) state.approvals = snapshot.approvals;
       const now = new Date().toISOString();
-      const firstSeenAt = Object.fromEntries(snapshot.approvals.map(approval => [approval.id, state.firstSeenAt[approval.id] ?? now]));
+      const firstSeenAt = Object.fromEntries(snapshot.approvals.map(approval => {
+        const identity = hostApprovalIdentity(approval);
+        return [identity, state.firstSeenAt[identity] ?? now];
+      }));
       if (JSON.stringify(firstSeenAt) !== JSON.stringify(state.firstSeenAt)) state.firstSeenAt = firstSeenAt;
     }
     state.stale = !snapshot.available;

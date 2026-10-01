@@ -575,6 +575,20 @@ watch(
   },
 );
 
+// The composer below can grow (an approval, a reply, a longer draft). A reader
+// at the newest message stays there instead of having it covered.
+let viewportResizeObserver: ResizeObserver | null = null;
+let observedViewportHeight = 0;
+function keepLatestInViewOnResize(): void {
+  const element = messagesElement.value;
+  if (!element || element.clientHeight === observedViewportHeight) return;
+  // Judge "at the newest message" by the height before this change: a scroll
+  // event measured after it can already read the shrunken list as scrolled up.
+  const wasAtLatest = isScrolledToBottom || element.scrollHeight - element.scrollTop - observedViewportHeight < 80;
+  observedViewportHeight = element.clientHeight;
+  if (props.active && wasAtLatest && !shouldRestoreInitialScroll) jumpToBottom();
+}
+
 onMounted(() => {
   void nextTick(() => {
     if (!restoreInitialScrollPosition()) {
@@ -582,6 +596,11 @@ onMounted(() => {
     }
     scheduleAutoFillViewport();
   });
+  if (typeof ResizeObserver !== "undefined" && messagesElement.value) {
+    observedViewportHeight = messagesElement.value.clientHeight;
+    viewportResizeObserver = new ResizeObserver(keepLatestInViewOnResize);
+    viewportResizeObserver.observe(messagesElement.value);
+  }
 });
 
 onDeactivated(() => {
@@ -600,6 +619,7 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  viewportResizeObserver?.disconnect();
   clearMessageArrivals();
   cancelAutoFillViewport();
   cancelLayoutAnchorRestore();

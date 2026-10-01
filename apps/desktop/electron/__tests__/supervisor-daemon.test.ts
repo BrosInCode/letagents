@@ -96,7 +96,8 @@ test("host approval client authenticates raw presentations and restores exact re
     const client = new SupervisorDaemonClient(options);
     const first = await client.listHostApprovals("room_1"); assert.equal(first.available, true);
     const view = first.approvals[0]!;
-    assert.deepEqual(Object.keys(view).sort(), ["detail", "dismissKey", "id", "presentation", "retryDecision", "status"]);
+    assert.deepEqual(Object.keys(view).sort(), ["detail", "dismissKey", "id", "presentation", "requestKey", "retryDecision", "status"]);
+    assert.match(view.requestKey ?? "", /^[a-f0-9]{64}$/, "the request identity is opaque");
     assert.equal(view.presentation.details, candidate.presentation.details); assert.equal(view.retryDecision, null);
     assert.equal(view.dismissKey, null, "a live request cannot be dismissed across restarts");
     assert.equal((await client.listHostApprovals("room_1")).approvals[0]!.id, view.id);
@@ -119,6 +120,7 @@ test("host approval client authenticates raw presentations and restores exact re
     assert.equal(decisions[1]!.decisionId, decisions[0]!.decisionId, "Electron restart cannot mint another decision");
     now += 31 * 60 * 1000;
     const expired = await client.listHostApprovals("room_1"); assert.notEqual(expired.approvals[0]!.id, view.id);
+    assert.equal(expired.approvals[0]!.requestKey, view.requestKey, "a new presentation of the same request keeps its request identity");
     assert.equal(expired.approvals[0]!.retryDecision, "allow_once");
     await client.decideHostApproval({ id: expired.approvals[0]!.id, decision: "allow_once" });
     assert.equal(decisions[2]!.decisionId, decisions[0]!.decisionId);
@@ -193,6 +195,7 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
     candidates = [{ ...base, reference: null, status: "unavailable", presentation: { ...base.presentation, title: "Approval unavailable" } }];
     const unobserved = await client.listHostApprovals("room_1"); assert.equal(unobserved.available, true);
     assert.equal(unobserved.approvals[0]!.dismissKey, null, "an unobservable lane is a live condition, not a durable record");
+    assert.equal(unobserved.approvals[0]!.requestKey, null, "an unobservable lane names no request");
     for (const invalid of [null, {}, { ...base, extra: "field" }, { ...base, status: "dispatching" },
       { ...base, recordedDecision: undefined }, { ...base, recordedDecision: { ...recorded, projectionSha256: "bad" } },
       { ...base, reference: null }, { ...base, reference: { ...base.reference, roomId: "foreign" } },

@@ -355,3 +355,62 @@ test("the Inbox offers the composer card's approval actions and copy", async () 
     assert.match(waitingHtml, /Board request/);
   } finally { await vite.close(); }
 });
+
+test("a stuck or recovered agent shows in Needs you on the supervisor push, between Needs you reads", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "Date"], now: NOW });
+  let push: ((entries: DesktopSupervisorManifestEntry[]) => void) | null = null;
+  Object.assign(globalThis, { window: { letagentsDesktop: { supervisor: {
+    onLiveAgents: (callback: (entries: DesktopSupervisorManifestEntry[]) => void) => { push = callback; return () => { push = null; }; },
+  } } } });
+  const data = ref<DesktopNeedsYou | null>(needsYou({ agents: [blockedAgent(at(600_000))] }));
+  await withAttention(data, (attention) => {
+    assert.equal(attention.items.value.length, 1, "stuck, as the last read reported");
+    push!([agent()]);
+    assert.equal(attention.items.value.length, 0, "recovered as soon as the push says so");
+    push!([blockedAgent(at(600_000))]);
+    assert.equal(attention.items.value.length, 1);
+    data.value = needsYou({ agents: [] });
+    assert.equal(attention.items.value.length, 0, "a newer read still replaces what was pushed");
+  });
+  assert.equal(push, null, "the push subscription ends with the scope");
+});
+
+test("board requests name the agent, not its full sender label", () => {
+  const [claim] = buildAgentAttentionItems({ rooms: [{ roomIdentifier: "room-a", boardIntents: [intent({
+    payload: { task_id: "task_6", assignee: "LunarAmber | EmmyMay's agent | Open Model" } })] }], nowMs: NOW });
+  const [item] = buildUniversalInbox(needsYou(), [], [claim]);
+  assert.equal(item.title, "Assign task_6 to LunarAmber");
+  const [handoff] = buildAgentAttentionItems({ rooms: [{ roomIdentifier: "room-a", boardIntents: [intent({ actionType: "task_override",
+    payload: { task_id: "task_6", action: "handoff", target_actor_key: "FieldTrail | EmmyMay's agent | Cursor" } })] }], nowMs: NOW });
+  assert.equal(buildUniversalInbox(needsYou(), [], [handoff])[0].title, "Hand off task_6 to FieldTrail");
+});
+
+test("a board request sent to people needs the owner at once and says a person decides it", () => {
+  const fresh = at(30_000);
+  const items = buildAgentAttentionItems({ rooms: [{ roomIdentifier: "room-a", boardIntents: [
+    intent({ id: "bi_own", createdAt: fresh, escalatedAt: fresh, proposerActorLabel: "HarborMarsh | EmmyMay's agent | Codex",
+      payload: { task_id: "task_1", assignee: "HarborMarsh | EmmyMay's agent | Codex" } }),
+    intent({ id: "bi_waiting", createdAt: fresh }),
+    intent({ id: "bi_older_server", createdAt: fresh, escalatedAt: undefined }),
+  ] }], nowMs: NOW });
+  assert.deepEqual(items.map(item => item.key), [JSON.stringify(["room-a", "board-intent", "bi_own"])],
+    "only the escalated request skips the manager's turn");
+  const [item] = buildUniversalInbox(needsYou(), [], items);
+  assert.equal(item.title, "Assign task_1 to HarborMarsh");
+  assert.match(item.body, /Waiting for a person to decide/);
+  assert.doesNotMatch(item.body, /Board Manager decision/);
+  const [waiting] = buildUniversalInbox(needsYou(), [], buildAgentAttentionItems({ rooms: [{ roomIdentifier: "room-a", boardIntents: [intent()] }], nowMs: NOW }));
+  assert.match(waiting.body, /Waiting for a Board Manager decision/);
+});
+
+test("a request its agent waits on is timed by request, so its grace survives a new presentation", () => {
+  // An expired live request keeps its reference, so main gives it a request key.
+  const waiting = approval({ id: "presentation-2", requestKey: "request-a", status: "unavailable",
+    detail: "This approval has expired. No new decision can be sent from this card.",
+    presentation: { ...approval().presentation, title: "Run a command",
+      details: JSON.stringify({ id: "per_1", sessionID: "ses_1", permission: "bash", patterns: ["npm test"], metadata: {}, always: [] }) } });
+  const items = buildAgentAttentionItems({ nowMs: NOW, approvalRooms: new Map([["room-a", { approvals: [waiting],
+    firstSeenAt: { "request-a": at(HOST_APPROVAL_BLOCKED_GRACE_MS + 60_000) }, stale: false }]]) });
+  assert.deepEqual(items.map(item => item.key), [JSON.stringify(["room-a", "approval", "request-a"])]);
+  assert.equal(items[0].timestamp, at(HOST_APPROVAL_BLOCKED_GRACE_MS + 60_000), "first seen when the request was, not this presentation");
+});

@@ -8,7 +8,7 @@ import { listDesktopAccountRooms } from './account-rooms.js';
 import { addLocalChatMessage } from './messages/local-store.js';
 import { getDesktopInboxUpdates } from './inbox.js';
 import { listDesktopPendingBoardIntents } from './board-governance.js';
-import type { DesktopAccountFocusRoomEntry, DesktopAccountRoomEntry } from '../../ipc-types.js';
+import type { DesktopAccountFocusRoomEntry, DesktopAccountRoomEntry, DesktopBoardIntentSummary } from '../../ipc-types.js';
 
 async function target(roomIdentifier: string) {
   if (!roomIdentifier?.trim()) throw new Error('Choose a room.');
@@ -67,6 +67,18 @@ export async function getDesktopMemoryHistory(roomIdentifier: string, id: string
   const db = await getLocalChatDatabase();
   return { records: localKnowledgeHistory(db, room.id, id), truncated: (getLocalKnowledge(db, room.id, id)?.version ?? 0) > 100 };
 }
+/**
+ * One room's requests and, where the account can decide them, its pending
+ * board intents. Needs you re-reads a room this way when the room's own
+ * activity shows a change, instead of waiting for the next full read.
+ */
+export async function getDesktopNeedsYouRoom(roomIdentifier: string, includeBoardIntents: boolean): Promise<Pick<DesktopAttentionRoom, 'records' | 'truncated' | 'tasks' | 'boardIntents'>> {
+  const [page, boardIntents] = await Promise.all([
+    getDesktopKnowledge(roomIdentifier, 'attention'),
+    includeBoardIntents ? listDesktopPendingBoardIntents(roomIdentifier) : Promise.resolve(undefined),
+  ]);
+  return { records: page.records, truncated: page.truncated, tasks: page.tasks ?? [], boardIntents };
+}
 // Registering a board intent always posts a room message, and a pending intent
 // expires after 24 hours on the server. A quieter room cannot hold one.
 const BOARD_INTENT_PENDING_TTL_MS = 24 * 60 * 60 * 1000;
@@ -74,6 +86,17 @@ const BOARD_INTENT_PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 export function mayHoldPendingBoardIntents(room: DesktopAccountRoomEntry | DesktopAccountFocusRoomEntry, now: number): boolean {
   const latest = Date.parse(room.latestMessageAt ?? '');
   return room.role === 'admin' && (!Number.isFinite(latest) || now - latest < BOARD_INTENT_PENDING_TTL_MS);
+}
+
+/**
+ * A room's pending board intents for the Inbox. A quiet admin room holds none
+ * but is still marked as one, so a later read of that room alone, made when
+ * its activity resumes, includes its intents. Other rooms are not the account's to decide.
+ */
+export function readPendingBoardIntents(room: DesktopAccountRoomEntry | DesktopAccountFocusRoomEntry, now: number,
+  list: (roomIdentifier: string) => Promise<DesktopBoardIntentSummary[]> = listDesktopPendingBoardIntents): Promise<DesktopBoardIntentSummary[] | undefined> {
+  if (room.role !== 'admin') return Promise.resolve(undefined);
+  return mayHoldPendingBoardIntents(room, now) ? list(room.roomIdentifier) : Promise.resolve([]);
 }
 export async function getDesktopNeedsYou(includeUpdates = false): Promise<DesktopNeedsYou> {
   const auth = await readStoredAuth();
@@ -92,7 +115,7 @@ export async function getDesktopNeedsYou(includeUpdates = false): Promise<Deskto
         const [attention, updates, boardIntents] = await Promise.allSettled([
           getDesktopKnowledge(room.roomIdentifier, 'attention'),
           includeUpdates ? getDesktopInboxUpdates(room.roomIdentifier) : Promise.resolve(undefined),
-          mayHoldPendingBoardIntents(room, now) ? listDesktopPendingBoardIntents(room.roomIdentifier) : Promise.resolve(undefined),
+          readPendingBoardIntents(room, now),
         ]);
         if (attention.status === 'rejected' || updates.status === 'rejected' || boardIntents.status === 'rejected') result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName });
         const page = attention.status === 'fulfilled' ? attention.value : { records: [], truncated: false, tasks: [] };

@@ -481,7 +481,7 @@ import {
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../ipc/index.js";
 import { hostApprovalStopsTurn } from "./room-chat/host-approval-presentation";
-import { hostApprovalRoom, refreshHostApprovals } from "./room-chat/host-approvals";
+import { hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./room-chat/host-approvals";
 import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
 
 const props = defineProps<{
@@ -1803,7 +1803,9 @@ async function resolveComposerPermission(
  */
 async function stopAgentTurnForApproval(entryId: string, approvalId: string): Promise<void> {
   const roomId = props.room.identifier;
-  const firstSeenAt = hostApprovalRoom(roomId).firstSeenAt[approvalId];
+  const shown = hostApprovalRoom(roomId);
+  const known = shown.approvals.find((candidate) => candidate.id === approvalId);
+  const firstSeenAt = known ? shown.firstSeenAt[hostApprovalIdentity(known)] : undefined;
   const snapshot = await desktopIpc.supervisor?.listHostApprovals?.(roomId).catch(() => null);
   const approval = snapshot?.available ? snapshot.approvals.find((candidate) => candidate.id === approvalId) : undefined;
   const entry = supervisorEntries.value.find((candidate) => candidate.id === entryId && candidate.roomId === roomId);
